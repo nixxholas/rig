@@ -1,8 +1,8 @@
 import type { SessionEvent } from "@slopus/happy-providers";
-import { asyncLock, createRootContext } from "@steve.kite/stdlib";
+import { createRootContext } from "@steve.kite/stdlib";
 import { describe, expect, it, vi } from "vitest";
 
-import { AgentBase, AgentBaseKV } from "../../sources/index.js";
+import { AgentBase, AgentKV } from "../../sources/index.js";
 import { InMemoryPersistence } from "../gym/InMemoryPersistence.js";
 import { ScriptedProvider } from "../gym/ScriptedProvider.js";
 import { providersOf, user } from "../gym/fixtures.js";
@@ -22,43 +22,11 @@ function deferred(): Deferred {
     return { promise, resolve };
 }
 
-function directKV(persistence: InMemoryPersistence, prefix: string): AgentBaseKV {
-    const lock = asyncLock({ reentry: "block" });
-    return new AgentBaseKV(persistence, prefix, async (operationCtx, work) =>
-        lock.runInLock(operationCtx, work),
-    );
+function directKV(persistence: InMemoryPersistence, prefix: string): AgentKV {
+    return new AgentKV(persistence, prefix);
 }
 
 describe("feature and metadata durability gaps", () => {
-    it("composes read-modify-write updates made by two live KV owners", async () => {
-        const persistence = new InMemoryPersistence();
-        persistence.values.set("shared.counter", 0);
-        const first = directKV(persistence, "shared.");
-        const second = directKV(persistence, "shared.");
-        const bothRead = deferred();
-        const originalReadValues = persistence.readValues.bind(persistence);
-        let reads = 0;
-
-        persistence.readValues = async (readCtx, prefix) => {
-            if (prefix === "shared.counter" && reads < 2) {
-                const snapshot = await originalReadValues(readCtx, prefix);
-                reads += 1;
-                if (reads === 2) bothRead.resolve();
-                await bothRead.promise;
-                return snapshot;
-            }
-            return await originalReadValues(readCtx, prefix);
-        };
-
-        const results = await Promise.all([
-            first.update(ctx, "counter", (current) => Number(current) + 1),
-            second.update(ctx, "counter", (current) => Number(current) + 1),
-        ]);
-
-        expect([...results].sort()).toEqual([1, 2]);
-        expect(persistence.values.get("shared.counter")).toBe(2);
-    });
-
     it("does not let failed context-token persistence change only the live agent's decisions", async () => {
         const persistence = new InMemoryPersistence();
         const originalWriteValue = persistence.writeValue.bind(persistence);

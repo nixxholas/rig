@@ -49,7 +49,8 @@ export interface RealGymTrace {
     readonly vendor: RealGymVendor;
     readonly model: string;
     readonly credential: string;
-    readonly agentId: string;
+    /** Assigned once the collection has allocated the agent's identity. */
+    agentId: string;
     readonly environment: AgentEnvironment;
     /** The features the agent was assembled from, in the order they contribute. */
     readonly features: readonly string[];
@@ -69,14 +70,7 @@ export interface RealGymTrace {
 
 type OpenedTrace = Pick<
     RealGymTrace,
-    | "scenario"
-    | "vendor"
-    | "model"
-    | "credential"
-    | "agentId"
-    | "environment"
-    | "features"
-    | "models"
+    "scenario" | "vendor" | "model" | "credential" | "environment" | "features" | "models"
 >;
 
 /** The traces gathered by a whole run, in the order their scenarios started. */
@@ -86,6 +80,7 @@ export class RealGymTraces {
     open(trace: OpenedTrace): RealGymTrace {
         const opened: RealGymTrace = {
             ...trace,
+            agentId: "",
             sessions: [],
             inferences: [],
             transcript: [],

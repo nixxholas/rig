@@ -2880,9 +2880,9 @@ describe("AgentBase load retry", () => {
             { type: "block", block: { type: "text", text: "earlier reply" } },
         ]);
         const originalLoad = persistence.load.bind(persistence);
-        // A turn loads twice: once to tell the pre-turn hooks how large the context is, and
-        // once for the inference itself. Both have to fail for the turn to fail.
-        let failures = 2;
+        // A turn reads the durable conversation once, before anything else it does. A read it
+        // cannot complete ends the turn there, without writing anything.
+        let failures = 1;
         persistence.load = () => {
             if (failures > 0) {
                 failures -= 1;

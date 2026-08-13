@@ -1,11 +1,11 @@
 import { createContextNamespace, deterministicStringify, type Context } from "@steve.kite/stdlib";
 
-import type { AgentBasePersistence, AgentBaseRecord } from "../../sources/index.js";
+import type { AgentPersistence, AgentRecord } from "../../sources/index.js";
 
 interface StagedTransaction {
     readonly owner: InMemoryPersistence;
     cleared: boolean;
-    readonly records: AgentBaseRecord[];
+    readonly records: AgentRecord[];
     readonly writes: Map<string, unknown>;
     readonly deletes: Set<string>;
     /** Committed entries this transaction claimed eagerly, kept so a rollback can restore them. */
@@ -34,12 +34,12 @@ function stored<Value>(value: Value): Value {
  * history. Operations inside a transaction stage their effects on the context-carried
  * transaction and apply them only at commit.
  */
-export class InMemoryPersistence implements AgentBasePersistence {
-    readonly records: AgentBaseRecord[];
+export class InMemoryPersistence implements AgentPersistence {
+    readonly records: AgentRecord[];
     readonly values = new Map<string, unknown>();
     loads = 0;
 
-    constructor(records: AgentBaseRecord[] = []) {
+    constructor(records: AgentRecord[] = []) {
         this.records = records;
     }
 
@@ -90,12 +90,12 @@ export class InMemoryPersistence implements AgentBasePersistence {
         return Promise.resolve();
     }
 
-    load(): Promise<readonly AgentBaseRecord[]> {
+    load(): Promise<readonly AgentRecord[]> {
         this.loads += 1;
         return Promise.resolve(this.records.map((record) => stored(record)));
     }
 
-    append(ctx: Context, record: AgentBaseRecord): Promise<void> {
+    append(ctx: Context, record: AgentRecord): Promise<void> {
         const staged = this.#staged(ctx);
         if (staged === undefined) {
             this.records.push(stored(record));

@@ -1,6 +1,6 @@
 import type { Context } from "@steve.kite/stdlib";
 
-import type { AgentBasePersistence, AgentBaseRecord } from "../../sources/index.js";
+import type { AgentPersistence, AgentRecord } from "../../sources/index.js";
 import type { InMemoryPersistence } from "./InMemoryPersistence.js";
 
 /** Thrown by every operation of a crashed process, and recognizable to the test driver. */
@@ -21,7 +21,7 @@ export function isCrash(error: unknown): boolean {
  * write must leave nothing half-applied, and nothing the caller was told had been accepted may
  * disappear.
  */
-export class FlakyPersistence implements AgentBasePersistence {
+export class FlakyPersistence implements AgentPersistence {
     readonly disk: InMemoryPersistence;
 
     operations = 0;
@@ -46,12 +46,12 @@ export class FlakyPersistence implements AgentBasePersistence {
         return this.disk.transaction(ctx, work);
     }
 
-    load(_ctx: Context): Promise<readonly AgentBaseRecord[]> {
+    load(_ctx: Context): Promise<readonly AgentRecord[]> {
         this.#step();
         return this.disk.load();
     }
 
-    append(ctx: Context, record: AgentBaseRecord): Promise<void> {
+    append(ctx: Context, record: AgentRecord): Promise<void> {
         this.#step();
         return this.disk.append(ctx, record);
     }
@@ -107,7 +107,7 @@ export class FlakyPersistence implements AgentBasePersistence {
  * dead process can no longer touch the disk at all. What the disk holds afterwards is exactly
  * what had already been committed — which is the whole point of crashing here.
  */
-export class CrashingPersistence implements AgentBasePersistence {
+export class CrashingPersistence implements AgentPersistence {
     readonly disk: InMemoryPersistence;
 
     /** Operations survived so far, counted across the whole process. */
@@ -137,12 +137,12 @@ export class CrashingPersistence implements AgentBasePersistence {
         return this.disk.transaction(ctx, work);
     }
 
-    load(_ctx: Context): Promise<readonly AgentBaseRecord[]> {
+    load(_ctx: Context): Promise<readonly AgentRecord[]> {
         this.#step();
         return this.disk.load();
     }
 
-    append(ctx: Context, record: AgentBaseRecord): Promise<void> {
+    append(ctx: Context, record: AgentRecord): Promise<void> {
         this.#step();
         return this.disk.append(ctx, record);
     }

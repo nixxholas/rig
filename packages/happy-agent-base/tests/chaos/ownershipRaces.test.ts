@@ -10,17 +10,7 @@ import { Type } from "@sinclair/typebox";
 import { createRootContext, type Context } from "@steve.kite/stdlib";
 import { describe, expect, it, vi } from "vitest";
 
-import {
-    AgentBase,
-    AgentBaseKV,
-    AgentStorage,
-    AgentSystemLocal,
-    agentConfig,
-    defineAgentTool,
-    type AgentConfig,
-    type AgentFeature,
-    type AgentFeatureConstructor,
-} from "../../sources/index.js";
+import { AgentBase, defineAgentTool } from "../../sources/index.js";
 import { askedIn, textIn, transcriptOf } from "../gym/chaosWorld.js";
 import { InMemoryPersistence } from "../gym/InMemoryPersistence.js";
 import { ScriptedProvider, ScriptedSession } from "../gym/ScriptedProvider.js";
@@ -39,12 +29,6 @@ function deferred(): Deferred {
         resolve = settle;
     });
     return { promise, resolve };
-}
-
-function managerKV(persistence: InMemoryPersistence): AgentBaseKV {
-    return new AgentBaseKV(persistence, "agents.", async (operationCtx, work) =>
-        work(operationCtx),
-    );
 }
 
 async function flushMicrotasks(): Promise<void> {
@@ -579,92 +563,5 @@ describe("consistency at concurrent ownership boundaries", () => {
             requestsAfterClose: 1,
             allSessionsDestroyed: true,
         });
-    });
-
-    it("allows only one manager to create a durable agent identity", async () => {
-        const managerDisk = new InMemoryPersistence();
-        const bothConfigReadsFinished = deferred();
-        const originalReadValues = managerDisk.readValues.bind(managerDisk);
-        let configReads = 0;
-
-        // Two daemon owners check the same absent ID before either can publish its config.
-        managerDisk.readValues = async (readCtx, prefix) => {
-            if (prefix === "agents.config.shared" && configReads < 2) {
-                const snapshot = await originalReadValues(readCtx, prefix);
-                configReads += 1;
-                if (configReads === 2) bothConfigReadsFinished.resolve();
-                await bothConfigReadsFinished.promise;
-                return snapshot;
-            }
-            return await originalReadValues(readCtx, prefix);
-        };
-
-        const loadedConfigs: AgentConfig[] = [];
-        const recorder: AgentFeatureConstructor = class implements AgentFeature {
-            readonly name = "config-recorder";
-
-            load(loadCtx: Context): Promise<void> {
-                const config = agentConfig(loadCtx);
-                if (config !== undefined) loadedConfigs.push(config);
-                return Promise.resolve();
-            }
-        };
-        const createManager = () =>
-            new AgentSystemLocal({
-                features: [recorder],
-                storage: new AgentStorage({
-                    kv: managerKV(managerDisk),
-                    persistence: () => new InMemoryPersistence(),
-                }),
-                providers: providersOf(new ScriptedProvider([])),
-                provider: "scripted",
-                models: [],
-            });
-        const first = createManager();
-        const second = createManager();
-        const configs: readonly AgentConfig[] = [
-            {
-                environment: {
-                    osVersion: "25.5.0",
-                    platform: "darwin",
-                    workingDirectory: "/owner-one",
-                    shell: "/bin/zsh",
-                },
-            },
-            {
-                environment: {
-                    osVersion: "25.5.0",
-                    platform: "darwin",
-                    workingDirectory: "/owner-two",
-                    shell: "/bin/zsh",
-                },
-            },
-        ];
-
-        const outcomes = await Promise.allSettled([
-            first.createWithId(ctx, "shared", configs[0]!),
-            second.createWithId(ctx, "shared", configs[1]!),
-        ]);
-        const created = outcomes.flatMap((outcome) =>
-            outcome.status === "fulfilled" ? [outcome.value] : [],
-        );
-        await Promise.all(created.map(async (agent) => agent.close()));
-        const storedConfig = managerDisk.values.get("agents.config.shared");
-        const winningConfigs = outcomes.flatMap((outcome, index) =>
-            outcome.status === "fulfilled" ? [configs[index]!] : [],
-        );
-
-        // A durable ID has one creator and one immutable creation config. Returning two live
-        // agents whose feature contexts disagree while storage retains only one config is a
-        // split-brain success, not two successful creates.
-        expect({
-            fulfilled: winningConfigs.length,
-            rejected: outcomes.filter((outcome) => outcome.status === "rejected").length,
-        }).toEqual({
-            fulfilled: 1,
-            rejected: 1,
-        });
-        expect(loadedConfigs).toEqual(winningConfigs);
-        expect(storedConfig).toEqual(winningConfigs[0]);
     });
 });

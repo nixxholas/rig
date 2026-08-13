@@ -9,7 +9,7 @@ import { describe, expect, it } from "vitest";
 
 import {
     AgentBase,
-    AgentBaseKV,
+    AgentKV,
     AgentStorage,
     AgentSystemLocal,
     defineAgentTool,
@@ -89,17 +89,18 @@ function selfTool(
     });
 }
 
-function managerKV(persistence: InMemoryPersistence): AgentBaseKV {
-    return new AgentBaseKV(persistence, "agents.", async (operationCtx, work) =>
-        work(operationCtx),
-    );
+function managerKV(persistence: InMemoryPersistence): AgentKV {
+    return new AgentKV(persistence, "agents.");
 }
 
-function managerHarness(
+async function managerHarness(
     provider: ScriptedProvider,
     persistence: InMemoryPersistence,
     execute: (callCtx: Context) => Promise<void>,
-): { readonly manager: AgentSystemLocal; readonly managerPersistence: InMemoryPersistence } {
+): Promise<{
+    readonly manager: AgentSystemLocal;
+    readonly managerPersistence: InMemoryPersistence;
+}> {
     const tool = selfTool(execute);
     class SelfToolFeature implements AgentFeature {
         readonly name = "self-tool";
@@ -111,16 +112,19 @@ function managerHarness(
 
     const managerPersistence = new InMemoryPersistence();
     return {
-        manager: new AgentSystemLocal({
-            features: [SelfToolFeature],
-            storage: new AgentStorage({
+        manager: await AgentSystemLocal.create(
+            ctx,
+            new AgentStorage({
                 kv: managerKV(managerPersistence),
                 persistence: () => persistence,
             }),
-            providers: providersOf(provider),
-            provider: "scripted",
-            models: [],
-        }),
+            {
+                features: [new SelfToolFeature()],
+                providers: providersOf(provider),
+                provider: "scripted",
+                models: [],
+            },
+        ),
         managerPersistence,
     };
 }
@@ -356,11 +360,11 @@ describe("self-reentrant tool calls", () => {
         let manager!: AgentSystemLocal;
         let agent!: Agent;
         let resolved!: Agent;
-        const harness = managerHarness(provider, persistence, async (callCtx) => {
-            resolved = await manager.resolve(callCtx, "managed-self");
+        const harness = await managerHarness(provider, persistence, async (callCtx) => {
+            resolved = await manager.resolve(callCtx, agent.id);
         });
         manager = harness.manager;
-        agent = await manager.createWithId(ctx, "managed-self", {});
+        agent = await manager.create(ctx, {});
 
         await agent.send(ctx, user("start"), { await: true });
         await agent.waitForIdle();
@@ -378,14 +382,15 @@ describe("self-reentrant tool calls", () => {
             textTurn("manager answer"),
         ]);
         let manager!: AgentSystemLocal;
+        let agent!: Agent;
         let managerSendResult!: Observed;
-        const harness = managerHarness(provider, persistence, async (callCtx) => {
+        const harness = await managerHarness(provider, persistence, async (callCtx) => {
             managerSendResult = await observeWithin(
-                manager.send(callCtx, "managed-self-send", user("sent through manager")),
+                manager.send(callCtx, agent.id, user("sent through manager")),
             );
         });
         manager = harness.manager;
-        const agent = await manager.createWithId(ctx, "managed-self-send", {});
+        agent = await manager.create(ctx, {});
 
         await agent.send(ctx, user("start"), { await: true });
         await agent.waitForIdle();
@@ -410,20 +415,21 @@ describe("self-reentrant tool calls", () => {
         const persistence = new InMemoryPersistence();
         const provider = new ScriptedProvider([toolCallTurn(), textTurn("after tool")]);
         let manager!: AgentSystemLocal;
+        let agent!: Agent;
         let compactResult!: Observed;
-        const harness = managerHarness(provider, persistence, async (callCtx) => {
+        const harness = await managerHarness(provider, persistence, async (callCtx) => {
             compactResult = await observeWithin(
-                manager.compact(callCtx, "managed-self-compaction", { await: true }),
+                manager.compact(callCtx, agent.id, { await: true }),
             );
         });
         manager = harness.manager;
-        const agent = await manager.createWithId(ctx, "managed-self-compaction", {});
+        agent = await manager.create(ctx, {});
 
         await agent.send(ctx, user("start"), { await: true });
         await agent.waitForIdle();
         const session = provider.sessions[0];
         session?.compactionResults.push(completedCompaction());
-        await manager.compact(ctx, "managed-self-compaction", { await: true });
+        await manager.compact(ctx, agent.id, { await: true });
         await agent.waitForIdle();
         await agent.close();
 

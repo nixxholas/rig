@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import {
     agentId,
-    AgentBaseKV,
+    AgentKV,
     agentConfig,
     agentFeatureConfig,
     AgentStorage,
@@ -13,7 +13,7 @@ import {
     type AgentConfig,
     type AgentEnvironment,
     type AgentFeature,
-    type AgentFeatureConstructor,
+    type AgentFeatureScope,
 } from "../sources/index.js";
 import { providersOf, queued, textTurn, user } from "./gym/fixtures.js";
 import { InMemoryPersistence } from "./gym/InMemoryPersistence.js";
@@ -39,66 +39,59 @@ async function until(predicate: () => boolean): Promise<void> {
     }
 }
 
-function managerKV(persistence: InMemoryPersistence): AgentBaseKV {
-    return new AgentBaseKV(persistence, "agentSystem.", async (operationCtx, work) =>
-        work(operationCtx),
-    );
+function managerKV(persistence: InMemoryPersistence): AgentKV {
+    return new AgentKV(persistence, "agentSystem.");
 }
 
 describe("AgentSystemLocal", () => {
-    it("loads feature classes in parallel and caches the resolved agent", async () => {
+    it("caches the resolved agent and its store, and tells features which agent they serve", async () => {
         const provider = new ScriptedProvider([]);
         const managerPersistence = new InMemoryPersistence();
-        const started: string[] = [];
-        const owners: AgentSystemRef[] = [];
-        const releases: (() => void)[] = [];
+        const served: string[] = [];
+        const owners: (AgentSystemRef | undefined)[] = [];
 
-        const feature = (name: string): AgentFeatureConstructor =>
-            class implements AgentFeature {
-                readonly name = name;
-                readonly agentId: string;
+        const feature = (featureName: string): AgentFeature =>
+            new (class implements AgentFeature {
+                readonly name = featureName;
 
-                constructor(agentId: string) {
-                    this.agentId = agentId;
-                }
+                readonly instructions = (hookCtx: Context, scope: AgentFeatureScope): string => {
+                    owners.push(agentsFromContext(hookCtx));
+                    served.push(`${this.name}:${scope.agent.id}`);
+                    return "";
+                };
+            })();
 
-                async load(loadCtx: Context): Promise<void> {
-                    const owner = agentsFromContext(loadCtx);
-                    if (owner !== undefined) owners.push(owner);
-                    started.push(`${this.name}:${this.agentId}`);
-                    await new Promise<void>((resolve) => releases.push(resolve));
-                }
-            };
-
-        let optionLoads = 0;
-        const agentSystem = new AgentSystemLocal({
-            features: [feature("first"), feature("second")],
-            storage: new AgentStorage({
+        let stores = 0;
+        const agentSystem = await AgentSystemLocal.create(
+            ctx,
+            new AgentStorage({
                 kv: managerKV(managerPersistence),
                 persistence: () => {
-                    optionLoads += 1;
+                    stores += 1;
                     return new InMemoryPersistence();
                 },
             }),
-            providers: providersOf(provider),
-            provider: "scripted",
-            models: [],
-        });
+            {
+                features: [feature("first"), feature("second")],
+                providers: providersOf(provider),
+                provider: "scripted",
+                models: [],
+            },
+        );
 
-        const first = agentSystem.createWithId(ctx, "agent-1", {
+        const firstAgent = await agentSystem.create(ctx, {
             environment: environmentOf("/tmp/agent-1"),
         });
-        const second = agentSystem.resolve(ctx, "agent-1");
-        await until(() => started.length === 2);
-
-        expect(started).toEqual(["first:agent-1", "second:agent-1"]);
-        releases.forEach((release) => release());
-
-        const [firstAgent, secondAgent] = await Promise.all([first, second]);
+        const secondAgent = await agentSystem.resolve(ctx, firstAgent.id);
         expect(firstAgent).toBe(secondAgent);
-        expect(optionLoads).toBe(1);
-        // Both loads were handed the very same reference, and never the collection itself.
-        expect(owners).toHaveLength(2);
+        expect(stores).toBe(1);
+
+        await firstAgent.send(ctx, user("go"), { await: true });
+        await firstAgent.waitForIdle();
+
+        // Both features were told the same agent, in the order the collection was given them.
+        expect(served).toEqual([`first:${firstAgent.id}`, `second:${firstAgent.id}`]);
+        // And each was handed the collection as a reference, never the collection itself.
         expect(owners[0]).toBeInstanceOf(AgentSystemRef);
         expect(owners[1]).toBe(owners[0]);
         await firstAgent.close();
@@ -111,7 +104,8 @@ describe("AgentSystemLocal", () => {
         const idlePersistence = new InMemoryPersistence();
         const managerPersistence = new InMemoryPersistence();
         activePersistence.values.set("send.0001", queued(user("continue")));
-        managerPersistence.values.set("agentSystem.active.active", true);
+        // The message was accepted and never answered, so the agent is durably owing an answer.
+        activePersistence.values.set("owed", { stage: "inference" });
         // Both agentSystem were created by the previous process, so this one only resolves them.
         managerPersistence.values.set("agentSystem.config.active", {
             environment: environmentOf("/work/active"),
@@ -119,26 +113,29 @@ describe("AgentSystemLocal", () => {
         managerPersistence.values.set("agentSystem.config.idle", {});
         const loaded: string[] = [];
 
-        const agentSystem = new AgentSystemLocal({
-            features: [],
-            storage: new AgentStorage({
+        const agentSystem = await AgentSystemLocal.create(
+            ctx,
+            new AgentStorage({
                 kv: managerKV(managerPersistence),
-                persistence: (agentId) => {
-                    loaded.push(agentId);
-                    return agentId === "active" ? activePersistence : idlePersistence;
+                persistence: (id) => {
+                    loaded.push(id);
+                    return id === "active" ? activePersistence : idlePersistence;
                 },
             }),
-            providers: providersOf(activeProvider),
-            provider: "scripted",
-            models: [],
-        });
+            {
+                features: [],
+                providers: providersOf(activeProvider),
+                provider: "scripted",
+                models: [],
+            },
+        );
 
         await agentSystem.resolve(ctx, "idle");
-        await agentSystem.start(ctx);
         const active = await agentSystem.resolve(ctx, "active");
         await active.waitForIdle();
 
-        expect(loaded).toEqual(["idle", "active"]);
+        // The active one was resumed by the start itself; the idle one waited to be asked for.
+        expect(loaded).toEqual(["active", "idle"]);
         expect(activeProvider.sessions[0]?.requests[0]?.context.messages).toEqual([
             user("continue"),
         ]);
@@ -150,22 +147,20 @@ describe("AgentSystemLocal", () => {
     it("resolves agentSystem automatically for session operations", async () => {
         const provider = new ScriptedProvider([textTurn("sent"), textTurn("steered")]);
         const persistence = new InMemoryPersistence();
-        const agentSystem = new AgentSystemLocal({
-            features: [],
-            storage: new AgentStorage({
+        const agentSystem = await AgentSystemLocal.create(
+            ctx,
+            new AgentStorage({
                 kv: managerKV(new InMemoryPersistence()),
                 persistence: () => persistence,
             }),
-            providers: providersOf(provider),
-            provider: "scripted",
-            models: [],
-        });
+            { features: [], providers: providersOf(provider), provider: "scripted", models: [] },
+        );
 
-        await agentSystem.createWithId(ctx, "agent-1", {});
-        await agentSystem.send(ctx, "agent-1", user("send"), { await: true });
-        const agent = await agentSystem.resolve(ctx, "agent-1");
+        const created = await agentSystem.create(ctx, {});
+        await agentSystem.send(ctx, created.id, user("send"), { await: true });
+        const agent = await agentSystem.resolve(ctx, created.id);
         await agent.waitForIdle();
-        await agentSystem.steer(ctx, "agent-1", user("steer"), { await: true });
+        await agentSystem.steer(ctx, created.id, user("steer"), { await: true });
         await agent.waitForIdle();
 
         const session = provider.sessions[0];
@@ -185,41 +180,50 @@ describe("AgentSystemLocal", () => {
             },
             context: { instructions: "", messages: [] },
         });
-        await agentSystem.compact(ctx, "agent-1", { await: true });
+        await agentSystem.compact(ctx, created.id, { await: true });
         expect(session?.compactions).toHaveLength(1);
 
-        await agentSystem.abort(ctx, "agent-1");
+        await agentSystem.abort(ctx, created.id);
         await agent.close();
     });
 });
 
 describe("AgentSystemLocal configuration", () => {
-    /** A collection over the given manager storage, with one recording feature. */
-    function collectionOf(
+    /**
+     * A collection over the given manager storage, with one feature that records what each
+     * agent's configuration looks like from inside that agent's own hooks. The feature instance
+     * is shared, so the configuration reaches it through the context of the agent it is running
+     * for rather than through its construction.
+     */
+    async function collectionOf(
         managerPersistence: InMemoryPersistence,
         seen: AgentConfig[],
         settings: (Record<string, unknown> | undefined)[],
-    ): AgentSystemLocal {
-        const recorder: AgentFeatureConstructor = class implements AgentFeature {
+        provider: ScriptedProvider = new ScriptedProvider([]),
+    ): Promise<AgentSystemLocal> {
+        const recorder: AgentFeature = new (class implements AgentFeature {
             readonly name = "recorder";
 
-            load(loadCtx: Context): Promise<void> {
-                const config = agentConfig(loadCtx);
+            instructions(hookCtx: Context): string {
+                const config = agentConfig(hookCtx);
                 if (config !== undefined) seen.push(config);
-                settings.push(agentFeatureConfig(loadCtx, "recorder"));
-                return Promise.resolve();
+                settings.push(agentFeatureConfig(hookCtx, "recorder"));
+                return "";
             }
-        };
-        return new AgentSystemLocal({
-            features: [recorder],
-            storage: new AgentStorage({
+        })();
+        return await AgentSystemLocal.create(
+            ctx,
+            new AgentStorage({
                 kv: managerKV(managerPersistence),
                 persistence: () => new InMemoryPersistence(),
             }),
-            providers: providersOf(new ScriptedProvider([])),
-            provider: "scripted",
-            models: [],
-        });
+            {
+                features: [recorder],
+                providers: providersOf(provider),
+                provider: "scripted",
+                models: [],
+            },
+        );
     }
 
     const config: AgentConfig = {
@@ -231,159 +235,157 @@ describe("AgentSystemLocal configuration", () => {
         const managerPersistence = new InMemoryPersistence();
         const seen: AgentConfig[] = [];
         const settings: (Record<string, unknown> | undefined)[] = [];
-        const agentSystem = collectionOf(managerPersistence, seen, settings);
+        const agentSystem = await collectionOf(
+            managerPersistence,
+            seen,
+            settings,
+            new ScriptedProvider([textTurn("first"), textTurn("second")]),
+        );
 
-        const agent = await agentSystem.createWithId(ctx, "agent-1", config);
+        const agent = await agentSystem.create(ctx, config);
+        await agent.send(ctx, user("go"), { await: true });
+        await agent.waitForIdle();
         expect(seen).toEqual([config]);
         // A feature sees only its own opaque entry, which the collection never interprets.
         expect(settings).toEqual([{ verbosity: "high" }]);
-        expect(await agentSystem.config(ctx, "agent-1")).toEqual(config);
+        expect(await agentSystem.config(ctx, agent.id)).toEqual(config);
         await agent.close();
 
         // A fresh collection over the same storage resolves the very same agent.
-        const restarted = collectionOf(managerPersistence, seen, settings);
-        const resolved = await restarted.resolve(ctx, "agent-1");
+        const restarted = await collectionOf(
+            managerPersistence,
+            seen,
+            settings,
+            new ScriptedProvider([textTurn("third")]),
+        );
+        const resolved = await restarted.resolve(ctx, agent.id);
+        await resolved.send(ctx, user("again"), { await: true });
+        await resolved.waitForIdle();
         expect(seen).toEqual([config, config]);
         await resolved.close();
     });
 
     it("refuses to resolve an agent that was never created", async () => {
-        const agentSystem = collectionOf(new InMemoryPersistence(), [], []);
+        const agentSystem = await collectionOf(new InMemoryPersistence(), [], []);
         await expect(agentSystem.resolve(ctx, "missing")).rejects.toThrow(
             'Agent "missing" has not been created.',
         );
         expect(await agentSystem.config(ctx, "missing")).toBeUndefined();
     });
 
-    it("refuses to create the same agent twice", async () => {
-        const agentSystem = collectionOf(new InMemoryPersistence(), [], []);
-        const agent = await agentSystem.createWithId(ctx, "agent-1", {});
-        await expect(agentSystem.createWithId(ctx, "agent-1", config)).rejects.toThrow(
-            'Agent "agent-1" already exists.',
-        );
-        // The original configuration is untouched.
-        expect(await agentSystem.config(ctx, "agent-1")).toEqual({});
-        await agent.close();
-    });
-
     it("rejects a configuration that does not match the schema", async () => {
-        const agentSystem = collectionOf(new InMemoryPersistence(), [], []);
+        const agentSystem = await collectionOf(new InMemoryPersistence(), [], []);
         await expect(
-            agentSystem.createWithId(ctx, "agent-1", {
+            agentSystem.create(ctx, {
                 // An environment is all or nothing: a partial one is not a configuration.
                 environment: { platform: "darwin" },
             } as unknown as AgentConfig),
-        ).rejects.toThrow('The configuration for agent "agent-1" is not valid.');
-        expect(await agentSystem.config(ctx, "agent-1")).toBeUndefined();
+        ).rejects.toThrow("is not valid.");
     });
 });
 
-describe("AgentSystemLocal individual and shared features", () => {
-    /** A shared feature that records, per agent, everything it was told from the context. */
+describe("AgentSystemLocal shared features", () => {
+    /** A feature instance that records, per agent, everything it was told from the context. */
     class SharedRecorder implements AgentFeature {
         static readonly instances: SharedRecorder[] = [];
-        static readonly loads: (AgentConfig | undefined)[] = [];
 
         readonly name = "shared-recorder";
         /** Which agents this one instance served, in the order it first saw them. */
         readonly served: string[] = [];
+        /** The configuration each of those agents was created with, as the hook was told it. */
+        readonly configurations: (AgentConfig | undefined)[] = [];
 
         constructor() {
             SharedRecorder.instances.push(this);
         }
 
-        load(loadCtx: Context): Promise<void> {
-            // A shared feature belongs to the collection, so it must not be handed one agent's
-            // configuration at load time.
-            SharedRecorder.loads.push(agentConfig(loadCtx));
-            return Promise.resolve();
-        }
-
-        readonly instructions = (hookCtx: Context): string => {
-            const id = agentId(hookCtx) ?? "unknown";
-            if (!this.served.includes(id)) this.served.push(id);
+        readonly instructions = (hookCtx: Context, scope: AgentFeatureScope): string => {
+            const id = scope.agent.id;
+            if (!this.served.includes(id)) {
+                this.served.push(id);
+                this.configurations.push(agentConfig(hookCtx));
+            }
             return `shared for ${id}`;
         };
     }
 
-    /** An individual feature: one instance per agent, configured by that agent alone. */
-    class IndividualRecorder implements AgentFeature {
-        static readonly instances: IndividualRecorder[] = [];
-
-        readonly name = "individual-recorder";
-        readonly agentId: string;
-        settings: Record<string, unknown> | undefined;
-
-        constructor(agentId: string) {
-            this.agentId = agentId;
-            IndividualRecorder.instances.push(this);
-        }
-
-        load(loadCtx: Context): Promise<void> {
-            this.settings = agentFeatureConfig(loadCtx, this.name);
-            return Promise.resolve();
-        }
-
-        readonly instructions = (): string => `individual for ${this.agentId}`;
-    }
-
-    function collectionOf(provider: ScriptedProvider): AgentSystemLocal {
-        return new AgentSystemLocal({
-            features: [IndividualRecorder],
-            sharedFeatures: [SharedRecorder],
-            storage: new AgentStorage({
+    async function collectionOf(
+        provider: ScriptedProvider,
+        features: readonly AgentFeature[],
+    ): Promise<AgentSystemLocal> {
+        return await AgentSystemLocal.create(
+            ctx,
+            new AgentStorage({
                 kv: managerKV(new InMemoryPersistence()),
                 persistence: () => new InMemoryPersistence(),
             }),
-            providers: providersOf(provider),
-            provider: "scripted",
-            models: [],
-        });
+            { features, providers: providersOf(provider), provider: "scripted", models: [] },
+        );
     }
 
-    it("gives every agent one shared instance and an individual instance of its own", async () => {
+    it("gives every agent the one instance the collection was built with", async () => {
         SharedRecorder.instances.length = 0;
-        SharedRecorder.loads.length = 0;
-        IndividualRecorder.instances.length = 0;
         const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
-        const agentSystem = collectionOf(provider);
+        const agentSystem = await collectionOf(provider, [new SharedRecorder()]);
 
-        const first = await agentSystem.createWithId(ctx, "agent-1", {
-            features: { "individual-recorder": { objective: "first" } },
-        });
-        const second = await agentSystem.createWithId(ctx, "agent-2", {
-            features: { "individual-recorder": { objective: "second" } },
-        });
+        const first = await agentSystem.create(ctx, {});
+        const second = await agentSystem.create(ctx, {});
 
-        // One shared instance for the collection, loaded once, without any agent's configuration.
+        // One instance for the whole collection, serving both agents.
         expect(SharedRecorder.instances).toHaveLength(1);
-        expect(SharedRecorder.loads).toEqual([undefined]);
         expect(first.feature("shared-recorder")).toBe(second.feature("shared-recorder"));
 
-        // One individual instance per agent, each configured by the agent it belongs to.
-        expect(IndividualRecorder.instances.map((feature) => feature.agentId)).toEqual([
-            "agent-1",
-            "agent-2",
-        ]);
-        expect(IndividualRecorder.instances.map((feature) => feature.settings)).toEqual([
-            { objective: "first" },
-            { objective: "second" },
-        ]);
-        expect(first.feature("individual-recorder")).not.toBe(
-            second.feature("individual-recorder"),
-        );
-
-        // The shared instance serves both agents, and its instructions open every prompt.
+        // That instance serves both agents, and its instructions open every prompt.
         await first.send(ctx, user("first"), { await: true });
         await first.waitForIdle();
         await second.send(ctx, user("second"), { await: true });
         await second.waitForIdle();
-        expect(SharedRecorder.instances[0]?.served).toEqual(["agent-1", "agent-2"]);
+        expect(SharedRecorder.instances[0]?.served).toEqual([first.id, second.id]);
         expect(provider.sessions.map((session) => session.options.instructions)).toEqual([
-            "shared for agent-1\n\nindividual for agent-1",
-            "shared for agent-2\n\nindividual for agent-2",
+            `shared for ${first.id}`,
+            `shared for ${second.id}`,
         ]);
 
+        await first.close();
+        await second.close();
+    });
+
+    it("gives a feature one store shared by every agent, beside a store of its own", async () => {
+        /** A feature that leaves a note for whichever agent runs next. */
+        class Postbox implements AgentFeature {
+            readonly name = "postbox";
+            /** What each agent found in the shared store, and in its own, before writing. */
+            readonly found: { shared: unknown; own: unknown }[] = [];
+
+            readonly instructions = async (
+                hookCtx: Context,
+                scope: AgentFeatureScope,
+            ): Promise<string> => {
+                this.found.push({
+                    shared: await scope.sharedKV.read(hookCtx, "note"),
+                    own: await scope.kv.read(hookCtx, "note"),
+                });
+                await scope.sharedKV.write(hookCtx, "note", `from ${scope.agent.id}`);
+                await scope.kv.write(hookCtx, "note", "mine");
+                return "";
+            };
+        }
+        const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
+        const postbox = new Postbox();
+        const agentSystem = await collectionOf(provider, [postbox]);
+
+        const first = await agentSystem.create(ctx, {});
+        await first.send(ctx, user("first"), { await: true });
+        await first.waitForIdle();
+        const second = await agentSystem.create(ctx, {});
+        await second.send(ctx, user("second"), { await: true });
+        await second.waitForIdle();
+
+        // The second agent reads what the first left in the shared store, and nothing in its own.
+        expect(postbox.found).toEqual([
+            { shared: undefined, own: undefined },
+            { shared: `from ${first.id}`, own: undefined },
+        ]);
         await first.close();
         await second.close();
     });
@@ -392,23 +394,28 @@ describe("AgentSystemLocal individual and shared features", () => {
         let seen: unknown;
         class Peek implements AgentFeature {
             readonly name = "peek";
-            load(loadCtx: Context): Promise<void> {
-                seen = agentsFromContext(loadCtx);
-                return Promise.resolve();
-            }
+            readonly instructions = (hookCtx: Context): string => {
+                seen = agentsFromContext(hookCtx);
+                return "";
+            };
         }
-        const agentSystem = new AgentSystemLocal({
-            sharedFeatures: [Peek],
-            storage: new AgentStorage({
+        const agentSystem = await AgentSystemLocal.create(
+            ctx,
+            new AgentStorage({
                 kv: managerKV(new InMemoryPersistence()),
                 persistence: () => new InMemoryPersistence(),
             }),
-            providers: providersOf(new ScriptedProvider([])),
-            provider: "scripted",
-            models: [],
-        });
+            {
+                features: [new Peek()],
+                providers: providersOf(new ScriptedProvider([textTurn("answer")])),
+                provider: "scripted",
+                models: [],
+            },
+        );
 
-        const agent = await agentSystem.createWithId(ctx, "agent-1", {});
+        const agent = await agentSystem.create(ctx, {});
+        await agent.send(ctx, user("go"), { await: true });
+        await agent.waitForIdle();
 
         expect(seen).toBeInstanceOf(AgentSystemRef);
         // Nothing that ends an agent's life, or waits for one, is reachable from inside.
@@ -418,46 +425,11 @@ describe("AgentSystemLocal individual and shared features", () => {
             "config",
             "constructor",
             "create",
-            "feature",
-            "featureState",
             "models",
             "resolve",
             "send",
             "steer",
         ]);
-        await agent.close();
-    });
-
-    it("retries a shared load that failed, and builds no agent until it succeeds", async () => {
-        let failures = 1;
-        class FailsOnce implements AgentFeature {
-            readonly name = "fails-once";
-            load(): Promise<void> {
-                if (failures > 0) {
-                    failures -= 1;
-                    return Promise.reject(new Error("shared load unavailable"));
-                }
-                return Promise.resolve();
-            }
-        }
-        const agentSystem = new AgentSystemLocal({
-            sharedFeatures: [FailsOnce],
-            storage: new AgentStorage({
-                kv: managerKV(new InMemoryPersistence()),
-                persistence: () => new InMemoryPersistence(),
-            }),
-            providers: providersOf(new ScriptedProvider([])),
-            provider: "scripted",
-            models: [],
-        });
-
-        await expect(agentSystem.createWithId(ctx, "agent-1", {})).rejects.toThrow(
-            "shared load unavailable",
-        );
-        // The failed creation left no identity behind, so the same ID can be created again.
-        expect(await agentSystem.config(ctx, "agent-1")).toBeUndefined();
-        const agent = await agentSystem.createWithId(ctx, "agent-1", {});
-        expect(agent.feature("fails-once")).toBeDefined();
         await agent.close();
     });
 });

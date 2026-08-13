@@ -744,54 +744,6 @@ describe("AgentBase black-box persistence and restart behavior", () => {
         await agent.close();
     });
 
-    it("repairs a call left unanswered in the middle of a stored conversation", async () => {
-        // A turn that died before it could settle its call, with messages appended after it, is
-        // beyond repair by appending: the answer belongs next to the call. The conversation is
-        // rewritten instead, atomically, and only because something is actually broken.
-        const call: SessionToolCallBlock = {
-            type: "tool_call",
-            callId: "call-buried",
-            name: "gone",
-            arguments: "{}",
-        };
-        const persistence = new InMemoryPersistence([
-            { type: "user", message: user("first") },
-            { type: "block", block: call },
-            { type: "system", message: system("The last turn failed: the store fell over.") },
-            { type: "user", message: user("second") },
-            { type: "block", block: { type: "text", text: "answered" } },
-        ]);
-        const provider = new ScriptedProvider([]);
-        const agent = await AgentBase.create(ctx, {
-            id: "buried-call",
-            providers: providersOf(provider),
-            provider: "scripted",
-            persistence,
-        });
-
-        agent.start();
-        await agent.waitForIdle();
-
-        // One replacement record now holds the whole conversation, with the missing result put
-        // back directly after the call that needed it.
-        expect(persistence.records).toHaveLength(1);
-        const record = persistence.records[0];
-        expect(record?.type).toBe("compaction");
-        expect(record?.type === "compaction" ? record.messages : []).toEqual([
-            user("first"),
-            { role: "assistant", content: [call] },
-            toolResult(
-                "call-buried",
-                "The turn ended before this tool call could be answered.",
-                true,
-            ),
-            system("The last turn failed: the store fell over."),
-            user("second"),
-            { role: "assistant", content: [{ type: "text", text: "answered" }] },
-        ]);
-        await agent.close();
-    });
-
     it("answers again after a restart when the last turn failed", async () => {
         // The note a failed turn leaves behind means the question it was given never got an
         // answer, so a restarted agent owes one — with the note itself as context.

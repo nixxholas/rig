@@ -8,7 +8,7 @@ import type {
 import { createRootContext, type Context } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
-import { AgentBase, agentKV, type AgentBaseKV } from "../../sources/index.js";
+import { AgentBase, agentKV, type AgentKV } from "../../sources/index.js";
 import { InMemoryPersistence } from "../gym/InMemoryPersistence.js";
 import { ScriptedProvider, ScriptedSession } from "../gym/ScriptedProvider.js";
 import { providersOf, textTurn, user } from "../gym/fixtures.js";
@@ -28,6 +28,18 @@ function deferred(): Deferred {
     return { promise, resolve };
 }
 
+/** How a promise settled, so a rejection can be asserted rather than thrown. */
+async function outcomeOf(
+    work: Promise<unknown>,
+): Promise<{ readonly status: "fulfilled" | "rejected" }> {
+    try {
+        await work;
+        return { status: "fulfilled" };
+    } catch {
+        return { status: "rejected" };
+    }
+}
+
 async function flushMicrotasks(): Promise<void> {
     for (let index = 0; index < 8; index += 1) await Promise.resolve();
 }
@@ -39,10 +51,11 @@ async function flushMicrotasks(): Promise<void> {
  * completion, and one response has exactly one terminal event.
  */
 describe("core loop consistency gaps", () => {
-    it("does not let a model-change hook retain a lock-bypassing KV after the hook returns", async () => {
+    it("does not let a model-change hook write through its KV after the hook returns", async () => {
         const persistence = new InMemoryPersistence();
         const provider = new ScriptedProvider([textTurn("switched"), textTurn("after the switch")]);
-        let escapedKV: AgentBaseKV | undefined;
+        let escapedKV: AgentKV | undefined;
+        let escapedCtx: Context | undefined;
         const agent = await AgentBase.create(ctx, {
             id: "escaped-model-change-kv",
             providers: providersOf(provider),
@@ -52,6 +65,7 @@ describe("core loop consistency gaps", () => {
             hooks: {
                 modelChanged: (hookCtx) => {
                     escapedKV = agentKV(hookCtx);
+                    escapedCtx = hookCtx;
                     return undefined;
                 },
             },
@@ -59,7 +73,9 @@ describe("core loop consistency gaps", () => {
 
         await agent.send(ctx, user("switch models"), { await: true, model: "openai/gpt" });
         await agent.waitForIdle();
-        if (escapedKV === undefined) throw new Error("The model-change hook did not receive KV.");
+        if (escapedKV === undefined || escapedCtx === undefined) {
+            throw new Error("The model-change hook did not receive KV.");
+        }
 
         const queueWriteStarted = deferred();
         const releaseQueueWrite = deferred();
@@ -83,7 +99,7 @@ describe("core loop consistency gaps", () => {
 
         const sending = agent.send(ctx, user("ordinary serialized write"), { await: true });
         await queueWriteStarted.promise;
-        await escapedKV.write(ctx, "after-hook", "escaped");
+        const escapedWrite = await outcomeOf(escapedKV.write(escapedCtx, "after-hook", "escaped"));
         const escapedValueLandedBeforeQueueLockReleased =
             persistence.values.get("kv.escaped-model-change-kv.after-hook") === "escaped";
 
@@ -92,12 +108,16 @@ describe("core loop consistency gaps", () => {
         await agent.waitForIdle();
         await agent.close();
 
-        // modelChanged receives a store specialized for the lock it is currently inside. Once
-        // the hook returns, retaining that facade must not let later work bypass the agent lock.
+        // modelChanged runs on the context of the transaction it is invoked inside, and that
+        // context ends with the hook. A store is only a scope, so what a retained handle may do
+        // is decided by the context it is used with: given the hook's own, it refuses outright
+        // rather than accepting a write it will not make.
         expect({
+            escapedWrite: escapedWrite.status,
             escapedWriteOverlappedQueueWrite,
             escapedValueLandedBeforeQueueLockReleased,
         }).toEqual({
+            escapedWrite: "rejected",
             escapedWriteOverlappedQueueWrite: false,
             escapedValueLandedBeforeQueueLockReleased: false,
         });

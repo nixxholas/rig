@@ -6,11 +6,11 @@ import { describe, expect, it } from "vitest";
 import {
     Agent,
     agentKV,
-    AgentBaseKV,
+    AgentKV,
     defineAgentTool,
     type AgentFeature,
 } from "../../sources/index.js";
-import { providersOf, textTurn, user } from "../gym/fixtures.js";
+import { providersOf, sharedKV, textTurn, user } from "../gym/fixtures.js";
 import { InMemoryPersistence } from "../gym/InMemoryPersistence.js";
 import { ScriptedProvider } from "../gym/ScriptedProvider.js";
 
@@ -61,6 +61,7 @@ describe("feature consistency races", () => {
             providers: providersOf(provider),
             provider: "scripted",
             persistence,
+            sharedKV: sharedKV(),
             features: [dottedFeature, dottedKeyFeature],
         });
 
@@ -132,6 +133,7 @@ describe("feature consistency races", () => {
             providers: providersOf(provider),
             provider: "scripted",
             persistence,
+            sharedKV: sharedKV(),
             features: [toolsFeature],
         });
 
@@ -147,13 +149,13 @@ describe("feature consistency races", () => {
     });
 });
 
-function directKV(persistence: InMemoryPersistence, prefix: string): AgentBaseKV {
-    return new AgentBaseKV(persistence, prefix, async (operationCtx, work) => work(operationCtx));
+function directKV(persistence: InMemoryPersistence, prefix: string): AgentKV {
+    return new AgentKV(persistence, prefix);
 }
 
-function requiredKV(operationCtx: Context): AgentBaseKV {
+function requiredKV(operationCtx: Context): AgentKV {
     const kv = agentKV(operationCtx);
-    if (kv === undefined) throw new Error("Expected a scoped AgentBaseKV.");
+    if (kv === undefined) throw new Error("Expected a scoped AgentKV.");
     return kv;
 }
 

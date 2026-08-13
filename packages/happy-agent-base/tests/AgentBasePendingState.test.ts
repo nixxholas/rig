@@ -117,7 +117,9 @@ describe("durable pending state", () => {
         // A process that dies here writes nothing further. What it already committed is the
         // consumed message and the stage it had reached, and both are discoverable by an owner
         // that has never seen this run.
-        expect(await agentBasePendingStateOf(ctx, persistence)).toEqual({ stage: "inference" });
+        expect(await agentBasePendingStateOf(ctx, persistence)).toMatchObject({
+            stage: "inference",
+        });
         expect(await agentBaseStoreOwesWork(ctx, persistence)).toBe(true);
 
         releaseInference.resolve();
@@ -202,7 +204,9 @@ describe("durable pending state", () => {
         // whole settlement unwinds: the hook's write is gone and the agent still says it owes
         // work, which costs one wasted resumption and never a lost answer.
         expect(persistence.values.has("conclusion")).toBe(false);
-        expect(await agentBasePendingStateOf(ctx, persistence)).toEqual({ stage: "inference" });
+        expect(await agentBasePendingStateOf(ctx, persistence)).toMatchObject({
+            stage: "inference",
+        });
         await agent.close();
     });
 });

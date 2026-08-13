@@ -45,16 +45,18 @@ export {
     agentKV,
     agentModel,
     agentProvider,
+    agentRunKV,
     agentServiceTier,
     withAgentContext,
     withAgentKV,
+    withAgentRunKV,
 } from "./AgentContexts.js";
 export {
     agentTaskContext,
     taskContextBeforeToolCall,
     withAgentTaskContext,
 } from "./AgentTaskContext.js";
-export { AgentBaseKV, type AgentBaseKVRunner } from "./AgentBaseKV.js";
+export { AgentKV } from "./AgentKV.js";
 export {
     type AgentBaseHooks,
     type AgentBaseInference,
@@ -64,7 +66,7 @@ export {
     type AgentBaseTurnStart,
     type MaybePromise,
 } from "./AgentBaseHooks.js";
-export { type AgentBasePersistence, type AgentBaseRecord } from "./AgentBasePersistence.js";
+export { type AgentPersistence, type AgentRecord } from "./AgentPersistence.js";
 export {
     agentBasePendingStateOf,
     agentBaseStoreOwesWork,
@@ -77,8 +79,8 @@ export { type AgentBaseState } from "./AgentBaseState.js";
 // Features: pluggable capabilities that compose into an agent's hooks, tools, and instructions.
 export {
     type AgentFeature,
-    type AgentFeatureConstructor,
-    type SharedAgentFeatureConstructor,
+    type AgentFeatureAgent,
+    type AgentFeatureScope,
 } from "./AgentFeature.js";
 export { type AgentFeatureAction } from "./AgentFeatureAction.js";
 

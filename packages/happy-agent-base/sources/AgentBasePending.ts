@@ -2,7 +2,7 @@ import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type { Context } from "@steve.kite/stdlib";
 
-import type { AgentBasePersistence } from "./AgentBasePersistence.js";
+import type { AgentPersistence } from "./AgentPersistence.js";
 
 /**
  * The one key an agent's outstanding work lives under, in the agent's own store. It is a single
@@ -45,7 +45,7 @@ export type AgentBasePendingState = Static<typeof AgentBasePendingState>;
  */
 export async function agentBasePendingStateOf(
     ctx: Context,
-    persistence: AgentBasePersistence,
+    persistence: AgentPersistence,
 ): Promise<AgentBasePendingState | undefined> {
     const entries = await persistence.readValues(ctx, AGENT_BASE_PENDING_KEY);
     const stored = entries.find((entry) => entry.key === AGENT_BASE_PENDING_KEY)?.value;
@@ -70,7 +70,7 @@ export async function agentBasePendingStateOf(
  */
 export async function agentBaseStoreOwesWork(
     ctx: Context,
-    persistence: AgentBasePersistence,
+    persistence: AgentPersistence,
 ): Promise<boolean> {
     if ((await agentBasePendingStateOf(ctx, persistence)) !== undefined) return true;
     const records = await persistence.load(ctx);

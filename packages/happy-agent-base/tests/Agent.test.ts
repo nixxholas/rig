@@ -3,8 +3,14 @@ import { Type } from "@sinclair/typebox";
 import { createRootContext } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
-import { Agent, agentKV, defineAgentTool, type AgentFeature } from "../sources/index.js";
-import { providersOf, system, textTurn, user } from "./gym/fixtures.js";
+import {
+    Agent,
+    agentKV,
+    defineAgentTool,
+    type AgentFeature,
+    type AgentFeatureAgent,
+} from "../sources/index.js";
+import { providersOf, sharedKV, system, textTurn, user } from "./gym/fixtures.js";
 import { InMemoryPersistence } from "./gym/InMemoryPersistence.js";
 import { ScriptedProvider } from "./gym/ScriptedProvider.js";
 
@@ -20,8 +26,8 @@ function tool(name: string) {
     });
 }
 
-function feature(hooks: Omit<AgentFeature, "load">): AgentFeature {
-    return { ...hooks, load: () => Promise.resolve() };
+function feature(hooks: AgentFeature): AgentFeature {
+    return { ...hooks };
 }
 
 function toolCallTurn(callId: string, name: string, argumentsJson: string): SessionEvent[] {
@@ -53,6 +59,7 @@ describe("Agent", () => {
             providers: providersOf(provider),
             provider: "scripted",
             persistence: new InMemoryPersistence(),
+            sharedKV: sharedKV(),
             features: [feature({ name: "publishing", tools: () => [reviewedTool] })],
         });
 
@@ -94,6 +101,7 @@ describe("Agent", () => {
             providers: providersOf(provider),
             provider: "scripted",
             persistence: new InMemoryPersistence(),
+            sharedKV: sharedKV(),
             features: [searchFeature, editFeature],
         });
 
@@ -129,7 +137,7 @@ describe("Agent", () => {
         const wrapper = (name: string): AgentFeature =>
             feature({
                 name,
-                aroundToolExecution: async (_hookCtx, execution) => {
+                aroundToolExecution: async (_hookCtx, _scope, execution) => {
                     order.push(`${name}:before`);
                     const [first, second] = await Promise.all([
                         execution.execute(),
@@ -145,6 +153,7 @@ describe("Agent", () => {
             providers: providersOf(provider),
             provider: "scripted",
             persistence: new InMemoryPersistence(),
+            sharedKV: sharedKV(),
             features: [
                 wrapper("outer"),
                 wrapper("inner"),
@@ -171,7 +180,7 @@ describe("Agent", () => {
         const observe = (name: string): AgentFeature =>
             feature({
                 name,
-                onEvent: (_hookCtx, event) => {
+                onEvent: (_hookCtx, _scope, event) => {
                     if (event.type === "done") seen.push(name);
                 },
             });
@@ -181,6 +190,7 @@ describe("Agent", () => {
             providers: providersOf(provider),
             provider: "scripted",
             persistence: new InMemoryPersistence(),
+            sharedKV: sharedKV(),
             features: [observe("first"), observe("second")],
         });
 
@@ -214,6 +224,7 @@ describe("Agent", () => {
             providers: providersOf(provider),
             provider: "scripted",
             persistence: new InMemoryPersistence(),
+            sharedKV: sharedKV(),
             sendMode: "all",
             features: [followUp("from first"), followUp("from second"), stop],
         });
@@ -236,7 +247,7 @@ describe("Agent", () => {
         const observed: boolean[] = [];
         const silent = feature({
             name: "silent",
-            modelChanged: (_hookCtx, change) => {
+            modelChanged: (_hookCtx, _scope, change) => {
                 observed.push(change.wasReset);
                 return undefined;
             },
@@ -247,7 +258,7 @@ describe("Agent", () => {
         });
         const late = feature({
             name: "late",
-            modelChanged: (_hookCtx, change) => {
+            modelChanged: (_hookCtx, _scope, change) => {
                 observed.push(change.wasReset);
                 return system("should lose");
             },
@@ -257,6 +268,7 @@ describe("Agent", () => {
             providers: providersOf(provider),
             provider: "scripted",
             persistence: new InMemoryPersistence(),
+            sharedKV: sharedKV(),
             model: "anthropic/claude",
             features: [silent, summarizer, late],
         });
@@ -292,7 +304,7 @@ describe("Agent", () => {
         });
         const working = feature({
             name: "working",
-            onEvent: (_hookCtx, event) => {
+            onEvent: (_hookCtx, _scope, event) => {
                 if (event.type === "done") seen.push("event");
             },
             beforeTurn: () => void seen.push("turn"),
@@ -307,6 +319,7 @@ describe("Agent", () => {
             providers: providersOf(provider),
             provider: "scripted",
             persistence: new InMemoryPersistence(),
+            sharedKV: sharedKV(),
             features: [broken, working],
         });
 
@@ -330,6 +343,7 @@ describe("Agent", () => {
             providers: providersOf(provider),
             provider: "scripted",
             persistence: new InMemoryPersistence(),
+            sharedKV: sharedKV(),
             features: [
                 feature({
                     name: "async",
@@ -361,6 +375,7 @@ describe("Agent", () => {
             providers: providersOf(provider),
             provider: "scripted",
             persistence,
+            sharedKV: sharedKV(),
             model: "anthropic/claude",
             features: [broken],
         });
@@ -393,12 +408,13 @@ describe("Agent", () => {
             providers: providersOf(provider),
             provider: "scripted",
             persistence: new InMemoryPersistence(),
+            sharedKV: sharedKV(),
             features: [
                 feature({ name: "first-bash", tools: () => [tool("bash")] }),
                 feature({ name: "second-bash", tools: () => [tool("bash")] }),
                 feature({
                     name: "observer",
-                    onEvent: (_hookCtx, event) => {
+                    onEvent: (_hookCtx, _scope, event) => {
                         if (event.type === "done" && event.state === "error") {
                             events.push(event.message);
                         }
@@ -423,11 +439,12 @@ describe("Agent", () => {
             providers: providersOf(provider),
             provider: "scripted",
             persistence: new InMemoryPersistence(),
+            sharedKV: sharedKV(),
             initialState: { instructions: "state instructions" },
             features: [
                 feature({
                     name: "observer",
-                    onEvent: (_hookCtx, event) => events.push(event),
+                    onEvent: (_hookCtx, _scope, event) => events.push(event),
                 }),
             ],
         });
@@ -470,6 +487,7 @@ describe("Agent", () => {
             providers: providersOf(provider),
             provider: "scripted",
             persistence,
+            sharedKV: sharedKV(),
             features: [memory, other],
         });
 
@@ -478,6 +496,89 @@ describe("Agent", () => {
 
         expect(persistence.values.get("kv.test-agent.feature.memory.note")).toBe("remembered");
         expect(listed).toEqual([[{ key: "note", value: "remembered" }], []]);
+        await agent.close();
+    });
+    it("tells every hook which agent it is serving, and what it is running on", async () => {
+        const provider = new ScriptedProvider([textTurn("answer")]);
+        const seen: AgentFeatureAgent[] = [];
+        const agent = await Agent.create(ctx, {
+            id: "identified-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence: new InMemoryPersistence(),
+            sharedKV: sharedKV(),
+            model: "gym/small",
+            effort: "high",
+            serviceTier: "priority",
+            features: [
+                feature({
+                    name: "identity",
+                    instructions: (_hookCtx, scope) => {
+                        seen.push(scope.agent);
+                        return "";
+                    },
+                }),
+            ],
+        });
+
+        await agent.send(ctx, user("go"), { await: true });
+        await agent.waitForIdle();
+
+        expect(seen[0]).toEqual({
+            id: "identified-agent",
+            provider: "scripted",
+            providerKind: "gym",
+            model: "gym/small",
+            effort: "high",
+            tier: "priority",
+        });
+        await agent.close();
+    });
+
+    it("lends each feature a run store that the settling transaction erases", async () => {
+        const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
+        const persistence = new InMemoryPersistence();
+        const withinRun: unknown[] = [];
+        const whileSettling: unknown[] = [];
+        const acrossRuns: unknown[] = [];
+        let runs = 0;
+        const notes = feature({
+            name: "notes",
+            beforeTurn: async (hookCtx, scope) => {
+                runs += 1;
+                // What an earlier run wrote about itself must not be here.
+                acrossRuns.push(await scope.runKV.read(hookCtx, "note"));
+                await scope.runKV.write(hookCtx, "note", `run ${runs}`);
+                return undefined;
+            },
+            afterTurn: async (hookCtx, scope) => {
+                withinRun.push(await scope.runKV.read(hookCtx, "note"));
+                return undefined;
+            },
+            afterAgentSettledTransact: async (hookCtx, scope) => {
+                // The run's notes are still readable here, and are gone once this commits.
+                whileSettling.push(await scope.runKV.read(hookCtx, "note"));
+            },
+        });
+        const agent = await Agent.create(ctx, {
+            id: "run-store-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+            sharedKV: sharedKV(),
+            features: [notes],
+        });
+
+        await agent.send(ctx, user("first"), { await: true });
+        await agent.waitForIdle();
+        await agent.send(ctx, user("second"), { await: true });
+        await agent.waitForIdle();
+
+        expect(withinRun).toEqual(["run 1", "run 2"]);
+        expect(whileSettling).toEqual(["run 1", "run 2"]);
+        expect(acrossRuns).toEqual([undefined, undefined]);
+        // Nothing the runs wrote about themselves outlives them.
+        expect([...persistence.values.keys()].filter((key) => key.includes(".run."))).toEqual([]);
         await agent.close();
     });
 });

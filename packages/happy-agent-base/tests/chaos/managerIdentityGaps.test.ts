@@ -4,12 +4,12 @@ import { describe, expect, it } from "vitest";
 import {
     agentFeatureConfig,
     agentSystem as agentsFromContext,
-    AgentBaseKV,
+    AgentKV,
     AgentStorage,
     AgentSystemLocal,
+    type Agent,
     type AgentConfig,
     type AgentFeature,
-    type AgentFeatureConstructor,
 } from "../../sources/index.js";
 import { askedIn } from "../gym/chaosWorld.js";
 import { InMemoryPersistence } from "../gym/InMemoryPersistence.js";
@@ -58,32 +58,44 @@ async function observedWithin<Value>(
     return observed;
 }
 
+/** Every question the provider was actually asked, across all of its sessions. */
+function questionsAskedOf(provider: ScriptedProvider): readonly string[] {
+    return provider.sessions.flatMap((session) =>
+        session.requests.flatMap((request) => askedIn(request.context.messages)),
+    );
+}
+
+/** Wait for something a run does on its own, rather than guessing how many ticks it takes. */
+async function until(predicate: () => boolean): Promise<void> {
+    const deadline = Date.now() + 1000;
+    while (!predicate()) {
+        if (Date.now() > deadline) throw new Error("The condition was not reached in time.");
+        await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+}
+
 async function flushMicrotasks(): Promise<void> {
     for (let index = 0; index < 12; index += 1) await Promise.resolve();
 }
 
-function managerKV(persistence: InMemoryPersistence): AgentBaseKV {
-    return new AgentBaseKV(persistence, "agentSystem.", async (operationCtx, work) =>
-        work(operationCtx),
-    );
+function managerKV(persistence: InMemoryPersistence): AgentKV {
+    return new AgentKV(persistence, "agentSystem.");
 }
 
-function collection(
+async function collection(
     managerPersistence: InMemoryPersistence,
     agentPersistence: InMemoryPersistence,
     provider: ScriptedProvider,
-    features: readonly AgentFeatureConstructor[] = [],
-): AgentSystemLocal {
-    return new AgentSystemLocal({
-        features,
-        storage: new AgentStorage({
+    features: readonly AgentFeature[] = [],
+): Promise<AgentSystemLocal> {
+    return await AgentSystemLocal.create(
+        ctx,
+        new AgentStorage({
             kv: managerKV(managerPersistence),
             persistence: () => agentPersistence,
         }),
-        providers: providersOf(provider),
-        provider: "scripted",
-        models: [],
-    });
+        { features, providers: providersOf(provider), provider: "scripted", models: [] },
+    );
 }
 
 function errorMessage(reason: unknown): string {
@@ -97,131 +109,6 @@ function errorMessage(reason: unknown): string {
  * below fixes the storage boundary at which the second owner enters.
  */
 describe("manager identity and recovery gaps", () => {
-    it("never leaves an observer holding an agent whose provisional identity was rolled back", async () => {
-        const managerDisk = new InMemoryPersistence();
-        const agentDisk = new InMemoryPersistence();
-        const failingLoadStarted = deferred();
-        const releaseFailingLoad = deferred();
-        const observerReadConfig = deferred();
-        const failAfterRelease: AgentFeatureConstructor = class implements AgentFeature {
-            readonly name = "fail-after-release";
-
-            async load(): Promise<void> {
-                failingLoadStarted.resolve();
-                await releaseFailingLoad.promise;
-                throw new Error("creator failed");
-            }
-        };
-        const creator = collection(managerDisk, agentDisk, new ScriptedProvider([]), [
-            failAfterRelease,
-        ]);
-        const observer = collection(managerDisk, agentDisk, new ScriptedProvider([]));
-        const originalReadValues = managerDisk.readValues.bind(managerDisk);
-        managerDisk.readValues = async (readCtx, prefix) => {
-            const entries = await originalReadValues(readCtx, prefix);
-            if (prefix === "agentSystem.config.shared") observerReadConfig.resolve();
-            return entries;
-        };
-
-        const creation = outcomeOf(
-            creator.createWithId(ctx, "shared", {
-                features: { identity: { generation: "provisional" } },
-            }),
-        );
-        await failingLoadStarted.promise;
-        const resolution = outcomeOf(observer.resolve(ctx, "shared"));
-        await observerReadConfig.promise;
-        releaseFailingLoad.resolve();
-        const [creationOutcome, resolutionOutcome] = await Promise.all([creation, resolution]);
-
-        const durableConfig = await observer.config(ctx, "shared");
-        const restarted = collection(managerDisk, agentDisk, new ScriptedProvider([]));
-        const restartedResolution = await outcomeOf(restarted.resolve(ctx, "shared"));
-        const observerWasOrphaned =
-            resolutionOutcome.status === "fulfilled" &&
-            (durableConfig === undefined || restartedResolution.status === "rejected");
-        const agentSystem = [resolutionOutcome, restartedResolution].flatMap((outcome) =>
-            outcome.status === "fulfilled" ? [outcome.value] : [],
-        );
-        await Promise.all(agentSystem.map((agent) => agent.close()));
-
-        expect({
-            creator: creationOutcome.status,
-            observerWasOrphaned,
-        }).toEqual({
-            creator: "rejected",
-            observerWasOrphaned: false,
-        });
-    });
-
-    it("does not let a stale creation rollback delete an ABA successor identity", async () => {
-        const managerDisk = new InMemoryPersistence();
-        const agentDisk = new InMemoryPersistence();
-        const releaseFailure = deferred();
-        const staleRollbackReachedDelete = deferred();
-        const releaseStaleRollback = deferred();
-        const failAfterRelease: AgentFeatureConstructor = class implements AgentFeature {
-            readonly name = "failing-creator";
-
-            async load(): Promise<void> {
-                await releaseFailure.promise;
-                throw new Error("first generation failed");
-            }
-        };
-        const first = collection(managerDisk, agentDisk, new ScriptedProvider([]), [
-            failAfterRelease,
-        ]);
-        const successorOwner = collection(managerDisk, agentDisk, new ScriptedProvider([]));
-        const originalDeleteValue = managerDisk.deleteValue.bind(managerDisk);
-        let blockStaleConfigDelete = true;
-        managerDisk.deleteValue = async (deleteCtx, key) => {
-            if (key === "agentSystem.config.shared" && blockStaleConfigDelete) {
-                blockStaleConfigDelete = false;
-                staleRollbackReachedDelete.resolve();
-                await releaseStaleRollback.promise;
-            }
-            await originalDeleteValue(deleteCtx, key);
-        };
-
-        const firstCreation = outcomeOf(
-            first.createWithId(ctx, "shared", {
-                features: { identity: { generation: "first" } },
-            }),
-        );
-        releaseFailure.resolve();
-        await staleRollbackReachedDelete.promise;
-
-        // A different owner removes the failed generation and claims the same ID for a genuine
-        // successor while the old generation's unconditional rollback is still suspended.
-        await successorOwner.delete(ctx, "shared");
-        const successor = await successorOwner.createWithId(ctx, "shared", {
-            features: { identity: { generation: "successor" } },
-        });
-        await successor.waitForIdle();
-        releaseStaleRollback.resolve();
-        const firstOutcome = await firstCreation;
-
-        const durableConfig = await successorOwner.config(ctx, "shared");
-        const restarted = collection(managerDisk, agentDisk, new ScriptedProvider([]));
-        const restartedResolution = await outcomeOf(restarted.resolve(ctx, "shared"));
-        if (restartedResolution.status === "fulfilled") {
-            await restartedResolution.value.close();
-        }
-        await successor.close();
-
-        expect({
-            first: firstOutcome.status,
-            durableConfig,
-            restart: restartedResolution.status,
-        }).toEqual({
-            first: "rejected",
-            durableConfig: {
-                features: { identity: { generation: "successor" } },
-            },
-            restart: "fulfilled",
-        });
-    });
-
     it("discovers a consumed unanswered user record created between start snapshots", async () => {
         const managerDisk = new InMemoryPersistence();
         const agentDisk = new InMemoryPersistence();
@@ -236,58 +123,37 @@ describe("manager identity and recovery gaps", () => {
             }
             return await originalReadValues(readCtx, prefix);
         };
-        let loads = 0;
-        const loaded: AgentFeatureConstructor = class implements AgentFeature {
-            readonly name = "loaded";
-
-            load(): Promise<void> {
-                loads += 1;
-                return Promise.resolve();
-            }
-        };
         const provider = new ScriptedProvider([textTurn("recovered")]);
-        const restarted = collection(managerDisk, agentDisk, provider, [loaded]);
-
-        const starting = restarted.start(ctx);
+        const starting = collection(managerDisk, agentDisk, provider);
         await configSnapshotStarted.promise;
-        // The active-index snapshot is already empty. A previous process now commits the
-        // consumed user record and disappears before it can publish another active span.
+        // The configuration snapshot is already taken. A previous process now commits the
+        // consumed user record, and the record of the answer it owes, and disappears.
         agentDisk.records.push({ type: "user", message: user("answer after restart") });
+        agentDisk.values.set("owed", { stage: "inference" });
         releaseConfigSnapshot.resolve();
-        await starting;
-        await flushMicrotasks();
-        if (loads > 0) {
-            const agent = await restarted.resolve(ctx, "shared");
-            await agent.waitForIdle();
-            await agent.close();
-        }
-        const questions = provider.sessions.flatMap((session) =>
-            session.requests.flatMap((request) => askedIn(request.context.messages)),
-        );
+        const restarted = await starting;
+        // Nobody resolves the agent. If starting the collection discovered the work committed
+        // after its snapshot, the answer that agent owes is asked for without being prompted.
+        await until(() => questionsAskedOf(provider).length > 0);
+        const agent = await restarted.resolve(ctx, "shared");
+        await agent.waitForIdle();
+        await agent.close();
 
-        expect({
-            loads,
-            questions,
-        }).toEqual({
-            loads: 1,
-            questions: ["answer after restart"],
-        });
+        expect(questionsAskedOf(provider)).toEqual(["answer after restart"]);
     });
 
-    it("serializes recovery probing with a live agent persistence operation", async () => {
+    it("starts over a store another owner is mid-write on without losing its work", async () => {
         const managerDisk = new InMemoryPersistence();
         const agentDisk = new InMemoryPersistence();
         const provider = new ScriptedProvider([textTurn("live answer")]);
-        const liveOwner = collection(managerDisk, agentDisk, provider);
-        const live = await liveOwner.createWithId(ctx, "shared", {});
+        const liveOwner = await collection(managerDisk, agentDisk, provider);
+        const live = await liveOwner.create(ctx, {});
         await live.waitForIdle();
 
         const liveWriteStarted = deferred();
         const releaseLiveWrite = deferred();
         const originalWriteValue = agentDisk.writeValue.bind(agentDisk);
-        const originalReadValues = agentDisk.readValues.bind(agentDisk);
         let liveOperationActive = false;
-        let recoveryOverlappedLiveOperation = false;
         agentDisk.writeValue = async (writeCtx, key, value) => {
             if (key.startsWith("send.") && !liveOperationActive) {
                 liveOperationActive = true;
@@ -299,17 +165,13 @@ describe("manager identity and recovery gaps", () => {
             }
             await originalWriteValue(writeCtx, key, value);
         };
-        agentDisk.readValues = async (readCtx, prefix) => {
-            if (prefix === "owed" && liveOperationActive) {
-                recoveryOverlappedLiveOperation = true;
-            }
-            return await originalReadValues(readCtx, prefix);
-        };
 
-        const sending = liveOwner.send(ctx, "shared", user("live work"), { await: true });
+        const sending = liveOwner.send(ctx, live.id, user("live work"), { await: true });
         await liveWriteStarted.promise;
-        const restarted = collection(managerDisk, agentDisk, new ScriptedProvider([]));
-        const starting = outcomeOf(restarted.start(ctx));
+        // A second owner comes up over the same store while that message is still being
+        // admitted. What it reads is one key, written in one step, so it never waits for a
+        // write it has nothing to do with — and it never sees half of one either.
+        const starting = outcomeOf(collection(managerDisk, agentDisk, new ScriptedProvider([])));
         const earlyStart = await observedWithin(starting);
         releaseLiveWrite.resolve();
         await Promise.all([sending, starting]);
@@ -317,200 +179,15 @@ describe("manager identity and recovery gaps", () => {
         await live.close();
 
         expect({
-            recoveryOverlappedLiveOperation,
             startSettledWhileWriteBlocked: earlyStart.status === "settled",
+            questions: askedIn(
+                provider.sessions.flatMap((session) =>
+                    session.requests.flatMap((request) => request.context.messages),
+                ),
+            ),
         }).toEqual({
-            recoveryOverlappedLiveOperation: false,
-            startSettledWhileWriteBlocked: false,
-        });
-    });
-
-    it("does not let a stale owner erase another owner's active marker", async () => {
-        const managerDisk = new InMemoryPersistence();
-        const agentDisk = new InMemoryPersistence();
-        managerDisk.values.set("agentSystem.config.shared", {});
-        const staleDeleteStarted = deferred();
-        const releaseStaleDelete = deferred();
-        const originalDeleteValue = managerDisk.deleteValue.bind(managerDisk);
-        let blockFirstActiveDelete = true;
-        managerDisk.deleteValue = async (deleteCtx, key) => {
-            if (key === "agentSystem.active.shared" && blockFirstActiveDelete) {
-                blockFirstActiveDelete = false;
-                staleDeleteStarted.resolve();
-                await releaseStaleDelete.promise;
-            }
-            await originalDeleteValue(deleteCtx, key);
-        };
-
-        const staleOwner = collection(managerDisk, agentDisk, new ScriptedProvider([]));
-        const stale = await staleOwner.resolve(ctx, "shared");
-        await staleDeleteStarted.promise;
-
-        const inferenceStarted = deferred();
-        const releaseInference = deferred();
-        const blockInference: AgentFeatureConstructor = class implements AgentFeature {
-            readonly name = "block-inference";
-
-            async beforeInference(): Promise<void> {
-                inferenceStarted.resolve();
-                await releaseInference.promise;
-            }
-        };
-        const writingProvider = new ScriptedProvider([textTurn("writer answer")]);
-        const writingOwner = collection(managerDisk, agentDisk, writingProvider, [blockInference]);
-        const writer = await writingOwner.resolve(ctx, "shared");
-        await writer.waitForIdle();
-        const sending = writingOwner.send(ctx, "shared", user("keep active"), { await: true });
-        await inferenceStarted.promise;
-        await sending;
-
-        releaseStaleDelete.resolve();
-        await stale.waitForIdle();
-        const activeWhileWriterOwes = managerDisk.values.get("agentSystem.active.shared") === true;
-
-        releaseInference.resolve();
-        await writer.waitForIdle();
-        await Promise.all([stale.close(), writer.close()]);
-
-        expect(activeWhileWriterOwes).toBe(true);
-    });
-
-    it("settles sibling feature loads before a rejected creation can overlap its retry", async () => {
-        const managerDisk = new InMemoryPersistence();
-        const agentDisk = new InMemoryPersistence();
-        const slowLoadStarted = deferred();
-        const secondSlowLoadStarted = deferred();
-        const releaseFirstSlowLoad = deferred();
-        let failingLoads = 0;
-        let slowLoads = 0;
-        let activeSlowLoads = 0;
-        let maximumActiveSlowLoads = 0;
-        const failsOnce: AgentFeatureConstructor = class implements AgentFeature {
-            readonly name = "fails-once";
-
-            load(): Promise<void> {
-                failingLoads += 1;
-                return failingLoads === 1
-                    ? Promise.reject(new Error("first feature rejected"))
-                    : Promise.resolve();
-            }
-        };
-        const slowSibling: AgentFeatureConstructor = class implements AgentFeature {
-            readonly name = "slow-sibling";
-
-            async load(): Promise<void> {
-                slowLoads += 1;
-                const attempt = slowLoads;
-                activeSlowLoads += 1;
-                maximumActiveSlowLoads = Math.max(maximumActiveSlowLoads, activeSlowLoads);
-                if (attempt === 1) {
-                    slowLoadStarted.resolve();
-                    await releaseFirstSlowLoad.promise;
-                } else {
-                    secondSlowLoadStarted.resolve();
-                }
-                activeSlowLoads -= 1;
-            }
-        };
-        const owner = collection(managerDisk, agentDisk, new ScriptedProvider([]), [
-            failsOnce,
-            slowSibling,
-        ]);
-
-        const firstCreation = outcomeOf(owner.createWithId(ctx, "shared", {}));
-        await slowLoadStarted.promise;
-        const earlyFailure = await observedWithin(firstCreation);
-        if (earlyFailure.status === "pending") releaseFirstSlowLoad.resolve();
-        await firstCreation;
-
-        const retry = outcomeOf(owner.createWithId(ctx, "shared", {}));
-        if (earlyFailure.status === "settled") {
-            await secondSlowLoadStarted.promise;
-            releaseFirstSlowLoad.resolve();
-        }
-        const retryOutcome = await retry;
-        await flushMicrotasks();
-        if (retryOutcome.status === "fulfilled") await retryOutcome.value.close();
-
-        expect({
-            maximumActiveSlowLoads,
-            retry: retryOutcome.status,
-        }).toEqual({
-            maximumActiveSlowLoads: 1,
-            retry: "fulfilled",
-        });
-    });
-
-    it("does not deadlock when a feature load resolves another agent from its collection", async () => {
-        const managerDisk = new InMemoryPersistence();
-        const agentDisk = new InMemoryPersistence();
-        managerDisk.values.set("agentSystem.config.dependency", {});
-        const reentrantFeature: AgentFeatureConstructor = class implements AgentFeature {
-            readonly name = "reentrant-load";
-            readonly #agentId: string;
-
-            constructor(agentId: string) {
-                this.#agentId = agentId;
-            }
-
-            async load(loadCtx: Context): Promise<void> {
-                if (this.#agentId !== "root") return;
-                const owner = agentsFromContext(loadCtx);
-                if (owner === undefined) throw new Error("missing collection");
-                // Enter as an independent caller while `root` still owns the collection lock.
-                // Passing the lock-bearing feature context would be rejected as direct reentry;
-                // the ordinary caller context exposes the global lock wait this scenario guards.
-                await owner.resolve(ctx, "dependency");
-            }
-        };
-        const owner = collection(managerDisk, agentDisk, new ScriptedProvider([]), [
-            reentrantFeature,
-        ]);
-
-        const creation = outcomeOf(owner.createWithId(ctx, "root", {}));
-        const observed = await observedWithin(creation);
-        if (observed.status === "settled" && observed.value.status === "fulfilled") {
-            const dependency = await owner.resolve(ctx, "dependency");
-            await Promise.all([observed.value.value.close(), dependency.close()]);
-        }
-
-        expect(observed.status === "settled" ? observed.value.status : "pending").toBe("fulfilled");
-    });
-
-    it("surfaces a rollback deletion failure and never leaves a ghost identity", async () => {
-        const managerDisk = new InMemoryPersistence();
-        const agentDisk = new InMemoryPersistence();
-        const broken: AgentFeatureConstructor = class implements AgentFeature {
-            readonly name = "broken";
-
-            load(): Promise<void> {
-                return Promise.reject(new Error("feature load failed"));
-            }
-        };
-        const owner = collection(managerDisk, agentDisk, new ScriptedProvider([]), [broken]);
-        const originalDeleteValue = managerDisk.deleteValue.bind(managerDisk);
-        let failRollback = true;
-        managerDisk.deleteValue = (deleteCtx, key) => {
-            if (key === "agentSystem.config.ghost" && failRollback) {
-                failRollback = false;
-                return Promise.reject(new Error("rollback delete failed"));
-            }
-            return originalDeleteValue(deleteCtx, key);
-        };
-
-        const creation = await outcomeOf(owner.createWithId(ctx, "ghost", {}));
-        const durableConfig = await owner.config(ctx, "ghost");
-        const message =
-            creation.status === "rejected" ? errorMessage(creation.reason) : "fulfilled";
-        // Leave this isolated in-memory store clean even when the production rollback did not.
-        managerDisk.values.delete("agentSystem.config.ghost");
-
-        expect({
-            durableConfig,
-            message,
-        }).toEqual({
-            durableConfig: undefined,
-            message: "rollback delete failed",
+            startSettledWhileWriteBlocked: true,
+            questions: ["live work"],
         });
     });
 
@@ -518,20 +195,23 @@ describe("manager identity and recovery gaps", () => {
         const managerDisk = new InMemoryPersistence();
         const agentDisk = new InMemoryPersistence();
         managerDisk.values.set("agentSystem.config.shared", {});
+        const resolvingOwner = await collection(managerDisk, agentDisk, new ScriptedProvider([]));
+        const deletingOwner = await collection(managerDisk, agentDisk, new ScriptedProvider([]));
+
+        // The resolution is suspended where it reads the agent's own store, which is the point
+        // the deletion of that identity has to be ordered against.
         const resolverLoadStarted = deferred();
         const releaseResolverLoad = deferred();
-        const blockingFeature: AgentFeatureConstructor = class implements AgentFeature {
-            readonly name = "blocking-load";
-
-            async load(): Promise<void> {
+        const originalReadValues = agentDisk.readValues.bind(agentDisk);
+        let blockFirstFlagRead = true;
+        agentDisk.readValues = async (readCtx, prefix) => {
+            if (prefix === "owed" && blockFirstFlagRead) {
+                blockFirstFlagRead = false;
                 resolverLoadStarted.resolve();
                 await releaseResolverLoad.promise;
             }
+            return await originalReadValues(readCtx, prefix);
         };
-        const resolvingOwner = collection(managerDisk, agentDisk, new ScriptedProvider([]), [
-            blockingFeature,
-        ]);
-        const deletingOwner = collection(managerDisk, agentDisk, new ScriptedProvider([]));
 
         const resolution = outcomeOf(resolvingOwner.resolve(ctx, "shared"));
         await resolverLoadStarted.promise;
@@ -540,7 +220,7 @@ describe("manager identity and recovery gaps", () => {
         const resolutionOutcome = await resolution;
 
         const durableConfig = await resolvingOwner.config(ctx, "shared");
-        const restarted = collection(managerDisk, agentDisk, new ScriptedProvider([]));
+        const restarted = await collection(managerDisk, agentDisk, new ScriptedProvider([]));
         const restartOutcome = await outcomeOf(restarted.resolve(ctx, "shared"));
         const linearized =
             resolutionOutcome.status === "rejected" ||
@@ -553,68 +233,36 @@ describe("manager identity and recovery gaps", () => {
         expect(linearized).toBe(true);
     });
 
-    it("recreates a deleted identity without its old conversation, settings, or feature KV", async () => {
-        const managerDisk = new InMemoryPersistence();
-        const agentDisk = new InMemoryPersistence();
-        const provider = new ScriptedProvider([textTurn("old answer"), textTurn("new answer")]);
-        const owner = collection(managerDisk, agentDisk, provider);
-
-        const oldAgent = await owner.createWithId(ctx, "shared", {});
-        await oldAgent.waitForIdle();
-        await owner.send(ctx, "shared", user("old question"), { await: true, model: "old-model" });
-        await oldAgent.waitForIdle();
-        agentDisk.values.set("kv.shared.feature.state.legacy", "old value");
-        await owner.delete(ctx, "shared");
-
-        const recreated = await owner.createWithId(ctx, "shared", {});
-        await recreated.waitForIdle();
-        const recreatedKV = agentDisk.values.get("kv.shared.feature.state.legacy");
-        await owner.send(ctx, "shared", user("new question"), { await: true });
-        await recreated.waitForIdle();
-        const requests = provider.sessions.flatMap((session) => session.requests);
-        const latest = requests.at(-1);
-        const latestQuestions = latest === undefined ? [] : askedIn(latest.context.messages);
-        const latestModel = latest?.model;
-        await recreated.close();
-
-        expect({
-            latestModel,
-            latestQuestions,
-            recreatedKV,
-        }).toEqual({
-            latestModel: undefined,
-            latestQuestions: ["new question"],
-            recreatedKV: undefined,
-        });
-    });
-
     it("copies nested creation config before caller mutation can diverge memory from storage", async () => {
         const managerDisk = new InMemoryPersistence();
         const agentDisk = new InMemoryPersistence();
-        const loadStarted = deferred();
-        const releaseLoad = deferred();
         let observedSetting: unknown;
-        const recorder: AgentFeatureConstructor = class implements AgentFeature {
+        const recorder: AgentFeature = new (class implements AgentFeature {
             readonly name = "recorder";
 
-            async load(loadCtx: Context): Promise<void> {
-                loadStarted.resolve();
-                await releaseLoad.promise;
-                observedSetting = agentFeatureConfig(loadCtx, "recorder")?.label;
+            instructions(hookCtx: Context): string {
+                observedSetting = agentFeatureConfig(hookCtx, "recorder")?.label;
+                return "";
             }
-        };
-        const owner = collection(managerDisk, agentDisk, new ScriptedProvider([]), [recorder]);
+        })();
+        const owner = await collection(
+            managerDisk,
+            agentDisk,
+            new ScriptedProvider([textTurn("answered")]),
+            [recorder],
+        );
         const config: AgentConfig = {
             features: { recorder: { label: "original" } },
         };
 
-        const creation = owner.createWithId(ctx, "shared", config);
-        await loadStarted.promise;
+        const creation = owner.create(ctx, config);
+        // The caller goes on editing the object it passed while the creation is still running.
         const callerSettings = config.features?.recorder;
         if (callerSettings !== undefined) callerSettings.label = "mutated by caller";
-        releaseLoad.resolve();
         const agent = await creation;
-        const durableConfig = await owner.config(ctx, "shared");
+        await agent.send(ctx, user("go"), { await: true });
+        await agent.waitForIdle();
+        const durableConfig = await owner.config(ctx, agent.id);
         await agent.close();
 
         expect({

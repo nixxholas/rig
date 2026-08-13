@@ -1,7 +1,7 @@
 import type { SessionReasoningEffort, SessionServiceTier } from "@slopus/happy-providers";
 import { createContextNamespace, type Context } from "@steve.kite/stdlib";
 
-import type { AgentBaseKV } from "./AgentBaseKV.js";
+import type { AgentKV } from "./AgentKV.js";
 
 /** Backing storage for `agentId`: the ID of the agent owning a context. */
 const idNamespace = createContextNamespace<string | undefined>("agentId", undefined);
@@ -20,7 +20,9 @@ const serviceTierNamespace = createContextNamespace<SessionServiceTier | undefin
     undefined,
 );
 /** Backing storage for `agentKV`: the scoped key-value store carried on a context. */
-const kvNamespace = createContextNamespace<AgentBaseKV | undefined>("agentKV", undefined);
+const kvNamespace = createContextNamespace<AgentKV | undefined>("agentKV", undefined);
+/** Backing storage for `agentRunKV`: the run's own store, erased when the agent settles. */
+const runKVNamespace = createContextNamespace<AgentKV | undefined>("agentRunKV", undefined);
 
 /**
  * Derive the agent's context carrying its ID, provider ID, model, effort, and service tier — all
@@ -72,11 +74,25 @@ export function agentServiceTier(ctx: Context): SessionServiceTier | undefined {
 }
 
 /** Carry a scoped key-value store on the context, replacing any store carried before. */
-export function withAgentKV(ctx: Context, kv: AgentBaseKV): Context {
+export function withAgentKV(ctx: Context, kv: AgentKV): Context {
     return kvNamespace.set(ctx, kv);
 }
 
 /** The scoped key-value store carried on this context, when the agent attached one. */
-export function agentKV(ctx: Context): AgentBaseKV | undefined {
+export function agentKV(ctx: Context): AgentKV | undefined {
     return kvNamespace.get(ctx);
+}
+
+/**
+ * Carry the store belonging to the run in progress, replacing any run store carried before. What
+ * it holds lives exactly as long as the work does: the agent erases the whole scope in the
+ * transaction that settles it, so nothing written here outlives the run that wrote it.
+ */
+export function withAgentRunKV(ctx: Context, kv: AgentKV): Context {
+    return runKVNamespace.set(ctx, kv);
+}
+
+/** The run's own store carried on this context, when the agent attached one. */
+export function agentRunKV(ctx: Context): AgentKV | undefined {
+    return runKVNamespace.get(ctx);
 }

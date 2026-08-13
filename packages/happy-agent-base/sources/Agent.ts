@@ -7,11 +7,21 @@ import {
     type AgentBaseMessageOptions,
     type AgentBaseOptions,
 } from "./AgentBase.js";
-import { agentKV, withAgentKV } from "./AgentContexts.js";
+import {
+    agentEffort,
+    agentKV,
+    agentModel,
+    agentProvider,
+    agentRunKV,
+    agentServiceTier,
+    withAgentKV,
+    withAgentRunKV,
+} from "./AgentContexts.js";
 import type { AgentBaseHooks, MaybePromise } from "./AgentBaseHooks.js";
 import type { AgentBaseState } from "./AgentBaseState.js";
-import type { AgentFeature } from "./AgentFeature.js";
+import type { AgentFeature, AgentFeatureScope } from "./AgentFeature.js";
 import type { AgentFeatureAction } from "./AgentFeatureAction.js";
+import type { AgentKV } from "./AgentKV.js";
 import type { AnyAgentTool } from "./AgentTool.js";
 
 /**
@@ -24,6 +34,11 @@ export interface AgentOptions<Tool extends AnyAgentTool = AnyAgentTool> extends 
 > {
     /** Independent capabilities whose hook implementations are merged, in array order. */
     readonly features?: readonly AgentFeature<Tool>[];
+    /**
+     * The store features share with every other agent built over the same storage. Each feature
+     * is handed its own scope of it, which is where anything outliving one conversation belongs.
+     */
+    readonly sharedKV: AgentKV;
 }
 
 /**
@@ -68,6 +83,19 @@ export class Agent<Tool extends AnyAgentTool = AnyAgentTool> {
     ): Promise<Agent<Tool>> {
         const { features, base } = split(options);
         return new Agent(await AgentBase.load(ctx, base), features);
+    }
+
+    /**
+     * Load the agent and set it going again if it has work left, or answer with nothing when it
+     * has none — how an owner coming up carries on what an earlier process was in the middle of.
+     */
+    static async loadActive<Tool extends AnyAgentTool = AnyAgentTool>(
+        ctx: Context,
+        options: AgentOptions<Tool>,
+    ): Promise<Agent<Tool> | undefined> {
+        const { features, base } = split(options);
+        const loaded = await AgentBase.loadActive(ctx, base);
+        return loaded === undefined ? undefined : new Agent(loaded, features);
     }
 
     /**
@@ -159,14 +187,22 @@ export class Agent<Tool extends AnyAgentTool = AnyAgentTool> {
 function split<Tool extends AnyAgentTool>(
     options: AgentOptions<Tool>,
 ): { features: readonly AgentFeature<Tool>[]; base: AgentBaseOptions } {
-    const { features, ...rest } = options;
+    const { features, sharedKV, ...rest } = options;
     const resolved = features ?? [];
-    return { features: resolved, base: { ...rest, hooks: mergeFeatures(resolved) } };
+    return {
+        features: resolved,
+        base: { ...rest, hooks: mergeFeatures(resolved, options, sharedKV) },
+    };
 }
 
 function mergeFeatures<Tool extends AnyAgentTool>(
     features: readonly AgentFeature<Tool>[],
+    options: AgentOptions<Tool>,
+    sharedKV: AgentKV,
 ): AgentBaseHooks {
+    /** What one feature's hook is handed alongside the context, for this call. */
+    const scopeOf = (ctx: Context, feature: AgentFeature<Tool>): AgentFeatureScope =>
+        featureScope(ctx, feature, options, sharedKV);
     const withInstructions = features.filter((feature) => feature.instructions !== undefined);
     const withTools = features.filter((feature) => feature.tools !== undefined);
     const withToolExecution = features.filter(
@@ -179,14 +215,16 @@ function mergeFeatures<Tool extends AnyAgentTool>(
     const fanOut = <Arguments extends readonly unknown[]>(
         pick: (
             feature: AgentFeature<Tool>,
-        ) => ((ctx: Context, ...args: Arguments) => MaybePromise<void>) | undefined,
+        ) =>
+            | ((ctx: Context, scope: AgentFeatureScope, ...args: Arguments) => MaybePromise<void>)
+            | undefined,
     ): ((ctx: Context, ...args: Arguments) => Promise<void>) | undefined => {
         const implemented = features.filter((feature) => pick(feature) !== undefined);
         if (implemented.length === 0) return undefined;
         return async (ctx, ...args) => {
             for (const feature of implemented) {
                 try {
-                    await pick(feature)?.(featureCtx(ctx, feature), ...args);
+                    await pick(feature)?.(featureCtx(ctx, feature), scopeOf(ctx, feature), ...args);
                 } catch {
                     // Features observe independently; one failing never silences the rest.
                 }
@@ -197,13 +235,15 @@ function mergeFeatures<Tool extends AnyAgentTool>(
     // features here are writing alongside the fact being committed, so containing one feature's
     // failure would commit a conclusion the rest of the transaction contradicts.
     const chain = (
-        pick: (feature: AgentFeature<Tool>) => ((ctx: Context) => MaybePromise<void>) | undefined,
+        pick: (
+            feature: AgentFeature<Tool>,
+        ) => ((ctx: Context, scope: AgentFeatureScope) => MaybePromise<void>) | undefined,
     ): ((ctx: Context) => Promise<void>) | undefined => {
         const implemented = features.filter((feature) => pick(feature) !== undefined);
         if (implemented.length === 0) return undefined;
         return async (ctx) => {
             for (const feature of implemented) {
-                await pick(feature)?.(featureCtx(ctx, feature));
+                await pick(feature)?.(featureCtx(ctx, feature), scopeOf(ctx, feature));
             }
         };
     };
@@ -215,6 +255,7 @@ function mergeFeatures<Tool extends AnyAgentTool>(
         ) =>
             | ((
                   ctx: Context,
+                  scope: AgentFeatureScope,
                   ...args: Arguments
               ) => MaybePromise<readonly AgentFeatureAction[] | undefined>)
             | undefined,
@@ -228,7 +269,11 @@ function mergeFeatures<Tool extends AnyAgentTool>(
             for (const feature of implemented) {
                 try {
                     actions.push(
-                        ...((await pick(feature)?.(featureCtx(ctx, feature), ...args)) ?? []),
+                        ...((await pick(feature)?.(
+                            featureCtx(ctx, feature),
+                            scopeOf(ctx, feature),
+                            ...args,
+                        )) ?? []),
                     );
                 } catch {
                     // Features act independently; one failing never discards the rest.
@@ -244,7 +289,11 @@ function mergeFeatures<Tool extends AnyAgentTool>(
                   onEvent: ((ctx, event) => {
                       for (const feature of withEvents) {
                           try {
-                              feature.onEvent?.(featureCtx(ctx, feature), event);
+                              feature.onEvent?.(
+                                  featureCtx(ctx, feature),
+                                  scopeOf(ctx, feature),
+                                  event,
+                              );
                           } catch {
                               // Features observe independently; one failing never silences
                               // the rest.
@@ -260,7 +309,10 @@ function mergeFeatures<Tool extends AnyAgentTool>(
                       const texts: string[] = [];
                       for (const feature of withInstructions) {
                           texts.push(
-                              (await feature.instructions?.(featureCtx(ctx, feature))) ?? "",
+                              (await feature.instructions?.(
+                                  featureCtx(ctx, feature),
+                                  scopeOf(ctx, feature),
+                              )) ?? "",
                           );
                       }
                       return texts.filter((text) => text.length > 0).join("\n\n");
@@ -274,7 +326,12 @@ function mergeFeatures<Tool extends AnyAgentTool>(
                   tools: async (ctx: Context) => {
                       const tools: AnyAgentTool[] = [];
                       for (const feature of withTools) {
-                          tools.push(...((await feature.tools?.(featureCtx(ctx, feature))) ?? []));
+                          tools.push(
+                              ...((await feature.tools?.(
+                                  featureCtx(ctx, feature),
+                                  scopeOf(ctx, feature),
+                              )) ?? []),
+                          );
                       }
                       return tools;
                   },
@@ -289,12 +346,16 @@ function mergeFeatures<Tool extends AnyAgentTool>(
                           const feature = withToolExecution[index];
                           if (feature === undefined) return await execution.execute();
                           let continued: Promise<unknown> | undefined;
-                          return await feature.aroundToolExecution?.(featureCtx(ctx, feature), {
-                              ...execution,
-                              // A wrapper may inspect the continuation from more than one code
-                              // path; every call joins the same downstream execution.
-                              execute: () => (continued ??= invoke(index + 1)),
-                          });
+                          return await feature.aroundToolExecution?.(
+                              featureCtx(ctx, feature),
+                              scopeOf(ctx, feature),
+                              {
+                                  ...execution,
+                                  // A wrapper may inspect the continuation from more than one
+                                  // code path; every call joins the same downstream execution.
+                                  execute: () => (continued ??= invoke(index + 1)),
+                              },
+                          );
                       };
                       return await invoke(0);
                   },
@@ -312,6 +373,7 @@ function mergeFeatures<Tool extends AnyAgentTool>(
                           try {
                               const message = await feature.modelChanged?.(
                                   featureCtx(ctx, feature),
+                                  scopeOf(ctx, feature),
                                   change,
                               );
                               injected ??= message;
@@ -364,12 +426,52 @@ function mergeFeatures<Tool extends AnyAgentTool>(
 }
 
 /**
- * The context a feature's hooks run on: the agent's context with the key-value store narrowed
- * to the feature's own name, so features never see each other's persisted entries.
+ * The context a feature's hooks run on: the agent's context with both key-value stores narrowed
+ * to the feature's own name, so features never see each other's persisted entries — and neither
+ * does a tool one of them runs.
  */
 function featureCtx(ctx: Context, feature: { readonly name: string }): Context {
     const kv = agentKV(ctx);
-    return kv === undefined ? ctx : withAgentKV(ctx, kv.scoped("feature", feature.name));
+    const runKV = agentRunKV(ctx);
+    const scoped = kv === undefined ? ctx : withAgentKV(ctx, kv.scoped("feature", feature.name));
+    return runKV === undefined
+        ? scoped
+        : withAgentRunKV(scoped, runKV.scoped("feature", feature.name));
+}
+
+/**
+ * What a feature's hook is handed alongside the context: the agent it is serving, and its own
+ * scope of each of the three stores. The selection comes from the context the agent derived for
+ * this call, so a hook always sees the model, effort, and tier the work is actually running on
+ * rather than the ones the agent was built with.
+ */
+function featureScope<Tool extends AnyAgentTool>(
+    ctx: Context,
+    feature: AgentFeature<Tool>,
+    options: AgentOptions<Tool>,
+    sharedKV: AgentKV,
+): AgentFeatureScope {
+    const kv = agentKV(ctx);
+    const runKV = agentRunKV(ctx);
+    if (kv === undefined || runKV === undefined) {
+        throw new Error(
+            `The feature "${feature.name}" was called on a context carrying no agent stores.`,
+        );
+    }
+    const provider = agentProvider(ctx) ?? options.provider;
+    return {
+        agent: {
+            id: options.id,
+            provider,
+            providerKind: options.providers.typeOf(provider) ?? undefined,
+            model: agentModel(ctx) ?? options.model,
+            effort: agentEffort(ctx) ?? options.effort,
+            tier: agentServiceTier(ctx) ?? options.serviceTier,
+        },
+        kv: kv.scoped("feature", feature.name),
+        sharedKV: sharedKV.scoped(feature.name),
+        runKV: runKV.scoped("feature", feature.name),
+    };
 }
 
 /**

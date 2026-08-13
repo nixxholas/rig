@@ -2,10 +2,8 @@ import type { SessionUserMessage } from "@slopus/happy-providers";
 import type { Context } from "@steve.kite/stdlib";
 
 import type { AgentBaseMessageOptions } from "./AgentBase.js";
-import type { AgentBaseKV } from "./AgentBaseKV.js";
 import type { AgentConfig } from "./AgentConfig.js";
 import type { AgentModel } from "./AgentModel.js";
-import type { AgentFeature } from "./AgentFeature.js";
 import { acceptanceIsWaitable, AgentRef } from "./AgentRef.js";
 import type { AgentInitialContext, AgentSystem } from "./AgentSystem.js";
 
@@ -54,16 +52,6 @@ export class AgentSystemRef {
     /** A reference to an existing agent; resolving one that was never created is an error. */
     async resolve(ctx: Context, agentId: string): Promise<AgentRef> {
         return new AgentRef(await this.#system.resolve(ctx, agentId));
-    }
-
-    /** Durable storage for one feature, shared by every agent in the collection. */
-    featureState(feature: string): AgentBaseKV {
-        return this.#system.featureState(feature);
-    }
-
-    /** A collection-wide feature by its stable name. */
-    feature(name: string): AgentFeature | undefined {
-        return this.#system.feature(name);
     }
 
     /** The configuration an agent was created with, or undefined when there is no such agent. */

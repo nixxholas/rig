@@ -5,13 +5,22 @@ import type {
     SessionUserMessage,
 } from "@slopus/happy-providers";
 
-import { AgentProviders } from "../../sources/index.js";
+import { AgentKV, AgentProviders } from "../../sources/index.js";
+import { InMemoryPersistence } from "./InMemoryPersistence.js";
 
 /** A registry holding the one provider under the ID `"scripted"` that tests configure. */
 export function providersOf(provider: BaseProvider): AgentProviders {
     const providers = new AgentProviders();
     providers.add("scripted", provider, "gym");
     return providers;
+}
+
+/**
+ * A store standing in for the one a collection shares between its agents, for a test that builds
+ * an `Agent` directly instead of going through an `AgentSystemLocal`.
+ */
+export function sharedKV(): AgentKV {
+    return new AgentKV(new InMemoryPersistence(), "shared.");
 }
 
 /** A complete scripted turn that streams the text one character at a time and ends normally. */

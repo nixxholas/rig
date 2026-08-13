@@ -34,54 +34,6 @@ function resultsIn(persistence: InMemoryPersistence): SessionToolResultMessage[]
  * it refuses outright, and what it does with a batch whose calls cannot be told apart.
  */
 describe("tool batch concurrency and re-entrancy", () => {
-    it("refuses a batch whose calls share one ID before any of them runs", async () => {
-        let executions = 0;
-        const tool = defineAgentTool({
-            name: "collide",
-            parameters: Type.Object({}),
-            returnType: Type.Object({}),
-            shouldReviewInAutoMode: () => false,
-            execute: () => {
-                executions += 1;
-                return Promise.resolve({});
-            },
-            toLLM: () => [{ type: "text", text: "ran" }],
-        });
-        const persistence = new InMemoryPersistence();
-        const agent = await AgentBase.create(ctx, {
-            id: "duplicate-call-ids",
-            providers: providersOf(
-                new ScriptedProvider([
-                    toolCallsTurn([
-                        { callId: "same", name: "collide" },
-                        { callId: "same", name: "collide" },
-                    ]),
-                    textTurn("after"),
-                ]),
-            ),
-            provider: "scripted",
-            persistence,
-            initialState: { tools: [tool] },
-        });
-
-        await agent.send(ctx, user("go"), { await: true });
-        await agent.waitForIdle();
-        const results = resultsIn(persistence);
-        await agent.close();
-
-        // Two calls under one ID have no answer the model could tell apart, so neither runs and
-        // the conversation carries exactly one result for that ID.
-        expect({
-            executions,
-            callIds: results.map((result) => result.callId),
-            errors: results.map((result) => result.isError),
-        }).toEqual({
-            executions: 0,
-            callIds: ["same"],
-            errors: [true],
-        });
-    });
-
     it("keeps each call of a concurrent batch in its own persistence scope", async () => {
         const observed: unknown[] = [];
         let entered = 0;

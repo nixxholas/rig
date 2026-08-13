@@ -1,4 +1,10 @@
-import type { SessionEvent, SessionSystemMessage } from "@slopus/happy-providers";
+import type {
+    ProviderModelCompatibilityType,
+    SessionEvent,
+    SessionReasoningEffort,
+    SessionServiceTier,
+    SessionSystemMessage,
+} from "@slopus/happy-providers";
 import type { Context } from "@steve.kite/stdlib";
 
 import type {
@@ -10,27 +16,62 @@ import type {
     MaybePromise,
 } from "./AgentBaseHooks.js";
 import type { AgentFeatureAction } from "./AgentFeatureAction.js";
+import type { AgentKV } from "./AgentKV.js";
 import type { AnyAgentTool } from "./AgentTool.js";
 
 /**
- * An individual feature class: one instance is built for each agent, so the instance may hold
- * that one agent's state and may be configured differently for each — a goal is the example, and
- * an agent whose configuration says nothing about it simply has no goal. The agent's ID is
- * offered to the constructor; a feature that does not need it simply takes no arguments.
+ * The agent a hook is serving, in full. One feature instance serves every agent in a collection,
+ * so this — rather than anything the feature was constructed with — is what tells it whose turn
+ * it is looking at, and what that agent is about to run on.
  */
-export interface AgentFeatureConstructor {
-    new (agentId: string): AgentFeature;
+export interface AgentFeatureAgent {
+    /** The system-generated identity of the agent, stable for its whole life. */
+    readonly id: string;
+    /** The registry ID of the provider in force, which one agent may switch between. */
+    readonly provider: string;
+    /**
+     * What kind of provider that ID is registered as — `"claude"`, `"codex"`, and so on. It is
+     * the vendor shape a feature has to reason about when a provider ID alone says nothing, and
+     * is absent when the ID is not registered.
+     */
+    readonly providerKind: ProviderModelCompatibilityType | undefined;
+    /** The model in force, absent when none was ever selected. */
+    readonly model: string | undefined;
+    /** The reasoning effort in force, absent when none was ever selected. */
+    readonly effort: SessionReasoningEffort | undefined;
+    /** The service tier in force, absent when none was ever selected. */
+    readonly tier: SessionServiceTier | undefined;
 }
 
 /**
- * A shared feature class: one instance is built for the whole collection and serves every agent
- * in it — the system prompt, the model catalog, subagents, and autocompaction are all the same
- * capability wherever it runs. Its hooks therefore learn which agent they are running for from
- * the context, through `agentId`, `agentKV`, and `agentConfig`, and any per-agent state
- * it keeps in memory must be keyed by that ID rather than held as a single value.
+ * What every hook of a feature is handed alongside the context: which agent it is running for,
+ * and the three stores it may write to, each with its own lifetime.
+ *
+ * They are passed rather than read off the context because a feature's own dependencies are not
+ * ambient state to be looked up: a hook is given exactly what it is entitled to, and cannot be
+ * handed a context that quietly means a different agent.
  */
-export interface SharedAgentFeatureConstructor {
-    new (): AgentFeature;
+export interface AgentFeatureScope {
+    /** The agent this hook is running for, and the selection it is running on. */
+    readonly agent: AgentFeatureAgent;
+    /**
+     * The feature's durable store for this one agent, scoped to `feature.<name>`. It belongs to
+     * the agent's conversation: it outlives every run, and it is cleared when the identity is
+     * created again. Renaming a feature orphans everything it stored here.
+     */
+    readonly kv: AgentKV;
+    /**
+     * The feature's durable store shared by every agent in the collection, and outliving all of
+     * them. Work one agent owes another lives here, since an agent's own store belongs to its
+     * conversation alone.
+     */
+    readonly sharedKV: AgentKV;
+    /**
+     * The feature's store for the run in progress, erased in the transaction that settles the
+     * agent. It is where a feature keeps what only makes sense while the agent is working, so a
+     * crash mid-run leaves notes a resumed run can read, and a finished run leaves none at all.
+     */
+    readonly runKV: AgentKV;
 }
 
 /**
@@ -38,6 +79,8 @@ export interface SharedAgentFeatureConstructor {
  * and the agent merges every feature's implementations into the singular hooks its internal
  * `AgentBase` runs with. The hook contracts are the same as `AgentBaseHooks`; see there for
  * when each hook fires and what its return value means.
+ *
+ * Every hook receives the agent's context first and its own `AgentFeatureScope` second.
  */
 export interface AgentFeature<Tool extends AnyAgentTool = AnyAgentTool> {
     /**
@@ -45,66 +88,74 @@ export interface AgentFeature<Tool extends AnyAgentTool = AnyAgentTool> {
      * name, so renaming a feature orphans everything it stored.
      */
     readonly name: string;
-    /**
-     * Load this feature's dependencies before its owning agent becomes available. Omit it when
-     * the feature has nothing to load.
-     */
-    readonly load?: (ctx: Context) => Promise<void>;
     /** Observes every session event; must never fail or delay the run. */
-    readonly onEvent?: (ctx: Context, event: SessionEvent) => void;
+    readonly onEvent?: (ctx: Context, scope: AgentFeatureScope, event: SessionEvent) => void;
     /** Merged after the base state and every earlier feature's instructions, in feature order. */
-    readonly instructions?: (ctx: Context) => MaybePromise<string>;
+    readonly instructions?: (ctx: Context, scope: AgentFeatureScope) => MaybePromise<string>;
     /** Merged after the base state and every earlier feature's tools, in feature order. */
-    readonly tools?: (ctx: Context) => MaybePromise<readonly Tool[]>;
+    readonly tools?: (ctx: Context, scope: AgentFeatureScope) => MaybePromise<readonly Tool[]>;
     /**
      * Wraps validated tool execution. Features compose as nested middleware in array order.
      * See `AgentBaseHooks.aroundToolExecution` for the continuation contract.
      */
     readonly aroundToolExecution?: (
         ctx: Context,
+        scope: AgentFeatureScope,
         execution: AgentBaseToolExecution,
     ) => MaybePromise<unknown>;
     /** The first feature that returns a handoff message wins the reset injection. */
     readonly modelChanged?: (
         ctx: Context,
+        scope: AgentFeatureScope,
         change: AgentBaseModelChange,
     ) => MaybePromise<SessionSystemMessage | undefined>;
     /** Called when the loop leaves the settled state and begins working. */
-    readonly beforeAgentLoop?: (ctx: Context) => MaybePromise<void>;
+    readonly beforeAgentLoop?: (ctx: Context, scope: AgentFeatureScope) => MaybePromise<void>;
     /**
      * Receives the measured size of the context the turn is about to run on. Actions from every
      * feature are concatenated and applied before the turn's first inference.
      */
     readonly beforeTurn?: (
         ctx: Context,
+        scope: AgentFeatureScope,
         turn: AgentBaseTurnStart,
     ) => MaybePromise<readonly AgentFeatureAction[] | undefined>;
     /** Called immediately before each inference request. */
-    readonly beforeInference?: (ctx: Context) => MaybePromise<void>;
+    readonly beforeInference?: (ctx: Context, scope: AgentFeatureScope) => MaybePromise<void>;
     /** Receives how the response ended and the token counts the provider measured for it. */
-    readonly afterInference?: (ctx: Context, inference: AgentBaseInference) => MaybePromise<void>;
+    readonly afterInference?: (
+        ctx: Context,
+        scope: AgentFeatureScope,
+        inference: AgentBaseInference,
+    ) => MaybePromise<void>;
     /**
      * Receives the token counts the turn's last measured response reported. Actions from every
      * feature are concatenated and applied together.
      */
     readonly afterTurn?: (
         ctx: Context,
+        scope: AgentFeatureScope,
         turn: AgentBaseTurn,
     ) => MaybePromise<readonly AgentFeatureAction[] | undefined>;
     /** Actions from every feature are concatenated and applied together. */
     readonly afterAgentLoop?: (
         ctx: Context,
+        scope: AgentFeatureScope,
     ) => MaybePromise<readonly AgentFeatureAction[] | undefined>;
     /**
-     * Called inside the transaction that records the agent as settled. The feature's own store
-     * on this context writes into that transaction, so what a feature concludes about the run
-     * and the fact that the run is over become durable together. The `Transact` suffix is what
-     * marks a hook as running inside a transaction.
+     * Called inside the transaction that records the agent as settled. The feature's stores write
+     * into that transaction, so what a feature concludes about the run and the fact that the run
+     * is over become durable together. The `Transact` suffix is what marks a hook as running
+     * inside a transaction. The run store is erased by that same transaction, so this is the last
+     * chance to keep any part of what the run wrote about itself.
      *
      * Unlike the observing hooks, a failure here is not contained: it rolls the settlement back
      * along with everything every feature wrote, and the agent stays recorded as working.
      */
-    readonly afterAgentSettledTransact?: (ctx: Context) => MaybePromise<void>;
+    readonly afterAgentSettledTransact?: (
+        ctx: Context,
+        scope: AgentFeatureScope,
+    ) => MaybePromise<void>;
     /** Called once after the loop has fully settled and no feature reopened it. */
-    readonly afterAgentSettled?: (ctx: Context) => MaybePromise<void>;
+    readonly afterAgentSettled?: (ctx: Context, scope: AgentFeatureScope) => MaybePromise<void>;
 }

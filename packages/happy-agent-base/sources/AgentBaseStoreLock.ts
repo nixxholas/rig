@@ -1,16 +1,16 @@
 import { asyncLock, type AsyncLock, type Context } from "@steve.kite/stdlib";
 
-import type { AgentBasePersistence } from "./AgentBasePersistence.js";
+import type { AgentPersistence } from "./AgentPersistence.js";
 
 /** Every lock handed out for a store, so `agentBaseWithStoreStill` can find and hold them all. */
-const owners = new WeakMap<AgentBasePersistence, AsyncLock[]>();
+const owners = new WeakMap<AgentPersistence, AsyncLock[]>();
 
 /**
  * A fresh lock for one owner of a store, remembered as belonging to that store. Two owners over
  * one store are genuinely concurrent — that is what makes the store, rather than any one owner's
  * memory, the authority — so each gets its own lock and neither waits for the other.
  */
-export function agentBaseStoreLock(persistence: AgentBasePersistence): AsyncLock {
+export function agentBaseStoreLock(persistence: AgentPersistence): AsyncLock {
     const created = asyncLock({ reentry: "block" });
     const existing = owners.get(persistence);
     if (existing === undefined) {
@@ -29,7 +29,7 @@ export function agentBaseStoreLock(persistence: AgentBasePersistence): AsyncLock
  */
 export async function agentBaseWithStoreStill<Result>(
     ctx: Context,
-    persistence: AgentBasePersistence,
+    persistence: AgentPersistence,
     work: (ctx: Context) => Promise<Result>,
 ): Promise<Result> {
     const held = [...(owners.get(persistence) ?? [])];

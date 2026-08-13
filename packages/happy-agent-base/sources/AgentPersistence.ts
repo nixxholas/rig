@@ -16,7 +16,7 @@ import type { Context } from "@steve.kite/stdlib";
  * written in the same transaction that physically deletes the superseded records, so it opens
  * the store; the records after it append as usual.
  */
-export type AgentBaseRecord =
+export type AgentRecord =
     | { readonly type: "user"; readonly message: SessionUserMessage }
     | { readonly type: "block"; readonly block: SessionAssistantBlock }
     | { readonly type: "tool"; readonly message: SessionToolResultMessage }
@@ -37,11 +37,12 @@ export type AgentBaseRecord =
  * Storage for one agent: an append-only main context store plus a sorted key-value store held
  * alongside it. A sent message is first written under a `pending.` key ordered by append time;
  * it reaches the main store only when a turn consumes it into the context, and its pending key
- * is deleted at that moment. The agent serializes all calls through one lock, so an
- * implementation never sees two operations in flight at the same time and needs no internal
- * locking.
+ * is deleted at that moment. Exactly one owner connects to a store, and the agent serializes its
+ * own record and bookkeeping writes through one lock, so history order always matches storage
+ * order. Key-value operations — a feature's or a tool's — run as they come, so each one has to be
+ * atomic on its own, but no implementation ever has to defend against a second owner.
  */
-export interface AgentBasePersistence {
+export interface AgentPersistence {
     /**
      * Run work atomically. The implementation opens a transaction and passes work a derived
      * context that its own operations recognize; how the transaction rides on that context is
@@ -50,9 +51,9 @@ export interface AgentBasePersistence {
      */
     transaction<Result>(ctx: Context, work: (ctx: Context) => Promise<Result>): Promise<Result>;
     /** Every record in the main context store, in append order. */
-    load(ctx: Context): Promise<readonly AgentBaseRecord[]>;
+    load(ctx: Context): Promise<readonly AgentRecord[]>;
     /** Add one more record to the end of the main context store. */
-    append(ctx: Context, record: AgentBaseRecord): Promise<void>;
+    append(ctx: Context, record: AgentRecord): Promise<void>;
     /**
      * Physically delete every record in the main context store. Called only inside the
      * compaction transaction, immediately before the replacement compaction record is appended,

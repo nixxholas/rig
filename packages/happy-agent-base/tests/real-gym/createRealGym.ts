@@ -2,7 +2,7 @@ import type { SessionReasoningEffort } from "@slopus/happy-providers";
 import type { Context } from "@steve.kite/stdlib";
 
 import {
-    AgentBaseKV,
+    AgentKV,
     AgentProviders,
     AgentSystemLocal,
     AgentStorage,
@@ -45,14 +45,12 @@ export async function createRealGym(
     if (real === null) return null;
 
     const environment = currentAgentEnvironment();
-    const agentId = `real-gym-${options.vendor}-${Date.now()}`;
     const models = realGymModels(options.vendor);
     const trace = options.traces.open({
         scenario: options.scenario,
         vendor: options.vendor,
         model: options.model,
         credential: real.credential,
-        agentId,
         environment,
         features: REAL_GYM_FEATURES.map((feature) => feature.name),
         models: models.map((model) => model.id),
@@ -63,22 +61,25 @@ export async function createRealGym(
     // One in-memory store per agent, plus the collection's own; the gym asserts against the
     // records they end up holding.
     const persistence = new InMemoryPersistence();
-    const agents = new AgentSystemLocal({
-        sharedFeatures: REAL_GYM_FEATURES.map((feature) => feature.Feature),
-        storage: new AgentStorage({
-            kv: new AgentBaseKV(new InMemoryPersistence(), "agents.", async (opCtx, work) =>
-                work(opCtx),
-            ),
+    const agents = await AgentSystemLocal.create(
+        ctx,
+        new AgentStorage({
+            kv: new AgentKV(new InMemoryPersistence(), "agents."),
             persistence: () => persistence,
         }),
-        providers,
-        provider: options.vendor,
-        models,
-    });
-    const agent = await agents.createWithId(ctx, agentId, {
+        {
+            features: REAL_GYM_FEATURES.map((feature) => new feature.Feature()),
+            providers,
+            provider: options.vendor,
+            models,
+        },
+    );
+    const agent = await agents.create(ctx, {
         environment,
         features: { gym: { scenario: options.scenario } },
     });
+    // The collection allocates the identity, so the trace learns it from the agent it built.
+    trace.agentId = agent.id;
     // The collection selects the provider; the model and effort travel with the first message.
     return new RealGym(agents, agent, persistence, trace, options.model, options.effort);
 }

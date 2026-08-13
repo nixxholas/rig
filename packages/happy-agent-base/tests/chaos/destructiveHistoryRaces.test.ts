@@ -11,7 +11,7 @@ import { Type } from "@sinclair/typebox";
 import { createRootContext, type Context } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
-import { AgentBase, defineAgentTool, type AgentBaseRecord } from "../../sources/index.js";
+import { AgentBase, defineAgentTool, type AgentRecord } from "../../sources/index.js";
 import { transcriptOf } from "../gym/chaosWorld.js";
 import { InMemoryPersistence } from "../gym/InMemoryPersistence.js";
 import { ScriptedProvider, ScriptedSession } from "../gym/ScriptedProvider.js";
@@ -99,56 +99,6 @@ function installCompaction(
  * coordinate exact consistency windows rather than depending on scheduler timing.
  */
 describe("consistency across destructive history boundaries", () => {
-    it("does not let load-time unanswered-call repair erase a concurrently committed suffix", async () => {
-        const buried = call("buried-call", "missing");
-        const disk = new InMemoryPersistence([
-            { type: "user", message: user("old question") },
-            { type: "block", block: buried },
-            { type: "system", message: system("The last turn failed.") },
-            { type: "user", message: user("later question") },
-            { type: "block", block: { type: "text", text: "later answer" } },
-        ]);
-        const repairReachedClear = deferred();
-        const releaseRepair = deferred();
-        const clearRecords = disk.clearRecords.bind(disk);
-        let intercepted = false;
-        disk.clearRecords = async (clearCtx) => {
-            if (!intercepted) {
-                intercepted = true;
-                repairReachedClear.resolve();
-                await releaseRepair.promise;
-            }
-            await clearRecords(clearCtx);
-        };
-        const agent = await AgentBase.create(ctx, {
-            id: "repair-versus-suffix",
-            providers: providersOf(new ScriptedProvider([])),
-            provider: "scripted",
-            persistence: disk,
-        });
-
-        agent.start();
-        expect(await observedWithin(repairReachedClear.promise)).toBe(true);
-        const concurrentSuffix: AgentBaseRecord[] = [
-            { type: "user", message: user("committed by another owner") },
-            { type: "block", block: { type: "text", text: "other owner's answer" } },
-        ];
-        for (const record of concurrentSuffix) await disk.append(ctx, record);
-        releaseRepair.resolve();
-        await agent.waitForIdle();
-        await agent.close();
-
-        // Repair may replace only the snapshot in which it found the malformed call. Anything
-        // committed after that snapshot is an authoritative suffix and must survive the rewrite.
-        expect(transcriptOf(disk).slice(-2)).toEqual([
-            user("committed by another owner"),
-            {
-                role: "assistant",
-                content: [{ type: "text", text: "other owner's answer" }],
-            },
-        ]);
-    });
-
     it("does not let sibling tool mappers append after a failed result commit ended the turn", async () => {
         const disk = new InMemoryPersistence();
         const firstResultFailed = deferred();
@@ -391,63 +341,5 @@ describe("consistency across destructive history boundaries", () => {
             },
             user("message after restart"),
         ]);
-    });
-
-    it("rejects duplicate provider tool-call IDs before executing ambiguous calls", async () => {
-        const duplicateEvents: SessionEvent[] = [
-            { type: "toolcall_start", callId: "duplicate", name: "work" },
-            { type: "toolcall_end", callId: "duplicate", arguments: '{"value":"first"}' },
-            { type: "toolcall_start", callId: "duplicate", name: "work" },
-            { type: "toolcall_end", callId: "duplicate", arguments: '{"value":"second"}' },
-            { type: "done", state: "tool_call", tokens: { input: 1, output: 1 } },
-        ];
-        const provider = new ScriptedProvider([duplicateEvents, textTurn("ambiguous")]);
-        const disk = new InMemoryPersistence();
-        const executions: string[] = [];
-        const events: SessionEvent[] = [];
-        const agent = await AgentBase.create(ctx, {
-            id: "duplicate-provider-call-ids",
-            providers: providersOf(provider),
-            provider: "scripted",
-            persistence: disk,
-            hooks: {
-                onEvent: (_eventCtx, event) => events.push(event),
-            },
-            initialState: {
-                tools: [
-                    defineAgentTool({
-                        name: "work",
-                        parameters: Type.Object({ value: Type.String() }),
-                        returnType: Type.Object({ value: Type.String() }),
-                        shouldReviewInAutoMode: () => false,
-                        execute: (_toolCtx, args) => {
-                            executions.push(args.value);
-                            return Promise.resolve({ value: args.value });
-                        },
-                        toLLM: (result) => [{ type: "text", text: result.value }],
-                    }),
-                ],
-            },
-        });
-
-        await agent.send(ctx, user("produce malformed duplicate calls"), { await: true });
-        await agent.waitForIdle();
-        await agent.close();
-
-        const internalErrors = events.filter(
-            (event) =>
-                event.type === "done" && event.state === "error" && event.kind === "internal_error",
-        );
-        expect(executions).toEqual([]);
-        expect(disk.records.filter((record) => record.type === "tool")).toEqual([]);
-        expect(internalErrors).toHaveLength(1);
-        const internalError = internalErrors[0];
-        expect(
-            internalError?.type === "done" &&
-                internalError.state === "error" &&
-                internalError.kind === "internal_error"
-                ? internalError.message
-                : undefined,
-        ).toMatch(/duplicate.*call.*id/i);
     });
 });

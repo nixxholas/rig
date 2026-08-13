@@ -7,7 +7,6 @@ import {
     knownModels,
     type AgentFeature,
     type AgentModel,
-    type SharedAgentFeatureConstructor,
 } from "../../sources/index.js";
 import type { RealGymVendor } from "./loadRealProvider.js";
 
@@ -60,12 +59,12 @@ export class FeatureGymHarness implements AgentFeature {
 }
 
 /**
- * The feature classes every gym agent runs with, named as the report lists them. All of them are
- * shared: one instance of each serves every agent the gym's collection builds.
+ * The feature classes every gym agent runs with, named as the report lists them. One instance of
+ * each serves every agent the gym's collection builds.
  */
 export const REAL_GYM_FEATURES: readonly {
     name: string;
-    Feature: SharedAgentFeatureConstructor;
+    Feature: new () => AgentFeature;
 }[] = [{ name: "gym", Feature: FeatureGymHarness }];
 
 const EFFORTS: readonly SessionReasoningEffort[] = [

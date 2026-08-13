@@ -90,3 +90,24 @@ on retry. All pending states are deleted completely when a turn finishes.
 We also clear data as soon as it is no longer needed. Once all tool calls have
 run and been saved in history, the tool cache is deleted immediately because
 everything is already committed.
+
+## Single owner per store
+
+There is no multi-owner support. Exactly one AgentSystem connects to a store,
+and there is exactly one live AgentBase per agent within it. This is enforced
+with a hard lock at the database level, the same way Rig already locks its own
+database.
+
+The store therefore never has two concurrent writers. State an owner wrote is
+state only that owner can have written. When a run finishes, it may erase its
+own records without checking whether someone else wrote them.
+
+Machinery whose only purpose is to make several concurrent owners safe over
+one store is not wanted. Per-owner lock registries, holding every owner still,
+atomic claim-on-delete for queue entries, owner tokens in durable records, and
+compare-and-delete on the active flag should be removed where they exist rather
+than carried forward.
+
+Reloading durable state before a turn stays for its own reason. It makes the
+store, rather than memory, the authority after a restart. It is not a defence
+against another live owner.

@@ -9,12 +9,12 @@ import { describe, expect, it } from "vitest";
 
 import {
     AgentBase,
-    AgentBaseKV,
+    agentId,
+    AgentKV,
     AgentStorage,
     AgentSystemLocal,
     agentSystem as agentsFromContext,
     type AgentFeature,
-    type AgentFeatureConstructor,
 } from "../../sources/index.js";
 import { InMemoryPersistence } from "../gym/InMemoryPersistence.js";
 import { ScriptedProvider, ScriptedSession } from "../gym/ScriptedProvider.js";
@@ -74,34 +74,30 @@ function summary(text: string): SessionCompaction {
     };
 }
 
-function managerKV(persistence: InMemoryPersistence): AgentBaseKV {
-    return new AgentBaseKV(persistence, "agentSystem.", async (operationCtx, work) =>
-        work(operationCtx),
-    );
+function managerKV(persistence: InMemoryPersistence): AgentKV {
+    return new AgentKV(persistence, "agentSystem.");
 }
 
-function collection(
+async function collection(
     managerPersistence: InMemoryPersistence,
     persistences: Map<string, InMemoryPersistence>,
     provider: ScriptedProvider,
-    features: readonly AgentFeatureConstructor[],
-): AgentSystemLocal {
-    return new AgentSystemLocal({
-        features,
-        storage: new AgentStorage({
+    features: readonly AgentFeature[],
+): Promise<AgentSystemLocal> {
+    return await AgentSystemLocal.create(
+        ctx,
+        new AgentStorage({
             kv: managerKV(managerPersistence),
-            persistence: (agentId) => {
-                const existing = persistences.get(agentId);
+            persistence: (id) => {
+                const existing = persistences.get(id);
                 if (existing !== undefined) return existing;
                 const created = new InMemoryPersistence();
-                persistences.set(agentId, created);
+                persistences.set(id, created);
                 return created;
             },
         }),
-        providers: providersOf(provider),
-        provider: "scripted",
-        models: [],
-    });
+        { features, providers: providersOf(provider), provider: "scripted", models: [] },
+    );
 }
 
 /**
@@ -524,32 +520,31 @@ describe("hook and event re-entrancy", () => {
         const managerDisk = new InMemoryPersistence();
         const disks = new Map<string, InMemoryPersistence>();
         const hookEntered = deferred();
-        const reentrantFeature: AgentFeatureConstructor = class implements AgentFeature {
+        const reentrantFeature: AgentFeature = new (class implements AgentFeature {
             readonly name = "model-change-self-send";
-            readonly #agentId: string;
-
-            constructor(agentId: string) {
-                this.#agentId = agentId;
-            }
 
             async modelChanged(hookCtx: Context): Promise<undefined> {
                 hookEntered.resolve();
                 const owner = agentsFromContext(hookCtx);
                 if (owner === undefined) throw new Error("missing collection");
-                await owner.send(hookCtx, this.#agentId, user("message from modelChanged"));
+                await owner.send(
+                    hookCtx,
+                    agentId(hookCtx) ?? "",
+                    user("message from modelChanged"),
+                );
                 return undefined;
             }
-        };
-        const owner = collection(
+        })();
+        const owner = await collection(
             managerDisk,
             disks,
             new ScriptedProvider([textTurn("after switch"), textTurn("after self-send")]),
             [reentrantFeature],
         );
-        const agent = await owner.createWithId(ctx, "self", {});
+        const agent = await owner.create(ctx, {});
         await agent.waitForIdle();
 
-        await owner.send(ctx, "self", user("switch"), { await: true, model: "openai/gpt" });
+        await owner.send(ctx, agent.id, user("switch"), { await: true, model: "openai/gpt" });
         await hookEntered.promise;
         const idle = await observedWithin(outcomeOf(agent.waitForIdle()));
 
@@ -559,33 +554,34 @@ describe("hook and event re-entrancy", () => {
     it("allows modelChanged to send to another agent without coupling their locks", async () => {
         const managerDisk = new InMemoryPersistence();
         const disks = new Map<string, InMemoryPersistence>();
-        const reentrantFeature: AgentFeatureConstructor = class implements AgentFeature {
+        // The identities are allocated by the collection, so the feature learns them from the
+        // agents it is about to serve rather than from a name the test chose.
+        let sourceId: string | undefined;
+        let targetId: string | undefined;
+        const reentrantFeature: AgentFeature = new (class implements AgentFeature {
             readonly name = "model-change-cross-send";
-            readonly #agentId: string;
-
-            constructor(agentId: string) {
-                this.#agentId = agentId;
-            }
 
             async modelChanged(hookCtx: Context): Promise<undefined> {
-                if (this.#agentId !== "source") return undefined;
+                if (agentId(hookCtx) !== sourceId) return undefined;
                 const owner = agentsFromContext(hookCtx);
                 if (owner === undefined) throw new Error("missing collection");
-                await owner.send(hookCtx, "target", user("message from source modelChanged"));
+                await owner.send(hookCtx, targetId ?? "", user("message from source modelChanged"));
                 return undefined;
             }
-        };
+        })();
         const provider = new ScriptedProvider([textTurn("target"), textTurn("source")]);
-        const owner = collection(managerDisk, disks, provider, [reentrantFeature]);
-        const source = await owner.createWithId(ctx, "source", {});
-        const target = await owner.createWithId(ctx, "target", {});
+        const owner = await collection(managerDisk, disks, provider, [reentrantFeature]);
+        const source = await owner.create(ctx, {});
+        const target = await owner.create(ctx, {});
+        sourceId = source.id;
+        targetId = target.id;
         await Promise.all([source.waitForIdle(), target.waitForIdle()]);
 
-        await owner.send(ctx, "source", user("switch"), { await: true, model: "openai/gpt" });
+        await owner.send(ctx, source.id, user("switch"), { await: true, model: "openai/gpt" });
         const observed = await observedWithin(
             outcomeOf(Promise.all([source.waitForIdle(), target.waitForIdle()])),
         );
-        const targetUsers = (disks.get("target")?.records ?? []).filter(
+        const targetUsers = (disks.get(target.id)?.records ?? []).filter(
             (record) => record.type === "user",
         );
         if (observed.status === "settled" && observed.value.status === "fulfilled") {

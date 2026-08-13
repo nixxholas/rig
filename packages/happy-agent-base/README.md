@@ -129,27 +129,36 @@ interface AgentConfig {
     features?: { [featureName: string]: { [key: string]: unknown } };
 }
 
-interface AgentFeatureConstructor {
-    new (agentId: string): AgentFeature; // individual: one instance per agent
-}
-
-interface SharedAgentFeatureConstructor {
-    new (): AgentFeature; // shared: one instance for the whole collection
-}
-
 interface AgentFeature {
     name: string;
-    load?: (ctx: Context) => Promise<void>;
-    // Plus any subset of AgentBaseHooks. aroundToolExecution wrappers nest in feature order.
+    // Plus any subset of AgentBaseHooks, each taking its AgentFeatureScope after the context.
+    // aroundToolExecution wrappers nest in feature order.
+}
+
+interface AgentFeatureScope {
+    agent: AgentFeatureAgent;
+    kv: AgentBaseKV; // this feature's store for this agent, outliving every run
+    sharedKV: AgentBaseKV; // this feature's store, shared by every agent in the collection
+    runKV: AgentBaseKV; // this feature's store for the run, erased when the agent settles
+}
+
+interface AgentFeatureAgent {
+    id: string;
+    provider: string; // registry ID
+    providerKind: ProviderModelCompatibilityType | undefined; // how that ID was registered
+    model: string | undefined;
+    effort: SessionReasoningEffort | undefined;
+    tier: SessionServiceTier | undefined;
 }
 
 class AgentBaseKV {
     readonly prefix: string; // absolute key prefix of this scope, ending with "."
-    scoped(segment: string): AgentBaseKV; // narrower store under `segment`
+    scoped(...segments: string[]): AgentBaseKV; // narrower store under `segments`
     read(ctx: Context, key: string): Promise<unknown>;
     list(ctx: Context, prefix?: string): Promise<readonly { key: string; value: unknown }[]>;
     write(ctx: Context, key: string, value: unknown): Promise<void>;
     delete(ctx: Context, key: string): Promise<void>;
+    clear(ctx: Context): Promise<void>; // every entry in the scope, including narrower ones
 }
 
 interface AgentBaseModelChange {
@@ -341,8 +350,12 @@ accessor. The store is an `AgentBaseKV` view over the agent's sorted store under
 always relative to the scope — a holder can neither see nor touch anything outside it, and
 `scoped(segment)` narrows further. Hooks receive the session scope; a tool execution receives
 the store narrowed to `call.<call ID>`, so a tool call persists under its own call ID and never
-in another call's scope. The `modelChanged` hook fires while the agent holds its persistence
-lock, so its store executes directly on the held lock instead of deadlocking.
+in another call's scope. Beside it the context carries a second store of the same shape, under
+`kv.<agent id>.run.` and readable through `agentRunKV`, which belongs to the run rather than to
+the conversation: the transaction that settles the agent erases the whole of it, so what a run
+wrote about itself never reaches the next one. The `modelChanged` hook fires while the agent
+holds its persistence lock, so its stores execute directly on the held lock instead of
+deadlocking.
 
 The lifecycle hooks bracket the loop's own structure. `beforeAgentLoop` fires when the loop
 leaves the settled state and begins working, and `afterAgentLoop` fires when it would settle
@@ -380,9 +393,14 @@ send queues stay durable and join the next requested turn.
 `Agent` is a thin wrapper around `AgentBase` that assembles its behavior from an array of
 `AgentFeature`s instead of one hooks object. Each feature carries a required stable `name` and
 implements any subset of the hooks; the agent merges them, in array order, into the singular
-private hooks its internal base runs with. A feature's hooks run with the key-value store
-narrowed to `feature.<name>`, so features never see each other's persisted entries — and
-renaming a feature orphans everything it stored. Features are independent: observing hooks — events and lifecycle brackets — fan out with
+private hooks its internal base runs with. Every hook receives the agent's context first and its
+own `AgentFeatureScope` second: the agent it is serving — identity, provider registry ID and
+kind, model, effort, and tier — and its three stores, each narrowed to `feature.<name>`, so
+features never see each other's persisted entries and renaming a feature orphans everything it
+stored. `kv` belongs to that one agent's conversation, `sharedKV` to the whole collection, and
+`runKV` to the run in progress and is erased when it settles. They are handed over rather than
+read off the context, so a hook is given exactly what it is entitled to and can never be passed
+a context that quietly means another agent. Features are independent: observing hooks — events and lifecycle brackets — fan out with
 per-feature isolation so one throwing feature never silences the others, and lifecycle actions
 concatenate with a failing feature losing only its own actions. Instructions and tools
 concatenate after the base state and stay loud: a failing feature fails the turn. For a model
@@ -401,26 +419,21 @@ exists is too. The configuration carries the environment the agent works on — 
 about its machine is ever half-true — plus one opaque settings map per feature, keyed by feature
 name; the agent never looks inside a feature's entry, so a feature validates its own against its
 own schema. Every context the agent derives carries the configuration, readable
-through the exported `agentConfig` and `agentFeatureConfig` accessors, from feature `load` all
-the way down to a tool execution.
+through the exported `agentConfig` and `agentFeatureConfig` accessors, from the first hook of a
+feature all the way down to a tool execution.
 
-A collection is given its features as two arrays, because there are two kinds. An **individual**
-feature is built once per agent — `new Feature(agentId)` — so it may hold that one agent's state
-and be configured for it alone. A **shared** feature is built once for the whole collection and
-handed to every agent it builds. A shared feature therefore learns which agent a hook is serving
-from the context — `agentBaseId`, the store on the context, and the agent's configuration —
-rather than from anything it was constructed with, and keeps what one run remembers keyed by
-that ID, dropping it when the agent settles. Its `load` runs once, before the first agent exists,
-on the collection's own context and so without any agent's configuration; a failed shared load
-is forgotten, so the next agent tries again rather than inheriting a collection that can never
-build one. Shared features come before the individual ones in every agent's feature list.
+A collection is given its features as instances the caller has already built and which are ready
+to serve — there is no load step. One instance serves every agent the collection builds, so it
+learns which agent a hook is running for from the scope it is handed rather than from anything
+it was constructed with, and keeps what one run remembers keyed by that ID, dropping it when the
+agent settles.
 
 `start(ctx)` resolves and resumes every agent that was still
 working when the previous process stopped, and `steer`, `send`, `abort`, and `compact` resolve
 an agent by ID before acting on it, forwarding the same options the agent takes.
-`featureState(feature)` hands a feature durable storage shared by every agent in the collection
-and outliving all of them — an agent's own store belongs to its conversation and is cleared when
-the ID is created again, so work one agent owes another lives here instead. `delete` closes an
+A feature's `sharedKV` is durable storage shared by every agent in the collection and outliving
+all of them — an agent's own store belongs to its conversation and is cleared when the ID is
+created again, so work one agent owes another lives here instead. `delete` closes an
 agent and releases its identity while leaving what it wrote in place; creating the ID again is
 what clears the store, so the new agent never wakes up inside its predecessor's conversation.
 
@@ -610,8 +623,8 @@ a chaos seed and has its own focused test in `tests/blackbox/`:
 `tests/real-gym/` runs the agent against live models instead of scripted ones. Each scenario
 goes through an `AgentSystemLocal` collection, exactly the way the product assembles an agent: the agent
 is created with its configuration — the real machine environment and the gym's own feature
-config — and resolved from the collection, which loads a shared `FeatureGymHarness` that
-contributes one real `record_answer` tool. So the assembled instructions, tool set, loop, and
+config — and resolved from the collection, which runs one shared `FeatureGymHarness` that
+contributes a real `record_answer` tool. So the assembled instructions, tool set, loop, and
 durable records are all the product's own, and the credentials are the ones the installed Codex
 and Claude Code assistants already manage, resolved in the same order Rig itself resolves them.
 Nothing is mocked, so the suite runs only when it is asked for by name:

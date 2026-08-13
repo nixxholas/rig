@@ -3,10 +3,8 @@ import type { Context } from "@steve.kite/stdlib";
 
 import type { Agent } from "./Agent.js";
 import type { AgentBaseAwaitOptions, AgentBaseMessageOptions } from "./AgentBase.js";
-import type { AgentBaseKV } from "./AgentBaseKV.js";
 import type { AgentConfig } from "./AgentConfig.js";
 import type { AgentModel } from "./AgentModel.js";
-import type { AgentFeature } from "./AgentFeature.js";
 
 /** Conversation state installed atomically before a newly created agent starts. */
 export interface AgentInitialContext {
@@ -44,21 +42,6 @@ export interface AgentSystem {
 
     /** The live agent for an ID, loading it if this process has not seen it yet. */
     resolve(ctx: Context, agentId: string): Promise<Agent>;
-
-    /** Resolve and resume every agent that has work left from before this process started. */
-    start(ctx: Context): Promise<void>;
-
-    /**
-     * Durable storage for one feature, shared by every agent in the collection and outliving all
-     * of them. An agent's own store belongs to its conversation and is erased along with its
-     * identity; this is where a feature keeps what is true of the collection rather than of one
-     * conversation — above all work one agent owes another, which a process disappearing
-     * mid-handover must not take with it.
-     */
-    featureState(feature: string): AgentBaseKV;
-
-    /** A collection-wide feature by its stable name. */
-    feature(name: string): AgentFeature | undefined;
 
     /**
      * Queue a user message for an agent, injected as soon as its current response and tool batch

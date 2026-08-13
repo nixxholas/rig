@@ -1,20 +1,20 @@
-import type { AgentBaseKV } from "./AgentBaseKV.js";
-import type { AgentBasePersistence } from "./AgentBasePersistence.js";
+import type { AgentKV } from "./AgentKV.js";
+import type { AgentPersistence } from "./AgentPersistence.js";
 
 /** What an `AgentStorage` is built from. */
 export interface AgentStorageOptions {
     /** Shared key-value storage used for state spanning all agents. */
-    readonly kv: AgentBaseKV;
+    readonly kv: AgentKV;
     /** Produce the isolated persistence used by one agent. */
-    readonly persistence: (agentId: string) => AgentBasePersistence;
+    readonly persistence: (agentId: string) => AgentPersistence;
 }
 
 /** Storage roots shared by an `AgentSystemLocal` collection. */
 export class AgentStorage {
     /** Shared key-value storage used for state spanning all agents. */
-    readonly kv: AgentBaseKV;
+    readonly kv: AgentKV;
     /** Produces the isolated persistence used by one agent. */
-    readonly #persistence: (agentId: string) => AgentBasePersistence;
+    readonly #persistence: (agentId: string) => AgentPersistence;
 
     constructor(options: AgentStorageOptions) {
         this.kv = options.kv;
@@ -22,7 +22,7 @@ export class AgentStorage {
     }
 
     /** The isolated persistence for the given agent. */
-    persistence(agentId: string): AgentBasePersistence {
+    persistence(agentId: string): AgentPersistence {
         return this.#persistence(agentId);
     }
 }

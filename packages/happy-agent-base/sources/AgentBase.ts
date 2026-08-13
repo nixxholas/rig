@@ -25,9 +25,9 @@ import {
     type Context,
 } from "@steve.kite/stdlib";
 
-import { withAgentContext, withAgentKV } from "./AgentContexts.js";
+import { withAgentContext, withAgentKV, withAgentRunKV } from "./AgentContexts.js";
 import { taskContextBeforeToolCall, withAgentTaskContext } from "./AgentTaskContext.js";
-import { AgentBaseKV } from "./AgentBaseKV.js";
+import { AgentKV } from "./AgentKV.js";
 import {
     AGENT_BASE_PENDING_KEY,
     agentBasePendingStateOf,
@@ -35,7 +35,7 @@ import {
     type AgentBasePendingState,
 } from "./AgentBasePending.js";
 import type { AgentBaseHooks, MaybePromise } from "./AgentBaseHooks.js";
-import type { AgentBasePersistence, AgentBaseRecord } from "./AgentBasePersistence.js";
+import type { AgentPersistence, AgentRecord } from "./AgentPersistence.js";
 import { agentBaseStoreLock, agentBaseWithStoreStill } from "./AgentBaseStoreLock.js";
 import type { AgentBaseState } from "./AgentBaseState.js";
 import { AgentProviders } from "./AgentProviders.js";
@@ -120,13 +120,11 @@ interface QueueEntry {
     readonly options: AgentBaseMessageOptions;
 }
 
-/** One call in a dispatched batch, with the reason it must not run when it is ambiguous. */
+/** One call in a dispatched batch. */
 interface ToolBatchEntry {
     /** The pending-tool key the call is durable under until its result commits. */
     readonly key: string;
     readonly call: SessionToolCallBlock;
-    /** Present when the call must be answered with this refusal instead of being executed. */
-    readonly rejected?: string;
 }
 
 /** One message offered to a durable queue, before it has a key. */
@@ -146,7 +144,7 @@ export interface AgentBaseOptions {
     /** The registry ID of the provider to use; serializable alongside model and effort. */
     readonly provider: string;
     /** The append-only store the conversation, the queues, and the settings live in. */
-    readonly persistence: AgentBasePersistence;
+    readonly persistence: AgentPersistence;
     /** Observers and correctness hooks the run is assembled from; `Agent` merges features here. */
     readonly hooks?: AgentBaseHooks;
     /** Copied into the agent's own mutable `state`. */
@@ -335,7 +333,7 @@ export class AgentBase {
     /** The registry ID of the provider in force; durable, so a restart resumes on the same one. */
     #providerId: string;
     /** The append-only store behind the conversation, the queues and the persisted settings. */
-    readonly #persistence: AgentBasePersistence;
+    readonly #persistence: AgentPersistence;
     /** The model in force. Changing it to an incompatible one resets the conversation. */
     #model: string | undefined;
     /** The reasoning effort in force. */
@@ -352,7 +350,14 @@ export class AgentBase {
     readonly #persistenceLock: AsyncLock;
 
     /** The session-scoped key-value store carried on every context the agent derives. */
-    readonly #kv: AgentBaseKV;
+    readonly #kv: AgentKV;
+    /**
+     * The store belonging to the run rather than to the conversation, erased in the transaction
+     * that settles the agent. What a run concludes about itself is worth nothing to the next one,
+     * and leaving it behind would let a restarted agent act on a decision made about work that is
+     * already over.
+     */
+    readonly #runKV: AgentKV;
     /** Whether steering drains one message per response or all of them at once. */
     readonly #steeringMode: AgentBaseQueueMode;
     /** Whether sends drain one message per response or all of them at once. */
@@ -393,7 +398,7 @@ export class AgentBase {
      * a failed turn leaves behind is owed a response, while a replacement written by a
      * compaction is owed nothing at all.
      */
-    #lastRecordType: AgentBaseRecord["type"] | undefined;
+    #lastRecordType: AgentRecord["type"] | undefined;
     /**
      * Whether that last record was a replacement that ended on a message still owed an answer.
      * Only the rewrite that wrote it can tell a summary's own last message from a suffix it kept.
@@ -513,6 +518,25 @@ export class AgentBase {
     }
 
     /**
+     * Load the agent and set it going again if it has work left, or answer with nothing when it
+     * has none. This is how an owner coming up carries on whatever an earlier process was in the
+     * middle of: the whole question is one key, and an agent told to go picks its own work back
+     * up, so the caller has only to bring it into existence.
+     *
+     * An agent owing nothing is not handed back, because there is nothing to do with it that
+     * resolving it when something is actually wanted of it would not do better.
+     */
+    static async loadActive(
+        ctx: Context,
+        options: AgentBaseOptions,
+    ): Promise<AgentBase | undefined> {
+        const agent = await AgentBase.load(ctx, options);
+        if (!agent.active) return undefined;
+        agent.start();
+        return agent;
+    }
+
+    /**
      * Read the outstanding work the store already holds, before this instance has written any of
      * its own. It is both what `active` answers from and what an interrupted run is recognized
      * by, so reading it here leaves the later stage writes nothing to learn from the store.
@@ -552,9 +576,8 @@ export class AgentBase {
         this.#model = options.model;
         this.#effort = options.effort;
         this.#serviceTier = options.serviceTier;
-        this.#kv = new AgentBaseKV(this.#persistence, `kv.${options.id}.`, (ctx, work) =>
-            this.#persistenceLock.runInLock(ctx, work),
-        );
+        this.#kv = new AgentKV(this.#persistence, `kv.${options.id}.`);
+        this.#runKV = this.#kv.scoped("run");
         // Everything the agent does — hooks and tool executions included — runs on a context
         // carrying its provider and the currently effective model, effort, and service tier.
         this.#ctx = this.#deriveCtx();
@@ -564,7 +587,8 @@ export class AgentBase {
 
     /**
      * The context everything the agent does runs on: its identity and effective selection, plus
-     * the session-scoped key-value store. Rebuilt whenever the selection changes.
+     * the session-scoped key-value store and the store of the run in progress. Rebuilt whenever
+     * the selection changes.
      */
     #deriveCtx(): Context {
         const ctx = withAgentContext(this.#baseCtx, {
@@ -574,7 +598,7 @@ export class AgentBase {
             effort: this.#effort,
             serviceTier: this.#serviceTier,
         });
-        return withAgentKV(ctx, this.#kv);
+        return withAgentRunKV(withAgentKV(ctx, this.#kv), this.#runKV);
     }
 
     /**
@@ -739,6 +763,10 @@ export class AgentBase {
                     });
                     accepted.push({ key, request });
                 }
+                // Accepting a message is what makes the work owed: the same transaction that
+                // admits it records that the agent owes an answer, so a process that dies right
+                // here is discovered still owing it rather than looking idle over a full queue.
+                await this.#recordPending(txCtx, { stage: "inference" });
             });
             for (const { key, request } of accepted) {
                 // The queue is resolved inside the lock: a history load running just before this
@@ -1082,10 +1110,27 @@ export class AgentBase {
                 // or changed the selection since, and answering out of a stale memory would
                 // reply to a conversation that no longer exists.
                 this.#loaded = undefined;
-                // The durable history has to be loaded before the pre-turn hooks can be told
-                // how large the conversation is; a failed load leaves them uninformed and the
-                // turn itself reports the failure.
-                await this.#ensureLoaded().catch(() => undefined);
+                // The durable history has to be loaded before anything else: a turn that cannot
+                // read the conversation cannot answer it, and must not write to it either —
+                // appending to a conversation it cannot see is how a message ends up after a
+                // tool call nobody answered. The turn ends here instead, leaving everything
+                // durable exactly as it was for the next attempt.
+                const loadFailure = await this.#ensureLoaded().then(
+                    () => undefined,
+                    (error: unknown) => error,
+                );
+                if (loadFailure !== undefined) {
+                    this.#emit({
+                        type: "done",
+                        state: "error",
+                        kind: "internal_error",
+                        message:
+                            loadFailure instanceof Error
+                                ? loadFailure.message
+                                : String(loadFailure),
+                    });
+                    break;
+                }
                 await this.#applyActions(this.#hooks.beforeTurn, abort.signal, {
                     contextTokens: this.#contextTokens,
                 });
@@ -1120,6 +1165,11 @@ export class AgentBase {
                 this.#persistence.transaction(lockCtx, async (txCtx) => {
                     await this.#clearPending(txCtx);
                     await this.#invokeTransactionalSettle(txCtx);
+                    // The run store is erased last, so a settling hook can still read what the
+                    // run concluded and keep whatever part of it belongs to the conversation.
+                    // It commits with the settlement: the run is over and its notes are gone as
+                    // one fact, never one without the other.
+                    await this.#clearRunStore(txCtx);
                 }),
             );
         } catch {
@@ -1128,21 +1178,31 @@ export class AgentBase {
     }
 
     /**
-     * Call the settling hooks that write inside the settling transaction. They are lent a store
-     * bound to that transaction — a capability taken back when they return, so it cannot be kept
-     * and used to write outside the transaction it belongs to. A throwing hook rolls the
-     * settlement back with it, because a hook here is writing a conclusion about the very fact
-     * being committed, and half of that pair is worse than neither.
+     * Call the settling hooks that write inside the settling transaction. They run on a context
+     * that lives exactly as long as the transaction does, so a store they keep hold of cannot be
+     * used to write once the settlement has committed. A throwing hook rolls the settlement back
+     * with it, because a hook here is writing a conclusion about the very fact being committed,
+     * and half of that pair is worse than neither.
      */
     async #invokeTransactionalSettle(txCtx: Context): Promise<void> {
         const hook = this.#hooks.afterAgentSettledTransact;
         if (hook === undefined) return;
-        const { kv, release } = this.#kv.locked(txCtx);
+        const committed = new AbortController();
         try {
-            await hook(withAgentKV(insideTurn.set(txCtx, []), kv));
+            const liveCtx = withLifetime(insideTurn.set(txCtx, []), committed.signal);
+            const hookCtx = withAgentKV(liveCtx, this.#kv);
+            await hook(withAgentRunKV(hookCtx, this.#runKV));
         } finally {
-            release();
+            committed.abort();
         }
+    }
+
+    /**
+     * Erase everything the run wrote about itself, inside the transaction that settles the agent:
+     * the clear runs on that transaction's own context, so it commits with the settlement.
+     */
+    async #clearRunStore(txCtx: Context): Promise<void> {
+        await this.#runKV.clear(txCtx);
     }
 
     /**
@@ -1395,9 +1455,15 @@ export class AgentBase {
                     // A response can carry a tool call and still not end in one — a stream that
                     // failed or was cut off after the call was emitted. Nothing will dispatch
                     // it, so it is settled here rather than left in the conversation for ever.
-                    await this.#settleUnansweredCalls(
-                        "The response ended before this tool call was dispatched.",
-                    );
+                    // A settling the store refused ends the turn instead: the call stays last,
+                    // where a later attempt can still answer it.
+                    if (
+                        !(await this.#settleUnansweredCalls(
+                            "The response ended before this tool call was dispatched.",
+                        ))
+                    ) {
+                        break;
+                    }
                 }
                 if (state === "tool_call") {
                     const calls = content.filter(
@@ -1405,32 +1471,10 @@ export class AgentBase {
                             block.type === "tool_call" && block.server !== true,
                     );
                     if (calls.length === 0) continue;
-                    const conflict = conflictingCallId(calls);
-                    if (conflict !== undefined) {
-                        // Two different calls sharing one ID have no answer the model could tell
-                        // apart — and neither would an error result, since it would be addressed
-                        // to the same ambiguous ID. So nothing runs and nothing is answered: the
-                        // turn fails loudly instead of inventing a reply to a question that has
-                        // no unambiguous form. A call simply repeated verbatim is not ambiguous
-                        // and is refused once, with a result, further down.
-                        const message =
-                            `Duplicate tool call id ${JSON.stringify(conflict)}: the response ` +
-                            "used it for two different calls, so they could not be told apart. " +
-                            "Neither ran.";
-                        this.#emit({
-                            type: "done",
-                            state: "error",
-                            kind: "internal_error",
-                            message,
-                        });
-                        await this.#appendFailure(message);
-                        break;
-                    }
                     const closedDuringTools = await this.#runToolBatch(
-                        toolBatchEntries(calls).map(({ call, rejected }, index) => ({
+                        calls.map((call, index) => ({
                             key: this.#toolKey(index, call.callId),
                             call,
-                            ...(rejected === undefined ? {} : { rejected }),
                         })),
                         false,
                         abort.signal,
@@ -1447,7 +1491,11 @@ export class AgentBase {
                 // a done event ends the turn with the queues intact.
                 if (state !== "normal" && state !== "length" && state !== "error") break;
             }
-            if (pendingError !== undefined) {
+            if (
+                pendingError !== undefined &&
+                this.#loaded !== undefined &&
+                this.#unansweredCalls(this.#messages).length === 0
+            ) {
                 await this.#appendFailure(pendingError);
             }
         } catch (error: unknown) {
@@ -1459,9 +1507,14 @@ export class AgentBase {
             });
             // A turn that failed while it owed tool results must not leave them owed: the next
             // message would be appended after an unanswered call, which most providers reject
-            // outright and no later turn would ever repair.
-            await this.#settleUnansweredCalls("The turn failed before this tool call finished.");
-            await this.#appendFailure(error instanceof Error ? error.message : String(error));
+            // outright and no later turn would ever repair. When even that write is refused, the
+            // note is not written either — the call stays last, and the next run settles it
+            // before anything else is said.
+            if (
+                await this.#settleUnansweredCalls("The turn failed before this tool call finished.")
+            ) {
+                await this.#appendFailure(error instanceof Error ? error.message : String(error));
+            }
         }
         this.#turnAborted = abort.signal.aborted;
     }
@@ -1596,15 +1649,20 @@ export class AgentBase {
     }
 
     /**
-     * Answer every call the last response left unanswered with an error result. The rule this
-     * keeps is that the durable conversation never holds a tool call without its result: a call
-     * is settled while it is still the last thing said, because a result appended after anything
-     * else would sit in the wrong place and could not be repaired later.
+     * Answer every call the last response left unanswered with an error result, and report
+     * whether the conversation now owes none. The rule this keeps is that the durable
+     * conversation never holds a tool call without its result: a call is settled while it is
+     * still the last thing said, because a result appended after anything else would sit in the
+     * wrong place, where nothing could put it right again. So a caller told the settling did not
+     * happen must append nothing either — leaving the call last is what lets a later attempt,
+     * here or after a restart, still answer it.
      */
-    async #settleUnansweredCalls(reason: string): Promise<void> {
-        if (this.#loaded === undefined) return;
+    async #settleUnansweredCalls(reason: string): Promise<boolean> {
+        // Nothing is known about the conversation, so nothing may be said about it.
+        if (this.#loaded === undefined) return false;
         const owed = this.#unansweredCalls(this.#messages);
-        if (owed.length === 0) return;
+        if (owed.length === 0) return true;
+        let settled = false;
         try {
             await this.#persistenceLock.runInLock(this.#ctx, async (lockCtx) => {
                 // A call the durable batch still holds belongs to the resume, which answers it
@@ -1625,9 +1683,12 @@ export class AgentBase {
                 });
                 this.#messages.push(...results);
             });
+            settled = true;
         } catch {
-            // The turn is already failing; a restart settles what this could not.
+            // The turn is already failing; a restart settles what this could not, as long as
+            // nothing is written over the top of the call in the meantime.
         }
+        return settled;
     }
 
     /**
@@ -1635,7 +1696,7 @@ export class AgentBase {
      * its memory accounts for, and a rewrite has to know exactly where its own knowledge ends —
      * so appending and counting are one step rather than two a caller could get out of order.
      */
-    async #appendRecord(ctx: Context, record: AgentBaseRecord): Promise<void> {
+    async #appendRecord(ctx: Context, record: AgentRecord): Promise<void> {
         await this.#persistence.append(ctx, record);
         this.#loadedRecordCount += 1;
     }
@@ -1778,17 +1839,25 @@ export class AgentBase {
                             // The hook runs while the persistence lock is held and inside the
                             // transaction that commits the switch, so its store executes directly on
                             // that transaction: what it writes lands and rolls back with the change
-                            // it was told about, never on its own.
-                            const locked = this.#kv.locked(txCtx);
-                            const changeCtx = withAgentKV(
-                                withAgentContext(this.#baseCtx, {
+                            // it was told about, never on its own. The context it is given ends with
+                            // the transaction, so a store it keeps cannot outlive the switch.
+                            const committed = new AbortController();
+                            // Derived from the transaction's own context, which is what makes
+                            // the hook's writes part of the switch rather than a second,
+                            // separate commit, and ending with it.
+                            const changeLifetime = withLifetime(
+                                withAgentContext(txCtx, {
                                     id: this.id,
                                     provider,
                                     model,
                                     effort,
                                     serviceTier,
                                 }),
-                                locked.kv,
+                                committed.signal,
+                            );
+                            const changeCtx = withAgentRunKV(
+                                withAgentKV(changeLifetime, this.#kv),
+                                this.#runKV,
                             );
                             try {
                                 injected = await this.#hooks.modelChanged(changeCtx, {
@@ -1812,8 +1881,8 @@ export class AgentBase {
                                     reset = false;
                                 }
                             } finally {
-                                // The shortcut belonged to the hook's call, not to the hook.
-                                locked.release();
+                                // The store belonged to the hook's call, not to the hook.
+                                committed.abort();
                             }
                             if (!reset) injected = undefined;
                         }
@@ -1954,7 +2023,6 @@ export class AgentBase {
                 call: value as SessionToolCallBlock,
             }));
             this.#pendingToolsUndispatched = false;
-            const dispatched = new Set(this.#pendingTools.map(({ call }) => call.callId));
             if (this.#pendingTools.length === 0) {
                 // A crash between the response's last block and the batch commit leaves calls
                 // the conversation still owes results for, with nothing durable to resume: the
@@ -1968,40 +2036,7 @@ export class AgentBase {
                         call,
                     }));
                     this.#pendingToolsUndispatched = true;
-                    for (const call of owed) dispatched.add(call.callId);
                 }
-            }
-            // Anything still unanswered is stranded in the middle of the conversation: a turn
-            // died before it could settle its calls, and the messages that followed made the
-            // gap unreachable by appending. Repairing it means rewriting the conversation, so
-            // it is written as the replacement record compaction already uses — atomically, and
-            // only when something actually needs repairing.
-            const repaired = repairUnansweredCalls(restored, dispatched);
-            if (repaired !== undefined) {
-                const snapshotCount = records.length;
-                let replaced = repaired;
-                await this.#recordTransaction(lockCtx, async (txCtx) => {
-                    await this.#persistence.clearRecords(txCtx);
-                    // The repair may replace only the snapshot it found the stranded call in.
-                    // Anything another owner committed while this was being written is an
-                    // authoritative suffix, so it is read here — after the deletion, which is
-                    // the last point another owner could still have appended — and carried into
-                    // the replacement rather than erased by it.
-                    const current = await this.#persistence.load(txCtx);
-                    replaced = [...repaired, ...messagesFromRecords(current.slice(snapshotCount))];
-                    // A repair rewrites the real conversation rather than summarizing it, so
-                    // what it ends on still has the same inference requirement after the rewrite.
-                    await this.#persistence.append(txCtx, {
-                        type: "compaction",
-                        messages: replaced,
-                        ...(needsInference(replaced) ? { continuesInference: true } : {}),
-                    });
-                });
-                restored = replaced;
-                this.#lastRecordType = "compaction";
-                this.#lastRecordContinuesInference = needsInference(replaced);
-                this.#loadedRecordCount = 1;
-                this.#messages = [...replaced];
             }
         });
     }
@@ -2085,9 +2120,7 @@ export class AgentBase {
         const batch = Promise.all(
             entries.map(async (entry, index) => {
                 let outcome: SessionToolResultMessage | typeof ABORTED;
-                if (entry.rejected !== undefined) {
-                    outcome = toolFailure(entry.call.callId, entry.rejected);
-                } else if (resume && !(await this.#isDurable(entry.call))) {
+                if (resume && !(await this.#isDurable(entry.call))) {
                     outcome = toolFailure(
                         entry.call.callId,
                         "The tool call was interrupted by a restart and was not retried.",
@@ -2163,11 +2196,10 @@ export class AgentBase {
     #unansweredCalls(messages: readonly SessionMessage[]): SessionToolCallBlock[] {
         const last = messages[messages.length - 1];
         if (last?.role !== "assistant") return [];
-        const calls = last.content.filter(
+        return last.content.filter(
             (block): block is SessionToolCallBlock =>
                 block.type === "tool_call" && block.server !== true,
         );
-        return toolBatchEntries(calls).map(({ call }) => call);
     }
 
     /** Sorted by position in the batch; only one batch is ever pending at a time. */
@@ -2211,7 +2243,10 @@ export class AgentBase {
         try {
             // A tool execution persists under its own call ID, never in another call's scope.
             const callCtx = withAgentTaskContext(
-                withAgentKV(ctx, this.#kv.scoped("call", call.callId)),
+                withAgentRunKV(
+                    withAgentKV(ctx, this.#kv.scoped("call", call.callId)),
+                    this.#runKV.scoped("call", call.callId),
+                ),
                 taskContextBeforeToolCall(this.#messages, call.callId),
             );
             let executed: Promise<unknown> | undefined;
@@ -2491,7 +2526,7 @@ function needsInference(messages: readonly SessionMessage[]): boolean {
  * response. Used both to restore the whole history and to read the tail of it, which is why it
  * takes any run of records rather than the store itself.
  */
-function messagesFromRecords(records: readonly AgentBaseRecord[]): SessionMessage[] {
+function messagesFromRecords(records: readonly AgentRecord[]): SessionMessage[] {
     let messages: SessionMessage[] = [];
     for (const record of records) {
         if (record.type === "compaction") {
@@ -2526,42 +2561,6 @@ function toolFailure(callId: string, reason: string): SessionToolResultMessage {
 }
 
 /**
- * Insert an error result for every call the conversation never answered, immediately after the
- * response that made it, and return the repaired conversation — or undefined when there is
- * nothing to repair, which is the ordinary case. Calls the caller is about to run or resume are
- * exempt: they are going to be answered properly.
- */
-function repairUnansweredCalls(
-    messages: readonly SessionMessage[],
-    exempt: ReadonlySet<string>,
-): SessionMessage[] | undefined {
-    const answered = new Set(
-        messages.flatMap((message) => (message.role === "tool" ? [message.callId] : [])),
-    );
-    const repaired: SessionMessage[] = [];
-    let changed = false;
-    for (const message of messages) {
-        repaired.push(message);
-        if (message.role !== "assistant") continue;
-        for (const block of message.content) {
-            if (block.type !== "tool_call" || block.server === true) continue;
-            if (answered.has(block.callId) || exempt.has(block.callId)) continue;
-            // One answer per call ID, even when a response repeated one: a second result for
-            // the same ID would be as unmatchable as the duplicate call that caused it.
-            answered.add(block.callId);
-            repaired.push(
-                toolFailure(
-                    block.callId,
-                    "The turn ended before this tool call could be answered.",
-                ),
-            );
-            changed = true;
-        }
-    }
-    return changed ? repaired : undefined;
-}
-
-/**
  * The provider-facing identity of a session configuration. Only descriptor fields the provider
  * sees participate, so re-created tool objects with identical descriptors do not churn the
  * session.
@@ -2580,57 +2579,4 @@ function sessionConfigKey(instructions: string, tools: readonly AnyAgentTool[]):
             tool.grammar ?? null,
         ]),
     ]);
-}
-
-/**
- * The first call ID a response used for two calls that are not the same call. Repeating one
- * identical call under one ID says nothing new — it is the same request twice, and answering it
- * once answers it. Two different calls under one ID are a genuine ambiguity: whatever result the
- * conversation carried back would be addressed to both of them.
- */
-function conflictingCallId(calls: readonly SessionToolCallBlock[]): string | undefined {
-    const seen = new Map<string, string>();
-    for (const call of calls) {
-        const shape = deterministicStringify([
-            call.name,
-            call.namespace ?? null,
-            call.arguments,
-            call.incomplete ?? null,
-        ]);
-        const previous = seen.get(call.callId);
-        if (previous !== undefined && previous !== shape) return call.callId;
-        seen.set(call.callId, shape);
-    }
-    return undefined;
-}
-
-/**
- * The calls of one response, reduced to one entry per call ID. A response is allowed to run
- * several tools at once, but only if the model can tell their answers apart: results are matched
- * back by call ID, and two calls sharing one ID have no distinguishable answer. Rather than
- * execute side effects whose results the conversation cannot describe, such a call ID is kept
- * once and refused — before anything runs, since a refusal after the fact would not undo it.
- */
-function toolBatchEntries(
-    calls: readonly SessionToolCallBlock[],
-): readonly { readonly call: SessionToolCallBlock; readonly rejected?: string }[] {
-    const counts = new Map<string, number>();
-    for (const call of calls) counts.set(call.callId, (counts.get(call.callId) ?? 0) + 1);
-    const taken = new Set<string>();
-    const entries: { readonly call: SessionToolCallBlock; readonly rejected?: string }[] = [];
-    for (const call of calls) {
-        if (taken.has(call.callId)) continue;
-        taken.add(call.callId);
-        entries.push(
-            (counts.get(call.callId) ?? 0) > 1
-                ? {
-                      call,
-                      rejected:
-                          "The response used this tool call ID more than once, so the calls " +
-                          "could not be told apart and none of them ran.",
-                  }
-                : { call },
-        );
-    }
-    return entries;
 }
