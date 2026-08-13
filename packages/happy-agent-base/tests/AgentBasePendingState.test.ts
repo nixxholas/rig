@@ -207,6 +207,7 @@ describe("durable pending state", () => {
         expect(await agentBasePendingStateOf(ctx, persistence)).toMatchObject({
             stage: "inference",
         });
+        expect(agent.active).toBe(true);
         await agent.close();
     });
 });

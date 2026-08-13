@@ -33,7 +33,7 @@ import {
     type AgentBasePendingStage,
     type AgentBasePendingState,
 } from "./AgentBasePending.js";
-import type { AgentBaseHooks, MaybePromise } from "./AgentBaseHooks.js";
+import type { AgentBaseHooks, AgentBasePersistedEvent, MaybePromise } from "./AgentBaseHooks.js";
 import type { AgentPersistence, AgentRecord } from "./AgentPersistence.js";
 import type { AgentBaseState } from "./AgentBaseState.js";
 import { AgentProviders } from "./AgentProviders.js";
@@ -584,9 +584,13 @@ export class AgentBase {
      * whatever else that transaction is writing, which is how a consumed message and the
      * inference it owes become durable as one fact rather than two.
      */
-    async #recordPending(ctx: Context, pending: AgentBasePendingState): Promise<void> {
+    async #recordPending(
+        ctx: Context,
+        pending: AgentBasePendingState,
+        force = false,
+    ): Promise<void> {
         const serialized = deterministicStringify(pending);
-        if (this.#pendingWritten === serialized) return;
+        if (!force && this.#pendingWritten === serialized) return;
         await this.#persistence.writeValue(ctx, AGENT_BASE_PENDING_KEY, pending);
         this.#pending = pending;
         this.#pendingWritten = serialized;
@@ -600,20 +604,41 @@ export class AgentBase {
      * is doing, and a run interrupted by a dead process would be indistinguishable from the one
      * starting here.
      */
-    async #enterStage(stage: AgentBasePendingStage): Promise<void> {
+    async #enterStage<Result = void>(
+        stage: AgentBasePendingStage,
+        transact?: (ctx: Context) => MaybePromise<Result>,
+    ): Promise<Result | undefined> {
         const pending: AgentBasePendingState = { stage };
-        if (deterministicStringify(pending) === this.#pendingWritten && this.#inheritedRead) return;
+        if (
+            transact === undefined &&
+            deterministicStringify(pending) === this.#pendingWritten &&
+            this.#inheritedRead
+        ) {
+            return undefined;
+        }
         try {
-            await this.#persistenceLock.runInLock(this.#ctx, async (lockCtx) => {
+            return await this.#persistenceLock.runInLock(this.#ctx, async (lockCtx) => {
                 if (!this.#inheritedRead) {
                     this.#inheritedRead = true;
                     this.#inherited = await agentBasePendingStateOf(lockCtx, this.#persistence);
                 }
-                await this.#recordPending(lockCtx, pending);
+                if (transact === undefined) {
+                    await this.#recordPending(lockCtx, pending);
+                    return undefined;
+                }
+                return await this.#recordTransaction(lockCtx, async (txCtx) => {
+                    // The state is staged first. The callback then writes against this exact
+                    // transaction, so neither its conclusion nor the state it observed can land
+                    // without the other.
+                    await this.#recordPending(txCtx, pending, true);
+                    return await this.#withTransactionalContext(txCtx, transact);
+                });
             });
-        } catch {
+        } catch (error) {
+            if (transact !== undefined) throw error;
             // Losing the record costs recovery precision, never the work itself: the turn is
             // already running and will answer whatever it was going to answer.
+            return undefined;
         }
     }
 
@@ -1078,7 +1103,7 @@ export class AgentBase {
             // crash could interrupt. What it records is refined as the run reaches each stage;
             // what matters at this point is that the record exists at all, since its absence is
             // what a later process reads as an agent that finished.
-            await this.#enterStage("inference");
+            await this.#enterStage("inference", this.#hooks.beforeAgentLoopTransact);
             await this.#invokeHook(this.#hooks.beforeAgentLoop);
             do {
                 this.#turnAborted = false;
@@ -1111,19 +1136,34 @@ export class AgentBase {
                     });
                     break;
                 }
-                await this.#applyActions(this.#hooks.beforeTurn, abort.signal, {
+                const turnStart = {
                     contextTokens: this.#contextTokens,
-                });
+                };
+                await this.#enterStage(
+                    "inference",
+                    this.#hooks.beforeTurnTransact === undefined
+                        ? undefined
+                        : (hookCtx) => this.#hooks.beforeTurnTransact?.(hookCtx, turnStart),
+                );
+                await this.#applyActions(this.#hooks.beforeTurn, abort.signal, turnStart);
                 await this.#runInference(abort);
-                await this.#applyActions(this.#hooks.afterTurn, abort.signal, {
+                const turn = {
                     contextTokens: this.#contextTokens,
                     aborted: this.#turnAborted,
-                });
+                };
+                await this.#enterStage(
+                    "inference",
+                    this.#hooks.afterTurnTransact === undefined
+                        ? undefined
+                        : (hookCtx) => this.#hooks.afterTurnTransact?.(hookCtx, turn),
+                );
+                await this.#applyActions(this.#hooks.afterTurn, abort.signal, turn);
                 if (!this.#turnRequested || this.#closed) break;
                 // Each turn cancels on its own scope. Reopening it here rather than at the top
                 // keeps the run's first turn under the scope its opening hook already ran in.
                 abort = this.#openAbortScope();
             } while (true);
+            await this.#enterStage("inference", this.#hooks.afterAgentLoopTransact);
             await this.#applyActions(this.#hooks.afterAgentLoop, abort.signal);
         } while (this.#turnRequested && !this.#closed);
         // Nothing is asked for any more, so the outstanding work is erased. That erasure is what
@@ -1142,7 +1182,7 @@ export class AgentBase {
     async #settleDurably(): Promise<void> {
         try {
             await this.#persistenceLock.runInLock(this.#ctx, (lockCtx) =>
-                this.#persistence.transaction(lockCtx, async (txCtx) => {
+                this.#recordTransaction(lockCtx, async (txCtx) => {
                     await this.#clearPending(txCtx);
                     await this.#invokeTransactionalSettle(txCtx);
                     // The run store is erased last, so a settling hook can still read what the
@@ -1167,14 +1207,7 @@ export class AgentBase {
     async #invokeTransactionalSettle(txCtx: Context): Promise<void> {
         const hook = this.#hooks.afterAgentSettledTransact;
         if (hook === undefined) return;
-        const committed = new AbortController();
-        try {
-            const liveCtx = withLifetime(insideTurn.set(txCtx, []), committed.signal);
-            const hookCtx = withAgentKV(liveCtx, this.#kv);
-            await hook(withAgentRunKV(hookCtx, this.#runKV));
-        } finally {
-            committed.abort();
-        }
+        await this.#withTransactionalContext(insideTurn.set(txCtx, []), hook);
     }
 
     /**
@@ -1235,6 +1268,24 @@ export class AgentBase {
         ...args: Arguments
     ): Promise<void> {
         await this.#invokeHookOn(this.#ctx, hook, ...args);
+    }
+
+    /**
+     * Lend a hook the transaction's context and feature stores for exactly one callback. Keeping
+     * the context after the callback cannot leak a transaction past its commit.
+     */
+    async #withTransactionalContext<Result>(
+        txCtx: Context,
+        work: (ctx: Context) => MaybePromise<Result>,
+    ): Promise<Result> {
+        const lifetime = new AbortController();
+        try {
+            const liveCtx = withLifetime(txCtx, lifetime.signal);
+            const hookCtx = withAgentKV(liveCtx, this.#kv);
+            return await work(withAgentRunKV(hookCtx, this.#runKV));
+        } finally {
+            lifetime.abort();
+        }
     }
 
     /**
@@ -1402,6 +1453,7 @@ export class AgentBase {
                 // hold a cancellation open, so a new cancellation must not start waiting for it
                 // either.
                 if ((await Promise.race([this.#settled(), abortPromise])) === ABORTED) continue;
+                await this.#enterStage("inference", this.#hooks.beforeInferenceTransact);
                 await this.#invokeHook(this.#hooks.beforeInference);
                 const stream = session.run(this.#ctx, {
                     context: {
@@ -1418,14 +1470,25 @@ export class AgentBase {
                 );
                 // A cancelled or failed response measures nothing, so the conversation keeps
                 // the last real measurement instead of forgetting how large it had become.
-                if (tokens !== undefined) {
-                    await this.#recordContextTokens(tokens.input + tokens.output);
-                }
-                await this.#invokeHook(this.#hooks.afterInference, {
+                const inference = {
                     state,
                     tokens,
                     ...(errorMessage === undefined ? {} : { errorMessage }),
-                });
+                };
+                const afterInferenceTransact =
+                    this.#hooks.afterInferenceTransact === undefined
+                        ? undefined
+                        : (hookCtx: Context) =>
+                              this.#hooks.afterInferenceTransact?.(hookCtx, inference);
+                if (tokens === undefined) {
+                    await this.#enterStage("inference", afterInferenceTransact);
+                } else {
+                    await this.#recordContextTokens(
+                        tokens.input + tokens.output,
+                        afterInferenceTransact,
+                    );
+                }
+                await this.#invokeHook(this.#hooks.afterInference, inference);
                 if (content.length > 0) {
                     this.#messages.push({ role: "assistant", content });
                 }
@@ -1532,16 +1595,33 @@ export class AgentBase {
      * lets a restarted agent keep knowing how large the conversation is without inferring it;
      * a failed write costs only that knowledge and never the response that produced it.
      */
-    async #recordContextTokens(tokens: number | undefined): Promise<void> {
+    async #recordContextTokens(
+        tokens: number | undefined,
+        transact?: (ctx: Context) => MaybePromise<void>,
+    ): Promise<void> {
+        const previousTokens = this.#contextTokens;
         this.#contextTokens = tokens;
         try {
-            await this.#persistenceLock.runInLock(this.#ctx, (lockCtx) =>
-                tokens === undefined
-                    ? this.#persistence.deleteValue(lockCtx, "context")
-                    : this.#persistence.writeValue(lockCtx, "context", { tokens }),
-            );
-        } catch {
-            // A measurement is not worth failing a turn over; memory still carries it.
+            await this.#persistenceLock.runInLock(this.#ctx, async (lockCtx) => {
+                const write = (writeCtx: Context): Promise<void> =>
+                    tokens === undefined
+                        ? this.#persistence.deleteValue(writeCtx, "context")
+                        : this.#persistence.writeValue(writeCtx, "context", { tokens });
+                if (transact === undefined) {
+                    await write(lockCtx);
+                    return;
+                }
+                await this.#recordTransaction(lockCtx, async (txCtx) => {
+                    await write(txCtx);
+                    await this.#withTransactionalContext(txCtx, transact);
+                });
+            });
+        } catch (error) {
+            // The prior committed measurement stays authoritative in memory. A transactional
+            // observer is part of the same durable conclusion and therefore fails the turn when
+            // that conclusion cannot commit; an ordinary best-effort measurement still does not.
+            this.#contextTokens = previousTokens;
+            if (transact !== undefined) throw error;
         }
     }
 
@@ -2229,12 +2309,21 @@ export class AgentBase {
         // in-memory assistant message never diverges from what a reload would rebuild.
         const persisted: SessionAssistantBlock[] = [];
         const toolCallIndexes = new Map<string, number>();
-        const persist = async (block: SessionAssistantBlock | undefined): Promise<void> => {
-            if (block === undefined) return;
-            await this.#persistenceLock.runInLock(this.#ctx, (lockCtx) =>
-                this.#appendRecord(lockCtx, { type: "block", block }),
-            );
-            persisted.push(block);
+        const persist = async (event: AgentBasePersistedEvent | undefined): Promise<void> => {
+            if (event === undefined) return;
+            await this.#persistenceLock.runInLock(this.#ctx, async (lockCtx) => {
+                if (this.#hooks.onEventTransact === undefined) {
+                    await this.#appendRecord(lockCtx, { type: "block", block: event.block });
+                } else {
+                    await this.#recordTransaction(lockCtx, async (txCtx) => {
+                        await this.#appendRecord(txCtx, { type: "block", block: event.block });
+                        await this.#withTransactionalContext(txCtx, (hookCtx) =>
+                            this.#hooks.onEventTransact?.(hookCtx, event),
+                        );
+                    });
+                }
+            });
+            persisted.push(event.block);
         };
         const iterator = stream[Symbol.asyncIterator]();
         // A response usually ends before its stream does — at the done event, or at an abort —
@@ -2273,7 +2362,9 @@ export class AgentBase {
                     }
                     case "text_end": {
                         const last = content[content.length - 1];
-                        await persist(last?.type === "text" ? last : undefined);
+                        await persist(
+                            last?.type === "text" ? { ...event, block: last } : undefined,
+                        );
                         break;
                     }
                     case "reasoning_start":
@@ -2299,7 +2390,7 @@ export class AgentBase {
                                     : { reasoning: event.reasoning }),
                             };
                             content[content.length - 1] = finished;
-                            await persist(finished);
+                            await persist({ ...event, block: finished });
                         }
                         break;
                     }
@@ -2329,7 +2420,7 @@ export class AgentBase {
                                     : { incomplete: event.incomplete }),
                             };
                             content[index] = finished;
-                            await persist(finished);
+                            await persist({ ...event, block: finished });
                         }
                         break;
                     }

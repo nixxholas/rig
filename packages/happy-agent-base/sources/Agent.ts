@@ -247,16 +247,18 @@ function mergeFeatures<Tool extends AnyAgentTool>(
     // Transactional hooks run in order inside one transaction, and a failure propagates: the
     // features here are writing alongside the fact being committed, so containing one feature's
     // failure would commit a conclusion the rest of the transaction contradicts.
-    const chain = (
+    const chain = <Arguments extends readonly unknown[]>(
         pick: (
             feature: AgentFeature<Tool>,
-        ) => ((ctx: Context, scope: AgentFeatureScope) => MaybePromise<void>) | undefined,
-    ): ((ctx: Context) => Promise<void>) | undefined => {
+        ) =>
+            | ((ctx: Context, scope: AgentFeatureScope, ...args: Arguments) => MaybePromise<void>)
+            | undefined,
+    ): ((ctx: Context, ...args: Arguments) => Promise<void>) | undefined => {
         const implemented = features.filter((feature) => pick(feature) !== undefined);
         if (implemented.length === 0) return undefined;
-        return async (ctx) => {
+        return async (ctx, ...args) => {
             for (const feature of implemented) {
-                await pick(feature)?.(featureCtx(ctx, feature), scopeOf(ctx, feature));
+                await pick(feature)?.(featureCtx(ctx, feature), scopeOf(ctx, feature), ...args);
             }
         };
     };
@@ -314,6 +316,10 @@ function mergeFeatures<Tool extends AnyAgentTool>(
                       }
                   }) satisfies AgentBaseHooks["onEvent"],
               }),
+        ...spread(
+            "onEventTransact",
+            chain((feature) => feature.onEventTransact),
+        ),
         ...(withInstructions.length === 0
             ? {}
             : {
@@ -404,24 +410,48 @@ function mergeFeatures<Tool extends AnyAgentTool>(
                   },
               }),
         ...spread(
+            "beforeAgentLoopTransact",
+            chain((feature) => feature.beforeAgentLoopTransact),
+        ),
+        ...spread(
             "beforeAgentLoop",
             fanOut((feature) => feature.beforeAgentLoop),
+        ),
+        ...spread(
+            "beforeTurnTransact",
+            chain((feature) => feature.beforeTurnTransact),
         ),
         ...spread(
             "beforeTurn",
             collect((feature) => feature.beforeTurn),
         ),
         ...spread(
+            "beforeInferenceTransact",
+            chain((feature) => feature.beforeInferenceTransact),
+        ),
+        ...spread(
             "beforeInference",
             fanOut((feature) => feature.beforeInference),
+        ),
+        ...spread(
+            "afterInferenceTransact",
+            chain((feature) => feature.afterInferenceTransact),
         ),
         ...spread(
             "afterInference",
             fanOut((feature) => feature.afterInference),
         ),
         ...spread(
+            "afterTurnTransact",
+            chain((feature) => feature.afterTurnTransact),
+        ),
+        ...spread(
             "afterTurn",
             collect((feature) => feature.afterTurn),
+        ),
+        ...spread(
+            "afterAgentLoopTransact",
+            chain((feature) => feature.afterAgentLoopTransact),
         ),
         ...spread(
             "afterAgentLoop",

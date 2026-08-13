@@ -1,8 +1,11 @@
 import type {
     SessionDoneState,
     SessionEvent,
+    SessionReasoningBlock,
     SessionSystemMessage,
+    SessionTextBlock,
     SessionTokens,
+    SessionToolCallBlock,
 } from "@slopus/happy-providers";
 import type { Context } from "@steve.kite/stdlib";
 
@@ -12,6 +15,24 @@ import type { AnyAgentTool } from "./AgentTool.js";
 
 /** A value or a promise of it; every hook may answer either synchronously or asynchronously. */
 export type MaybePromise<Value> = Value | Promise<Value>;
+
+/**
+ * A provider event whose completed assistant block is being committed to durable history.
+ *
+ * Raw stream observation still belongs to `onEvent`. This narrower event is delivered only for
+ * valid terminal block events, inside the transaction that appends `block`, so starts, deltas,
+ * retries, usage, done events, unmatched ends, and abandoned partial blocks never appear here.
+ */
+export type AgentBasePersistedEvent =
+    | (Extract<SessionEvent, { readonly type: "text_end" }> & {
+          readonly block: SessionTextBlock;
+      })
+    | (Extract<SessionEvent, { readonly type: "reasoning_end" }> & {
+          readonly block: SessionReasoningBlock;
+      })
+    | (Extract<SessionEvent, { readonly type: "toolcall_end" }> & {
+          readonly block: SessionToolCallBlock;
+      });
 
 /** What the `modelChanged` hook sees when a consumed message changes the effective model. */
 export interface AgentBaseModelChange {
@@ -90,6 +111,11 @@ export interface AgentBaseHooks {
     /** Called for every session event the provider emits, for observation only. */
     readonly onEvent?: (ctx: Context, event: SessionEvent) => void;
     /**
+     * Called only for a completed assistant block, inside the transaction that appends it to
+     * durable history. A failure rolls the append and every write made by this hook back.
+     */
+    readonly onEventTransact?: (ctx: Context, event: AgentBasePersistedEvent) => MaybePromise<void>;
+    /**
      * Extends `state.instructions` for the session, consulted before each inference and
      * compaction. This is a correctness hook: a failure fails the turn loudly instead of
      * silently running with a wrong prompt.
@@ -126,8 +152,14 @@ export interface AgentBaseHooks {
         ctx: Context,
         change: AgentBaseModelChange,
     ) => MaybePromise<SessionSystemMessage | undefined>;
+    /**
+     * Runs after the agent is staged as working, inside the transaction committing that state.
+     */
+    readonly beforeAgentLoopTransact?: (ctx: Context) => MaybePromise<void>;
     /** Called when the loop leaves the settled state and begins working. */
     readonly beforeAgentLoop?: (ctx: Context) => MaybePromise<void>;
+    /** Runs inside the transaction committing the inference stage for the turn being opened. */
+    readonly beforeTurnTransact?: (ctx: Context, turn: AgentBaseTurnStart) => MaybePromise<void>;
     /**
      * Called at the start of each turn, before its queues drain, with the conversation's
      * measured size. Returned actions are applied before the turn runs, so a `compact` action
@@ -138,13 +170,25 @@ export interface AgentBaseHooks {
         ctx: Context,
         turn: AgentBaseTurnStart,
     ) => MaybePromise<readonly AgentFeatureAction[] | undefined>;
+    /** Runs inside the transaction committing the inference stage for the request being made. */
+    readonly beforeInferenceTransact?: (ctx: Context) => MaybePromise<void>;
     /** Called immediately before each inference request. */
     readonly beforeInference?: (ctx: Context) => MaybePromise<void>;
+    /**
+     * Runs inside the transaction committing the response's measured context size. A response
+     * without a measurement instead recommits its inference stage with this hook.
+     */
+    readonly afterInferenceTransact?: (
+        ctx: Context,
+        inference: AgentBaseInference,
+    ) => MaybePromise<void>;
     /**
      * Called immediately after each inference response is collected, with how it ended and the
      * token counts the provider measured for it.
      */
     readonly afterInference?: (ctx: Context, inference: AgentBaseInference) => MaybePromise<void>;
+    /** Runs inside the transaction committing the stage left by the completed turn. */
+    readonly afterTurnTransact?: (ctx: Context, turn: AgentBaseTurn) => MaybePromise<void>;
     /**
      * Called when a turn ends, with the conversation's measured size and whether the turn was
      * cancelled. Returned actions are all applied together before the loop continues; any of
@@ -154,6 +198,8 @@ export interface AgentBaseHooks {
         ctx: Context,
         turn: AgentBaseTurn,
     ) => MaybePromise<readonly AgentFeatureAction[] | undefined>;
+    /** Runs inside the transaction committing the stage left by the completed loop. */
+    readonly afterAgentLoopTransact?: (ctx: Context) => MaybePromise<void>;
     /**
      * Called when the loop would settle back to idle. Returned actions are all applied together
      * and start the work over instead of settling.

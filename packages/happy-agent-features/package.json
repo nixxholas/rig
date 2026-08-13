@@ -1,0 +1,48 @@
+{
+    "name": "@slopus/happy-agent-features",
+    "version": "0.0.0",
+    "description": "Ready-made features for Happy agents.",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/slopus/rig.git",
+        "directory": "packages/happy-agent-features"
+    },
+    "files": [
+        "dist",
+        "README.md"
+    ],
+    "type": "module",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.js",
+            "default": "./dist/index.js"
+        }
+    },
+    "publishConfig": {
+        "access": "public"
+    },
+    "scripts": {
+        "build": "node --eval \"import('node:fs/promises').then(({ rm }) => rm('dist', { force: true, recursive: true }))\" && tsc -p tsconfig.build.json",
+        "check": "tsc --noEmit",
+        "test": "vitest run --passWithNoTests"
+    },
+    "dependencies": {
+        "@sinclair/typebox": "^0.34.49",
+        "@slopus/happy-providers": "0.0.7",
+        "@steve.kite/stdlib": "0.0.8"
+    },
+    "devDependencies": {
+        "@slopus/happy-agent-base": "workspace:*",
+        "@types/node": "^24.0.10",
+        "typescript": "^7.0.2",
+        "vitest": "^3.2.4"
+    },
+    "peerDependencies": {
+        "@slopus/happy-agent-base": "workspace:*"
+    },
+    "engines": {
+        "node": ">=22.19.0"
+    }
+}

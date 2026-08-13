@@ -201,6 +201,51 @@ describe("Agent", () => {
         await agent.close();
     });
 
+    it("chains transactional event features in order and rolls them back together", async () => {
+        const order: string[] = [];
+        const persistence = new InMemoryPersistence();
+        const provider = new ScriptedProvider([textTurn("answer")]);
+        const agent = await Agent.create(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+            sharedKV: sharedKV(),
+            features: [
+                feature({
+                    name: "first",
+                    onEventTransact: async (hookCtx, scope, event) => {
+                        order.push(`first:${event.type}`);
+                        await scope.kv.write(hookCtx, "seen", true);
+                    },
+                }),
+                feature({
+                    name: "second",
+                    onEventTransact: async (hookCtx, scope, event) => {
+                        order.push(`second:${event.type}`);
+                        await scope.kv.write(hookCtx, "seen", true);
+                        throw new Error("transactional observer failed");
+                    },
+                }),
+                feature({
+                    name: "third",
+                    onEventTransact: () => {
+                        order.push("third");
+                    },
+                }),
+            ],
+        });
+
+        await agent.send(ctx, user("go"), { await: true });
+        await agent.waitForIdle();
+
+        expect(order).toEqual(["first:text_end", "second:text_end"]);
+        expect(persistence.values.has("kv.test-agent.feature.first.seen")).toBe(false);
+        expect(persistence.values.has("kv.test-agent.feature.second.seen")).toBe(false);
+        expect(persistence.records.some((record) => record.type === "block")).toBe(false);
+        await agent.close();
+    });
+
     it("concatenates lifecycle actions from every feature", async () => {
         const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
         let done = false;

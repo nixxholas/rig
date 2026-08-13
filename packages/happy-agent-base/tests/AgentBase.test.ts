@@ -10,6 +10,7 @@ import { createRootContext, type Context } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
 import {
+    AGENT_BASE_PENDING_KEY,
     AgentBase,
     agentEffort,
     agentKV,
@@ -19,6 +20,7 @@ import {
     AgentProviders,
     defineAgentTool,
     type AgentBaseInference,
+    type AgentBasePersistedEvent,
     type AgentBaseTurn,
     type AgentBaseTurnStart,
 } from "../sources/index.js";
@@ -2552,14 +2554,20 @@ describe("AgentBase lifecycle hooks", () => {
             provider: "scripted",
             persistence: new InMemoryPersistence(),
             hooks: {
+                beforeAgentLoopTransact: () => void order.push("beforeAgentLoopTransact"),
                 beforeAgentLoop: () => void order.push("beforeAgentLoop"),
+                beforeTurnTransact: () => void order.push("beforeTurnTransact"),
                 beforeTurn: () => void order.push("beforeTurn"),
+                beforeInferenceTransact: () => void order.push("beforeInferenceTransact"),
                 beforeInference: () => void order.push("beforeInference"),
+                afterInferenceTransact: () => void order.push("afterInferenceTransact"),
                 afterInference: () => void order.push("afterInference"),
+                afterTurnTransact: () => void order.push("afterTurnTransact"),
                 afterTurn: () => {
                     order.push("afterTurn");
                     return undefined;
                 },
+                afterAgentLoopTransact: () => void order.push("afterAgentLoopTransact"),
                 afterAgentLoop: () => {
                     order.push("afterAgentLoop");
                     return undefined;
@@ -2571,13 +2579,223 @@ describe("AgentBase lifecycle hooks", () => {
         await agent.waitForIdle();
 
         expect(order).toEqual([
+            "beforeAgentLoopTransact",
             "beforeAgentLoop",
+            "beforeTurnTransact",
             "beforeTurn",
+            "beforeInferenceTransact",
             "beforeInference",
+            "afterInferenceTransact",
             "afterInference",
+            "afterTurnTransact",
             "afterTurn",
+            "afterAgentLoopTransact",
             "afterAgentLoop",
         ]);
+        await agent.close();
+    });
+
+    it("runs lifecycle transact hooks inside the transaction committing their state", async () => {
+        class TransactionTracingPersistence extends InMemoryPersistence {
+            readonly writes: { readonly key: string; readonly transaction: number | undefined }[] =
+                [];
+            #nextTransaction = 0;
+            #transaction: number | undefined;
+
+            override async transaction<Result>(
+                transactionCtx: Context,
+                work: (workCtx: Context) => Promise<Result>,
+            ): Promise<Result> {
+                const transaction = ++this.#nextTransaction;
+                return await super.transaction(transactionCtx, async (workCtx) => {
+                    const previous = this.#transaction;
+                    this.#transaction = transaction;
+                    try {
+                        return await work(workCtx);
+                    } finally {
+                        this.#transaction = previous;
+                    }
+                });
+            }
+
+            override writeValue(writeCtx: Context, key: string, value: unknown): Promise<void> {
+                this.writes.push({ key, transaction: this.#transaction });
+                return super.writeValue(writeCtx, key, value);
+            }
+        }
+
+        const persistence = new TransactionTracingPersistence();
+        const provider = new ScriptedProvider([textTurn("answer")]);
+        const agent = await AgentBase.create(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+            hooks: {
+                beforeAgentLoopTransact: async (hookCtx) => {
+                    const kv = agentKV(hookCtx);
+                    if (kv === undefined) throw new Error("Missing transactional agent store.");
+                    await kv.write(hookCtx, "before-loop", true);
+                },
+                afterInferenceTransact: async (hookCtx) => {
+                    const kv = agentKV(hookCtx);
+                    if (kv === undefined) throw new Error("Missing transactional agent store.");
+                    await kv.write(hookCtx, "after-inference", true);
+                },
+            },
+        });
+
+        await agent.send(ctx, user("go"), { await: true });
+        await agent.waitForIdle();
+
+        const beforeLoop = persistence.writes.find(
+            ({ key }) => key === "kv.test-agent.before-loop",
+        );
+        const afterInference = persistence.writes.find(
+            ({ key }) => key === "kv.test-agent.after-inference",
+        );
+        expect(beforeLoop?.transaction).toBeTypeOf("number");
+        expect(afterInference?.transaction).toBeTypeOf("number");
+        expect(persistence.writes).toContainEqual({
+            key: AGENT_BASE_PENDING_KEY,
+            transaction: beforeLoop?.transaction,
+        });
+        expect(persistence.writes).toContainEqual({
+            key: "context",
+            transaction: afterInference?.transaction,
+        });
+        await agent.close();
+    });
+
+    it("rolls afterInferenceTransact back with the context state it observes", async () => {
+        const persistence = new InMemoryPersistence();
+        const ordinary: AgentBaseInference[] = [];
+        const turns: AgentBaseTurn[] = [];
+        const provider = new ScriptedProvider([textTurn("answer")]);
+        const agent = await AgentBase.create(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+            hooks: {
+                afterInferenceTransact: async (hookCtx) => {
+                    const kv = agentKV(hookCtx);
+                    if (kv === undefined) throw new Error("Missing transactional agent store.");
+                    await kv.write(hookCtx, "rolled-back-inference", true);
+                    throw new Error("transactional inference observer failed");
+                },
+                afterInference: (_hookCtx, inference) => void ordinary.push(inference),
+                afterTurn: (_hookCtx, turn) => void turns.push(turn),
+            },
+        });
+
+        await agent.send(ctx, user("go"), { await: true });
+        await agent.waitForIdle();
+
+        expect(persistence.values.has("context")).toBe(false);
+        expect(persistence.values.has("kv.test-agent.rolled-back-inference")).toBe(false);
+        expect(ordinary).toEqual([]);
+        expect(turns).toEqual([{ contextTokens: undefined, aborted: false }]);
+        await agent.close();
+    });
+
+    it("delivers only completed durable blocks to onEventTransact", async () => {
+        const raw: SessionEvent[] = [];
+        const committed: AgentBasePersistedEvent[] = [];
+        const persistence = new InMemoryPersistence();
+        const provider = new ScriptedProvider([
+            [
+                { type: "text_start" },
+                { type: "text_delta", delta: "hello" },
+                { type: "text_end" },
+                { type: "reasoning_start" },
+                { type: "reasoning_delta", delta: "thinking" },
+                { type: "reasoning_end", reasoning: "opaque" },
+                { type: "toolcall_start", callId: "call-1", name: "missing" },
+                { type: "toolcall_delta", callId: "call-1", delta: "{}" },
+                { type: "toolcall_end", callId: "call-1", arguments: "{}" },
+                { type: "done", state: "normal", tokens: { input: 4, output: 2 } },
+            ],
+        ]);
+        const agent = await AgentBase.create(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+            hooks: {
+                onEvent: (_hookCtx, event) => raw.push(event),
+                onEventTransact: async (hookCtx, event) => {
+                    committed.push(event);
+                    const kv = agentKV(hookCtx);
+                    if (kv === undefined) throw new Error("Missing transactional agent store.");
+                    await kv.write(hookCtx, `event.${committed.length}`, event.type);
+                },
+            },
+        });
+
+        await agent.send(ctx, user("go"), { await: true });
+        await agent.waitForIdle();
+
+        expect(raw.map((event) => event.type)).toEqual([
+            "text_start",
+            "text_delta",
+            "text_end",
+            "reasoning_start",
+            "reasoning_delta",
+            "reasoning_end",
+            "toolcall_start",
+            "toolcall_delta",
+            "toolcall_end",
+            "done",
+        ]);
+        expect(committed).toEqual([
+            { type: "text_end", block: { type: "text", text: "hello" } },
+            {
+                type: "reasoning_end",
+                reasoning: "opaque",
+                block: { type: "reasoning", text: "thinking", reasoning: "opaque" },
+            },
+            {
+                type: "toolcall_end",
+                callId: "call-1",
+                arguments: "{}",
+                block: {
+                    type: "tool_call",
+                    callId: "call-1",
+                    name: "missing",
+                    arguments: "{}",
+                },
+            },
+        ]);
+        expect(persistence.values.get("kv.test-agent.event.1")).toBe("text_end");
+        expect(persistence.values.get("kv.test-agent.event.2")).toBe("reasoning_end");
+        expect(persistence.values.get("kv.test-agent.event.3")).toBe("toolcall_end");
+        await agent.close();
+    });
+
+    it("rolls an onEventTransact write back with the durable block when the hook fails", async () => {
+        const persistence = new InMemoryPersistence();
+        const provider = new ScriptedProvider([textTurn("not committed")]);
+        const agent = await AgentBase.create(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+            hooks: {
+                onEventTransact: async (hookCtx) => {
+                    const kv = agentKV(hookCtx);
+                    if (kv === undefined) throw new Error("Missing transactional agent store.");
+                    await kv.write(hookCtx, "rolled-back", true);
+                    throw new Error("event projection failed");
+                },
+            },
+        });
+
+        await agent.send(ctx, user("go"), { await: true });
+        await agent.waitForIdle();
+
+        expect(persistence.records.some((record) => record.type === "block")).toBe(false);
+        expect(persistence.values.has("kv.test-agent.rolled-back")).toBe(false);
         await agent.close();
     });
 

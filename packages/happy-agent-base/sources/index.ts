@@ -61,6 +61,7 @@ export {
     type AgentBaseHooks,
     type AgentBaseInference,
     type AgentBaseModelChange,
+    type AgentBasePersistedEvent,
     type AgentBaseToolExecution,
     type AgentBaseTurn,
     type AgentBaseTurnStart,

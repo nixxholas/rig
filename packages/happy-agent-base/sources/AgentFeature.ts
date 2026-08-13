@@ -10,6 +10,7 @@ import type { Context } from "@steve.kite/stdlib";
 import type {
     AgentBaseInference,
     AgentBaseModelChange,
+    AgentBasePersistedEvent,
     AgentBaseToolExecution,
     AgentBaseTurn,
     AgentBaseTurnStart,
@@ -103,6 +104,12 @@ export interface AgentFeature<Tool extends AnyAgentTool = AnyAgentTool> {
     readonly afterStart?: (ctx: Context, agents: AgentSystemRef) => Promise<void>;
     /** Observes every session event; must never fail or delay the run. */
     readonly onEvent?: (ctx: Context, scope: AgentFeatureScope, event: SessionEvent) => void;
+    /** Runs inside the transaction committing a completed assistant block. */
+    readonly onEventTransact?: (
+        ctx: Context,
+        scope: AgentFeatureScope,
+        event: AgentBasePersistedEvent,
+    ) => MaybePromise<void>;
     /** Merged after the base state and every earlier feature's instructions, in feature order. */
     readonly instructions?: (ctx: Context, scope: AgentFeatureScope) => MaybePromise<string>;
     /** Merged after the base state and every earlier feature's tools, in feature order. */
@@ -122,8 +129,19 @@ export interface AgentFeature<Tool extends AnyAgentTool = AnyAgentTool> {
         scope: AgentFeatureScope,
         change: AgentBaseModelChange,
     ) => MaybePromise<SessionSystemMessage | undefined>;
+    /** Transactional counterpart to `beforeAgentLoop`. */
+    readonly beforeAgentLoopTransact?: (
+        ctx: Context,
+        scope: AgentFeatureScope,
+    ) => MaybePromise<void>;
     /** Called when the loop leaves the settled state and begins working. */
     readonly beforeAgentLoop?: (ctx: Context, scope: AgentFeatureScope) => MaybePromise<void>;
+    /** Transactional counterpart to `beforeTurn`. */
+    readonly beforeTurnTransact?: (
+        ctx: Context,
+        scope: AgentFeatureScope,
+        turn: AgentBaseTurnStart,
+    ) => MaybePromise<void>;
     /**
      * Receives the measured size of the context the turn is about to run on. Actions from every
      * feature are concatenated and applied before the turn's first inference.
@@ -133,13 +151,30 @@ export interface AgentFeature<Tool extends AnyAgentTool = AnyAgentTool> {
         scope: AgentFeatureScope,
         turn: AgentBaseTurnStart,
     ) => MaybePromise<readonly AgentFeatureAction[] | undefined>;
+    /** Transactional counterpart to `beforeInference`. */
+    readonly beforeInferenceTransact?: (
+        ctx: Context,
+        scope: AgentFeatureScope,
+    ) => MaybePromise<void>;
     /** Called immediately before each inference request. */
     readonly beforeInference?: (ctx: Context, scope: AgentFeatureScope) => MaybePromise<void>;
+    /** Transactional counterpart to `afterInference`. */
+    readonly afterInferenceTransact?: (
+        ctx: Context,
+        scope: AgentFeatureScope,
+        inference: AgentBaseInference,
+    ) => MaybePromise<void>;
     /** Receives how the response ended and the token counts the provider measured for it. */
     readonly afterInference?: (
         ctx: Context,
         scope: AgentFeatureScope,
         inference: AgentBaseInference,
+    ) => MaybePromise<void>;
+    /** Transactional counterpart to `afterTurn`. */
+    readonly afterTurnTransact?: (
+        ctx: Context,
+        scope: AgentFeatureScope,
+        turn: AgentBaseTurn,
     ) => MaybePromise<void>;
     /**
      * Receives the token counts the turn's last measured response reported. Actions from every
@@ -150,6 +185,11 @@ export interface AgentFeature<Tool extends AnyAgentTool = AnyAgentTool> {
         scope: AgentFeatureScope,
         turn: AgentBaseTurn,
     ) => MaybePromise<readonly AgentFeatureAction[] | undefined>;
+    /** Transactional counterpart to `afterAgentLoop`. */
+    readonly afterAgentLoopTransact?: (
+        ctx: Context,
+        scope: AgentFeatureScope,
+    ) => MaybePromise<void>;
     /** Actions from every feature are concatenated and applied together. */
     readonly afterAgentLoop?: (
         ctx: Context,

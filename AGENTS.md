@@ -97,6 +97,14 @@ Never edit an existing database migration retroactively. Once a migration exists
 
 Coding-agent source trees are located at `~/Developer/coding-assistant-sources`. Use the Codex and Claude Code sources there as the implementation reference whenever adding, comparing, or updating provider-aligned behavior. Adapt their strongest ideas to rig's simpler product model instead of copying complexity that does not improve the experience.
 
+## happy-agent-base is frozen
+
+Never change anything in `packages/happy-agent-base` without direct human input in the current task. It is the agent core, and its loop, persistence, store semantics, and permission boundaries are settled deliberately. Treat it as read-only reference material while working on anything else.
+
+This holds even when a change there looks obviously right: a bug, a missing export, a type that does not quite fit, a rename that would tidy the tree, or one small addition that would make the work at hand easier. Build against the package as it is. If the work genuinely cannot be done without changing it, stop and explain what is needed so the user can decide.
+
+Work that only consumes the package — a new feature, a new caller, a new package depending on it — is ordinary work and needs no permission.
+
 ## Package manager
 
 Always use `pnpm` for this project. Do not use `npm`, `npx`, or `yarn` for installs, scripts, dependency changes, or lockfile updates unless the user explicitly asks for a different package manager.
