@@ -707,8 +707,10 @@ describe("cross-agent tool re-entrancy", () => {
 
         expect(observed).toEqual({
             settledWithoutIntervention: true,
-            aConfig: undefined,
-            bConfig: undefined,
+            // Each close revokes the peer tool that was carrying the matching delete. The
+            // conversations settle without a cycle, while both recoverable identities remain.
+            aConfig: {},
+            bConfig: {},
             aPending: [],
             bPending: [],
         });
