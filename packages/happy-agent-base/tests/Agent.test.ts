@@ -3,7 +3,7 @@ import { Type } from "@sinclair/typebox";
 import { createRootContext } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
-import { Agent, defineAgentTool, type AgentFeature } from "../sources/index.js";
+import { Agent, agentBaseKV, defineAgentTool, type AgentFeature } from "../sources/index.js";
 import { providersOf, system, textTurn, user } from "./gym/fixtures.js";
 import { InMemoryPersistence } from "./gym/InMemoryPersistence.js";
 import { ScriptedProvider } from "./gym/ScriptedProvider.js";
@@ -19,19 +19,25 @@ function tool(name: string) {
     });
 }
 
+function feature(hooks: Omit<AgentFeature, "load">): AgentFeature {
+    return { ...hooks, load: () => Promise.resolve() };
+}
+
 describe("Agent", () => {
     it("merges instructions and tools from every feature in order", async () => {
         const searchTool = tool("search");
         const editTool = tool("edit");
         const provider = new ScriptedProvider([textTurn("answer")]);
-        const searchFeature: AgentFeature = {
+        const searchFeature = feature({
+            name: "search",
             instructions: () => "You can search.",
             tools: () => [searchTool],
-        };
-        const editFeature: AgentFeature = {
+        });
+        const editFeature = feature({
+            name: "edit",
             instructions: () => "You can edit.",
             tools: () => [editTool],
-        };
+        });
         const agent = new Agent(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
@@ -40,25 +46,25 @@ describe("Agent", () => {
             features: [searchFeature, editFeature],
         });
 
-        await agent.send(ctx, user("go"));
+        await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
 
         const session = provider.sessions[0];
         expect(session?.options.instructions).toBe("You can search.\n\nYou can edit.");
         expect(session?.options.tools).toEqual([searchTool, editTool]);
-        expect(session?.requests[0]?.context.instructions).toBe(
-            "You can search.\n\nYou can edit.",
-        );
+        expect(session?.requests[0]?.context.instructions).toBe("You can search.\n\nYou can edit.");
         await agent.close();
     });
 
     it("fans events out to every feature in order", async () => {
         const seen: string[] = [];
-        const observe = (name: string): AgentFeature => ({
-            onEvent: (_hookCtx, event) => {
-                if (event.type === "done") seen.push(name);
-            },
-        });
+        const observe = (name: string): AgentFeature =>
+            feature({
+                name,
+                onEvent: (_hookCtx, event) => {
+                    if (event.type === "done") seen.push(name);
+                },
+            });
         const provider = new ScriptedProvider([textTurn("answer")]);
         const agent = new Agent(ctx, {
             id: "test-agent",
@@ -68,7 +74,7 @@ describe("Agent", () => {
             features: [observe("first"), observe("second")],
         });
 
-        await agent.send(ctx, user("go"));
+        await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
 
         expect(seen).toEqual(["first", "second"]);
@@ -78,18 +84,21 @@ describe("Agent", () => {
     it("concatenates lifecycle actions from every feature", async () => {
         const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
         let done = false;
-        const followUp = (text: string): AgentFeature => ({
-            afterTurn: () => {
-                if (done) return undefined;
-                return [{ type: "send", message: user(text) }];
-            },
-        });
-        const stop: AgentFeature = {
+        const followUp = (text: string): AgentFeature =>
+            feature({
+                name: `follow-up-${text.replaceAll(" ", "-")}`,
+                afterTurn: () => {
+                    if (done) return undefined;
+                    return [{ type: "send", message: user(text) }];
+                },
+            });
+        const stop = feature({
+            name: "stop",
             afterTurn: () => {
                 done = true;
                 return undefined;
             },
-        };
+        });
         const agent = new Agent(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
@@ -99,7 +108,7 @@ describe("Agent", () => {
             features: [followUp("from first"), followUp("from second"), stop],
         });
 
-        await agent.send(ctx, user("go"));
+        await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
 
         // Both features' actions were applied together and drained into one follow-up turn.
@@ -115,21 +124,24 @@ describe("Agent", () => {
     it("lets the first answering feature win the reset injection while all observe the change", async () => {
         const provider = new ScriptedProvider([textTurn("claude"), textTurn("gpt")]);
         const observed: boolean[] = [];
-        const silent: AgentFeature = {
+        const silent = feature({
+            name: "silent",
             modelChanged: (_hookCtx, change) => {
                 observed.push(change.wasReset);
                 return undefined;
             },
-        };
-        const summarizer: AgentFeature = {
+        });
+        const summarizer = feature({
+            name: "summarizer",
             modelChanged: () => system("summary"),
-        };
-        const late: AgentFeature = {
+        });
+        const late = feature({
+            name: "late",
             modelChanged: (_hookCtx, change) => {
                 observed.push(change.wasReset);
                 return system("should lose");
             },
-        };
+        });
         const agent = new Agent(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
@@ -139,9 +151,9 @@ describe("Agent", () => {
             features: [silent, summarizer, late],
         });
 
-        await agent.send(ctx, user("hello"));
+        await agent.send(ctx, user("hello"), { await: true });
         await agent.waitForIdle();
-        await agent.send(ctx, user("switch"), { model: "openai/gpt" });
+        await agent.send(ctx, user("switch"), { await: true, model: "openai/gpt" });
         await agent.waitForIdle();
 
         expect(observed).toEqual([true, true]);
@@ -149,6 +161,147 @@ describe("Agent", () => {
             system("summary"),
             user("switch"),
         ]);
+        await agent.close();
+    });
+
+    it("isolates a throwing observer so later features still see everything", async () => {
+        const seen: string[] = [];
+        const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
+        let done = false;
+        const broken = feature({
+            name: "broken",
+            onEvent: () => {
+                throw new Error("observer broke");
+            },
+            beforeTurn: () => {
+                throw new Error("lifecycle broke");
+            },
+            afterTurn: () => {
+                throw new Error("actions broke");
+            },
+        });
+        const working = feature({
+            name: "working",
+            onEvent: (_hookCtx, event) => {
+                if (event.type === "done") seen.push("event");
+            },
+            beforeTurn: () => void seen.push("turn"),
+            afterTurn: () => {
+                if (done) return undefined;
+                done = true;
+                return [{ type: "send", message: user("follow up") }];
+            },
+        });
+        const agent = new Agent(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence: new InMemoryPersistence(),
+            features: [broken, working],
+        });
+
+        await agent.send(ctx, user("go"), { await: true });
+        await agent.waitForIdle();
+
+        // The broken feature silenced nothing: the working feature observed both turns and
+        // its follow-up action survived the broken feature's afterTurn failure.
+        const requests = provider.sessions[0]?.requests ?? [];
+        expect(requests).toHaveLength(2);
+        expect(requests[1]?.context.messages.at(-1)).toEqual(user("follow up"));
+        expect(seen).toEqual(["turn", "event", "turn", "event"]);
+        await agent.close();
+    });
+
+    it("supports asynchronous feature hooks", async () => {
+        const asyncTool = tool("async_tool");
+        const provider = new ScriptedProvider([textTurn("answer")]);
+        const agent = new Agent(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence: new InMemoryPersistence(),
+            features: [
+                feature({
+                    name: "async",
+                    instructions: () => Promise.resolve("async instructions"),
+                    tools: () => Promise.resolve([asyncTool]),
+                }),
+            ],
+        });
+
+        await agent.send(ctx, user("go"), { await: true });
+        await agent.waitForIdle();
+
+        expect(provider.sessions[0]?.options.instructions).toBe("async instructions");
+        expect(provider.sessions[0]?.options.tools).toEqual([asyncTool]);
+        await agent.close();
+    });
+
+    it("rejects an incompatible switch when a model-change feature fails", async () => {
+        const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
+        const persistence = new InMemoryPersistence();
+        const broken = feature({
+            name: "broken",
+            modelChanged: () => {
+                throw new Error("handoff broke");
+            },
+        });
+        const agent = new Agent(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+            model: "anthropic/claude",
+            features: [broken],
+        });
+
+        await agent.send(ctx, user("hello"), { await: true });
+        await agent.waitForIdle();
+        await agent.send(ctx, user("switch"), { await: true, model: "openai/gpt" });
+        await agent.waitForIdle();
+
+        // The failed handoff rejected the switch: the history survived and the previous
+        // model stayed effective.
+        expect(provider.sessions).toHaveLength(1);
+        expect(provider.sessions[0]?.destroyed).toBe(false);
+        expect(provider.sessions[0]?.requests[1]?.context.messages).toEqual([
+            user("hello"),
+            { role: "assistant", content: [{ type: "text", text: "first" }] },
+            user("switch"),
+        ]);
+        expect(provider.sessions[0]?.requests[1]).toMatchObject({
+            model: "anthropic/claude",
+        });
+        await agent.close();
+    });
+
+    it("fails the turn when two features register the same tool", async () => {
+        const provider = new ScriptedProvider([textTurn("answer")]);
+        const events: string[] = [];
+        const agent = new Agent(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence: new InMemoryPersistence(),
+            features: [
+                feature({ name: "first-bash", tools: () => [tool("bash")] }),
+                feature({ name: "second-bash", tools: () => [tool("bash")] }),
+                feature({
+                    name: "observer",
+                    onEvent: (_hookCtx, event) => {
+                        if (event.type === "done" && event.state === "error") {
+                            events.push(event.message);
+                        }
+                    },
+                }),
+            ],
+        });
+
+        await agent.send(ctx, user("go"), { await: true });
+        await agent.waitForIdle();
+
+        expect(provider.sessions).toHaveLength(0);
+        expect(events).toEqual(['Two tools are registered as "bash".']);
         await agent.close();
     });
 
@@ -161,17 +314,60 @@ describe("Agent", () => {
             provider: "scripted",
             persistence: new InMemoryPersistence(),
             initialState: { instructions: "state instructions" },
-            features: [{ onEvent: (_hookCtx, event) => events.push(event) }],
+            features: [
+                feature({
+                    name: "observer",
+                    onEvent: (_hookCtx, event) => events.push(event),
+                }),
+            ],
         });
 
-        await agent.send(ctx, user("go"));
+        await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
 
         // No feature implements instructions, so the mutable state answers as usual.
-        expect(provider.sessions[0]?.requests[0]?.context.instructions).toBe(
-            "state instructions",
-        );
+        expect(provider.sessions[0]?.requests[0]?.context.instructions).toBe("state instructions");
         expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
+        await agent.close();
+    });
+
+    it("scopes each feature's store to the feature's name", async () => {
+        const provider = new ScriptedProvider([textTurn("answer")]);
+        const persistence = new InMemoryPersistence();
+        const listed: unknown[] = [];
+        const memory = feature({
+            name: "memory",
+            afterTurn: async (hookCtx) => {
+                const kv = agentBaseKV(hookCtx);
+                if (kv === undefined) throw new Error("No store on the context.");
+                await kv.write(hookCtx, "note", "remembered");
+                listed.push(await kv.list(hookCtx));
+                return undefined;
+            },
+        });
+        const other = feature({
+            name: "other",
+            afterTurn: async (hookCtx) => {
+                const kv = agentBaseKV(hookCtx);
+                if (kv === undefined) throw new Error("No store on the context.");
+                // A feature sees only its own scope, never a sibling's entries.
+                listed.push(await kv.list(hookCtx));
+                return undefined;
+            },
+        });
+        const agent = new Agent(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+            features: [memory, other],
+        });
+
+        await agent.send(ctx, user("go"), { await: true });
+        await agent.waitForIdle();
+
+        expect(persistence.values.get("kv.test-agent.feature.memory.note")).toBe("remembered");
+        expect(listed).toEqual([[{ key: "note", value: "remembered" }], []]);
         await agent.close();
     });
 });

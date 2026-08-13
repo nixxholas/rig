@@ -6,23 +6,36 @@ import type {
     SessionStream,
 } from "@slopus/happy-providers";
 import { Type } from "@sinclair/typebox";
-import { createRootContext } from "@steve.kite/stdlib";
+import { createRootContext, type Context } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
 import {
     AgentBase,
     agentBaseEffort,
+    agentBaseKV,
     agentBaseModel,
     agentBaseProvider,
     agentBaseServiceTier,
     AgentProviders,
     defineAgentTool,
+    type AgentBaseInference,
+    type AgentBaseTurn,
+    type AgentBaseTurnStart,
 } from "../sources/index.js";
 import { providersOf, queued, system, textTurn, user } from "./gym/fixtures.js";
 import { InMemoryPersistence } from "./gym/InMemoryPersistence.js";
 import { ScriptedProvider, ScriptedSession } from "./gym/ScriptedProvider.js";
 
 const ctx = createRootContext().named("happy-agent-base-test");
+
+function tool(name: string) {
+    return defineAgentTool({
+        name,
+        returnType: Type.Object({}),
+        execute: () => Promise.resolve({}),
+        toLLM: () => [{ type: "text", text: "ok" }],
+    });
+}
 
 async function until(predicate: () => boolean): Promise<void> {
     const deadline = Date.now() + 1000;
@@ -45,7 +58,7 @@ describe("AgentBase", () => {
             initialState: { instructions: "Be brief." },
         });
 
-        await agent.send(ctx, user("hi"));
+        await agent.send(ctx, user("hi"), { await: true });
         await agent.waitForIdle();
 
         expect(events.filter((event) => event.type === "text_delta")).toHaveLength(11);
@@ -76,7 +89,7 @@ describe("AgentBase", () => {
             initialState: { instructions: "Original instructions." },
         });
 
-        await agent.send(ctx, user("first"));
+        await agent.send(ctx, user("first"), { await: true });
         await agent.waitForIdle();
 
         let executed = false;
@@ -92,15 +105,21 @@ describe("AgentBase", () => {
                 toLLM: () => [],
             }),
         );
-        await agent.send(ctx, user("second"));
+        await agent.send(ctx, user("second"), { await: true });
         await agent.waitForIdle();
 
-        const requests = provider.sessions[0]?.requests ?? [];
-        expect(requests[0]?.context.instructions).toBe("Original instructions.");
-        expect(requests[1]?.context.instructions).toBe("Changed instructions.");
+        expect(provider.sessions[0]?.requests[0]?.context.instructions).toBe(
+            "Original instructions.",
+        );
+        // The changed configuration recreated the provider session, so the model sees the
+        // current instructions and tool descriptors.
+        expect(provider.sessions[0]?.destroyed).toBe(true);
+        const second = provider.sessions[1];
+        expect(second?.options.instructions).toBe("Changed instructions.");
+        expect(second?.requests[0]?.context.instructions).toBe("Changed instructions.");
         // The tool added after construction executed for the later turn.
         expect(executed).toBe(true);
-        expect(requests[2]?.context.messages.at(-1)).toMatchObject({ role: "tool" });
+        expect(second?.requests[1]?.context.messages.at(-1)).toMatchObject({ role: "tool" });
         await agent.close();
     });
 
@@ -123,7 +142,7 @@ describe("AgentBase", () => {
             },
         });
 
-        await agent.send(ctx, user("first"));
+        await agent.send(ctx, user("first"), { await: true });
         await agent.waitForIdle();
 
         const session = provider.sessions[0];
@@ -153,23 +172,25 @@ describe("AgentBase", () => {
             providers: providersOf(provider),
             provider: "scripted",
             persistence: new InMemoryPersistence(),
-            initialState: { tools: [
-                defineAgentTool({
-                    name: "read_file",
-                    parameters: Type.Object({ path: Type.String() }),
-                    returnType: Type.Object({ contents: Type.String() }),
-                    execute: (_toolCtx, args) => {
-                        // args is statically typed as { path: string } by the schema.
-                        seen.push(args.path);
-                        return Promise.resolve({ contents: "file contents" });
-                    },
-                    // result is statically typed as { contents: string } by the schema.
-                    toLLM: (result) => [{ type: "text", text: result.contents }],
-                }),
-            ] },
+            initialState: {
+                tools: [
+                    defineAgentTool({
+                        name: "read_file",
+                        parameters: Type.Object({ path: Type.String() }),
+                        returnType: Type.Object({ contents: Type.String() }),
+                        execute: (_toolCtx, args) => {
+                            // args is statically typed as { path: string } by the schema.
+                            seen.push(args.path);
+                            return Promise.resolve({ contents: "file contents" });
+                        },
+                        // result is statically typed as { contents: string } by the schema.
+                        toLLM: (result) => [{ type: "text", text: result.contents }],
+                    }),
+                ],
+            },
         });
 
-        await agent.send(ctx, user("read it"));
+        await agent.send(ctx, user("read it"), { await: true });
         await agent.waitForIdle();
 
         expect(seen).toEqual(["a.txt"]);
@@ -214,30 +235,32 @@ describe("AgentBase", () => {
             providers: providersOf(provider),
             provider: "scripted",
             persistence: new InMemoryPersistence(),
-            initialState: { tools: [
-                defineAgentTool({
-                    name: "slow_tool",
-                    returnType: Type.Object({ value: Type.String() }),
-                    execute: async () => {
-                        await new Promise((resolve) => setTimeout(resolve, 20));
-                        finished.push("slow");
-                        return { value: "slow result" };
-                    },
-                    toLLM: (result) => [{ type: "text", text: result.value }],
-                }),
-                defineAgentTool({
-                    name: "failing_tool",
-                    returnType: Type.Object({}),
-                    execute: () => {
-                        finished.push("failing");
-                        return Promise.reject(new Error("tool blew up"));
-                    },
-                    toLLM: () => [],
-                }),
-            ] },
+            initialState: {
+                tools: [
+                    defineAgentTool({
+                        name: "slow_tool",
+                        returnType: Type.Object({ value: Type.String() }),
+                        execute: async () => {
+                            await new Promise((resolve) => setTimeout(resolve, 20));
+                            finished.push("slow");
+                            return { value: "slow result" };
+                        },
+                        toLLM: (result) => [{ type: "text", text: result.value }],
+                    }),
+                    defineAgentTool({
+                        name: "failing_tool",
+                        returnType: Type.Object({}),
+                        execute: () => {
+                            finished.push("failing");
+                            return Promise.reject(new Error("tool blew up"));
+                        },
+                        toLLM: () => [],
+                    }),
+                ],
+            },
         });
 
-        await agent.send(ctx, user("go"));
+        await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
 
         // The quick tool settles before the slow one: they ran in parallel.
@@ -280,21 +303,23 @@ describe("AgentBase", () => {
             providers: providersOf(provider),
             provider: "scripted",
             persistence: new InMemoryPersistence(),
-            initialState: { tools: [
-                defineAgentTool({
-                    name: "read_file",
-                    parameters: Type.Object({ path: Type.String() }),
-                    returnType: Type.Object({}),
-                    execute: () => {
-                        executed = true;
-                        return Promise.resolve({});
-                    },
-                    toLLM: () => [],
-                }),
-            ] },
+            initialState: {
+                tools: [
+                    defineAgentTool({
+                        name: "read_file",
+                        parameters: Type.Object({ path: Type.String() }),
+                        returnType: Type.Object({}),
+                        execute: () => {
+                            executed = true;
+                            return Promise.resolve({});
+                        },
+                        toLLM: () => [],
+                    }),
+                ],
+            },
         });
 
-        await agent.send(ctx, user("read it"));
+        await agent.send(ctx, user("read it"), { await: true });
         await agent.waitForIdle();
 
         expect(executed).toBe(false);
@@ -340,7 +365,7 @@ describe("AgentBase", () => {
             hooks: { onEvent: (_hookCtx, event) => events.push(event) },
         });
 
-        await agent.send(ctx, user("weather?"));
+        await agent.send(ctx, user("weather?"), { await: true });
         await agent.waitForIdle();
 
         // The server call stays in the assistant message; its provider-settled result is
@@ -362,9 +387,7 @@ describe("AgentBase", () => {
             { type: "block", block: { type: "text", text: "It is sunny." } },
         ]);
         // The result events still reach the hooks like every other stream event.
-        expect(
-            events.filter((event) => event.type.startsWith("toolcall_result")),
-        ).toHaveLength(3);
+        expect(events.filter((event) => event.type.startsWith("toolcall_result"))).toHaveLength(3);
         await agent.close();
     });
 
@@ -379,7 +402,7 @@ describe("AgentBase", () => {
             hooks: { onEvent: (_hookCtx, event) => events.push(event) },
         });
 
-        await agent.send(ctx, user("go"));
+        await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
 
         expect(events).toEqual([
@@ -410,7 +433,7 @@ describe("AgentBase", () => {
             hooks: { onEvent: (_hookCtx, event) => events.push(event) },
         });
 
-        await agent.send(ctx, user("hi"));
+        await agent.send(ctx, user("hi"), { await: true });
         await agent.waitForIdle();
 
         expect(events).toEqual([
@@ -426,7 +449,7 @@ describe("AgentBase", () => {
 });
 
 describe("AgentBase persistence", () => {
-    it("loads stored history on the first inference attempt only", async () => {
+    it("reloads the stored history before each turn", async () => {
         const persistence = new InMemoryPersistence([
             { type: "user", message: user("earlier question") },
             { type: "block", block: { type: "text", text: "earlier " } },
@@ -440,12 +463,14 @@ describe("AgentBase persistence", () => {
             persistence,
         });
 
-        await agent.send(ctx, user("hi"));
+        await agent.send(ctx, user("hi"), { await: true });
         await agent.waitForIdle();
-        await agent.send(ctx, user("more"));
+        await agent.send(ctx, user("more"), { await: true });
         await agent.waitForIdle();
 
-        expect(persistence.loads).toBe(1);
+        // A turn answers the durable conversation, not the one this instance remembers, so
+        // each turn reloads before it decides anything.
+        expect(persistence.loads).toBe(2);
         expect(provider.sessions[0]?.requests[0]?.context.messages).toEqual([
             user("earlier question"),
             {
@@ -481,17 +506,19 @@ describe("AgentBase persistence", () => {
             providers: providersOf(provider),
             provider: "scripted",
             persistence,
-            initialState: { tools: [
-                defineAgentTool({
-                    name: "read_file",
-                    returnType: Type.Object({ contents: Type.String() }),
-                    execute: () => Promise.resolve({ contents: "contents" }),
-                    toLLM: (result) => [{ type: "text", text: result.contents }],
-                }),
-            ] },
+            initialState: {
+                tools: [
+                    defineAgentTool({
+                        name: "read_file",
+                        returnType: Type.Object({ contents: Type.String() }),
+                        execute: () => Promise.resolve({ contents: "contents" }),
+                        toLLM: (result) => [{ type: "text", text: result.contents }],
+                    }),
+                ],
+            },
         });
 
-        await agent.send(ctx, user("go"));
+        await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
 
         expect(persistence.records).toEqual([
@@ -520,7 +547,7 @@ describe("AgentBase persistence", () => {
             },
             { type: "block", block: { type: "text", text: "ok" } },
         ]);
-        expect(persistence.values.size).toBe(0);
+        expect(persistence.pending.size).toBe(0);
         await agent.close();
     });
 
@@ -556,7 +583,7 @@ describe("AgentBase persistence", () => {
             },
         });
 
-        await agent.send(ctx, user("go"));
+        await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
 
         const kinds = persistence.records.map((record) =>
@@ -566,7 +593,7 @@ describe("AgentBase persistence", () => {
         // records stay contiguous; it enters the main store only when the follow-up turn
         // consumes it, ahead of that turn's block.
         expect(kinds).toEqual(["user", "block", "block", "user", "block"]);
-        expect(persistence.values.size).toBe(0);
+        expect(persistence.pending.size).toBe(0);
 
         const reloadedProvider = new ScriptedProvider([textTurn("hello again")]);
         const reloaded = new AgentBase(ctx, {
@@ -575,7 +602,7 @@ describe("AgentBase persistence", () => {
             provider: "scripted",
             persistence,
         });
-        await reloaded.send(ctx, user("back"));
+        await reloaded.send(ctx, user("back"), { await: true });
         await reloaded.waitForIdle();
 
         expect(reloadedProvider.sessions[0]?.requests[0]?.context.messages).toEqual([
@@ -611,12 +638,12 @@ describe("AgentBase persistence", () => {
             },
         });
 
-        await agent.send(ctx, user("hi"));
+        await agent.send(ctx, user("hi"), { await: true });
 
         // The message is durably stored the moment send resolves: still under its pending
         // key, or already consumed into the main store if the turn got that far.
         const persisted = [
-            ...[...persistence.values.values()].map(
+            ...[...persistence.pending.values()].map(
                 (value) => (value as { message: unknown }).message,
             ),
             ...persistence.records
@@ -635,8 +662,8 @@ describe("AgentBase persistence", () => {
         const write = persistence.writeValue.bind(persistence);
         persistence.writeValue = async (writeCtx, key, value) => {
             // The first write is slow; without the lock the second would land first.
-            const { message } = value as ReturnType<typeof queued>;
-            if (message.content[0]?.type === "text" && message.content[0].text === "first") {
+            const { message } = value as Partial<ReturnType<typeof queued>>;
+            if (message?.content[0]?.type === "text" && message.content[0].text === "first") {
                 await new Promise((resolve) => setTimeout(resolve, 20));
             }
             await write(writeCtx, key, value);
@@ -651,8 +678,8 @@ describe("AgentBase persistence", () => {
         });
 
         await Promise.all([
-            agent.send(ctx, user("first")),
-            agent.send(ctx, user("second")),
+            agent.send(ctx, user("first"), { await: true }),
+            agent.send(ctx, user("second"), { await: true }),
         ]);
         await agent.waitForIdle();
 
@@ -679,11 +706,11 @@ describe("AgentBase persistence", () => {
             persistence,
         });
 
-        await expect(agent.send(ctx, user("hi"))).rejects.toThrow("disk full");
+        await expect(agent.send(ctx, user("hi"), { await: true })).rejects.toThrow("disk full");
         await agent.waitForIdle();
 
         expect(persistence.records).toEqual([]);
-        expect(persistence.values.size).toBe(0);
+        expect(persistence.pending.size).toBe(0);
         expect(provider.sessions).toHaveLength(0);
         await agent.close();
     });
@@ -701,7 +728,7 @@ describe("AgentBase persistence", () => {
             hooks: { onEvent: (_hookCtx, event) => events.push(event) },
         });
 
-        await agent.send(ctx, user("hi"));
+        await agent.send(ctx, user("hi"), { await: true });
         await agent.waitForIdle();
 
         expect(events).toEqual([
@@ -724,7 +751,7 @@ describe("AgentBase persistence", () => {
                 },
             },
         ]);
-        expect([...persistence.values.values()]).toEqual([queued(user("hi"))]);
+        expect([...persistence.pending.values()]).toEqual([queued(user("hi"))]);
         expect(provider.sessions).toHaveLength(0);
         await agent.close();
     });
@@ -742,7 +769,7 @@ describe("AgentBase persistence", () => {
             hooks: { onEvent: (_hookCtx, event) => events.push(event) },
         });
 
-        await agent.send(ctx, user("hi"));
+        await agent.send(ctx, user("hi"), { await: true });
         await agent.waitForIdle();
 
         expect(events).toEqual([
@@ -756,7 +783,7 @@ describe("AgentBase persistence", () => {
         // The load failed before any turn could consume the message, so it is still waiting
         // under its pending key rather than in the main context store.
         expect(persistence.records).toEqual([]);
-        expect([...persistence.values.values()]).toEqual([queued(user("hi"))]);
+        expect([...persistence.pending.values()]).toEqual([queued(user("hi"))]);
         expect(provider.sessions).toHaveLength(0);
         await agent.close();
     });
@@ -779,32 +806,34 @@ describe("AgentBase persistence", () => {
             providers: providersOf(provider),
             provider: "scripted",
             persistence,
-            initialState: { tools: [
-                defineAgentTool({
-                    name: "slow_tool",
-                    returnType: Type.Object({ value: Type.String() }),
-                    execute: async () => {
-                        await new Promise((resolve) => setTimeout(resolve, 20));
-                        return { value: "slow" };
-                    },
-                    toLLM: (result) => [{ type: "text", text: result.value }],
-                }),
-                defineAgentTool({
-                    name: "fast_tool",
-                    returnType: Type.Object({ value: Type.String() }),
-                    execute: () => {
-                        // Both calls are already durable in the sorted store while running.
-                        keysDuringFast = [...persistence.values.keys()].filter((key) =>
-                            key.startsWith("tool."),
-                        );
-                        return Promise.resolve({ value: "fast" });
-                    },
-                    toLLM: (result) => [{ type: "text", text: result.value }],
-                }),
-            ] },
+            initialState: {
+                tools: [
+                    defineAgentTool({
+                        name: "slow_tool",
+                        returnType: Type.Object({ value: Type.String() }),
+                        execute: async () => {
+                            await new Promise((resolve) => setTimeout(resolve, 20));
+                            return { value: "slow" };
+                        },
+                        toLLM: (result) => [{ type: "text", text: result.value }],
+                    }),
+                    defineAgentTool({
+                        name: "fast_tool",
+                        returnType: Type.Object({ value: Type.String() }),
+                        execute: () => {
+                            // Both calls are already durable in the sorted store while running.
+                            keysDuringFast = [...persistence.values.keys()].filter((key) =>
+                                key.startsWith("tool."),
+                            );
+                            return Promise.resolve({ value: "fast" });
+                        },
+                        toLLM: (result) => [{ type: "text", text: result.value }],
+                    }),
+                ],
+            },
         });
 
-        await agent.send(ctx, user("go"));
+        await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
 
         expect(keysDuringFast).toEqual(["tool.000000.call-a", "tool.000001.call-b"]);
@@ -814,7 +843,7 @@ describe("AgentBase persistence", () => {
                 .filter((record) => record.type === "tool")
                 .map((record) => record.message.callId),
         ).toEqual(["call-a", "call-b"]);
-        expect(persistence.values.size).toBe(0);
+        expect(persistence.pending.size).toBe(0);
         await agent.close();
     });
 
@@ -847,27 +876,29 @@ describe("AgentBase persistence", () => {
             providers: providersOf(provider),
             provider: "scripted",
             persistence,
-            initialState: { tools: [
-                defineAgentTool({
-                    name: "durable_tool",
-                    durable: true,
-                    returnType: Type.Object({ value: Type.String() }),
-                    execute: () => {
-                        durableRuns += 1;
-                        return Promise.resolve({ value: "retried result" });
-                    },
-                    toLLM: (result) => [{ type: "text", text: result.value }],
-                }),
-                defineAgentTool({
-                    name: "fragile_tool",
-                    returnType: Type.Object({}),
-                    execute: () => {
-                        fragileRuns += 1;
-                        return Promise.resolve({});
-                    },
-                    toLLM: () => [],
-                }),
-            ] },
+            initialState: {
+                tools: [
+                    defineAgentTool({
+                        name: "durable_tool",
+                        durable: true,
+                        returnType: Type.Object({ value: Type.String() }),
+                        execute: () => {
+                            durableRuns += 1;
+                            return Promise.resolve({ value: "retried result" });
+                        },
+                        toLLM: (result) => [{ type: "text", text: result.value }],
+                    }),
+                    defineAgentTool({
+                        name: "fragile_tool",
+                        returnType: Type.Object({}),
+                        execute: () => {
+                            fragileRuns += 1;
+                            return Promise.resolve({});
+                        },
+                        toLLM: () => [],
+                    }),
+                ],
+            },
         });
 
         agent.start();
@@ -900,7 +931,7 @@ describe("AgentBase persistence", () => {
             },
             { type: "block", block: { type: "text", text: "recovered" } },
         ]);
-        expect(persistence.values.size).toBe(0);
+        expect(persistence.pending.size).toBe(0);
         // The follow-up inference saw the full context: call blocks then both results.
         expect(provider.sessions[0]?.requests[0]?.context.messages).toEqual([
             user("go"),
@@ -968,7 +999,46 @@ describe("AgentBase persistence", () => {
             { type: "user", message: user("lost send") },
             { type: "block", block: { type: "text", text: "caught up" } },
         ]);
-        expect(persistence.values.size).toBe(0);
+        expect(persistence.pending.size).toBe(0);
+        await agent.close();
+    });
+
+    it("closes a provider stream that is still open once the response is done", async () => {
+        // Providers keep a connection behind the stream, so a response that ends before the
+        // stream does must still release it rather than leave it dangling.
+        class OpenStreamProvider extends ScriptedProvider {
+            streamClosed = false;
+            override async session(id: string, options: never): Promise<BaseSession> {
+                const session = (await super.session(id, options)) as ScriptedSession;
+                const run = session.run.bind(session);
+                const self = this;
+                session.run = (runCtx, request): SessionStream => {
+                    const scripted = run(runCtx, request);
+                    return (async function* () {
+                        try {
+                            yield* scripted;
+                            // The provider would keep streaming; nobody is reading any more.
+                            yield { type: "text_delta", delta: "after" } as SessionEvent;
+                        } finally {
+                            self.streamClosed = true;
+                        }
+                    })();
+                };
+                return session;
+            }
+        }
+        const provider = new OpenStreamProvider([textTurn("hello")]);
+        const agent = new AgentBase(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence: new InMemoryPersistence(),
+        });
+
+        await agent.send(ctx, user("go"), { await: true });
+        await agent.waitForIdle();
+
+        await until(() => provider.streamClosed);
         await agent.close();
     });
 
@@ -1018,11 +1088,11 @@ describe("AgentBase persistence", () => {
             hooks: { onEvent: (_hookCtx, event) => events.push(event) },
         });
 
-        await agent.send(ctx, user("go"));
+        await agent.send(ctx, user("go"), { await: true });
         await until(() =>
             events.some((event) => event.type === "text_delta" && event.delta === "partial"),
         );
-        await agent.abort();
+        await agent.abort(ctx, { await: true });
 
         expect(events.at(-1)).toEqual({ type: "done", state: "cancelled" });
         // Once the stalled await settles, the requested stream closure runs its finally, and
@@ -1046,7 +1116,7 @@ describe("AgentBase persistence", () => {
             provider: "scripted",
             persistence,
         });
-        await reloaded.send(ctx, user("next"));
+        await reloaded.send(ctx, user("next"), { await: true });
         await reloaded.waitForIdle();
         expect(reloadedProvider.sessions[0]?.requests[0]?.context.messages).toEqual([
             user("go"),
@@ -1075,24 +1145,26 @@ describe("AgentBase persistence", () => {
             provider: "scripted",
             persistence,
             hooks: { onEvent: (_hookCtx, event) => events.push(event) },
-            initialState: { tools: [
-                defineAgentTool({
-                    name: "hang_tool",
-                    returnType: Type.Object({}),
-                    execute: (toolCtx) => {
-                        started = true;
-                        lifetime = toolCtx.lifetime;
-                        return new Promise<never>(() => undefined);
-                    },
-                    toLLM: () => [],
-                }),
-            ] },
+            initialState: {
+                tools: [
+                    defineAgentTool({
+                        name: "hang_tool",
+                        returnType: Type.Object({}),
+                        execute: (toolCtx) => {
+                            started = true;
+                            lifetime = toolCtx.lifetime;
+                            return new Promise<never>(() => undefined);
+                        },
+                        toLLM: () => [],
+                    }),
+                ],
+            },
         });
 
-        await agent.send(ctx, user("go"));
+        await agent.send(ctx, user("go"), { await: true });
         await until(() => started);
         expect(lifetime?.aborted).toBe(false);
-        await agent.abort();
+        await agent.abort(ctx, { await: true });
         // The running tool observed the cancellation through its context lifetime.
         expect(lifetime?.aborted).toBe(true);
 
@@ -1106,7 +1178,7 @@ describe("AgentBase persistence", () => {
             },
         });
         // The pending entry was consumed by the aborted result, not left for a restart.
-        expect(persistence.values.size).toBe(0);
+        expect(persistence.pending.size).toBe(0);
         expect(events.at(-1)).toEqual({ type: "done", state: "cancelled" });
         expect(provider.sessions[0]?.requests).toHaveLength(1);
         await agent.close();
@@ -1121,10 +1193,10 @@ describe("AgentBase persistence", () => {
             persistence: new InMemoryPersistence(),
         });
 
-        await agent.abort();
-        await agent.send(ctx, user("hi"));
+        await agent.abort(ctx, { await: true });
+        await agent.send(ctx, user("hi"), { await: true });
         await agent.waitForIdle();
-        await agent.abort();
+        await agent.abort(ctx, { await: true });
 
         expect(provider.sessions[0]?.requests).toHaveLength(1);
         await agent.close();
@@ -1164,12 +1236,13 @@ describe("AgentBase per-message settings", () => {
         });
 
         await agent.send(ctx, user("switch"), {
+            await: true,
             model: "anthropic/better",
             effort: "high",
             serviceTier: "priority",
         });
         await agent.waitForIdle();
-        await agent.send(ctx, user("plain"));
+        await agent.send(ctx, user("plain"), { await: true });
         await agent.waitForIdle();
 
         const session = provider.sessions[0];
@@ -1214,9 +1287,9 @@ describe("AgentBase per-message settings", () => {
             },
         });
 
-        await agent.send(ctx, user("hello"));
+        await agent.send(ctx, user("hello"), { await: true });
         await agent.waitForIdle();
-        await agent.send(ctx, user("switch"), { model: "openai/gpt" });
+        await agent.send(ctx, user("switch"), { await: true, model: "openai/gpt" });
         await agent.waitForIdle();
 
         expect(changes).toEqual([
@@ -1258,9 +1331,9 @@ describe("AgentBase per-message settings", () => {
             model: "anthropic/claude",
         });
 
-        await agent.send(ctx, user("hello"));
+        await agent.send(ctx, user("hello"), { await: true });
         await agent.waitForIdle();
-        await agent.send(ctx, user("switch"), { model: "openai/gpt" });
+        await agent.send(ctx, user("switch"), { await: true, model: "openai/gpt" });
         await agent.waitForIdle();
 
         expect(provider.sessions[1]?.requests[0]?.context.messages).toEqual([user("switch")]);
@@ -1285,9 +1358,9 @@ describe("AgentBase per-message settings", () => {
             },
         });
 
-        await agent.send(ctx, user("hello"));
+        await agent.send(ctx, user("hello"), { await: true });
         await agent.waitForIdle();
-        await agent.send(ctx, user("switch"), { model: "anthropic/claude-b" });
+        await agent.send(ctx, user("switch"), { await: true, model: "anthropic/claude-b" });
         await agent.waitForIdle();
 
         expect(changes).toEqual([
@@ -1328,9 +1401,9 @@ describe("AgentBase per-message settings", () => {
             },
         });
 
-        await agent.send(ctx, user("hello"));
+        await agent.send(ctx, user("hello"), { await: true });
         await agent.waitForIdle();
-        await agent.send(ctx, user("switch"), { provider: "bedrock" });
+        await agent.send(ctx, user("switch"), { await: true, provider: "bedrock" });
         await agent.waitForIdle();
 
         // A claude-family model may move from a claude provider to a bedrock provider without
@@ -1371,17 +1444,15 @@ describe("AgentBase per-message settings", () => {
             persistence: new InMemoryPersistence(),
         });
 
-        await agent.send(ctx, user("hello"));
+        await agent.send(ctx, user("hello"), { await: true });
         await agent.waitForIdle();
-        await agent.send(ctx, user("switch"), { provider: "claude-b" });
+        await agent.send(ctx, user("switch"), { await: true, provider: "claude-b" });
         await agent.waitForIdle();
 
         // Same compatibility type but a different registry entry — for example another
         // credential — cannot continue the conversation.
         expect(firstProvider.sessions[0]?.destroyed).toBe(true);
-        expect(secondProvider.sessions[0]?.requests[0]?.context.messages).toEqual([
-            user("switch"),
-        ]);
+        expect(secondProvider.sessions[0]?.requests[0]?.context.messages).toEqual([user("switch")]);
         await agent.close();
     });
 
@@ -1405,7 +1476,7 @@ describe("AgentBase per-message settings", () => {
             model: "anthropic/claude-x",
             persistence,
         });
-        await firstAgent.send(ctx, user("switch"), { provider: "bedrock" });
+        await firstAgent.send(ctx, user("switch"), { await: true, provider: "bedrock" });
         await firstAgent.waitForIdle();
         await firstAgent.close();
 
@@ -1418,7 +1489,7 @@ describe("AgentBase per-message settings", () => {
             model: "anthropic/claude-x",
             persistence,
         });
-        await secondAgent.send(ctx, user("plain"));
+        await secondAgent.send(ctx, user("plain"), { await: true });
         await secondAgent.waitForIdle();
 
         // The durable settings restored the provider switch; the constructor default did not
@@ -1438,7 +1509,7 @@ describe("AgentBase per-message settings", () => {
             persistence,
             model: "anthropic/default",
         });
-        await firstAgent.send(ctx, user("switch"), { model: "anthropic/better" });
+        await firstAgent.send(ctx, user("switch"), { await: true, model: "anthropic/better" });
         await firstAgent.waitForIdle();
         await firstAgent.close();
 
@@ -1450,7 +1521,7 @@ describe("AgentBase per-message settings", () => {
             persistence,
             model: "anthropic/default",
         });
-        await secondAgent.send(ctx, user("plain"));
+        await secondAgent.send(ctx, user("plain"), { await: true });
         await secondAgent.waitForIdle();
 
         // The previously effective model survived the restart through the durable settings.
@@ -1462,6 +1533,83 @@ describe("AgentBase per-message settings", () => {
 });
 
 describe("AgentBase message delivery strategies", () => {
+    it("answers a message that arrives while a turn is still starting up", async () => {
+        // start() opens a turn that has nothing to do yet. A message sent while that turn is
+        // still running its pre-turn hooks must not be swallowed by it.
+        const provider = new ScriptedProvider([textTurn("answered")]);
+        let releaseHook = (): void => undefined;
+        const inHook = new Promise<void>((resolve) => {
+            releaseHook = resolve;
+        });
+        let hookEntered = (): void => undefined;
+        const entered = new Promise<void>((resolve) => {
+            hookEntered = resolve;
+        });
+        const agent = new AgentBase(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence: new InMemoryPersistence(),
+            hooks: {
+                beforeTurn: async () => {
+                    hookEntered();
+                    await inHook;
+                    return undefined;
+                },
+            },
+        });
+
+        agent.start();
+        await entered;
+        // The send lands while the first turn sits inside its pre-turn hook.
+        await agent.send(ctx, user("hello"), { await: true });
+        releaseHook();
+        await agent.waitForIdle();
+
+        expect(provider.sessions[0]?.requests).toHaveLength(1);
+        expect(provider.sessions[0]?.requests[0]?.context.messages).toEqual([user("hello")]);
+        await agent.close();
+    });
+
+    it("answers a message that lands while the history is being loaded", async () => {
+        // The load replaces the in-memory queues wholesale. A send that waits on the same
+        // persistence lock must join the queue the load left behind, not the one it discarded.
+        const provider = new ScriptedProvider([textTurn("answered")]);
+        let releaseLoad = (): void => undefined;
+        const inLoad = new Promise<void>((resolve) => {
+            releaseLoad = resolve;
+        });
+        let loadEntered = (): void => undefined;
+        const entered = new Promise<void>((resolve) => {
+            loadEntered = resolve;
+        });
+        const persistence = new InMemoryPersistence();
+        const load = persistence.load.bind(persistence);
+        persistence.load = async () => {
+            loadEntered();
+            await inLoad;
+            return load();
+        };
+        const agent = new AgentBase(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+        });
+
+        agent.start();
+        await entered;
+        // The send blocks on the persistence lock the load is holding.
+        const sent = agent.send(ctx, user("hello"), { await: true });
+        releaseLoad();
+        await sent;
+        await agent.waitForIdle();
+
+        expect(provider.sessions[0]?.requests).toHaveLength(1);
+        expect(provider.sessions[0]?.requests[0]?.context.messages).toEqual([user("hello")]);
+        await agent.close();
+    });
+
     it("steering while idle triggers a new turn on its own", async () => {
         const persistence = new InMemoryPersistence();
         const provider = new ScriptedProvider([textTurn("answered")]);
@@ -1472,7 +1620,7 @@ describe("AgentBase message delivery strategies", () => {
             persistence,
         });
 
-        await agent.steer(ctx, user("just steering"));
+        await agent.steer(ctx, user("just steering"), { await: true });
         await agent.waitForIdle();
 
         expect(provider.sessions[0]?.requests).toHaveLength(1);
@@ -1483,7 +1631,7 @@ describe("AgentBase message delivery strategies", () => {
             { type: "user", message: user("just steering") },
             { type: "block", block: { type: "text", text: "answered" } },
         ]);
-        expect(persistence.values.size).toBe(0);
+        expect(persistence.pending.size).toBe(0);
         await agent.close();
     });
 
@@ -1511,7 +1659,7 @@ describe("AgentBase message delivery strategies", () => {
             },
         });
 
-        await agent.send(ctx, user("go"));
+        await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
 
         const requests = provider.sessions[0]?.requests ?? [];
@@ -1547,7 +1695,7 @@ describe("AgentBase message delivery strategies", () => {
             },
         });
 
-        await agent.send(ctx, user("go"));
+        await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
 
         const requests = provider.sessions[0]?.requests ?? [];
@@ -1583,7 +1731,7 @@ describe("AgentBase message delivery strategies", () => {
             },
         });
 
-        await agent.send(ctx, user("go"));
+        await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
 
         const requests = provider.sessions[0]?.requests ?? [];
@@ -1615,7 +1763,7 @@ describe("AgentBase message delivery strategies", () => {
             },
         });
 
-        await agent.send(ctx, user("go"));
+        await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
 
         const requests = provider.sessions[0]?.requests ?? [];
@@ -1653,7 +1801,7 @@ describe("AgentBase message delivery strategies", () => {
             },
         });
 
-        await agent.send(ctx, user("go"));
+        await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
 
         const requests = provider.sessions[0]?.requests ?? [];
@@ -1683,14 +1831,16 @@ describe("AgentBase message delivery strategies", () => {
             providers: providersOf(provider),
             provider: "scripted",
             persistence: new InMemoryPersistence(),
-            initialState: { tools: [
-                defineAgentTool({
-                    name: "lookup",
-                    returnType: Type.Object({ value: Type.String() }),
-                    execute: () => Promise.resolve({ value: "found" }),
-                    toLLM: (result) => [{ type: "text", text: result.value }],
-                }),
-            ] },
+            initialState: {
+                tools: [
+                    defineAgentTool({
+                        name: "lookup",
+                        returnType: Type.Object({ value: Type.String() }),
+                        execute: () => Promise.resolve({ value: "found" }),
+                        toLLM: (result) => [{ type: "text", text: result.value }],
+                    }),
+                ],
+            },
             hooks: {
                 onEvent: (_hookCtx, event) => {
                     if (event.type === "toolcall_start") {
@@ -1700,7 +1850,7 @@ describe("AgentBase message delivery strategies", () => {
             },
         });
 
-        await agent.send(ctx, user("go"));
+        await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
 
         // The steering message rides into the same request as the tool result: injected after
@@ -1765,13 +1915,13 @@ describe("AgentBase compaction", () => {
             },
         });
 
-        await agent.send(ctx, user("go"));
+        await agent.send(ctx, user("go"), { await: true });
         await until(() => started);
         const session = provider.sessions[0];
         if (session !== undefined) {
             session.compactionResults = [completed([compactionMessage, user("go")])];
         }
-        const compaction = agent.compact(ctx);
+        const compaction = agent.compact(ctx, { await: true });
         await compaction;
 
         // The compaction saw the complete finished turn, not the mid-turn state.
@@ -1789,7 +1939,7 @@ describe("AgentBase compaction", () => {
             },
         ]);
 
-        await agent.send(ctx, user("after compaction"));
+        await agent.send(ctx, user("after compaction"), { await: true });
         await agent.waitForIdle();
         expect(session?.requests.at(-1)?.context.messages).toEqual([
             compactionMessage,
@@ -1816,15 +1966,13 @@ describe("AgentBase compaction", () => {
             const original = provider.session.bind(provider);
             provider.session = async (id, options) => {
                 const session = await original(id, options);
-                (session as ScriptedSession).compactionResults = [
-                    completed([compactionMessage]),
-                ];
+                (session as ScriptedSession).compactionResults = [completed([compactionMessage])];
                 resolve();
                 return session;
             };
         });
 
-        await agent.compact(ctx);
+        await agent.compact(ctx, { await: true });
         await primed;
 
         expect(provider.sessions[0]?.requests).toHaveLength(0);
@@ -1858,12 +2006,16 @@ describe("AgentBase compaction", () => {
             persistence,
         });
 
-        await Promise.all([agent.compact(ctx), agent.compact(ctx), agent.compact(ctx)]);
+        await Promise.all([
+            agent.compact(ctx, { await: true }),
+            agent.compact(ctx, { await: true }),
+            agent.compact(ctx, { await: true }),
+        ]);
 
         expect(provider.sessions[0]?.compactions).toHaveLength(1);
-        expect(
-            persistence.records.filter((record) => record.type === "compaction"),
-        ).toHaveLength(1);
+        expect(persistence.records.filter((record) => record.type === "compaction")).toHaveLength(
+            1,
+        );
         await agent.close();
     });
 
@@ -1888,16 +2040,16 @@ describe("AgentBase compaction", () => {
             persistence,
         });
 
-        const first = agent.compact(ctx);
-        const second = agent.compact(ctx);
+        const first = agent.compact(ctx, { await: true });
+        const second = agent.compact(ctx, { await: true });
         await expect(first).rejects.toThrow("model unavailable");
         await expect(second).rejects.toThrow("model unavailable");
 
         // The history is untouched and the agent keeps working.
-        expect(
-            persistence.records.filter((record) => record.type === "compaction"),
-        ).toHaveLength(0);
-        await agent.send(ctx, user("still there?"));
+        expect(persistence.records.filter((record) => record.type === "compaction")).toHaveLength(
+            0,
+        );
+        await agent.send(ctx, user("still there?"), { await: true });
         await agent.waitForIdle();
         expect(provider.sessions[0]?.requests[0]?.context.messages).toEqual([
             user("hi"),
@@ -1932,7 +2084,7 @@ describe("AgentBase compaction", () => {
             persistence,
         });
 
-        await expect(agent.compact(ctx)).rejects.toThrow("disk full");
+        await expect(agent.compact(ctx, { await: true })).rejects.toThrow("disk full");
 
         // The clear and the replacement write commit together or not at all.
         expect(persistence.records).toEqual(records);
@@ -1955,7 +2107,7 @@ describe("AgentBase compaction", () => {
             persistence,
         });
 
-        await agent.send(ctx, user("latest"));
+        await agent.send(ctx, user("latest"), { await: true });
         await agent.waitForIdle();
 
         expect(provider.sessions[0]?.requests[0]?.context.messages).toEqual([
@@ -2005,41 +2157,134 @@ describe("AgentBase instructions and tools hooks", () => {
             },
         });
 
-        await agent.send(ctx, user("go"));
+        await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
 
-        // The hooks answered for the session, the request, and the tool execution alike, even
-        // though the state carries different instructions and no tools.
-        expect(provider.sessions[0]?.options.instructions).toBe("hooked instructions");
+        // The hooks extend the state for the session, the request, and the tool execution
+        // alike: the state instructions come first, the state tools precede the hooked ones.
+        expect(provider.sessions[0]?.options.instructions).toBe(
+            "state instructions\n\nhooked instructions",
+        );
         expect(provider.sessions[0]?.options.tools).toEqual([hookedTool]);
         expect(provider.sessions[0]?.requests[0]?.context.instructions).toBe(
-            "hooked instructions",
+            "state instructions\n\nhooked instructions",
         );
         expect(executions).toBe(1);
         await agent.close();
     });
 
-    it("falls back to the state when a hook throws", async () => {
+    it("fails the turn loudly when a configuration hook throws", async () => {
+        const persistence = new InMemoryPersistence();
         const provider = new ScriptedProvider([textTurn("answer")]);
+        const events: SessionEvent[] = [];
         const agent = new AgentBase(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
-            persistence: new InMemoryPersistence(),
+            persistence,
             initialState: { instructions: "state instructions" },
             hooks: {
+                onEvent: (_hookCtx, event) => events.push(event),
                 instructions: () => {
                     throw new Error("hook broke");
                 },
             },
         });
 
-        await agent.send(ctx, user("go"));
+        await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
 
-        expect(provider.sessions[0]?.requests[0]?.context.instructions).toBe(
-            "state instructions",
-        );
+        // Instructions are a correctness hook: no inference ran with a wrong prompt, and the
+        // failure surfaced like any other failed turn.
+        expect(provider.sessions).toHaveLength(0);
+        expect(events.at(-1)).toEqual({
+            type: "done",
+            state: "error",
+            kind: "internal_error",
+            message: "hook broke",
+        });
+        expect(persistence.records.at(-1)).toMatchObject({ type: "system" });
+        await agent.close();
+    });
+
+    it("fails the turn when two tools share a name", async () => {
+        const provider = new ScriptedProvider([textTurn("answer")]);
+        const events: SessionEvent[] = [];
+        const agent = new AgentBase(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence: new InMemoryPersistence(),
+            initialState: { tools: [tool("bash"), tool("bash")] },
+            hooks: { onEvent: (_hookCtx, event) => events.push(event) },
+        });
+
+        await agent.send(ctx, user("go"), { await: true });
+        await agent.waitForIdle();
+
+        expect(provider.sessions).toHaveLength(0);
+        expect(events.at(-1)).toEqual({
+            type: "done",
+            state: "error",
+            kind: "internal_error",
+            message: 'Two tools are registered as "bash".',
+        });
+        await agent.close();
+    });
+
+    it("recreates the provider session when the tools hook output changes", async () => {
+        const toolA = tool("tool_a");
+        const toolB = tool("tool_b");
+        const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
+        // The first inference flips the feature state, exactly like a tool execution would.
+        let current = [toolA];
+        const agent = new AgentBase(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence: new InMemoryPersistence(),
+            hooks: {
+                tools: () => current,
+                afterInference: () => {
+                    current = [toolB];
+                },
+            },
+        });
+
+        await agent.send(ctx, user("one"), { await: true });
+        await agent.waitForIdle();
+        await agent.send(ctx, user("two"), { await: true });
+        await agent.waitForIdle();
+
+        // The next inference saw the changed descriptors and got a fresh session carrying
+        // tool B; the stale session no longer serves the model.
+        expect(provider.sessions).toHaveLength(2);
+        expect(provider.sessions[0]?.options.tools).toEqual([toolA]);
+        expect(provider.sessions[0]?.destroyed).toBe(true);
+        expect(provider.sessions[1]?.options.tools).toEqual([toolB]);
+        expect(provider.sessions[1]?.requests).toHaveLength(1);
+        await agent.close();
+    });
+
+    it("supports asynchronous configuration hooks", async () => {
+        const asyncTool = tool("async_tool");
+        const provider = new ScriptedProvider([textTurn("answer")]);
+        const agent = new AgentBase(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence: new InMemoryPersistence(),
+            hooks: {
+                instructions: () => Promise.resolve("async instructions"),
+                tools: () => Promise.resolve([asyncTool]),
+            },
+        });
+
+        await agent.send(ctx, user("go"), { await: true });
+        await agent.waitForIdle();
+
+        expect(provider.sessions[0]?.options.instructions).toBe("async instructions");
+        expect(provider.sessions[0]?.options.tools).toEqual([asyncTool]);
         await agent.close();
     });
 
@@ -2074,7 +2319,7 @@ describe("AgentBase instructions and tools hooks", () => {
             },
         });
 
-        await agent.send(ctx, user("go"));
+        await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
 
         expect(seenModel).toBe("tool-visible-model");
@@ -2113,7 +2358,7 @@ describe("AgentBase inference errors", () => {
             },
         });
 
-        await agent.send(ctx, user("go"));
+        await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
 
         // The failed response never answered the queued message, so it drained into a fresh
@@ -2121,9 +2366,9 @@ describe("AgentBase inference errors", () => {
         const requests = provider.sessions[0]?.requests ?? [];
         expect(requests).toHaveLength(2);
         expect(requests[1]?.context.messages.at(-1)).toEqual(user("still waiting"));
-        expect(
-            events.filter((event) => event.type === "done").map((event) => event.state),
-        ).toEqual(["error", "normal"]);
+        expect(events.filter((event) => event.type === "done").map((event) => event.state)).toEqual(
+            ["error", "normal"],
+        );
         // The later successful response recovered the error, so the failed response leaves
         // no system message behind.
         expect(persistence.records.some((record) => record.type === "system")).toBe(false);
@@ -2143,7 +2388,7 @@ describe("AgentBase inference errors", () => {
             persistence,
         });
 
-        await agent.send(ctx, user("go"));
+        await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
 
         const failure = {
@@ -2153,7 +2398,7 @@ describe("AgentBase inference errors", () => {
         expect(persistence.records.at(-1)).toEqual({ type: "system", message: failure });
 
         // The next turn sees the surfaced failure in its context.
-        await agent.send(ctx, user("again"));
+        await agent.send(ctx, user("again"), { await: true });
         await agent.waitForIdle();
 
         expect(provider.sessions[0]?.requests[1]?.context.messages).toEqual([
@@ -2176,7 +2421,7 @@ describe("AgentBase inference errors", () => {
             persistence: new InMemoryPersistence(),
         });
 
-        await agent.send(ctx, user("go"));
+        await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
 
         expect(provider.sessions[0]?.requests).toHaveLength(1);
@@ -2209,7 +2454,7 @@ describe("AgentBase lifecycle hooks", () => {
             },
         });
 
-        await agent.send(ctx, user("go"));
+        await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
 
         expect(order).toEqual([
@@ -2221,6 +2466,187 @@ describe("AgentBase lifecycle hooks", () => {
             "afterAgentLoop",
         ]);
         await agent.close();
+    });
+
+    it("tells afterTurn the turn was aborted", async () => {
+        const turns: AgentBaseTurn[] = [];
+        const events: SessionEvent[] = [];
+        let releaseHang = (): void => undefined;
+        const hang = new Promise<void>((resolve) => {
+            releaseHang = resolve;
+        });
+        class HangingProvider extends ScriptedProvider {
+            override async session(id: string, options: never): Promise<BaseSession> {
+                const session = (await super.session(id, options)) as ScriptedSession;
+                const run = session.run.bind(session);
+                session.run = (runCtx, request): SessionStream => {
+                    const scripted = run(runCtx, request);
+                    return (async function* () {
+                        yield* scripted;
+                        // The provider stalls until the abort interrupts the turn.
+                        await hang;
+                    })();
+                };
+                return session;
+            }
+        }
+        const provider = new HangingProvider([
+            [
+                { type: "text_start" },
+                { type: "text_delta", delta: "partial" },
+                { type: "text_end" },
+            ],
+        ]);
+        const agent = new AgentBase(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence: new InMemoryPersistence(),
+            hooks: {
+                onEvent: (_hookCtx, event) => events.push(event),
+                afterTurn: (_hookCtx, turn) => {
+                    turns.push(turn);
+                    return undefined;
+                },
+            },
+        });
+
+        await agent.send(ctx, user("go"), { await: true });
+        await until(() => events.some((event) => event.type === "text_end"));
+        await agent.abort(ctx, { await: true });
+        releaseHang();
+
+        // The response never reached a done event, so it measured no tokens — and the turn
+        // reports plainly that it was cancelled rather than finished.
+        expect(turns).toEqual([{ tokens: undefined, aborted: true }]);
+        await agent.close();
+    });
+
+    it("reports the real token counts of each response to afterInference and afterTurn", async () => {
+        const inferences: (AgentBaseInference | undefined)[] = [];
+        const turns: AgentBaseTurn[] = [];
+        const provider = new ScriptedProvider([
+            [
+                { type: "toolcall_start", callId: "call-1", name: "noop_tool" },
+                { type: "toolcall_end", callId: "call-1", arguments: "{}" },
+                { type: "done", state: "tool_call", tokens: { input: 100, output: 20 } },
+            ],
+            [
+                { type: "text_start" },
+                { type: "text_delta", delta: "done" },
+                { type: "text_end" },
+                { type: "done", state: "normal", tokens: { input: 400, output: 30 } },
+            ],
+        ]);
+        const agent = new AgentBase(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence: new InMemoryPersistence(),
+            initialState: { tools: [tool("noop_tool")] },
+            hooks: {
+                afterInference: (_hookCtx, inference) => void inferences.push(inference),
+                afterTurn: (_hookCtx, turn) => {
+                    turns.push(turn);
+                    return undefined;
+                },
+            },
+        });
+
+        await agent.send(ctx, user("go"), { await: true });
+        await agent.waitForIdle();
+
+        // Each response reports what it measured; the turn carries the last measurement.
+        expect(inferences).toEqual([
+            { state: "tool_call", tokens: { input: 100, output: 20 } },
+            { state: "normal", tokens: { input: 400, output: 30 } },
+        ]);
+        expect(turns).toEqual([{ contextTokens: 430, aborted: false }]);
+        await agent.close();
+    });
+
+    it("reports no tokens for a failed response and keeps the turn's last measurement", async () => {
+        const inferences: AgentBaseInference[] = [];
+        const turns: AgentBaseTurn[] = [];
+        // The tool call keeps the turn going, so the failing second inference belongs to the
+        // same turn as the measured first response.
+        const provider = new ScriptedProvider([
+            [
+                { type: "toolcall_start", callId: "call-1", name: "noop_tool" },
+                { type: "toolcall_end", callId: "call-1", arguments: "{}" },
+                { type: "done", state: "tool_call", tokens: { input: 200, output: 10 } },
+            ],
+            [{ type: "done", state: "error", kind: "unknown", message: "provider exploded" }],
+        ]);
+        const agent = new AgentBase(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence: new InMemoryPersistence(),
+            initialState: { tools: [tool("noop_tool")] },
+            hooks: {
+                afterInference: (_hookCtx, inference) => void inferences.push(inference),
+                afterTurn: (_hookCtx, turn) => {
+                    turns.push(turn);
+                    return undefined;
+                },
+            },
+        });
+
+        await agent.send(ctx, user("go"), { await: true });
+        await agent.waitForIdle();
+
+        expect(inferences).toEqual([
+            { state: "tool_call", tokens: { input: 200, output: 10 } },
+            { state: "error", tokens: undefined, errorMessage: "provider exploded" },
+        ]);
+        expect(turns).toEqual([{ contextTokens: 210, aborted: false }]);
+        await agent.close();
+    });
+
+    it("tells beforeTurn the measured size of the context, persisted across a restart", async () => {
+        const persistence = new InMemoryPersistence();
+        const starts: (number | undefined)[] = [];
+        const hooks = {
+            beforeTurn: (_hookCtx: Context, turn: AgentBaseTurnStart) => {
+                starts.push(turn.contextTokens);
+                return undefined;
+            },
+        };
+        const first = new ScriptedProvider([
+            [
+                { type: "text_start" },
+                { type: "text_delta", delta: "hello" },
+                { type: "text_end" },
+                { type: "done", state: "normal", tokens: { input: 500, output: 40 } },
+            ],
+        ]);
+        const agent = new AgentBase(ctx, {
+            id: "test-agent",
+            providers: providersOf(first),
+            provider: "scripted",
+            persistence,
+            hooks,
+        });
+        // The first turn has nothing measured yet; its response then measures the context.
+        await agent.send(ctx, user("go"), { await: true });
+        await agent.waitForIdle();
+        expect(starts).toEqual([undefined]);
+        expect(persistence.values.get("context")).toEqual({ tokens: 540 });
+        await agent.close();
+
+        // A fresh agent reads the size back instead of starting out uninformed.
+        const restarted = new AgentBase(ctx, {
+            id: "test-agent",
+            providers: providersOf(new ScriptedProvider([textTurn("again")])),
+            provider: "scripted",
+            persistence,
+            hooks,
+        });
+        await restarted.send(ctx, user("more"), { await: true });
+        await restarted.waitForIdle();
+        expect(starts).toEqual([undefined, 540]);
+        await restarted.close();
     });
 
     it("runs another turn in the same loop when afterTurn queues a message", async () => {
@@ -2243,7 +2669,7 @@ describe("AgentBase lifecycle hooks", () => {
             },
         });
 
-        await agent.send(ctx, user("go"));
+        await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
 
         const requests = provider.sessions[0]?.requests ?? [];
@@ -2275,7 +2701,7 @@ describe("AgentBase lifecycle hooks", () => {
             },
         });
 
-        await agent.send(ctx, user("go"));
+        await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
 
         // Both actions were queued before the loop continued, so they drain into one inference.
@@ -2308,7 +2734,7 @@ describe("AgentBase lifecycle hooks", () => {
             },
         });
 
-        await agent.send(ctx, user("go"));
+        await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
 
         const requests = provider.sessions[0]?.requests ?? [];
@@ -2363,7 +2789,7 @@ describe("AgentBase lifecycle hooks", () => {
             },
         });
 
-        await agent.send(ctx, user("go"));
+        await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
 
         expect(provider.sessions[0]?.compactions).toHaveLength(1);
@@ -2383,7 +2809,9 @@ describe("AgentBase load retry", () => {
             { type: "block", block: { type: "text", text: "earlier reply" } },
         ]);
         const originalLoad = persistence.load.bind(persistence);
-        let failures = 1;
+        // A turn loads twice: once to tell the pre-turn hooks how large the context is, and
+        // once for the inference itself. Both have to fail for the turn to fail.
+        let failures = 2;
         persistence.load = () => {
             if (failures > 0) {
                 failures -= 1;
@@ -2401,7 +2829,7 @@ describe("AgentBase load retry", () => {
             hooks: { onEvent: (_hookCtx, event) => events.push(event) },
         });
 
-        await agent.send(ctx, user("first try"));
+        await agent.send(ctx, user("first try"), { await: true });
         await agent.waitForIdle();
         expect(events).toEqual([
             {
@@ -2422,6 +2850,112 @@ describe("AgentBase load retry", () => {
             user("first try"),
         ]);
         expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
+        await agent.close();
+    });
+});
+
+describe("AgentBase scoped persistence", () => {
+    it("scopes a tool execution's store to its call ID", async () => {
+        const provider = new ScriptedProvider([
+            [
+                { type: "toolcall_start", callId: "call-1", name: "remember" },
+                { type: "toolcall_end", callId: "call-1", arguments: "{}" },
+                { type: "done", state: "tool_call", tokens: { input: 1, output: 1 } },
+            ],
+            textTurn("remembered"),
+        ]);
+        const persistence = new InMemoryPersistence();
+        const seen: unknown[] = [];
+        const agent = new AgentBase(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+            initialState: {
+                tools: [
+                    defineAgentTool({
+                        name: "remember",
+                        returnType: Type.Object({}),
+                        execute: async (toolCtx) => {
+                            const kv = agentBaseKV(toolCtx);
+                            if (kv === undefined) throw new Error("No store on the context.");
+                            await kv.write(toolCtx, "note", "stashed");
+                            seen.push(await kv.read(toolCtx, "note"));
+                            seen.push(await kv.list(toolCtx));
+                            return {};
+                        },
+                        toLLM: () => [{ type: "text", text: "ok" }],
+                    }),
+                ],
+            },
+        });
+
+        await agent.send(ctx, user("go"), { await: true });
+        await agent.waitForIdle();
+
+        // The write landed under the call ID's scope, and the tool read it back with a
+        // scope-relative key.
+        expect(persistence.values.get("kv.test-agent.call.call-1.note")).toBe("stashed");
+        expect(seen).toEqual(["stashed", [{ key: "note", value: "stashed" }]]);
+        await agent.close();
+    });
+
+    it("gives hooks the session-scoped store", async () => {
+        const provider = new ScriptedProvider([textTurn("answer")]);
+        const persistence = new InMemoryPersistence();
+        const agent = new AgentBase(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+            hooks: {
+                instructions: async (hookCtx) => {
+                    const kv = agentBaseKV(hookCtx);
+                    if (kv === undefined) throw new Error("No store on the context.");
+                    await kv.write(hookCtx, "prepared", true);
+                    return "hooked";
+                },
+            },
+        });
+
+        await agent.send(ctx, user("go"), { await: true });
+        await agent.waitForIdle();
+
+        expect(persistence.values.get("kv.test-agent.prepared")).toBe(true);
+        await agent.close();
+    });
+
+    it("lets a model-change hook persist without deadlocking on the agent's lock", async () => {
+        const provider = new ScriptedProvider([textTurn("claude"), textTurn("gpt")]);
+        const persistence = new InMemoryPersistence();
+        const agent = new AgentBase(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+            model: "anthropic/claude",
+            hooks: {
+                modelChanged: async (hookCtx, change) => {
+                    const kv = agentBaseKV(hookCtx);
+                    if (kv === undefined) throw new Error("No store on the context.");
+                    await kv.write(hookCtx, "last-model", change.model);
+                    return system("handoff");
+                },
+            },
+        });
+
+        await agent.send(ctx, user("hello"), { await: true });
+        await agent.waitForIdle();
+        await agent.send(ctx, user("switch"), { await: true, model: "openai/gpt" });
+        await agent.waitForIdle();
+
+        // The hook runs while the agent holds its persistence lock; the store executed
+        // directly on the held lock instead of deadlocking, and the switch completed.
+        expect(persistence.values.get("kv.test-agent.last-model")).toBe("openai/gpt");
+        expect(provider.sessions[1]?.requests[0]?.context.messages).toEqual([
+            system("handoff"),
+            user("switch"),
+        ]);
         await agent.close();
     });
 });

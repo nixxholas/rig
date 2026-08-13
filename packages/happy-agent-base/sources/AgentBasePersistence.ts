@@ -21,7 +21,18 @@ export type AgentBaseRecord =
     | { readonly type: "block"; readonly block: SessionAssistantBlock }
     | { readonly type: "tool"; readonly message: SessionToolResultMessage }
     | { readonly type: "system"; readonly message: SessionSystemMessage }
-    | { readonly type: "compaction"; readonly messages: readonly SessionMessage[] };
+    | {
+          readonly type: "compaction";
+          readonly messages: readonly SessionMessage[];
+          /**
+           * Whether the replacement ends on something that is still owed an answer. A summary is
+           * not a question however it happens to end, so a restart does not respond to one — but
+           * a replacement also keeps whatever joined the conversation after its snapshot, and a
+           * message kept that way is owed exactly what it was owed before the rewrite. The
+           * rewrite is the only place that still knows which of the two it wrote.
+           */
+          readonly owed?: boolean;
+      };
 
 /**
  * Storage for one agent: an append-only main context store plus a sorted key-value store held
@@ -38,10 +49,7 @@ export interface AgentBasePersistence {
      * entirely the implementation's business. Work resolving commits every operation; a thrown
      * error rolls them all back.
      */
-    transaction<Result>(
-        ctx: Context,
-        work: (ctx: Context) => Promise<Result>,
-    ): Promise<Result>;
+    transaction<Result>(ctx: Context, work: (ctx: Context) => Promise<Result>): Promise<Result>;
     load(ctx: Context): Promise<readonly AgentBaseRecord[]>;
     append(ctx: Context, record: AgentBaseRecord): Promise<void>;
     /**
@@ -56,5 +64,33 @@ export interface AgentBasePersistence {
         prefix: string,
     ): Promise<readonly { readonly key: string; readonly value: unknown }[]>;
     writeValue(ctx: Context, key: string, value: unknown): Promise<void>;
+    /**
+     * Write the value only if the key is absent, and report whether this call is the one that
+     * wrote it. The check and the write are a single atomic step, so of two writers racing for
+     * the same key exactly one is told it won — which is what makes a durable identity, such as
+     * an agent's creation record, safe to claim from more than one owner at a time.
+     */
+    writeValueIfAbsent(ctx: Context, key: string, value: unknown): Promise<boolean>;
+    /**
+     * Write the value only if the stored one is still what the caller decided from, and report
+     * whether this call is the one that wrote it. The comparison and the write are a single
+     * atomic step, so a read-decide-write sequence can be made safe against another owner who
+     * decided from the same value: the loser is told it lost and decides again, instead of
+     * overwriting a decision it never saw. Absence is a value like any other, and matches an
+     * expectation of `undefined`.
+     */
+    writeValueIfUnchanged(
+        ctx: Context,
+        key: string,
+        expected: unknown,
+        value: unknown,
+    ): Promise<boolean>;
     deleteValue(ctx: Context, key: string): Promise<void>;
+    /**
+     * Delete the key and report whether this call is the one that removed it. The check and the
+     * deletion are a single atomic step and take effect at once — a transaction that later rolls
+     * back restores the entry. This is how a durable queue entry is claimed: of several owners
+     * over one store racing to consume the same message, exactly one is told it won.
+     */
+    deleteValueIfPresent(ctx: Context, key: string): Promise<boolean>;
 }

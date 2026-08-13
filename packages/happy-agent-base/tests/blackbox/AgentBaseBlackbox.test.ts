@@ -18,7 +18,7 @@ import {
     type AnyAgentTool,
 } from "../../sources/index.js";
 import { InMemoryPersistence } from "../gym/InMemoryPersistence.js";
-import { providersOf, queued, textTurn, user } from "../gym/fixtures.js";
+import { providersOf, queued, system, textTurn, user } from "../gym/fixtures.js";
 import { ScriptedProvider } from "../gym/ScriptedProvider.js";
 
 const ctx = createRootContext().named("happy-agent-base-blackbox-test");
@@ -53,11 +53,7 @@ function toolCallTurn(calls: readonly ToolCallSpec[]): SessionEvent[] {
     ];
 }
 
-function toolResult(
-    callId: string,
-    text: string,
-    isError?: boolean,
-): SessionToolResultMessage {
+function toolResult(callId: string, text: string, isError?: boolean): SessionToolResultMessage {
     return {
         role: "tool",
         callId,
@@ -144,7 +140,7 @@ describe("AgentBase black-box stream and request behavior", () => {
             },
         });
 
-        await agent.send(ctx, user("observe this"));
+        await agent.send(ctx, user("observe this"), { await: true });
         await agent.waitForIdle();
 
         expect(observed).toEqual(scriptedEvents);
@@ -176,7 +172,7 @@ describe("AgentBase black-box stream and request behavior", () => {
             serviceTier: "priority",
         });
 
-        await agent.send(ctx, user("question"));
+        await agent.send(ctx, user("question"), { await: true });
         await agent.waitForIdle();
 
         const session = provider.sessions[0];
@@ -230,7 +226,7 @@ describe("AgentBase black-box stream and request behavior", () => {
             hooks: { onEvent: (_hookCtx, event) => events.push(event) },
         });
 
-        await agent.send(ctx, user("stop"));
+        await agent.send(ctx, user("stop"), { await: true });
         await agent.waitForIdle();
 
         expect(events).toEqual([done, done]);
@@ -252,9 +248,9 @@ describe("AgentBase black-box stream and request behavior", () => {
             persistence,
         });
 
-        await agent.send(ctx, user("first"));
+        await agent.send(ctx, user("first"), { await: true });
         await agent.waitForIdle();
-        await agent.send(ctx, user("second"));
+        await agent.send(ctx, user("second"), { await: true });
         await agent.waitForIdle();
 
         expect(provider.sessions[0]?.requests).toHaveLength(2);
@@ -287,7 +283,7 @@ describe("AgentBase black-box stream and request behavior", () => {
             persistence,
         });
 
-        await agent.send(ctx, user("empty reply"));
+        await agent.send(ctx, user("empty reply"), { await: true });
         await agent.waitForIdle();
 
         expect(persistence.records).toEqual([
@@ -311,11 +307,11 @@ describe("AgentBase black-box stream and request behavior", () => {
             persistence: new InMemoryPersistence(),
         });
 
-        await agent.send(ctx, user("first"));
+        await agent.send(ctx, user("first"), { await: true });
         await agent.waitForIdle();
-        await agent.send(ctx, user("second"));
+        await agent.send(ctx, user("second"), { await: true });
         await agent.waitForIdle();
-        await agent.send(ctx, user("third"));
+        await agent.send(ctx, user("third"), { await: true });
         await agent.waitForIdle();
 
         expect(provider.sessions[0]?.requests.map((request) => request.context.messages)).toEqual([
@@ -358,10 +354,10 @@ describe("AgentBase black-box stream and request behavior", () => {
             },
         });
 
-        const sent = agent.send(ctx, user("persist now"));
+        const sent = agent.send(ctx, user("persist now"), { await: true });
         await sent;
 
-        expect([...persistence.values.values()]).toEqual([queued(user("persist now"))]);
+        expect([...persistence.pending.values()]).toEqual([queued(user("persist now"))]);
         expect(done).toBe(false);
         let idleResolved = false;
         const idle = agent.waitForIdle().then(() => {
@@ -404,7 +400,7 @@ describe("AgentBase black-box persistence and restart behavior", () => {
             persistence,
         });
 
-        await agent.send(ctx, user("question three"));
+        await agent.send(ctx, user("question three"), { await: true });
         await agent.waitForIdle();
 
         // The trailing seeded user message is unanswered, so recovery answers it first; the
@@ -445,7 +441,7 @@ describe("AgentBase black-box persistence and restart behavior", () => {
             sendMode: "all",
         });
 
-        await agent.send(ctx, user("new message"));
+        await agent.send(ctx, user("new message"), { await: true });
         await agent.waitForIdle();
 
         expect(provider.sessions[0]?.requests[0]?.context.messages).toEqual([
@@ -458,7 +454,7 @@ describe("AgentBase black-box persistence and restart behavior", () => {
             { type: "user", message: user("old two") },
             { type: "user", message: user("new message") },
         ]);
-        expect(persistence.values.size).toBe(0);
+        expect(persistence.pending.size).toBe(0);
         await agent.close();
     });
 
@@ -502,13 +498,11 @@ describe("AgentBase black-box persistence and restart behavior", () => {
                 type: "system",
                 message: {
                     role: "system",
-                    content: [
-                        { type: "text", text: "The last turn failed: second delete failed" },
-                    ],
+                    content: [{ type: "text", text: "The last turn failed: second delete failed" }],
                 },
             },
         ]);
-        expect([...persistence.values.entries()]).toEqual([
+        expect([...persistence.pending.entries()]).toEqual([
             ["send.00000000000001.000000", first],
             ["send.00000000000002.000000", second],
         ]);
@@ -599,7 +593,9 @@ describe("AgentBase black-box persistence and restart behavior", () => {
             providers: providersOf(provider),
             provider: "scripted",
             persistence,
-            initialState: { tools: [makeTool("durable-retry", true), makeTool("fragile-retry", false)] },
+            initialState: {
+                tools: [makeTool("durable-retry", true), makeTool("fragile-retry", false)],
+            },
         });
 
         agent.start();
@@ -622,8 +618,253 @@ describe("AgentBase black-box persistence and restart behavior", () => {
                 .filter((record) => record.type === "tool")
                 .map((record) => record.message.callId),
         ).toEqual(["call-a", "call-b", "call-c"]);
-        expect(persistence.values.size).toBe(0);
+        expect(persistence.pending.size).toBe(0);
         await agent.close();
+    });
+
+    it("dispatches a trailing tool call that was never committed as a batch", async () => {
+        // The response's blocks are durable as they stream, so a crash between the last block
+        // and the batch commit leaves a call with no pending entry to resume. It has certainly
+        // not executed — the commit precedes every execution — so it is dispatched now, and
+        // even a non-durable call is safe to run.
+        const call: SessionToolCallBlock = {
+            type: "tool_call",
+            callId: "call-never-committed",
+            name: "fragile",
+            arguments: "{}",
+        };
+        const persistence = new InMemoryPersistence([
+            { type: "user", message: user("do it") },
+            { type: "block", block: call },
+        ]);
+        const provider = new ScriptedProvider([textTurn("answered")]);
+        const executions: string[] = [];
+        const agent = new AgentBase(ctx, {
+            id: "undispatched-tool-restart",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+            initialState: {
+                tools: [
+                    defineAgentTool({
+                        name: "fragile",
+                        durable: false,
+                        returnType: Type.Object({ value: Type.String() }),
+                        execute: () => {
+                            executions.push("fragile");
+                            return Promise.resolve({ value: "fragile result" });
+                        },
+                        toLLM: (result) => [{ type: "text", text: result.value }],
+                    }),
+                ],
+            },
+        });
+
+        agent.start();
+        await agent.waitForIdle();
+
+        expect(executions).toEqual(["fragile"]);
+        expect(provider.sessions[0]?.requests[0]?.context.messages).toEqual([
+            user("do it"),
+            { role: "assistant", content: [call] },
+            toolResult("call-never-committed", "fragile result"),
+        ]);
+        // Nothing is left owed, and the conversation no longer holds an unanswered call.
+        expect(persistence.pending.size).toBe(0);
+        await agent.close();
+    });
+
+    it("settles a tool call the response emitted but never dispatched", async () => {
+        // A stream that fails after emitting a call ends the turn without a batch. The call is
+        // answered with an error rather than left in the conversation, where every later
+        // message would be appended behind a call the model never got an answer for.
+        const call: SessionToolCallBlock = {
+            type: "tool_call",
+            callId: "call-stranded",
+            name: "never-run",
+            arguments: "{}",
+        };
+        const persistence = new InMemoryPersistence();
+        const provider = new ScriptedProvider([
+            [
+                { type: "toolcall_start", callId: call.callId, name: call.name },
+                { type: "toolcall_end", callId: call.callId, arguments: "{}" },
+                {
+                    type: "done",
+                    state: "error",
+                    kind: "internal_error",
+                    message: "upstream fell over",
+                },
+            ],
+            textTurn("recovered"),
+        ]);
+        const executions: string[] = [];
+        const agent = new AgentBase(ctx, {
+            id: "stranded-call",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+            initialState: {
+                tools: [
+                    defineAgentTool({
+                        name: "never-run",
+                        returnType: Type.Object({}),
+                        execute: () => {
+                            executions.push("never-run");
+                            return Promise.resolve({});
+                        },
+                        toLLM: () => [{ type: "text", text: "ran" }],
+                    }),
+                ],
+            },
+        });
+
+        await agent.send(ctx, user("go"), { await: true });
+        await agent.waitForIdle();
+
+        // The failed response never dispatched the call, so nothing ran.
+        expect(executions).toEqual([]);
+        const results = persistence.records.filter((record) => record.type === "tool");
+        expect(results).toHaveLength(1);
+        expect(results[0]?.message).toEqual(
+            toolResult(
+                "call-stranded",
+                "The response ended before this tool call was dispatched.",
+                true,
+            ),
+        );
+        // The error result comes before the note about the failed turn, so the call is answered
+        // where a provider expects its answer.
+        const types = persistence.records.map((record) => record.type);
+        expect(types.indexOf("tool")).toBeLessThan(types.indexOf("system"));
+        await agent.close();
+    });
+
+    it("repairs a call left unanswered in the middle of a stored conversation", async () => {
+        // A turn that died before it could settle its call, with messages appended after it, is
+        // beyond repair by appending: the answer belongs next to the call. The conversation is
+        // rewritten instead, atomically, and only because something is actually broken.
+        const call: SessionToolCallBlock = {
+            type: "tool_call",
+            callId: "call-buried",
+            name: "gone",
+            arguments: "{}",
+        };
+        const persistence = new InMemoryPersistence([
+            { type: "user", message: user("first") },
+            { type: "block", block: call },
+            { type: "system", message: system("The last turn failed: the store fell over.") },
+            { type: "user", message: user("second") },
+            { type: "block", block: { type: "text", text: "answered" } },
+        ]);
+        const provider = new ScriptedProvider([]);
+        const agent = new AgentBase(ctx, {
+            id: "buried-call",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+        });
+
+        agent.start();
+        await agent.waitForIdle();
+
+        // One replacement record now holds the whole conversation, with the missing result put
+        // back directly after the call that needed it.
+        expect(persistence.records).toHaveLength(1);
+        const record = persistence.records[0];
+        expect(record?.type).toBe("compaction");
+        expect(record?.type === "compaction" ? record.messages : []).toEqual([
+            user("first"),
+            { role: "assistant", content: [call] },
+            toolResult(
+                "call-buried",
+                "The turn ended before this tool call could be answered.",
+                true,
+            ),
+            system("The last turn failed: the store fell over."),
+            user("second"),
+            { role: "assistant", content: [{ type: "text", text: "answered" }] },
+        ]);
+        await agent.close();
+    });
+
+    it("answers again after a restart when the last turn failed", async () => {
+        // The note a failed turn leaves behind means the question it was given never got an
+        // answer, so a restarted agent owes one — with the note itself as context.
+        const persistence = new InMemoryPersistence([
+            { type: "user", message: user("what happened?") },
+            { type: "system", message: system("The last turn failed: the store fell over.") },
+        ]);
+        const provider = new ScriptedProvider([textTurn("here is the answer")]);
+        const agent = new AgentBase(ctx, {
+            id: "failed-turn-restart",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+        });
+
+        agent.start();
+        await agent.waitForIdle();
+
+        expect(provider.sessions[0]?.requests).toHaveLength(1);
+        expect(persistence.records.at(-1)).toEqual({
+            type: "block",
+            block: { type: "text", text: "here is the answer" },
+        });
+        await agent.close();
+    });
+
+    it("does not answer a compaction it restarts on", async () => {
+        // A replacement written by a compaction can end on any message the summary happens to
+        // use. It is not a question that was left unanswered, so a restart must not respond to
+        // it — unlike a conversation cut off mid-turn.
+        const persistence = new InMemoryPersistence([
+            {
+                type: "compaction",
+                messages: [user("a summary of everything so far")],
+            },
+        ]);
+        const provider = new ScriptedProvider([textTurn("unwanted")]);
+        const agent = new AgentBase(ctx, {
+            id: "restart-on-compaction",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+        });
+
+        agent.start();
+        await agent.waitForIdle();
+
+        expect(provider.sessions).toHaveLength(0);
+        expect(persistence.records).toHaveLength(1);
+        await agent.close();
+    });
+
+    it("queues messages in order across restarts that share a millisecond", async () => {
+        // A restarted agent counts its queue keys from zero again. Without the durable order,
+        // two messages queued in the same millisecond by two processes collide on one key and
+        // the first one is simply overwritten.
+        const persistence = new InMemoryPersistence();
+        const options = {
+            id: "restart-queue-order",
+            providers: providersOf(new ScriptedProvider([])),
+            provider: "scripted",
+            persistence,
+        };
+        const first = new AgentBase(ctx, options);
+        await first.send(ctx, user("first"), { await: true });
+        const second = new AgentBase(ctx, options);
+        await second.send(ctx, user("second"), { await: true });
+
+        const stored = [...persistence.pending.entries()]
+            .filter(([key]) => key.startsWith("send."))
+            .sort(([a], [b]) => (a < b ? -1 : 1));
+        expect(stored.map(([, value]) => (value as { message: unknown }).message)).toEqual([
+            user("first"),
+            user("second"),
+        ]);
+        await first.close();
+        await second.close();
     });
 
     it("leaves a tool pending when its result transaction fails so a restart can recover it", async () => {
@@ -637,8 +878,10 @@ describe("AgentBase black-box persistence and restart behavior", () => {
         let transactionCount = 0;
         const realTransaction = persistence.transaction.bind(persistence);
         persistence.transaction = async (transactionContext, work) => {
+            // Acceptance, consumption, and the tool dispatch commit first; the fourth is the one
+            // that would record the tool's result.
             transactionCount += 1;
-            if (transactionCount === 3) {
+            if (transactionCount === 4) {
                 throw new Error("result transaction crashed");
             }
             return realTransaction(transactionContext, work);
@@ -666,7 +909,7 @@ describe("AgentBase black-box persistence and restart behavior", () => {
             initialState: { tools: [makeDurableTool()] },
         });
 
-        await firstAgent.send(ctx, user("recover"));
+        await firstAgent.send(ctx, user("recover"), { await: true });
         await firstAgent.waitForIdle();
 
         expect(firstExecutions).toBe(1);
@@ -676,7 +919,7 @@ describe("AgentBase black-box persistence and restart behavior", () => {
             kind: "internal_error",
             message: "result transaction crashed",
         });
-        expect([...persistence.values.entries()]).toEqual([["tool.000000.crashed-result", call]]);
+        expect([...persistence.pending.entries()]).toEqual([["tool.000000.crashed-result", call]]);
         await firstAgent.close();
 
         const secondProvider = new ScriptedProvider([textTurn("recovered")]);
@@ -705,7 +948,7 @@ describe("AgentBase black-box persistence and restart behavior", () => {
             },
             toolResult("crashed-result", "result"),
         ]);
-        expect(persistence.values.size).toBe(0);
+        expect(persistence.pending.size).toBe(0);
         await secondAgent.close();
     });
 
@@ -742,10 +985,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
         expected: string,
         tools: readonly AnyAgentTool[] = [knownTool()],
     ): Promise<void> {
-        const provider = new ScriptedProvider([
-            toolCallTurn([call]),
-            textTurn("follow-up"),
-        ]);
+        const provider = new ScriptedProvider([toolCallTurn([call]), textTurn("follow-up")]);
         const agent = new AgentBase(ctx, {
             id: `invalid-${call.callId}`,
             providers: providersOf(provider),
@@ -754,7 +994,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
             initialState: { tools: [...tools] },
         });
         try {
-            await agent.send(ctx, user("invoke"));
+            await agent.send(ctx, user("invoke"), { await: true });
             await agent.waitForIdle();
 
             expect(provider.sessions[0]?.requests).toHaveLength(2);
@@ -806,20 +1046,22 @@ describe("AgentBase black-box tool validation and ordering", () => {
             providers: providersOf(provider),
             provider: "scripted",
             persistence: new InMemoryPersistence(),
-            initialState: { tools: [
-                defineAgentTool({
-                    name: "empty_args",
-                    returnType: Type.Object({ value: Type.String() }),
-                    execute: async (_toolCtx, args) => {
-                        received = args;
-                        return { value: "accepted" };
-                    },
-                    toLLM: (result) => [{ type: "text", text: result.value }],
-                }),
-            ] },
+            initialState: {
+                tools: [
+                    defineAgentTool({
+                        name: "empty_args",
+                        returnType: Type.Object({ value: Type.String() }),
+                        execute: async (_toolCtx, args) => {
+                            received = args;
+                            return { value: "accepted" };
+                        },
+                        toLLM: (result) => [{ type: "text", text: result.value }],
+                    }),
+                ],
+            },
         });
 
-        await agent.send(ctx, user("empty"));
+        await agent.send(ctx, user("empty"), { await: true });
         await agent.waitForIdle();
 
         expect(received).toEqual({});
@@ -854,7 +1096,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
             initialState: { tools: [namespacedTool] },
         });
 
-        await agent.send(ctx, user("search"));
+        await agent.send(ctx, user("search"), { await: true });
         await agent.waitForIdle();
 
         expect(executed).toBe(1);
@@ -886,7 +1128,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
         const invalidResultTool = defineAgentTool({
             name: "invalid_result",
             returnType: Type.Object({ value: Type.String() }),
-            execute: async () => ({ value: 123 } as unknown as { value: string }),
+            execute: async () => ({ value: 123 }) as unknown as { value: string },
             toLLM: () => {
                 rendered += 1;
                 return [{ type: "text", text: "must not render" }];
@@ -914,7 +1156,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
             initialState: { tools: [invalidResultTool, errorResultTool] },
         });
 
-        await agent.send(ctx, user("run both"));
+        await agent.send(ctx, user("run both"), { await: true });
         await agent.waitForIdle();
 
         expect(rendered).toBe(0);
@@ -938,25 +1180,27 @@ describe("AgentBase black-box tool validation and ordering", () => {
             providers: providersOf(provider),
             provider: "scripted",
             persistence: new InMemoryPersistence(),
-            initialState: { tools: [
-                defineAgentTool({
-                    name: "throws",
-                    returnType: Type.Object({}),
-                    execute: async () => {
-                        throw new Error("execute failed");
-                    },
-                    toLLM: () => [],
-                }),
-                defineAgentTool({
-                    name: "works",
-                    returnType: Type.Object({ value: Type.String() }),
-                    execute: async () => ({ value: "ok" }),
-                    toLLM: (result) => [{ type: "text", text: result.value }],
-                }),
-            ] },
+            initialState: {
+                tools: [
+                    defineAgentTool({
+                        name: "throws",
+                        returnType: Type.Object({}),
+                        execute: async () => {
+                            throw new Error("execute failed");
+                        },
+                        toLLM: () => [],
+                    }),
+                    defineAgentTool({
+                        name: "works",
+                        returnType: Type.Object({ value: Type.String() }),
+                        execute: async () => ({ value: "ok" }),
+                        toLLM: (result) => [{ type: "text", text: result.value }],
+                    }),
+                ],
+            },
         });
 
-        await agent.send(ctx, user("run"));
+        await agent.send(ctx, user("run"), { await: true });
         await agent.waitForIdle();
 
         expect(provider.sessions[0]?.requests[1]?.context.messages.slice(-2)).toEqual([
@@ -995,21 +1239,23 @@ describe("AgentBase black-box tool validation and ordering", () => {
             providers: providersOf(provider),
             provider: "scripted",
             persistence,
-            initialState: { tools: [
-                defineAgentTool({
-                    name: "server_tool",
-                    server: { type: "native_server" },
-                    returnType: Type.Object({}),
-                    execute: async () => {
-                        executed = true;
-                        return {};
-                    },
-                    toLLM: () => [],
-                }),
-            ] },
+            initialState: {
+                tools: [
+                    defineAgentTool({
+                        name: "server_tool",
+                        server: { type: "native_server" },
+                        returnType: Type.Object({}),
+                        execute: async () => {
+                            executed = true;
+                            return {};
+                        },
+                        toLLM: () => [],
+                    }),
+                ],
+            },
         });
 
-        await agent.send(ctx, user("server"));
+        await agent.send(ctx, user("server"), { await: true });
         await agent.waitForIdle();
 
         expect(executed).toBe(false);
@@ -1027,7 +1273,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
                 },
             },
         ]);
-        expect(persistence.values.size).toBe(0);
+        expect(persistence.pending.size).toBe(0);
         await agent.close();
     });
 
@@ -1043,7 +1289,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
             persistence,
         });
 
-        await agent.send(ctx, user("no calls"));
+        await agent.send(ctx, user("no calls"), { await: true });
         await agent.waitForIdle();
 
         expect(provider.sessions[0]?.requests).toHaveLength(1);
@@ -1083,10 +1329,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
                 toLLM: (result) => [{ type: "text", text: result.value }],
             }),
         );
-        const provider = new ScriptedProvider([
-            toolCallTurn(calls),
-            textTurn("all done"),
-        ]);
+        const provider = new ScriptedProvider([toolCallTurn(calls), textTurn("all done")]);
         const agent = new AgentBase(ctx, {
             id: "parallel-order",
             providers: providersOf(provider),
@@ -1095,10 +1338,12 @@ describe("AgentBase black-box tool validation and ordering", () => {
             initialState: { tools: [...tools] },
         });
 
-        await agent.send(ctx, user("parallel"));
+        await agent.send(ctx, user("parallel"), { await: true });
         await agent.waitForIdle();
 
-        expect(keysAtFirstStart).toEqual(calls.map((_, index) => `tool.${String(index).padStart(6, "0")}.call-${index}`));
+        expect(keysAtFirstStart).toEqual(
+            calls.map((_, index) => `tool.${String(index).padStart(6, "0")}.call-${index}`),
+        );
         expect(keysBeforeSecondResult).toEqual([
             "tool.000001.call-1",
             "tool.000002.call-2",
@@ -1114,7 +1359,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
         expect(provider.sessions[0]?.requests[1]?.context.messages.slice(-5)).toEqual(
             calls.map((call) => toolResult(call.callId, call.name)),
         );
-        expect(persistence.values.size).toBe(0);
+        expect(persistence.pending.size).toBe(0);
         await agent.close();
     });
 });
@@ -1131,7 +1376,7 @@ describe("AgentBase black-box lifecycle behavior", () => {
 
         await expect(agent.waitForIdle()).resolves.toBeUndefined();
         await agent.close();
-        await expect(agent.send(ctx, user("after close"))).rejects.toThrow(
+        await expect(agent.send(ctx, user("after close"), { await: true })).rejects.toThrow(
             "The agent has been closed.",
         );
         expect(() => agent.start()).toThrow("The agent has been closed.");
@@ -1148,7 +1393,7 @@ describe("AgentBase black-box lifecycle behavior", () => {
             persistence: new InMemoryPersistence(),
         });
 
-        await agent.send(ctx, user("close me"));
+        await agent.send(ctx, user("close me"), { await: true });
         await agent.waitForIdle();
         await agent.close();
         await agent.close();

@@ -1,7 +1,4 @@
-import type {
-    SessionOutputBlock,
-    SessionToolLarkGrammar,
-} from "@slopus/happy-providers";
+import type { SessionOutputBlock, SessionToolLarkGrammar } from "@slopus/happy-providers";
 import type { Static, TSchema } from "@sinclair/typebox";
 import type { Context } from "@steve.kite/stdlib";
 
@@ -12,10 +9,7 @@ import type { Context } from "@steve.kite/stdlib";
  * into model-facing content. A thrown execute, an invalid result, or `isError` returning true
  * becomes an error tool result for the model rather than failing the run.
  */
-export interface AgentTool<
-    Args extends TSchema = TSchema,
-    Result extends TSchema = TSchema,
-> {
+export interface AgentTool<Args extends TSchema = TSchema, Result extends TSchema = TSchema> {
     readonly name: string;
     readonly namespace?: string;
     /** Description of the containing namespace, when this tool is namespaced. */
@@ -53,9 +47,8 @@ export interface AgentTool<
 export type AnyAgentTool = AgentTool<any, any>;
 
 /** Define a tool with TypeBox-inferred argument and result types. */
-export function defineAgentTool<
-    const Args extends TSchema,
-    const Result extends TSchema,
->(tool: AgentTool<Args, Result>): AgentTool<Args, Result> {
+export function defineAgentTool<const Args extends TSchema, const Result extends TSchema>(
+    tool: AgentTool<Args, Result>,
+): AgentTool<Args, Result> {
     return tool;
 }
