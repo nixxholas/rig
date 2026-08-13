@@ -26,7 +26,7 @@ import {
     type AnyAgentTool,
 } from "../../sources/index.js";
 import { InMemoryPersistence } from "../gym/InMemoryPersistence.js";
-import { providersOf, system, textTurn, user } from "../gym/fixtures.js";
+import { inMemoryStorageLock, providersOf, system, textTurn, user } from "../gym/fixtures.js";
 
 const ctx = createRootContext().named("happy-agent-base-cross-agent-reentrancy");
 
@@ -278,6 +278,7 @@ async function harness(
     const owner = await AgentSystemLocal.create(
         ctx,
         new AgentStorage({
+            acquireLock: inMemoryStorageLock(),
             kv: managerKV(manager),
             persistence: (id) => {
                 const existing = persistences.get(id);

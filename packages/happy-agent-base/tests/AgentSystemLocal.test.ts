@@ -2,7 +2,6 @@ import { createRootContext, type Context } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
 import {
-    agentId,
     AgentKV,
     agentConfig,
     agentFeatureConfig,
@@ -15,7 +14,7 @@ import {
     type AgentFeature,
     type AgentFeatureScope,
 } from "../sources/index.js";
-import { providersOf, queued, textTurn, user } from "./gym/fixtures.js";
+import { inMemoryStorageLock, providersOf, queued, textTurn, user } from "./gym/fixtures.js";
 import { InMemoryPersistence } from "./gym/InMemoryPersistence.js";
 import { ScriptedProvider } from "./gym/ScriptedProvider.js";
 
@@ -44,6 +43,294 @@ function managerKV(persistence: InMemoryPersistence): AgentKV {
 }
 
 describe("AgentSystemLocal", () => {
+    it("awaits beforeStart before agents and afterStart after agents", async () => {
+        const provider = new ScriptedProvider([textTurn("resumed")]);
+        const managerPersistence = new InMemoryPersistence();
+        const activePersistence = new InMemoryPersistence();
+        managerPersistence.values.set("agentSystem.config.active", {});
+        activePersistence.values.set("send.0001", queued(user("continue")));
+        activePersistence.values.set("owed", { stage: "inference" });
+        const events: string[] = [];
+        const releases = new Map<string, () => void>();
+        const references: AgentSystemRef[] = [];
+        const startFeature = (name: string): AgentFeature =>
+            new (class implements AgentFeature {
+                readonly name = name;
+
+                beforeStart(startCtx: Context, agents: AgentSystemRef): Promise<void> {
+                    events.push(`beforeStart:${name}:start`);
+                    references.push(agents);
+                    expect(agentsFromContext(startCtx)).toBe(agents);
+                    return new Promise((resolve) => {
+                        releases.set(name, () => {
+                            events.push(`beforeStart:${name}:end`);
+                            resolve();
+                        });
+                    });
+                }
+
+                async afterStart(startCtx: Context, agents: AgentSystemRef): Promise<void> {
+                    expect(agentsFromContext(startCtx)).toBe(agents);
+                    expect((await agents.resolve(startCtx, "active")).id).toBe("active");
+                    events.push(`afterStart:${name}`);
+                }
+
+                async beforeAgentLoop(hookCtx: Context, scope: AgentFeatureScope): Promise<void> {
+                    const agents = agentsFromContext(hookCtx);
+                    expect((await agents?.resolve(hookCtx, scope.agent.id))?.id).toBe(
+                        scope.agent.id,
+                    );
+                    events.push(`agentLoop:${name}`);
+                }
+
+                instructions(): string {
+                    events.push(`instructions:${name}`);
+                    return "";
+                }
+            })();
+        const storage = new AgentStorage({
+            acquireLock: inMemoryStorageLock(),
+            kv: managerKV(managerPersistence),
+            persistence: (agentId) => {
+                events.push(`restore:${agentId}`);
+                return activePersistence;
+            },
+        });
+
+        const creating = AgentSystemLocal.create(ctx, storage, {
+            features: [startFeature("first"), startFeature("second")],
+            providers: providersOf(provider),
+            provider: "scripted",
+            models: [],
+        });
+        await until(() => releases.size === 2);
+
+        // Both hooks started together, and no restored agent can reach another feature hook yet.
+        expect(events).toEqual(["beforeStart:first:start", "beforeStart:second:start"]);
+        expect(provider.sessions).toHaveLength(0);
+        await expect(references[0]?.resolve(ctx, "active")).rejects.toThrow("not ready");
+
+        releases.get("first")?.();
+        await Promise.resolve();
+        expect(provider.sessions).toHaveLength(0);
+        releases.get("second")?.();
+
+        const system = await creating;
+        const active = await system.resolve(ctx, "active");
+        await active.waitForIdle();
+        const beforeFinished = events.indexOf("beforeStart:second:end");
+        const restored = events.indexOf("restore:active");
+        expect(beforeFinished).toBeGreaterThan(-1);
+        expect(restored).toBeGreaterThan(beforeFinished);
+        expect(events.indexOf("afterStart:first")).toBeGreaterThan(restored);
+        expect(events.indexOf("afterStart:second")).toBeGreaterThan(restored);
+        expect(events.indexOf("instructions:first")).toBeGreaterThan(beforeFinished);
+        expect(events.indexOf("instructions:second")).toBeGreaterThan(beforeFinished);
+        expect(events.indexOf("agentLoop:first")).toBeGreaterThan(restored);
+        expect(events.indexOf("agentLoop:second")).toBeGreaterThan(restored);
+        await system.close(ctx);
+    });
+
+    it("waits for every startup restoration before releasing a failed startup's lock", async () => {
+        const managerPersistence = new InMemoryPersistence();
+        managerPersistence.values.set("agentSystem.config.failed", {});
+        managerPersistence.values.set("agentSystem.config.slow", {});
+        let locked = false;
+        let slowStarted = false;
+        let slowFinishedWhileLocked = false;
+        let releaseSlow = (): void => undefined;
+        const acquireLock = () => {
+            if (locked) return Promise.reject(new Error("The agent store is already locked."));
+            locked = true;
+            return Promise.resolve({
+                release: () => {
+                    locked = false;
+                    return Promise.resolve();
+                },
+            });
+        };
+        const failedPersistence = new (class extends InMemoryPersistence {
+            override readValues(
+                readCtx: Context,
+                prefix: string,
+            ): ReturnType<InMemoryPersistence["readValues"]> {
+                if (prefix === "owed") {
+                    return Promise.reject(new Error("Failed to restore one agent."));
+                }
+                return super.readValues(readCtx, prefix);
+            }
+        })();
+        const slowPersistence = new (class extends InMemoryPersistence {
+            override async readValues(
+                readCtx: Context,
+                prefix: string,
+            ): ReturnType<InMemoryPersistence["readValues"]> {
+                if (prefix === "owed") {
+                    slowStarted = true;
+                    await new Promise<void>((resolve) => {
+                        releaseSlow = resolve;
+                    });
+                    slowFinishedWhileLocked = locked;
+                }
+                return await super.readValues(readCtx, prefix);
+            }
+        })();
+        slowPersistence.values.set("owed", { stage: "inference" });
+        const storage = (): AgentStorage =>
+            new AgentStorage({
+                acquireLock,
+                kv: managerKV(managerPersistence),
+                persistence: (agentId) =>
+                    agentId === "failed" ? failedPersistence : slowPersistence,
+            });
+        const options = {
+            features: [],
+            providers: providersOf(new ScriptedProvider([])),
+            provider: "scripted",
+            models: [],
+        };
+
+        const creating = AgentSystemLocal.create(ctx, storage(), options);
+        await until(() => slowStarted);
+        await expect(AgentSystemLocal.create(ctx, storage(), options)).rejects.toThrow(
+            "already locked",
+        );
+        releaseSlow();
+        await expect(creating).rejects.toThrow("Failed to restore one agent.");
+
+        expect({ locked, slowFinishedWhileLocked }).toEqual({
+            locked: false,
+            slowFinishedWhileLocked: true,
+        });
+    });
+
+    it("releases the storage lock when a feature start hook fails", async () => {
+        const acquireLock = inMemoryStorageLock();
+        const managerPersistence = new InMemoryPersistence();
+        const storage = (): AgentStorage =>
+            new AgentStorage({
+                acquireLock,
+                kv: managerKV(managerPersistence),
+                persistence: () => new InMemoryPersistence(),
+            });
+        const providers = providersOf(new ScriptedProvider([]));
+        let releaseSlow = (): void => undefined;
+        let slowStarted = false;
+        const failing: AgentFeature = {
+            name: "failing",
+            beforeStart: () => Promise.reject(new Error("Feature initialization failed.")),
+        };
+        const slow: AgentFeature = {
+            name: "slow",
+            beforeStart: () =>
+                new Promise((resolve) => {
+                    slowStarted = true;
+                    releaseSlow = resolve;
+                }),
+        };
+
+        const creation = AgentSystemLocal.create(ctx, storage(), {
+            features: [failing, slow],
+            providers,
+            provider: "scripted",
+            models: [],
+        });
+        let settled = false;
+        void creation.then(
+            () => {
+                settled = true;
+            },
+            () => {
+                settled = true;
+            },
+        );
+        await until(() => slowStarted);
+        await Promise.resolve();
+        expect(settled).toBe(false);
+        await expect(
+            AgentSystemLocal.create(ctx, storage(), {
+                features: [],
+                providers,
+                provider: "scripted",
+                models: [],
+            }),
+        ).rejects.toThrow("already locked");
+
+        releaseSlow();
+        await expect(creation).rejects.toThrow("Feature initialization failed.");
+        const recovered = await AgentSystemLocal.create(ctx, storage(), {
+            features: [],
+            providers,
+            provider: "scripted",
+            models: [],
+        });
+        await recovered.close(ctx);
+
+        await expect(
+            AgentSystemLocal.create(ctx, storage(), {
+                features: [
+                    {
+                        name: "failing-after",
+                        afterStart: () => Promise.reject(new Error("Feature post-start failed.")),
+                    },
+                ],
+                providers,
+                provider: "scripted",
+                models: [],
+            }),
+        ).rejects.toThrow("Feature post-start failed.");
+        const recoveredAgain = await AgentSystemLocal.create(ctx, storage(), {
+            features: [],
+            providers,
+            provider: "scripted",
+            models: [],
+        });
+        await recoveredAgain.close(ctx);
+    });
+
+    it("owns its durable store exclusively until the system closes", async () => {
+        const acquireLock = inMemoryStorageLock();
+        const managerPersistence = new InMemoryPersistence();
+        const agentStores = new Map<string, InMemoryPersistence>();
+        const storage = (): AgentStorage =>
+            new AgentStorage({
+                acquireLock,
+                kv: managerKV(managerPersistence),
+                persistence: (agentId) => {
+                    const existing = agentStores.get(agentId);
+                    if (existing !== undefined) return existing;
+                    const created = new InMemoryPersistence();
+                    agentStores.set(agentId, created);
+                    return created;
+                },
+            });
+        const options = {
+            features: [],
+            providers: providersOf(new ScriptedProvider([])),
+            provider: "scripted",
+            models: [],
+        };
+
+        const firstStorage = storage();
+        const first = await AgentSystemLocal.create(ctx, firstStorage, options);
+        await expect(AgentSystemLocal.create(ctx, firstStorage, options)).rejects.toThrow(
+            "already owned",
+        );
+        await expect(AgentSystemLocal.create(ctx, storage(), options)).rejects.toThrow(
+            "already locked",
+        );
+
+        await first.close(ctx);
+        const second = await AgentSystemLocal.create(ctx, storage(), options);
+        // An old owner's repeated close must not release the new owner's lock.
+        await first.close(ctx);
+        await expect(AgentSystemLocal.create(ctx, storage(), options)).rejects.toThrow(
+            "already locked",
+        );
+        await expect(first.resolve(ctx, "missing")).rejects.toThrow("system is closed");
+        await second.close(ctx);
+    });
+
     it("caches the resolved agent and its store, and tells features which agent they serve", async () => {
         const provider = new ScriptedProvider([]);
         const managerPersistence = new InMemoryPersistence();
@@ -65,6 +352,7 @@ describe("AgentSystemLocal", () => {
         const agentSystem = await AgentSystemLocal.create(
             ctx,
             new AgentStorage({
+                acquireLock: inMemoryStorageLock(),
                 kv: managerKV(managerPersistence),
                 persistence: () => {
                     stores += 1;
@@ -116,6 +404,7 @@ describe("AgentSystemLocal", () => {
         const agentSystem = await AgentSystemLocal.create(
             ctx,
             new AgentStorage({
+                acquireLock: inMemoryStorageLock(),
                 kv: managerKV(managerPersistence),
                 persistence: (id) => {
                     loaded.push(id);
@@ -150,6 +439,7 @@ describe("AgentSystemLocal", () => {
         const agentSystem = await AgentSystemLocal.create(
             ctx,
             new AgentStorage({
+                acquireLock: inMemoryStorageLock(),
                 kv: managerKV(new InMemoryPersistence()),
                 persistence: () => persistence,
             }),
@@ -214,6 +504,7 @@ describe("AgentSystemLocal configuration", () => {
         return await AgentSystemLocal.create(
             ctx,
             new AgentStorage({
+                acquireLock: inMemoryStorageLock(),
                 kv: managerKV(managerPersistence),
                 persistence: () => new InMemoryPersistence(),
             }),
@@ -316,6 +607,7 @@ describe("AgentSystemLocal shared features", () => {
         return await AgentSystemLocal.create(
             ctx,
             new AgentStorage({
+                acquireLock: inMemoryStorageLock(),
                 kv: managerKV(new InMemoryPersistence()),
                 persistence: () => new InMemoryPersistence(),
             }),
@@ -402,6 +694,7 @@ describe("AgentSystemLocal shared features", () => {
         const agentSystem = await AgentSystemLocal.create(
             ctx,
             new AgentStorage({
+                acquireLock: inMemoryStorageLock(),
                 kv: managerKV(new InMemoryPersistence()),
                 persistence: () => new InMemoryPersistence(),
             }),

@@ -18,7 +18,7 @@ import {
 } from "../../sources/index.js";
 import { InMemoryPersistence } from "../gym/InMemoryPersistence.js";
 import { ScriptedProvider, ScriptedSession } from "../gym/ScriptedProvider.js";
-import { providersOf, textTurn, user } from "../gym/fixtures.js";
+import { inMemoryStorageLock, providersOf, textTurn, user } from "../gym/fixtures.js";
 
 const ctx = createRootContext().named("happy-agent-base-hook-reentrancy");
 
@@ -87,6 +87,7 @@ async function collection(
     return await AgentSystemLocal.create(
         ctx,
         new AgentStorage({
+            acquireLock: inMemoryStorageLock(),
             kv: managerKV(managerPersistence),
             persistence: (id) => {
                 const existing = persistences.get(id);

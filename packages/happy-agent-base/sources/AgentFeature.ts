@@ -17,6 +17,7 @@ import type {
 } from "./AgentBaseHooks.js";
 import type { AgentFeatureAction } from "./AgentFeatureAction.js";
 import type { AgentKV } from "./AgentKV.js";
+import type { AgentSystemRef } from "./AgentSystemRef.js";
 import type { AnyAgentTool } from "./AgentTool.js";
 
 /**
@@ -80,7 +81,8 @@ export interface AgentFeatureScope {
  * `AgentBase` runs with. The hook contracts are the same as `AgentBaseHooks`; see there for
  * when each hook fires and what its return value means.
  *
- * Every hook receives the agent's context first and its own `AgentFeatureScope` second.
+ * Agent-scoped hooks receive the agent's context first and their `AgentFeatureScope` second.
+ * System start hooks instead receive the system context and its deadlock-safe `AgentSystemRef`.
  */
 export interface AgentFeature<Tool extends AnyAgentTool = AnyAgentTool> {
     /**
@@ -88,6 +90,17 @@ export interface AgentFeature<Tool extends AnyAgentTool = AnyAgentTool> {
      * name, so renaming a feature orphans everything it stored.
      */
     readonly name: string;
+    /**
+     * The first hook a feature receives. Called once after the owning AgentSystem acquires its
+     * store lock and before any agent is restored or started. Every feature initializes
+     * concurrently, and agent work begins only after all of them settle successfully.
+     */
+    readonly beforeStart?: (ctx: Context, agents: AgentSystemRef) => Promise<void>;
+    /**
+     * Called once after every durable-active agent has been restored and started. Every feature
+     * runs concurrently, and system creation resolves only after all of them settle successfully.
+     */
+    readonly afterStart?: (ctx: Context, agents: AgentSystemRef) => Promise<void>;
     /** Observes every session event; must never fail or delay the run. */
     readonly onEvent?: (ctx: Context, scope: AgentFeatureScope, event: SessionEvent) => void;
     /** Merged after the base state and every earlier feature's instructions, in feature order. */

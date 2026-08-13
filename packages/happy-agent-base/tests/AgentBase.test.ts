@@ -1366,8 +1366,6 @@ describe("AgentBase per-message settings", () => {
                 previousProvider: "scripted",
                 provider: "scripted",
                 providers,
-                previousProviderInstance: provider,
-                providerInstance: provider,
                 wasReset: true,
             },
         ]);
@@ -1407,7 +1405,7 @@ describe("AgentBase per-message settings", () => {
         await agent.close();
     });
 
-    it("keeps the history and the session on a compatible model change", async () => {
+    it("keeps history but replaces the session on a compatible model change", async () => {
         const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
         const changes: unknown[] = [];
         const agent = await AgentBase.create(ctx, {
@@ -1437,11 +1435,57 @@ describe("AgentBase per-message settings", () => {
                 wasReset: false,
             }),
         ]);
-        expect(provider.sessions).toHaveLength(1);
-        expect(provider.sessions[0]?.destroyed).toBe(false);
-        expect(provider.sessions[0]?.requests[1]?.context.messages).toEqual([
+        expect(provider.sessions).toHaveLength(2);
+        expect(provider.sessions[0]?.destroyed).toBe(true);
+        expect(provider.sessions[1]?.requests[0]?.context.messages).toEqual([
             user("hello"),
             { role: "assistant", content: [{ type: "text", text: "first" }] },
+            user("switch"),
+        ]);
+        await agent.close();
+    });
+
+    it("resolves a fresh Bedrock-shaped provider for a compatible model switch", async () => {
+        const firstProvider = new ScriptedProvider([textTurn("from haiku")]);
+        const secondProvider = new ScriptedProvider([textTurn("from sonnet")]);
+        const selections: unknown[] = [];
+        const providers = new AgentProviders();
+        providers.add(
+            "bedrock",
+            async (selection) => {
+                selections.push(selection);
+                if (selection.model === "anthropic/claude-haiku") return firstProvider;
+                if (selection.model === "anthropic/claude-sonnet") return secondProvider;
+                throw new Error(`Unexpected Bedrock model: ${selection.model ?? "none"}`);
+            },
+            "bedrock",
+        );
+        const agent = await AgentBase.create(ctx, {
+            id: "test-agent",
+            providers,
+            provider: "bedrock",
+            model: "anthropic/claude-haiku",
+            persistence: new InMemoryPersistence(),
+        });
+
+        await agent.send(ctx, user("hello"), { await: true });
+        await agent.waitForIdle();
+        await agent.send(ctx, user("switch"), {
+            await: true,
+            model: "anthropic/claude-sonnet",
+        });
+        await agent.waitForIdle();
+
+        expect(selections).toEqual([
+            { id: "bedrock", model: "anthropic/claude-haiku" },
+            { id: "bedrock", model: "anthropic/claude-sonnet" },
+        ]);
+        expect(firstProvider.sessions[0]?.destroyed).toBe(true);
+        expect(firstProvider.sessions[0]?.requests[0]?.model).toBe("anthropic/claude-haiku");
+        expect(secondProvider.sessions[0]?.requests[0]?.model).toBe("anthropic/claude-sonnet");
+        expect(secondProvider.sessions[0]?.requests[0]?.context.messages).toEqual([
+            user("hello"),
+            { role: "assistant", content: [{ type: "text", text: "from haiku" }] },
             user("switch"),
         ]);
         await agent.close();
@@ -1483,8 +1527,6 @@ describe("AgentBase per-message settings", () => {
                 previousProvider: "claude",
                 provider: "bedrock",
                 providers,
-                previousProviderInstance: claudeProvider,
-                providerInstance: bedrockProvider,
                 wasReset: false,
             },
         ]);

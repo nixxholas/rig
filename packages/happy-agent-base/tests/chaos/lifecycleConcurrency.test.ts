@@ -1,22 +1,19 @@
 import type {
     BaseSession,
-    SessionCompaction,
-    SessionCompactionOptions,
     SessionOptions,
     SessionRunRequest,
     SessionStream,
 } from "@slopus/happy-providers";
 import { Type } from "@sinclair/typebox";
 import { createRootContext, type Context } from "@steve.kite/stdlib";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { AgentBase, defineAgentTool } from "../../sources/index.js";
-import { askedIn, textIn, transcriptOf } from "../gym/chaosWorld.js";
 import { InMemoryPersistence } from "../gym/InMemoryPersistence.js";
 import { ScriptedProvider, ScriptedSession } from "../gym/ScriptedProvider.js";
-import { providersOf, system, textTurn, user } from "../gym/fixtures.js";
+import { providersOf, textTurn, user } from "../gym/fixtures.js";
 
-const ctx = createRootContext().named("happy-agent-base-ownership-races");
+const ctx = createRootContext().named("happy-agent-base-lifecycle-concurrency");
 
 interface Deferred {
     readonly promise: Promise<void>;
@@ -45,173 +42,7 @@ async function settlesWhileBlocked(promise: Promise<void>): Promise<boolean> {
     });
 }
 
-/**
- * These scenarios deliberately overlap ownership boundaries rather than merely adding timing
- * noise inside one owner. Per-instance locks can make one AgentBase perfectly orderly while two
- * live instances, two managers, or a lifecycle operation still disagree about what is durable.
- */
-describe("consistency at concurrent ownership boundaries", () => {
-    it("keeps every acknowledged queue entry durable when two live owners share one agent ID", async () => {
-        const disk = new InMemoryPersistence();
-        const provider = new ScriptedProvider([]);
-        const providers = providersOf(provider);
-        const bothQueueReadsFinished = deferred();
-        const releaseLoads = deferred();
-        const bothLoadsStarted = deferred();
-        const originalReadValues = disk.readValues.bind(disk);
-        const originalLoad = disk.load.bind(disk);
-        let queueReads = 0;
-        let loads = 0;
-
-        // Give both owners the same empty queue snapshot. Their instance-local locks cannot
-        // order this read/choose/write sequence against each other.
-        disk.readValues = async (readCtx, prefix) => {
-            if (prefix === "send." && queueReads < 2) {
-                const snapshot = await originalReadValues(readCtx, prefix);
-                queueReads += 1;
-                if (queueReads === 2) bothQueueReadsFinished.resolve();
-                await bothQueueReadsFinished.promise;
-                return snapshot;
-            }
-            return await originalReadValues(readCtx, prefix);
-        };
-        // Hold both runs immediately after acknowledgement, reproducing the process-loss window
-        // in which the durable queue is the only authority for accepted work.
-        disk.load = async () => {
-            loads += 1;
-            if (loads === 2) bothLoadsStarted.resolve();
-            await releaseLoads.promise;
-            return await originalLoad();
-        };
-
-        const first = await AgentBase.create(ctx, {
-            id: "shared-agent",
-            providers,
-            provider: "scripted",
-            persistence: disk,
-        });
-        const second = await AgentBase.create(ctx, {
-            id: "shared-agent",
-            providers,
-            provider: "scripted",
-            persistence: disk,
-        });
-        const clock = vi.spyOn(Date, "now").mockReturnValue(1_750_000_000_000);
-
-        await Promise.all([
-            first.send(ctx, user("accepted by owner one"), { await: true }),
-            second.send(ctx, user("accepted by owner two"), { await: true }),
-        ]);
-        await bothLoadsStarted.promise;
-        const durableAtAcknowledgement = [...disk.values.entries()]
-            .filter(([key]) => key.startsWith("send."))
-            .map(([key, value]) => ({ key, value }));
-
-        clock.mockRestore();
-        releaseLoads.resolve();
-        await Promise.all([first.waitForIdle(), second.waitForIdle()]);
-        await Promise.all([first.close(), second.close()]);
-
-        // Both send promises resolved, so a crash now must be able to recover both messages.
-        // A shared key means the later write silently replaced the earlier acknowledgement.
-        expect(durableAtAcknowledgement).toHaveLength(2);
-        expect(new Set(durableAtAcknowledgement.map(({ key }) => key)).size).toBe(2);
-        expect(
-            durableAtAcknowledgement
-                .map(({ value }) => value)
-                .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
-        ).toEqual(
-            [
-                { message: user("accepted by owner one"), options: {} },
-                { message: user("accepted by owner two"), options: {} },
-            ].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
-        );
-    });
-
-    it("serializes compaction with another live owner's committed inference", async () => {
-        const disk = new InMemoryPersistence([
-            { type: "user", message: user("history before compaction") },
-            { type: "block", block: { type: "text", text: "old answer" } },
-        ]);
-        const provider = new ScriptedProvider([textTurn("concurrent answer")]);
-        const compactionStarted = deferred();
-        const releaseCompaction = deferred();
-        const originalSession = provider.session.bind(provider);
-        const replacement: SessionCompaction = {
-            status: "completed",
-            preservedMessages: [],
-            usage: {
-                input: 10,
-                output: 2,
-                cacheRead: 0,
-                cacheWrite: 0,
-                totalTokens: 12,
-            },
-            context: {
-                instructions: "",
-                messages: [system("summary of the old prefix")],
-            },
-        };
-
-        provider.session = async (id: string, options: SessionOptions): Promise<BaseSession> => {
-            const session = (await originalSession(id, options)) as ScriptedSession;
-            if (provider.sessions.length === 1) {
-                session.compact = async (
-                    _compactCtx: Context,
-                    compactOptions: SessionCompactionOptions,
-                ) => {
-                    session.compactions.push(compactOptions);
-                    compactionStarted.resolve();
-                    await releaseCompaction.promise;
-                    return replacement;
-                };
-            }
-            return session;
-        };
-        const providers = providersOf(provider);
-        const compactingOwner = await AgentBase.create(ctx, {
-            id: "shared-agent",
-            providers,
-            provider: "scripted",
-            persistence: disk,
-        });
-        const writingOwner = await AgentBase.create(ctx, {
-            id: "shared-agent",
-            providers,
-            provider: "scripted",
-            persistence: disk,
-        });
-
-        const compaction = compactingOwner.compact(ctx, { await: true });
-        await compactionStarted.promise;
-
-        await writingOwner.send(ctx, user("committed while compaction was running"), {
-            await: true,
-        });
-        await writingOwner.waitForIdle();
-        await writingOwner.close();
-        const beforeCompactionCommit = transcriptOf(disk);
-        expect(askedIn(beforeCompactionCommit)).toContain("committed while compaction was running");
-        expect(textIn(beforeCompactionCommit)).toContain("concurrent answer");
-
-        releaseCompaction.resolve();
-        await compaction;
-        await compactingOwner.waitForIdle();
-        await compactingOwner.close();
-
-        // Compaction may replace only its snapshot. Work committed after that snapshot is a
-        // suffix and must survive the destructive clear-and-replace transaction.
-        const afterCompactionCommit = transcriptOf(disk);
-        expect(afterCompactionCommit).toEqual([
-            system("summary of the old prefix"),
-            user("committed while compaction was running"),
-            {
-                role: "assistant",
-                content: [{ type: "text", text: "concurrent answer" }],
-            },
-        ]);
-    });
-
+describe("lifecycle concurrency", () => {
     it("cancels a turn aborted while its pre-inference hook is still running", async () => {
         const provider = new ScriptedProvider([textTurn("this must never be requested")]);
         const beforeTurnStarted = deferred();

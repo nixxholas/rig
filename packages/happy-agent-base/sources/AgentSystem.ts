@@ -27,6 +27,9 @@ export interface AgentSystem {
     /** The models this collection offers its agents. */
     readonly models: readonly AgentModel[];
 
+    /** Stop every agent and release this system's exclusive ownership of its durable store. */
+    close(ctx: Context): Promise<void>;
+
     /**
      * Create an agent with a new system-generated cuid2 identity and the configuration it keeps
      * for its whole life. The configuration and optional initial context are persisted before

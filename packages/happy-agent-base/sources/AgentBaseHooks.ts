@@ -1,5 +1,4 @@
 import type {
-    BaseProvider,
     SessionDoneState,
     SessionEvent,
     SessionSystemMessage,
@@ -26,10 +25,6 @@ export interface AgentBaseModelChange {
     readonly provider: string;
     /** The registry the agent resolves its providers from. */
     readonly providers: AgentProviders;
-    /** The live instance behind `previousProvider`, or null when no longer registered. */
-    readonly previousProviderInstance: BaseProvider | null;
-    /** The live instance behind `provider`, or null when not registered. */
-    readonly providerInstance: BaseProvider | null;
     /** True when the change was incompatible and the conversation history was erased. */
     readonly wasReset: boolean;
 }

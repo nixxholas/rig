@@ -4,8 +4,9 @@ import type {
     SessionSystemMessage,
     SessionUserMessage,
 } from "@slopus/happy-providers";
+import type { Context } from "@steve.kite/stdlib";
 
-import { AgentKV, AgentProviders } from "../../sources/index.js";
+import { AgentKV, AgentProviders, type AgentStorageLock } from "../../sources/index.js";
 import { InMemoryPersistence } from "./InMemoryPersistence.js";
 
 /** A registry holding the one provider under the ID `"scripted"` that tests configure. */
@@ -21,6 +22,28 @@ export function providersOf(provider: BaseProvider): AgentProviders {
  */
 export function sharedKV(): AgentKV {
     return new AgentKV(new InMemoryPersistence(), "shared.");
+}
+
+/**
+ * A process-local stand-in for the hard database lock production AgentStorage adapters provide.
+ * Reuse one returned function across storage objects to model one durable database.
+ */
+export function inMemoryStorageLock(): (ctx: Context) => Promise<AgentStorageLock> {
+    let held = false;
+    return () => {
+        if (held) return Promise.reject(new Error("The agent store is already locked."));
+        held = true;
+        let released = false;
+        return Promise.resolve({
+            release: () => {
+                if (!released) {
+                    released = true;
+                    held = false;
+                }
+                return Promise.resolve();
+            },
+        });
+    };
 }
 
 /** A complete scripted turn that streams the text one character at a time and ends normally. */

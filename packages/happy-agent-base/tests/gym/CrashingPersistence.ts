@@ -74,29 +74,9 @@ export class FlakyPersistence implements AgentPersistence {
         return this.disk.writeValue(ctx, key, value);
     }
 
-    writeValueIfAbsent(ctx: Context, key: string, value: unknown): Promise<boolean> {
-        this.#step();
-        return this.disk.writeValueIfAbsent(ctx, key, value);
-    }
-
-    writeValueIfUnchanged(
-        ctx: Context,
-        key: string,
-        expected: unknown,
-        value: unknown,
-    ): Promise<boolean> {
-        this.#step();
-        return this.disk.writeValueIfUnchanged(ctx, key, expected, value);
-    }
-
     deleteValue(ctx: Context, key: string): Promise<void> {
         this.#step();
         return this.disk.deleteValue(ctx, key);
-    }
-
-    deleteValueIfPresent(ctx: Context, key: string): Promise<boolean> {
-        this.#step();
-        return this.disk.deleteValueIfPresent(ctx, key);
     }
 }
 
@@ -165,28 +145,8 @@ export class CrashingPersistence implements AgentPersistence {
         return this.disk.writeValue(ctx, key, value);
     }
 
-    writeValueIfAbsent(ctx: Context, key: string, value: unknown): Promise<boolean> {
-        this.#step();
-        return this.disk.writeValueIfAbsent(ctx, key, value);
-    }
-
-    writeValueIfUnchanged(
-        ctx: Context,
-        key: string,
-        expected: unknown,
-        value: unknown,
-    ): Promise<boolean> {
-        this.#step();
-        return this.disk.writeValueIfUnchanged(ctx, key, expected, value);
-    }
-
     deleteValue(ctx: Context, key: string): Promise<void> {
         this.#step();
         return this.disk.deleteValue(ctx, key);
-    }
-
-    deleteValueIfPresent(ctx: Context, key: string): Promise<boolean> {
-        this.#step();
-        return this.disk.deleteValueIfPresent(ctx, key);
     }
 }

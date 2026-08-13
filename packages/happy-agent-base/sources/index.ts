@@ -25,7 +25,7 @@ export {
     type AgentFeatureConfig,
     type AgentPlatform,
 } from "./AgentConfig.js";
-export { AgentStorage, type AgentStorageOptions } from "./AgentStorage.js";
+export { AgentStorage, type AgentStorageLock, type AgentStorageOptions } from "./AgentStorage.js";
 
 // Provider/model routing and the curated model catalog.
 export { type AgentModel } from "./AgentModel.js";
@@ -84,8 +84,12 @@ export {
 } from "./AgentFeature.js";
 export { type AgentFeatureAction } from "./AgentFeatureAction.js";
 
-// Registry of provider instances agents resolve their models through.
-export { AgentProviders } from "./AgentProviders.js";
+// Registry of provider sources agents resolve their selected models through.
+export {
+    AgentProviders,
+    type AgentProviderSelection,
+    type AgentProviderSource,
+} from "./AgentProviders.js";
 
 // Tool definitions.
 export {

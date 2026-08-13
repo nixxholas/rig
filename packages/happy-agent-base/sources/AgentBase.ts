@@ -14,7 +14,6 @@ import type {
 } from "@slopus/happy-providers";
 import { areProviderModelsCompatible } from "@slopus/happy-providers";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { randomUUID } from "node:crypto";
 import { Value } from "@sinclair/typebox/value";
 import {
     asyncLock,
@@ -36,7 +35,6 @@ import {
 } from "./AgentBasePending.js";
 import type { AgentBaseHooks, MaybePromise } from "./AgentBaseHooks.js";
 import type { AgentPersistence, AgentRecord } from "./AgentPersistence.js";
-import { agentBaseStoreLock, agentBaseWithStoreStill } from "./AgentBaseStoreLock.js";
 import type { AgentBaseState } from "./AgentBaseState.js";
 import { AgentProviders } from "./AgentProviders.js";
 import type { AgentFeatureAction } from "./AgentFeatureAction.js";
@@ -68,9 +66,6 @@ const insideLoops = new AsyncLocalStorage<readonly string[]>();
  * hears the shutdown finish, short enough that one still holding the loop is told promptly.
  */
 const INSIDE_CLOSE_REPORT_MS = 15;
-
-/** Rolls a consumption back when every entry in its batch was already taken by another owner. */
-const LOST_QUEUE_RACE = Symbol("lostQueueRace");
 
 /** How a message queue drains: one message per model response, or every queued message at once. */
 export type AgentBaseQueueMode = "one-at-a-time" | "all";
@@ -113,7 +108,7 @@ export interface AgentBaseAwaitOptions {
 
 /** A durably queued message together with the settings it carries. */
 interface QueueEntry {
-    /** The store key the message was written under, and the one a consumption claims it by. */
+    /** The store key the message was written under and removed through when consumed. */
     readonly key: string;
     readonly message: SessionUserMessage;
     /** The settings this message makes effective when it is consumed. */
@@ -170,8 +165,7 @@ export interface AgentBaseOptions {
  *
  * The rest of this comment is the list of promises the implementation has to keep. They are
  * written down because most of them are invisible in ordinary use and only show themselves when
- * a process dies, two owners share a store, or a caller races the loop — every one of them was
- * bought with a bug found by `tests/chaos/`, and each has a focused test that fails without it.
+ * a process dies or a caller races the loop. Each has focused test coverage.
  *
  * ## Serialization
  *
@@ -190,24 +184,19 @@ export interface AgentBaseOptions {
  *   acceptance is the same one, and a close still waits for it.
  * - Messages a hook returns from one decision are accepted as one batch. A caller arriving while
  *   that batch is being written lands after all of it, never between two halves of one thought.
- * - Queue keys order by what the store already holds and end in a segment identifying their
- *   writer, so two owners accepting in the same millisecond may order arbitrarily but can never
- *   overwrite one another.
+ * - Queue keys order by what the store already holds, including when the clock moves backwards.
  * - An agent holding a durable message never describes itself as settled.
  *
  * ## Consuming a message
  *
- * A consumption claims each entry with an atomic delete inside its own transaction, so one
- * durable message is answered exactly once however many live owners hold it in memory. A batch
- * that claims nothing rolls back having changed nothing. A message is never durable in both the
- * queue and the context, or in neither, and memory changes only after the commit.
+ * A consumption deletes each entry inside the transaction that appends it to the context. A
+ * message is never durable in both places, or in neither, and memory changes only after commit.
  *
  * ## Turns
  *
- * A turn answers the durable conversation, not the one this instance remembers: it reloads
- * before it decides anything, so an appended message or a model switch from another owner is in
- * force by the next turn. A turn that consumes the last queued work clears the request it just
- * answered, rather than buying an extra turn with an empty queue and a full set of hooks.
+ * A turn reloads the durable conversation before it decides anything, keeping the store
+ * authoritative across restarts. A turn that consumes the last queued work clears the request it
+ * just answered rather than buying an extra empty turn with a full set of hooks.
  *
  * ## Tool calls
  *
@@ -229,10 +218,8 @@ export interface AgentBaseOptions {
  * ## Compaction
  *
  * A compaction runs before a turn's first inference, so the model always receives a settled
- * conversation. It replaces the history whole or not at all, and the suffix it preserves is
- * rebuilt from the store inside the commit — from a record count taken at the snapshot, so work
- * another owner committed while the provider was summarizing survives. A compaction nobody will
- * carry out is rejected rather than left waiting.
+ * conversation. It replaces the history whole or not at all. A compaction nobody will carry out
+ * is rejected rather than left waiting.
  *
  * ## Model changes
  *
@@ -386,32 +373,12 @@ export class AgentBase {
     /** The in-flight or finished load of the durable state; cleared at the start of every turn. */
     #loaded: Promise<void> | undefined;
     /**
-     * Identifies this instance's writes, so no other writer can produce one of its keys. It is a
-     * UUID rather than a number drawn from the general-purpose generator, because two owners of
-     * one store acknowledging a message each are relying on it to keep their keys apart, and a
-     * generator that can be seeded — or replaced — would let both of them claim the same one.
-     */
-    readonly #writer = randomUUID();
-    /**
      * The kind of the last durable record, which says what the conversation is waiting for far
      * more precisely than the message it ends on: a consumed message, a tool result or the note
      * a failed turn leaves behind is owed a response, while a replacement written by a
      * compaction is owed nothing at all.
      */
     #lastRecordType: AgentRecord["type"] | undefined;
-    /**
-     * Whether that last record was a replacement that ended on a message still owed an answer.
-     * Only the rewrite that wrote it can tell a summary's own last message from a suffix it kept.
-     */
-    #lastRecordContinuesInference = false;
-    /**
-     * How many durable records the in-memory conversation accounts for: the ones it was loaded
-     * from, plus every one this instance has appended since. A rewrite replaces exactly those.
-     * Counting the store afresh would treat records this instance has never seen as already
-     * summarized and erase them; forgetting its own appends would carry records the summary
-     * already covers into the replacement a second time.
-     */
-    #loadedRecordCount = 0;
     /**
      * Whether this instance has checked whether a cut-off run should resume inference. The
      * question is only meaningful once, against the state the agent first loaded: afterwards a
@@ -567,7 +534,7 @@ export class AgentBase {
         this.#providers = options.providers;
         this.#providerId = options.provider;
         this.#persistence = options.persistence;
-        this.#persistenceLock = agentBaseStoreLock(options.persistence);
+        this.#persistenceLock = asyncLock({ reentry: "block" });
         this.#hooks = options.hooks ?? {};
         this.state = {
             instructions: options.initialState?.instructions ?? "",
@@ -1046,6 +1013,10 @@ export class AgentBase {
             }),
         ]);
         if (!settled) {
+            // The caller cannot wait for its own turn, but the agent is closing all the same.
+            // Revoke the caller's tool/store capability before reporting the cyclic wait so it
+            // cannot resume later and write after the owning system releases its store lock.
+            this.#closeController.abort();
             throw new Error(
                 "Closing the agent from inside its own run loop would wait for a turn that " +
                     "cannot finish. The shutdown was started and will complete once this " +
@@ -1053,6 +1024,17 @@ export class AgentBase {
             );
         }
         await this.#closing;
+    }
+
+    /**
+     * Wait for a close that has already been requested to finish. Unlike `close`, this never
+     * initiates shutdown, so owners can separate the caller-facing reentrancy report from the
+     * underlying lifetime barrier.
+     */
+    async waitForClosed(): Promise<void> {
+        const closing = this.#closing;
+        if (closing === undefined) throw new Error("The agent has not been asked to close.");
+        await closing;
     }
 
     /**
@@ -1105,10 +1087,8 @@ export class AgentBase {
                 // redundant turn this can cost is cheap: an empty queue drains without any
                 // inference.
                 this.#turnRequested = false;
-                // Every turn starts from the durable state rather than from what this instance
-                // last remembered. Another owner over the same store may have appended messages
-                // or changed the selection since, and answering out of a stale memory would
-                // reply to a conversation that no longer exists.
+                // Every turn starts from durable state rather than from what this instance last
+                // remembered, so the store remains authoritative after recovery.
                 this.#loaded = undefined;
                 // The durable history has to be loaded before anything else: a turn that cannot
                 // read the conversation cannot answer it, and must not write to it either —
@@ -1524,27 +1504,16 @@ export class AgentBase {
      * and so owes an inference nobody asked for again.
      *
      * What is outstanding is read from the conversation: a tail that is a consumed message, a
-     * tool result, or the note a failed turn left behind is owed an answer, while a replacement
-     * written by a compaction is owed one only when the suffix it kept ends in a request.
-     *
-     * The pending record deliberately does not decide this, because one store may have several
-     * live owners and there is only one record. An owner working right now leaves behind exactly
-     * what a process that died would have left, so deciding from the record alone would have
-     * each owner treat the others' work as abandoned and answer it a second time. What the
-     * record adds is the knowledge that some run reached the model: a listener shown the
+     * tool result, or the note a failed turn left behind is owed an answer. The pending record
+     * adds the knowledge that the interrupted run reached the model: a listener shown the
      * beginning of a block that will now never arrive is told to drop it. Only finished blocks
-     * are ever persisted, so the conversation is intact and it is the view being corrected.
+     * are persisted, so the conversation is intact and it is the view being corrected.
      */
     #resumesInterruptedRun(): boolean {
         const owed =
             this.#lastRecordType === "user" ||
             this.#lastRecordType === "tool" ||
-            this.#lastRecordType === "system" ||
-            // A replacement record is not a question in itself, however it happens to end — but
-            // it keeps the suffix that joined the conversation after its snapshot, and a consumed
-            // message in that suffix still needs inference. Which kind of message ends the
-            // replacement is not visible in the messages, so the rewrite that knew records it.
-            (this.#lastRecordType === "compaction" && this.#lastRecordContinuesInference);
+            this.#lastRecordType === "system";
         if (owed && this.#inherited?.stage === "inference") this.#emit({ type: "block_reset" });
         return owed;
     }
@@ -1577,12 +1546,11 @@ export class AgentBase {
     }
 
     /**
-     * Run the pending compaction, if any. The snapshot is taken before the turn's first
-     * inference, with this pass being the only history writer, so nothing joins the history
-     * mid-compaction; the suffix copy still keeps any such message, defensively. The replacement
-     * is appended as a compaction record — the load-time reset point — and settles the shared
-     * promise for every caller awaiting it. A provider failure rejects them and leaves the
-     * history untouched.
+     * Run the pending compaction, if any. This pass is the only history writer, so the provider
+     * summarizes exactly the conversation that the replacement supersedes. The replacement is
+     * appended as a compaction record — the load-time reset point — and settles the shared
+     * promise for every caller awaiting it. A provider failure rejects them and leaves history
+     * untouched.
      */
     async #runCompaction(signal: AbortSignal): Promise<void> {
         const pending = this.#compaction;
@@ -1591,15 +1559,6 @@ export class AgentBase {
             await this.#enterStage("compaction");
             const instructions = await this.#instructions();
             const session = await this.#ensureSession(instructions, await this.#tools());
-            // The snapshot is the durable conversation, counted as records: everything appended
-            // after this point is a suffix the replacement has to keep, whoever wrote it. Taking
-            // the boundary from the store rather than from this instance's own memory means a
-            // record another owner committed while the provider was summarizing survives the
-            // clear-and-replace instead of being erased by it.
-            // The boundary is the prefix this instance's memory was built from, not whatever
-            // the store holds now: the provider is about to summarize that memory, and counting
-            // a newer store would describe records it never saw as summarized.
-            const snapshotCount = this.#loadedRecordCount;
             const snapshot = [...this.#messages];
             await this.#settled();
             // Provider compaction is this turn's work, so it runs on this turn's lifetime: an
@@ -1614,27 +1573,17 @@ export class AgentBase {
             }
             if (result.status === "completed") {
                 await this.#persistenceLock.runInLock(this.#ctx, async (lockCtx) => {
-                    const records = await this.#persistence.load(lockCtx);
-                    const suffix = messagesFromRecords(records.slice(snapshotCount));
-                    const replaced = [...result.context.messages, ...suffix];
-                    // Only a message in the live suffix can require another inference. The
-                    // summary's own final message is provider-authored context, not a request.
-                    const continuesInference = suffix.length > 0 && needsInference(replaced);
                     // Physically delete the superseded records and write the replacement —
                     // which keeps the messages that stay — in one atomic step.
                     await this.#recordTransaction(lockCtx, async (txCtx) => {
                         await this.#persistence.clearRecords(txCtx);
                         await this.#persistence.append(txCtx, {
                             type: "compaction",
-                            messages: replaced,
-                            ...(continuesInference ? { continuesInference: true } : {}),
+                            messages: result.context.messages,
                         });
                     });
-                    this.#messages = [...replaced];
+                    this.#messages = [...result.context.messages];
                     this.#lastRecordType = "compaction";
-                    this.#lastRecordContinuesInference = continuesInference;
-                    // The store is now the one replacement record, and memory is exactly it.
-                    this.#loadedRecordCount = 1;
                 });
                 // The conversation the measurement described is gone; its size is unknown
                 // again until the next response measures the replacement.
@@ -1692,25 +1641,19 @@ export class AgentBase {
     }
 
     /**
-     * Append one record and keep count of it. Every record this instance writes is one more that
-     * its memory accounts for, and a rewrite has to know exactly where its own knowledge ends —
-     * so appending and counting are one step rather than two a caller could get out of order.
+     * Append one record to the durable conversation.
      */
     async #appendRecord(ctx: Context, record: AgentRecord): Promise<void> {
         await this.#persistence.append(ctx, record);
-        this.#loadedRecordCount += 1;
     }
 
     /**
-     * A transaction whose effect on the record count unwinds with it. Records staged by a
-     * transaction that rolls back were never written, and memory never took them either, so the
-     * count must not go on claiming them.
+     * A transaction whose pending-state cache unwinds with it.
      */
     async #recordTransaction<Result>(
         ctx: Context,
         work: (ctx: Context) => Promise<Result>,
     ): Promise<Result> {
-        const counted = this.#loadedRecordCount;
         // The outstanding work unwinds with the records for the same reason: a stage staged by a
         // transaction that rolled back was never written, and memory claiming it would make the
         // agent skip the write that actually records what it is doing.
@@ -1719,7 +1662,6 @@ export class AgentBase {
         try {
             return await this.#persistence.transaction(ctx, work);
         } catch (error: unknown) {
-            this.#loadedRecordCount = counted;
             this.#pending = pending;
             this.#pendingWritten = written;
             throw error;
@@ -1761,9 +1703,7 @@ export class AgentBase {
     ): Promise<boolean> {
         return await this.#persistenceLock.runInLock(this.#ctx, async (lockCtx) => {
             if (queue.length === 0) return false;
-            // The durable queue, not memory, decides what is left to consume. Another owner over
-            // the same store may have taken these entries already, and a message answered twice
-            // is as wrong as one answered never.
+            // The durable queue, not memory, decides what is left to consume after a restart.
             const durable = new Set(
                 (await this.#persistence.readValues(lockCtx, prefix)).map(({ key }) => key),
             );
@@ -1831,128 +1771,100 @@ export class AgentBase {
                     reset = model !== this.#model;
                 }
             }
-            const consumed: QueueEntry[] = [];
-            try {
-                await this.#recordTransaction(lockCtx, async (txCtx) => {
-                    if (selectionChanged) {
-                        if (this.#hooks.modelChanged !== undefined && model !== undefined) {
-                            // The hook runs while the persistence lock is held and inside the
-                            // transaction that commits the switch, so its store executes directly on
-                            // that transaction: what it writes lands and rolls back with the change
-                            // it was told about, never on its own. The context it is given ends with
-                            // the transaction, so a store it keeps cannot outlive the switch.
-                            const committed = new AbortController();
-                            // Derived from the transaction's own context, which is what makes
-                            // the hook's writes part of the switch rather than a second,
-                            // separate commit, and ending with it.
-                            const changeLifetime = withLifetime(
-                                withAgentContext(txCtx, {
-                                    id: this.id,
-                                    provider,
-                                    model,
-                                    effort,
-                                    serviceTier,
-                                }),
-                                committed.signal,
-                            );
-                            const changeCtx = withAgentRunKV(
-                                withAgentKV(changeLifetime, this.#kv),
-                                this.#runKV,
-                            );
-                            try {
-                                injected = await this.#hooks.modelChanged(changeCtx, {
-                                    previousModel: this.#model,
-                                    model,
-                                    previousProvider: this.#providerId,
-                                    provider,
-                                    providers: this.#providers,
-                                    previousProviderInstance: this.#providers.get(this.#providerId),
-                                    providerInstance: this.#providers.get(provider),
-                                    wasReset: reset,
-                                });
-                            } catch {
-                                // A failing handoff must not cost the conversation: an incompatible
-                                // switch is rejected outright — the previous selection stays
-                                // effective and the history is not cleared. A compatible change
-                                // proceeds; the hook only observed it.
-                                if (reset) {
-                                    provider = this.#providerId;
-                                    model = this.#model;
-                                    reset = false;
-                                }
-                            } finally {
-                                // The store belonged to the hook's call, not to the hook.
-                                committed.abort();
-                            }
-                            if (!reset) injected = undefined;
-                        }
-                    }
-                    consumed.length = 0;
-                    // Each entry is claimed as it is consumed: the delete answers whether this
-                    // owner is the one that took it, so a message shared by two live owners over
-                    // one store is answered exactly once. Claiming first also means losing the
-                    // whole batch rolls the transaction back before it has changed anything.
-                    for (const entry of batch) {
-                        const claimed = await this.#persistence.deleteValueIfPresent(
-                            txCtx,
-                            entry.key,
+            await this.#recordTransaction(lockCtx, async (txCtx) => {
+                if (selectionChanged) {
+                    if (this.#hooks.modelChanged !== undefined && model !== undefined) {
+                        // The hook runs while the persistence lock is held and inside the
+                        // transaction that commits the switch, so its store executes directly on
+                        // that transaction: what it writes lands and rolls back with the change
+                        // it was told about, never on its own. The context it is given ends with
+                        // the transaction, so a store it keeps cannot outlive the switch.
+                        const committed = new AbortController();
+                        // Derived from the transaction's own context, which is what makes
+                        // the hook's writes part of the switch rather than a second,
+                        // separate commit, and ending with it.
+                        const changeLifetime = withLifetime(
+                            withAgentContext(txCtx, {
+                                id: this.id,
+                                provider,
+                                model,
+                                effort,
+                                serviceTier,
+                            }),
+                            committed.signal,
                         );
-                        if (claimed) consumed.push(entry);
-                    }
-                    if (consumed.length === 0) throw LOST_QUEUE_RACE;
-                    if (reset) {
-                        await this.#persistence.clearRecords(txCtx);
-                        this.#loadedRecordCount = 0;
-                        // The erased conversation is what the measurement described.
-                        await this.#persistence.deleteValue(txCtx, "context");
-                        if (injected !== undefined) {
-                            await this.#appendRecord(txCtx, {
-                                type: "system",
-                                message: injected,
+                        const changeCtx = withAgentRunKV(
+                            withAgentKV(changeLifetime, this.#kv),
+                            this.#runKV,
+                        );
+                        try {
+                            injected = await this.#hooks.modelChanged(changeCtx, {
+                                previousModel: this.#model,
+                                model,
+                                previousProvider: this.#providerId,
+                                provider,
+                                providers: this.#providers,
+                                wasReset: reset,
                             });
+                        } catch {
+                            // A failing handoff must not cost the conversation: an incompatible
+                            // switch is rejected outright — the previous selection stays
+                            // effective and the history is not cleared. A compatible change
+                            // proceeds; the hook only observed it.
+                            if (reset) {
+                                provider = this.#providerId;
+                                model = this.#model;
+                                reset = false;
+                            }
+                        } finally {
+                            // The store belonged to the hook's call, not to the hook.
+                            committed.abort();
                         }
+                        if (!reset) injected = undefined;
                     }
-                    for (const entry of consumed) {
+                }
+                // The queue move is atomic with appending the consumed messages and recording
+                // the inference they make due. The store has one owner, so ordinary deletes
+                // are sufficient.
+                for (const entry of batch) {
+                    await this.#persistence.deleteValue(txCtx, entry.key);
+                }
+                if (reset) {
+                    await this.#persistence.clearRecords(txCtx);
+                    // The erased conversation is what the measurement described.
+                    await this.#persistence.deleteValue(txCtx, "context");
+                    if (injected !== undefined) {
                         await this.#appendRecord(txCtx, {
-                            type: "user",
-                            message: entry.message,
+                            type: "system",
+                            message: injected,
                         });
                     }
-                    if (changed) {
-                        await this.#persistence.writeValue(txCtx, "settings", {
-                            provider,
-                            ...(model === undefined ? {} : { model }),
-                            ...(effort === undefined ? {} : { effort }),
-                            ...(serviceTier === undefined ? {} : { serviceTier }),
-                        });
-                    }
-                    // Consuming a message is precisely the act that makes an inference owed, so
-                    // the two commit as one. A crash cannot land between them and leave a
-                    // message in the conversation that nothing remembers having to answer.
-                    await this.#recordPending(txCtx, { stage: "inference" });
-                });
-            } catch (error: unknown) {
-                if (error !== LOST_QUEUE_RACE) throw error;
-                // Another owner answered all of them. They are gone from the store, so they are
-                // dropped from memory too, and this turn simply has nothing to inject.
-                queue.splice(0, count);
-                return false;
-            }
+                }
+                for (const entry of batch) {
+                    await this.#appendRecord(txCtx, {
+                        type: "user",
+                        message: entry.message,
+                    });
+                }
+                if (changed) {
+                    await this.#persistence.writeValue(txCtx, "settings", {
+                        provider,
+                        ...(model === undefined ? {} : { model }),
+                        ...(effort === undefined ? {} : { effort }),
+                        ...(serviceTier === undefined ? {} : { serviceTier }),
+                    });
+                }
+                // Consuming a message is precisely the act that makes an inference owed, so
+                // the two commit as one. A crash cannot land between them and leave a
+                // message in the conversation that nothing remembers having to answer.
+                await this.#recordPending(txCtx, { stage: "inference" });
+            });
             queue.splice(0, count);
             if (reset) {
                 this.#messages = injected === undefined ? [] : [injected];
                 this.#contextTokens = undefined;
             }
-            if (reset || provider !== this.#providerId) {
-                const session = this.#session;
-                this.#session = undefined;
-                try {
-                    await session?.destroy();
-                } catch {
-                    // The change already committed; a failing destroy must not undo it.
-                }
-            }
-            this.#messages.push(...consumed.map((entry) => entry.message));
+            this.#messages.push(...batch.map((entry) => entry.message));
             // This turn is answering the request that these messages raised. A send accepted
             // while the turn was already running raised it again, and letting that stand would
             // buy an extra turn with an empty queue and a full set of lifecycle hooks.
@@ -1985,9 +1897,6 @@ export class AgentBase {
             const records = await this.#persistence.load(lockCtx);
             const last = records[records.length - 1];
             this.#lastRecordType = last?.type;
-            this.#lastRecordContinuesInference =
-                last?.type === "compaction" && last.continuesInference === true;
-            this.#loadedRecordCount = records.length;
             let restored = messagesFromRecords(records);
             const steering = await this.#persistence.readValues(lockCtx, "steering.");
             const sends = await this.#persistence.readValues(lockCtx, "send.");
@@ -2126,8 +2035,9 @@ export class AgentBase {
                         "The tool call was interrupted by a restart and was not retried.",
                     );
                 } else {
+                    const toolLifetime = AbortSignal.any([signal, this.#closeController.signal]);
                     const execution = this.#executeToolCall(
-                        withLifetime(this.#ctx, signal),
+                        withLifetime(this.#ctx, toolLifetime),
                         entry.call,
                     );
                     running.push(execution);
@@ -2280,21 +2190,16 @@ export class AgentBase {
     }
 
     /**
-     * A key that sorts after every entry the queue already holds and belongs to no other
-     * writer. The order comes from the store rather than from a counter this instance keeps,
-     * because a restarted agent starts counting again and would otherwise reuse a key. The
-     * trailing writer segment settles the rest: two owners that read the same tail at the same
-     * millisecond still produce different keys, so an acknowledged message can never be
-     * overwritten by one accepted elsewhere — only ordered arbitrarily against it, which is all
-     * that simultaneous acceptance can mean. Reading the tail also keeps the order right when
-     * the clock goes backwards.
+     * A key that sorts after every entry the queue already holds. The order comes from the store
+     * rather than from an in-memory counter, because a restarted agent begins counting again.
+     * Reading the tail also keeps order correct when the clock moves backwards.
      */
     async #queueKey(ctx: Context, prefix: string): Promise<string> {
         const existing = await this.#persistence.readValues(ctx, prefix);
         const last = existing[existing.length - 1]?.key;
         const time = String(Date.now()).padStart(14, "0");
         const key = (slot: string, sequence: number): string =>
-            `${prefix}${slot}.${String(sequence).padStart(6, "0")}.${this.#writer}`;
+            `${prefix}${slot}.${String(sequence).padStart(6, "0")}`;
         if (last === undefined) return key(time, 0);
         const [lastSlot, lastSequence] = last.slice(prefix.length).split(".");
         if (lastSlot === undefined || time > lastSlot) return key(time, 0);
@@ -2477,7 +2382,7 @@ export class AgentBase {
         instructions: string,
         tools: readonly AnyAgentTool[],
     ): Promise<BaseSession> {
-        const key = sessionConfigKey(instructions, tools);
+        const key = sessionConfigKey(this.#providerId, this.#model, instructions, tools);
         if (this.#session !== undefined && this.#sessionConfig !== key) {
             const session = this.#session;
             this.#session = undefined;
@@ -2491,7 +2396,7 @@ export class AgentBase {
             }
         }
         if (this.#session === undefined) {
-            const provider = this.#providers.get(this.#providerId);
+            const provider = await this.#providers.resolve(this.#providerId, this.#model);
             if (provider === null) {
                 throw new Error(`Provider "${this.#providerId}" is not registered.`);
             }
@@ -2512,12 +2417,6 @@ export class AgentBase {
             // Hooks observe the stream; they never fail a run.
         }
     }
-}
-
-/** Whether a conversation ends on something the model has not answered. */
-function needsInference(messages: readonly SessionMessage[]): boolean {
-    const last = messages[messages.length - 1];
-    return last?.role === "user" || last?.role === "tool" || last?.role === "system";
 }
 
 /**
@@ -2565,8 +2464,15 @@ function toolFailure(callId: string, reason: string): SessionToolResultMessage {
  * sees participate, so re-created tool objects with identical descriptors do not churn the
  * session.
  */
-function sessionConfigKey(instructions: string, tools: readonly AnyAgentTool[]): string {
+function sessionConfigKey(
+    provider: string,
+    model: string | undefined,
+    instructions: string,
+    tools: readonly AnyAgentTool[],
+): string {
     return deterministicStringify([
+        provider,
+        model ?? null,
         instructions,
         tools.map((tool) => [
             tool.name,

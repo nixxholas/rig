@@ -370,6 +370,84 @@ describe("abort and shutdown lifecycle gaps", () => {
         });
     });
 
+    it("waits for old stream cleanup before destroying a session after a model switch", async () => {
+        const provider = new ScriptedProvider([textTurn("second answer")]);
+        const firstRunStarted = deferred();
+        const cleanupStarted = deferred();
+        const releaseCleanup = deferred();
+        const switchObserved = deferred();
+        const firstDestroyStarted = deferred();
+        const originalSession = provider.session.bind(provider);
+        let cleanupActive = false;
+        let destroyOverlappedCleanup = false;
+
+        provider.session = async (id: string, options: SessionOptions): Promise<BaseSession> => {
+            const session = (await originalSession(id, options)) as ScriptedSession;
+            if (provider.sessions.length === 1) {
+                session.run = (runCtx: Context, request: SessionRunRequest): SessionStream => {
+                    session.requestContexts.push(runCtx);
+                    session.requests.push(request);
+                    return oneDoneThenBlockedCleanup(
+                        firstRunStarted,
+                        cleanupStarted,
+                        releaseCleanup,
+                        (active) => {
+                            cleanupActive = active;
+                        },
+                    );
+                };
+                session.destroy = () => {
+                    session.destroyCalls += 1;
+                    session.destroyed = true;
+                    destroyOverlappedCleanup ||= cleanupActive;
+                    firstDestroyStarted.resolve();
+                };
+            }
+            return session;
+        };
+
+        const agent = await AgentBase.create(ctx, {
+            id: "model-switch-stream-cleanup",
+            providers: providersOf(provider),
+            provider: "scripted",
+            model: "anthropic/claude-a",
+            persistence: new InMemoryPersistence(),
+            hooks: {
+                modelChanged: () => {
+                    switchObserved.resolve();
+                },
+            },
+        });
+        await agent.send(ctx, user("first request"), { await: true });
+        await Promise.all([firstRunStarted.promise, cleanupStarted.promise]);
+
+        await agent.send(ctx, user("switch models"), {
+            await: true,
+            model: "anthropic/claude-b",
+        });
+        await switchObserved.promise;
+        const destroyStartedBeforeCleanupRelease = await settlesWhileBlocked(
+            firstDestroyStarted.promise,
+        );
+
+        releaseCleanup.resolve();
+        await firstDestroyStarted.promise;
+        await agent.waitForIdle();
+        await agent.close();
+
+        // A compatible model switch keeps history but still transfers ownership to a fresh,
+        // model-bound session. The old stream must release that session before destruction.
+        expect({
+            destroyStartedBeforeCleanupRelease,
+            destroyOverlappedCleanup,
+            sessions: provider.sessions.length,
+        }).toEqual({
+            destroyStartedBeforeCleanupRelease: false,
+            destroyOverlappedCleanup: false,
+            sessions: 2,
+        });
+    });
+
     it("lets a second abort settle while the next turn waits for prior stream cleanup", async () => {
         const persistence = new InMemoryPersistence();
         const provider = new ScriptedProvider([]);

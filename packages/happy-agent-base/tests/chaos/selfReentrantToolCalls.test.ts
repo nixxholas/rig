@@ -10,15 +10,17 @@ import { describe, expect, it } from "vitest";
 import {
     AgentBase,
     AgentKV,
+    agentKV,
     AgentStorage,
     AgentSystemLocal,
     defineAgentTool,
     type Agent,
     type AgentFeature,
+    type AgentStorageLock,
 } from "../../sources/index.js";
 import { InMemoryPersistence } from "../gym/InMemoryPersistence.js";
 import { ScriptedProvider } from "../gym/ScriptedProvider.js";
-import { providersOf, textTurn, user } from "../gym/fixtures.js";
+import { inMemoryStorageLock, providersOf, textTurn, user } from "../gym/fixtures.js";
 
 const ctx = createRootContext().named("happy-agent-base-self-reentrant-tool-calls");
 
@@ -97,6 +99,7 @@ async function managerHarness(
     provider: ScriptedProvider,
     persistence: InMemoryPersistence,
     execute: (callCtx: Context) => Promise<void>,
+    acquireLock: (ctx: Context) => Promise<AgentStorageLock> = inMemoryStorageLock(),
 ): Promise<{
     readonly manager: AgentSystemLocal;
     readonly managerPersistence: InMemoryPersistence;
@@ -115,6 +118,7 @@ async function managerHarness(
         manager: await AgentSystemLocal.create(
             ctx,
             new AgentStorage({
+                acquireLock,
                 kv: managerKV(managerPersistence),
                 persistence: () => persistence,
             }),
@@ -352,6 +356,102 @@ describe("self-reentrant tool calls", () => {
         expect(result).toEqual({ state: "fulfilled" });
         expect(toolResults(persistence)).toHaveLength(1);
         expect(provider.sessions[0]?.destroyCalls).toBe(1);
+    });
+
+    it("keeps the store locked until a reentrant system close actually finishes", async () => {
+        const persistence = new InMemoryPersistence();
+        const provider = new ScriptedProvider([toolCallTurn(), textTurn("after tool")]);
+        let manager!: AgentSystemLocal;
+        let released = false;
+        let releasedInsideTool = true;
+        let closeResult!: Observed;
+        let toolFinished = (): void => undefined;
+        const toolFinishedPromise = new Promise<void>((resolve) => {
+            toolFinished = resolve;
+        });
+        const harness = await managerHarness(
+            provider,
+            persistence,
+            async (callCtx) => {
+                closeResult = await observeWithin(manager.close(callCtx));
+                releasedInsideTool = released;
+                toolFinished();
+            },
+            () =>
+                Promise.resolve({
+                    release: () => {
+                        released = true;
+                        return Promise.resolve();
+                    },
+                }),
+        );
+        manager = harness.manager;
+        const agent = await manager.create(ctx, {});
+
+        await agent.send(ctx, user("start"), { await: true });
+        await toolFinishedPromise;
+        expect(closeResult).toMatchObject({
+            state: "rejected",
+            message: expect.stringContaining("inside one of its own agents"),
+        });
+        expect(releasedInsideTool).toBe(false);
+
+        await manager.close(ctx);
+        expect(released).toBe(true);
+        expect(provider.sessions[0]?.destroyCalls).toBe(1);
+    });
+
+    it("revokes a detached tool store before the system releases its lock", async () => {
+        const persistence = new InMemoryPersistence();
+        const provider = new ScriptedProvider([toolCallTurn()]);
+        let manager!: AgentSystemLocal;
+        let released = false;
+        let releaseTool = (): void => undefined;
+        let toolStarted = (): void => undefined;
+        let toolFinished = (): void => undefined;
+        const toolStartedPromise = new Promise<void>((resolve) => {
+            toolStarted = resolve;
+        });
+        const toolFinishedPromise = new Promise<void>((resolve) => {
+            toolFinished = resolve;
+        });
+        let writeError: string | undefined;
+        const harness = await managerHarness(
+            provider,
+            persistence,
+            async (callCtx) => {
+                toolStarted();
+                await new Promise<void>((resolve) => {
+                    releaseTool = resolve;
+                });
+                try {
+                    await agentKV(callCtx)?.write(callCtx, "late", true);
+                } catch (error: unknown) {
+                    writeError = error instanceof Error ? error.message : String(error);
+                } finally {
+                    toolFinished();
+                }
+            },
+            () =>
+                Promise.resolve({
+                    release: () => {
+                        released = true;
+                        return Promise.resolve();
+                    },
+                }),
+        );
+        manager = harness.manager;
+        const agent = await manager.create(ctx, {});
+
+        await agent.send(ctx, user("start"), { await: true });
+        await toolStartedPromise;
+        await manager.close(ctx);
+        expect(released).toBe(true);
+
+        releaseTool();
+        await toolFinishedPromise;
+        expect(writeError).toContain("context belongs to has ended");
+        expect([...persistence.values.keys()].some((key) => key.endsWith(".late"))).toBe(false);
     });
 
     it("lets a tool resolve its own manager-owned agent without waiting on manager state", async () => {

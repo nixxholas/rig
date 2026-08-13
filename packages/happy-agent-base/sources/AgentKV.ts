@@ -117,15 +117,6 @@ export class AgentKV {
     }
 
     /**
-     * Claim a key: writes only when it is absent, and answers whether this caller claimed it.
-     * Two callers racing for one key cannot both be told they wrote it.
-     */
-    async writeIfAbsent(ctx: Context, key: string, value: unknown): Promise<boolean> {
-        assertLive(ctx);
-        return await this.#persistence.writeValueIfAbsent(ctx, `${this.prefix}${key}`, value);
-    }
-
-    /**
      * Remove every entry in this scope, including the ones its narrower scopes wrote. This is how
      * a store whose lifetime has ended is disposed of — the run store when the agent settles — so
      * it runs as one operation of the underlying store and joins a transaction like any other

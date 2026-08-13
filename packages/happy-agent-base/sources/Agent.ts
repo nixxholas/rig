@@ -112,6 +112,11 @@ export class Agent<Tool extends AnyAgentTool = AnyAgentTool> {
         return this.#base.id;
     }
 
+    /** Whether durable state says this agent still has work to resume. */
+    get active(): boolean {
+        return this.#base.active;
+    }
+
     /**
      * The feature this agent runs under `name`, when it has one. An individual feature holds the
      * state of the single agent it was built for, so this is how that agent's owner reaches what
@@ -171,6 +176,14 @@ export class Agent<Tool extends AnyAgentTool = AnyAgentTool> {
     /** Finish everything already accepted, then destroy the provider session. */
     async close(): Promise<void> {
         await this.#base.close();
+    }
+
+    /**
+     * Wait for a close that has already been requested to finish, including when its original
+     * caller was inside the agent and could not wait for its own turn.
+     */
+    async waitForClosed(): Promise<void> {
+        await this.#base.waitForClosed();
     }
 }
 

@@ -24,13 +24,6 @@ export type AgentRecord =
     | {
           readonly type: "compaction";
           readonly messages: readonly SessionMessage[];
-          /**
-           * Whether inference should continue from the replacement's tail. A summary is not a
-           * request however it happens to end, but a replacement also preserves messages that
-           * joined after its snapshot. The rewrite is the only place that knows whether its tail
-           * came from the summary or that live suffix.
-           */
-          readonly continuesInference?: boolean;
       };
 
 /**
@@ -67,34 +60,6 @@ export interface AgentPersistence {
     ): Promise<readonly { readonly key: string; readonly value: unknown }[]>;
     /** Store the value under `key`, replacing whatever was there before. */
     writeValue(ctx: Context, key: string, value: unknown): Promise<void>;
-    /**
-     * Write the value only if the key is absent, and report whether this call is the one that
-     * wrote it. The check and the write are a single atomic step, so of two writers racing for
-     * the same key exactly one is told it won — which is what makes a durable identity, such as
-     * an agent's creation record, safe to claim from more than one owner at a time.
-     */
-    writeValueIfAbsent(ctx: Context, key: string, value: unknown): Promise<boolean>;
-    /**
-     * Write the value only if the stored one is still what the caller decided from, and report
-     * whether this call is the one that wrote it. The comparison and the write are a single
-     * atomic step, so a read-decide-write sequence can be made safe against another owner who
-     * decided from the same value: the loser is told it lost and decides again, instead of
-     * overwriting a decision it never saw. Absence is a value like any other, and matches an
-     * expectation of `undefined`.
-     */
-    writeValueIfUnchanged(
-        ctx: Context,
-        key: string,
-        expected: unknown,
-        value: unknown,
-    ): Promise<boolean>;
     /** Remove the entry stored under `key`, if any. */
     deleteValue(ctx: Context, key: string): Promise<void>;
-    /**
-     * Delete the key and report whether this call is the one that removed it. The check and the
-     * deletion are a single atomic step and take effect at once — a transaction that later rolls
-     * back restores the entry. This is how a durable queue entry is claimed: of several owners
-     * over one store racing to consume the same message, exactly one is told it won.
-     */
-    deleteValueIfPresent(ctx: Context, key: string): Promise<boolean>;
 }

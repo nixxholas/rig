@@ -1,21 +1,11 @@
-import type {
-    BaseSession,
-    SessionCompaction,
-    SessionCompactionOptions,
-    SessionEvent,
-    SessionMessage,
-    SessionOptions,
-    SessionToolCallBlock,
-} from "@slopus/happy-providers";
 import { Type } from "@sinclair/typebox";
-import { createRootContext, type Context } from "@steve.kite/stdlib";
+import { createRootContext } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
-import { AgentBase, defineAgentTool, type AgentRecord } from "../../sources/index.js";
-import { transcriptOf } from "../gym/chaosWorld.js";
+import { AgentBase, defineAgentTool } from "../../sources/index.js";
 import { InMemoryPersistence } from "../gym/InMemoryPersistence.js";
-import { ScriptedProvider, ScriptedSession } from "../gym/ScriptedProvider.js";
-import { providersOf, system, textTurn, user } from "../gym/fixtures.js";
+import { ScriptedProvider } from "../gym/ScriptedProvider.js";
+import { providersOf, textTurn, user } from "../gym/fixtures.js";
 
 const ctx = createRootContext().named("happy-agent-base-destructive-history-races");
 
@@ -46,52 +36,6 @@ async function observedWithin(work: Promise<unknown>, milliseconds = 500): Promi
             },
         );
     });
-}
-
-function call(callId: string, name = "work"): SessionToolCallBlock {
-    return {
-        type: "tool_call",
-        callId,
-        name,
-        arguments: "{}",
-    };
-}
-
-function completedCompaction(messages: readonly SessionMessage[]): SessionCompaction {
-    return {
-        status: "completed",
-        preservedMessages: [],
-        usage: {
-            input: 10,
-            output: 2,
-            cacheRead: 0,
-            cacheWrite: 0,
-            totalTokens: 12,
-        },
-        context: { instructions: "", messages },
-    };
-}
-
-function installCompaction(
-    provider: ScriptedProvider,
-    result: SessionCompaction,
-    started?: Deferred,
-    release?: Deferred,
-): void {
-    const createSession = provider.session.bind(provider);
-    provider.session = async (id: string, options: SessionOptions): Promise<BaseSession> => {
-        const session = (await createSession(id, options)) as ScriptedSession;
-        session.compact = async (
-            _compactCtx: Context,
-            compactOptions: SessionCompactionOptions,
-        ) => {
-            session.compactions.push(compactOptions);
-            started?.resolve();
-            if (release !== undefined) await release.promise;
-            return result;
-        };
-        return session;
-    };
 }
 
 /**
@@ -174,117 +118,6 @@ describe("consistency across destructive history boundaries", () => {
         // failure record or race a later turn.
         expect(staleMapperTriedToAppend).toBe(false);
         expect(disk.records).toEqual(recordsAtTerminalFailure);
-    });
-
-    it("does not compact stale memory using a fresh durable record count", async () => {
-        const disk = new InMemoryPersistence([
-            { type: "user", message: user("history before both owners") },
-            { type: "block", block: { type: "text", text: "old answer" } },
-        ]);
-        const staleOwnerLoaded = deferred();
-        const releaseStaleOwner = deferred();
-        const compactingProvider = new ScriptedProvider([]);
-        installCompaction(
-            compactingProvider,
-            completedCompaction([system("summary of the old history")]),
-        );
-        const compactingOwner = await AgentBase.create(ctx, {
-            id: "stale-owner-compaction",
-            providers: providersOf(compactingProvider),
-            provider: "scripted",
-            persistence: disk,
-            hooks: {
-                beforeTurn: async (): Promise<undefined> => {
-                    staleOwnerLoaded.resolve();
-                    await releaseStaleOwner.promise;
-                    return undefined;
-                },
-            },
-        });
-        const writingProvider = new ScriptedProvider([textTurn("committed answer")]);
-        const writingOwner = await AgentBase.create(ctx, {
-            id: "stale-owner-compaction",
-            providers: providersOf(writingProvider),
-            provider: "scripted",
-            persistence: disk,
-        });
-
-        const compaction = compactingOwner.compact(ctx, { await: true });
-        expect(await observedWithin(staleOwnerLoaded.promise)).toBe(true);
-        await writingOwner.send(ctx, user("committed before the compaction snapshot count"), {
-            await: true,
-        });
-        await writingOwner.waitForIdle();
-        await writingOwner.close();
-        releaseStaleOwner.resolve();
-        await compaction;
-        await compactingOwner.waitForIdle();
-        await compactingOwner.close();
-
-        // The destructive boundary and the provider snapshot must describe the same durable
-        // prefix. Counting a newer store while summarizing older memory treats the unseen turn
-        // as already summarized and erases it.
-        expect(transcriptOf(disk)).toEqual([
-            system("summary of the old history"),
-            user("committed before the compaction snapshot count"),
-            {
-                role: "assistant",
-                content: [{ type: "text", text: "committed answer" }],
-            },
-        ]);
-    });
-
-    it("preserves response-owed provenance for a consumed user suffix kept by compaction", async () => {
-        const disk = new InMemoryPersistence([
-            { type: "user", message: user("old question") },
-            { type: "block", block: { type: "text", text: "old answer" } },
-        ]);
-        const compactionStarted = deferred();
-        const releaseCompaction = deferred();
-        const compactingProvider = new ScriptedProvider([]);
-        installCompaction(
-            compactingProvider,
-            completedCompaction([system("summary")]),
-            compactionStarted,
-            releaseCompaction,
-        );
-        const compactingOwner = await AgentBase.create(ctx, {
-            id: "compaction-with-owed-suffix",
-            providers: providersOf(compactingProvider),
-            provider: "scripted",
-            persistence: disk,
-        });
-
-        const compaction = compactingOwner.compact(ctx, { await: true });
-        expect(await observedWithin(compactionStarted.promise)).toBe(true);
-        await disk.append(ctx, {
-            type: "user",
-            message: user("consumed while compaction was running"),
-        });
-        releaseCompaction.resolve();
-        await compaction;
-        await compactingOwner.waitForIdle();
-        await compactingOwner.close();
-
-        const recoveryProvider = new ScriptedProvider([textTurn("recovered answer")]);
-        const recovered = await AgentBase.create(ctx, {
-            id: "compaction-with-owed-suffix",
-            providers: providersOf(recoveryProvider),
-            provider: "scripted",
-            persistence: disk,
-        });
-        recovered.start();
-        await recovered.waitForIdle();
-        await recovered.close();
-
-        // The replacement record may end in a user message because it retained a post-snapshot
-        // suffix. That message was consumed and still needs an answer; the record's compaction
-        // type must not erase that provenance at restart.
-        expect(recoveryProvider.sessions.flatMap((session) => session.requests)).toHaveLength(1);
-        expect(transcriptOf(disk).at(-1)).toEqual({
-            role: "assistant",
-            content: [{ type: "text", text: "recovered answer" }],
-        });
     });
 
     it("keeps live and restarted context identical when normal done arrives without text_end", async () => {

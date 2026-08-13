@@ -9,6 +9,7 @@ import {
     currentAgentEnvironment,
     type Agent,
 } from "../../sources/index.js";
+import { inMemoryStorageLock } from "../gym/fixtures.js";
 import { InMemoryPersistence } from "../gym/InMemoryPersistence.js";
 import { loadRealProvider, type RealGymVendor } from "./loadRealProvider.js";
 import { REAL_GYM_FEATURES, realGymModels } from "./realGymFeatures.js";
@@ -64,6 +65,7 @@ export async function createRealGym(
     const agents = await AgentSystemLocal.create(
         ctx,
         new AgentStorage({
+            acquireLock: inMemoryStorageLock(),
             kv: new AgentKV(new InMemoryPersistence(), "agents."),
             persistence: () => persistence,
         }),

@@ -59,14 +59,9 @@ export async function agentBasePendingStateOf(
  * owner starting up needs answered — which identities are worth resuming — and the one it needs
  * again before declaring an identity finished.
  *
- * Two things count. A pending record means a run was under way and has not erased it, either
- * because it is still running somewhere or because it died. A conversation whose last record is
- * a consumed message, a tool result, or a failure note is owed a response whoever is meant to
- * give it, and that outlives any one process — which is what makes it discoverable at all by an
- * owner that has never seen the run.
- *
- * The caller is responsible for holding the store still; a half-applied step of some owner reads
- * as a whole one otherwise.
+ * Two things count. A pending record means a run was under way and has not erased it because the
+ * process died. A conversation whose last record is a consumed message, a tool result, or a
+ * failure note is also owed a response and remains discoverable after a restart.
  */
 export async function agentBaseStoreOwesWork(
     ctx: Context,
@@ -76,8 +71,5 @@ export async function agentBaseStoreOwesWork(
     const records = await persistence.load(ctx);
     const last = records[records.length - 1];
     if (last === undefined) return false;
-    if (last.type === "user" || last.type === "tool" || last.type === "system") return true;
-    // A replacement is not a question in itself, but it keeps the suffix that joined after its
-    // snapshot, and only the rewrite that wrote it knows whether that suffix ends in a request.
-    return last.type === "compaction" && last.continuesInference === true;
+    return last.type === "user" || last.type === "tool" || last.type === "system";
 }
