@@ -30,6 +30,9 @@ export function resolveDockerNetworkPermissions(
     return {
         directEgress: false,
         managedPolicy: {
+            ...(allowedHosts.length === 0 && projectPolicy === undefined
+                ? { allowPrivateAddresses: true }
+                : {}),
             allowedDomains:
                 projectPolicy === undefined
                     ? operationRules

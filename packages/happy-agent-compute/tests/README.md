@@ -206,6 +206,23 @@ Seatbelt intentionally makes the system temporary directory writable, so a sibli
 - An outside write grant applies to only the operation that carries it; the next operation does not
   retain it.
 
+### Unified egress proxy
+
+Run with the supervisor binary built (`cargo +1.96.0 build --manifest-path native/Cargo.toml` in
+`packages/happy-agent-supervisor`), outside any enclosing sandbox:
+
+```sh
+HAPPY_AGENT_COMPUTE_LIVE_TEST=1 pnpm --filter @slopus/happy-agent-compute \
+  exec vitest run tests/live/unifiedEgressProxy.live.test.ts
+```
+
+- The real supervisor binary, given a descriptor connected by `spawn`, reaches a real origin
+  through the loopback HTTP front-end.
+- The same path through the SOCKS5 front-end.
+- A host outside the command's allow list comes back as `403` to the workload and as a recorded
+  denial on the host.
+- A token the proxy does not know stops the command at exit 125 with no workload output.
+
 ## Known unproven or failing claims
 
 1. Docker `noFollow` is not currently atomic. The live swap returned `"secr"` from
@@ -220,3 +237,11 @@ Seatbelt intentionally makes the system temporary directory writable, so a sibli
 5. Old ambient permission-revision races are intentionally not portable. Equivalent callers must
    be tested for immutable operation snapshots and for higher-layer process shutdown on a later
    permission reduction.
+6. The Linux side of the outgoing proxy is proven on arm64 only. The native suite runs green on a
+   real arm64 kernel in a container, which covers the namespace isolation, the loopback front-ends
+   and the seccomp ordering. The amd64 lane still cannot be run under emulation, because QEMU user
+   emulation does not implement `prctl(PR_SET_SECCOMP)`, so the supervisor fails closed there
+   before any front-end is reached. That lane needs a real x86_64 kernel in CI.
+7. The host proxy has only been driven against a macOS supervisor end to end. The frame protocol is
+   architecture independent and is exercised from both sides, but no run has paired the TypeScript
+   proxy with a Linux supervisor in one process tree.

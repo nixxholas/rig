@@ -5,6 +5,7 @@ import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import type { ComputeHostPolicy } from "../ComputeHostPolicy.js";
 import type { ComputePermissionMode } from "../ComputePermissions.js";
 import { createHostPolicyPrivatePaths } from "./impl/createHostPolicyPrivatePaths.js";
+import { createLinuxLocalBindingCommand } from "./impl/createLinuxLocalBindingCommand.js";
 import { findGitWritablePaths } from "./impl/findGitWritablePaths.js";
 import { MANAGED_NETWORK_SOCAT_PREFLIGHT } from "../network/impl/managedNetworkSocatPreflight.js";
 import {
@@ -42,6 +43,7 @@ export async function createLinuxBubblewrapCommand(options: {
     hostPolicy?: ComputeHostPolicy;
     mode: Exclude<ComputePermissionMode, "full_access">;
     mountProc?: boolean;
+    networkAllowLocalBinding?: boolean;
     networkFullAccess?: boolean;
     networkUnixProxySockets?: {
         authenticationToken: string;
@@ -182,6 +184,31 @@ export async function createLinuxBubblewrapCommand(options: {
                       basename(options.networkUnixProxySockets.socks),
                   ),
               };
+    const projectConfigPlaceholders =
+        protectProjectMetadata && options.mode !== "read_only"
+            ? await prepareProjectPolicyPlaceholders(
+                  networkPolicyPaths,
+                  gitExcludePath,
+                  networkPolicyFileNames,
+              )
+            : [];
+    const protectedPaths = allProtectedPaths.filter(
+        (path) =>
+            existsSync(path) &&
+            (!isAtOrBelow(privateTemporaryRoot, path) ||
+                writableRoots.some((root) => isAtOrBelow(root, path))),
+    );
+    const grantedSocketPaths = [...new Set(options.unixSocketPaths ?? [])].filter(
+        (path) => existsSync(path) && !allProtectedPaths.some((root) => isAtOrBelow(root, path)),
+    );
+    const alwaysWritableRoots =
+        options.mode === "read_only"
+            ? []
+            : [...new Set(options.alwaysWritablePaths ?? [])].filter(
+                  (path) =>
+                      existsSync(path) &&
+                      !allProtectedPaths.some((root) => isAtOrBelow(root, path)),
+              );
     const userCommand =
         sandboxNetworkSockets === undefined
             ? requestedCommand
@@ -210,25 +237,20 @@ export async function createLinuxBubblewrapCommand(options: {
                       1080,
                       ...(sandboxNetworkSockets.loopback ?? []).map(({ port }) => port),
                   ]),
-                  requestedCommand,
+                  options.networkAllowLocalBinding === true
+                      ? requestedCommand
+                      : createLinuxLocalBindingCommand({
+                            bwrapPath: options.bwrapPath ?? "bwrap",
+                            command: requestedCommand,
+                            commandCwd,
+                            shell: options.shell,
+                            writablePaths: [
+                                ...writableRoots,
+                                ...grantedSocketPaths,
+                                ...alwaysWritableRoots,
+                            ],
+                        }),
               ].join("\n");
-    const projectConfigPlaceholders =
-        protectProjectMetadata && options.mode !== "read_only"
-            ? await prepareProjectPolicyPlaceholders(
-                  networkPolicyPaths,
-                  gitExcludePath,
-                  networkPolicyFileNames,
-              )
-            : [];
-    const protectedPaths = allProtectedPaths.filter(
-        (path) =>
-            existsSync(path) &&
-            (!isAtOrBelow(privateTemporaryRoot, path) ||
-                writableRoots.some((root) => isAtOrBelow(root, path))),
-    );
-    const grantedSocketPaths = [...new Set(options.unixSocketPaths ?? [])].filter(
-        (path) => existsSync(path) && !allProtectedPaths.some((root) => isAtOrBelow(root, path)),
-    );
     const protectedCreatePaths = [...new Set(protectedCreateCandidates)].filter(
         (path) =>
             !existsSync(path) &&
@@ -273,10 +295,7 @@ export async function createLinuxBubblewrapCommand(options: {
     for (const socketPath of grantedSocketPaths) args.push("--bind", socketPath, socketPath);
     // Caller-owned roots are bound last, after any root covered by a denial was filtered out.
     if (options.mode !== "read_only") {
-        for (const alwaysWritablePath of [...new Set(options.alwaysWritablePaths ?? [])].filter(
-            (path) =>
-                existsSync(path) && !allProtectedPaths.some((root) => isAtOrBelow(root, path)),
-        )) {
+        for (const alwaysWritablePath of alwaysWritableRoots) {
             args.push("--bind", alwaysWritablePath, alwaysWritablePath);
         }
     }
@@ -313,10 +332,13 @@ export async function createLinuxBubblewrapCommand(options: {
         }
     }
 
-    // The network namespace is the whole of the egress policy here: keeping it isolated is what
-    // makes the bridge the only way out, and sharing it is what unrestricted egress means.
+    // Sharing the host network grants both direct egress and host-reachable listeners, so it is
+    // reserved for a permission value that grants both. Every narrower combination keeps the
+    // namespace isolated and, when egress is granted, reaches the managed bridge above.
     args.push("--unshare-user", "--unshare-pid");
-    if (options.networkFullAccess !== true) args.push("--unshare-net");
+    if (options.networkFullAccess !== true || options.networkAllowLocalBinding !== true) {
+        args.push("--unshare-net");
+    }
     args.push(options.mountProc === false ? "--bind" : "--proc", "/proc");
     if (options.mountProc === false) args.push("/proc");
     args.push("--chdir", commandCwd, "--");

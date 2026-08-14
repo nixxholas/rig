@@ -117,6 +117,8 @@ export interface ManagedNetworkRule {
 
 export interface ManagedNetworkPolicy {
     allowLocalBinding?: boolean;
+    /** Allows destinations on loopback, link-local, and private networks. */
+    allowPrivateAddresses?: boolean;
     allowedDomains?: readonly ManagedNetworkRule[];
     allowedLoopbackPorts?: readonly number[];
     deniedDomains?: readonly ManagedNetworkRule[];

@@ -87,11 +87,9 @@ describeLive("live host operating-system sandbox boundary", () => {
         const cwd = join(root, "workspace");
         const output = join(root, "output");
         const protectedDirectory = join(cwd, "protected");
-        await Promise.all([
-            mkdir(cwd),
-            mkdir(output),
-            mkdir(protectedDirectory, { recursive: true }),
-        ]);
+        // The recursive mkdir below also creates cwd, so these cannot race each other for it.
+        await mkdir(cwd);
+        await Promise.all([mkdir(output), mkdir(protectedDirectory)]);
         // Docker and host CI may execute as a different uid from the fixture creator.
         await chmod(output, 0o777);
         const compute = track(createHostCompute({ ctx, cwd }));

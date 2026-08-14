@@ -30,7 +30,8 @@
         "test:live": "HAPPY_AGENT_COMPUTE_LIVE_TEST=1 vitest run tests/live",
         "test:live:docker": "HAPPY_AGENT_COMPUTE_LIVE_TEST=1 vitest run tests/live/dockerBackend.live.test.ts",
         "test:live:host": "HAPPY_AGENT_COMPUTE_LIVE_TEST=1 vitest run tests/live/hostSandbox.live.test.ts",
-        "test:live:just-bash": "HAPPY_AGENT_COMPUTE_LIVE_TEST=1 vitest run tests/live/justBashPermissions.live.test.ts"
+        "test:live:just-bash": "HAPPY_AGENT_COMPUTE_LIVE_TEST=1 vitest run tests/live/justBashPermissions.live.test.ts",
+        "test:live:unified-egress": "HAPPY_AGENT_COMPUTE_LIVE_TEST=1 vitest run tests/live/unifiedEgressProxy.live.test.ts"
     },
     "dependencies": {
         "@anthropic-ai/sandbox-runtime": "^0.0.64",

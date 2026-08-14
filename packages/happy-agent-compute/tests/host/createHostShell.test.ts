@@ -244,6 +244,7 @@ describe("createHostShell commands", () => {
         const processOptions = run.mock.calls[0]?.[1];
         if (process.platform === "linux") {
             expect(startManagedNetwork).toHaveBeenCalledWith({
+                allowPrivateAddresses: true,
                 allowedDomains: [{ domain: "*" }],
             });
             expect(processOptions?.args).toContain("--unshare-net");

@@ -1,4 +1,3 @@
-import { lookup } from "node:dns/promises";
 import {
     createServer,
     request as httpRequest,
@@ -7,18 +6,28 @@ import {
     validateHeaderName,
     validateHeaderValue,
 } from "node:http";
-import { createServer as createTcpServer, isIP } from "node:net";
+import { createServer as createTcpServer } from "node:net";
 import { connect } from "node:net";
 import type { Socket } from "node:net";
 import { PassThrough, type Duplex, type Readable } from "node:stream";
 import { Value } from "@sinclair/typebox/value";
+import {
+    createBoundedEgressResolver,
+    egressResolutionBlockedReason,
+    resolveAnyEgressAddress,
+    resolvePublicEgressAddress,
+} from "./impl/resolveEgressAddress.js";
+import {
+    egressBlockReason,
+    normalizeEgressDomain,
+    validateEgressRules,
+} from "./impl/egressPolicyRules.js";
 import {
     MANAGED_NETWORK_MAX_BODY_BYTES,
     managedNetworkRequestCompletionSchema,
     type ManagedNetworkBlockedRequest,
     type ManagedNetworkPolicy,
     type ManagedNetworkProxyHandle,
-    type ManagedNetworkRule,
     type ManagedNetworkInterceptor,
 } from "./ManagedNetworkPolicy.js";
 
@@ -37,7 +46,7 @@ export async function startManagedNetworkProxy(
         socksPort?: number;
     } = {},
 ): Promise<ManagedNetworkProxyHandle> {
-    validatePolicy(policy);
+    validateEgressRules(policy);
     const sockets = new Set<{ destroy(): void }>();
     const resolveTimeoutMs = options.resolveTimeoutMs ?? DEFAULT_DNS_RESOLUTION_TIMEOUT_MS;
     if (!Number.isSafeInteger(resolveTimeoutMs) || resolveTimeoutMs < 1) {
@@ -48,8 +57,11 @@ export async function startManagedNetworkProxy(
     if (!Number.isSafeInteger(interceptionBodyTimeoutMs) || interceptionBodyTimeoutMs < 1) {
         throw new Error("Plugin interception body timeout must be a positive integer.");
     }
-    const resolveAddress = createBoundedResolver(
-        options.resolveAddress ?? resolvePublicAddress,
+    const resolveAddress = createBoundedEgressResolver(
+        options.resolveAddress ??
+            (policy.allowPrivateAddresses === true
+                ? resolveAnyEgressAddress
+                : resolvePublicEgressAddress),
         resolveTimeoutMs,
     );
     const connectUpstream = options.connectUpstream ?? ((target) => connect(target));
@@ -211,10 +223,10 @@ async function proxySocksConnection(
         }
         const portBytes = await readSocketBytes(client, 2);
         const port = portBytes.readUInt16BE(0);
-        const blockedReason = blockReason(policy, host, port);
+        const blockedReason = egressBlockReason(policy, host, port);
         if (blockedReason !== undefined) {
             recordBlockedRequest({
-                host: normalizeDomain(host),
+                host: normalizeEgressDomain(host),
                 port,
                 protocol: "socks5",
                 reason: blockedReason,
@@ -226,10 +238,10 @@ async function proxySocksConnection(
         try {
             address = await resolveAddressWhileOpen(host, resolveAddress, signal);
         } catch (error) {
-            const reason = resolutionBlockedReason(error);
+            const reason = egressResolutionBlockedReason(error);
             if (reason !== undefined) {
                 recordBlockedRequest({
-                    host: normalizeDomain(host),
+                    host: normalizeEgressDomain(host),
                     port,
                     protocol: "socks5",
                     reason,
@@ -290,10 +302,10 @@ async function proxyConnect(
         client.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
         return;
     }
-    const blockedReason = blockReason(policy, target.host, target.port);
+    const blockedReason = egressBlockReason(policy, target.host, target.port);
     if (blockedReason !== undefined) {
         recordBlockedRequest({
-            host: normalizeDomain(target.host),
+            host: normalizeEgressDomain(target.host),
             port: target.port,
             protocol: "https_connect",
             reason: blockedReason,
@@ -325,7 +337,7 @@ async function proxyConnect(
                     networkInterceptor?.observeTunnel({
                         bytesFromClient,
                         bytesFromServer,
-                        hostname: normalizeDomain(target.host),
+                        hostname: normalizeEgressDomain(target.host),
                         port: target.port,
                         type: "tunnel",
                     });
@@ -349,10 +361,10 @@ async function proxyConnect(
         });
     } catch (error) {
         if (!client.destroyed) {
-            const reason = resolutionBlockedReason(error);
+            const reason = egressResolutionBlockedReason(error);
             if (reason !== undefined) {
                 recordBlockedRequest({
-                    host: normalizeDomain(target.host),
+                    host: normalizeEgressDomain(target.host),
                     port: target.port,
                     protocol: "https_connect",
                     reason,
@@ -388,10 +400,10 @@ async function proxyHttpRequest(
         return;
     }
     const port = target.port === "" ? 80 : Number(target.port);
-    const blockedReason = blockReason(policy, target.hostname, port);
+    const blockedReason = egressBlockReason(policy, target.hostname, port);
     if (blockedReason !== undefined) {
         recordBlockedRequest({
-            host: normalizeDomain(target.hostname),
+            host: normalizeEgressDomain(target.hostname),
             port,
             protocol: "http",
             reason: blockedReason,
@@ -403,7 +415,7 @@ async function proxyHttpRequest(
     let requestMethod = incoming.method ?? "GET";
     let requestHeaders: IncomingHttpHeaders = { ...incoming.headers };
     let requestBody: Buffer | Readable = incoming;
-    const normalizedHostname = normalizeDomain(target.hostname);
+    const normalizedHostname = normalizeEgressDomain(target.hostname);
     let shouldIntercept = false;
     if (networkInterceptor !== undefined) {
         try {
@@ -465,14 +477,14 @@ async function proxyHttpRequest(
                     }
                     const rewrittenPort =
                         requestTarget.port === "" ? 80 : Number(requestTarget.port);
-                    const rewrittenBlock = blockReason(
+                    const rewrittenBlock = egressBlockReason(
                         policy,
                         requestTarget.hostname,
                         rewrittenPort,
                     );
                     if (rewrittenBlock !== undefined) {
                         recordBlockedRequest({
-                            host: normalizeDomain(requestTarget.hostname),
+                            host: normalizeEgressDomain(requestTarget.hostname),
                             port: rewrittenPort,
                             protocol: "http",
                             reason: rewrittenBlock,
@@ -519,10 +531,10 @@ async function proxyHttpRequest(
         else requestBody.pipe(upstream);
     } catch (error) {
         if (!response.destroyed) {
-            const reason = resolutionBlockedReason(error);
+            const reason = egressResolutionBlockedReason(error);
             if (reason !== undefined) {
                 recordBlockedRequest({
-                    host: normalizeDomain(requestTarget.hostname),
+                    host: normalizeEgressDomain(requestTarget.hostname),
                     port: requestPort,
                     protocol: "http",
                     reason,
@@ -659,103 +671,6 @@ async function resolveAddressWhileOpen(
     return address;
 }
 
-function createBoundedResolver(
-    resolveAddress: (host: string) => Promise<string>,
-    timeoutMs: number,
-): (host: string) => Promise<string> {
-    return async (host) => {
-        let timeout: NodeJS.Timeout | undefined;
-        try {
-            return await Promise.race([
-                Promise.resolve()
-                    .then(() => resolveAddress(host))
-                    .catch((error: unknown) => {
-                        if (error instanceof NonPublicAddressError) throw error;
-                        throw new DnsResolutionError();
-                    }),
-                new Promise<never>((_resolve, reject) => {
-                    timeout = setTimeout(() => reject(new DnsResolutionError()), timeoutMs);
-                    timeout.unref();
-                }),
-            ]);
-        } finally {
-            if (timeout !== undefined) clearTimeout(timeout);
-        }
-    };
-}
-
-function resolutionBlockedReason(
-    error: unknown,
-): "dns_resolution_failed" | "non_public_address" | undefined {
-    if (error instanceof NonPublicAddressError) return "non_public_address";
-    if (error instanceof DnsResolutionError) return "dns_resolution_failed";
-    return undefined;
-}
-
-function blockReason(
-    policy: ManagedNetworkPolicy,
-    host: string,
-    port: number,
-): ManagedNetworkBlockedRequest["reason"] | undefined {
-    const normalizedHost = normalizeDomain(host);
-    if (policy.deniedDomains?.some((rule) => matchesRule(rule, normalizedHost, port)) === true) {
-        return "denied";
-    }
-    return policy.allowedDomains?.some((rule) => matchesRule(rule, normalizedHost, port)) === true
-        ? undefined
-        : "not_allowed";
-}
-
-function matchesRule(rule: ManagedNetworkRule, host: string, port: number): boolean {
-    const pattern = normalizeDomain(rule.domain);
-    const domainMatches =
-        pattern === "*" ||
-        (pattern.startsWith("*.") &&
-            host.length > pattern.length - 1 &&
-            host.endsWith(pattern.slice(1)))
-            ? true
-            : host === pattern;
-    return domainMatches && (rule.ports === undefined || rule.ports.includes(port));
-}
-
-function validatePolicy(policy: ManagedNetworkPolicy): void {
-    for (const rule of [...(policy.allowedDomains ?? []), ...(policy.deniedDomains ?? [])]) {
-        const domain = normalizeDomain(rule.domain);
-        if (
-            domain.length === 0 ||
-            domain.includes("/") ||
-            domain.includes(":") ||
-            (domain.includes("*") &&
-                domain !== "*" &&
-                (!domain.startsWith("*.") || domain.slice(2).includes("*")))
-        ) {
-            throw new Error(`Invalid managed network domain pattern: ${rule.domain}`);
-        }
-        for (const port of rule.ports ?? []) {
-            if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
-                throw new Error(`Invalid managed network port: ${String(port)}`);
-            }
-        }
-    }
-}
-
-async function resolvePublicAddress(host: string): Promise<string> {
-    if (host === "localhost") throw new NonPublicAddressError();
-    const addresses =
-        isIP(host) === 0 ? await lookup(host, { all: true, verbatim: true }) : [{ address: host }];
-    const publicAddress = addresses.find(({ address }) => !isNonPublicAddress(address));
-    if (
-        publicAddress === undefined ||
-        addresses.some(({ address }) => isNonPublicAddress(address))
-    ) {
-        throw new NonPublicAddressError();
-    }
-    return publicAddress.address;
-}
-
-class NonPublicAddressError extends Error {}
-class DnsResolutionError extends Error {}
-
 function writeConnectBlocked(client: Duplex, reason: ManagedNetworkBlockedRequest["reason"]): void {
     const body = blockedMessage(reason);
     client.end(
@@ -797,87 +712,6 @@ function blockedMessage(reason: ManagedNetworkBlockedRequest["reason"]): string 
         return "DNS resolution failed or exceeded the sandbox policy timeout.";
     }
     return "Sandbox policy blocks local or private network addresses.";
-}
-
-export function isNonPublicAddress(address: string): boolean {
-    const addressKind = isIP(address);
-    if (addressKind === 4) return isNonPublicIpv4(parseIpv4Octets(address));
-    if (addressKind !== 6) return true;
-    const words = parseIpv6Words(address);
-    if (words === undefined) return true;
-    if (words.slice(0, 5).every((word) => word === 0) && (words[5] === 0 || words[5] === 0xffff)) {
-        return isNonPublicIpv4([
-            (words[6]! >>> 8) & 0xff,
-            words[6]! & 0xff,
-            (words[7]! >>> 8) & 0xff,
-            words[7]! & 0xff,
-        ]);
-    }
-    return (
-        (words[0]! & 0xfe00) === 0xfc00 ||
-        (words[0]! & 0xffc0) === 0xfe80 ||
-        (words[0]! & 0xff00) === 0xff00
-    );
-}
-
-function isNonPublicIpv4(octets: readonly number[]): boolean {
-    return (
-        octets[0] === 0 ||
-        octets[0] === 10 ||
-        octets[0] === 127 ||
-        (octets[0] === 100 && (octets[1] ?? 0) >= 64 && (octets[1] ?? 0) <= 127) ||
-        (octets[0] === 169 && octets[1] === 254) ||
-        (octets[0] === 172 && (octets[1] ?? 0) >= 16 && (octets[1] ?? 0) <= 31) ||
-        (octets[0] === 192 && octets[1] === 0 && octets[2] === 0) ||
-        (octets[0] === 192 && octets[1] === 0 && octets[2] === 2) ||
-        (octets[0] === 192 && octets[1] === 168) ||
-        (octets[0] === 198 && (octets[1] === 18 || octets[1] === 19)) ||
-        (octets[0] === 198 && octets[1] === 51 && octets[2] === 100) ||
-        (octets[0] === 203 && octets[1] === 0 && octets[2] === 113) ||
-        (octets[0] ?? 0) >= 224
-    );
-}
-
-function parseIpv4Octets(address: string): readonly number[] {
-    return address.split(".").map(Number);
-}
-
-function parseIpv6Words(address: string): readonly number[] | undefined {
-    let normalized = address.toLowerCase();
-    if (normalized.includes(".")) {
-        const separator = normalized.lastIndexOf(":");
-        if (separator === -1) return undefined;
-        const octets = parseIpv4Octets(normalized.slice(separator + 1));
-        if (
-            octets.length !== 4 ||
-            octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)
-        ) {
-            return undefined;
-        }
-        normalized =
-            `${normalized.slice(0, separator)}:` +
-            `${((octets[0]! << 8) | octets[1]!).toString(16)}:` +
-            `${((octets[2]! << 8) | octets[3]!).toString(16)}`;
-    }
-    const halves = normalized.split("::");
-    if (halves.length > 2) return undefined;
-    const left = parseIpv6Half(halves[0] ?? "");
-    const right = halves.length === 1 ? [] : parseIpv6Half(halves[1] ?? "");
-    if (left === undefined || right === undefined) return undefined;
-    if (halves.length === 1) return left.length === 8 ? left : undefined;
-    const omitted = 8 - left.length - right.length;
-    return omitted < 1 ? undefined : [...left, ...Array<number>(omitted).fill(0), ...right];
-}
-
-function parseIpv6Half(value: string): readonly number[] | undefined {
-    if (value === "") return [];
-    const segments = value.split(":");
-    if (segments.some((segment) => !/^[\da-f]{1,4}$/u.test(segment))) return undefined;
-    return segments.map((segment) => Number.parseInt(segment, 16));
-}
-
-function normalizeDomain(domain: string): string {
-    return domain.trim().toLowerCase().replace(/\.$/u, "");
 }
 
 function parseAuthority(

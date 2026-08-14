@@ -82,7 +82,55 @@ describe("createLinuxBubblewrapCommand", () => {
         expect(script).toContain("command-secret");
         expect(script).toContain("TCP-LISTEN:1080,bind=127.0.0.1");
         expect(script).toContain("TCP-LISTEN:443,bind=127.0.0.1");
+        expect(script).toContain("'--seccomp' '3'");
+        expect(script!.indexOf("TCP-LISTEN:3128")).toBeLessThan(script!.indexOf("'--seccomp' '3'"));
         expect(script).toContain("curl https://example.com");
+    });
+
+    it("does not apply the local-listener filter when local binding is granted", async () => {
+        const root = await mkdtemp(join(tmpdir(), "agent-compute-bwrap-network-binding-"));
+        temporaryDirectories.push(root);
+
+        const result = await createLinuxBubblewrapCommand({
+            bwrapPath: "/usr/bin/bwrap",
+            command: "node server.js",
+            commandCwd: root,
+            cwd: root,
+            mode: "workspace_write",
+            networkAllowLocalBinding: true,
+            networkUnixProxySockets: {
+                authenticationToken: "command-secret",
+                http: "/tmp/agent-compute-network/http.sock",
+                socks: "/tmp/agent-compute-network/socks.sock",
+            },
+            shell: "/bin/sh",
+            temporaryDirectory: join(root, "tmp"),
+        });
+
+        expect(result.args.at(-1)).not.toContain("'--seccomp' '3'");
+    });
+
+    it("shares the host network only when direct egress and local binding are both granted", async () => {
+        const root = await mkdtemp(join(tmpdir(), "agent-compute-bwrap-direct-network-"));
+        temporaryDirectories.push(root);
+        const command = {
+            bwrapPath: "/usr/bin/bwrap",
+            command: "true",
+            commandCwd: root,
+            cwd: root,
+            mode: "workspace_write" as const,
+            networkFullAccess: true,
+            shell: "/bin/sh",
+        };
+
+        const bindingWithheld = await createLinuxBubblewrapCommand(command);
+        const bindingGranted = await createLinuxBubblewrapCommand({
+            ...command,
+            networkAllowLocalBinding: true,
+        });
+
+        expect(bindingWithheld.args).toContain("--unshare-net");
+        expect(bindingGranted.args).not.toContain("--unshare-net");
     });
 
     it("does not re-expose the host /tmp after installing the private network tmpfs", async () => {

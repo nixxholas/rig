@@ -13,7 +13,10 @@ describe("resolveDockerNetworkPermissions", () => {
 
         expect(resolved).toEqual({
             directEgress: false,
-            managedPolicy: { allowedDomains: [{ domain: "*" }] },
+            managedPolicy: {
+                allowPrivateAddresses: true,
+                allowedDomains: [{ domain: "*" }],
+            },
         });
     });
 
@@ -25,6 +28,7 @@ describe("resolveDockerNetworkPermissions", () => {
         );
 
         expect(resolved.directEgress).toBe(false);
+        expect(resolved.managedPolicy?.allowPrivateAddresses).toBe(true);
         expect(resolved.managedPolicy?.allowedDomains).toEqual([{ domain: "*" }]);
     });
 

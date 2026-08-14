@@ -9,10 +9,8 @@ import type {
     ManagedNetworkRequestCompletion,
     ManagedNetworkTunnel,
 } from "../../sources/network/ManagedNetworkPolicy.js";
-import {
-    isNonPublicAddress,
-    startManagedNetworkProxy,
-} from "../../sources/network/startManagedNetworkProxy.js";
+import { isNonPublicAddress } from "../../sources/network/impl/resolveEgressAddress.js";
+import { startManagedNetworkProxy } from "../../sources/network/startManagedNetworkProxy.js";
 
 const closeables: Array<{ close(): Promise<void> | void }> = [];
 
@@ -104,6 +102,38 @@ describe("startManagedNetworkProxy", () => {
         const response = await connectThroughProxy(proxy.port, `anything.example:${address.port}`);
 
         expect(response).toContain("200 Connection Established");
+    });
+
+    it("allows private destinations only when unrestricted egress explicitly grants them", async () => {
+        const upstream = createServer((socket) => socket.pipe(socket));
+        await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+        closeables.push({
+            close: () => new Promise<void>((resolve) => upstream.close(() => resolve())),
+        });
+        const address = upstream.address();
+        if (address === null || typeof address === "string") throw new Error("Missing TCP port.");
+        const restricted = await startManagedNetworkProxy({
+            allowedDomains: [{ domain: "*" }],
+        });
+        closeables.push(restricted);
+        const unrestricted = await startManagedNetworkProxy({
+            allowPrivateAddresses: true,
+            allowedDomains: [{ domain: "*" }],
+        });
+        closeables.push(unrestricted);
+
+        const blocked = await connectThroughProxy(
+            restricted.port,
+            `127.0.0.1:${String(address.port)}`,
+        );
+        const allowed = await connectThroughProxy(
+            unrestricted.port,
+            `127.0.0.1:${String(address.port)}`,
+        );
+
+        expect(blocked).toContain("403 Forbidden");
+        expect(blocked).toContain("X-Proxy-Error: blocked-private-address");
+        expect(allowed).toContain("200 Connection Established");
     });
 
     it("gives deny rules precedence over an allow wildcard", async () => {

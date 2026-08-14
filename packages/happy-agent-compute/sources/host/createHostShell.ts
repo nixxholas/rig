@@ -723,6 +723,7 @@ function toManagedNetworkPolicy(permissions: ComputePermissions): ManagedNetwork
         return undefined;
     }
     return {
+        ...(proxyUnrestrictedEgress ? { allowPrivateAddresses: true } : {}),
         allowedDomains: (proxyUnrestrictedEgress ? ["*"] : allowedHosts).map((domain) => ({
             domain,
         })),
