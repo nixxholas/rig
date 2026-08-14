@@ -134,7 +134,7 @@ describeLive("live host operating-system sandbox boundary", () => {
         await mkdir(secretDirectory);
         await writeFile(secret, "host-live-secret");
         const compute = track(createHostCompute({ ctx, cwd }));
-        const permissions = computePermissions("full_access", {
+        const permissions = computePermissions("auto", {
             allowedReadPaths: [secretDirectory],
             deniedReadPaths: [secretDirectory],
         });
@@ -174,10 +174,10 @@ describeLive("live host operating-system sandbox boundary", () => {
         });
     }, 60_000);
 
-    it("blocks a real listener when local binding is withheld even in full access", async () => {
+    it("blocks a real listener when local binding is withheld", async () => {
         const cwd = await makeWorkspace();
         const compute = track(createHostCompute({ ctx, cwd }));
-        const permissions = computePermissions("full_access", {
+        const permissions = computePermissions("auto", {
             network: { egress: true, localBinding: false },
         });
         const command = [

@@ -221,6 +221,15 @@ export async function createMacOsSeatbeltCommand(options: {
             ? [
                   '(allow network-outbound (remote ip "*:*"))',
                   "(allow system-socket (socket-domain AF_INET) (socket-domain AF_INET6))",
+                  // Name resolution on macOS is not an IP conversation. libinfo hands the query to
+                  // mDNSResponder over its Unix socket, so egress without this socket resolves
+                  // nothing and every hostname fails. The literals name that one socket and no
+                  // other, which keeps the reach withheld from the Docker daemon and the agents
+                  // above. /var/run is a symlink, and Seatbelt matches the resolved path, so the
+                  // /private form is the one that takes effect; both are stated so the rule does
+                  // not silently depend on that layout.
+                  '(allow network-outbound (remote unix-socket (literal "/private/var/run/mDNSResponder")))',
+                  '(allow network-outbound (remote unix-socket (literal "/var/run/mDNSResponder")))',
                   `(allow mach-lookup
   (global-name "com.apple.dnssd.service")
   (global-name "com.apple.SystemConfiguration.DNSConfiguration")
@@ -230,7 +239,9 @@ export async function createMacOsSeatbeltCommand(options: {
   (global-name "com.apple.networkd"))`,
               ]
             : []),
-        ...(projectSocketRules.length === 0 && grantedSocketRules.length === 0
+        ...(projectSocketRules.length === 0 &&
+        grantedSocketRules.length === 0 &&
+        options.networkFullAccess !== true
             ? []
             : ["(allow system-socket (socket-domain AF_UNIX))"]),
         ...projectSocketRules,

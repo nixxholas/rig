@@ -31,7 +31,7 @@ describeLive("live just-bash operation-scoped permission boundary", () => {
             allowedReadPaths: ["/outside"],
             allowedWritePaths: ["/output"],
         });
-        const denied = computePermissions("full_access", {
+        const denied = computePermissions("auto", {
             allowedReadPaths: ["/outside/private", "/workspace/private"],
             deniedReadPaths: ["/outside/private", "/workspace/private"],
             allowedWritePaths: ["/output"],

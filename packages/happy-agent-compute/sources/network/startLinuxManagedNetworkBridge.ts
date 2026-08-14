@@ -161,8 +161,11 @@ async function makeSocketConnectableAcrossUserNamespaces(socketPath: string): Pr
             "code" in error &&
             (error.code === "EINVAL" || error.code === "ENOTSUP")
         ) {
-            // Docker Desktop's shared filesystem rejects chmod on Unix sockets but already
-            // permits the cross-container connection. Native Linux filesystems accept chmod.
+            // Docker Desktop's shared filesystem rejects chmod on Unix sockets. It also cannot
+            // carry a connection to a socket the macOS host created — the entry is visible
+            // through file sharing, but connecting to it returns ENOTSUP — so the managed bridge
+            // works on native Linux only. Returning here keeps that a network failure the caller
+            // sees rather than a confusing chmod error during setup.
             return;
         }
         throw error;

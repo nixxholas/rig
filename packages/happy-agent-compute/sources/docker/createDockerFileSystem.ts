@@ -16,8 +16,6 @@ import { runDockerExec } from "./impl/runDockerExec.js";
 const MAX_FILE_READ_BYTES = 32 * 1024 * 1024;
 // Linux NAME_MAX is 255 bytes. One extra byte carries the terminating NUL.
 const MAX_DOCKER_DIRECTORY_ENTRY_BYTES = 256;
-const DOCKER_ARCHIVE_BLOCK_BYTES = 512;
-const MAX_DOCKER_ARCHIVE_METADATA_BYTES = 1024 * 1024;
 
 /**
  * A {@link ComputeFileSystem} whose every call runs inside one container.
@@ -278,81 +276,68 @@ export function createDockerFileSystem(
  * Rejecting link entries is therefore atomic with the read: there is no check syscall after which
  * another process can swap the final component before a later `cat` opens it.
  */
+/**
+ * Reads a file without ever following a symbolic link in its final component.
+ *
+ * The daemon's archive endpoint cannot be used for this. It stats the path, then opens it again to
+ * stream the bytes, so a link swapped in between those two steps is followed and the target's
+ * contents are returned under a regular-file header — the exact disclosure this option exists to
+ * prevent. Checking the path first from here has the same flaw one step further out.
+ *
+ * So the check happens after the open, against the open file itself rather than the name. The
+ * shell opens the path once onto a descriptor; from then on the descriptor is pinned to whatever
+ * inode that single operation resolved, and nothing done to the path afterwards can change it.
+ * `/proc/self/fd` names that inode's own path, so a descriptor whose real path differs from the
+ * requested one was reached through a link, and it is refused before a single byte is read. There
+ * is no window between the two steps because the second one asks about the result of the first.
+ */
 async function readDockerFileWithoutFollowing(
     container: Awaited<ReturnType<DockerEnvironment["container"]>>,
     path: string,
     maxBytes: number,
 ): Promise<Buffer> {
-    const archive = await container.getArchive({ path });
-    try {
-        const bytes = await collectDockerFileArchive(archive, path, maxBytes);
-        return extractDockerFileArchive(bytes, path, maxBytes);
-    } finally {
-        (
-            archive as NodeJS.ReadableStream & {
-                destroy?: () => void;
-            }
-        ).destroy?.();
+    const result = await runDockerExec(
+        container,
+        [
+            "/bin/sh",
+            "-c",
+            [
+                "target=$1",
+                "limit=$2",
+                // The open is a redirection on a group rather than `exec` so that a path which
+                // cannot be opened at all — a directory, a dangling link, a file that vanished —
+                // skips the body and reaches the last line instead of taking the shell down with
+                // a status of its own. stderr is redirected before the open so that a shell which
+                // does treat the failed redirection as fatal cannot leak its own diagnostic in
+                // place of the read.
+                "{",
+                "  opened=$(readlink /proc/self/fd/3) || exit 22",
+                '  [ "$opened" = "$target" ] || exit 23',
+                '  head -c "$limit" <&3',
+                "  exit 0",
+                '} 2>/dev/null 3< "$target"',
+                "exit 21",
+            ].join("\n"),
+            "compute-no-follow-read",
+            path,
+            String(maxBytes + 1),
+        ],
+        {
+            maxOutputBytes: maxBytes + 1,
+        },
+    );
+    if (result.exitCode === 23) {
+        throw new Error(`Could not read '${path}' because it is a symbolic link.`);
     }
-}
-
-async function collectDockerFileArchive(
-    archive: NodeJS.ReadableStream,
-    path: string,
-    maxBytes: number,
-): Promise<Buffer> {
-    const chunks: Buffer[] = [];
-    let length = 0;
-    for await (const chunk of archive) {
-        const bytes = Buffer.from(chunk as Uint8Array);
-        length += bytes.byteLength;
-        if (length > maxBytes + MAX_DOCKER_ARCHIVE_METADATA_BYTES) {
-            throw fileReadLimitError(path, maxBytes);
-        }
-        chunks.push(bytes);
+    if (result.exitCode === null) throw dockerCommandError("read", path, result.stderr);
+    // Every other non-zero status means the path could not be opened as a readable regular file:
+    // the script's own 21 and 22, and whatever status a shell picks for itself when it treats the
+    // failed open as fatal. None of them can carry file contents, so all of them refuse alike.
+    if (result.exitCode !== 0) {
+        throw new Error(`Could not read '${path}' because it is not a regular file.`);
     }
-    return Buffer.concat(chunks, length);
-}
-
-function extractDockerFileArchive(archive: Buffer, path: string, maxBytes: number): Buffer {
-    let offset = 0;
-    while (offset + DOCKER_ARCHIVE_BLOCK_BYTES <= archive.byteLength) {
-        const header = archive.subarray(offset, offset + DOCKER_ARCHIVE_BLOCK_BYTES);
-        if (header.every((byte) => byte === 0)) break;
-        const size = parseDockerArchiveSize(header, path);
-        const contentOffset = offset + DOCKER_ARCHIVE_BLOCK_BYTES;
-        const paddedSize =
-            Math.ceil(size / DOCKER_ARCHIVE_BLOCK_BYTES) * DOCKER_ARCHIVE_BLOCK_BYTES;
-        const nextOffset = contentOffset + paddedSize;
-        if (nextOffset > archive.byteLength) throw invalidDockerArchiveError(path);
-
-        const type = header[156] ?? 0;
-        if (type === 0 || type === 0x30) {
-            if (size > maxBytes) throw fileReadLimitError(path, maxBytes);
-            return Buffer.from(archive.subarray(contentOffset, contentOffset + size));
-        }
-        if (type === 0x31 || type === 0x32) {
-            throw new Error(`Could not read '${path}' because it is a symbolic link.`);
-        }
-        // PAX and GNU long-name records describe the following entry rather than the path itself.
-        if (![0x67, 0x78, 0x4b, 0x4c].includes(type)) {
-            throw new Error(`Could not read '${path}' because it is not a regular file.`);
-        }
-        offset = nextOffset;
-    }
-    throw new Error(`Could not read '${path}' because it is not a regular file.`);
-}
-
-function parseDockerArchiveSize(header: Buffer, path: string): number {
-    const raw = header.subarray(124, 136).toString("ascii").replaceAll("\0", "").trim();
-    if (!/^[0-7]+$/.test(raw)) throw invalidDockerArchiveError(path);
-    const size = Number.parseInt(raw, 8);
-    if (!Number.isSafeInteger(size) || size < 0) throw invalidDockerArchiveError(path);
-    return size;
-}
-
-function invalidDockerArchiveError(path: string): Error {
-    return new Error(`Docker returned an invalid archive while reading '${path}'.`);
+    if (result.stdout.length > maxBytes) throw fileReadLimitError(path, maxBytes);
+    return result.stdout;
 }
 
 function parseDockerLstat(output: Buffer, path: string): ComputeFileStat {

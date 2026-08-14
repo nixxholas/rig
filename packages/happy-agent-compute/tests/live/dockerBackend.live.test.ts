@@ -13,6 +13,7 @@ import { createDockerCompute } from "../../sources/docker/createDockerCompute.js
 
 const LIVE = process.env.HAPPY_AGENT_COMPUTE_LIVE_TEST === "1";
 const describeLive = LIVE ? describe : describe.skip;
+const itOnNativeLinux = process.platform === "linux" ? it : it.skip;
 const image = process.env.HAPPY_AGENT_COMPUTE_DOCKER_IMAGE ?? "rig-gym:local";
 const docker = new Dockerode();
 const ctx: Context = createRootContext().named("happy-agent-compute-docker-live-test");
@@ -146,40 +147,47 @@ describeLive("live Docker compute boundary", () => {
         );
     }, 60_000);
 
-    it("allows and denies real egress through the managed proxy bridge", async () => {
-        const { compute } = await managedCompute();
-        const request = proxyRequestCommand("example.com");
-        const allowed = await compute.shell.run({
-            command: request,
-            permissions: computePermissions("workspace_write", {
-                network: {
-                    egress: true,
-                    allowedHosts: ["example.com"],
-                    localBinding: false,
-                },
-            }),
-            timeoutMs: 20_000,
-        });
-        expect(allowed.exitCode, JSON.stringify(allowed)).toBe(0);
-        expect(allowed.stdout).toMatch(/^status:[1-5]\d\d$/mu);
-        expect(allowed.stderr).not.toContain("was denied by Rig's sandbox network policy");
+    // The managed bridge reaches the host proxy through a bind-mounted Unix socket. Docker Desktop
+    // shows the macOS host's socket inside the container but cannot carry a connection to it, so
+    // this case proves nothing there and is left to the native-Linux lane that the release runs.
+    itOnNativeLinux(
+        "allows and denies real egress through the managed proxy bridge",
+        async () => {
+            const { compute } = await managedCompute();
+            const request = proxyRequestCommand("example.com");
+            const allowed = await compute.shell.run({
+                command: request,
+                permissions: computePermissions("workspace_write", {
+                    network: {
+                        egress: true,
+                        allowedHosts: ["example.com"],
+                        localBinding: false,
+                    },
+                }),
+                timeoutMs: 20_000,
+            });
+            expect(allowed.exitCode, JSON.stringify(allowed)).toBe(0);
+            expect(allowed.stdout).toMatch(/^status:[1-5]\d\d$/mu);
+            expect(allowed.stderr).not.toContain("was denied by Rig's sandbox network policy");
 
-        const denied = await compute.shell.run({
-            command: request,
-            permissions: computePermissions("workspace_write", {
-                network: {
-                    egress: true,
-                    allowedHosts: ["example.org"],
-                    localBinding: false,
-                },
-            }),
-            timeoutMs: 20_000,
-        });
-        expect(denied.exitCode, JSON.stringify(denied)).not.toBe(0);
-        expect(denied.stderr).toContain(
-            "Network access to example.com:443 was denied by Rig's sandbox network policy",
-        );
-    }, 90_000);
+            const denied = await compute.shell.run({
+                command: request,
+                permissions: computePermissions("workspace_write", {
+                    network: {
+                        egress: true,
+                        allowedHosts: ["example.org"],
+                        localBinding: false,
+                    },
+                }),
+                timeoutMs: 20_000,
+            });
+            expect(denied.exitCode, JSON.stringify(denied)).not.toBe(0);
+            expect(denied.stderr).toContain(
+                "Network access to example.com:443 was denied by Rig's sandbox network policy",
+            );
+        },
+        90_000,
+    );
 
     it("marks a timed-out session without killing the container process", async () => {
         const { compute } = await managedCompute();

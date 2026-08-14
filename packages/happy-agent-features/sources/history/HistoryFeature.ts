@@ -1,11 +1,11 @@
 import type {
     AgentBaseInference,
-    AgentBaseToolExecution,
+    AgentBasePersistedEvent,
+    AgentBaseToolOutcome,
     AgentFeature,
     AgentFeatureScope,
     AnyAgentTool,
 } from "@slopus/happy-agent-base";
-import type { SessionEvent } from "@slopus/happy-providers";
 import type { Context } from "@steve.kite/stdlib";
 
 import type { HistoryBlock, HistoryMessage } from "./HistoryMessage.js";
@@ -35,8 +35,9 @@ const DEFAULT_TOOL_OUTPUT_LIMIT = 16_000;
  * loses none of its history.
  *
  * The feature writes as the agent works — every completed assistant response, every tool result,
- * every failed inference — and never lets that writing decide anything: a store that is slow or
- * broken loses the record, not the run. What it cannot see, it is told: a user message belongs to
+ * every failed inference — from inside the transactions that commit that work, so the record and
+ * the thing recorded become durable together. It never lets that writing decide anything: a store
+ * that is slow or broken loses the record, not the run. What it cannot see, it is told: a user message belongs to
  * whoever sent it, so the host records those with `record`.
  *
  * Reading is the `read_agent_history` tool for the model, and `read` for everyone else, both
@@ -49,8 +50,8 @@ export class HistoryFeature implements AgentFeature {
     readonly #store: HistoryStore;
     /** How much of a tool's output is worth recording. */
     readonly #toolOutputLimit: number;
-    /** What the response in progress has produced so far, per agent. */
-    readonly #pending = new Map<string, PendingResponse>();
+    /** Blocks of the response in progress, per agent, waiting for it to complete. */
+    readonly #pending = new Map<string, HistoryBlock[]>();
 
     constructor(options: HistoryFeatureOptions) {
         this.#store = options.store;
@@ -83,52 +84,33 @@ export class HistoryFeature implements AgentFeature {
     ];
 
     /**
-     * Follow the response as it streams, keeping each completed block.
+     * Keep each completed block of the response in progress.
      *
-     * Observation only: this runs on the event path the agent is answering on, so it accumulates
-     * in memory and writes nothing. What it collects becomes one message when the response ends.
+     * The event runs inside the transaction that appends the block to the agent's own durable
+     * state, so what is collected here is exactly what the agent kept: a block whose commit is
+     * rolled back is never recorded. Collecting is all this does — it writes nothing, because a
+     * failure here would roll that commit back.
      */
-    readonly onEvent = (_ctx: Context, scope: AgentFeatureScope, event: SessionEvent): void => {
-        const pending = this.#pendingFor(scope.agent.id);
-        if (event.type === "text_start") pending.text = "";
-        else if (event.type === "text_delta") pending.text += event.delta;
-        else if (event.type === "text_end") {
-            if (pending.text.length > 0) pending.blocks.push({ type: "text", text: pending.text });
-            pending.text = "";
-        } else if (event.type === "reasoning_start") pending.reasoning = "";
-        else if (event.type === "reasoning_delta") pending.reasoning += event.delta;
-        else if (event.type === "reasoning_end") {
-            // A provider that signs or encrypts its reasoning exposes none of it. That the model
-            // thought is worth recording; pretending to know what it thought is not.
-            pending.blocks.push(
-                pending.reasoning.length > 0
-                    ? { type: "thinking", thinking: pending.reasoning }
-                    : { type: "thinking", thinking: "", redacted: true },
-            );
-            pending.reasoning = "";
-        } else if (event.type === "toolcall_end") {
-            pending.blocks.push({
-                type: "tool_call",
-                callId: event.callId,
-                name: pending.names.get(event.callId) ?? event.callId,
-                arguments: parseArguments(event.arguments),
-            });
-            pending.names.delete(event.callId);
-        } else if (event.type === "toolcall_start") {
-            pending.names.set(event.callId, event.name);
-        }
+    readonly onEventTransact = (
+        _ctx: Context,
+        scope: AgentFeatureScope,
+        event: AgentBasePersistedEvent,
+    ): void => {
+        this.#pendingFor(scope.agent.id).push(toHistoryBlock(event));
     };
 
     /**
      * Write the finished response as one message, and the failure as one of its own when the
-     * response failed. A response that produced nothing records nothing.
+     * response failed. Both land in the transaction that commits the inference, so the record and
+     * the thing recorded become durable together. A response that produced nothing records
+     * nothing, and a store that refuses costs the record rather than the run.
      */
-    readonly afterInference = async (
+    readonly afterInferenceTransact = async (
         ctx: Context,
         scope: AgentFeatureScope,
         inference: AgentBaseInference,
     ): Promise<void> => {
-        const pending = this.#pending.get(scope.agent.id);
+        const blocks = this.#pending.get(scope.agent.id) ?? [];
         this.#pending.delete(scope.agent.id);
         const attribution = {
             at: Date.now(),
@@ -136,8 +118,8 @@ export class HistoryFeature implements AgentFeature {
             provider: scope.agent.provider,
         };
         const messages: HistoryMessage[] = [];
-        if (pending !== undefined && pending.blocks.length > 0) {
-            messages.push({ role: "assistant", blocks: pending.blocks, ...attribution });
+        if (blocks.length > 0) {
+            messages.push({ role: "assistant", blocks, ...attribution });
         }
         if (inference.errorMessage !== undefined) {
             messages.push({
@@ -155,49 +137,15 @@ export class HistoryFeature implements AgentFeature {
     };
 
     /**
-     * Record what a tool answered, once it has answered.
-     *
-     * Recording is deliberately outside the call's own success: this hook decides whether the
-     * tool ran, so a store that is slow or broken must not turn a completed tool into a failed
-     * one. The result reaches the model either way.
+     * Record what a call answered, whether the tool produced it, a hook did, or a failure did.
+     * The model has already been answered by this point, so a store that is slow or broken costs
+     * the record and nothing else.
      */
-    readonly aroundToolExecution = async (
+    readonly afterToolCall = async (
         ctx: Context,
         scope: AgentFeatureScope,
-        execution: AgentBaseToolExecution,
-    ): Promise<unknown> => {
-        try {
-            const result = await execution.execute();
-            await this.#recordToolResult(ctx, scope, execution, result, false);
-            return result;
-        } catch (error) {
-            await this.#recordToolResult(ctx, scope, execution, describeError(error), true);
-            throw error;
-        }
-    };
-
-    /** What this agent's response has produced so far, started if it has produced nothing. */
-    #pendingFor(agentId: string): PendingResponse {
-        const existing = this.#pending.get(agentId);
-        if (existing !== undefined) return existing;
-        const created: PendingResponse = {
-            blocks: [],
-            names: new Map(),
-            reasoning: "",
-            text: "",
-        };
-        this.#pending.set(agentId, created);
-        return created;
-    }
-
-    /** Append one tool result, swallowing whatever the store thinks of it. */
-    async #recordToolResult(
-        ctx: Context,
-        scope: AgentFeatureScope,
-        execution: AgentBaseToolExecution,
-        result: unknown,
-        isError: boolean,
-    ): Promise<void> {
+        outcome: AgentBaseToolOutcome,
+    ): Promise<void> => {
         try {
             await this.#store.append(ctx, scope.agent.id, [
                 {
@@ -205,10 +153,10 @@ export class HistoryFeature implements AgentFeature {
                     blocks: [
                         {
                             type: "tool_result",
-                            callId: execution.callId,
-                            toolName: execution.tool.name,
-                            output: this.#renderToolOutput(execution, result, isError),
-                            ...(isError ? { isError: true } : {}),
+                            callId: outcome.callId,
+                            toolName: outcome.tool.name,
+                            output: this.#renderToolOutput(outcome),
+                            ...(outcome.isError ? { isError: true } : {}),
                         },
                     ],
                     at: Date.now(),
@@ -217,31 +165,48 @@ export class HistoryFeature implements AgentFeature {
         } catch {
             // History is a record of the run, never a condition of it.
         }
+    };
+
+    /** The blocks this agent's response has finished so far, started when it is the first. */
+    #pendingFor(agentId: string): HistoryBlock[] {
+        const existing = this.#pending.get(agentId);
+        if (existing !== undefined) return existing;
+        const created: HistoryBlock[] = [];
+        this.#pending.set(agentId, created);
+        return created;
     }
 
-    /** What the tool answered, as the bounded text a reader can make sense of. */
-    #renderToolOutput(
-        execution: AgentBaseToolExecution,
-        result: unknown,
-        isError: boolean,
-    ): string {
-        const text = isError ? String(result) : renderResult(execution.tool, result);
+    /** What the call answered, as the bounded text a reader can make sense of. */
+    #renderToolOutput(outcome: AgentBaseToolOutcome): string {
+        // What the model was told is what a reader of the history is looking at too, so the
+        // record does not re-render the structured result into something the run never said.
+        const text = outcome.content
+            .map((block) =>
+                block.type === "text" ? block.text : `[${block.type} output: ${block.mimeType}]`,
+            )
+            .join("\n");
         return text.length <= this.#toolOutputLimit
             ? text
             : `${text.slice(0, this.#toolOutputLimit)}\n...[truncated ${text.length - this.#toolOutputLimit} chars]`;
     }
 }
 
-/** One response as it streams: the blocks it has finished, and the one it is still writing. */
-interface PendingResponse {
-    /** Blocks completed so far, in the order the model produced them. */
-    readonly blocks: HistoryBlock[];
-    /** The names of tool calls that have started, until their arguments arrive. */
-    readonly names: Map<string, string>;
-    /** Reasoning accumulated for the block being written. */
-    reasoning: string;
-    /** Text accumulated for the block being written. */
-    text: string;
+/** The block a persisted event carries. */
+function toHistoryBlock(event: AgentBasePersistedEvent): HistoryBlock {
+    if (event.type === "text_end") return { type: "text", text: event.block.text };
+    if (event.type === "reasoning_end") {
+        // A provider that signs or encrypts its reasoning exposes none of it. That the model
+        // thought is worth recording; pretending to know what it thought is not.
+        return event.block.text === undefined
+            ? { type: "thinking", thinking: "", redacted: true }
+            : { type: "thinking", thinking: event.block.text };
+    }
+    return {
+        type: "tool_call",
+        callId: event.block.callId,
+        name: event.block.name,
+        arguments: parseArguments(event.block.arguments),
+    };
 }
 
 /** The call's arguments as data when they parse, and as the raw text when they do not. */
@@ -251,32 +216,4 @@ function parseArguments(value: string): unknown {
     } catch {
         return value;
     }
-}
-
-/** What the model was shown for this result, as text. */
-function renderResult(tool: AnyAgentTool, result: unknown): string {
-    try {
-        return tool
-            .toLLM(result)
-            .map((block) =>
-                block.type === "text" ? block.text : `[${block.type} output: ${block.mimeType}]`,
-            )
-            .join("\n");
-    } catch {
-        return stringify(result);
-    }
-}
-
-/** A structured value as text, however it resists. */
-function stringify(value: unknown): string {
-    try {
-        return JSON.stringify(value) ?? String(value);
-    } catch {
-        return String(value);
-    }
-}
-
-/** What went wrong, in the words the failure used. */
-function describeError(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
 }

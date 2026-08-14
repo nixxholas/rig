@@ -87,3 +87,70 @@ the new model to go and read what it can no longer see. Pass `history` — a `Hi
 the notice also carries an overview and both ends of the erased conversation, bounded, so the new
 model starts by reading what happened rather than only being told that something did. A compatible
 switch keeps the history and produces no notice.
+
+## Compute
+
+A machine to work on, as ten tools over one compute: `read_file`, `write_file`, `edit_file`,
+`list_directory`, `find_files`, `search_files`, `run_command`, `read_command_output`,
+`send_command_input`, and `stop_command`. They are common Rig tools rather than any vendor's, so
+every model receives exactly these, under these names, with these arguments.
+
+```ts
+const compute = new ComputeFeature({ compute: hostCompute });
+const agent = await Agent.create(ctx, { ...options, features: [compute] });
+```
+
+Two behaviours are worth knowing before using it. Reading a file is what earns the right to change
+it: each agent's reads live in that agent's own store, and a write or an edit to a file it never
+read — or read before somebody else changed it — is refused rather than quietly discarding that
+work. And a command that outlives its wait is not killed: it goes on running with an ID the model
+comes back to, which is what lets a dev server started in one turn still be serving in the next.
+Every read of such a command returns only what arrived since the last one.
+
+The compute is the host's, and the feature never disposes of it. Commands left running belong to
+the compute, and disposing that compute is what ends them. For the person watching, the feature
+exposes `runningCommands`, `readCommand` — which looks without taking output the model has not been
+given yet — and `stopCommand`.
+
+What the feature asks of a compute is declared here as a structural interface rather than imported,
+so this package does not depend on `@slopus/happy-agent-compute`: a real compute satisfies it with
+nothing to adapt, and so does anything else answering the same calls.
+
+## Permissions
+
+The mode an agent runs in, enforced. `@slopus/happy-agent-base` carries the mode — `read_only`,
+`workspace_write`, `auto`, `full_access` — on every context and makes its changes durable, but it
+enforces nothing, because it cannot know what a tool touches. This feature is what turns the mode
+into behaviour.
+
+```ts
+const permissions = new PermissionsFeature({ reviewer });
+const agent = await Agent.create(ctx, { ...options, features: [permissions] });
+await agent.steer(
+    ctx,
+    { role: "user", content: [{ type: "text", text: permissionModeChangeNotice("read_only") }] },
+    { permissionMode: "read_only" },
+);
+```
+
+Every tool call is decided from what the tool itself declares. A tool that says it cannot be
+contained by the sandbox is unavailable in Read only and Workspace write, and is refused without a
+review, since there is nothing to review. Outside Auto nothing is reviewed and nothing is elevated:
+the mode simply travels on the context and the tools that act on the machine obey it. In Auto, a
+call the tool says needs reviewing goes to the reviewer, and an allowed call runs under Full access
+only when the tool says that invocation cannot be carried out inside the sandbox — for that one
+call, never for the agent.
+
+The two refusals are different on purpose. A denial is a decision, and the model is told it is
+final and must not be routed around. A reviewer that is absent, fails, or takes too long has
+decided nothing, so the action is refused as unproven and the model is told to say what it needs
+rather than to try again another way. Refusal after refusal ends the turn: once the person is out
+of the loop, nothing else will stop it.
+
+The feature decides; it never runs anything and it never owns the mode. Its decision comes back to
+the agent as `beforeToolCall`'s answer — run the call, run it under Full access for its length, or
+answer the model with a refusal — and the agent is what carries it out. The mode itself belongs to
+the agent, so changing it means steering a message that carries it: the change takes effect exactly
+where the conversation shows it did, never in the middle of a response or a running tool batch, and
+`permissionModeChangeNotice` is the text to send with it. The listener is told about every change
+and every decision, transactionally for the change and afterwards for the rest.

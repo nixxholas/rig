@@ -2,7 +2,7 @@ import { createRootContext } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
 import { GoalFeature, type GoalEvent } from "../../sources/index.js";
-import { goalWorld } from "../support/goalWorld.js";
+import { agentWorld } from "../support/agentWorld.js";
 
 const ctx = createRootContext().named("happy-agent-features-goal-operations");
 
@@ -14,7 +14,7 @@ function recordingFeature(): { goals: GoalFeature; events: string[] } {
             ? `${event.type} ${event.agentId}`
             : `${event.type} ${event.agentId} ${event.goal.status}`;
     const goals = new GoalFeature({
-        storage: goalWorld().storage,
+        storage: agentWorld().storage,
         listener: {
             onEventTransactional: (_ctx, event) => {
                 events.push(`transactional: ${describe_(event)}`);
@@ -29,7 +29,7 @@ function recordingFeature(): { goals: GoalFeature; events: string[] } {
 
 describe("goal operations", () => {
     it("sets, reads, and clears the goal of an agent that has never run", async () => {
-        const goals = new GoalFeature({ storage: goalWorld().storage });
+        const goals = new GoalFeature({ storage: agentWorld().storage });
 
         expect(await goals.goal(ctx, "agent-1")).toBeUndefined();
         const goal = await goals.setGoal(ctx, "agent-1", "  ship the thing  ");
@@ -47,7 +47,7 @@ describe("goal operations", () => {
     });
 
     it("keeps each agent's goal to itself", async () => {
-        const goals = new GoalFeature({ storage: goalWorld().storage });
+        const goals = new GoalFeature({ storage: agentWorld().storage });
 
         await goals.setGoal(ctx, "agent-1", "ship the thing");
 
@@ -55,14 +55,14 @@ describe("goal operations", () => {
     });
 
     it("refuses an objective that says nothing", async () => {
-        const goals = new GoalFeature({ storage: goalWorld().storage });
+        const goals = new GoalFeature({ storage: agentWorld().storage });
 
         await expect(goals.setGoal(ctx, "agent-1", "   ")).rejects.toThrow("must not be empty");
         expect(await goals.goal(ctx, "agent-1")).toBeUndefined();
     });
 
     it("refuses to replace a goal that is not finished", async () => {
-        const goals = new GoalFeature({ storage: goalWorld().storage });
+        const goals = new GoalFeature({ storage: agentWorld().storage });
         const first = await goals.setGoal(ctx, "agent-1", "ship the thing");
 
         await expect(goals.setGoal(ctx, "agent-1", "ship something else")).rejects.toThrow(
@@ -85,7 +85,7 @@ describe("goal operations", () => {
     });
 
     it("starts a new goal once the previous one is complete", async () => {
-        const goals = new GoalFeature({ storage: goalWorld().storage });
+        const goals = new GoalFeature({ storage: agentWorld().storage });
         await goals.setGoal(ctx, "agent-1", "ship the thing");
         await goals.changeGoalStatus(ctx, "agent-1", "complete");
 
@@ -112,7 +112,7 @@ describe("goal operations", () => {
     });
 
     it("says so when there is no goal to change", async () => {
-        const goals = new GoalFeature({ storage: goalWorld().storage });
+        const goals = new GoalFeature({ storage: agentWorld().storage });
 
         await expect(goals.changeGoalStatus(ctx, "agent-1", "complete")).rejects.toThrow(
             "does not have a goal",
@@ -120,7 +120,7 @@ describe("goal operations", () => {
     });
 
     it("tells the transactional listener before the change is readable, and the other after", async () => {
-        const world = goalWorld();
+        const world = agentWorld();
         const seen: string[] = [];
         const goals: GoalFeature = new GoalFeature({
             storage: world.storage,
@@ -145,7 +145,7 @@ describe("goal operations", () => {
 
     it("rolls the change back when the transactional listener fails", async () => {
         const goals = new GoalFeature({
-            storage: goalWorld().storage,
+            storage: agentWorld().storage,
             listener: {
                 onEventTransactional: () => {
                     throw new Error("the listener refused");
@@ -160,7 +160,7 @@ describe("goal operations", () => {
     });
 
     it("serializes concurrent changes to one agent's goal", async () => {
-        const goals = new GoalFeature({ storage: goalWorld().storage });
+        const goals = new GoalFeature({ storage: agentWorld().storage });
 
         const [first, second] = await Promise.allSettled([
             goals.setGoal(ctx, "agent-1", "ship the thing"),

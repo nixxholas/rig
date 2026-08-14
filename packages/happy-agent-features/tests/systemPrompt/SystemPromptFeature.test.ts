@@ -16,6 +16,7 @@ function scopeOf(
         effort: undefined,
         id: "agent",
         model,
+        permissionMode: "auto",
         provider: "provider",
         providerKind,
         tier: undefined,

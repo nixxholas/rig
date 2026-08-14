@@ -56,49 +56,29 @@ function environmentFor(container: Dockerode.Container): DockerEnvironment {
 
 const fullAccess = () => computePermissions("full_access");
 
-function archivedFileContainer(
-    type: "file" | "symlink",
-    content: string,
-): {
+/**
+ * A container that answers the no-follow read's exec and records whether the archive endpoint was
+ * reached. `archivePaths` staying empty is the assertion that matters: the daemon's archive cannot
+ * express an atomic no-follow read, so any use of it here would be the bug returning.
+ */
+function noFollowContainer(response: ScriptedExec): {
     archivePaths: string[];
     commands: string[][];
     container: Dockerode.Container;
 } {
     const archivePaths: string[] = [];
-    const commands: string[][] = [];
+    const scripted = scriptedContainer([response]);
     const container = {
-        async exec(options: { Cmd?: string[] }) {
-            commands.push(options.Cmd ?? []);
-            throw new Error("An atomic no-follow read must not execute a check-then-read script.");
-        },
+        ...scripted.container,
+        exec: (options: { AttachStdin?: boolean; Cmd?: string[] }) =>
+            (scripted.container as unknown as { exec: (o: unknown) => unknown }).exec(options),
         async getArchive(options: { path: string }) {
             archivePaths.push(options.path);
-            const stream = new PassThrough();
-            queueMicrotask(() => stream.end(createTarEntry(type, content)));
-            return stream;
+            throw new Error("An atomic no-follow read must not use the archive endpoint.");
         },
+        modem: (scripted.container as unknown as { modem: unknown }).modem,
     } as unknown as Dockerode.Container;
-    return { archivePaths, commands, container };
-}
-
-function createTarEntry(type: "file" | "symlink", content: string): Buffer {
-    const header = Buffer.alloc(512);
-    header.write("result.txt", 0, "utf8");
-    header.write("0000644\0", 100, "ascii");
-    header.write("0000000\0", 108, "ascii");
-    header.write("0000000\0", 116, "ascii");
-    const body = type === "file" ? Buffer.from(content) : Buffer.alloc(0);
-    header.write(`${body.byteLength.toString(8).padStart(11, "0")}\0`, 124, "ascii");
-    header.write("00000000000\0", 136, "ascii");
-    header.fill(0x20, 148, 156);
-    header[156] = type === "file" ? 0x30 : 0x32;
-    if (type === "symlink") header.write("target.txt", 157, "utf8");
-    header.write("ustar\0", 257, "ascii");
-    header.write("00", 263, "ascii");
-    const checksum = header.reduce((sum, byte) => sum + byte, 0);
-    header.write(`${checksum.toString(8).padStart(6, "0")}\0 `, 148, "ascii");
-    const padding = Buffer.alloc((512 - (body.byteLength % 512)) % 512);
-    return Buffer.concat([header, body, padding, Buffer.alloc(1024)]);
+    return { archivePaths, commands: scripted.commands, container };
 }
 
 describe("createDockerFileSystem", () => {
@@ -120,7 +100,7 @@ describe("createDockerFileSystem", () => {
     });
 
     it("reads one regular file without following a symbolic link at its final component", async () => {
-        const { archivePaths, commands, container } = archivedFileContainer("file", "done");
+        const { archivePaths, commands, container } = noFollowContainer({ stdout: "done" });
         const fs = createDockerFileSystem(environmentFor(container));
 
         await expect(
@@ -129,12 +109,14 @@ describe("createDockerFileSystem", () => {
                 noFollow: true,
             }),
         ).resolves.toEqual(Buffer.from("done"));
-        expect(archivePaths).toEqual(["/workspace/result.txt"]);
-        expect(commands).toEqual([]);
+        // The daemon's archive endpoint stats the path and then opens it again, so a link swapped
+        // in between is followed. This read must never reach for it.
+        expect(archivePaths).toEqual([]);
+        expect(commands[0]?.at(-2)).toBe("/workspace/result.txt");
     });
 
     it("refuses a no-follow read of a symbolic link", async () => {
-        const { archivePaths, commands, container } = archivedFileContainer("symlink", "");
+        const { archivePaths, container } = noFollowContainer({ exitCode: 23 });
         const fs = createDockerFileSystem(environmentFor(container));
 
         await expect(
@@ -143,8 +125,35 @@ describe("createDockerFileSystem", () => {
                 noFollow: true,
             }),
         ).rejects.toThrow("symbolic link");
-        expect(archivePaths).toEqual(["/workspace/result.txt"]);
-        expect(commands).toEqual([]);
+        expect(archivePaths).toEqual([]);
+    });
+
+    it("refuses a no-follow read of a path that cannot be opened as a regular file", async () => {
+        const { container } = noFollowContainer({ exitCode: 21 });
+        const fs = createDockerFileSystem(environmentFor(container));
+
+        await expect(
+            fs.readFileBuffer(fullAccess(), "/workspace/result.txt", {
+                maxBytes: 4,
+                noFollow: true,
+            }),
+        ).rejects.toThrow("not a regular file");
+    });
+
+    it("checks the opened descriptor rather than the path it was asked for", async () => {
+        const { commands, container } = noFollowContainer({ stdout: "done" });
+        const fs = createDockerFileSystem(environmentFor(container));
+
+        await fs.readFileBuffer(fullAccess(), "/workspace/result.txt", {
+            maxBytes: 4,
+            noFollow: true,
+        });
+
+        const script = commands[0]?.[2] ?? "";
+        // Asking the path what it is and then opening it leaves a window to swap it. Asking the
+        // descriptor closes that window, so the check must name /proc/self/fd, never the path.
+        expect(script).toContain("readlink /proc/self/fd/3");
+        expect(script).not.toMatch(/\btest -L\b|\[ -L /u);
     });
 
     it("restores modification times with a BusyBox-portable UTC touch command", async () => {

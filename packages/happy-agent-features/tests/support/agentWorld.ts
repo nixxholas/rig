@@ -3,13 +3,13 @@ import { AgentKV, AgentStorage } from "@slopus/happy-agent-base";
 import { InMemoryPersistence } from "./InMemoryPersistence.js";
 
 /** One collection's storage, with each agent's store kept so a test can look inside it. */
-export interface GoalWorld {
+export interface AgentWorld {
     readonly storage: AgentStorage;
     readonly stores: Map<string, InMemoryPersistence>;
 }
 
 /** Storage standing in for a collection's, giving every agent its own isolated store. */
-export function goalWorld(): GoalWorld {
+export function agentWorld(): AgentWorld {
     const stores = new Map<string, InMemoryPersistence>();
     let locked = false;
     const storage = new AgentStorage({

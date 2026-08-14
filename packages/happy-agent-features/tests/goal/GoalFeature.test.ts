@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { GoalFeature } from "../../sources/index.js";
 import { ScriptedProvider, type ScriptedSession } from "../support/ScriptedProvider.js";
 import { providersOf, sharedKV, textTurn, toolCallTurn, user } from "../support/fixtures.js";
-import { goalWorld } from "../support/goalWorld.js";
+import { agentWorld } from "../support/agentWorld.js";
 
 const ctx = createRootContext().named("happy-agent-features-goal");
 
@@ -23,7 +23,7 @@ function requestedTexts(session: ScriptedSession): string[] {
 
 /** One agent of a collection, running that collection's goal feature. */
 async function goalAgent(agentId: string, script: SessionEvent[][]) {
-    const world = goalWorld();
+    const world = agentWorld();
     const provider = new ScriptedProvider(script);
     const goals = new GoalFeature({ storage: world.storage });
     const agent = await Agent.create(ctx, {
@@ -129,7 +129,7 @@ describe("GoalFeature", () => {
     });
 
     it("sets a goal from outside to work by sending the agent into a turn", async () => {
-        const world = goalWorld();
+        const world = agentWorld();
         const provider = new ScriptedProvider([
             toolCallTurn("call-1", "update_goal", JSON.stringify({ status: "complete" })),
             textTurn("done"),

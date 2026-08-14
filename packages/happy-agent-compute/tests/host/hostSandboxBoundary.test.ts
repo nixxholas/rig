@@ -19,26 +19,46 @@ const temporaryDirectories: string[] = [];
  * Bubblewrap on Linux. The test runner is itself sandboxed and cannot always spawn a nested one, so
  * these cases are gated on a probe: when a restricted command cannot even run, the boundary is
  * unproven here rather than broken, and the assertions are skipped with that reason recorded.
+ *
+ * A skipped boundary reads as a pass, which is exactly how an unproven sandbox goes unnoticed. Set
+ * HAPPY_AGENT_COMPUTE_REQUIRE_SANDBOX=1 where the sandbox is expected to work, such as release
+ * validation, and a probe failure fails the suite instead of quietly excusing it.
  */
 let restrictedCommandsRun = false;
+const REQUIRE_SANDBOX = process.env.HAPPY_AGENT_COMPUTE_REQUIRE_SANDBOX === "1";
 
 beforeAll(async () => {
-    if (process.platform !== "darwin" && process.platform !== "linux") return;
+    if (process.platform !== "darwin" && process.platform !== "linux") {
+        if (REQUIRE_SANDBOX) {
+            throw new Error(
+                `HAPPY_AGENT_COMPUTE_REQUIRE_SANDBOX=1 needs macOS or Linux, but this is ${process.platform}.`,
+            );
+        }
+        return;
+    }
     const cwd = await makeWorkspace();
     const compute = createHostCompute({
         ctx,
         cwd,
     });
+    let failure = "the probe command did not run";
     try {
         const probe = await compute.shell.run({
             command: "printf ok",
             permissions: computePermissions("workspace_write"),
         });
         restrictedCommandsRun = probe.exitCode === 0 && probe.stdout === "ok";
-    } catch {
+        failure = `exitCode=${String(probe.exitCode)} stdout=${JSON.stringify(probe.stdout)} stderr=${JSON.stringify(probe.stderr)}`;
+    } catch (error) {
         restrictedCommandsRun = false;
+        failure = error instanceof Error ? error.message : String(error);
     } finally {
         await compute.dispose(ctx);
+    }
+    if (!restrictedCommandsRun && REQUIRE_SANDBOX) {
+        throw new Error(
+            `HAPPY_AGENT_COMPUTE_REQUIRE_SANDBOX=1 was set, but no restricted command could run, so the sandbox boundary is unproven: ${failure}`,
+        );
     }
 });
 
