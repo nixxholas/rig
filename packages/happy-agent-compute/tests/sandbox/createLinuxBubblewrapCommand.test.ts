@@ -434,7 +434,8 @@ describe("createLinuxBubblewrapCommand", () => {
         ).rejects.toThrow("resolves outside its trusted metadata directory");
     });
     it("lets a denied write root beat an exact socket grant", async () => {
-        const root = await mkdtemp(join(tmpdir(), "agent-compute-bwrap-socket-grant-"));
+        // Bubblewrap masks the system temporary directory, so it cannot host this boundary fixture.
+        const root = await mkdtemp(join(import.meta.dirname, ".bwrap-socket-grant-"));
         temporaryDirectories.push(root);
         const cwd = join(root, "project");
         const runtime = join(root, "runtime");
