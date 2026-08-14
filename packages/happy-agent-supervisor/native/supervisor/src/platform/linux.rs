@@ -390,10 +390,20 @@ fn change_mount_read_only_by_attribute(
     Ok(())
 }
 
-/// Bind remount is the pre-5.12 equivalent, and it is not recursive, so the subtree has to be
-/// walked by hand. Every mount under the target must be covered: skipping one would leave a
-/// writable hole exactly where `AT_RECURSIVE` leaves none, so anything that cannot be enumerated
-/// or remounted is an error rather than a mount left alone.
+/// Bind remount is the pre-5.12 equivalent of `mount_setattr`, and it is neither recursive nor
+/// able to name a mount other than by path, so the subtree has to be walked by hand.
+///
+/// Two things make that harder than it sounds, and both were learned from real kernels rather than
+/// from the manual page. Mountinfo lists mounts that the process can no longer reach — the
+/// inherited procfs and its children survive in the list after a private one is mounted over
+/// `/proc` — and mountinfo order is not stacking order, because overmounting `/` does not move a
+/// process whose root is the mount underneath. So the list is treated as a set of candidate paths
+/// and the kernel is asked about each one, rather than the tree being reconstructed from the file.
+///
+/// `EINVAL` from the remount is the kernel saying no mount is rooted at that path, which happens
+/// exactly for the shadowed entries; whatever covers that path is reached at its own path instead.
+/// That one error is skipped. Every other failure, and a requested path that is not a mount root at
+/// all, fails closed.
 fn change_mount_read_only_by_remount(
     path: &Path,
     recursive: bool,
@@ -409,14 +419,11 @@ fn change_mount_read_only_by_remount(
         if !matches {
             continue;
         }
-        // A mount point can appear more than once once the recursive bind of `/` has shadowed the
-        // inherited tree. Path-based remount always lands on the topmost mount, which is the last
-        // one listed, so the later entry is the one whose flags have to be preserved.
         match targets.iter_mut().find(|target| target.path == mount.path) {
-            Some(existing) => {
-                existing.flags = mount.flags;
-                existing.read_only = mount.read_only;
-            }
+            // Duplicate entries for one path are copies of a single mount, or a fresh filesystem
+            // laid over the one it replaces. Taking the union of their restrictions cannot drop a
+            // flag the owning user namespace locked, whichever of them the path resolves to.
+            Some(existing) => existing.flags |= mount.flags,
             None => targets.push(mount),
         }
     }
@@ -429,14 +436,11 @@ fn change_mount_read_only_by_remount(
     }
     targets.sort_by(|left, right| left.path.cmp(&right.path));
     for target in &targets {
-        // A mount already in the requested state needs no syscall, and skipping it is what makes
-        // the walk survive mounts the container runtime pinned read-only, such as sysfs. The end
-        // state is identical to the one `AT_RECURSIVE` produces, so this skips work, not strictness.
-        if target.read_only == read_only {
+        // The live state comes from the kernel, not from mountinfo, because mountinfo may be
+        // describing a mount this process can no longer reach at that path.
+        if live_mount_is_read_only(&target.path)? == read_only {
             continue;
         }
-        // The kernel refuses a bind remount that drops a flag locked by the owning user namespace,
-        // so the per-mount flags read back from mountinfo have to be carried through unchanged.
         let mut flags = libc::MS_REMOUNT | libc::MS_BIND | target.flags;
         if read_only {
             flags |= libc::MS_RDONLY;
@@ -452,10 +456,13 @@ fn change_mount_read_only_by_remount(
             )
         };
         if result != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINVAL) && target.path != path {
+                continue;
+            }
             return Err(std::io::Error::other(format!(
-                "bind remount failed for {}: {}",
-                target.path.display(),
-                std::io::Error::last_os_error()
+                "bind remount failed for {}: {error}",
+                target.path.display()
             ))
             .into());
         }
@@ -463,10 +470,18 @@ fn change_mount_read_only_by_remount(
     Ok(())
 }
 
+fn live_mount_is_read_only(path: &Path) -> SupervisorResult<bool> {
+    let target = c_path(path)?;
+    let mut statistics = unsafe { std::mem::zeroed::<libc::statfs>() };
+    syscall_zero("read live mount flags", unsafe {
+        libc::statfs(target.as_ptr(), &mut statistics)
+    })?;
+    Ok(statistics.f_flags & libc::ST_RDONLY != 0)
+}
+
 struct MountPoint {
     path: PathBuf,
     flags: libc::c_ulong,
-    read_only: bool,
 }
 
 fn read_mount_points() -> SupervisorResult<Vec<MountPoint>> {
@@ -474,8 +489,7 @@ fn read_mount_points() -> SupervisorResult<Vec<MountPoint>> {
     let mut result = Vec::new();
     for line in contents.lines() {
         let mut fields = line.split(' ');
-        // mountinfo is `id parent major:minor root mountPoint options ...`, so the mount point is
-        // the fifth field and the per-mount options the sixth.
+        // mountinfo is `id parent major:minor root mountPoint options ...`.
         let (Some(path), Some(options)) = (fields.nth(4), fields.next()) else {
             return Err(std::io::Error::other(format!(
                 "unreadable /proc/self/mountinfo line: {line}"
@@ -485,7 +499,6 @@ fn read_mount_points() -> SupervisorResult<Vec<MountPoint>> {
         result.push(MountPoint {
             path: unescape_mount_field(path),
             flags: mount_option_flags(options),
-            read_only: options.split(',').any(|option| option == "ro"),
         });
     }
     Ok(result)
