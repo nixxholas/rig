@@ -26,7 +26,6 @@
     "scripts": {
         "build": "node --eval \"import('node:fs/promises').then(({ rm }) => rm('dist', { force: true, recursive: true }))\" && tsc -p tsconfig.build.json",
         "check": "tsc --noEmit",
-        "pretest": "pnpm --filter @slopus/happy-agent-base build",
         "test": "vitest run --passWithNoTests"
     },
     "dependencies": {
@@ -35,13 +34,13 @@
         "@steve.kite/stdlib": "0.0.8"
     },
     "devDependencies": {
-        "@slopus/happy-agent-base": "workspace:*",
+        "@slopus/happy-agent-base": "0.0.5",
         "@types/node": "^24.0.10",
         "typescript": "^7.0.2",
         "vitest": "^3.2.4"
     },
     "peerDependencies": {
-        "@slopus/happy-agent-base": "workspace:*"
+        "@slopus/happy-agent-base": "0.0.5"
     },
     "engines": {
         "node": ">=22.19.0"

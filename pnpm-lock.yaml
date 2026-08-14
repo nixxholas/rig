@@ -144,6 +144,40 @@ importers:
         specifier: ^3.2.4
         version: 3.2.6(@types/node@24.13.2)(jiti@2.7.0)(tsx@4.23.0)(yaml@2.9.0)
 
+  packages/happy-agent-compute:
+    dependencies:
+      '@anthropic-ai/sandbox-runtime':
+        specifier: ^0.0.64
+        version: 0.0.64
+      '@lydell/node-pty':
+        specifier: 1.2.0-beta.12
+        version: 1.2.0-beta.12
+      '@sinclair/typebox':
+        specifier: ^0.34.49
+        version: 0.34.49
+      '@steve.kite/stdlib':
+        specifier: 0.0.8
+        version: 0.0.8
+      dockerode:
+        specifier: ^5.0.1
+        version: 5.0.1
+      just-bash:
+        specifier: ^3.0.2
+        version: 3.0.2
+    devDependencies:
+      '@types/dockerode':
+        specifier: ^4.0.1
+        version: 4.0.1
+      '@types/node':
+        specifier: ^24.0.10
+        version: 24.13.3
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.6(@types/node@24.13.3)(jiti@2.7.0)(tsx@4.23.0)(yaml@2.9.0)
+
   packages/happy-agent-features:
     dependencies:
       '@sinclair/typebox':
@@ -157,8 +191,8 @@ importers:
         version: 0.0.8
     devDependencies:
       '@slopus/happy-agent-base':
-        specifier: workspace:*
-        version: link:../happy-agent-base
+        specifier: 0.0.5
+        version: 0.0.5(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
       '@types/node':
         specifier: ^24.0.10
         version: 24.13.3
@@ -349,6 +383,9 @@ importers:
       '@slopus/ghostty-wasm':
         specifier: 1.3.6
         version: 1.3.6
+      '@slopus/happy-agent-base':
+        specifier: 0.0.5
+        version: 0.0.5(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
       '@slopus/happy-providers':
         specifier: 0.0.7
         version: 0.0.7(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
@@ -389,6 +426,9 @@ importers:
       '@slopus/ghostty-web':
         specifier: workspace:*
         version: link:../ghostty-web
+      '@slopus/happy-agent-compute':
+        specifier: workspace:*
+        version: link:../happy-agent-compute
       '@slopus/rig-execution':
         specifier: workspace:*
         version: link:../rig-execution
@@ -2201,6 +2241,10 @@ packages:
 
   '@slopus/ghostty-wasm@1.3.6':
     resolution: {integrity: sha512-S8KS9VyGgv451D8ZrRoS5vAg1Eqk8dZJWzM28HrjXVmD1B8g3Ec1QsjUWAIVqReuZyZqLFxZfjH6rU0N/f7n2Q==}
+
+  '@slopus/happy-agent-base@0.0.5':
+    resolution: {integrity: sha512-dhBnT/iEykMu4xU440w6W078igRdWtI3xEHxDnoC/rnjhQEXQGglqBUUQtnHlzHZJyf+3v7ASwthKFOEW8KtRg==}
+    engines: {node: '>=22.19.0'}
 
   '@slopus/happy-providers@0.0.7':
     resolution: {integrity: sha512-5IR/BM3IRoz91oEbJ9XMRauTvXQyqZ1hSKaPlpxHJbMGjDaYDrxkcsSLQySbRr2q2FsOWAZUPTjrmpl6b1b8EA==}
@@ -5839,6 +5883,21 @@ snapshots:
   '@sinclair/typebox@0.34.49': {}
 
   '@slopus/ghostty-wasm@1.3.6': {}
+
+  '@slopus/happy-agent-base@0.0.5(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)':
+    dependencies:
+      '@paralleldrive/cuid2': 3.3.0
+      '@sinclair/typebox': 0.34.49
+      '@slopus/happy-providers': 0.0.7(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
+      '@steve.kite/stdlib': 0.0.8
+    transitivePeerDependencies:
+      - '@aws-sdk/credential-provider-node'
+      - '@cfworker/json-schema'
+      - '@smithy/hash-node'
+      - '@smithy/signature-v4'
+      - supports-color
+      - ws
+      - zod
 
   '@slopus/happy-providers@0.0.7(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)':
     dependencies:
