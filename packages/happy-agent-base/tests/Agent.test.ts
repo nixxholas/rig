@@ -115,37 +115,35 @@ describe("Agent", () => {
         await agent.close();
     });
 
-    it("composes tool middleware in feature order without executing downstream work twice", async () => {
+    it("lets each feature amend the call the next one decides about", async () => {
         const provider = new ScriptedProvider([
-            toolCallTurn("call-1", "mutate", "{}"),
+            toolCallTurn("call-1", "mutate", '{"text":"a"}'),
             textTurn("done"),
         ]);
         const order: string[] = [];
         let executions = 0;
         const mutate = defineAgentTool({
             name: "mutate",
-            parameters: Type.Object({}, { additionalProperties: false }),
+            parameters: Type.Object({ text: Type.String() }, { additionalProperties: false }),
             returnType: Type.Object({ value: Type.String() }),
             shouldReviewInAutoMode: () => false,
-            execute: async () => {
+            execute: async (_toolCtx, { text }) => {
                 executions += 1;
-                order.push("tool");
-                return { value: "ok" };
+                order.push(`tool:${text}`);
+                return { value: text };
             },
             toLLM: ({ value }) => [{ type: "text", text: value }],
         });
-        const wrapper = (name: string): AgentFeature =>
+        const amend = (name: string, suffix: string): AgentFeature =>
             feature({
                 name,
-                aroundToolExecution: async (_hookCtx, _scope, execution) => {
-                    order.push(`${name}:before`);
-                    const [first, second] = await Promise.all([
-                        execution.execute(),
-                        execution.execute(),
-                    ]);
-                    expect(second).toBe(first);
-                    order.push(`${name}:after`);
-                    return first;
+                beforeToolCall: (_hookCtx, _scope, call) => {
+                    const { text } = call.arguments as { text: string };
+                    order.push(`${name}:before:${text}`);
+                    return { type: "run", arguments: { text: text + suffix } };
+                },
+                afterToolCall: (_hookCtx, _scope, outcome) => {
+                    order.push(`${name}:after:${(outcome.result as { value: string }).value}`);
                 },
             });
         const agent = await Agent.create(ctx, {
@@ -155,8 +153,8 @@ describe("Agent", () => {
             persistence: new InMemoryPersistence(),
             sharedKV: sharedKV(),
             features: [
-                wrapper("outer"),
-                wrapper("inner"),
+                amend("outer", "b"),
+                amend("inner", "c"),
                 feature({ name: "tools", tools: () => [mutate] }),
             ],
         });
@@ -166,12 +164,78 @@ describe("Agent", () => {
 
         expect(executions).toBe(1);
         expect(order).toEqual([
-            "outer:before",
-            "inner:before",
-            "tool",
-            "inner:after",
-            "outer:after",
+            "outer:before:a",
+            "inner:before:ab",
+            "tool:abc",
+            "outer:after:abc",
+            "inner:after:abc",
         ]);
+        expect(provider.sessions[0]?.requests[1]?.context.messages.at(-1)).toEqual({
+            role: "tool",
+            callId: "call-1",
+            content: [{ type: "text", text: "abc" }],
+        });
+        await agent.close();
+    });
+
+    it("lets a feature answer a call itself, so the tool never runs", async () => {
+        const provider = new ScriptedProvider([
+            toolCallTurn("call-1", "mutate", "{}"),
+            textTurn("done"),
+        ]);
+        let executions = 0;
+        const outcomes: string[] = [];
+        const mutate = defineAgentTool({
+            name: "mutate",
+            parameters: Type.Object({}, { additionalProperties: false }),
+            returnType: Type.Null(),
+            shouldReviewInAutoMode: () => false,
+            execute: async () => {
+                executions += 1;
+                return null;
+            },
+            toLLM: () => [],
+        });
+        const agent = await Agent.create(ctx, {
+            id: "answering-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence: new InMemoryPersistence(),
+            sharedKV: sharedKV(),
+            features: [
+                feature({
+                    name: "refuse",
+                    beforeToolCall: () => ({
+                        type: "answer",
+                        content: [{ type: "text", text: "not allowed" }],
+                        isError: true,
+                    }),
+                }),
+                feature({
+                    name: "later",
+                    beforeToolCall: () => {
+                        throw new Error("a settled call must not reach the next feature");
+                    },
+                    afterToolCall: (_hookCtx, _scope, outcome) => {
+                        // A hook answered the call, so there is no structured result to see.
+                        outcomes.push(`${String(outcome.isError)}:${String("result" in outcome)}`);
+                    },
+                }),
+                feature({ name: "tools", tools: () => [mutate] }),
+            ],
+        });
+
+        await agent.send(ctx, user("mutate"), { await: true });
+        await agent.waitForIdle();
+
+        expect(executions).toBe(0);
+        expect(outcomes).toEqual(["true:false"]);
+        expect(provider.sessions[0]?.requests[1]?.context.messages.at(-1)).toEqual({
+            role: "tool",
+            callId: "call-1",
+            content: [{ type: "text", text: "not allowed" }],
+            isError: true,
+        });
         await agent.close();
     });
 
@@ -576,6 +640,7 @@ describe("Agent", () => {
             model: "gym/small",
             effort: "high",
             tier: "priority",
+            permissionMode: "auto",
         });
         await agent.close();
     });

@@ -11,6 +11,7 @@ import {
     agentEffort,
     agentKV,
     agentModel,
+    agentPermissionMode,
     agentProvider,
     agentRunKV,
     agentServiceTier,
@@ -20,6 +21,7 @@ import {
 import type { AgentBaseHooks, MaybePromise } from "./AgentBaseHooks.js";
 import type { AgentBaseState } from "./AgentBaseState.js";
 import type { AgentFeature, AgentFeatureScope } from "./AgentFeature.js";
+import type { AgentPermissionMode } from "./AgentPermissionMode.js";
 import type { AgentFeatureAction } from "./AgentFeatureAction.js";
 import type { AgentKV } from "./AgentKV.js";
 import type { AnyAgentTool } from "./AgentTool.js";
@@ -218,9 +220,7 @@ function mergeFeatures<Tool extends AnyAgentTool>(
         featureScope(ctx, feature, options, sharedKV);
     const withInstructions = features.filter((feature) => feature.instructions !== undefined);
     const withTools = features.filter((feature) => feature.tools !== undefined);
-    const withToolExecution = features.filter(
-        (feature) => feature.aroundToolExecution !== undefined,
-    );
+    const withBeforeToolCall = features.filter((feature) => feature.beforeToolCall !== undefined);
     const withModelChanged = features.filter((feature) => feature.modelChanged !== undefined);
     const withEvents = features.filter((feature) => feature.onEvent !== undefined);
     // Observing hooks fan out with per-feature isolation: one throwing feature must never
@@ -355,30 +355,63 @@ function mergeFeatures<Tool extends AnyAgentTool>(
                       return tools;
                   },
               }),
-        ...(withToolExecution.length === 0
+        ...spread(
+            "beforeToolCallTransact",
+            chain((feature) => feature.beforeToolCallTransact),
+        ),
+        ...(withBeforeToolCall.length === 0
             ? {}
             : {
-                  // Correctness middleware: the first feature is the outermost wrapper, and a
-                  // failure propagates to the base so it becomes this call's error result.
-                  aroundToolExecution: async (ctx, execution) => {
-                      const invoke = async (index: number): Promise<unknown> => {
-                          const feature = withToolExecution[index];
-                          if (feature === undefined) return await execution.execute();
-                          let continued: Promise<unknown> | undefined;
-                          return await feature.aroundToolExecution?.(
+                  // Correctness hook: features decide in array order, each seeing the call as the
+                  // one before it left it, and a failure propagates to the base so it becomes
+                  // this call's error result.
+                  beforeToolCall: async (ctx, call) => {
+                      let current = call;
+                      // Nothing carries a mode into the next feature's view of the call, so the
+                      // last feature to name one is the one that meant it about the run itself.
+                      let permissionMode: AgentPermissionMode | undefined;
+                      for (const feature of withBeforeToolCall) {
+                          const decision = await feature.beforeToolCall?.(
                               featureCtx(ctx, feature),
                               scopeOf(ctx, feature),
-                              {
-                                  ...execution,
-                                  // A wrapper may inspect the continuation from more than one
-                                  // code path; every call joins the same downstream execution.
-                                  execute: () => (continued ??= invoke(index + 1)),
-                              },
+                              current,
                           );
+                          if (decision === undefined) continue;
+                          // An answer settles the call: there is no longer a run for the
+                          // features after it to have an opinion about.
+                          if (decision.type === "answer") return decision;
+                          current = {
+                              callId: current.callId,
+                              tool: decision.tool ?? current.tool,
+                              arguments: decision.arguments ?? current.arguments,
+                          };
+                          permissionMode = decision.permissionMode ?? permissionMode;
+                      }
+                      if (
+                          current.tool === call.tool &&
+                          current.arguments === call.arguments &&
+                          permissionMode === undefined
+                      ) {
+                          return undefined;
+                      }
+                      return {
+                          type: "run",
+                          ...(current.tool === call.tool ? {} : { tool: current.tool }),
+                          ...(current.arguments === call.arguments
+                              ? {}
+                              : { arguments: current.arguments }),
+                          ...(permissionMode === undefined ? {} : { permissionMode }),
                       };
-                      return await invoke(0);
                   },
               }),
+        ...spread(
+            "afterToolCall",
+            fanOut((feature) => feature.afterToolCall),
+        ),
+        ...spread(
+            "afterToolCallTransact",
+            chain((feature) => feature.afterToolCallTransact),
+        ),
         ...(withModelChanged.length === 0
             ? {}
             : {
@@ -409,6 +442,22 @@ function mergeFeatures<Tool extends AnyAgentTool>(
                       return injected;
                   },
               }),
+        ...spread(
+            "messageAcceptedTransact",
+            chain((feature) => feature.messageAcceptedTransact),
+        ),
+        ...spread(
+            "messageAccepted",
+            fanOut((feature) => feature.messageAccepted),
+        ),
+        ...spread(
+            "permissionModeChangedTransact",
+            chain((feature) => feature.permissionModeChangedTransact),
+        ),
+        ...spread(
+            "permissionModeChanged",
+            fanOut((feature) => feature.permissionModeChanged),
+        ),
         ...spread(
             "beforeAgentLoopTransact",
             chain((feature) => feature.beforeAgentLoopTransact),
@@ -510,6 +559,7 @@ function featureScope<Tool extends AnyAgentTool>(
             model: agentModel(ctx) ?? options.model,
             effort: agentEffort(ctx) ?? options.effort,
             tier: agentServiceTier(ctx) ?? options.serviceTier,
+            permissionMode: agentPermissionMode(ctx),
         },
         kv: kv.scoped("feature", feature.name),
         sharedKV: sharedKV.scoped(feature.name),

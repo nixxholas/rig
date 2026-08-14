@@ -1,15 +1,19 @@
 import type {
     SessionDoneState,
     SessionEvent,
+    SessionOutputBlock,
     SessionReasoningBlock,
     SessionSystemMessage,
     SessionTextBlock,
     SessionTokens,
     SessionToolCallBlock,
+    SessionToolResultMessage,
+    SessionUserMessage,
 } from "@slopus/happy-providers";
 import type { Context } from "@steve.kite/stdlib";
 
 import type { AgentFeatureAction } from "./AgentFeatureAction.js";
+import type { AgentPermissionMode } from "./AgentPermissionMode.js";
 import type { AgentProviders } from "./AgentProviders.js";
 import type { AnyAgentTool } from "./AgentTool.js";
 
@@ -50,6 +54,29 @@ export interface AgentBaseModelChange {
     readonly wasReset: boolean;
 }
 
+/**
+ * What the message-accepted hooks see: one queued message at the moment it stops being something
+ * waiting outside the conversation and becomes part of it.
+ *
+ * The two queues are the same thing at different times — steering injects between responses, a send
+ * waits until the agent would otherwise stop — so the kind is what tells a listener which of the two
+ * it is looking at. Everything else about the message is in the message.
+ */
+export interface AgentBaseAcceptedMessage {
+    /** Which queue the message waited in, and therefore what made it inject when it did. */
+    readonly kind: "steering" | "send";
+    /** The message exactly as it entered the conversation. */
+    readonly message: SessionUserMessage;
+}
+
+/** What the permission-mode hooks see when a consumed message changes how much may be touched. */
+export interface AgentBasePermissionModeChange {
+    /** The mode in force until this message was consumed. */
+    readonly previousMode: AgentPermissionMode;
+    /** The mode now in force, and carried on every context the agent derives from here on. */
+    readonly mode: AgentPermissionMode;
+}
+
 /** What the `afterInference` hook sees about the response that just completed. */
 export interface AgentBaseInference {
     /** How the response ended, or undefined when the stream ended without a done event. */
@@ -85,21 +112,71 @@ export interface AgentBaseTurn extends AgentBaseTurnStart {
     readonly aborted: boolean;
 }
 
-/**
- * One validated tool invocation offered to an around-execution correctness hook.
- *
- * A wrapper calls `execute` to continue to the next wrapper and, ultimately, the tool. Repeated
- * calls join the same execution rather than repeating side effects.
- */
-export interface AgentBaseToolExecution {
+/** One validated tool invocation, as it stands before anything decides what to do with it. */
+export interface AgentBaseToolCall {
     /** The ID the model attached to this call, used to match its eventual result back to it. */
     readonly callId: string;
-    /** The tool definition the call resolved to. */
+    /** The tool definition the call resolved to, already amended by any earlier decision. */
     readonly tool: AnyAgentTool;
-    /** The call's arguments, already parsed from JSON but not yet validated against the schema. */
+    /** The call's arguments, validated against the tool's schema and amended the same way. */
     readonly arguments: unknown;
-    /** Continue to the next wrapper and, ultimately, the tool itself. */
-    readonly execute: () => Promise<unknown>;
+}
+
+/**
+ * What a `beforeToolCall` hook decides about one call. Nothing here runs anything: the hook says
+ * what should happen and the loop is what carries it out, so tool execution stays in one place —
+ * the place that also commits the result, retries an interrupted batch, and settles a cancelled
+ * one.
+ *
+ * Answering `undefined` decides nothing and leaves the call exactly as it stands.
+ */
+export type AgentBaseToolCallDecision =
+    | {
+          /** Run the call, with whatever this decision changes about it. */
+          readonly type: "run";
+          /** Run this tool instead of the one the model named. */
+          readonly tool?: AnyAgentTool;
+          /** Run with these arguments instead, revalidated against the tool that will run. */
+          readonly arguments?: unknown;
+          /**
+           * Run this one call under another permission mode. It applies to the execution and to
+           * nothing else: the agent's own mode is untouched and the next call is decided again.
+           */
+          readonly permissionMode?: AgentPermissionMode;
+      }
+    | {
+          /**
+           * Answer the model directly; the tool never runs. This is how a call is refused, served
+           * from a cache, or replaced by something the hook already knows.
+           */
+          readonly type: "answer";
+          /** Exactly what the model is told this call produced. */
+          readonly content: readonly SessionOutputBlock[];
+          /** Whether the model is told the call failed. */
+          readonly isError?: boolean;
+      };
+
+/**
+ * What a call ended up producing, for the hooks that only watch. Every call reaches this once,
+ * whether it ran, was answered by a hook, or failed before it could run at all.
+ */
+export interface AgentBaseToolOutcome {
+    /** The ID the model attached to the call. */
+    readonly callId: string;
+    /** The tool that actually ran, after any replacement a decision made. */
+    readonly tool: AnyAgentTool;
+    /** The arguments it actually ran with. */
+    readonly arguments: unknown;
+    /** Exactly what the model is told, whatever produced it. */
+    readonly content: readonly SessionOutputBlock[];
+    /** Whether the model is told the call failed. */
+    readonly isError: boolean;
+    /**
+     * The structured result the tool returned. Absent when the tool never ran — a hook answered
+     * the call, or it failed before or during execution — so its presence is what distinguishes a
+     * tool that answered from one that never got the chance.
+     */
+    readonly result?: unknown;
 }
 
 /**
@@ -130,15 +207,55 @@ export interface AgentBaseHooks {
      */
     readonly tools?: (ctx: Context) => MaybePromise<readonly AnyAgentTool[]>;
     /**
-     * Wraps execution after the tool exists and its JSON arguments pass runtime validation.
-     * This is a correctness hook: a failure becomes that call's error result. The hook must call
-     * `execution.execute()` to continue; omitting it deliberately replaces the execution, while
-     * repeated calls join the same downstream work.
+     * Runs inside the transaction that makes a dispatched batch durable, once per call in it,
+     * before anything runs. That transaction is what records that these calls are owed results, so
+     * a hook writing its own note of a call about to happen commits it with exactly that fact.
+     *
+     * The call is what the store holds at this point — the block the model produced, arguments
+     * still unparsed — because nothing has resolved or validated it yet. A batch being resumed
+     * after a restart does not run this again: it was already dispatched, and the process that
+     * dispatched it already ran the hook. A failure rolls the dispatch back and fails the turn.
      */
-    readonly aroundToolExecution?: (
+    readonly beforeToolCallTransact?: (
         ctx: Context,
-        execution: AgentBaseToolExecution,
-    ) => MaybePromise<unknown>;
+        call: SessionToolCallBlock,
+    ) => MaybePromise<void>;
+    /**
+     * Decides what to do with one call, after the tool has been resolved and its arguments have
+     * passed validation, and before anything runs. The hook may leave the call alone, amend it —
+     * another tool, other arguments, another permission mode for this one execution — or answer
+     * the model itself, in which case the tool never runs.
+     *
+     * It cannot run anything. Execution belongs to the loop, which is also what commits the
+     * result, resumes an interrupted batch, and settles a cancelled one; a hook that drove
+     * execution would be deciding inside machinery it cannot see. This is a correctness hook: a
+     * failure becomes that call's error result.
+     */
+    readonly beforeToolCall?: (
+        ctx: Context,
+        call: AgentBaseToolCall,
+    ) => MaybePromise<AgentBaseToolCallDecision | undefined>;
+    /**
+     * Called once per call with what it produced, before that result is committed to the
+     * conversation. Observing only: the model has already been answered, so a failure here is
+     * contained and changes nothing.
+     */
+    readonly afterToolCall?: (ctx: Context, outcome: AgentBaseToolOutcome) => MaybePromise<void>;
+    /**
+     * Runs inside the transaction that appends one result to the durable conversation and releases
+     * the call it answers, so what a feature concludes about the result and the result itself
+     * become durable together.
+     *
+     * Every result the conversation records reaches this, including the ones no execution
+     * produced: a call settled as an error because an abort, a shutdown, a restart, or a failed
+     * turn ended it. What it receives is the result message exactly as the conversation stores
+     * it. A failure rolls that commit back, leaving the call unanswered — which ends a running
+     * batch and the turn with it, and leaves a settlement for a later attempt to make.
+     */
+    readonly afterToolCallTransact?: (
+        ctx: Context,
+        result: SessionToolResultMessage,
+    ) => MaybePromise<void>;
     /**
      * Called when a consumed message changes the effective model. An incompatible change —
      * judged by the provider-model compatibility matrix — erases the conversation history
@@ -152,6 +269,49 @@ export interface AgentBaseHooks {
         ctx: Context,
         change: AgentBaseModelChange,
     ) => MaybePromise<SessionSystemMessage | undefined>;
+    /**
+     * Runs inside the transaction that moves a queued message into the durable conversation, once
+     * per message and in the order the messages were appended. The context carries the selection
+     * the message made effective, including its permission mode, so a hook writing its own record
+     * of what was said records it under what it was actually said to.
+     *
+     * This is where a durable account of the conversation belongs: what it writes commits with the
+     * message itself, so no reader can ever see one without the other. A failure rolls the whole
+     * consumption back — the message stays queued, and the turn reports the failure — because a
+     * message recorded nowhere is worse than a message not yet delivered.
+     */
+    readonly messageAcceptedTransact?: (
+        ctx: Context,
+        accepted: AgentBaseAcceptedMessage,
+    ) => MaybePromise<void>;
+    /**
+     * Called once per message after the consumption has committed and the lock is released, in the
+     * order the messages were appended. This is the observing half: it may take as long as it
+     * likes and its failure is contained, so anything that must not be able to undo the message
+     * belongs here rather than in the transactional hook.
+     */
+    readonly messageAccepted?: (
+        ctx: Context,
+        accepted: AgentBaseAcceptedMessage,
+    ) => MaybePromise<void>;
+    /**
+     * Runs inside the transaction that commits a consumed message which changed the permission
+     * mode, before the message-accepted hooks for that same consumption. A failure rolls the
+     * consumption back, so the mode never changes without whatever a feature concluded from it.
+     */
+    readonly permissionModeChangedTransact?: (
+        ctx: Context,
+        change: AgentBasePermissionModeChange,
+    ) => MaybePromise<void>;
+    /**
+     * Called after such a consumption has committed, with the mode that is now in force on every
+     * context the agent derives. Observing only: the mode has already changed, and a failure here
+     * cannot take it back.
+     */
+    readonly permissionModeChanged?: (
+        ctx: Context,
+        change: AgentBasePermissionModeChange,
+    ) => MaybePromise<void>;
     /**
      * Runs after the agent is staged as working, inside the transaction committing that state.
      */

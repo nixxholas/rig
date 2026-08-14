@@ -116,7 +116,11 @@ describe("AgentSystemRef", () => {
                 : writeValue(writeCtx, key, value);
 
         // From another agent, acceptance is a durable write this caller may be told about.
-        const fromElsewhere = withAgentContext(ctx, { id: "caller", provider: "scripted" });
+        const fromElsewhere = withAgentContext(ctx, {
+            id: "caller",
+            provider: "scripted",
+            permissionMode: "auto",
+        });
         const elsewhere = await ref
             .steer(fromElsewhere, target.id, user("from another agent"))
             .then(() => "accepted")
@@ -127,6 +131,7 @@ describe("AgentSystemRef", () => {
         const fromItself = withAgentContext(ctx, {
             id: target.id,
             provider: "scripted",
+            permissionMode: "auto",
         });
         const itself = await ref
             .steer(fromItself, target.id, user("from itself"))

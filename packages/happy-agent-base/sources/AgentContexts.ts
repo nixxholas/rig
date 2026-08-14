@@ -2,6 +2,7 @@ import type { SessionReasoningEffort, SessionServiceTier } from "@slopus/happy-p
 import { createContextNamespace, type Context } from "@steve.kite/stdlib";
 
 import type { AgentKV } from "./AgentKV.js";
+import { DEFAULT_AGENT_PERMISSION_MODE, type AgentPermissionMode } from "./AgentPermissionMode.js";
 
 /** Backing storage for `agentId`: the ID of the agent owning a context. */
 const idNamespace = createContextNamespace<string | undefined>("agentId", undefined);
@@ -19,17 +20,22 @@ const serviceTierNamespace = createContextNamespace<SessionServiceTier | undefin
     "agentServiceTier",
     undefined,
 );
+/** Backing storage for `agentPermissionMode`: how much the work on a context may touch. */
+const permissionModeNamespace = createContextNamespace<AgentPermissionMode>(
+    "agentPermissionMode",
+    DEFAULT_AGENT_PERMISSION_MODE,
+);
 /** Backing storage for `agentKV`: the scoped key-value store carried on a context. */
 const kvNamespace = createContextNamespace<AgentKV | undefined>("agentKV", undefined);
 /** Backing storage for `agentRunKV`: the run's own store, erased when the agent settles. */
 const runKVNamespace = createContextNamespace<AgentKV | undefined>("agentRunKV", undefined);
 
 /**
- * Derive the agent's context carrying its ID, provider ID, model, effort, and service tier — all
- * serializable values. The agent applies this once at construction, so hooks and tool executions
- * can read the values back through the accessors below. The ID is what lets one feature instance
- * serve every agent in a collection: a shared feature learns which agent a hook is running for
- * from the context rather than from something it was constructed with.
+ * Derive the agent's context carrying its ID, provider ID, model, effort, service tier, and
+ * permission mode — all serializable values. The agent applies this once at construction, so hooks
+ * and tool executions can read the values back through the accessors below. The ID is what lets one
+ * feature instance serve every agent in a collection: a shared feature learns which agent a hook is
+ * running for from the context rather than from something it was constructed with.
  */
 export function withAgentContext(
     ctx: Context,
@@ -39,13 +45,15 @@ export function withAgentContext(
         readonly model?: string | undefined;
         readonly effort?: SessionReasoningEffort | undefined;
         readonly serviceTier?: SessionServiceTier | undefined;
+        readonly permissionMode: AgentPermissionMode;
     },
 ): Context {
     const withId = idNamespace.set(ctx, values.id);
     const withProvider = providerNamespace.set(withId, values.provider);
     const withModel = modelNamespace.set(withProvider, values.model);
     const withEffort = effortNamespace.set(withModel, values.effort);
-    return serviceTierNamespace.set(withEffort, values.serviceTier);
+    const withTier = serviceTierNamespace.set(withEffort, values.serviceTier);
+    return permissionModeNamespace.set(withTier, values.permissionMode);
 }
 
 /** The ID of the agent owning this context. */
@@ -71,6 +79,24 @@ export function agentProvider(ctx: Context): string | undefined {
 /** The service tier configured for the agent owning this context, when one was set. */
 export function agentServiceTier(ctx: Context): SessionServiceTier | undefined {
     return serviceTierNamespace.get(ctx);
+}
+
+/**
+ * How much the work on this context may touch. It is the mode the agent is running in, unless a
+ * narrower scope replaced it for one execution.
+ */
+export function agentPermissionMode(ctx: Context): AgentPermissionMode {
+    return permissionModeNamespace.get(ctx);
+}
+
+/**
+ * Run one stretch of work under another mode. This is how an allowed Auto action is lent the access
+ * it was reviewed for: the work derived from this context sees the wider mode, and everything
+ * outside it goes on seeing the agent's own. Deriving from a context the agent handed out is what
+ * keeps the rest of that context — the agent's identity, its stores, its lifetime — intact.
+ */
+export function withAgentPermissionMode(ctx: Context, mode: AgentPermissionMode): Context {
+    return permissionModeNamespace.set(ctx, mode);
 }
 
 /** Carry a scoped key-value store on the context, replacing any store carried before. */

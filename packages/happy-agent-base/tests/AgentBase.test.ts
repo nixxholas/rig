@@ -221,7 +221,7 @@ describe("AgentBase", () => {
         await agent.close();
     });
 
-    it("offers only schema-validated tool calls to the around-execution hook", async () => {
+    it("offers only schema-validated tool calls to the before-call hook", async () => {
         const provider = new ScriptedProvider([
             [
                 { type: "toolcall_start", callId: "call-1", name: "read_file" },
@@ -242,9 +242,9 @@ describe("AgentBase", () => {
             provider: "scripted",
             persistence: new InMemoryPersistence(),
             hooks: {
-                aroundToolExecution: async (_hookCtx, execution) => {
+                beforeToolCall: () => {
                     hooks += 1;
-                    return await execution.execute();
+                    return undefined;
                 },
             },
             initialState: {
@@ -2770,6 +2770,118 @@ describe("AgentBase lifecycle hooks", () => {
         expect(persistence.values.get("kv.test-agent.event.1")).toBe("text_end");
         expect(persistence.values.get("kv.test-agent.event.2")).toBe("reasoning_end");
         expect(persistence.values.get("kv.test-agent.event.3")).toBe("toolcall_end");
+        await agent.close();
+    });
+
+    it("commits tool-call notes with the batch that dispatched them and the results that answer them", async () => {
+        const persistence = new InMemoryPersistence();
+        const provider = new ScriptedProvider([
+            [
+                { type: "toolcall_start", callId: "call-1", name: "look" },
+                { type: "toolcall_end", callId: "call-1", arguments: "{}" },
+                { type: "done", state: "tool_call", tokens: { input: 1, output: 1 } },
+            ],
+            textTurn("done"),
+        ]);
+        const order: string[] = [];
+        const agent = await AgentBase.create(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+            hooks: {
+                beforeToolCallTransact: async (hookCtx, call) => {
+                    order.push(`dispatched:${call.callId}`);
+                    const kv = agentKV(hookCtx);
+                    if (kv === undefined) throw new Error("Missing transactional agent store.");
+                    await kv.write(hookCtx, "dispatched", call.name);
+                },
+                afterToolCallTransact: async (hookCtx, result) => {
+                    order.push(`answered:${result.callId}`);
+                    const kv = agentKV(hookCtx);
+                    if (kv === undefined) throw new Error("Missing transactional agent store.");
+                    await kv.write(hookCtx, "answered", result.content);
+                },
+            },
+            initialState: {
+                tools: [
+                    defineAgentTool({
+                        name: "look",
+                        returnType: Type.Null(),
+                        shouldReviewInAutoMode: () => false,
+                        execute: () => {
+                            order.push("tool");
+                            return Promise.resolve(null);
+                        },
+                        toLLM: () => [{ type: "text", text: "looked" }],
+                    }),
+                ],
+            },
+        });
+
+        await agent.send(ctx, user("look"), { await: true });
+        await agent.waitForIdle();
+
+        expect(order).toEqual(["dispatched:call-1", "tool", "answered:call-1"]);
+        // Both notes live in the call's own scope, which is where the execution itself writes.
+        expect(persistence.values.get("kv.test-agent.call.call-1.dispatched")).toBe("look");
+        expect(persistence.values.get("kv.test-agent.call.call-1.answered")).toEqual([
+            { type: "text", text: "looked" },
+        ]);
+        await agent.close();
+    });
+
+    it("rolls a dispatched batch back when beforeToolCallTransact fails", async () => {
+        const persistence = new InMemoryPersistence();
+        const provider = new ScriptedProvider([
+            [
+                { type: "toolcall_start", callId: "call-1", name: "look" },
+                { type: "toolcall_end", callId: "call-1", arguments: "{}" },
+                { type: "done", state: "tool_call", tokens: { input: 1, output: 1 } },
+            ],
+        ]);
+        let executions = 0;
+        const agent = await AgentBase.create(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+            hooks: {
+                beforeToolCallTransact: async (hookCtx) => {
+                    const kv = agentKV(hookCtx);
+                    if (kv === undefined) throw new Error("Missing transactional agent store.");
+                    await kv.write(hookCtx, "rolled-back", true);
+                    throw new Error("dispatch projection failed");
+                },
+            },
+            initialState: {
+                tools: [
+                    defineAgentTool({
+                        name: "look",
+                        returnType: Type.Null(),
+                        shouldReviewInAutoMode: () => false,
+                        execute: () => {
+                            executions += 1;
+                            return Promise.resolve(null);
+                        },
+                        toLLM: () => [],
+                    }),
+                ],
+            },
+        });
+
+        await agent.send(ctx, user("look"), { await: true });
+        await agent.waitForIdle();
+
+        expect(executions).toBe(0);
+        expect(persistence.values.has("kv.test-agent.call.call-1.rolled-back")).toBe(false);
+        // Nothing was dispatched, so nothing is owed a result after a restart either.
+        expect([...persistence.values.keys()].filter((key) => key.startsWith("tool."))).toEqual([]);
+        // The turn failed, so what it left the model owed is settled as an error rather than
+        // as the tool having run.
+        expect(persistence.records.filter((record) => record.type === "tool")).toMatchObject([
+            { message: { callId: "call-1", isError: true } },
+        ]);
         await agent.close();
     });
 

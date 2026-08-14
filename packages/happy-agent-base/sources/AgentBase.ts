@@ -24,7 +24,12 @@ import {
     type Context,
 } from "@steve.kite/stdlib";
 
-import { withAgentContext, withAgentKV, withAgentRunKV } from "./AgentContexts.js";
+import {
+    withAgentContext,
+    withAgentKV,
+    withAgentPermissionMode,
+    withAgentRunKV,
+} from "./AgentContexts.js";
 import { taskContextBeforeToolCall, withAgentTaskContext } from "./AgentTaskContext.js";
 import { AgentKV } from "./AgentKV.js";
 import {
@@ -33,8 +38,20 @@ import {
     type AgentBasePendingStage,
     type AgentBasePendingState,
 } from "./AgentBasePending.js";
-import type { AgentBaseHooks, AgentBasePersistedEvent, MaybePromise } from "./AgentBaseHooks.js";
+import type {
+    AgentBaseAcceptedMessage,
+    AgentBaseHooks,
+    AgentBasePermissionModeChange,
+    AgentBasePersistedEvent,
+    AgentBaseToolOutcome,
+    MaybePromise,
+} from "./AgentBaseHooks.js";
 import type { AgentPersistence, AgentRecord } from "./AgentPersistence.js";
+import {
+    DEFAULT_AGENT_PERMISSION_MODE,
+    isAgentPermissionMode,
+    type AgentPermissionMode,
+} from "./AgentPermissionMode.js";
 import type { AgentBaseState } from "./AgentBaseState.js";
 import { AgentProviders } from "./AgentProviders.js";
 import type { AgentFeatureAction } from "./AgentFeatureAction.js";
@@ -84,6 +101,12 @@ export interface AgentBaseMessageOptions {
     readonly effort?: SessionReasoningEffort;
     /** Which of the provider's service tiers to bill and schedule the request on. */
     readonly serviceTier?: SessionServiceTier;
+    /**
+     * How much of the machine the agent may touch from this message onwards. It takes effect when
+     * the message is consumed rather than when it is queued, because a response and its tool batch
+     * are already running under the mode they were started with.
+     */
+    readonly permissionMode?: AgentPermissionMode;
 }
 
 /**
@@ -150,6 +173,11 @@ export interface AgentBaseOptions {
     readonly effort?: SessionReasoningEffort;
     /** The initial service tier, superseded by the first message that carries one. */
     readonly serviceTier?: SessionServiceTier;
+    /**
+     * The mode the agent starts in, superseded by the first message that carries one and by
+     * whatever the store already holds. Agents run in Auto when nobody says otherwise.
+     */
+    readonly permissionMode?: AgentPermissionMode;
     /** How the steering queue drains; one message per response by default. */
     readonly steeringMode?: AgentBaseQueueMode;
     /** How the send queue drains; one message per response by default. */
@@ -228,6 +256,20 @@ export interface AgentBaseOptions {
  * model. `modelChanged` runs inside the lock and is lent a store bound to that hold — a
  * capability released when the hook returns, so it cannot be retained to bypass the lock later.
  * A failing handoff rejects an incompatible switch outright rather than costing the history.
+ *
+ * ## Permission modes
+ *
+ * How much of the machine the agent may touch travels with its messages, exactly like its model,
+ * and takes effect when the message is consumed rather than when it is queued: a response and the
+ * tools it dispatched are already running under the mode they were started with, and are left to
+ * finish under it. The mode is durable, so a restart resumes in the mode the conversation reached,
+ * and it is carried on every context the agent derives, so a hook or a tool reads what it is
+ * running under rather than being told.
+ *
+ * The loop enforces nothing. It has no idea what any particular tool touches, and a runtime that
+ * guessed would be wrong about tools it has never seen. Enforcement belongs to the features and
+ * tools that do know; the loop's whole part is to carry the mode, make its changes durable, and
+ * report them.
  *
  * ## Recovery
  *
@@ -327,6 +369,11 @@ export class AgentBase {
     #effort: SessionReasoningEffort | undefined;
     /** The service tier in force. */
     #serviceTier: SessionServiceTier | undefined;
+    /**
+     * How much of the machine the agent may touch. Durable, so a restart resumes in the mode the
+     * conversation reached, and carried on every context the agent derives.
+     */
+    #permissionMode: AgentPermissionMode;
     /** The single set of hooks the run is observed by and its configuration extended from. */
     readonly #hooks: AgentBaseHooks;
     /**
@@ -543,6 +590,7 @@ export class AgentBase {
         this.#model = options.model;
         this.#effort = options.effort;
         this.#serviceTier = options.serviceTier;
+        this.#permissionMode = options.permissionMode ?? DEFAULT_AGENT_PERMISSION_MODE;
         this.#kv = new AgentKV(this.#persistence, `kv.${options.id}.`);
         this.#runKV = this.#kv.scoped("run");
         // Everything the agent does — hooks and tool executions included — runs on a context
@@ -558,14 +606,27 @@ export class AgentBase {
      * the selection changes.
      */
     #deriveCtx(): Context {
-        const ctx = withAgentContext(this.#baseCtx, {
+        const ctx = withAgentContext(this.#baseCtx, this.#selection());
+        return withAgentRunKV(withAgentKV(ctx, this.#kv), this.#runKV);
+    }
+
+    /** Everything about what the agent is currently running on, as one value to carry. */
+    #selection(): {
+        readonly id: string;
+        readonly provider: string;
+        readonly model: string | undefined;
+        readonly effort: SessionReasoningEffort | undefined;
+        readonly serviceTier: SessionServiceTier | undefined;
+        readonly permissionMode: AgentPermissionMode;
+    } {
+        return {
             id: this.id,
             provider: this.#providerId,
             model: this.#model,
             effort: this.#effort,
             serviceTier: this.#serviceTier,
-        });
-        return withAgentRunKV(withAgentKV(ctx, this.#kv), this.#runKV);
+            permissionMode: this.#permissionMode,
+        };
     }
 
     /**
@@ -1438,10 +1499,10 @@ export class AgentBase {
                 let injected = await this.#consumeQueue(
                     this.#steering,
                     this.#steeringMode,
-                    "steering.",
+                    "steering",
                 );
                 if (!injected && !needsInference) {
-                    injected = await this.#consumeQueue(this.#sends, this.#sendMode, "send.");
+                    injected = await this.#consumeQueue(this.#sends, this.#sendMode, "send");
                 }
                 // Nothing to answer — a start() on an idle history, or the queues ran dry.
                 if (!injected && !needsInference) break;
@@ -1708,6 +1769,15 @@ export class AgentBase {
                 await this.#recordTransaction(lockCtx, async (txCtx) => {
                     for (const result of results) {
                         await this.#appendRecord(txCtx, { type: "tool", message: result });
+                        // A result the conversation records is a result the hook sees, however
+                        // little of a run produced it. A hook that fails here leaves the calls
+                        // unsettled, which is what lets a later attempt answer them properly.
+                        await this.#invokeToolTransactHook(
+                            txCtx,
+                            result.callId,
+                            this.#hooks.afterToolCallTransact,
+                            result,
+                        );
                     }
                 });
                 this.#messages.push(...results);
@@ -1775,13 +1845,21 @@ export class AgentBase {
      * Move the oldest queued message — or, in "all" mode, every queued message — into the main
      * context store and the in-memory history. The moves run in one transaction, so a message
      * is never durable in both stores or neither, and memory changes only after the commit.
+     *
+     * What the consumption has to announce is announced once the lock has been released. A hook
+     * told a message has landed may perfectly well answer by sending another one, and doing that
+     * while this still held the store lock would be the hook waiting for its own caller.
      */
     async #consumeQueue(
         queue: QueueEntry[],
         mode: AgentBaseQueueMode,
-        prefix: string,
+        kind: QueueRequest["kind"],
     ): Promise<boolean> {
-        return await this.#persistenceLock.runInLock(this.#ctx, async (lockCtx) => {
+        const prefix = `${kind}.`;
+        /** Filled in once the consumption has committed, and reported after the lock is released. */
+        const accepted: AgentBaseAcceptedMessage[] = [];
+        let permissionChange: AgentBasePermissionModeChange | undefined;
+        const consumed = await this.#persistenceLock.runInLock(this.#ctx, async (lockCtx) => {
             if (queue.length === 0) return false;
             // The durable queue, not memory, decides what is left to consume after a restart.
             const durable = new Set(
@@ -1799,6 +1877,7 @@ export class AgentBase {
             let model = this.#model;
             let effort = this.#effort;
             let serviceTier = this.#serviceTier;
+            let permissionMode = this.#permissionMode;
             let changed = false;
             for (const entry of batch) {
                 if (entry.options.provider !== undefined) {
@@ -1817,7 +1896,18 @@ export class AgentBase {
                     serviceTier = entry.options.serviceTier;
                     changed = true;
                 }
+                if (entry.options.permissionMode !== undefined) {
+                    permissionMode = entry.options.permissionMode;
+                    changed = true;
+                }
             }
+            // The mode the messages make effective, kept apart from the rest because it is the one
+            // setting with hooks of its own: a change is announced, and what a feature concludes
+            // from it commits with the message that carried it.
+            const modeChange: AgentBasePermissionModeChange | undefined =
+                permissionMode === this.#permissionMode
+                    ? undefined
+                    : { previousMode: this.#permissionMode, mode: permissionMode };
             // A provider or model change is checked against the provider-model compatibility
             // matrix. An incompatible change resets the conversation: the history is erased
             // completely, the old provider session is destroyed, and the `modelChanged` hook
@@ -1870,6 +1960,7 @@ export class AgentBase {
                                 model,
                                 effort,
                                 serviceTier,
+                                permissionMode,
                             }),
                             committed.signal,
                         );
@@ -1932,13 +2023,38 @@ export class AgentBase {
                         ...(model === undefined ? {} : { model }),
                         ...(effort === undefined ? {} : { effort }),
                         ...(serviceTier === undefined ? {} : { serviceTier }),
+                        permissionMode,
                     });
                 }
                 // Consuming a message is precisely the act that makes an inference owed, so
                 // the two commit as one. A crash cannot land between them and leave a
                 // message in the conversation that nothing remembers having to answer.
                 await this.#recordPending(txCtx, { stage: "inference" });
+                // Last, so a hook writing its own account of the consumption sees a transaction
+                // holding all of it. The mode comes before the messages: it is what they were
+                // said under, and a listener recording them wants to know that first.
+                const selection = { provider, model, effort, serviceTier, permissionMode };
+                if (modeChange !== undefined) {
+                    await this.#invokeTransactHook(
+                        txCtx,
+                        selection,
+                        this.#hooks.permissionModeChangedTransact,
+                        modeChange,
+                    );
+                }
+                for (const entry of batch) {
+                    await this.#invokeTransactHook(
+                        txCtx,
+                        selection,
+                        this.#hooks.messageAcceptedTransact,
+                        { kind, message: entry.message },
+                    );
+                }
             });
+            // Committed: from here the messages are part of the conversation, so what has to be
+            // announced about them is decided now and reported once the lock is released.
+            permissionChange = modeChange;
+            accepted.push(...batch.map((entry) => ({ kind, message: entry.message })));
             queue.splice(0, count);
             if (reset) {
                 this.#messages = injected === undefined ? [] : [injected];
@@ -1960,10 +2076,42 @@ export class AgentBase {
                 this.#model = model;
                 this.#effort = effort;
                 this.#serviceTier = serviceTier;
+                this.#permissionMode = permissionMode;
                 this.#ctx = this.#deriveCtx();
             }
             return true;
         });
+        // Outside the lock, and on the agent's own context, which now carries whatever these
+        // messages made effective.
+        if (permissionChange !== undefined) {
+            await this.#invokeHook(this.#hooks.permissionModeChanged, permissionChange);
+        }
+        for (const message of accepted) {
+            await this.#invokeHook(this.#hooks.messageAccepted, message);
+        }
+        return consumed;
+    }
+
+    /**
+     * Call a hook that writes inside the consumption's transaction, on a context carrying the
+     * selection those messages made effective rather than the one they replaced. Its failure is
+     * not contained: it rolls the whole consumption back, leaving the messages queued.
+     */
+    async #invokeTransactHook<Argument>(
+        txCtx: Context,
+        selection: {
+            readonly provider: string;
+            readonly model: string | undefined;
+            readonly effort: SessionReasoningEffort | undefined;
+            readonly serviceTier: SessionServiceTier | undefined;
+            readonly permissionMode: AgentPermissionMode;
+        },
+        hook: ((ctx: Context, argument: Argument) => MaybePromise<void>) | undefined,
+        argument: Argument,
+    ): Promise<void> {
+        if (hook === undefined) return;
+        const hookCtx = withAgentContext(txCtx, { id: this.id, ...selection });
+        await this.#withTransactionalContext(hookCtx, (liveCtx) => hook(liveCtx, argument));
     }
 
     /**
@@ -2005,6 +2153,13 @@ export class AgentBase {
                 this.#model = persisted.model;
                 this.#effort = persisted.effort;
                 this.#serviceTier = persisted.serviceTier;
+                // The permission mode is the one setting whose absence is not a decision: a record
+                // written before any message carried a mode says nothing about it, and a value
+                // that is not a mode at all says nothing either. Both keep the mode the agent was
+                // built with rather than running under something nothing can interpret.
+                if (isAgentPermissionMode(persisted.permissionMode)) {
+                    this.#permissionMode = persisted.permissionMode;
+                }
                 this.#ctx = this.#deriveCtx();
             }
             this.#pendingTools = pendingTools.map(({ key, value }) => ({
@@ -2056,6 +2211,16 @@ export class AgentBase {
                     // then never find calls owed with no record of a run owing them, nor a run
                     // recorded as running tools that were never written.
                     await this.#recordPending(txCtx, { stage: "tools" });
+                    // Last, so a hook noting a call about to happen sees a transaction holding
+                    // the whole batch it belongs to.
+                    for (const entry of entries) {
+                        await this.#invokeToolTransactHook(
+                            txCtx,
+                            entry.call.callId,
+                            this.#hooks.beforeToolCallTransact,
+                            entry.call,
+                        );
+                    }
                 }),
             );
         } else {
@@ -2089,6 +2254,12 @@ export class AgentBase {
                             // stays: that is the tool's state, not the batch's bookkeeping, and
                             // an owner may still want to read what a finished call recorded.
                             await this.#persistence.deleteValue(txCtx, entry.key);
+                            await this.#invokeToolTransactHook(
+                                txCtx,
+                                entry.call.callId,
+                                this.#hooks.afterToolCallTransact,
+                                result,
+                            );
                         });
                         this.#messages.push(result);
                         committed += 1;
@@ -2198,6 +2369,41 @@ export class AgentBase {
     }
 
     /**
+     * The scope one call owns: state persists under its own call ID, never in another call's
+     * scope, and the task context ends where the call was made. The execution and all four tool
+     * hooks share it, so what one of them writes about a call is where the others look for it.
+     */
+    #callScoped(ctx: Context, callId: string): Context {
+        return withAgentTaskContext(
+            withAgentRunKV(
+                withAgentKV(ctx, this.#kv.scoped("call", callId)),
+                this.#runKV.scoped("call", callId),
+            ),
+            taskContextBeforeToolCall(this.#messages, callId),
+        );
+    }
+
+    /**
+     * Call a tool hook that writes inside a transaction of its own call's. The lifetime ends with
+     * the callback, so a context kept afterwards cannot outlive the transaction it belongs to.
+     * Its failure is not contained: it rolls that transaction back.
+     */
+    async #invokeToolTransactHook<Argument>(
+        txCtx: Context,
+        callId: string,
+        hook: ((ctx: Context, argument: Argument) => MaybePromise<void>) | undefined,
+        argument: Argument,
+    ): Promise<void> {
+        if (hook === undefined) return;
+        const lifetime = new AbortController();
+        try {
+            await hook(this.#callScoped(withLifetime(txCtx, lifetime.signal), callId), argument);
+        } finally {
+            lifetime.abort();
+        }
+    }
+
+    /**
      * Run one tool call; every failure becomes an error tool result instead of an exception.
      * The context carries the turn's abort signal as its lifetime, so a running tool can
      * observe cancellation and stop its own work.
@@ -2230,43 +2436,76 @@ export class AgentBase {
         if (tool.parameters !== undefined && !Value.Check(tool.parameters, args)) {
             return failure(`The arguments for "${call.name}" did not match its schema.`);
         }
+        const callCtx = this.#callScoped(ctx, call.callId);
+        // From here the call is one the two tool hooks bracket: a tool that exists, a call that
+        // finished, and arguments its schema accepts. A call refused before that reaches neither
+        // hook, because there is nothing yet to decide about or to report.
+        let ran = tool;
+        let ranArguments = args;
+        let outcome: AgentBaseToolOutcome;
         try {
-            // A tool execution persists under its own call ID, never in another call's scope.
-            const callCtx = withAgentTaskContext(
-                withAgentRunKV(
-                    withAgentKV(ctx, this.#kv.scoped("call", call.callId)),
-                    this.#runKV.scoped("call", call.callId),
-                ),
-                taskContextBeforeToolCall(this.#messages, call.callId),
-            );
-            let executed: Promise<unknown> | undefined;
-            const execute = (): Promise<unknown> =>
-                (executed ??= Promise.resolve().then(
-                    async () => await tool.execute(callCtx, args),
-                ));
-            const result: unknown =
-                this.#hooks.aroundToolExecution === undefined
-                    ? await execute()
-                    : await this.#hooks.aroundToolExecution(callCtx, {
-                          callId: call.callId,
-                          tool,
-                          arguments: args,
-                          execute,
-                      });
-            if (!Value.Check(tool.returnType, result)) {
-                return failure(`Tool "${call.name}" returned an invalid result.`);
-            }
-            const content = tool.toLLM(result);
-            const isError = tool.isError?.(result) === true;
-            return {
-                role: "tool",
+            const decision = await this.#hooks.beforeToolCall?.(callCtx, {
                 callId: call.callId,
-                content: [...content],
-                ...(isError ? { isError: true } : {}),
-            };
+                tool,
+                arguments: args,
+            });
+            if (decision?.type === "answer") {
+                // The hook answered the model itself, so the tool never runs and there is no
+                // structured result — only what the model is told.
+                outcome = {
+                    callId: call.callId,
+                    tool,
+                    arguments: args,
+                    content: [...decision.content],
+                    isError: decision.isError === true,
+                };
+            } else {
+                if (decision?.tool !== undefined) ran = decision.tool;
+                if (decision?.arguments !== undefined) ranArguments = decision.arguments;
+                // An amended call is validated again: the schema that mattered is the one belonging
+                // to the tool that is about to run, on the arguments it is about to receive.
+                if (
+                    (ran !== tool || ranArguments !== args) &&
+                    ran.parameters !== undefined &&
+                    !Value.Check(ran.parameters, ranArguments)
+                ) {
+                    throw new Error(`The arguments for "${ran.name}" did not match its schema.`);
+                }
+                const runCtx =
+                    decision?.permissionMode === undefined
+                        ? callCtx
+                        : withAgentPermissionMode(callCtx, decision.permissionMode);
+                const result: unknown = await ran.execute(runCtx, ranArguments);
+                if (!Value.Check(ran.returnType, result)) {
+                    throw new Error(`Tool "${ran.name}" returned an invalid result.`);
+                }
+                outcome = {
+                    callId: call.callId,
+                    tool: ran,
+                    arguments: ranArguments,
+                    content: [...ran.toLLM(result)],
+                    isError: ran.isError?.(result) === true,
+                    result,
+                };
+            }
         } catch (error: unknown) {
-            return failure(error instanceof Error ? error.message : String(error));
+            outcome = {
+                callId: call.callId,
+                tool: ran,
+                arguments: ranArguments,
+                content: [
+                    { type: "text", text: error instanceof Error ? error.message : String(error) },
+                ],
+                isError: true,
+            };
         }
+        await this.#invokeHookOn(callCtx, this.#hooks.afterToolCall, outcome);
+        return {
+            role: "tool",
+            callId: call.callId,
+            content: outcome.content,
+            ...(outcome.isError ? { isError: true } : {}),
+        };
     }
 
     /**

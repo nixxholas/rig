@@ -44,13 +44,22 @@ export {
     agentId,
     agentKV,
     agentModel,
+    agentPermissionMode,
     agentProvider,
     agentRunKV,
     agentServiceTier,
     withAgentContext,
     withAgentKV,
+    withAgentPermissionMode,
     withAgentRunKV,
 } from "./AgentContexts.js";
+export {
+    agentPermissionModeLabel,
+    agentPermissionModeSchema,
+    isAgentPermissionMode,
+    DEFAULT_AGENT_PERMISSION_MODE,
+    type AgentPermissionMode,
+} from "./AgentPermissionMode.js";
 export {
     agentTaskContext,
     taskContextBeforeToolCall,
@@ -58,11 +67,15 @@ export {
 } from "./AgentTaskContext.js";
 export { AgentKV } from "./AgentKV.js";
 export {
+    type AgentBaseAcceptedMessage,
     type AgentBaseHooks,
     type AgentBaseInference,
     type AgentBaseModelChange,
+    type AgentBasePermissionModeChange,
     type AgentBasePersistedEvent,
-    type AgentBaseToolExecution,
+    type AgentBaseToolCall,
+    type AgentBaseToolCallDecision,
+    type AgentBaseToolOutcome,
     type AgentBaseTurn,
     type AgentBaseTurnStart,
     type MaybePromise,

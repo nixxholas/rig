@@ -4,20 +4,27 @@ import type {
     SessionReasoningEffort,
     SessionServiceTier,
     SessionSystemMessage,
+    SessionToolCallBlock,
+    SessionToolResultMessage,
 } from "@slopus/happy-providers";
 import type { Context } from "@steve.kite/stdlib";
 
 import type {
+    AgentBaseAcceptedMessage,
     AgentBaseInference,
     AgentBaseModelChange,
+    AgentBasePermissionModeChange,
     AgentBasePersistedEvent,
-    AgentBaseToolExecution,
+    AgentBaseToolCall,
+    AgentBaseToolCallDecision,
+    AgentBaseToolOutcome,
     AgentBaseTurn,
     AgentBaseTurnStart,
     MaybePromise,
 } from "./AgentBaseHooks.js";
 import type { AgentFeatureAction } from "./AgentFeatureAction.js";
 import type { AgentKV } from "./AgentKV.js";
+import type { AgentPermissionMode } from "./AgentPermissionMode.js";
 import type { AgentSystemRef } from "./AgentSystemRef.js";
 import type { AnyAgentTool } from "./AgentTool.js";
 
@@ -43,6 +50,12 @@ export interface AgentFeatureAgent {
     readonly effort: SessionReasoningEffort | undefined;
     /** The service tier in force, absent when none was ever selected. */
     readonly tier: SessionServiceTier | undefined;
+    /**
+     * How much of the machine the agent may touch. The runtime carries it and makes its changes
+     * durable but enforces nothing, so a feature whose tools act on the machine is what decides
+     * what this mode actually permits.
+     */
+    readonly permissionMode: AgentPermissionMode;
 }
 
 /**
@@ -115,20 +128,72 @@ export interface AgentFeature<Tool extends AnyAgentTool = AnyAgentTool> {
     /** Merged after the base state and every earlier feature's tools, in feature order. */
     readonly tools?: (ctx: Context, scope: AgentFeatureScope) => MaybePromise<readonly Tool[]>;
     /**
-     * Wraps validated tool execution. Features compose as nested middleware in array order.
-     * See `AgentBaseHooks.aroundToolExecution` for the continuation contract.
+     * Runs inside the transaction that makes a dispatched batch durable, once per call in it.
+     * Features run in array order and a failure propagates, rolling the dispatch back.
      */
-    readonly aroundToolExecution?: (
+    readonly beforeToolCallTransact?: (
         ctx: Context,
         scope: AgentFeatureScope,
-        execution: AgentBaseToolExecution,
-    ) => MaybePromise<unknown>;
+        call: SessionToolCallBlock,
+    ) => MaybePromise<void>;
+    /**
+     * Decides what to do with one validated call before it runs. Features are asked in array
+     * order: what one of them amends is what the next one sees, and the first to answer the model
+     * settles the call and ends the chain.
+     */
+    readonly beforeToolCall?: (
+        ctx: Context,
+        scope: AgentFeatureScope,
+        call: AgentBaseToolCall,
+    ) => MaybePromise<AgentBaseToolCallDecision | undefined>;
+    /** Observes what one call produced, before its result is committed. */
+    readonly afterToolCall?: (
+        ctx: Context,
+        scope: AgentFeatureScope,
+        outcome: AgentBaseToolOutcome,
+    ) => MaybePromise<void>;
+    /**
+     * Runs inside the transaction appending one tool result to the durable conversation. Features
+     * run in array order and a failure propagates, rolling that commit back.
+     */
+    readonly afterToolCallTransact?: (
+        ctx: Context,
+        scope: AgentFeatureScope,
+        result: SessionToolResultMessage,
+    ) => MaybePromise<void>;
     /** The first feature that returns a handoff message wins the reset injection. */
     readonly modelChanged?: (
         ctx: Context,
         scope: AgentFeatureScope,
         change: AgentBaseModelChange,
     ) => MaybePromise<SessionSystemMessage | undefined>;
+    /**
+     * Runs inside the transaction appending a queued message to the durable conversation, once per
+     * message. Features run in array order and a failure propagates, rolling the consumption back.
+     */
+    readonly messageAcceptedTransact?: (
+        ctx: Context,
+        scope: AgentFeatureScope,
+        accepted: AgentBaseAcceptedMessage,
+    ) => MaybePromise<void>;
+    /** Observes the same messages once the consumption has committed. */
+    readonly messageAccepted?: (
+        ctx: Context,
+        scope: AgentFeatureScope,
+        accepted: AgentBaseAcceptedMessage,
+    ) => MaybePromise<void>;
+    /** Transactional counterpart to `permissionModeChanged`; a failure rolls the change back. */
+    readonly permissionModeChangedTransact?: (
+        ctx: Context,
+        scope: AgentFeatureScope,
+        change: AgentBasePermissionModeChange,
+    ) => MaybePromise<void>;
+    /** Observes a permission-mode change a consumed message made, once it is durable. */
+    readonly permissionModeChanged?: (
+        ctx: Context,
+        scope: AgentFeatureScope,
+        change: AgentBasePermissionModeChange,
+    ) => MaybePromise<void>;
     /** Transactional counterpart to `beforeAgentLoop`. */
     readonly beforeAgentLoopTransact?: (
         ctx: Context,
