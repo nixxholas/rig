@@ -13,6 +13,16 @@ const PACKAGES: Record<ReleasePackageKey, ReleasePackage> = {
         tagPrefix: "happy-agent-base-v",
         testArguments: [["--filter", "@slopus/happy-agent-base", "test"]],
     },
+    "happy-agent-compute": {
+        buildArguments: ["--filter", "@slopus/happy-agent-compute", "build"],
+        checkArguments: ["--filter", "@slopus/happy-agent-compute", "check"],
+        commitPrefix: "Release happy-agent-compute v",
+        directory: fileURLToPath(new URL("../../packages/happy-agent-compute/", import.meta.url)),
+        key: "happy-agent-compute",
+        manifestPath: "packages/happy-agent-compute/package.json",
+        tagPrefix: "happy-agent-compute-v",
+        testArguments: [["--filter", "@slopus/happy-agent-compute", "test"]],
+    },
     "happy-providers": {
         buildArguments: ["--filter", "@slopus/happy-providers", "build"],
         checkArguments: ["--filter", "@slopus/happy-providers", "check"],
@@ -70,11 +80,12 @@ export function resolveReleasePackage(value: string | undefined): ReleasePackage
         key !== "rig" &&
         key !== "rig-connect" &&
         key !== "happy-agent-base" &&
+        key !== "happy-agent-compute" &&
         key !== "happy-plugins" &&
         key !== "happy-providers"
     ) {
         throw new Error(
-            `Unknown release package ${key}. Expected rig, rig-connect, happy-agent-base, happy-plugins, or happy-providers.`,
+            `Unknown release package ${key}. Expected rig, rig-connect, happy-agent-base, happy-agent-compute, happy-plugins, or happy-providers.`,
         );
     }
     return PACKAGES[key];
