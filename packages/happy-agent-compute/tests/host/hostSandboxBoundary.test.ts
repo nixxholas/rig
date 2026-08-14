@@ -1,6 +1,5 @@
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createRootContext, type Context } from "@steve.kite/stdlib";
@@ -164,7 +163,11 @@ async function makeWorkspace(): Promise<string> {
 }
 
 async function makeTemporaryDirectory(): Promise<string> {
-    const path = await mkdtemp(join(tmpdir(), "host-sandbox-"));
+    // Seatbelt deliberately leaves the system temporary directory writable, because toolchain
+    // shims cache there on every invocation. A fixture under that directory therefore proves
+    // nothing about the workspace boundary — the write it expects to be refused is one the
+    // sandbox is supposed to allow. Keep the fixture beside this test instead.
+    const path = await mkdtemp(join(import.meta.dirname, ".host-boundary-"));
     temporaryDirectories.push(path);
     return path;
 }
