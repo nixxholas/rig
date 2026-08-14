@@ -23,6 +23,7 @@
         "release:minor": "pnpm release minor",
         "release:patch": "pnpm release patch",
         "release:happy-agent-base:patch": "pnpm release happy-agent-base patch",
+        "release:happy-agent-compute:patch": "pnpm release happy-agent-compute patch",
         "release:happy-providers:patch": "pnpm release happy-providers patch",
         "release:happy-plugins:patch": "pnpm release happy-plugins patch",
         "release:rig-connect:patch": "pnpm release rig-connect patch",

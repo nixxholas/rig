@@ -22,6 +22,7 @@ const USAGE = `Usage:
   pnpm release beta
   pnpm release rig-connect <version>
   pnpm release happy-agent-base <version>
+  pnpm release happy-agent-compute <version>
   pnpm release happy-plugins <version>
   pnpm release happy-providers <version>
 
@@ -32,6 +33,7 @@ Examples:
   pnpm release 0.4.0            that same choice, spelled out
   pnpm release rig-connect patch
   pnpm release happy-agent-base patch
+  pnpm release happy-agent-compute patch
   pnpm release happy-plugins patch
   pnpm release happy-providers patch
 
@@ -44,6 +46,7 @@ async function release(): Promise<void> {
         arguments_[0] === "rig" ||
         arguments_[0] === "rig-connect" ||
         arguments_[0] === "happy-agent-base" ||
+        arguments_[0] === "happy-agent-compute" ||
         arguments_[0] === "happy-plugins" ||
         arguments_[0] === "happy-providers";
     const releasePackage = resolveReleasePackage(explicitPackage ? arguments_.shift() : undefined);
