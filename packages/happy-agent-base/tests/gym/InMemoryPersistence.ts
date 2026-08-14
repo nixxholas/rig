@@ -46,7 +46,15 @@ export class InMemoryPersistence implements AgentPersistence {
      * settle marker — which record what the agent knows rather than work still owed.
      */
     get pending(): Map<string, unknown> {
-        return new Map([...this.values].filter(([key]) => key !== "context" && key !== "owed"));
+        return new Map(
+            [...this.values].filter(
+                ([key]) =>
+                    key !== "context" &&
+                    key !== "owed" &&
+                    key !== "agentConfig" &&
+                    !key.startsWith("message."),
+            ),
+        );
     }
 
     async transaction<Result>(
@@ -120,6 +128,12 @@ export class InMemoryPersistence implements AgentPersistence {
             staged.deletes.delete(key);
         }
         return Promise.resolve();
+    }
+
+    async writeValueIfAbsent(ctx: Context, key: string, value: unknown): Promise<boolean> {
+        if ((await this.readValues(ctx, key)).some((entry) => entry.key === key)) return false;
+        await this.writeValue(ctx, key, value);
+        return true;
     }
 
     deleteValue(ctx: Context, key: string): Promise<void> {

@@ -13,6 +13,7 @@ import type {
     SessionUserMessage,
 } from "@slopus/happy-providers";
 import { areProviderModelsCompatible } from "@slopus/happy-providers";
+import { createId } from "@paralleldrive/cuid2";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { Value } from "@sinclair/typebox/value";
 import {
@@ -30,6 +31,7 @@ import {
     withAgentPermissionMode,
     withAgentRunKV,
 } from "./AgentContexts.js";
+import { agentConfig, ownAgentConfig, withAgentConfig, type AgentConfig } from "./AgentConfig.js";
 import { taskContextBeforeToolCall, withAgentTaskContext } from "./AgentTaskContext.js";
 import { AgentKV } from "./AgentKV.js";
 import {
@@ -47,6 +49,14 @@ import type {
     MaybePromise,
 } from "./AgentBaseHooks.js";
 import type { AgentPersistence, AgentRecord } from "./AgentPersistence.js";
+import {
+    cuid2Schema,
+    ownAgentMessageMetadata,
+    ownAgentMetadata,
+    type AgentMessageMetadata,
+    type AgentMetadata,
+    type AgentMetadataChange,
+} from "./AgentMetadata.js";
 import {
     DEFAULT_AGENT_PERMISSION_MODE,
     isAgentPermissionMode,
@@ -76,6 +86,8 @@ const insideTurn = createContextNamespace<readonly string[]>("agentInsideTurn", 
  * its own and outlives whatever happened to start it.
  */
 const insideLoops = new AsyncLocalStorage<readonly string[]>();
+/** Persistence locks held by the current asynchronous call chain, independent of Context. */
+const insidePersistenceLocks = new AsyncLocalStorage<readonly string[]>();
 
 /**
  * How long a close asked for from inside the agent's own run loop waits for the shutdown before
@@ -93,6 +105,10 @@ export type AgentBaseQueueMode = "one-at-a-time" | "all";
  * though relying on that default is discouraged — prefer sending settings with the message.
  */
 export interface AgentBaseMessageOptions {
+    /** Stable cuid2 identity for idempotent delivery; generated when omitted. */
+    readonly id?: string;
+    /** Immutable feature-owned metadata that travels with this one message. */
+    readonly metadata?: AgentMessageMetadata;
     /** The registry ID of the provider to switch to. */
     readonly provider?: string;
     /** The model to switch to; an incompatible one resets the conversation. */
@@ -133,7 +149,9 @@ export interface AgentBaseAwaitOptions {
 interface QueueEntry {
     /** The store key the message was written under and removed through when consumed. */
     readonly key: string;
+    readonly id: string;
     readonly message: SessionUserMessage;
+    readonly metadata?: AgentMessageMetadata;
     /** The settings this message makes effective when it is consumed. */
     readonly options: AgentBaseMessageOptions;
 }
@@ -149,7 +167,9 @@ interface ToolBatchEntry {
 interface QueueRequest {
     /** Which of the two queues it belongs in, and so when it will be injected. */
     readonly kind: "steering" | "send";
+    readonly id: string;
     readonly message: SessionUserMessage;
+    readonly metadata?: AgentMessageMetadata;
     readonly options: AgentBaseMessageOptions;
 }
 
@@ -354,9 +374,11 @@ export class AgentBase {
      * starts here, so a change of provider or model rebuilds one context from a known base
      * rather than layering another value onto whatever the last one happened to carry.
      */
-    readonly #baseCtx: Context;
+    #baseCtx: Context;
     /** The base context extended with the effective selection and the agent's key-value store. */
     #ctx: Context;
+    /** The immutable configuration snapshot carried by every hook context. */
+    #config: AgentConfig;
     /** The registry the provider ID is resolved through, each time a session is created. */
     readonly #providers: AgentProviders;
     /** The registry ID of the provider in force; durable, so a restart resumes on the same one. */
@@ -556,7 +578,8 @@ export class AgentBase {
      * by, so reading it here leaves the later stage writes nothing to learn from the store.
      */
     async #loadPendingState(): Promise<void> {
-        await this.#persistenceLock.runInLock(this.#ctx, async (lockCtx) => {
+        await this.#runInPersistenceLock(this.#ctx, async (lockCtx) => {
+            await this.#loadConfig(lockCtx);
             const stored = await agentBasePendingStateOf(lockCtx, this.#persistence);
             this.#inherited = stored;
             this.#inheritedRead = true;
@@ -574,10 +597,11 @@ export class AgentBase {
      */
     private constructor(ctx: Context, options: AgentBaseOptions) {
         this.id = options.id;
+        this.#config = ownAgentConfig(agentConfig(ctx) ?? {});
         // An agent is its own lifetime. Whatever call happened to construct it — a tool of
         // another agent, most often — is not a loop this one runs inside, so an inherited
         // marker is dropped rather than carried into work that outlives that call.
-        this.#baseCtx = insideTurn.set(ctx, [options.id]);
+        this.#baseCtx = withAgentConfig(insideTurn.set(ctx, [options.id]), this.#config);
         this.#providers = options.providers;
         this.#providerId = options.provider;
         this.#persistence = options.persistence;
@@ -606,8 +630,24 @@ export class AgentBase {
      * the selection changes.
      */
     #deriveCtx(): Context {
-        const ctx = withAgentContext(this.#baseCtx, this.#selection());
-        return withAgentRunKV(withAgentKV(ctx, this.#kv), this.#runKV);
+        return this.#hookContext(this.#baseCtx);
+    }
+
+    /** Add this agent's selection and stores to a caller context without losing its transaction. */
+    #hookContext(ctx: Context): Context {
+        const selected = withAgentContext(ctx, this.#selection());
+        return withAgentRunKV(withAgentKV(selected, this.#kv), this.#runKV);
+    }
+
+    /** Load a directly owned configuration written by `updateMetadata`, when one exists. */
+    async #loadConfig(ctx: Context): Promise<void> {
+        const stored = await this.#persistence.readValues(ctx, "agentConfig");
+        const exact = stored.find(({ key }) => key === "agentConfig")?.value;
+        if (exact === undefined) return;
+        const config = ownAgentConfig(exact as AgentConfig);
+        this.#config = config;
+        this.#baseCtx = withAgentConfig(this.#baseCtx, config);
+        this.#ctx = this.#deriveCtx();
     }
 
     /** Everything about what the agent is currently running on, as one value to carry. */
@@ -678,7 +718,7 @@ export class AgentBase {
             return undefined;
         }
         try {
-            return await this.#persistenceLock.runInLock(this.#ctx, async (lockCtx) => {
+            return await this.#runInPersistenceLock(this.#ctx, async (lockCtx) => {
                 if (!this.#inheritedRead) {
                     this.#inheritedRead = true;
                     this.#inherited = await agentBasePendingStateOf(lockCtx, this.#persistence);
@@ -745,6 +785,61 @@ export class AgentBase {
     }
 
     /**
+     * Shallow-merge fields into this agent's immutable metadata. The complete AgentConfig and
+     * transactional hook writes commit together; observing hooks run only after that commit.
+     */
+    async updateMetadata(ctx: Context, update: AgentMetadata): Promise<void> {
+        const ownedUpdate = ownAgentMetadata(update);
+        if (ownedUpdate === undefined) throw new Error("The agent metadata is not valid.");
+        if (this.#closed) throw new Error("The agent has been closed.");
+        if (
+            insideTurn.get(ctx).includes(this.id) ||
+            this.#insideOwnLoop() ||
+            this.#insideOwnPersistenceLock()
+        ) {
+            throw new Error(
+                "Updating metadata from inside this agent's current operation would wait for " +
+                    "that same operation to finish. Update it after the hook or tool returns.",
+            );
+        }
+        let change!: AgentMetadataChange;
+        let next!: AgentConfig;
+        await this.#runInPersistenceLock(ctx, async (lockCtx) => {
+            const previousMetadata = ownAgentMetadata(this.#config.metadata ?? {});
+            const metadata = ownAgentMetadata({ ...previousMetadata, ...ownedUpdate });
+            if (previousMetadata === undefined || metadata === undefined) {
+                throw new Error("The agent metadata is not valid.");
+            }
+            next = ownAgentConfig({ ...this.#config, metadata });
+            change = {
+                agentId: this.id,
+                previousMetadata,
+                update: ownedUpdate,
+                metadata,
+            };
+            await this.#persistence.transaction(lockCtx, async (txCtx) => {
+                await this.#persistence.writeValue(txCtx, "agentConfig", next);
+                await this.#withTransactionalContext(
+                    withAgentConfig(txCtx, next),
+                    async (hookCtx) =>
+                        await this.#hooks.metadataChangedTransact?.(
+                            this.#hookContext(hookCtx),
+                            change,
+                        ),
+                );
+            });
+            this.#config = next;
+            this.#baseCtx = withAgentConfig(this.#baseCtx, next);
+            this.#ctx = this.#deriveCtx();
+        });
+        await this.#invokeHookOn(
+            this.#hookContext(withAgentConfig(ctx, next)),
+            this.#hooks.metadataChanged,
+            change,
+        );
+    }
+
+    /**
      * Hand one message to a durable queue. The acceptance runs whether or not the caller waits
      * for it — an unwaited failure is still a message that never entered the conversation, and
      * the agent's own close still drains it, so nothing is dropped by not looking.
@@ -755,7 +850,16 @@ export class AgentBase {
         message: SessionUserMessage,
         options: (AgentBaseMessageOptions & AgentBaseAwaitOptions) | undefined,
     ): Promise<void> {
-        const { await: wait = false, ...settings } = options ?? {};
+        const {
+            await: wait = false,
+            id = createId(),
+            metadata: suppliedMetadata,
+            ...settings
+        } = options ?? {};
+        if (!Value.Check(cuid2Schema, id)) {
+            throw new Error("The message ID must be a cuid2 identity.");
+        }
+        const metadata = ownAgentMessageMetadata(suppliedMetadata);
         // Refusing the flag rather than the operation: a closed agent and a re-entrant wait are
         // both caller mistakes, and both are reported before any work is started.
         this.#assertCanWait(
@@ -764,7 +868,15 @@ export class AgentBase {
             kind === "steering" ? "a steered message" : "a sent message",
         );
         if (this.#closed) throw new Error("The agent has been closed.");
-        const accepted = this.#enqueue(ctx, [{ kind, message, options: settings }]);
+        const accepted = this.#enqueue(ctx, [
+            {
+                kind,
+                id,
+                message: structuredClone(message),
+                ...(metadata === undefined ? {} : { metadata }),
+                options: settings,
+            },
+        ]);
         if (wait) return accepted;
         accepted.catch(() => undefined);
     }
@@ -794,6 +906,24 @@ export class AgentBase {
         return insideLoops.getStore()?.includes(this.id) === true;
     }
 
+    /** Whether this call chain already holds this agent's persistence lock. */
+    #insideOwnPersistenceLock(): boolean {
+        return insidePersistenceLocks.getStore()?.includes(this.id) === true;
+    }
+
+    /** Hold the persistence lock while marking it independently of the caller's Context. */
+    async #runInPersistenceLock<Result>(
+        ctx: Context,
+        work: (lockCtx: Context) => Promise<Result>,
+    ): Promise<Result> {
+        return await this.#persistenceLock.runInLock(ctx, async (lockCtx) => {
+            const held = insidePersistenceLocks.getStore() ?? [];
+            return await insidePersistenceLocks.run([...held, this.id], async () => {
+                return await work(lockCtx);
+            });
+        });
+    }
+
     /**
      * Accept a batch of messages as one durable step. Every message is written under the same
      * hold of the persistence lock and inside one transaction, so a caller arriving while a
@@ -805,17 +935,24 @@ export class AgentBase {
         if (this.#closed) throw new Error("The agent has been closed.");
         // Admitted: from here on the messages are the agent's responsibility, and a close that
         // begins now waits for them rather than resolving over the top of them.
-        const admitted = this.#persistenceLock.runInLock(ctx, async (lockCtx) => {
+        const admitted = this.#runInPersistenceLock(ctx, async (lockCtx) => {
             const accepted: { readonly key: string; readonly request: QueueRequest }[] = [];
             await this.#persistence.transaction(lockCtx, async (txCtx) => {
                 for (const request of batch) {
+                    const identityKey = `message.${request.id}`;
+                    if (!(await this.#persistence.writeValueIfAbsent(txCtx, identityKey, true))) {
+                        continue;
+                    }
                     const key = await this.#queueKey(txCtx, `${request.kind}.`);
                     await this.#persistence.writeValue(txCtx, key, {
+                        id: request.id,
                         message: request.message,
+                        ...(request.metadata === undefined ? {} : { metadata: request.metadata }),
                         options: request.options,
                     });
                     accepted.push({ key, request });
                 }
+                if (accepted.length === 0) return;
                 // Accepting a message is what makes the work owed: the same transaction that
                 // admits it records that the agent owes an answer, so a process that dies right
                 // here is discovered still owing it rather than looking idle over a full queue.
@@ -826,8 +963,15 @@ export class AgentBase {
                 // one replaces the queue arrays wholesale, and a reference taken before the wait
                 // would push the message into an array nobody reads again.
                 const queue = request.kind === "steering" ? this.#steering : this.#sends;
-                queue.push({ key, message: request.message, options: request.options });
+                queue.push({
+                    key,
+                    id: request.id,
+                    message: request.message,
+                    ...(request.metadata === undefined ? {} : { metadata: request.metadata }),
+                    options: request.options,
+                });
             }
+            if (accepted.length === 0) return;
             this.#turnRequested = true;
             this.#startRun();
         });
@@ -1186,7 +1330,7 @@ export class AgentBase {
                     (error: unknown) => error,
                 );
                 if (loadFailure !== undefined) {
-                    this.#emit({
+                    await this.#emit({
                         type: "done",
                         state: "error",
                         kind: "internal_error",
@@ -1242,7 +1386,7 @@ export class AgentBase {
      */
     async #settleDurably(): Promise<void> {
         try {
-            await this.#persistenceLock.runInLock(this.#ctx, (lockCtx) =>
+            await this.#runInPersistenceLock(this.#ctx, (lockCtx) =>
                 this.#recordTransaction(lockCtx, async (txCtx) => {
                     await this.#clearPending(txCtx);
                     await this.#invokeTransactionalSettle(txCtx);
@@ -1424,9 +1568,19 @@ export class AgentBase {
                 this.#ensureCompaction().catch(() => undefined);
                 continue;
             }
+            const id = action.id ?? createId();
+            if (!Value.Check(cuid2Schema, id)) continue;
+            let metadata: AgentMessageMetadata | undefined;
+            try {
+                metadata = ownAgentMessageMetadata(action.metadata);
+            } catch {
+                continue;
+            }
             batch.push({
                 kind: action.type === "steer" ? "steering" : "send",
-                message: action.message,
+                id,
+                message: structuredClone(action.message),
+                ...(metadata === undefined ? {} : { metadata }),
                 options: {},
             });
         }
@@ -1474,7 +1628,7 @@ export class AgentBase {
             let needsInference = resumed.length > 0;
             if (!this.#recoveryChecked) {
                 this.#recoveryChecked = true;
-                needsInference ||= this.#resumesInterruptedRun();
+                if (await this.#resumesInterruptedRun()) needsInference = true;
             }
             // Each cycle first drains the queues, then runs one inference. Steering injects at
             // every stop between responses and always outranks sends; sent messages inject
@@ -1493,7 +1647,7 @@ export class AgentBase {
                 if (abort.signal.aborted) {
                     const hasPendingWork =
                         needsInference || this.#steering.length > 0 || this.#sends.length > 0;
-                    if (hasPendingWork) this.#emit({ type: "done", state: "cancelled" });
+                    if (hasPendingWork) await this.#emit({ type: "done", state: "cancelled" });
                     break;
                 }
                 let injected = await this.#consumeQueue(
@@ -1603,7 +1757,7 @@ export class AgentBase {
                 await this.#appendFailure(pendingError);
             }
         } catch (error: unknown) {
-            this.#emit({
+            await this.#emit({
                 type: "done",
                 state: "error",
                 kind: "internal_error",
@@ -1633,12 +1787,14 @@ export class AgentBase {
      * beginning of a block that will now never arrive is told to drop it. Only finished blocks
      * are persisted, so the conversation is intact and it is the view being corrected.
      */
-    #resumesInterruptedRun(): boolean {
+    async #resumesInterruptedRun(): Promise<boolean> {
         const owed =
             this.#lastRecordType === "user" ||
             this.#lastRecordType === "tool" ||
             this.#lastRecordType === "system";
-        if (owed && this.#inherited?.stage === "inference") this.#emit({ type: "block_reset" });
+        if (owed && this.#inherited?.stage === "inference") {
+            await this.#emit({ type: "block_reset" });
+        }
         return owed;
     }
 
@@ -1663,7 +1819,7 @@ export class AgentBase {
         const previousTokens = this.#contextTokens;
         this.#contextTokens = tokens;
         try {
-            await this.#persistenceLock.runInLock(this.#ctx, async (lockCtx) => {
+            await this.#runInPersistenceLock(this.#ctx, async (lockCtx) => {
                 const write = (writeCtx: Context): Promise<void> =>
                     tokens === undefined
                         ? this.#persistence.deleteValue(writeCtx, "context")
@@ -1713,10 +1869,14 @@ export class AgentBase {
                 throw new Error(result.message);
             }
             if (result.status === "completed") {
-                await this.#persistenceLock.runInLock(this.#ctx, async (lockCtx) => {
+                await this.#runInPersistenceLock(this.#ctx, async (lockCtx) => {
                     // Physically delete the superseded records and write the replacement —
                     // which keeps the messages that stay — in one atomic step.
                     await this.#recordTransaction(lockCtx, async (txCtx) => {
+                        await this.#deleteMessageIdentities(
+                            txCtx,
+                            await this.#persistence.load(txCtx),
+                        );
                         await this.#persistence.clearRecords(txCtx);
                         await this.#persistence.append(txCtx, {
                             type: "compaction",
@@ -1754,7 +1914,7 @@ export class AgentBase {
         if (owed.length === 0) return true;
         let settled = false;
         try {
-            await this.#persistenceLock.runInLock(this.#ctx, async (lockCtx) => {
+            await this.#runInPersistenceLock(this.#ctx, async (lockCtx) => {
                 // A call the durable batch still holds belongs to the resume, which answers it
                 // properly — and re-executes it when the tool is durable. Settling it here as
                 // well would give the conversation two results for one call.
@@ -1797,6 +1957,15 @@ export class AgentBase {
         await this.#persistence.append(ctx, record);
     }
 
+    /** Remove deduplication identities for user records a history replacement is deleting. */
+    async #deleteMessageIdentities(ctx: Context, records: readonly AgentRecord[]): Promise<void> {
+        for (const record of records) {
+            if (record.type === "user") {
+                await this.#persistence.deleteValue(ctx, `message.${record.id}`);
+            }
+        }
+    }
+
     /**
      * A transaction whose pending-state cache unwinds with it.
      */
@@ -1832,7 +2001,7 @@ export class AgentBase {
             content: [{ type: "text", text: `The last turn failed: ${message}` }],
         };
         try {
-            await this.#persistenceLock.runInLock(this.#ctx, async (lockCtx) => {
+            await this.#runInPersistenceLock(this.#ctx, async (lockCtx) => {
                 await this.#appendRecord(lockCtx, { type: "system", message: failure });
                 this.#messages.push(failure);
             });
@@ -1859,7 +2028,7 @@ export class AgentBase {
         /** Filled in once the consumption has committed, and reported after the lock is released. */
         const accepted: AgentBaseAcceptedMessage[] = [];
         let permissionChange: AgentBasePermissionModeChange | undefined;
-        const consumed = await this.#persistenceLock.runInLock(this.#ctx, async (lockCtx) => {
+        const consumed = await this.#runInPersistenceLock(this.#ctx, async (lockCtx) => {
             if (queue.length === 0) return false;
             // The durable queue, not memory, decides what is left to consume after a restart.
             const durable = new Set(
@@ -2001,6 +2170,7 @@ export class AgentBase {
                     await this.#persistence.deleteValue(txCtx, entry.key);
                 }
                 if (reset) {
+                    await this.#deleteMessageIdentities(txCtx, await this.#persistence.load(txCtx));
                     await this.#persistence.clearRecords(txCtx);
                     // The erased conversation is what the measurement described.
                     await this.#persistence.deleteValue(txCtx, "context");
@@ -2014,7 +2184,9 @@ export class AgentBase {
                 for (const entry of batch) {
                     await this.#appendRecord(txCtx, {
                         type: "user",
+                        id: entry.id,
                         message: entry.message,
+                        ...(entry.metadata === undefined ? {} : { metadata: entry.metadata }),
                     });
                 }
                 if (changed) {
@@ -2047,14 +2219,26 @@ export class AgentBase {
                         txCtx,
                         selection,
                         this.#hooks.messageAcceptedTransact,
-                        { kind, message: entry.message },
+                        {
+                            id: entry.id,
+                            kind,
+                            message: entry.message,
+                            ...(entry.metadata === undefined ? {} : { metadata: entry.metadata }),
+                        },
                     );
                 }
             });
             // Committed: from here the messages are part of the conversation, so what has to be
             // announced about them is decided now and reported once the lock is released.
             permissionChange = modeChange;
-            accepted.push(...batch.map((entry) => ({ kind, message: entry.message })));
+            accepted.push(
+                ...batch.map((entry) => ({
+                    id: entry.id,
+                    kind,
+                    message: entry.message,
+                    ...(entry.metadata === undefined ? {} : { metadata: entry.metadata }),
+                })),
+            );
             queue.splice(0, count);
             if (reset) {
                 this.#messages = injected === undefined ? [] : [injected];
@@ -2121,7 +2305,7 @@ export class AgentBase {
      * not-yet-consumed queues. Consecutive block records reassemble into one assistant message.
      */
     async #loadHistory(): Promise<void> {
-        await this.#persistenceLock.runInLock(this.#ctx, async (lockCtx) => {
+        await this.#runInPersistenceLock(this.#ctx, async (lockCtx) => {
             const records = await this.#persistence.load(lockCtx);
             const last = records[records.length - 1];
             this.#lastRecordType = last?.type;
@@ -2138,10 +2322,22 @@ export class AgentBase {
             this.#contextTokens = measured?.tokens;
             const entry = (key: string, value: unknown): QueueEntry => {
                 const envelope = value as {
+                    readonly id: string;
                     readonly message: SessionUserMessage;
+                    readonly metadata?: AgentMessageMetadata;
                     readonly options?: AgentBaseMessageOptions;
                 };
-                return { key, message: envelope.message, options: envelope.options ?? {} };
+                if (!Value.Check(cuid2Schema, envelope.id)) {
+                    throw new Error(`The queued message under "${key}" has an invalid ID.`);
+                }
+                const metadata = ownAgentMessageMetadata(envelope.metadata);
+                return {
+                    key,
+                    id: envelope.id,
+                    message: envelope.message,
+                    ...(metadata === undefined ? {} : { metadata }),
+                    options: envelope.options ?? {},
+                };
             };
             this.#steering = steering.map(({ key, value }) => entry(key, value));
             this.#sends = sends.map(({ key, value }) => entry(key, value));
@@ -2202,7 +2398,7 @@ export class AgentBase {
         abortPromise: Promise<typeof ABORTED>,
     ): Promise<boolean> {
         if (!resume) {
-            await this.#persistenceLock.runInLock(this.#ctx, (lockCtx) =>
+            await this.#runInPersistenceLock(this.#ctx, (lockCtx) =>
                 this.#recordTransaction(lockCtx, async (txCtx) => {
                     for (const entry of entries) {
                         await this.#persistence.writeValue(txCtx, entry.key, entry.call);
@@ -2239,7 +2435,7 @@ export class AgentBase {
         const commitReady = async (): Promise<void> => {
             if (commitFailed) return;
             try {
-                await this.#persistenceLock.runInLock(this.#ctx, async (lockCtx) => {
+                await this.#runInPersistenceLock(this.#ctx, async (lockCtx) => {
                     while (committed < entries.length) {
                         const entry = entries[committed];
                         const result = results[committed];
@@ -2550,7 +2746,7 @@ export class AgentBase {
         const toolCallIndexes = new Map<string, number>();
         const persist = async (event: AgentBasePersistedEvent | undefined): Promise<void> => {
             if (event === undefined) return;
-            await this.#persistenceLock.runInLock(this.#ctx, async (lockCtx) => {
+            await this.#runInPersistenceLock(this.#ctx, async (lockCtx) => {
                 if (this.#hooks.onEventTransact === undefined) {
                     await this.#appendRecord(lockCtx, { type: "block", block: event.block });
                 } else {
@@ -2576,7 +2772,7 @@ export class AgentBase {
                 const next = await Promise.race([iterator.next(), abortPromise]);
                 if (next === ABORTED) {
                     // Drop the unfinished block and end the turn.
-                    this.#emit({ type: "done", state: "cancelled" });
+                    await this.#emit({ type: "done", state: "cancelled" });
                     return { content: persisted, state: "cancelled" };
                 }
                 if (next.done === true) {
@@ -2584,7 +2780,7 @@ export class AgentBase {
                     break;
                 }
                 const event = next.value;
-                this.#emit(event);
+                await this.#emit(event);
                 switch (event.type) {
                     case "text_start":
                         content.push({ type: "text", text: "" });
@@ -2740,9 +2936,9 @@ export class AgentBase {
     }
 
     /** Report one stream event to the hooks. Hooks observe the stream; they never fail a run. */
-    #emit(event: SessionEvent): void {
+    async #emit(event: SessionEvent): Promise<void> {
         try {
-            this.#hooks.onEvent?.(this.#ctx, event);
+            await this.#hooks.onEvent?.(this.#ctx, event);
         } catch {
             // Hooks observe the stream; they never fail a run.
         }

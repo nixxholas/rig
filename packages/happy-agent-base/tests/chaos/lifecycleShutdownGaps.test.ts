@@ -12,7 +12,7 @@ import { describe, expect, it } from "vitest";
 import { AgentBase, agentKV } from "../../sources/index.js";
 import { InMemoryPersistence } from "../gym/InMemoryPersistence.js";
 import { ScriptedProvider, ScriptedSession } from "../gym/ScriptedProvider.js";
-import { providersOf, system, textTurn, user } from "../gym/fixtures.js";
+import { providersOf, system, textTurn, user, userRecord } from "../gym/fixtures.js";
 
 const ctx = createRootContext().named("happy-agent-base-lifecycle-shutdown-gaps");
 
@@ -157,7 +157,7 @@ describe("abort and shutdown lifecycle gaps", () => {
 
     it("passes the active abort lifetime to provider compaction and settles it on abort", async () => {
         const persistence = new InMemoryPersistence([
-            { type: "user", message: user("history to compact") },
+            userRecord("history to compact"),
             { type: "block", block: { type: "text", text: "old answer" } },
         ]);
         const provider = new ScriptedProvider([]);

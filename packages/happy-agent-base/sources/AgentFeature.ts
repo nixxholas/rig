@@ -24,6 +24,7 @@ import type {
 } from "./AgentBaseHooks.js";
 import type { AgentFeatureAction } from "./AgentFeatureAction.js";
 import type { AgentKV } from "./AgentKV.js";
+import type { AgentMetadata, AgentMetadataChange } from "./AgentMetadata.js";
 import type { AgentPermissionMode } from "./AgentPermissionMode.js";
 import type { AgentSystemRef } from "./AgentSystemRef.js";
 import type { AnyAgentTool } from "./AgentTool.js";
@@ -34,8 +35,10 @@ import type { AnyAgentTool } from "./AgentTool.js";
  * it is looking at, and what that agent is about to run on.
  */
 export interface AgentFeatureAgent {
-    /** The system-generated identity of the agent, stable for its whole life. */
+    /** The generated or caller-supplied cuid2 identity, stable for the agent's whole life. */
     readonly id: string;
+    /** The immutable descriptive metadata currently stored in this agent's configuration. */
+    readonly metadata: AgentMetadata | undefined;
     /** The registry ID of the provider in force, which one agent may switch between. */
     readonly provider: string;
     /**
@@ -109,14 +112,18 @@ export interface AgentFeature<Tool extends AnyAgentTool = AnyAgentTool> {
      * store lock and before any agent is restored or started. Every feature initializes
      * concurrently, and agent work begins only after all of them settle successfully.
      */
-    readonly beforeStart?: (ctx: Context, agents: AgentSystemRef) => Promise<void>;
+    readonly beforeStart?: (ctx: Context, agents: AgentSystemRef) => MaybePromise<void>;
     /**
      * Called once after every durable-active agent has been restored and started. Every feature
      * runs concurrently, and system creation resolves only after all of them settle successfully.
      */
-    readonly afterStart?: (ctx: Context, agents: AgentSystemRef) => Promise<void>;
-    /** Observes every session event; must never fail or delay the run. */
-    readonly onEvent?: (ctx: Context, scope: AgentFeatureScope, event: SessionEvent) => void;
+    readonly afterStart?: (ctx: Context, agents: AgentSystemRef) => MaybePromise<void>;
+    /** Observes every session event; the run awaits it and contains its failure. */
+    readonly onEvent?: (
+        ctx: Context,
+        scope: AgentFeatureScope,
+        event: SessionEvent,
+    ) => MaybePromise<unknown>;
     /** Runs inside the transaction committing a completed assistant block. */
     readonly onEventTransact?: (
         ctx: Context,
@@ -193,6 +200,18 @@ export interface AgentFeature<Tool extends AnyAgentTool = AnyAgentTool> {
         ctx: Context,
         scope: AgentFeatureScope,
         change: AgentBasePermissionModeChange,
+    ) => MaybePromise<void>;
+    /** Transactional counterpart to `metadataChanged`; a failure rolls the merge back. */
+    readonly metadataChangedTransact?: (
+        ctx: Context,
+        scope: AgentFeatureScope,
+        change: AgentMetadataChange,
+    ) => MaybePromise<void>;
+    /** Observes the complete merged agent metadata after it commits. */
+    readonly metadataChanged?: (
+        ctx: Context,
+        scope: AgentFeatureScope,
+        change: AgentMetadataChange,
     ) => MaybePromise<void>;
     /** Transactional counterpart to `beforeAgentLoop`. */
     readonly beforeAgentLoopTransact?: (

@@ -3,9 +3,10 @@ import type { Context } from "@steve.kite/stdlib";
 
 import type { AgentBaseMessageOptions } from "./AgentBase.js";
 import type { AgentConfig } from "./AgentConfig.js";
+import type { AgentMetadata } from "./AgentMetadata.js";
 import type { AgentModel } from "./AgentModel.js";
 import { acceptanceIsWaitable, AgentRef } from "./AgentRef.js";
-import type { AgentInitialContext, AgentSystem } from "./AgentSystem.js";
+import type { AgentCreateOptions, AgentSystem } from "./AgentSystem.js";
 
 /**
  * A reference to a collection of agents that cannot deadlock, for code that runs inside an agent
@@ -29,10 +30,13 @@ import type { AgentInitialContext, AgentSystem } from "./AgentSystem.js";
 export class AgentSystemRef {
     /** The collection this reference forwards every operation to without waiting on its loops. */
     readonly #system: AgentSystem;
+    /** The agent this reference belongs to, or `null` for collection lifecycle code. */
+    readonly agentId: string | null;
 
     /** Wrap a collection as the deadlock-free reference given to code running inside it. */
-    constructor(system: AgentSystem) {
+    constructor(system: AgentSystem, agentId: string | null = null) {
         this.#system = system;
+        this.agentId = agentId;
     }
 
     /** The models this collection offers its agents. */
@@ -40,23 +44,42 @@ export class AgentSystemRef {
         return this.#system.models;
     }
 
-    /** Create an agent with a new system-generated cuid2 identity. */
+    /** Create an agent, inheriting this reference's agent as parent unless options override it. */
     async create(
         ctx: Context,
         config: AgentConfig,
-        initialContext?: AgentInitialContext,
+        options?: AgentCreateOptions,
     ): Promise<AgentRef> {
-        return new AgentRef(await this.#system.create(ctx, config, initialContext));
+        const parent = options?.parent === undefined ? this.agentId : options.parent;
+        const agent = await this.#system.create(ctx, config, { ...options, parent });
+        return new AgentRef(agent, parent);
     }
 
     /** A reference to an existing agent; resolving one that was never created is an error. */
     async resolve(ctx: Context, agentId: string): Promise<AgentRef> {
-        return new AgentRef(await this.#system.resolve(ctx, agentId));
+        const agent = await this.#system.resolve(ctx, agentId);
+        const parent = await this.#system.parentOf(ctx, agentId);
+        return new AgentRef(agent, parent);
     }
 
-    /** The configuration an agent was created with, or undefined when there is no such agent. */
+    /** The current configuration of an agent, or undefined when there is no such agent. */
     async config(ctx: Context, agentId: string): Promise<AgentConfig | undefined> {
         return await this.#system.config(ctx, agentId);
+    }
+
+    /** Shallow-merge fields into an agent's immutable metadata. */
+    async updateMetadata(ctx: Context, agentId: string, update: AgentMetadata): Promise<void> {
+        await this.#system.updateMetadata(ctx, agentId, update);
+    }
+
+    /** The direct children of an agent, in durable key order. */
+    async childOf(ctx: Context, agentId: string): Promise<readonly string[]> {
+        return await this.#system.childOf(ctx, agentId);
+    }
+
+    /** The parent of an agent, or `null` when it is a root. */
+    async parentOf(ctx: Context, agentId: string): Promise<string | null> {
+        return await this.#system.parentOf(ctx, agentId);
     }
 
     /**

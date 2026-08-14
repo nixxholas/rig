@@ -1,5 +1,6 @@
 import { createId } from "@paralleldrive/cuid2";
 import type { SessionMessage, SessionUserMessage } from "@slopus/happy-providers";
+import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { asyncLock, type AsyncLock, type Context } from "@steve.kite/stdlib";
 
@@ -8,14 +9,22 @@ import { type AgentBaseAwaitOptions, type AgentBaseMessageOptions } from "./Agen
 import { agentId as agentIdOf } from "./AgentContexts.js";
 import type { AgentKV } from "./AgentKV.js";
 import type { AgentPersistence } from "./AgentPersistence.js";
-import { agentConfigSchema, withAgentConfig, type AgentConfig } from "./AgentConfig.js";
+import {
+    agentConfigSchema,
+    ownAgentConfig,
+    withAgentConfig,
+    type AgentConfig,
+} from "./AgentConfig.js";
 import type { AgentFeature } from "./AgentFeature.js";
+import { cuid2Schema, type AgentMetadata } from "./AgentMetadata.js";
 import type { AgentModel } from "./AgentModel.js";
 import type { AgentProviders } from "./AgentProviders.js";
 import type { AgentStorage, AgentStorageLock } from "./AgentStorage.js";
-import type { AgentInitialContext, AgentSystem } from "./AgentSystem.js";
+import type { AgentCreateOptions, AgentSystem } from "./AgentSystem.js";
 import { withAgentSystem } from "./AgentSystemContext.js";
 import { AgentSystemRef } from "./AgentSystemRef.js";
+
+const storedParentSchema = Type.String();
 
 /** Everything `AgentSystemLocal` needs to build and run the agents in its collection. */
 export interface AgentSystemLocalOptions {
@@ -56,7 +65,7 @@ export class AgentSystemLocal implements AgentSystem {
      * What this collection looks like from inside one of its agents, and the only form of it a
      * derived context ever carries.
      */
-    readonly #ref: AgentSystemRef = new AgentSystemRef(this);
+    readonly #ref: AgentSystemRef = new AgentSystemRef(this, null);
     /** The collection's feature instances, every one of them serving every agent it builds. */
     readonly #features: readonly AgentFeature[];
     /** Where the collection's identities, configuration, and per-agent state are durable. */
@@ -67,8 +76,10 @@ export class AgentSystemLocal implements AgentSystem {
     readonly #provider: string;
     /** Exclusive database-backed ownership of this collection's whole durable store. */
     readonly #storageLock: AgentStorageLock;
-    /** The configuration each identity was created with. */
+    /** The identity index and creation-time config fallback; current config lives with the agent. */
     readonly #configs: AgentKV;
+    /** The durable parent of each non-root identity, keyed by child identity. */
+    readonly #parents: AgentKV;
     /**
      * The root of the store features share across the collection. Each feature works under its
      * own scope of it, which is where anything outliving one agent's conversation belongs.
@@ -137,6 +148,7 @@ export class AgentSystemLocal implements AgentSystem {
         this.#provider = options.provider;
         this.models = [...options.models];
         this.#configs = storage.kv.scoped("config");
+        this.#parents = storage.kv.scoped("parent");
         this.#sharedFeatureKV = storage.kv.scoped("features");
     }
 
@@ -217,35 +229,56 @@ export class AgentSystemLocal implements AgentSystem {
     }
 
     /**
-     * Create an agent with the configuration it keeps for its whole life, and resolve it. The
-     * identity is allocated here and nowhere else: it is a cuid2, globally unique, so a new
-     * agent never lands on an identity that already exists or on a store something else wrote.
-     * The configuration is persisted before the agent runs, so every later process resolves the
-     * agent exactly as it was created.
+     * Create and resolve an agent. Its identity is either a validated caller-supplied cuid2 or
+     * allocated here, and the transaction refuses an existing identity rather than overwriting
+     * it. Configuration and parentage are persisted before the agent runs, so every later process
+     * resolves the same agent; only its metadata may subsequently change.
      *
      * Nothing here is undone: an agent whose features refuse to load leaves an identity that
      * exists, is resolvable, and will be built the next time something wants it. Taking a
      * provisional identity back after a failed build would add a compensation that can itself
      * fail.
      */
-    async create(
-        ctx: Context,
-        config: AgentConfig,
-        initialContext?: AgentInitialContext,
-    ): Promise<Agent> {
+    async create(ctx: Context, config: AgentConfig, options?: AgentCreateOptions): Promise<Agent> {
         return await this.#admit(async () => {
-            const agentId = createId();
+            const agentId = options?.id ?? createId();
+            if (!Value.Check(cuid2Schema, agentId)) {
+                throw new Error("The agent ID must be a cuid2 identity.");
+            }
             if (!Value.Check(agentConfigSchema, config)) {
                 throw new Error(`The configuration for agent "${agentId}" is not valid.`);
             }
+            const parent =
+                options?.parent === undefined ? (agentIdOf(ctx) ?? null) : options.parent;
             // The caller keeps its own object, and may go on editing it. What was created is what
             // was passed at this moment, so storage and this agent's context both get a copy.
-            const owned = structuredClone(config);
+            const owned = ownAgentConfig(config);
             return await this.#lockFor(agentId).runInLock(ctx, async (lockCtx) => {
-                await this.#configs.write(lockCtx, agentId, owned);
-                if (initialContext !== undefined) {
-                    await this.#seedInitialContext(lockCtx, agentId, initialContext.messages);
+                if ((await this.#configs.read(lockCtx, agentId)) !== undefined) {
+                    throw new Error(`Agent "${agentId}" already exists.`);
                 }
+                if (parent !== null && (await this.#configs.read(lockCtx, parent)) === undefined) {
+                    throw new Error(`Agent "${parent}" has not been created.`);
+                }
+                await this.#preparePersistence(
+                    lockCtx,
+                    agentId,
+                    owned,
+                    options?.initialContext?.messages ?? [],
+                );
+                await this.#configs.transaction(lockCtx, async (_configs, txCtx) => {
+                    if ((await this.#configs.read(txCtx, agentId)) !== undefined) {
+                        throw new Error(`Agent "${agentId}" already exists.`);
+                    }
+                    if (
+                        parent !== null &&
+                        (await this.#configs.read(txCtx, parent)) === undefined
+                    ) {
+                        throw new Error(`Agent "${parent}" has not been created.`);
+                    }
+                    await this.#configs.write(txCtx, agentId, owned);
+                    if (parent !== null) await this.#parents.write(txCtx, agentId, parent);
+                });
                 const agent = await this.#instantiate(lockCtx, agentId, owned);
                 if (agent === undefined) throw new Error(`Agent "${agentId}" could not be built.`);
                 return agent;
@@ -269,41 +302,98 @@ export class AgentSystemLocal implements AgentSystem {
                 const agent = this.#agents.get(agentId);
                 this.#agents.delete(agentId);
                 await agent?.close();
-                await this.#configs.delete(lockCtx, agentId);
+                await this.#configs.transaction(lockCtx, async (_configs, txCtx) => {
+                    await this.#configs.delete(txCtx, agentId);
+                    await this.#parents.delete(txCtx, agentId);
+                    const children = await this.#parents.list(txCtx);
+                    for (const child of children) {
+                        if (child.value === agentId) await this.#parents.delete(txCtx, child.key);
+                    }
+                });
                 this.#persistences.delete(agentId);
             });
         });
     }
 
-    /** Install a projected conversation before the new agent is started. */
-    async #seedInitialContext(
+    /**
+     * Atomically clear an earlier incarnation's isolated store and install the new configuration
+     * and projected conversation before publishing the identity in the collection index.
+     */
+    async #preparePersistence(
         ctx: Context,
         agentId: string,
+        config: AgentConfig,
         messages: readonly SessionMessage[],
     ): Promise<void> {
-        if (messages.length === 0) return;
         const persistence = this.#persistenceFor(agentId);
         await persistence.transaction(ctx, async (txCtx) => {
-            await persistence.append(txCtx, {
-                type: "compaction",
-                messages: structuredClone(messages),
-            });
+            await persistence.clearRecords(txCtx);
+            for (const { key } of await persistence.readValues(txCtx, "")) {
+                await persistence.deleteValue(txCtx, key);
+            }
+            await persistence.writeValue(txCtx, "agentConfig", config);
+            if (messages.length > 0) {
+                await persistence.append(txCtx, {
+                    type: "compaction",
+                    messages: structuredClone(messages),
+                });
+            }
         });
     }
 
-    /** The configuration an agent was created with, or undefined when there is no such agent. */
+    /** The current configuration of an agent, or undefined when there is no such agent. */
     async config(ctx: Context, agentId: string): Promise<AgentConfig | undefined> {
         return await this.#admit(async () => await this.#config(ctx, agentId));
     }
 
     /** Read one stored configuration while its owning operation is already admitted. */
     async #config(ctx: Context, agentId: string): Promise<AgentConfig | undefined> {
-        const stored = await this.#configs.read(ctx, agentId);
-        if (stored === undefined) return undefined;
+        const indexed = await this.#configs.read(ctx, agentId);
+        if (indexed === undefined) return undefined;
+        const local = await this.#persistenceFor(agentId).readValues(ctx, "agentConfig");
+        const stored = local.find(({ key }) => key === "agentConfig")?.value ?? indexed;
         if (!Value.Check(agentConfigSchema, stored)) {
             throw new Error(`The stored configuration of agent "${agentId}" is not valid.`);
         }
-        return stored;
+        return ownAgentConfig(stored);
+    }
+
+    /** Shallow-merge fields into one agent's immutable metadata. */
+    async updateMetadata(ctx: Context, agentId: string, update: AgentMetadata): Promise<void> {
+        await this.#admit(async () => {
+            const agent = await this.#resolve(ctx, agentId);
+            await agent.updateMetadata(ctx, update);
+        });
+    }
+
+    /** The direct children of an existing agent, in durable key order. */
+    async childOf(ctx: Context, agentId: string): Promise<readonly string[]> {
+        return await this.#admit(async () => {
+            await this.#requireAgent(ctx, agentId);
+            return (await this.#parents.list(ctx)).flatMap(({ key, value }) =>
+                value === agentId ? [key] : [],
+            );
+        });
+    }
+
+    /** The parent of an existing agent, or `null` when it is a root. */
+    async parentOf(ctx: Context, agentId: string): Promise<string | null> {
+        return await this.#admit(async () => {
+            await this.#requireAgent(ctx, agentId);
+            const parent = await this.#parents.read(ctx, agentId);
+            if (parent === undefined) return null;
+            if (!Value.Check(storedParentSchema, parent)) {
+                throw new Error(`The stored parent of agent "${agentId}" is not valid.`);
+            }
+            return parent;
+        });
+    }
+
+    /** Refuse relationship queries for an identity that has never been created. */
+    async #requireAgent(ctx: Context, agentId: string): Promise<void> {
+        if ((await this.#config(ctx, agentId)) === undefined) {
+            throw new Error(`Agent "${agentId}" has not been created.`);
+        }
     }
 
     /**
@@ -344,7 +434,10 @@ export class AgentSystemLocal implements AgentSystem {
         onlyIfActive = false,
         start = true,
     ): Promise<Agent | undefined> {
-        const agentCtx = withAgentConfig(withAgentSystem(ctx, this.#ref), config);
+        const agentCtx = withAgentConfig(
+            withAgentSystem(ctx, new AgentSystemRef(this, agentId)),
+            config,
+        );
         const options = {
             id: agentId,
             providers: this.#providers,
@@ -384,11 +477,12 @@ export class AgentSystemLocal implements AgentSystem {
     async #start(ctx: Context): Promise<readonly Agent[]> {
         const created = await this.#configs.list(ctx);
         const results = await Promise.allSettled(
-            created.map(async ({ key: agentId, value }) => {
-                if (!Value.Check(agentConfigSchema, value)) return undefined;
+            created.map(async ({ key: agentId }) => {
                 return await this.#lockFor(agentId).runInLock(ctx, async (lockCtx) => {
                     if (this.#agents.has(agentId)) return undefined;
-                    return await this.#instantiate(lockCtx, agentId, value, true, false);
+                    const config = await this.#config(lockCtx, agentId);
+                    if (config === undefined) return undefined;
+                    return await this.#instantiate(lockCtx, agentId, config, true, false);
                 });
             }),
         );

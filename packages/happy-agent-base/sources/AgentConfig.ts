@@ -1,7 +1,10 @@
 import { release } from "node:os";
 
 import { Type, type Static } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
 import { createContextNamespace, type Context } from "@steve.kite/stdlib";
+
+import { agentMetadataSchema, ownAgentMetadata, type AgentMetadata } from "./AgentMetadata.js";
 
 /** The operating systems Node reports, mirroring `NodeJS.Platform`. */
 export const agentPlatformSchema = Type.Union([
@@ -49,20 +52,35 @@ export const agentEnvironmentSchema = Type.Object({
 export type AgentEnvironment = Static<typeof agentEnvironmentSchema>;
 
 /**
- * What an agent was created with: the environment it works on, when it has one, and one opaque
- * settings map per feature, keyed by the feature's name. The configuration is static for the
- * agent's whole life and is persisted when the agent is created, so a later process resolves
- * the very same agent it was created as.
+ * What an agent was created with: the environment it works on, when it has one, one opaque
+ * settings map per feature, and descriptive metadata. Environment and feature settings stay
+ * fixed; metadata changes only through the agent metadata API, which shallow-merges updates and
+ * persists the resulting complete configuration.
  */
 export const agentConfigSchema = Type.Object({
     /** The machine this agent was told it works on, when it was told anything at all. */
     environment: Type.Optional(agentEnvironmentSchema),
     /** Per-feature settings, keyed by feature name; each entry is opaque to the agent. */
     features: Type.Optional(Type.Record(Type.String(), agentFeatureConfigSchema)),
+    /** Immutable descriptive metadata, replaced only through a merged metadata update. */
+    metadata: Type.Optional(agentMetadataSchema),
 });
 
 /** The TypeScript type inferred from {@link agentConfigSchema}. */
 export type AgentConfig = Static<typeof agentConfigSchema>;
+
+/** @internal Validate and own one configuration while deeply freezing its metadata. */
+export function ownAgentConfig(config: AgentConfig): AgentConfig {
+    if (!Value.Check(agentConfigSchema, config)) {
+        throw new Error("The agent configuration is not valid.");
+    }
+    const cloned = structuredClone(config);
+    const metadata = ownAgentMetadata(cloned.metadata);
+    return {
+        ...cloned,
+        ...(metadata === undefined ? {} : { metadata }),
+    };
+}
 
 /**
  * The environment this process is running in, ready to be handed to an agent at creation. The
@@ -85,7 +103,7 @@ const configNamespace = createContextNamespace<AgentConfig | undefined>(
     undefined,
 );
 
-/** Carry the configuration an agent was created with; every hook and tool reads it back. */
+/** Carry the agent's current configuration; every hook and tool reads it back. */
 export function withAgentConfig(ctx: Context, config: AgentConfig): Context {
     return configNamespace.set(ctx, config);
 }
@@ -98,6 +116,11 @@ export function agentConfig(ctx: Context): AgentConfig | undefined {
 /** The environment of the agent owning this context, when it was created with one. */
 export function agentEnvironment(ctx: Context): AgentEnvironment | undefined {
     return configNamespace.get(ctx)?.environment;
+}
+
+/** The immutable metadata describing the agent owning this context, when it has any. */
+export function agentMetadata(ctx: Context): AgentMetadata | undefined {
+    return configNamespace.get(ctx)?.metadata;
 }
 
 /** The opaque settings the named feature was configured with, if it was configured at all. */

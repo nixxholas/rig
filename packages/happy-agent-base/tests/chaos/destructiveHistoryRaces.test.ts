@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { AgentBase, defineAgentTool } from "../../sources/index.js";
 import { InMemoryPersistence } from "../gym/InMemoryPersistence.js";
 import { ScriptedProvider } from "../gym/ScriptedProvider.js";
-import { providersOf, textTurn, user } from "../gym/fixtures.js";
+import { providersOf, queued, textTurn, user } from "../gym/fixtures.js";
 
 const ctx = createRootContext().named("happy-agent-base-destructive-history-races");
 
@@ -122,14 +122,8 @@ describe("consistency across destructive history boundaries", () => {
 
     it("keeps live and restarted context identical when normal done arrives without text_end", async () => {
         const disk = new InMemoryPersistence();
-        disk.values.set("send.00000000000001.000000.seed", {
-            message: user("first queued message"),
-            options: {},
-        });
-        disk.values.set("send.00000000000002.000000.seed", {
-            message: user("second queued message"),
-            options: {},
-        });
+        disk.values.set("send.00000000000001.000000.seed", queued(user("first queued message")));
+        disk.values.set("send.00000000000002.000000.seed", queued(user("second queued message")));
         disk.values.set("owed", true);
         const liveProvider = new ScriptedProvider([
             [

@@ -24,11 +24,15 @@ import {
     type AgentBaseTurn,
     type AgentBaseTurnStart,
 } from "../sources/index.js";
-import { providersOf, queued, system, textTurn, user } from "./gym/fixtures.js";
+import { providersOf, queued, system, textTurn, user, userRecord } from "./gym/fixtures.js";
 import { InMemoryPersistence } from "./gym/InMemoryPersistence.js";
 import { ScriptedProvider, ScriptedSession } from "./gym/ScriptedProvider.js";
 
 const ctx = createRootContext().named("happy-agent-base-test");
+
+function recordedUser(text: string) {
+    return expect.objectContaining({ type: "user", message: user(text) });
+}
 
 function tool(name: string) {
     return defineAgentTool({
@@ -436,7 +440,7 @@ describe("AgentBase", () => {
         // needs no follow-up inference.
         expect(provider.sessions[0]?.requests).toHaveLength(1);
         expect(persistence.records).toEqual([
-            { type: "user", message: user("weather?") },
+            recordedUser("weather?"),
             {
                 type: "block",
                 block: {
@@ -514,7 +518,7 @@ describe("AgentBase", () => {
 describe("AgentBase persistence", () => {
     it("reloads the stored history before each turn", async () => {
         const persistence = new InMemoryPersistence([
-            { type: "user", message: user("earlier question") },
+            userRecord("earlier question"),
             { type: "block", block: { type: "text", text: "earlier " } },
             { type: "block", block: { type: "text", text: "answer" } },
         ]);
@@ -586,7 +590,7 @@ describe("AgentBase persistence", () => {
         await agent.waitForIdle();
 
         expect(persistence.records).toEqual([
-            { type: "user", message: user("go") },
+            recordedUser("go"),
             {
                 type: "block",
                 block: { type: "reasoning", text: "hmm", reasoning: "opaque" },
@@ -815,7 +819,9 @@ describe("AgentBase persistence", () => {
                 },
             },
         ]);
-        expect([...persistence.pending.values()]).toEqual([queued(user("hi"))]);
+        expect([...persistence.pending.values()]).toEqual([
+            expect.objectContaining({ message: user("hi"), options: {} }),
+        ]);
         expect(provider.sessions).toHaveLength(0);
         await agent.close();
     });
@@ -847,7 +853,9 @@ describe("AgentBase persistence", () => {
         // The load failed before any turn could consume the message, so it is still waiting
         // under its pending key rather than in the main context store.
         expect(persistence.records).toEqual([]);
-        expect([...persistence.pending.values()]).toEqual([queued(user("hi"))]);
+        expect([...persistence.pending.values()]).toEqual([
+            expect.objectContaining({ message: user("hi"), options: {} }),
+        ]);
         expect(provider.sessions).toHaveLength(0);
         await agent.close();
     });
@@ -928,7 +936,7 @@ describe("AgentBase persistence", () => {
         };
         // The crash happened after the batch was committed but before any result landed.
         const persistence = new InMemoryPersistence([
-            { type: "user", message: user("go") },
+            userRecord("go"),
             { type: "block", block: durableCall },
             { type: "block", block: fragileCall },
         ]);
@@ -1025,9 +1033,7 @@ describe("AgentBase persistence", () => {
     });
 
     it("start finishes a turn cut off before the assistant replied", async () => {
-        const persistence = new InMemoryPersistence([
-            { type: "user", message: user("still waiting") },
-        ]);
+        const persistence = new InMemoryPersistence([userRecord("still waiting")]);
         const provider = new ScriptedProvider([textTurn("here now")]);
         const agent = await AgentBase.create(ctx, {
             id: "test-agent",
@@ -1064,7 +1070,7 @@ describe("AgentBase persistence", () => {
         await agent.waitForIdle();
 
         expect(persistence.records).toEqual([
-            { type: "user", message: user("lost send") },
+            recordedUser("lost send"),
             { type: "block", block: { type: "text", text: "caught up" } },
         ]);
         expect(persistence.pending.size).toBe(0);
@@ -1172,7 +1178,7 @@ describe("AgentBase persistence", () => {
         );
         // Only the finished block survives; the unfinished one is dropped everywhere.
         expect(persistence.records).toEqual([
-            { type: "user", message: user("go") },
+            recordedUser("go"),
             { type: "block", block: { type: "text", text: "finished" } },
         ]);
         await agent.close();
@@ -1273,7 +1279,7 @@ describe("AgentBase persistence", () => {
 
     it("start on an idle history loads without running inference", async () => {
         const persistence = new InMemoryPersistence([
-            { type: "user", message: user("hi") },
+            userRecord("hi"),
             { type: "block", block: { type: "text", text: "hello" } },
         ]);
         const provider = new ScriptedProvider([textTurn("never")]);
@@ -1382,7 +1388,7 @@ describe("AgentBase per-message settings", () => {
         ]);
         expect(persistence.records).toEqual([
             { type: "system", message: system("Summary of the previous conversation.") },
-            { type: "user", message: user("switch") },
+            recordedUser("switch"),
             { type: "block", block: { type: "text", text: "gpt says" } },
         ]);
         await agent.close();
@@ -1739,7 +1745,7 @@ describe("AgentBase message delivery strategies", () => {
             user("just steering"),
         ]);
         expect(persistence.records).toEqual([
-            { type: "user", message: user("just steering") },
+            recordedUser("just steering"),
             { type: "block", block: { type: "text", text: "answered" } },
         ]);
         expect(persistence.pending.size).toBe(0);
@@ -2064,7 +2070,7 @@ describe("AgentBase compaction", () => {
 
     it("compacts an idle agent without running inference", async () => {
         const persistence = new InMemoryPersistence([
-            { type: "user", message: user("hi") },
+            userRecord("hi"),
             { type: "block", block: { type: "text", text: "hello" } },
         ]);
         const provider = new ScriptedProvider([]);
@@ -2102,7 +2108,7 @@ describe("AgentBase compaction", () => {
 
     it("shares one compaction between parallel compact calls", async () => {
         const persistence = new InMemoryPersistence([
-            { type: "user", message: user("hi") },
+            userRecord("hi"),
             { type: "block", block: { type: "text", text: "hello" } },
         ]);
         const provider = new ScriptedProvider([]);
@@ -2134,7 +2140,7 @@ describe("AgentBase compaction", () => {
 
     it("rejects every waiter when the provider reports a failed compaction", async () => {
         const persistence = new InMemoryPersistence([
-            { type: "user", message: user("hi") },
+            userRecord("hi"),
             { type: "block", block: { type: "text", text: "hello" } },
         ]);
         const provider = new ScriptedProvider([textTurn("still works")]);
@@ -2174,7 +2180,7 @@ describe("AgentBase compaction", () => {
 
     it("rolls the deletion back when the compaction record fails to write", async () => {
         const records = [
-            { type: "user" as const, message: user("hi") },
+            userRecord("hi"),
             { type: "block" as const, block: { type: "text" as const, text: "hello" } },
         ];
         const persistence = new InMemoryPersistence([...records]);
@@ -2206,10 +2212,10 @@ describe("AgentBase compaction", () => {
 
     it("replays the compacted context after a reload", async () => {
         const persistence = new InMemoryPersistence([
-            { type: "user", message: user("old question") },
+            userRecord("old question"),
             { type: "block", block: { type: "text", text: "old answer" } },
             { type: "compaction", messages: [compactionMessage, user("kept message")] },
-            { type: "user", message: user("newer question") },
+            userRecord("newer question"),
             { type: "block", block: { type: "text", text: "newer answer" } },
         ]);
         const provider = new ScriptedProvider([textTurn("reply")]);
@@ -3248,7 +3254,7 @@ describe("AgentBase lifecycle hooks", () => {
 describe("AgentBase load retry", () => {
     it("retries a failed history load on the next turn", async () => {
         const persistence = new InMemoryPersistence([
-            { type: "user", message: user("earlier") },
+            userRecord("earlier"),
             { type: "block", block: { type: "text", text: "earlier reply" } },
         ]);
         const originalLoad = persistence.load.bind(persistence);

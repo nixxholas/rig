@@ -9,7 +9,7 @@ import {
 } from "../sources/index.js";
 import { InMemoryPersistence } from "./gym/InMemoryPersistence.js";
 import { ScriptedProvider } from "./gym/ScriptedProvider.js";
-import { providersOf, textTurn, user } from "./gym/fixtures.js";
+import { providersOf, textTurn, user, userRecord } from "./gym/fixtures.js";
 
 const ctx = createRootContext().named("happy-agent-base-pending-state");
 
@@ -129,9 +129,7 @@ describe("durable pending state", () => {
     });
 
     it("tells a listener to drop a block that a cut-off run will never finish", async () => {
-        const persistence = new InMemoryPersistence([
-            { type: "user", message: user("interrupted question") },
-        ]);
+        const persistence = new InMemoryPersistence([userRecord("interrupted question")]);
         persistence.values.set(AGENT_BASE_PENDING_KEY, { stage: "inference" });
         const events: string[] = [];
         const provider = new ScriptedProvider([textTurn("recovered")]);

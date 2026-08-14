@@ -37,9 +37,24 @@ transaction that appends the result. Nothing outside the loop ever executes a to
 drove execution would be deciding inside machinery that also commits results, resumes interrupted
 batches, and settles cancelled ones.
 
-Features may implement async `beforeStart(ctx, agents)` and `afterStart(ctx, agents)` hooks.
+Features may implement `beforeStart(ctx, agents)` and `afterStart(ctx, agents)` hooks.
 Every `beforeStart` settles successfully before active agents are restored; every `afterStart`
 runs after those agents are restored and started. Both receive the system's `AgentSystemRef`.
+All hooks may return synchronously or with a promise, including `onEvent`; the runtime awaits each
+answer and contains failures from observing hooks.
+
+Messages receive a generated cuid2 identity, or accept one through `{ id }` for idempotent
+delivery. A repeated ID is an ignored persistence conflict while its message remains in the
+durable conversation; deliberate conversation replacement releases identities for the records it
+removes. Optional immutable metadata travels beside the provider message and reaches both
+message-accepted hooks; feature-generated send and steer actions accept the same fields.
+
+Agent configuration may contain immutable metadata such as `title`. `updateMetadata` is available
+from `AgentBase`, `Agent`, `AgentRef`, `AgentSystem`, and `AgentSystemRef`; updates shallow-merge,
+commit before memory changes, and fire transactional and post-commit hooks. Created agents also
+record a durable parent. An `AgentSystemRef` carries its owning agent ID (or `null`) and uses it as
+the default parent, while creation options may override the parent or explicitly choose `null`.
+`parentOf` and `childOf` query the resulting direct relationship, and `AgentRef.parent` exposes it.
 
 This package contains no ready-made product features. Reusable tools, hooks, permissions,
 workspaces, search, workflows, and other capabilities belong in

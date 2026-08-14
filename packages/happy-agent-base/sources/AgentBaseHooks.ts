@@ -13,6 +13,7 @@ import type {
 import type { Context } from "@steve.kite/stdlib";
 
 import type { AgentFeatureAction } from "./AgentFeatureAction.js";
+import type { AgentMessageMetadata, AgentMetadataChange } from "./AgentMetadata.js";
 import type { AgentPermissionMode } from "./AgentPermissionMode.js";
 import type { AgentProviders } from "./AgentProviders.js";
 import type { AnyAgentTool } from "./AgentTool.js";
@@ -63,10 +64,14 @@ export interface AgentBaseModelChange {
  * it is looking at. Everything else about the message is in the message.
  */
 export interface AgentBaseAcceptedMessage {
+    /** The stable cuid2 identity assigned when this message was first offered. */
+    readonly id: string;
     /** Which queue the message waited in, and therefore what made it inject when it did. */
     readonly kind: "steering" | "send";
     /** The message exactly as it entered the conversation. */
     readonly message: SessionUserMessage;
+    /** Immutable feature-owned metadata supplied with the message. */
+    readonly metadata?: AgentMessageMetadata;
 }
 
 /** What the permission-mode hooks see when a consumed message changes how much may be touched. */
@@ -180,13 +185,14 @@ export interface AgentBaseToolOutcome {
 }
 
 /**
- * Optional observation points. A hook must never fail or delay the run. Every hook receives the
- * agent's context, which carries the provider, model, and effort readable through
- * `agentProvider`, `agentModel`, and `agentEffort`.
+ * Optional observation and extension points. Every hook may answer synchronously or with a
+ * promise, and the run waits for that answer. Observing-hook failures are contained; correctness
+ * and transactional-hook failures follow the contract documented on that hook. Every hook
+ * receives the agent's context, including its immutable AgentConfig and current selection.
  */
 export interface AgentBaseHooks {
-    /** Called for every session event the provider emits, for observation only. */
-    readonly onEvent?: (ctx: Context, event: SessionEvent) => void;
+    /** Called and awaited for every session event the provider emits, for observation only. */
+    readonly onEvent?: (ctx: Context, event: SessionEvent) => MaybePromise<unknown>;
     /**
      * Called only for a completed assistant block, inside the transaction that appends it to
      * durable history. A failure rolls the append and every write made by this hook back.
@@ -312,6 +318,16 @@ export interface AgentBaseHooks {
         ctx: Context,
         change: AgentBasePermissionModeChange,
     ) => MaybePromise<void>;
+    /**
+     * Runs inside the transaction merging an agent's metadata into its durable configuration.
+     * A failure rolls the configuration update back.
+     */
+    readonly metadataChangedTransact?: (
+        ctx: Context,
+        change: AgentMetadataChange,
+    ) => MaybePromise<void>;
+    /** Observes an agent metadata update after the merged configuration has committed. */
+    readonly metadataChanged?: (ctx: Context, change: AgentMetadataChange) => MaybePromise<void>;
     /**
      * Runs after the agent is staged as working, inside the transaction committing that state.
      */

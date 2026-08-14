@@ -7,6 +7,7 @@
         "outDir": "dist",
         "rootDir": "sources",
         "sourceMap": true,
+        "stripInternal": true,
         "types": ["node"]
     },
     "exclude": ["tests"]

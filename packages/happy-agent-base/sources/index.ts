@@ -3,17 +3,18 @@
 // Agent instances and the collection that creates, resolves, and stores them.
 export { Agent, type AgentOptions } from "./Agent.js";
 export { type AgentSystem } from "./AgentSystem.js";
-export { type AgentInitialContext } from "./AgentSystem.js";
+export { type AgentCreateOptions, type AgentInitialContext } from "./AgentSystem.js";
 export { AgentSystemLocal, type AgentSystemLocalOptions } from "./AgentSystemLocal.js";
 export { AgentSystemRef } from "./AgentSystemRef.js";
 export { AgentRef } from "./AgentRef.js";
 export { agentSystem, withAgentSystem } from "./AgentSystemContext.js";
 
-// Static agent configuration: environment, per-feature settings, and their context carrier.
+// Agent configuration: fixed environment/settings, mergeable metadata, and its context carrier.
 export {
     agentConfig,
     agentConfigSchema,
     agentFeatureConfig,
+    agentMetadata,
     agentEnvironment,
     agentEnvironmentSchema,
     agentFeatureConfigSchema,
@@ -25,6 +26,16 @@ export {
     type AgentFeatureConfig,
     type AgentPlatform,
 } from "./AgentConfig.js";
+export {
+    agentMessageMetadataSchema,
+    agentMetadataSchema,
+    agentMetadataValueSchema,
+    cuid2Schema,
+    type AgentMessageMetadata,
+    type AgentMetadata,
+    type AgentMetadataChange,
+    type AgentMetadataValue,
+} from "./AgentMetadata.js";
 export { AgentStorage, type AgentStorageLock, type AgentStorageOptions } from "./AgentStorage.js";
 
 // Provider/model routing and the curated model catalog.

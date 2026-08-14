@@ -1,6 +1,7 @@
 import type { SessionSystemMessage, SessionUserMessage } from "@slopus/happy-providers";
 import type { Context } from "@steve.kite/stdlib";
 
+import { agentConfig } from "./AgentConfig.js";
 import {
     AgentBase,
     type AgentBaseAwaitOptions,
@@ -24,6 +25,7 @@ import type { AgentFeature, AgentFeatureScope } from "./AgentFeature.js";
 import type { AgentPermissionMode } from "./AgentPermissionMode.js";
 import type { AgentFeatureAction } from "./AgentFeatureAction.js";
 import type { AgentKV } from "./AgentKV.js";
+import type { AgentMetadata } from "./AgentMetadata.js";
 import type { AnyAgentTool } from "./AgentTool.js";
 
 /**
@@ -153,6 +155,11 @@ export class Agent<Tool extends AnyAgentTool = AnyAgentTool> {
         options?: AgentBaseMessageOptions & AgentBaseAwaitOptions,
     ): Promise<void> {
         await this.#base.send(ctx, message, options);
+    }
+
+    /** Shallow-merge fields into this agent's immutable metadata. */
+    async updateMetadata(ctx: Context, update: AgentMetadata): Promise<void> {
+        await this.#base.updateMetadata(ctx, update);
     }
 
     /** Start the loop without a new message, continuing a turn an earlier run left unfinished. */
@@ -301,10 +308,10 @@ function mergeFeatures<Tool extends AnyAgentTool>(
         ...(withEvents.length === 0
             ? {}
             : {
-                  onEvent: ((ctx, event) => {
+                  onEvent: (async (ctx, event) => {
                       for (const feature of withEvents) {
                           try {
-                              feature.onEvent?.(
+                              await feature.onEvent?.(
                                   featureCtx(ctx, feature),
                                   scopeOf(ctx, feature),
                                   event,
@@ -459,6 +466,14 @@ function mergeFeatures<Tool extends AnyAgentTool>(
             fanOut((feature) => feature.permissionModeChanged),
         ),
         ...spread(
+            "metadataChangedTransact",
+            chain((feature) => feature.metadataChangedTransact),
+        ),
+        ...spread(
+            "metadataChanged",
+            fanOut((feature) => feature.metadataChanged),
+        ),
+        ...spread(
             "beforeAgentLoopTransact",
             chain((feature) => feature.beforeAgentLoopTransact),
         ),
@@ -554,6 +569,7 @@ function featureScope<Tool extends AnyAgentTool>(
     return {
         agent: {
             id: options.id,
+            metadata: agentConfig(ctx)?.metadata,
             provider,
             providerKind: options.providers.typeOf(provider) ?? undefined,
             model: agentModel(ctx) ?? options.model,

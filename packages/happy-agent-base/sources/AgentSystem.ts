@@ -4,6 +4,7 @@ import type { Context } from "@steve.kite/stdlib";
 import type { Agent } from "./Agent.js";
 import type { AgentBaseAwaitOptions, AgentBaseMessageOptions } from "./AgentBase.js";
 import type { AgentConfig } from "./AgentConfig.js";
+import type { AgentMetadata } from "./AgentMetadata.js";
 import type { AgentModel } from "./AgentModel.js";
 
 /** Conversation state installed atomically before a newly created agent starts. */
@@ -12,10 +13,24 @@ export interface AgentInitialContext {
     readonly messages: readonly SessionMessage[];
 }
 
+/** Optional identity, ancestry, and conversation supplied while creating one agent. */
+export interface AgentCreateOptions {
+    /** Client-chosen cuid2 identity; generated when omitted. */
+    readonly id?: string;
+    /** The conversation installed before the agent's first turn. */
+    readonly initialContext?: AgentInitialContext;
+    /**
+     * The parent agent. Omission inherits the creating reference or calling agent, `null` creates
+     * a root, and an explicit ID must already exist.
+     */
+    readonly parent?: string | null;
+}
+
 /**
  * A collection of agents addressed by ID: what an owner can ask of the agents it runs. An agent
- * exists only once it has been created with its configuration, which is persisted and stays in
- * effect for the agent's whole life; resolving one that was never created is an error.
+ * exists only once it has been created with its persisted configuration; resolving one that was
+ * never created is an error. Environment and feature settings stay fixed, while metadata changes
+ * through a transactional shallow merge.
  *
  * This is the full surface, including the operations that wait for an agent's run loop to reach a
  * particular point — `delete`, and anything reached through the returned `Agent`. Those are for
@@ -31,17 +46,25 @@ export interface AgentSystem {
     close(ctx: Context): Promise<void>;
 
     /**
-     * Create an agent with a new system-generated cuid2 identity and the configuration it keeps
-     * for its whole life. The configuration and optional initial context are persisted before
-     * the agent runs; a creation that fails to produce an agent leaves no identity behind.
+     * Create an agent with a generated or caller-supplied cuid2 identity. Configuration,
+     * parentage, and optional initial context are persisted before it runs.
      */
-    create(ctx: Context, config: AgentConfig, initialContext?: AgentInitialContext): Promise<Agent>;
+    create(ctx: Context, config: AgentConfig, options?: AgentCreateOptions): Promise<Agent>;
 
     /** Close an agent and release its identity, so the same ID can be created again. */
     delete(ctx: Context, agentId: string): Promise<void>;
 
-    /** The configuration an agent was created with, or undefined when there is no such agent. */
+    /** The current configuration of an agent, or undefined when there is no such agent. */
     config(ctx: Context, agentId: string): Promise<AgentConfig | undefined>;
+
+    /** Shallow-merge fields into an agent's immutable metadata. */
+    updateMetadata(ctx: Context, agentId: string, update: AgentMetadata): Promise<void>;
+
+    /** The direct children of an agent, in durable key order. */
+    childOf(ctx: Context, agentId: string): Promise<readonly string[]>;
+
+    /** The parent of an agent, or `null` when it is a root. */
+    parentOf(ctx: Context, agentId: string): Promise<string | null>;
 
     /** The live agent for an ID, loading it if this process has not seen it yet. */
     resolve(ctx: Context, agentId: string): Promise<Agent>;

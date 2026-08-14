@@ -18,10 +18,14 @@ import {
     type AnyAgentTool,
 } from "../../sources/index.js";
 import { InMemoryPersistence } from "../gym/InMemoryPersistence.js";
-import { providersOf, queued, system, textTurn, user } from "../gym/fixtures.js";
+import { providersOf, queued, system, textTurn, user, userRecord } from "../gym/fixtures.js";
 import { ScriptedProvider } from "../gym/ScriptedProvider.js";
 
 const ctx = createRootContext().named("happy-agent-base-blackbox-test");
+
+function recordedUser(text: string) {
+    return expect.objectContaining({ type: "user", message: user(text) });
+}
 
 type ToolCallSpec = {
     readonly callId: string;
@@ -231,7 +235,7 @@ describe("AgentBase black-box stream and request behavior", () => {
         await agent.waitForIdle();
 
         expect(events).toEqual([done, done]);
-        expect(persistence.records).toEqual([{ type: "user", message: user("stop") }]);
+        expect(persistence.records).toEqual([recordedUser("stop")]);
         expect(provider.sessions[0]?.requests).toHaveLength(1);
         await agent.close();
     });
@@ -261,8 +265,8 @@ describe("AgentBase black-box stream and request behavior", () => {
             user("second"),
         ]);
         expect(persistence.records).toEqual([
-            { type: "user", message: user("first") },
-            { type: "user", message: user("second") },
+            recordedUser("first"),
+            recordedUser("second"),
             { type: "block", block: { type: "text", text: "second reply" } },
         ]);
         await agent.close();
@@ -288,7 +292,7 @@ describe("AgentBase black-box stream and request behavior", () => {
         await agent.waitForIdle();
 
         expect(persistence.records).toEqual([
-            { type: "user", message: user("empty reply") },
+            recordedUser("empty reply"),
             { type: "block", block: { type: "text", text: "" } },
         ]);
         expect(provider.sessions[0]?.requests[0]?.context.messages).toEqual([user("empty reply")]);
@@ -358,7 +362,9 @@ describe("AgentBase black-box stream and request behavior", () => {
         const sent = agent.send(ctx, user("persist now"), { await: true });
         await sent;
 
-        expect([...persistence.pending.values()]).toEqual([queued(user("persist now"))]);
+        expect([...persistence.pending.values()]).toEqual([
+            expect.objectContaining({ message: user("persist now"), options: {} }),
+        ]);
         expect(done).toBe(false);
         let idleResolved = false;
         const idle = agent.waitForIdle().then(() => {
@@ -382,7 +388,7 @@ describe("AgentBase black-box persistence and restart behavior", () => {
             arguments: '{"value":"one"}',
         };
         const persistence = new InMemoryPersistence([
-            { type: "user", message: user("question one") },
+            userRecord("question one"),
             { type: "block", block: { type: "reasoning", text: "thinking", reasoning: "sig" } },
             { type: "block", block: { type: "text", text: "partial" } },
             { type: "block", block: firstCall },
@@ -391,7 +397,7 @@ describe("AgentBase black-box persistence and restart behavior", () => {
                 message: toolResult("call-1", "lookup result"),
             },
             { type: "block", block: { type: "text", text: "after tool" } },
-            { type: "user", message: user("question two") },
+            userRecord("question two"),
         ]);
         const provider = new ScriptedProvider([textTurn("new answer"), textTurn("next answer")]);
         const agent = await AgentBase.create(ctx, {
@@ -451,9 +457,9 @@ describe("AgentBase black-box persistence and restart behavior", () => {
             user("new message"),
         ]);
         expect(persistence.records.slice(0, 3)).toEqual([
-            { type: "user", message: user("old one") },
-            { type: "user", message: user("old two") },
-            { type: "user", message: user("new message") },
+            recordedUser("old one"),
+            recordedUser("old two"),
+            recordedUser("new message"),
         ]);
         expect(persistence.pending.size).toBe(0);
         await agent.close();
@@ -520,7 +526,7 @@ describe("AgentBase black-box persistence and restart behavior", () => {
         };
         const result = toolResult("unfinished-call", "already done");
         const persistence = new InMemoryPersistence([
-            { type: "user", message: user("continue") },
+            userRecord("continue"),
             { type: "block", block: call },
             { type: "tool", message: result },
         ]);
@@ -568,7 +574,7 @@ describe("AgentBase black-box persistence and restart behavior", () => {
         };
         const resultA = toolResult("call-a", "first result");
         const persistence = new InMemoryPersistence([
-            { type: "user", message: user("resume") },
+            userRecord("resume"),
             { type: "block", block: callA },
             { type: "block", block: callB },
             { type: "block", block: callC },
@@ -636,7 +642,7 @@ describe("AgentBase black-box persistence and restart behavior", () => {
             arguments: "{}",
         };
         const persistence = new InMemoryPersistence([
-            { type: "user", message: user("do it") },
+            userRecord("do it"),
             { type: "block", block: call },
         ]);
         const provider = new ScriptedProvider([textTurn("answered")]);
@@ -748,7 +754,7 @@ describe("AgentBase black-box persistence and restart behavior", () => {
         // The note a failed turn leaves behind means the question it was given never got an
         // answer, so a restarted agent owes one — with the note itself as context.
         const persistence = new InMemoryPersistence([
-            { type: "user", message: user("what happened?") },
+            userRecord("what happened?"),
             { type: "system", message: system("The last turn failed: the store fell over.") },
         ]);
         const provider = new ScriptedProvider([textTurn("here is the answer")]);
@@ -912,8 +918,8 @@ describe("AgentBase black-box persistence and restart behavior", () => {
     it("keeps a transaction scoped to its own persistence instance", async () => {
         const first = new InMemoryPersistence();
         const second = new InMemoryPersistence();
-        const firstRecord = { type: "user" as const, message: user("first") };
-        const secondRecord = { type: "user" as const, message: user("second") };
+        const firstRecord = userRecord("first");
+        const secondRecord = userRecord("second");
         await expect(
             first.transaction(ctx, async (transactionContext) => {
                 await first.append(transactionContext, firstRecord);
@@ -1227,7 +1233,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
         expect(executed).toBe(false);
         expect(provider.sessions[0]?.requests).toHaveLength(1);
         expect(persistence.records).toEqual([
-            { type: "user", message: user("server") },
+            recordedUser("server"),
             {
                 type: "block",
                 block: {
@@ -1259,7 +1265,7 @@ describe("AgentBase black-box tool validation and ordering", () => {
         await agent.waitForIdle();
 
         expect(provider.sessions[0]?.requests).toHaveLength(1);
-        expect(persistence.records).toEqual([{ type: "user", message: user("no calls") }]);
+        expect(persistence.records).toEqual([recordedUser("no calls")]);
         await agent.close();
     });
 

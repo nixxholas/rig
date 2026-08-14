@@ -4,6 +4,7 @@ import type { Context } from "@steve.kite/stdlib";
 import type { Agent } from "./Agent.js";
 import type { AgentBaseMessageOptions } from "./AgentBase.js";
 import { agentId } from "./AgentContexts.js";
+import type { AgentMetadata } from "./AgentMetadata.js";
 
 /**
  * Whether this caller may be told that `agentId` durably accepted a message. Acceptance is a
@@ -34,9 +35,12 @@ export function acceptanceIsWaitable(ctx: Context, target: string): boolean {
 export class AgentRef {
     /** The agent this reference wraps. */
     readonly #agent: Agent;
+    /** The durable parent captured when this reference was resolved, or `null` for a root. */
+    readonly parent: string | null;
 
-    constructor(agent: Agent) {
+    constructor(agent: Agent, parent: string | null = null) {
         this.#agent = agent;
+        this.parent = parent;
     }
 
     /** The wrapped agent's ID. */
@@ -66,6 +70,11 @@ export class AgentRef {
             ...options,
             await: acceptanceIsWaitable(ctx, this.#agent.id),
         });
+    }
+
+    /** Shallow-merge fields into this agent's immutable metadata. */
+    async updateMetadata(ctx: Context, update: AgentMetadata): Promise<void> {
+        await this.#agent.updateMetadata(ctx, update);
     }
 
     /** Ask the agent to compact, which it does between turns. */

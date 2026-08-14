@@ -74,6 +74,11 @@ export class FlakyPersistence implements AgentPersistence {
         return this.disk.writeValue(ctx, key, value);
     }
 
+    writeValueIfAbsent(ctx: Context, key: string, value: unknown): Promise<boolean> {
+        this.#step();
+        return this.disk.writeValueIfAbsent(ctx, key, value);
+    }
+
     deleteValue(ctx: Context, key: string): Promise<void> {
         this.#step();
         return this.disk.deleteValue(ctx, key);
@@ -143,6 +148,11 @@ export class CrashingPersistence implements AgentPersistence {
     writeValue(ctx: Context, key: string, value: unknown): Promise<void> {
         this.#step();
         return this.disk.writeValue(ctx, key, value);
+    }
+
+    writeValueIfAbsent(ctx: Context, key: string, value: unknown): Promise<boolean> {
+        this.#step();
+        return this.disk.writeValueIfAbsent(ctx, key, value);
     }
 
     deleteValue(ctx: Context, key: string): Promise<void> {

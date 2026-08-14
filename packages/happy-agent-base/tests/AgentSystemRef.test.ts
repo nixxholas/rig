@@ -67,7 +67,7 @@ describe("AgentSystemRef", () => {
             created: true,
             resolved: true,
             id: created.id,
-            reachable: ["abort", "compact", "constructor", "id", "send", "steer"],
+            reachable: ["abort", "compact", "constructor", "id", "send", "steer", "updateMetadata"],
         });
 
         expect(created.id).toMatch(/^[a-z0-9]+$/);

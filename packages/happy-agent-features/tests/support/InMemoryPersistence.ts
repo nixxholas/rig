@@ -101,6 +101,12 @@ export class InMemoryPersistence implements AgentPersistence {
         return Promise.resolve();
     }
 
+    async writeValueIfAbsent(ctx: Context, key: string, value: unknown): Promise<boolean> {
+        if ((await this.readValues(ctx, key)).some((entry) => entry.key === key)) return false;
+        await this.writeValue(ctx, key, value);
+        return true;
+    }
+
     deleteValue(ctx: Context, key: string): Promise<void> {
         const staged = this.#staged(ctx);
         if (staged === undefined) {

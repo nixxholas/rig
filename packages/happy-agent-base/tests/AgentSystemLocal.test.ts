@@ -714,14 +714,17 @@ describe("AgentSystemLocal shared features", () => {
         // Nothing that ends an agent's life, or waits for one, is reachable from inside.
         expect(Object.getOwnPropertyNames(Object.getPrototypeOf(seen)).sort()).toEqual([
             "abort",
+            "childOf",
             "compact",
             "config",
             "constructor",
             "create",
             "models",
+            "parentOf",
             "resolve",
             "send",
             "steer",
+            "updateMetadata",
         ]);
         await agent.close();
     });

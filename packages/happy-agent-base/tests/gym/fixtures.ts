@@ -6,7 +6,12 @@ import type {
 } from "@slopus/happy-providers";
 import type { Context } from "@steve.kite/stdlib";
 
-import { AgentKV, AgentProviders, type AgentStorageLock } from "../../sources/index.js";
+import {
+    AgentKV,
+    AgentProviders,
+    type AgentRecord,
+    type AgentStorageLock,
+} from "../../sources/index.js";
 import { InMemoryPersistence } from "./InMemoryPersistence.js";
 
 /** A registry holding the one provider under the ID `"scripted"` that tests configure. */
@@ -64,14 +69,30 @@ export function user(text: string): SessionUserMessage {
     return { role: "user", content: [{ type: "text", text }] };
 }
 
+/** One deterministic persisted user record for pre-seeded test history. */
+export function userRecord(text: string): Extract<AgentRecord, { readonly type: "user" }> {
+    const message = user(text);
+    return { type: "user", id: messageId(message), message };
+}
+
 export function system(text: string): SessionSystemMessage {
     return { role: "system", content: [{ type: "text", text }] };
 }
 
 /** The durable envelope a queued message is stored under before it is consumed. */
 export function queued(message: SessionUserMessage): {
+    id: string;
     message: SessionUserMessage;
     options: Record<string, never>;
 } {
-    return { message, options: {} };
+    return { id: messageId(message), message, options: {} };
+}
+
+function messageId(message: SessionUserMessage): string {
+    const serialized = JSON.stringify(message);
+    let hash = 0;
+    for (const character of serialized) {
+        hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
+    }
+    return `q${hash.toString(36).padEnd(23, "0")}`;
 }
