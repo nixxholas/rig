@@ -1,11 +1,5 @@
 export type { EventId } from "./EventId.js";
-export type {
-    Model,
-    ProviderError,
-    ServiceTier,
-    StopReason,
-    Usage,
-} from "./InferenceProtocol.js";
+export type { Model, ProviderError, ServiceTier, StopReason, Usage } from "./InferenceProtocol.js";
 export {
     CURRENT_ONBOARDING_VERSION,
     onboardMurmurRequestSchema,
@@ -297,7 +291,7 @@ export type {
     RemoteTerminalSummary,
     ResizeRemoteTerminalRequest,
 } from "../terminal/index.js";
-export type { GoalStatus, SessionGoal } from "../goals/index.js";
+export type { GoalStatus, SessionGoal } from "@slopus/happy-agent-features";
 export type { ScheduledMessage } from "../scheduling/index.js";
 export type {
     ProviderUsage,

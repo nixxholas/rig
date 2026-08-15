@@ -1,4 +1,4 @@
-import type { GoalStatus } from "../goals/index.js";
+import type { GoalStatus } from "@slopus/happy-agent-features";
 
 export function humanizeGoalStatus(status: GoalStatus): string {
     if (status === "active") return "Active";

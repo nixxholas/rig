@@ -9,7 +9,7 @@ import type {
 } from "../agent/index.js";
 import type { Context } from "@steve.kite/stdlib";
 import type { PermissionMode } from "../permissions/index.js";
-import type { GoalStatus, SessionGoal } from "../goals/index.js";
+import type { GoalStatus, SessionGoal } from "@slopus/happy-agent-features";
 import type {
     AbortRunOptions,
     AbortRunResponse,

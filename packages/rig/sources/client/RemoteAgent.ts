@@ -31,7 +31,7 @@ import type {
 import type { CodingAssistantProviderInfo } from "../app/CodingAssistantAgentBackend.js";
 import type { PermissionMode } from "../permissions/index.js";
 import type { SecretAttachmentScope } from "../secrets/index.js";
-import type { GoalStatus, SessionGoal } from "../goals/index.js";
+import type { GoalStatus, SessionGoal } from "@slopus/happy-agent-features";
 import { ProtocolHttpClient } from "./ProtocolHttpClient.js";
 import { RemoteAgentRunError } from "./RemoteAgentRunError.js";
 

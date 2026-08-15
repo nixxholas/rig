@@ -19,8 +19,7 @@ import type { PermissionMode } from "../permissions/index.js";
 import type { UserInputRequest, UserInputResponse } from "../user-input/index.js";
 import type { McpServerSummary } from "../mcp/index.js";
 import type { SessionTask } from "../tasks/index.js";
-import type { WorkflowRun } from "@slopus/happy-agent-features";
-import type { ChangeGoalStatusRequest, CreateGoalRequest, SessionGoal } from "../goals/index.js";
+import type { GoalStatus, SessionGoal, WorkflowRun } from "@slopus/happy-agent-features";
 import type { EventId } from "./EventId.js";
 import type { GitChangeSnapshot, PresenceSnapshot } from "./ProjectProtocol.js";
 import type { DockerExecutionConfig } from "../execution/DockerExecutionConfig.js";
@@ -813,9 +812,15 @@ export interface UnregisterSecretResponse {
     removed: boolean;
 }
 
-export type SetGoalRequest = CreateGoalRequest & { mutationId?: string };
+export interface SetGoalRequest {
+    objective: string;
+    mutationId?: string;
+}
 
-export type ChangeSessionGoalStatusRequest = ChangeGoalStatusRequest & { mutationId?: string };
+export interface ChangeSessionGoalStatusRequest {
+    status: GoalStatus;
+    mutationId?: string;
+}
 
 export interface GoalSessionResponse {
     session: ProtocolSession;

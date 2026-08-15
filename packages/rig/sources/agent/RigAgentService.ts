@@ -11,9 +11,13 @@ import {
 } from "@slopus/happy-agent-base";
 import {
     AppletFeature,
+    GoalFeature,
     HistoryFeature,
     ModelSwitchFeature,
     SystemPromptFeature,
+    TasksFeature,
+    WorkletsFeature,
+    WorkflowsFeature,
 } from "@slopus/happy-agent-features";
 import type { SessionReasoningEffort, SessionUserMessage } from "@slopus/happy-providers";
 import { Type } from "@sinclair/typebox";
@@ -22,7 +26,10 @@ import type { Context } from "@steve.kite/stdlib";
 
 import type { SessionDatabase } from "../persistence/database/SessionDatabase.js";
 import { withDatabase } from "../persistence/databaseContext.js";
-import { runSessionTransaction } from "../persistence/database/SessionTransactionContext.js";
+import {
+    deferSessionTransactionCommit,
+    runSessionTransaction,
+} from "../persistence/database/SessionTransactionContext.js";
 import {
     markAgentMessageSubmissionConsumed,
     markAgentMessageSubmissionsSettled,
@@ -69,7 +76,11 @@ import { RigHistoryStore } from "./RigHistoryStore.js";
 import { RigProtocolFeature, type RigAgentConfiguration } from "./RigProtocolFeature.js";
 import type { RigProtocolProjection } from "./RigProtocolProjection.js";
 import { SqliteAgentPersistence } from "./persistence/SqliteAgentPersistence.js";
+import { RigGoalStorage } from "./persistence/RigGoalStorage.js";
 import { RigAppletCatalog } from "../persistence/applets/RigAppletCatalog.js";
+import { SqliteWorkflowStore } from "../persistence/workflows/SqliteWorkflowStore.js";
+import { RigWorkletCatalog } from "../persistence/worklets/RigWorkletCatalog.js";
+import { UnavailableWorkletRuntime } from "../host-runtime/worklets/UnavailableWorkletRuntime.js";
 import { resolveAppletRootDirectory } from "../config/resolveAppletRootDirectory.js";
 import type { ContentBlock, UserMessage } from "./types.js";
 
@@ -90,6 +101,10 @@ const submitMessageCoreSchema = Type.Object(
 
 export class RigAgentService {
     readonly applets: AppletFeature;
+    readonly goal: GoalFeature;
+    readonly tasks: TasksFeature;
+    readonly worklets: WorkletsFeature;
+    readonly workflows: WorkflowsFeature;
     readonly #bridge: RigProtocolFeature;
     readonly #models: readonly AgentModel[];
     readonly #system: AgentSystemLocal;
@@ -150,6 +165,34 @@ export class RigAgentService {
                 catalog: new RigAppletCatalog(options.database),
                 rootDirectory: resolveAppletRootDirectory(options.env),
             });
+            const featureStorage = {
+                persistence: (agentId: string) =>
+                    new SqliteAgentPersistence(options.database, agentId),
+            };
+            const afterCommit = (
+                featureCtx: Context,
+                callback: (postCommitCtx: Context) => void | Promise<void>,
+            ): void => {
+                void deferSessionTransactionCommit(
+                    () => callback(withDatabase(featureCtx, options.database)),
+                    options.database,
+                );
+            };
+            const goal = new GoalFeature({
+                afterCommit,
+                storage: new RigGoalStorage(options.database),
+            });
+            const tasks = new TasksFeature({
+                afterCommit,
+                storage: featureStorage,
+            });
+            const workflows = new WorkflowsFeature({
+                store: new SqliteWorkflowStore(options.database),
+            });
+            const worklets = new WorkletsFeature({
+                catalog: new RigWorkletCatalog(options.database),
+                runtime: new UnavailableWorkletRuntime(),
+            });
             // The bridge is deliberately last: every configurable feature must finish its
             // transactional projection before the protocol event and terminal callbacks can be
             // staged.
@@ -157,7 +200,17 @@ export class RigAgentService {
                 withDatabase(ctx, options.database),
                 storage,
                 {
-                    features: [systemPrompt, history, modelSwitch, applets, bridge],
+                    features: [
+                        systemPrompt,
+                        history,
+                        modelSwitch,
+                        goal,
+                        tasks,
+                        workflows,
+                        worklets,
+                        applets,
+                        bridge,
+                    ],
                     models: runtime.models,
                     provider: runtime.defaultProvider,
                     providers: runtime.providers,
@@ -170,6 +223,10 @@ export class RigAgentService {
                 options.database,
                 options.projection,
                 applets,
+                goal,
+                tasks,
+                worklets,
+                workflows,
             );
         } catch (error) {
             throw error;
@@ -183,6 +240,10 @@ export class RigAgentService {
         database: SessionDatabase,
         projection: RigProtocolProjection,
         applets: AppletFeature,
+        goal: GoalFeature,
+        tasks: TasksFeature,
+        worklets: WorkletsFeature,
+        workflows: WorkflowsFeature,
     ) {
         this.#bridge = bridge;
         this.#models = models;
@@ -190,6 +251,10 @@ export class RigAgentService {
         this.#database = database;
         this.#projection = projection;
         this.applets = applets;
+        this.goal = goal;
+        this.tasks = tasks;
+        this.worklets = worklets;
+        this.workflows = workflows;
     }
 
     async submit(

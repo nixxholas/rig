@@ -12,7 +12,7 @@ import { agentRecords, agentValues } from "../../persistence/database/schema.js"
 import type { SessionDatabase } from "../../persistence/database/SessionDatabase.js";
 import { inDatabase } from "../../persistence/database/inDatabase.js";
 import { withDatabase } from "../../persistence/databaseContext.js";
-import { runSessionTransaction } from "../../session/SessionTransactionContext.js";
+import { runSessionTransaction } from "../../persistence/database/SessionTransactionContext.js";
 
 export class SqliteAgentPersistence implements AgentPersistence {
     readonly #agentId: string;
