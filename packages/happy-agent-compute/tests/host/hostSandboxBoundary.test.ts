@@ -14,8 +14,9 @@ const computes: Compute[] = [];
 const temporaryDirectories: string[] = [];
 
 /**
- * The restricted-command boundary is enforced by the operating-system sandbox — Seatbelt on macOS,
- * Bubblewrap on Linux. The test runner is itself sandboxed and cannot always spawn a nested one, so
+ * The restricted-command boundary is enforced by the native supervisor — Seatbelt on macOS and
+ * Linux namespaces on Linux. The test runner is itself sandboxed and cannot always spawn a nested
+ * one, so
  * these cases are gated on a probe: when a restricted command cannot even run, the boundary is
  * unproven here rather than broken, and the assertions are skipped with that reason recorded.
  *
@@ -163,10 +164,8 @@ async function makeWorkspace(): Promise<string> {
 }
 
 async function makeTemporaryDirectory(): Promise<string> {
-    // Seatbelt deliberately leaves the system temporary directory writable, because toolchain
-    // shims cache there on every invocation. A fixture under that directory therefore proves
-    // nothing about the workspace boundary — the write it expects to be refused is one the
-    // sandbox is supposed to allow. Keep the fixture beside this test instead.
+    // Keep the fixture beside the test so its outside-workspace target is explicit and independent
+    // from operating-system temporary-directory conventions.
     const path = await mkdtemp(join(import.meta.dirname, ".host-boundary-"));
     temporaryDirectories.push(path);
     return path;

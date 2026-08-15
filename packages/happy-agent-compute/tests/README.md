@@ -14,22 +14,18 @@ HAPPY_AGENT_COMPUTE_LIVE_TEST=1 pnpm --filter @slopus/happy-agent-compute \
 ```
 
 The Docker image defaults to `rig-gym:local`. Override it with
-`HAPPY_AGENT_COMPUTE_DOCKER_IMAGE`. The image must contain Bubblewrap, `socat`, Node, and the
-normal Docker sandbox prerequisites.
+`HAPPY_AGENT_COMPUTE_DOCKER_IMAGE`. The image must contain a POSIX shell and the commands used by
+the live cases. Managed containers receive the static Linux supervisor from the package; attached
+containers must already mount the matching installed NPM artifact read-only at
+`/tools/happy-agent-sandbox`.
 
-Run the host lane outside an already restricted process. macOS Seatbelt and Linux Bubblewrap
+Run the host lane outside an already restricted process. macOS Seatbelt and the Linux supervisor
 cannot necessarily nest inside an agent or CI runner sandbox. Run the Docker lane where the Docker
 socket is available.
 
 When the opt-in is absent, live cases are reported as skipped. When it is present, a missing OS
 sandbox, Docker daemon, or Docker image throws from setup and fails the suite. A live prerequisite
 must never turn into a passing assertion.
-
-A package script would make the intended lane discoverable. The exact line to add to `scripts` is:
-
-```json
-"test:live": "HAPPY_AGENT_COMPUTE_LIVE_TEST=1 vitest run tests/live"
-```
 
 ## Rig parity audit
 
@@ -47,58 +43,45 @@ Status meanings:
 
 ### Agent context, filesystem, sandbox, and network
 
-| Rig test                                                    | Compute equivalent                                                                        | Status                                                                                                                                                                                                       |
-| ----------------------------------------------------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `ManagedNetworkPolicy.test.ts`                              | `tests/network/ManagedNetworkPolicy.test.ts`                                              | Present                                                                                                                                                                                                      |
-| `assertCanWritePath.test.ts`                                | `tests/sandbox/assertCanWritePath.test.ts`, host/just-bash/Docker permission tests        | Present; compute adds caller denials and grants                                                                                                                                                              |
-| `createJustBashBashContext.test.ts`                         | `tests/justBash/createJustBashCompute.test.ts`                                            | Weaker; exit reporting is present, but oldest-session eviction and completed-session retention have no equivalent assertion                                                                                  |
-| `createJustBashFileSystemContext.test.ts`                   | `tests/justBash/createJustBashCompute.test.ts`                                            | Present                                                                                                                                                                                                      |
-| `createLinuxBubblewrapCommand.test.ts`                      | `tests/sandbox/createLinuxBubblewrapCommand.test.ts`                                      | Present                                                                                                                                                                                                      |
-| `createMacOsSeatbeltCommand.test.ts`                        | `tests/sandbox/createMacOsSeatbeltCommand.test.ts`, `tests/live/hostSandbox.live.test.ts` | Weaker; generated policy and core live boundary are covered, but Rig's live Unix-socket and protected-config cases were not ported                                                                           |
-| `createNodeAgentContext.test.ts` filesystem and shell cases | host compute, filesystem, shell, and host live tests                                      | Weaker; core execution is present, while Git broker, Git identity, selected-secret injection, and provider-control-channel cases remain above this package                                                   |
-| `createNodeBashContext.test.ts`                             | `tests/host/createHostShell.test.ts`                                                      | Weaker; timeout, deltas, stdin, process-tree stop, exit notification, eviction, and network mapping are present; cleanup-failure, orphan-child, peek, retention-cap, and several lifecycle races are missing |
-| `createNodeFileSystemContext.test.ts`                       | `tests/host/createHostCompute.test.ts`, host live tests                                   | Present for paging, bounded reads, `noFollow`, per-operation permissions, and host read/write boundaries                                                                                                     |
-| `createProtectedPathMonitor.test.ts`                        | none                                                                                      | Missing                                                                                                                                                                                                      |
-| `createSandboxConfigDirectoryCache.test.ts`                 | same-named sandbox test                                                                   | Present                                                                                                                                                                                                      |
-| `createSandboxFilesystemConfig.test.ts`                     | same-named sandbox test                                                                   | Present; compute adds operation-specific grants and denials                                                                                                                                                  |
-| `createSandboxedCommand.test.ts`                            | same-named sandbox test                                                                   | Present for command construction and prerequisites; real enforcement is in the live host lane                                                                                                                |
-| `createSensitiveReadPaths.test.ts`                          | same-named sandbox test                                                                   | Present                                                                                                                                                                                                      |
-| `createShellEnvironment.test.ts`                            | same-named sandbox test                                                                   | Present                                                                                                                                                                                                      |
-| `createToolEnvironment.test.ts`                             | same-named sandbox test                                                                   | Present                                                                                                                                                                                                      |
-| `findGitWritablePaths.test.ts`                              | same-named sandbox test                                                                   | Present                                                                                                                                                                                                      |
-| `formatManagedNetworkDenial.test.ts`                        | same-named network test                                                                   | Present                                                                                                                                                                                                      |
-| `isPathInsideWorkspace.test.ts`                             | same-named sandbox test                                                                   | Present                                                                                                                                                                                                      |
-| `justBashArchiveCodecs.test.ts`                             | none                                                                                      | Missing                                                                                                                                                                                                      |
-| `loadProjectManagedNetworkPolicy.test.ts`                   | Docker loader test and `toManagedNetworkPolicy.test.ts`                                   | Weaker; no host test proves that root policy is re-read on every call                                                                                                                                        |
-| `prepareProjectConfigPlaceholder.test.ts`                   | same-named sandbox test                                                                   | Present                                                                                                                                                                                                      |
-| `resolveFileSystemPath.test.ts`                             | same-named sandbox test                                                                   | Present                                                                                                                                                                                                      |
-| `runCleanupSteps.test.ts`                                   | same-named sandbox test                                                                   | Present                                                                                                                                                                                                      |
-| `startLinuxManagedNetworkBridge.test.ts`                    | same-named network test                                                                   | Weaker; authentication is present, but partial-start cleanup when the SOCKS bridge fails is missing                                                                                                          |
-| `startManagedNetworkProxy.test.ts`                          | same-named network test                                                                   | Present for the core policy, DNS, tunnel, interception, timeout, and cleanup contracts; a few Rig plugin-forwarding variants differ                                                                          |
-| `subagentSelectionDescriptions.test.ts`                     | none                                                                                      | Out of scope                                                                                                                                                                                                 |
+| Rig test                                                    | Compute equivalent                                                                 | Status                                                                                                                                                                                                       |
+| ----------------------------------------------------------- | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `loadProjectManagedNetworkPolicy.test.ts`                   | `tests/network/toManagedNetworkPolicy.test.ts`, Docker loader test                 | Present for the compute-owned policy translation and Docker file framing                                                                                                                                     |
+| `assertCanWritePath.test.ts`                                | `tests/sandbox/assertCanWritePath.test.ts`, host/just-bash/Docker permission tests | Present; compute adds caller denials and grants                                                                                                                                                              |
+| `createJustBashBashContext.test.ts`                         | `tests/justBash/createJustBashCompute.test.ts`                                     | Weaker; exit reporting is present, but oldest-session eviction and completed-session retention have no equivalent assertion                                                                                  |
+| `createJustBashFileSystemContext.test.ts`                   | `tests/justBash/createJustBashCompute.test.ts`                                     | Present                                                                                                                                                                                                      |
+| `createSupervisorPolicy.test.ts`                            | `tests/supervisor/createSupervisorPolicy.test.ts`                                  | Present; the published supervisor owns native filesystem and network enforcement                                                                                                                             |
+| `createNodeAgentContext.test.ts` filesystem and shell cases | host compute, filesystem, shell, and host live tests                               | Weaker; core execution is present, while Git broker, Git identity, selected-secret injection, and provider-control-channel cases remain above this package                                                   |
+| `createNodeBashContext.test.ts`                             | `tests/host/createHostShell.test.ts`                                               | Weaker; timeout, deltas, stdin, process-tree stop, exit notification, eviction, and network mapping are present; cleanup-failure, orphan-child, peek, retention-cap, and several lifecycle races are missing |
+| `createNodeFileSystemContext.test.ts`                       | `tests/host/createHostCompute.test.ts`, host live tests                            | Present for paging, bounded reads, `noFollow`, per-operation permissions, and host read/write boundaries                                                                                                     |
+| `createProtectedPathMonitor.test.ts`                        | none                                                                               | Missing                                                                                                                                                                                                      |
+| `prepareHostProjectConfigPlaceholders.test.ts`              | `tests/host/impl/prepareHostProjectConfigPlaceholders.test.ts`, host shell test    | Present for absent protected-policy reservation and concurrent release                                                                                                                                       |
+| `createSensitiveReadPaths.test.ts`                          | same-named sandbox test                                                            | Present                                                                                                                                                                                                      |
+| `createShellEnvironment.test.ts`                            | same-named sandbox test                                                            | Present                                                                                                                                                                                                      |
+| `createToolEnvironment.test.ts`                             | same-named sandbox test                                                            | Present                                                                                                                                                                                                      |
+| `isPathInsideWorkspace.test.ts`                             | same-named sandbox test                                                            | Present                                                                                                                                                                                                      |
+| `justBashArchiveCodecs.test.ts`                             | none                                                                               | Missing                                                                                                                                                                                                      |
+| `resolveFileSystemPath.test.ts`                             | same-named sandbox test                                                            | Present                                                                                                                                                                                                      |
+| `runCleanupSteps.test.ts`                                   | same-named sandbox test                                                            | Present                                                                                                                                                                                                      |
+| `subagentSelectionDescriptions.test.ts`                     | none                                                                               | Out of scope                                                                                                                                                                                                 |
 
 ### Docker execution
 
-| Rig test                                          | Compute equivalent                                                   | Status                                                                                                                                            |
-| ------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `DockerEnvironment.test.ts`                       | `tests/docker/DockerEnvironment.test.ts`, Docker disposal live cases | Present; compute adds missing-container errors and real managed/attached disposal                                                                 |
-| `assertDockerReadPath.test.ts`                    | same-named Docker test                                               | Present; compute adds denied reads                                                                                                                |
-| `assertDockerWritePath.test.ts`                   | same-named Docker test                                               | Present; compute adds read-only, grants, denials, and denial precedence                                                                           |
-| `createDockerBashContext.test.ts`                 | `tests/docker/createDockerShell.test.ts`, Docker timeout live case   | Weaker; most session mechanics are ported, but Git broker, selected secrets, and permission-revision races are not applicable or not ported       |
-| `createDockerFileSystemContext.test.ts`           | `tests/docker/createDockerFileSystem.test.ts`                        | Present at the fake-daemon boundary                                                                                                               |
-| `createDockerFileSystemContext.docker.test.ts`    | `tests/live/dockerBackend.live.test.ts`                              | Present and broader: a real daemon is used for containment, `noFollow`, sessions, network, and disposal; the live `noFollow` race currently fails |
-| `createDockerSandboxCommand.test.ts`              | same-named Docker test                                               | Present; compute adds independent egress/listener and path grant/deny construction                                                                |
-| `formatDockerTouchTimestamp.test.ts`              | same-named Docker test                                               | Present                                                                                                                                           |
-| `loadDockerProjectManagedNetworkPolicy.test.ts`   | same-named Docker test                                               | Present                                                                                                                                           |
-| `parseDockerPathStat.test.ts`                     | same-named Docker test                                               | Present                                                                                                                                           |
-| `prepareDockerNetworkBridgeContainerRoot.test.ts` | same-named Docker test                                               | Present                                                                                                                                           |
-| `prepareDockerNetworkBridgeHostRoot.test.ts`      | same-named Docker test                                               | Present                                                                                                                                           |
-| `prepareDockerSandbox.test.ts`                    | same-named Docker test                                               | Present; compute adds a human-readable dependency failure                                                                                         |
-| `resolveDockerBindMountPath.test.ts`              | same-named Docker test                                               | Present                                                                                                                                           |
-| `resolveDockerExecutionConfig.test.ts`            | same-named Docker test                                               | Present                                                                                                                                           |
-| `resolveDockerPath.test.ts`                       | same-named Docker test                                               | Present                                                                                                                                           |
-| `runDockerExec.test.ts`                           | same-named Docker test                                               | Present                                                                                                                                           |
-| `validateDockerExecutionConfig.test.ts`           | same-named Docker test                                               | Present; compute adds union and absolute-path validation                                                                                          |
+| Rig test                                        | Compute equivalent                                                   | Status                                                                                                                                      |
+| ----------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DockerEnvironment.test.ts`                     | `tests/docker/DockerEnvironment.test.ts`, Docker disposal live cases | Present; compute adds missing-container errors and real managed/attached disposal                                                           |
+| `assertDockerReadPath.test.ts`                  | same-named Docker test                                               | Present; compute adds denied reads                                                                                                          |
+| `assertDockerWritePath.test.ts`                 | same-named Docker test                                               | Present; compute adds read-only, grants, denials, and denial precedence                                                                     |
+| `createDockerBashContext.test.ts`               | `tests/docker/createDockerShell.test.ts`, Docker timeout live case   | Weaker; most session mechanics are ported, but Git broker, selected secrets, and permission-revision races are not applicable or not ported |
+| `createDockerFileSystemContext.test.ts`         | `tests/docker/createDockerFileSystem.test.ts`                        | Present at the fake-daemon boundary                                                                                                         |
+| `createDockerFileSystemContext.docker.test.ts`  | `tests/live/dockerBackend.live.test.ts`                              | Present and broader: a real daemon is used for containment, atomic `noFollow`, sessions, network, and disposal                              |
+| `createDockerSupervisorCommand.test.ts`         | `tests/docker/impl/createDockerSupervisorCommand.test.ts`            | Present; policy transport preserves stdin and avoids a mutable in-container policy file                                                     |
+| `formatDockerTouchTimestamp.test.ts`            | same-named Docker test                                               | Present                                                                                                                                     |
+| `loadDockerProjectManagedNetworkPolicy.test.ts` | same-named Docker test                                               | Present                                                                                                                                     |
+| `parseDockerPathStat.test.ts`                   | same-named Docker test                                               | Present                                                                                                                                     |
+| `resolveDockerExecutionConfig.test.ts`          | same-named Docker test                                               | Present                                                                                                                                     |
+| `resolveDockerPath.test.ts`                     | same-named Docker test                                               | Present                                                                                                                                     |
+| `runDockerExec.test.ts`                         | same-named Docker test                                               | Present                                                                                                                                     |
+| `validateDockerExecutionConfig.test.ts`         | same-named Docker test                                               | Present; compute adds union and absolute-path validation                                                                                    |
 
 All pre-existing compute Docker tests use hand-written Dockerode fakes. They prove request
 construction, parsing, lifecycle coordination, and fail-closed decisions, but they do not prove
@@ -157,8 +140,8 @@ session, and terminal assertions, but the backend contracts should have a lower-
 | `reducing_permissions_stops_existing_full_access_processes.test.ts` | none                                                        | Out of scope under per-operation compute permissions; the owning session must decide which existing process to stop |
 | `docker_session_routes_files_and_commands_to_container.test.ts`     | Docker filesystem/shell tests and live lane                 | Present at backend boundary                                                                                         |
 | `docker_shell_respects_permission_mode.test.ts`                     | Docker containment live case                                | Present                                                                                                             |
-| `docker_managed_network_reaches_allowed_http_service.test.ts`       | Docker managed-network live case                            | Present as a test, currently failing because allowed traffic times out                                              |
-| `managed_network_request_runs_through_linux_proxy_bridge.test.ts`   | network bridge unit tests and Docker live case              | Weaker until the Docker live allowed path passes                                                                    |
+| `docker_managed_network_reaches_allowed_http_service.test.ts`       | Docker managed-network live case                            | Present in the native-Linux live lane                                                                               |
+| `managed_network_request_runs_through_linux_proxy_bridge.test.ts`   | supervisor proxy unit tests and Docker live case            | Present at the native supervisor and package-wiring boundaries                                                      |
 | `sandbox_policy_files_cannot_be_poisoned_by_model_commands.test.ts` | placeholder, protected-path, and sandbox-command tests      | Weaker; no compute live concurrent policy-poisoning case                                                            |
 | `workspace_write_uses_codex_linux_sandbox.test.ts`                  | Linux command construction and host/Docker live containment | Present at backend boundary                                                                                         |
 | `workspace_write_custom_shell_cannot_bypass_sandbox.test.ts`        | host/Docker custom-shell validation and live containment    | Weaker; no hostile custom-shell live case                                                                           |
@@ -178,12 +161,11 @@ session, and terminal assertions, but the backend contracts should have a lower-
 - A write denial beats both the workspace grant and an explicit grant.
 - `deniedReadPaths` masks real content, including when the path is also granted.
 - Withheld egress blocks real `curl`.
-- Withheld local binding blocks a real Node listener even in `full_access`.
-- Granted unbounded macOS egress is asserted and currently fails with DNS resolution blocked.
+- Withheld local binding blocks a real Node listener in a restricted mode.
+- Granted unbounded egress reaches a real HTTPS destination.
 
-The fixture deliberately lives beside the test rather than in the system temporary directory.
-Seatbelt intentionally makes the system temporary directory writable, so a sibling under
-`tmpdir()` cannot prove the workspace boundary.
+The fixture deliberately lives beside the test so its outside-workspace target is explicit and
+independent from operating-system temporary-directory conventions.
 
 ### Docker
 
@@ -192,8 +174,7 @@ Seatbelt intentionally makes the system temporary directory writable, so a sibli
   is then shown unable to write it while still writing `/workspace`.
 - A live final-component swap races regular files against a symlink while `noFollow` reads through
   Docker's archive API. Any returned bytes must be the regular file, never the target.
-- Allowed and denied host policies traverse the real command-scoped proxy and authenticated Unix
-  bridge. The allowed path currently times out.
+- Allowed and denied host policies traverse the supervisor's real command-scoped proxy.
 - A timed-out session stays running, observes a release file, and completes afterwards.
 - Disposal removes a managed container.
 - Disposal leaves an explicitly attached container running.
@@ -206,30 +187,17 @@ Seatbelt intentionally makes the system temporary directory writable, so a sibli
 - An outside write grant applies to only the operation that carries it; the next operation does not
   retain it.
 
-The supervisor's own outgoing proxy is no longer exercised from here. It needs nothing from this
-package: the supervisor forks its own egress process and enforces the command's host list itself,
-so its end-to-end coverage lives in
-`packages/happy-agent-supervisor/native/supervisor/tests/outgoing_proxy.rs`.
+The supervisor's native suite owns exhaustive proxy behavior in
+`packages/happy-agent-supervisor/native/supervisor/tests/outgoing_proxy.rs`. Compute's native-Linux
+Docker live case proves the package wiring: policy translation, mounted binary, stdin transport,
+allowed egress, and denied egress.
 
-## Known unproven or failing claims
+## Live-test scope
 
-1. Docker `noFollow` is not currently atomic. The live swap returned `"secr"` from
-   `/home/rig/secret.txt` through `/workspace/race/candidate`.
-2. Docker managed-network allowed egress is not currently working in the live package lane. A
-   Node fetch through the authenticated bridge reaches its 15-second abort without a response.
-3. On macOS, `workspace_write` with unbounded `egress: true` cannot currently resolve
-   `example.com` inside Seatbelt (`curl` exit 6), while an independent host curl succeeds.
-4. The detailed live Unix-socket, concurrent project-policy, protected Git-hook, hostile custom
-   shell, and restricted-profile contracts proven by Rig/gym do not yet have package-level live
-   equivalents.
-5. Old ambient permission-revision races are intentionally not portable. Equivalent callers must
-   be tested for immutable operation snapshots and for higher-layer process shutdown on a later
-   permission reduction.
-6. The Linux side of the outgoing proxy is proven on arm64 only. The native suite runs green on a
-   real arm64 kernel in a container, which covers the namespace isolation, the loopback front-ends
-   and the seccomp ordering. The amd64 lane still cannot be run under emulation, because QEMU user
-   emulation does not implement `prctl(PR_SET_SECCOMP)`, so the supervisor fails closed there
-   before any front-end is reached. That lane needs a real x86_64 kernel in CI.
-7. The host proxy has only been driven against a macOS supervisor end to end. The frame protocol is
-   architecture independent and is exercised from both sides, but no run has paired the TypeScript
-   proxy with a Linux supervisor in one process tree.
+- The detailed concurrent project-policy, protected Git-hook, hostile custom-shell, and
+  restricted-profile contracts proven by Rig/gym do not all have package-level live equivalents.
+- Old ambient permission-revision races are intentionally obsolete. Compute instead tests immutable
+  operation snapshots; higher layers own stopping processes after a later permission reduction.
+- The Docker egress case runs only on a native Linux daemon. Docker Desktop is still covered for
+  container lifecycle and filesystem behavior, but it does not provide the same nested namespace
+  environment.

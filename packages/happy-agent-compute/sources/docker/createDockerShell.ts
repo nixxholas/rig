@@ -1,13 +1,15 @@
 import { randomUUID } from "node:crypto";
-import { chmod, mkdtemp, rm, symlink } from "node:fs/promises";
-import { basename, join } from "node:path";
 import { posix } from "node:path";
 import { PassThrough, type Duplex } from "node:stream";
 
 import type Dockerode from "dockerode";
 
 import { EMPTY_COMPUTE_HOST_POLICY, type ComputeHostPolicy } from "../ComputeHostPolicy.js";
-import { assertComputePermissions, type ComputePermissions } from "../ComputePermissions.js";
+import {
+    assertComputePermissions,
+    type ComputeNetworkPermissions,
+    type ComputePermissions,
+} from "../ComputePermissions.js";
 import type {
     ComputeRunOptions,
     ComputeRunResult,
@@ -16,23 +18,13 @@ import type {
     ComputeSessionSnapshot,
     ComputeShell,
 } from "../ComputeShell.js";
-import { formatManagedNetworkDenial } from "../network/impl/formatManagedNetworkDenial.js";
-import {
-    validateManagedNetworkLoopbackPorts,
-    type ManagedNetworkBlockedRequest,
-    type ManagedNetworkInterceptor,
-    type ManagedNetworkPolicy,
-    type ManagedNetworkProxyHandle,
-} from "../network/ManagedNetworkPolicy.js";
-import {
-    startLinuxManagedNetworkBridge,
-    type LinuxManagedNetworkBridge,
-} from "../network/startLinuxManagedNetworkBridge.js";
-import { startManagedNetworkProxy } from "../network/startManagedNetworkProxy.js";
+import type { ManagedNetworkPolicy } from "../network/ManagedNetworkPolicy.js";
 import { runCleanupSteps } from "../sandbox/impl/runCleanupSteps.js";
+import { quoteShellArgument } from "../sandbox/impl/quoteShellArgument.js";
 import { BoundedOutputBuffer } from "../processes/index.js";
-import { createDockerSandboxCommand } from "./impl/createDockerSandboxCommand.js";
+import { createSupervisorPolicy } from "../supervisor/index.js";
 import type { DockerEnvironment } from "./DockerEnvironment.js";
+import { createDockerSupervisorCommand } from "./impl/createDockerSupervisorCommand.js";
 import { DOCKER_PROTECTED_PATH_MONITOR_SCRIPT } from "./impl/dockerProtectedPathMonitorScript.js";
 import { errorToMessage } from "./impl/errorToMessage.js";
 import {
@@ -40,13 +32,6 @@ import {
     loadDockerProjectManagedNetworkPolicyState,
     type ParseDockerProjectNetworkConfig,
 } from "./impl/loadDockerProjectManagedNetworkPolicy.js";
-import { prepareDockerNetworkBridgeContainerRoot } from "./impl/prepareDockerNetworkBridgeContainerRoot.js";
-import {
-    DOCKER_NETWORK_BRIDGE_DIRECTORY,
-    prepareDockerNetworkBridgeHostRoot,
-} from "./impl/prepareDockerNetworkBridgeHostRoot.js";
-import { prepareDockerSandbox, type PreparedDockerSandbox } from "./impl/prepareDockerSandbox.js";
-import { resolveDockerBindMountPath } from "./impl/resolveDockerBindMountPath.js";
 import { resolveDockerNetworkPermissions } from "./impl/resolveDockerNetworkPermissions.js";
 import {
     dockerNetworkPolicyFileNames,
@@ -55,7 +40,6 @@ import {
     resolveDockerPrivateDirectories,
     snapshotDockerHostPolicy,
 } from "./impl/resolveDockerHostPolicy.js";
-import { resolveDockerPath } from "./impl/resolveDockerPath.js";
 import { runDockerExec } from "./impl/runDockerExec.js";
 
 /** How the Docker shell is wired to the layer above it. */
@@ -64,8 +48,6 @@ export interface DockerShellOptions {
     baseEnvironment?: Readonly<Record<string, string>>;
     /** Product-owned paths and root project files this shell must protect. */
     hostPolicy?: ComputeHostPolicy;
-    /** An optional HTTP interceptor consulted by the managed proxy. */
-    networkInterceptor?: ManagedNetworkInterceptor;
     /** Interprets a project config file into a managed-network configuration; see the type. */
     parseNetworkConfig?: ParseDockerProjectNetworkConfig;
 }
@@ -82,8 +64,6 @@ interface DockerShellSession {
     exitObserved: boolean;
     finished: boolean;
     killed: boolean;
-    managedNetwork?: DockerManagedNetwork;
-    networkDenial?: ManagedNetworkBlockedRequest;
     pidFile: string;
     networkPolicyPlaceholderCleanup?: () => Promise<void>;
     sessionId: number;
@@ -94,21 +74,22 @@ interface DockerShellSession {
     stdoutUnread: BoundedOutputBuffer;
     stdoutOffset: number;
     stream: Duplex;
-    stopNetworkDenialListener?: () => void;
     timedOut: boolean;
     timeout?: NodeJS.Timeout;
 }
 
-interface DockerManagedNetwork {
-    authenticationToken: string;
-    bridge: LinuxManagedNetworkBridge;
-    close(): Promise<void>;
-    containerHttpSocketPath: string;
-    containerLoopbackSockets: readonly { path: string; port: number }[];
-    containerSocksSocketPath: string;
-    proxy: ManagedNetworkProxyHandle;
+interface ActiveDockerNetworkPolicyPlaceholder {
+    projectRoot: string;
+    container: Dockerode.Container;
+    markerPath: string;
+    networkPolicyFile: string;
+    references: number;
 }
 
+const activeNetworkPolicyPlaceholders = new Map<string, ActiveDockerNetworkPolicyPlaceholder>();
+const networkPolicyPlaceholderLocks = new Map<string, Promise<void>>();
+const dockerEnvironmentKeys = new WeakMap<object, string>();
+let nextDockerEnvironmentKey = 1;
 const MAX_ACTIVE_SESSIONS = 64;
 const MAX_RETAINED_SESSIONS = 64;
 // How long a command has to shut itself down before it is forced; long enough to be polite, short
@@ -137,8 +118,8 @@ exec "$@"
  * what accumulated since the previous read, stdin is written straight into the command, stopping is
  * graceful then forceful across the whole process tree, an unobserved exit is reported once, and
  * passing the session cap evicts the oldest command rather than failing the agent's. Restricted
- * commands are wrapped by {@link createDockerSandboxCommand} and reach allowed egress only through
- * the managed-network bridge.
+ * commands invoke the static Linux supervisor mounted at {@link DOCKER_SUPERVISOR_PATH}; the
+ * supervisor owns the filesystem, namespace, and filtered egress boundary.
  */
 export function createDockerShell(
     environment: DockerEnvironment,
@@ -152,13 +133,53 @@ export function createDockerShell(
     const sessions = new Map<number, DockerShellSession>();
     const contextId = randomUUID();
     const cwd = environment.config.workingDirectory;
+    const environmentKey = getDockerEnvironmentKey(environment);
     let nextSessionId = 1;
     let onActiveSessionCountChange: ((count: number) => void) | undefined;
     let onSessionExit: ((exit: ComputeSessionExit) => void | Promise<void>) | undefined;
-    let canonicalWorkspace: Promise<string> | undefined;
-    let sandboxRuntime: Promise<PreparedDockerSandbox> | undefined;
     const activeSessionCount = () =>
         [...sessions.values()].filter((session) => !session.finished && !session.evicted).length;
+    const retainNetworkPolicyPlaceholder = (
+        key: string,
+        candidate: ActiveDockerNetworkPolicyPlaceholder,
+    ): void => {
+        const existing = activeNetworkPolicyPlaceholders.get(key);
+        if (existing !== undefined) {
+            existing.references += 1;
+            return;
+        }
+        candidate.references = 1;
+        activeNetworkPolicyPlaceholders.set(key, candidate);
+    };
+    const retainExistingNetworkPolicyPlaceholder = (key: string): void => {
+        const existing = activeNetworkPolicyPlaceholders.get(key);
+        if (existing !== undefined) existing.references += 1;
+    };
+    const createNetworkPolicyPlaceholderCleanup = (
+        key: string,
+    ): (() => Promise<void>) | undefined => {
+        const placeholder = activeNetworkPolicyPlaceholders.get(key);
+        if (placeholder === undefined) return undefined;
+        let closed = false;
+        return async () => {
+            if (closed) return;
+            closed = true;
+            await withNetworkPolicyPlaceholderLock(key, async () => {
+                placeholder.references -= 1;
+                if (placeholder.references > 0) return;
+                // Deletion stays after the awaited cleanup so a failure keeps the zero-reference
+                // entry available for a later retry instead of treating the file as user-owned.
+                await cleanupDockerNetworkPolicyPlaceholder(
+                    placeholder.container,
+                    cwd,
+                    placeholder.projectRoot,
+                    placeholder.markerPath,
+                    placeholder.networkPolicyFile,
+                );
+                activeNetworkPolicyPlaceholders.delete(key);
+            });
+        };
+    };
 
     const start = async (
         runOptions: Omit<ComputeRunOptions, "signal">,
@@ -179,212 +200,202 @@ export function createDockerShell(
         const shell = runOptions.shell ?? "/bin/sh";
         const pidFile = `/tmp/compute-exec-${process.pid}-${contextId}-${sessionId}.pid`;
         const container = await environment.container();
-        const hostPrivateDirectories =
-            permissionMode === "full_access"
-                ? []
-                : await resolveDockerPrivateDirectories(environment, hostPolicy, baseEnvironment);
-        const hostDeniedWritePaths =
-            permissionMode === "full_access"
-                ? []
-                : [...hostPrivateDirectories, ...readableDirectories];
-        const protectsProjectMetadata =
-            permissionMode !== "full_access" && permissionMode !== "read_only";
-        const requestedNetwork = resolveDockerNetworkPermissions(permissions);
+        const restricted = permissionMode !== "full_access";
+        const supervisorPath = restricted ? await environment.supervisorBinary() : undefined;
+        const hostPrivateDirectories = !restricted
+            ? []
+            : await resolveDockerPrivateDirectories(environment, hostPolicy, baseEnvironment);
+        const hostDeniedWritePaths = !restricted
+            ? []
+            : [...hostPrivateDirectories, ...readableDirectories];
+        const protectsProjectMetadata = restricted && permissionMode !== "read_only";
         const usesProjectNetworkPolicy =
             protectsProjectMetadata &&
             networkPolicyFiles.length > 0 &&
             options.parseNetworkConfig !== undefined;
-        const directEgress = requestedNetwork.directEgress && !usesProjectNetworkPolicy;
-        const needsSandbox =
-            permissionMode !== "full_access" ||
-            permissions.deniedReadPaths !== undefined ||
-            permissions.deniedWritePaths !== undefined ||
-            !directEgress ||
-            !permissions.network.localBinding;
-        const runtime = needsSandbox ? await loadSandboxRuntime(container) : undefined;
-        const workspaceCwd = needsSandbox ? await loadCanonicalWorkspace() : undefined;
-        const requestedNetworkPolicy =
-            requestedNetwork.managedPolicy ??
-            (permissions.network.egress && usesProjectNetworkPolicy
-                ? { allowedDomains: [{ domain: "*" }] }
-                : undefined);
-        const needsNetworkBridge =
-            (protectsProjectMetadata && networkPolicyFiles.length > 0) ||
-            (requestedNetworkPolicy !== undefined &&
-                ((requestedNetworkPolicy.allowedDomains?.length ?? 0) > 0 ||
-                    (requestedNetworkPolicy.allowedLoopbackPorts?.length ?? 0) > 0));
-        const containerNetworkBridgeRoot = needsNetworkBridge
-            ? await prepareDockerNetworkBridgeContainerRoot(container, workspaceCwd!)
-            : undefined;
         const networkPolicyPlaceholderMarker =
-            containerNetworkBridgeRoot === undefined ||
-            !protectsProjectMetadata ||
-            networkPolicyFiles.length === 0
+            !usesProjectNetworkPolicy || networkPolicyFiles.length === 0
                 ? undefined
-                : posix.join(
-                      containerNetworkBridgeRoot,
-                      `.policy-${contextId}-${String(sessionId)}`,
-                  );
+                : posix.join(cwd, `.policy-${contextId}-${String(sessionId)}`);
+        const networkPolicyPath =
+            networkPolicyFiles.length === 0 ? undefined : posix.join(cwd, networkPolicyFiles[0]!);
+        const networkPolicyKey =
+            networkPolicyPath === undefined
+                ? undefined
+                : `${environmentKey}\0${cwd}\0${networkPolicyPath}`;
         let networkPolicyState:
             | Awaited<ReturnType<typeof loadDockerProjectManagedNetworkPolicyState>>
             | undefined;
         try {
-            networkPolicyState =
-                networkPolicyPlaceholderMarker === undefined
-                    ? undefined
-                    : await loadDockerProjectManagedNetworkPolicyState(
-                          container,
-                          cwd,
-                          containerNetworkBridgeRoot!,
-                          networkPolicyPlaceholderMarker,
-                          networkPolicyFiles,
-                          options.parseNetworkConfig,
-                      );
+            networkPolicyState = await withNetworkPolicyPlaceholderLock(
+                networkPolicyKey,
+                async () => {
+                    if (
+                        networkPolicyPlaceholderMarker === undefined ||
+                        networkPolicyKey === undefined
+                    ) {
+                        return undefined;
+                    }
+                    const state = await loadDockerProjectManagedNetworkPolicyState(
+                        container,
+                        cwd,
+                        cwd,
+                        networkPolicyPlaceholderMarker,
+                        networkPolicyFiles,
+                        options.parseNetworkConfig,
+                        {
+                            onPlaceholderCreated(networkPolicyFile) {
+                                retainNetworkPolicyPlaceholder(networkPolicyKey!, {
+                                    projectRoot: cwd,
+                                    container,
+                                    markerPath: networkPolicyPlaceholderMarker,
+                                    networkPolicyFile,
+                                    references: 0,
+                                });
+                            },
+                        },
+                    );
+                    if (state.placeholderNetworkPolicyFile === undefined) {
+                        retainExistingNetworkPolicyPlaceholder(networkPolicyKey);
+                    }
+                    return state;
+                },
+            );
         } catch (error) {
             if (networkPolicyPlaceholderMarker !== undefined) {
-                await cleanupDockerNetworkPolicyPlaceholder(
-                    container,
-                    cwd,
-                    containerNetworkBridgeRoot!,
-                    networkPolicyPlaceholderMarker,
-                    networkPolicyFiles[0]!,
-                ).catch(() => undefined);
+                const cleanup = createNetworkPolicyPlaceholderCleanup(networkPolicyKey!);
+                if (cleanup !== undefined) {
+                    await cleanup().catch(() => undefined);
+                } else {
+                    await cleanupDockerNetworkPolicyPlaceholder(
+                        container,
+                        cwd,
+                        cwd,
+                        networkPolicyPlaceholderMarker,
+                        networkPolicyFiles[0]!,
+                    ).catch(() => undefined);
+                }
             }
             throw error;
         }
-        const resolvedNetwork = resolveDockerNetworkPermissions(
-            permissions,
-            networkPolicyState?.policy,
-        );
-        const networkPolicy = directEgress
-            ? undefined
-            : (resolvedNetwork.managedPolicy ?? requestedNetworkPolicy);
         const networkPolicyPlaceholderCleanup =
-            networkPolicyState?.placeholderNetworkPolicyFile !== undefined &&
-            networkPolicyPlaceholderMarker !== undefined &&
-            containerNetworkBridgeRoot !== undefined
-                ? () =>
-                      cleanupDockerNetworkPolicyPlaceholder(
-                          container,
-                          cwd,
-                          containerNetworkBridgeRoot,
-                          networkPolicyPlaceholderMarker,
-                          networkPolicyState.placeholderNetworkPolicyFile!,
-                      )
-                : undefined;
-        const requiresManagedNetwork =
-            networkPolicy !== undefined &&
-            ((networkPolicy.allowedDomains?.length ?? 0) > 0 ||
-                (networkPolicy.allowedLoopbackPorts?.length ?? 0) > 0);
-        let managedNetwork: DockerManagedNetwork | undefined;
-        try {
-            const networkBridgeHostPath =
-                requiresManagedNetwork && containerNetworkBridgeRoot !== undefined
-                    ? await loadNetworkBridgeHostPath(
-                          container,
-                          workspaceCwd!,
-                          containerNetworkBridgeRoot,
-                      )
-                    : undefined;
-            managedNetwork = !requiresManagedNetwork
+            networkPolicyPlaceholderMarker === undefined || networkPolicyKey === undefined
                 ? undefined
-                : await startDockerManagedNetwork(
-                      containerNetworkBridgeRoot!,
-                      networkBridgeHostPath!,
-                      networkPolicy!,
-                      options.networkInterceptor,
-                  );
-            if (containerNetworkBridgeRoot !== undefined) {
-                await validateDockerNetworkBridgeRoot(container, containerNetworkBridgeRoot);
-            }
-        } catch (error) {
-            const failedManagedNetwork = managedNetwork;
-            await runCleanupSteps("Docker command startup", [
-                ...(failedManagedNetwork === undefined ? [] : [() => failedManagedNetwork.close()]),
-                ...(networkPolicyPlaceholderCleanup === undefined
+                : createNetworkPolicyPlaceholderCleanup(networkPolicyKey);
+        const protectedNetworkPolicyMarker =
+            networkPolicyKey === undefined
+                ? undefined
+                : activeNetworkPolicyPlaceholders.get(networkPolicyKey)?.markerPath;
+        const cleanupStartup = () =>
+            runCleanupSteps(
+                "Docker command startup",
+                networkPolicyPlaceholderCleanup === undefined
                     ? []
-                    : [networkPolicyPlaceholderCleanup]),
-            ]);
+                    : [networkPolicyPlaceholderCleanup],
+            );
+        let resolvedNetwork: ReturnType<typeof resolveDockerNetworkPermissions>;
+        let supervisorNetwork: ReturnType<typeof resolveDockerSupervisorNetwork>;
+        try {
+            resolvedNetwork = resolveDockerNetworkPermissions(
+                permissions,
+                networkPolicyState?.policy,
+            );
+            supervisorNetwork = resolveDockerSupervisorNetwork(
+                permissions,
+                networkPolicyState?.policy,
+                resolvedNetwork.managedPolicy,
+            );
+        } catch (error) {
+            await cleanupStartup();
+            throw error;
+        }
+        const protectedProjectPaths =
+            !restricted || permissionMode === "read_only"
+                ? []
+                : [
+                      ...[".git", ...protectedProjectFiles].map((name) => posix.join(cwd, name)),
+                      ...(protectedNetworkPolicyMarker === undefined
+                          ? []
+                          : [protectedNetworkPolicyMarker]),
+                  ];
+        const deniedWritePaths =
+            permissionMode === "read_only"
+                ? []
+                : [
+                      ...(permissions.deniedWritePaths ?? []),
+                      ...hostDeniedWritePaths,
+                      ...protectedProjectPaths,
+                  ];
+        let supervisorPolicy: ReturnType<typeof createSupervisorPolicy> | undefined;
+        try {
+            const existingDeniedWritePaths = await resolveExistingDockerContainerPaths(
+                container,
+                cwd,
+                deniedWritePaths,
+                { rejectSymlinks: true },
+            );
+            const allowedWritePaths = await resolveExistingDockerContainerPaths(
+                container,
+                cwd,
+                permissions.allowedWritePaths ?? [],
+            );
+            supervisorPolicy = restricted
+                ? createSupervisorPolicy({
+                      cwd,
+                      permissions,
+                      ...(permissions.allowedReadPaths === undefined
+                          ? {}
+                          : { allowedReadPaths: permissions.allowedReadPaths }),
+                      deniedReadPaths: [
+                          ...(permissions.deniedReadPaths ?? []),
+                          ...hostPrivateDirectories,
+                      ],
+                      allowedWritePaths,
+                      deniedWritePaths: existingDeniedWritePaths,
+                      network: supervisorNetwork.network,
+                      ...(supervisorNetwork.proxy ? { networkProxy: true } : {}),
+                  })
+                : undefined;
+        } catch (error) {
+            await cleanupStartup();
             throw error;
         }
         let invokedCommand: string[];
+        let supervisorInitialStdin = "";
         try {
-            invokedCommand = !needsSandbox
-                ? [shell, "-lc", runOptions.command]
-                : createDockerSandboxCommand({
-                      command: runOptions.command,
-                      commandCwd: runCwd,
-                      deniedReadPaths: await resolveDockerDeniedReadPaths(environment, [
-                          ...(permissions.deniedReadPaths ?? []),
-                          ...hostPrivateDirectories,
-                      ]),
-                      isolateNetwork: !directEgress,
-                      mode: permissionMode,
-                      protectedPaths: await resolveDockerPermissionPaths(environment, [
-                          ...(permissions.deniedWritePaths ?? []),
-                          ...hostDeniedWritePaths,
-                      ]),
-                      protectedProjectFiles:
-                          permissionMode === "full_access" ? [] : protectedProjectFiles,
-                      readablePaths:
-                          permissionMode === "full_access"
-                              ? []
-                              : await resolveExistingDockerPermissionPaths(
-                                    environment,
-                                    readableDirectories,
-                                ),
-                      writablePaths:
-                          permissionMode === "read_only"
-                              ? []
-                              : await resolveExistingDockerPermissionPaths(
-                                    environment,
-                                    permissions.allowedWritePaths ?? [],
-                                ),
-                      ...(containerNetworkBridgeRoot === undefined
-                          ? {}
-                          : { networkBridgeRoot: containerNetworkBridgeRoot }),
-                      ...(managedNetwork === undefined
-                          ? {}
-                          : {
-                                networkUnixProxySockets: {
-                                    authenticationToken: managedNetwork.authenticationToken,
-                                    http: managedNetwork.containerHttpSocketPath,
-                                    loopback: managedNetwork.containerLoopbackSockets,
-                                    socks: managedNetwork.containerSocksSocketPath,
-                                },
-                            }),
-                      ...(networkPolicyState === undefined
-                          ? {}
-                          : {
-                                readyNetworkPolicyFiles: networkPolicyState.readyNetworkPolicyFiles,
-                            }),
-                      runtime: runtime!,
-                      shell,
-                      workspaceCwd: workspaceCwd ?? cwd,
-                  });
+            if (supervisorPolicy === undefined) {
+                invokedCommand = [shell, "-lc", runOptions.command];
+            } else {
+                const supervisorCommand = createDockerSupervisorCommand({
+                    command: withWorkingDirectory(runOptions.command, runCwd),
+                    policy: supervisorPolicy,
+                    shell,
+                    ...(supervisorPath === undefined ? {} : { supervisorPath }),
+                });
+                invokedCommand = [supervisorCommand.command, ...supervisorCommand.args];
+                supervisorInitialStdin = supervisorCommand.initialStdin;
+            }
         } catch (error) {
-            await runCleanupSteps("Docker command startup", [
-                ...(managedNetwork === undefined ? [] : [() => managedNetwork.close()]),
-                ...(networkPolicyPlaceholderCleanup === undefined
-                    ? []
-                    : [networkPolicyPlaceholderCleanup]),
-            ]);
+            await cleanupStartup();
             throw error;
         }
-        const protectedCreatePaths =
-            workspaceCwd === undefined || permissionMode === "read_only"
-                ? []
-                : [
-                      ...(permissionMode === "full_access"
-                          ? []
-                          : [".git", ...protectedProjectFiles].map((name) =>
-                                posix.join(workspaceCwd, name),
-                            )),
-                      ...(await findAbsentDeniedWritePaths(container, cwd, [
-                          ...(permissions.deniedWritePaths ?? []),
-                          ...hostDeniedWritePaths,
-                      ])),
-                  ];
+        let protectedCreatePaths: readonly string[];
+        try {
+            protectedCreatePaths =
+                !restricted || permissionMode === "read_only"
+                    ? []
+                    : [
+                          ...protectedProjectPaths,
+                          ...(await findAbsentDeniedWritePaths(container, cwd, [
+                              ...(permissions.deniedWritePaths ?? []),
+                              ...hostDeniedWritePaths,
+                              ...protectedProjectPaths,
+                          ])),
+                      ];
+        } catch (error) {
+            await cleanupStartup();
+            throw error;
+        }
         let exec: Dockerode.Exec;
         try {
             const payloadCommand =
@@ -400,11 +411,7 @@ export function createDockerShell(
                           "--",
                           ...invokedCommand,
                       ];
-            const commandEnvironment = withDockerManagedNetworkEnvironment(
-                baseEnvironment,
-                managedNetwork,
-                managedNetwork !== undefined,
-            );
+            const commandEnvironment = { ...baseEnvironment };
             exec = await container.exec({
                 AttachStdin: true,
                 AttachStderr: true,
@@ -425,29 +432,19 @@ export function createDockerShell(
                           ),
                       }),
                 Tty: false,
-                WorkingDir: runCwd,
+                WorkingDir: restricted ? cwd : runCwd,
             });
         } catch (error) {
-            await runCleanupSteps("Docker command startup", [
-                ...(managedNetwork === undefined ? [] : [() => managedNetwork.close()]),
-                ...(networkPolicyPlaceholderCleanup === undefined
-                    ? []
-                    : [networkPolicyPlaceholderCleanup]),
-            ]);
+            await cleanupStartup();
             throw error;
         }
         let stream!: Duplex;
         try {
             stream = await exec.start({ hijack: true, stdin: true, Tty: false });
-            stream.write(DOCKER_EXEC_START_GATE);
+            stream.write(`${DOCKER_EXEC_START_GATE}${supervisorInitialStdin}`);
         } catch (error) {
             stream?.end();
-            await runCleanupSteps("Docker command startup", [
-                ...(managedNetwork === undefined ? [] : [() => managedNetwork.close()]),
-                ...(networkPolicyPlaceholderCleanup === undefined
-                    ? []
-                    : [networkPolicyPlaceholderCleanup]),
-            ]);
+            await cleanupStartup();
             throw error;
         }
         const stdoutStream = new PassThrough();
@@ -463,7 +460,6 @@ export function createDockerShell(
             exitObserved,
             finished: false,
             killed: false,
-            ...(managedNetwork === undefined ? {} : { managedNetwork }),
             ...(networkPolicyPlaceholderCleanup === undefined
                 ? {}
                 : { networkPolicyPlaceholderCleanup }),
@@ -495,8 +491,6 @@ export function createDockerShell(
             const finish = async (error?: Error) => {
                 if (settled) return;
                 settled = true;
-                session.stopNetworkDenialListener?.();
-                delete session.stopNetworkDenialListener;
                 if (error !== undefined) {
                     appendStderr(Buffer.from(error.message));
                 }
@@ -511,24 +505,17 @@ export function createDockerShell(
                     session.exitCode = null;
                 }
                 try {
-                    await runCleanupSteps("Docker command", [
-                        ...(session.managedNetwork === undefined
+                    await runCleanupSteps(
+                        "Docker command",
+                        session.networkPolicyPlaceholderCleanup === undefined
                             ? []
-                            : [() => session.managedNetwork!.close()]),
-                        ...(session.networkPolicyPlaceholderCleanup === undefined
-                            ? []
-                            : [session.networkPolicyPlaceholderCleanup]),
-                    ]);
+                            : [session.networkPolicyPlaceholderCleanup],
+                    );
                 } catch (cleanupError) {
                     appendStderr(
                         Buffer.from(`Command cleanup failed: ${errorToMessage(cleanupError)}\n`),
                     );
                     session.exitCode = 1;
-                }
-                if (session.networkDenial !== undefined) {
-                    appendStderr(Buffer.from(formatManagedNetworkDenial(session.networkDenial)));
-                    session.exitCode = 1;
-                    session.killed = false;
                 }
                 session.finished = true;
                 if (session.timeout !== undefined) clearTimeout(session.timeout);
@@ -551,13 +538,6 @@ export function createDockerShell(
             stream.once("close", () => void finish());
         });
         sessions.set(sessionId, session);
-        const stopNetworkDenialListener = managedNetwork?.proxy.onBlockedRequest((request) => {
-            session.networkDenial ??= request;
-            requestKill(session);
-        });
-        if (stopNetworkDenialListener !== undefined) {
-            session.stopNetworkDenialListener = stopNetworkDenialListener;
-        }
         onActiveSessionCountChange?.(activeSessionCount());
         if (runOptions.timeoutMs !== undefined) {
             session.timeout = setTimeout(
@@ -572,44 +552,6 @@ export function createDockerShell(
         }
         trimFinishedSessions();
         return session;
-    };
-
-    const loadSandboxRuntime = async (
-        container: Dockerode.Container,
-    ): Promise<PreparedDockerSandbox> => {
-        if (sandboxRuntime === undefined) {
-            const pending = prepareDockerSandbox(container);
-            sandboxRuntime = pending;
-            void pending.catch(() => {
-                if (sandboxRuntime === pending) sandboxRuntime = undefined;
-            });
-        }
-        return sandboxRuntime;
-    };
-
-    const loadCanonicalWorkspace = (): Promise<string> => {
-        canonicalWorkspace ??= resolveDockerPath(environment, cwd).catch((error: unknown) => {
-            canonicalWorkspace = undefined;
-            throw error;
-        });
-        return canonicalWorkspace;
-    };
-
-    const loadNetworkBridgeHostPath = async (
-        container: Dockerode.Container,
-        workspaceCwd: string,
-        expectedContainerRoot: string,
-    ): Promise<string> => {
-        const mapping = await resolveDockerBindMountPath(container, workspaceCwd);
-        await prepareDockerNetworkBridgeHostRoot(mapping.hostPath);
-        const containerPath = posix.join(mapping.containerPath, DOCKER_NETWORK_BRIDGE_DIRECTORY);
-        if (containerPath !== expectedContainerRoot) {
-            throw new Error(
-                "Docker managed network bridge root does not match the working-directory bind mount.",
-            );
-        }
-        await validateDockerNetworkBridgeRoot(container, containerPath);
-        return mapping.hostPath;
     };
 
     const kill = async (session: DockerShellSession): Promise<void> => {
@@ -865,32 +807,58 @@ function snapshotPermissions(permissions: ComputePermissions): ComputePermission
     };
 }
 
-async function resolveDockerPermissionPaths(
-    environment: DockerEnvironment,
-    paths: readonly string[],
-): Promise<readonly string[]> {
-    const cwd = environment.config.workingDirectory;
-    const resolved = await Promise.all(
-        paths.flatMap((path) => {
-            const target = posix.resolve(cwd, path);
-            return [target, resolveDockerPath(environment, target)];
-        }),
-    );
-    return [...new Set(resolved)];
+function getDockerEnvironmentKey(environment: DockerEnvironment): string {
+    const object = environment as unknown as object;
+    const existing = dockerEnvironmentKeys.get(object);
+    if (existing !== undefined) return existing;
+    const configured = environment.config.container ?? environment.config.name;
+    const key =
+        configured === undefined
+            ? `environment-${String(nextDockerEnvironmentKey++)}`
+            : `${environment.config.socketPath ?? "/var/run/docker.sock"}\0${configured}`;
+    dockerEnvironmentKeys.set(object, key);
+    return key;
 }
 
-async function resolveExistingDockerPermissionPaths(
-    environment: DockerEnvironment,
+async function withNetworkPolicyPlaceholderLock<T>(
+    key: string | undefined,
+    action: () => Promise<T>,
+): Promise<T> {
+    if (key === undefined) return action();
+    const previous = networkPolicyPlaceholderLocks.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const current = previous.then(
+        () =>
+            new Promise<void>((resolve) => {
+                release = resolve;
+            }),
+    );
+    networkPolicyPlaceholderLocks.set(key, current);
+    await previous;
+    try {
+        return await action();
+    } finally {
+        release();
+        if (networkPolicyPlaceholderLocks.get(key) === current) {
+            networkPolicyPlaceholderLocks.delete(key);
+        }
+    }
+}
+
+async function resolveExistingDockerContainerPaths(
+    container: Dockerode.Container,
+    cwd: string,
     paths: readonly string[],
+    options: { rejectSymlinks?: boolean } = {},
 ): Promise<readonly string[]> {
-    const resolved = await resolveDockerPermissionPaths(environment, paths);
+    const resolved = [...new Set(paths.map((path) => posix.resolve(cwd, path)))];
     if (resolved.length === 0) return [];
     const result = await runDockerExec(
-        await environment.container(),
+        container,
         [
             "/bin/sh",
             "-c",
-            'for path do if [ -e "$path" ] || [ -L "$path" ]; then printf "1\\n"; else printf "0\\n"; fi; done',
+            'for path do if [ -L "$path" ]; then printf "S\\n"; elif [ -e "$path" ]; then printf "1\\n"; else printf "0\\n"; fi; done',
             "compute-permission-paths",
             ...resolved,
         ],
@@ -903,37 +871,15 @@ async function resolveExistingDockerPermissionPaths(
     if (exists.length !== resolved.length) {
         throw new Error("Docker returned incomplete permission-path metadata.");
     }
+    if (exists.some((status) => status !== "0" && status !== "1" && status !== "S")) {
+        throw new Error("Docker returned invalid permission-path metadata.");
+    }
+    if (options.rejectSymlinks === true && exists.includes("S")) {
+        throw new Error(
+            "Restricted Docker commands cannot protect a symbolic-link permission path.",
+        );
+    }
     return resolved.filter((_path, index) => exists[index] === "1");
-}
-
-async function resolveDockerDeniedReadPaths(
-    environment: DockerEnvironment,
-    paths: readonly string[],
-): Promise<readonly { kind: "directory" | "file"; path: string }[]> {
-    const resolved = await resolveExistingDockerPermissionPaths(environment, paths);
-    if (resolved.length === 0) return [];
-    const result = await runDockerExec(
-        await environment.container(),
-        [
-            "/bin/sh",
-            "-c",
-            'for path do if [ -d "$path" ] && [ ! -L "$path" ]; then printf "directory\\n"; else printf "file\\n"; fi; done',
-            "compute-denied-read-paths",
-            ...resolved,
-        ],
-        { maxOutputBytes: resolved.length * 10 },
-    );
-    if (result.exitCode !== 0) {
-        throw new Error("Could not inspect denied Docker read paths.");
-    }
-    const kinds = result.stdout.toString("utf8").trimEnd().split("\n");
-    if (kinds.length !== resolved.length) {
-        throw new Error("Docker returned incomplete denied-read metadata.");
-    }
-    return resolved.map((path, index) => ({
-        kind: kinds[index] === "directory" ? "directory" : "file",
-        path,
-    }));
 }
 
 async function findAbsentDeniedWritePaths(
@@ -961,7 +907,62 @@ async function findAbsentDeniedWritePaths(
     if (absent.length !== targets.length) {
         throw new Error("Docker returned incomplete denied-write metadata.");
     }
+    if (absent.some((status) => status !== "0" && status !== "1")) {
+        throw new Error("Docker returned invalid denied-write metadata.");
+    }
     return targets.filter((_path, index) => absent[index] === "1");
+}
+
+function resolveDockerSupervisorNetwork(
+    permissions: ComputePermissions,
+    projectPolicy: ManagedNetworkPolicy | undefined,
+    managedPolicy: ManagedNetworkPolicy | undefined,
+): { network: ComputeNetworkPermissions; proxy: boolean } {
+    const network: ComputeNetworkPermissions = {
+        egress: permissions.network.egress,
+        localBinding:
+            permissions.network.localBinding && projectPolicy?.allowLocalBinding !== false,
+    };
+    if (!permissions.network.egress) return { network, proxy: false };
+    const permissionHosts = permissions.network.allowedHosts ?? [];
+    // The native supervisor can deny local binding independently, so unrestricted egress never
+    // needs a separate proxy solely because localBinding is false.
+    if (managedPolicy === undefined && permissionHosts.length === 0) {
+        return { network, proxy: false };
+    }
+    const policy = managedPolicy ?? { allowedDomains: [] };
+    if ((policy.allowedLoopbackPorts?.length ?? 0) > 0) {
+        throw new Error(
+            "Docker project network policies with allowed loopback ports are not supported by the native supervisor.",
+        );
+    }
+    if ((policy.deniedDomains?.length ?? 0) > 0) {
+        throw new Error(
+            "Docker project network policies with denied domains are not supported by the native supervisor.",
+        );
+    }
+    if (policy.allowedDomains?.some(({ ports }) => ports !== undefined) === true) {
+        throw new Error(
+            "Docker project network policies with per-domain ports are not supported by the native supervisor.",
+        );
+    }
+    const allowedHosts = (policy.allowedDomains ?? []).map(({ domain }) => domain);
+    // A project wildcard expresses open egress. Keep it direct so it does not become the native
+    // supervisor's deliberately-invalid bare '*' host allow-list.
+    if (allowedHosts.includes("*")) {
+        return { network, proxy: false };
+    }
+    return {
+        network: {
+            ...network,
+            allowedHosts,
+        },
+        proxy: true,
+    };
+}
+
+function withWorkingDirectory(command: string, cwd: string): string {
+    return `cd ${quoteShellArgument(cwd)} && ${command}`;
 }
 
 function toRunResult(result: ComputeSessionSnapshot): ComputeRunResult {
@@ -1003,126 +1004,4 @@ async function inspectDockerExec(exec: Dockerode.Exec): Promise<Dockerode.ExecIn
     } finally {
         if (timeout !== undefined) clearTimeout(timeout);
     }
-}
-
-async function startDockerManagedNetwork(
-    containerBridgeRoot: string,
-    workspaceHostPath: string,
-    policy: ManagedNetworkPolicy,
-    networkInterceptor?: ManagedNetworkInterceptor,
-): Promise<DockerManagedNetwork> {
-    if (
-        (policy.allowedDomains?.length ?? 0) === 0 &&
-        (policy.allowedLoopbackPorts?.length ?? 0) === 0
-    ) {
-        throw new Error(
-            "Managed network access requires an allowed domain or an allowed loopback port.",
-        );
-    }
-    validateManagedNetworkLoopbackPorts(policy.allowedLoopbackPorts ?? []);
-    const hostBridgeRoot = await prepareDockerNetworkBridgeHostRoot(workspaceHostPath);
-    const directory = await mkdtemp(join(hostBridgeRoot, "command-"));
-    const containerDirectory = posix.join(containerBridgeRoot, basename(directory));
-    let shortRoot: string | undefined;
-    let proxy: ManagedNetworkProxyHandle | undefined;
-    let bridge: LinuxManagedNetworkBridge | undefined;
-    try {
-        shortRoot = await mkdtemp("/tmp/compute-network-");
-        const runningShortRoot = shortRoot;
-        const shortDirectory = join(runningShortRoot, "s");
-        await symlink(directory, shortDirectory, "dir");
-        const runningProxy = await startManagedNetworkProxy(
-            policy,
-            networkInterceptor === undefined ? {} : { networkInterceptor },
-        );
-        proxy = runningProxy;
-        bridge = await startLinuxManagedNetworkBridge(runningProxy, {
-            directory: shortDirectory,
-            ...(policy.allowedLoopbackPorts === undefined
-                ? {}
-                : { loopbackPorts: policy.allowedLoopbackPorts }),
-        });
-        await makeDockerBridgeDirectoryTraversable(directory);
-        const runningBridge = bridge;
-        let closed = false;
-        return {
-            authenticationToken: runningBridge.authenticationToken,
-            bridge: runningBridge,
-            containerHttpSocketPath: posix.join(containerDirectory, "http.sock"),
-            containerLoopbackSockets: runningBridge.loopbackSockets.map(({ port }) => ({
-                path: posix.join(containerDirectory, `loopback-${String(port)}.sock`),
-                port,
-            })),
-            containerSocksSocketPath: posix.join(containerDirectory, "socks.sock"),
-            proxy: runningProxy,
-            async close() {
-                if (closed) return;
-                await runCleanupSteps("Docker managed network", [
-                    () => runningBridge.close(),
-                    () => runningProxy.close(),
-                    () => rm(runningShortRoot, { force: true, recursive: true }),
-                    () => rm(directory, { force: true, recursive: true }),
-                ]);
-                closed = true;
-            },
-        };
-    } catch (error) {
-        const failedProxy = proxy;
-        const failedBridge = bridge;
-        await runCleanupSteps("Docker managed network startup", [
-            ...(failedBridge === undefined ? [] : [() => failedBridge.close()]),
-            ...(failedProxy === undefined ? [] : [() => failedProxy.close()]),
-            ...(shortRoot === undefined
-                ? []
-                : [() => rm(shortRoot!, { force: true, recursive: true })]),
-            () => rm(directory, { force: true, recursive: true }),
-        ]);
-        throw error;
-    }
-}
-
-async function validateDockerNetworkBridgeRoot(
-    container: Dockerode.Container,
-    root: string,
-): Promise<void> {
-    const result = await runDockerExec(container, [
-        "/bin/sh",
-        "-c",
-        '[ -d "$1" ] && [ ! -L "$1" ]',
-        "compute-network-validation",
-        root,
-    ]);
-    if (result.exitCode !== 0) {
-        throw new Error(
-            "Could not validate the protected Docker network bridge directory immediately before command startup.",
-        );
-    }
-}
-
-async function makeDockerBridgeDirectoryTraversable(directory: string): Promise<void> {
-    // The random command token remains the authorization boundary. Traverse-only directory
-    // access lets a container UID that differs from the host UID reach the authenticated
-    // bridge without allowing it to list or replace any bridge path.
-    await chmod(directory, 0o711);
-}
-
-function withDockerManagedNetworkEnvironment(
-    environment: Readonly<Record<string, string>>,
-    managedNetwork: DockerManagedNetwork | undefined,
-    useProxyEnvironment: boolean,
-): Record<string, string> {
-    if (managedNetwork === undefined || !useProxyEnvironment) return { ...environment };
-    const noProxy = "localhost,127.0.0.1,::1";
-    return {
-        ...environment,
-        ALL_PROXY: "socks5h://127.0.0.1:1080",
-        HTTP_PROXY: "http://127.0.0.1:3128",
-        HTTPS_PROXY: "http://127.0.0.1:3128",
-        NODE_USE_ENV_PROXY: "1",
-        NO_PROXY: noProxy,
-        all_proxy: "socks5h://127.0.0.1:1080",
-        http_proxy: "http://127.0.0.1:3128",
-        https_proxy: "http://127.0.0.1:3128",
-        no_proxy: noProxy,
-    };
 }

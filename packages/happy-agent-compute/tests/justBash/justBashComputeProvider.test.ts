@@ -34,7 +34,8 @@ describe("justBashComputeProvider", () => {
                 folder: "/host/project",
             }),
         ).toBe(true);
-        expect(compute.providerId).toBe("just-bash");
+        expect(compute.id).toBe("just-bash");
+        expect(compute.kind).toBe("emulated");
         await expect(
             compute.fs.readFile(computePermissions("read_only"), "readme.txt"),
         ).resolves.toBe("hello");

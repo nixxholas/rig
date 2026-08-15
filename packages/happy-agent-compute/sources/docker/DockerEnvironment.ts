@@ -1,8 +1,15 @@
 import Dockerode from "dockerode";
+import { posix } from "node:path";
+import {
+    resolveLinuxSupervisorBinary,
+    type LinuxSupervisorArchitecture,
+} from "@slopus/happy-agent-supervisor";
 
 import { errorToMessage } from "./impl/errorToMessage.js";
 import type { DockerExecutionConfig } from "./DockerExecutionConfig.js";
 import { isDockerNotFoundError } from "./impl/isDockerNotFoundError.js";
+import { DOCKER_SUPERVISOR_PATH } from "./impl/createDockerSupervisorCommand.js";
+import { runDockerExec } from "./impl/runDockerExec.js";
 
 const DEFAULT_DOCKER_SOCKET = "/var/run/docker.sock";
 
@@ -34,6 +41,7 @@ export class DockerEnvironment {
     readonly #managedContainerName: string | undefined;
     readonly #sessionId: string;
     #containerPromise: Promise<Dockerode.Container> | undefined;
+    #supervisorBinaryPromise: Promise<string> | undefined;
     #managedOwnership: ManagedContainerOwnership | undefined;
     #releasePromise: Promise<void> | undefined;
     #released = false;
@@ -65,6 +73,24 @@ export class DockerEnvironment {
             throw error;
         });
         return this.#containerPromise;
+    }
+
+    /**
+     * Returns the in-container supervisor path after proving that an attached container already
+     * carries the required read-only mount. Managed containers install the mount at creation time;
+     * an attached container cannot be repaired safely after it is running, so it fails closed.
+     */
+    supervisorBinary(): Promise<string> {
+        if (this.#released) {
+            return Promise.reject(new Error("The Docker environment has already been released."));
+        }
+        this.#supervisorBinaryPromise ??= this.#resolveSupervisorBinary().catch(
+            (error: unknown) => {
+                this.#supervisorBinaryPromise = undefined;
+                throw error;
+            },
+        );
+        return this.#supervisorBinaryPromise;
     }
 
     /**
@@ -176,6 +202,17 @@ export class DockerEnvironment {
     }
 
     async #createManagedContainer(image: string, name: string): Promise<Dockerode.Container> {
+        const supervisorBinary = this.#resolveSupervisorBinaryForHost();
+        const requestedMounts = this.config.mounts ?? [];
+        if (
+            requestedMounts.some(
+                (mount) => posix.normalize(mount.target) === DOCKER_SUPERVISOR_PATH,
+            )
+        ) {
+            throw new Error(
+                `Docker mount target '${DOCKER_SUPERVISOR_PATH}' is reserved for the Happy agent supervisor.`,
+            );
+        }
         const container = await this.#docker
             .createContainer({
                 name,
@@ -193,16 +230,24 @@ export class DockerEnvironment {
                 Tty: false,
                 WorkingDir: this.config.workingDirectory,
                 HostConfig: {
-                    Mounts: (this.config.mounts ?? []).map((mount) => ({
-                        Type: "bind" as const,
-                        Source: mount.source,
-                        Target: mount.target,
-                        ReadOnly: mount.readOnly ?? false,
-                    })),
+                    Mounts: [
+                        ...requestedMounts.map((mount) => ({
+                            Type: "bind" as const,
+                            Source: mount.source,
+                            Target: mount.target,
+                            ReadOnly: mount.readOnly ?? false,
+                        })),
+                        {
+                            Type: "bind" as const,
+                            Source: supervisorBinary,
+                            Target: DOCKER_SUPERVISOR_PATH,
+                            ReadOnly: true,
+                        },
+                    ],
                     // Restricted commands create their own user, PID, mount, and network
-                    // namespaces with Bubblewrap. Docker's default seccomp profile blocks
-                    // those unprivileged namespace operations before Bubblewrap can apply
-                    // the narrower command boundary.
+                    // namespaces with the native supervisor. Docker's default seccomp profile
+                    // blocks those unprivileged namespace operations before the supervisor can
+                    // apply the narrower command boundary.
                     SecurityOpt: ["seccomp=unconfined"],
                 },
             })
@@ -217,4 +262,78 @@ export class DockerEnvironment {
         });
         return container;
     }
+
+    async #resolveSupervisorBinary(): Promise<string> {
+        const container = await this.container();
+        const details = await container.inspect();
+        const architecture = resolveConfiguredLinuxArchitecture(this.config.architecture);
+        const expectedSource = this.#resolveSupervisorBinaryForHost();
+        const mount = details.Mounts?.find(
+            (candidate) => candidate.Destination === DOCKER_SUPERVISOR_PATH,
+        );
+        if (
+            mount === undefined ||
+            mount.Type !== "bind" ||
+            mount.RW !== false ||
+            typeof mount.Source !== "string" ||
+            mount.Source !== expectedSource
+        ) {
+            throw new Error(
+                `Restricted Docker commands require a read-only bind mount at ${DOCKER_SUPERVISOR_PATH}. ` +
+                    `Restart the container with the ${architecture} static Linux supervisor mounted directly from ${expectedSource}.`,
+            );
+        }
+        const result = await runDockerExec(container, [
+            "/bin/sh",
+            "-c",
+            [
+                "path=$1",
+                "expected=$2",
+                '[ -x "$path" ] || exit 40',
+                'printf %s \'{"mode":"full_access","network":{"egress":true,"localBinding":true}}\' | "$path" --policy-fd 3 3<&0 -- /bin/sh -c "exit 0" >/dev/null 2>&1',
+                "status=$?",
+                '[ "$status" -eq 0 ] || exit 41',
+                "machine=$(uname -m 2>/dev/null) || exit 42",
+                'case "$expected:$machine" in',
+                "  x64:x86_64|x64:amd64|amd64:x86_64|amd64:amd64|x86_64:x86_64|x86_64:amd64|aarch64:aarch64|aarch64:arm64|arm64:aarch64|arm64:arm64) exit 0 ;;",
+                "  *) exit 43 ;;",
+                "esac",
+            ].join("\n"),
+            "happy-agent-supervisor-check",
+            DOCKER_SUPERVISOR_PATH,
+            architecture,
+        ]);
+        if (result.exitCode === 40) {
+            throw new Error(
+                `Restricted Docker commands require an executable supervisor at ${DOCKER_SUPERVISOR_PATH}.`,
+            );
+        }
+        if (result.exitCode !== 0) {
+            throw new Error(
+                `Restricted Docker commands require a ${architecture} Linux supervisor at ${DOCKER_SUPERVISOR_PATH}; ` +
+                    "the attached read-only mount is missing or targets a different architecture.",
+            );
+        }
+        return DOCKER_SUPERVISOR_PATH;
+    }
+
+    #resolveSupervisorBinaryForHost(): string {
+        const architecture = resolveConfiguredLinuxArchitecture(this.config.architecture);
+        try {
+            return resolveLinuxSupervisorBinary(architecture);
+        } catch (error) {
+            throw new Error(
+                `Could not prepare the Linux supervisor for Docker architecture '${architecture}': ${errorToMessage(error)}`,
+            );
+        }
+    }
+}
+
+function resolveConfiguredLinuxArchitecture(
+    configured: LinuxSupervisorArchitecture | undefined,
+): LinuxSupervisorArchitecture {
+    if (configured !== undefined) return configured;
+    if (process.arch === "arm64") return "arm64";
+    if (process.arch === "x64") return "x64";
+    return process.arch as LinuxSupervisorArchitecture;
 }

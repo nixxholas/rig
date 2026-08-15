@@ -1,9 +1,8 @@
 name: Publish happy-agent-compute
 
-# happy-agent-compute is the only package whose correctness is an operating-system claim: Seatbelt
-# on macOS and Bubblewrap on Linux enforce the boundary, not TypeScript. A release therefore has to
-# prove the sandbox actually holds on both platforms before anything reaches npm, which is why this
-# package releases on its own workflow instead of the shared ubuntu-only one.
+# happy-agent-compute is the only package whose correctness is an operating-system claim: the
+# published native supervisor applies Seatbelt on macOS and namespaces, mounts, and seccomp on
+# Linux. A release therefore proves the installed NPM artifact on both platforms before publishing.
 
 on:
     push:
@@ -28,10 +27,10 @@ jobs:
             fail-fast: false
             matrix:
                 include:
-                    - name: macOS (Seatbelt)
+                    - name: macOS supervisor
                       runner: macos-15
                       docker: false
-                    - name: Linux (Bubblewrap)
+                    - name: Linux supervisor
                       runner: ubuntu-24.04
                       docker: true
 
@@ -48,12 +47,11 @@ jobs:
                   node-version: "24"
                   package-manager-cache: false
 
-            - name: Install Linux sandbox dependencies
+            - name: Enable Linux user namespaces
               if: runner.os == 'Linux'
               run: |
-                  sudo apt-get update
-                  sudo apt-get install --yes bubblewrap socat
-                  # Bubblewrap needs unprivileged user namespaces, which Ubuntu confines by default.
+                  # The native supervisor enters an unprivileged user namespace before applying
+                  # its mount and PID boundaries. Ubuntu's AppArmor sysctl disables that by default.
                   if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
                       sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
                   fi
@@ -66,7 +64,7 @@ jobs:
 
             - name: Run unit tests
               env:
-                  # Keep Sandbox Runtime's home-directory mask away from the checkout.
+                  # Keep the supervisor's universal home-directory denial away from the checkout.
                   HOME: ${{ runner.temp }}/rig-test-home
                   # Refuse to let an unspawnable sandbox report the boundary cases as passing.
                   HAPPY_AGENT_COMPUTE_REQUIRE_SANDBOX: "1"
@@ -133,5 +131,18 @@ jobs:
             - name: Build the package
               run: pnpm --filter @slopus/happy-agent-compute build
 
-            - name: Publish the package
-              run: pnpm exec tsx scripts/publishPackage.ts
+            - name: Publish with GitHub trusted publishing
+              run: |
+                  package="@slopus/happy-agent-compute"
+                  version="$(node -p "require('./packages/happy-agent-compute/package.json').version")"
+                  distribution_tag="${RELEASE_DIST_TAG:-latest}"
+                  if pnpm dlx npm@11.18.0 view "${package}@${version}" version --registry https://registry.npmjs.org/ >/dev/null 2>&1; then
+                      echo "${package}@${version} is already published."
+                  else
+                      cd packages/happy-agent-compute
+                      pnpm dlx npm@11.18.0 publish \
+                          --access public \
+                          --tag "${distribution_tag}" \
+                          --provenance \
+                          --registry https://registry.npmjs.org/
+                  fi

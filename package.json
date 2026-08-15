@@ -55,6 +55,16 @@
         "overrides": {
             "@steve.kite/stdlib": "0.0.8"
         },
+        "supportedArchitectures": {
+            "cpu": [
+                "arm64",
+                "x64"
+            ],
+            "os": [
+                "darwin",
+                "linux"
+            ]
+        },
         "onlyBuiltDependencies": [
             "@ffmpeg-installer/darwin-arm64",
             "@ffmpeg-installer/darwin-x64",

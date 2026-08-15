@@ -1,6 +1,6 @@
 /** Public surface of `@slopus/happy-agent-compute`. */
 
-export { type Compute } from "./Compute.js";
+export { type Compute, type ComputeKind } from "./Compute.js";
 export {
     computeHostPolicySchema,
     EMPTY_COMPUTE_HOST_POLICY,
@@ -68,8 +68,12 @@ export * from "./docker/index.js";
 // Process lifecycle machinery the backends share.
 export * from "./processes/index.js";
 
-// Command sandbox: the filesystem and network boundary a restricted command runs inside.
+// Filesystem path and environment helpers used by the backends.
 export * from "./sandbox/index.js";
 
-// Managed network: the command-scoped proxy and bridge that carry allowed egress.
+// Project-network policy data and low-level helpers; restricted compute egress uses the native
+// supervisor directly.
 export * from "./network/index.js";
+
+// Native supervisor policy translation used by restricted host and Docker commands.
+export * from "./supervisor/index.js";

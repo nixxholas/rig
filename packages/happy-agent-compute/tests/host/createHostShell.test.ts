@@ -1,8 +1,9 @@
-import { access, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createRootContext, type Context } from "@steve.kite/stdlib";
+import { resolveSupervisorBinary } from "@slopus/happy-agent-supervisor";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { Compute } from "../../sources/Compute.js";
@@ -193,17 +194,17 @@ describe("createHostShell commands", () => {
         expect(callerPermissions.mode).toBe("read_only");
     });
 
-    it("maps an allowed-host egress grant to a command-scoped managed network policy", async () => {
+    it("invokes the native supervisor with an allowed-host policy", async () => {
         const cwd = await makeWorkspace();
-        const run = vi.fn(async (_ctx: Context, options: ProcessRunOptions) =>
-            completedProcessResult(options),
-        );
-        const startManagedNetwork = vi.fn(async () => undefined);
+        const policies: unknown[] = [];
+        const run = vi.fn(async (_ctx: Context, options: ProcessRunOptions) => {
+            policies.push(readSupervisorPolicy(options));
+            return completedProcessResult(options);
+        });
         const shell = createHostShell({
             ctx,
             cwd,
             processManager: { run } as unknown as NativeProcessManager,
-            startManagedNetwork,
         });
         shells.push(shell);
         const permissions = computePermissions("workspace_write", {
@@ -216,23 +217,108 @@ describe("createHostShell commands", () => {
 
         await shell.run({ command: "true", permissions });
 
-        expect(startManagedNetwork).toHaveBeenCalledWith({
-            allowedDomains: [{ domain: "api.example.com" }, { domain: "*.packages.example.com" }],
+        expect(policies).toEqual([
+            expect.objectContaining({
+                mode: "workspace_write",
+                network: {
+                    egress: true,
+                    allowedHosts: ["api.example.com", "*.packages.example.com"],
+                    localBinding: false,
+                    outgoingProxy: { frontEnds: ["http", "socks5"] },
+                },
+            }),
+        ]);
+        expect(run.mock.calls[0]?.[1]).toMatchObject({
+            command: expect.stringContaining("happy-agent-supervisor"),
+            args: expect.arrayContaining(["--policy-fd", "3"]),
         });
         expect(run).toHaveBeenCalledOnce();
     });
 
-    it("gives Workspace write unrestricted egress when the operation explicitly requests it", async () => {
+    it("protects the installed supervisor from later workspace commands", async () => {
         const cwd = await makeWorkspace();
-        const run = vi.fn(async (_ctx: Context, options: ProcessRunOptions) =>
-            completedProcessResult(options),
-        );
-        const startManagedNetwork = vi.fn(async () => undefined);
+        const policies: { deniedWritePaths?: string[] }[] = [];
+        const run = vi.fn(async (_ctx: Context, options: ProcessRunOptions) => {
+            policies.push(readSupervisorPolicy(options) as { deniedWritePaths?: string[] });
+            return completedProcessResult(options);
+        });
         const shell = createHostShell({
             ctx,
             cwd,
             processManager: { run } as unknown as NativeProcessManager,
-            startManagedNetwork,
+        });
+        shells.push(shell);
+
+        await shell.run({
+            command: "true",
+            permissions: computePermissions("workspace_write"),
+        });
+
+        expect(policies[0]?.deniedWritePaths).toContain(resolveSupervisorBinary());
+    });
+
+    it("rejects project policy paths outside the workspace before creating placeholders", async () => {
+        const cwd = await makeWorkspace();
+        const outside = join(cwd, "..", "outside-policy.toml");
+        temporaryDirectories.push(outside);
+        const shell = createHostShell({
+            ctx,
+            cwd,
+            hostPolicy: { networkPolicyFiles: ["../outside-policy.toml"] },
+            processManager: new NativeProcessManager(ctx),
+        });
+        shells.push(shell);
+
+        await expect(
+            shell.run({
+                command: "true",
+                permissions: computePermissions("workspace_write"),
+            }),
+        ).rejects.toThrow("must be a root file name");
+        await expect(access(outside)).rejects.toMatchObject({ code: "ENOENT" });
+    });
+
+    it("uses the stdin handshake only for a restricted pseudo-terminal", async () => {
+        const cwd = await makeWorkspace();
+        const run = vi.fn(async (_ctx: Context, options: ProcessRunOptions) =>
+            completedProcessResult(options),
+        );
+        const shell = createHostShell({
+            ctx,
+            cwd,
+            processManager: { run } as unknown as NativeProcessManager,
+        });
+        shells.push(shell);
+
+        await shell.run({
+            command: "true",
+            permissions: computePermissions("workspace_write"),
+            tty: true,
+        });
+
+        expect(run.mock.calls[0]?.[1]).toMatchObject({
+            command: "/bin/sh",
+            initialStdin: expect.any(String),
+            initialStdinHandshake: {
+                completeMarker: expect.any(String),
+                readyMarker: expect.any(String),
+            },
+            tty: true,
+        });
+        expect(run.mock.calls[0]?.[1].extraFileDescriptorInputs).toBeUndefined();
+    });
+
+    it("lets the native supervisor own unrestricted egress and local-binding denial", async () => {
+        const cwd = await makeWorkspace();
+        const policies: unknown[] = [];
+        const run = vi.fn(async (_ctx: Context, options: ProcessRunOptions) => {
+            policies.push(readSupervisorPolicy(options));
+            return completedProcessResult(options);
+        });
+        const shell = createHostShell({
+            ctx,
+            cwd,
+            processManager: { run } as unknown as NativeProcessManager,
         });
         shells.push(shell);
         const permissions = computePermissions("workspace_write", {
@@ -241,56 +327,145 @@ describe("createHostShell commands", () => {
 
         await shell.run({ command: "true", permissions });
 
-        const processOptions = run.mock.calls[0]?.[1];
-        if (process.platform === "linux") {
-            expect(startManagedNetwork).toHaveBeenCalledWith({
-                allowPrivateAddresses: true,
-                allowedDomains: [{ domain: "*" }],
-            });
-            expect(processOptions?.args).toContain("--unshare-net");
-        } else if (process.platform === "darwin") {
-            expect(startManagedNetwork).toHaveBeenCalledWith(undefined);
-            expect(processOptions?.args?.[1]).toContain(
-                '(allow network-outbound (remote ip "*:*"))',
-            );
-        }
+        expect(policies).toEqual([
+            expect.objectContaining({
+                network: { egress: true, localBinding: false },
+            }),
+        ]);
     });
 
-    it("keeps granted egress from also granting local binding when binding is refused", async () => {
+    it("carries universal credential denials into the native supervisor policy", async () => {
         const cwd = await makeWorkspace();
-        await mkdir(join(cwd, ".agent-state"));
-        const run = vi.fn(async (_ctx: Context, options: ProcessRunOptions) =>
-            completedProcessResult(options),
+        const home = join(cwd, "..", "agent-home");
+        const policies: { deniedReadPaths?: string[] }[] = [];
+        const run = vi.fn(async (_ctx: Context, options: ProcessRunOptions) => {
+            policies.push(readSupervisorPolicy(options) as { deniedReadPaths?: string[] });
+            return completedProcessResult(options);
+        });
+        const shell = createHostShell({
+            ctx,
+            cwd,
+            homeDirectory: home,
+            processManager: { run } as unknown as NativeProcessManager,
+        });
+        shells.push(shell);
+
+        await shell.run({
+            command: "true",
+            permissions: computePermissions("workspace_write"),
+        });
+
+        expect(policies[0]?.deniedReadPaths).toEqual(
+            expect.arrayContaining([home, join(home, ".ssh"), join(home, ".aws")]),
         );
+    });
+
+    it("keeps a credential subtree denied when the workspace is inside it", async () => {
+        const root = await makeWorkspace();
+        const home = join(root, "home");
+        const cwd = join(home, ".ssh", "workspace");
+        await mkdir(cwd, { recursive: true });
+        const policies: { deniedReadPaths?: string[] }[] = [];
+        const run = vi.fn(async (_ctx: Context, options: ProcessRunOptions) => {
+            policies.push(readSupervisorPolicy(options) as { deniedReadPaths?: string[] });
+            return completedProcessResult(options);
+        });
+        const shell = createHostShell({
+            ctx,
+            cwd,
+            homeDirectory: home,
+            processManager: { run } as unknown as NativeProcessManager,
+        });
+        shells.push(shell);
+
+        await shell.run({
+            command: "true",
+            permissions: computePermissions("workspace_write"),
+        });
+
+        expect(policies[0]?.deniedReadPaths).toContain(join(home, ".ssh"));
+    });
+
+    it("bases the home denial on the canonical workspace when cwd is a symlink", async () => {
+        const root = await makeWorkspace();
+        const home = join(root, "home");
+        const target = join(root, "real-workspace");
+        const cwd = join(home, "workspace-link");
+        await mkdir(home, { recursive: true });
+        await mkdir(target, { recursive: true });
+        await symlink(target, cwd);
+        const policies: { deniedReadPaths?: string[] }[] = [];
+        const run = vi.fn(async (_ctx: Context, options: ProcessRunOptions) => {
+            policies.push(readSupervisorPolicy(options) as { deniedReadPaths?: string[] });
+            return completedProcessResult(options);
+        });
+        const shell = createHostShell({
+            ctx,
+            cwd,
+            homeDirectory: home,
+            processManager: { run } as unknown as NativeProcessManager,
+        });
+        shells.push(shell);
+
+        await shell.run({
+            command: "true",
+            permissions: computePermissions("workspace_write"),
+        });
+
+        expect(policies[0]?.deniedReadPaths).toContain(home);
+    });
+
+    it("reserves an absent project policy before invoking the native supervisor", async () => {
+        const cwd = await makeWorkspace();
+        const policyPath = join(cwd, "agent-policy.toml");
+        let observed = false;
+        const run = vi.fn(async () => {
+            observed = true;
+            await expect(readFile(policyPath, "utf8")).resolves.toBe("");
+            return completedProcessResult({
+                command: "true",
+                cwd,
+            } as ProcessRunOptions);
+        });
+        const shell = createHostShell({
+            ctx,
+            cwd,
+            hostPolicy: { networkPolicyFiles: ["agent-policy.toml"] },
+            processManager: { run } as unknown as NativeProcessManager,
+        });
+        shells.push(shell);
+
+        await shell.run({
+            command: "true",
+            permissions: computePermissions("workspace_write"),
+        });
+
+        expect(observed).toBe(true);
+        await expect(access(policyPath)).rejects.toMatchObject({ code: "ENOENT" });
+    });
+
+    it("rejects symlinked denied-write paths before starting a restricted command", async () => {
+        const cwd = await makeWorkspace();
+        const target = join(cwd, "..", "protected-target");
+        await mkdir(target);
+        await symlink(target, join(cwd, "protected"));
+        const run = vi.fn();
         const shell = createHostShell({
             ctx,
             cwd,
             processManager: { run } as unknown as NativeProcessManager,
-            startManagedNetwork: async () => undefined,
         });
         shells.push(shell);
-        const permissions = computePermissions("auto", {
-            network: { egress: true, localBinding: false },
-        });
 
-        await shell.run({ command: "true", permissions });
-
-        const processOptions = run.mock.calls[0]?.[1];
-        expect(processOptions?.command).not.toBe("true");
-        if (process.platform === "linux") {
-            expect(processOptions?.args).toContain("--unshare-net");
-            expect(processOptions?.args).not.toContain(join(cwd, ".agent-state"));
-        } else if (process.platform === "darwin") {
-            expect(processOptions?.args?.[1]).toContain(
-                '(allow network-outbound (remote ip "*:*"))',
-            );
-            expect(processOptions?.args?.[1]).not.toContain(
-                '(allow network-bind (local ip "*:*"))',
-            );
-            expect(processOptions?.args).not.toEqual(
-                expect.arrayContaining([expect.stringContaining(join(cwd, ".agent-state"))]),
-            );
-        }
+        await expect(
+            shell.run({
+                command: "true",
+                permissions: computePermissions("workspace_write", {
+                    deniedWritePaths: ["protected"],
+                }),
+            }),
+        ).rejects.toThrow("symbolic-link path");
+        expect(run).not.toHaveBeenCalled();
     });
 
     it("kills its active sessions when the compute is disposed", async () => {
@@ -327,6 +502,12 @@ async function makeWorkspace(): Promise<string> {
     const cwd = join(root, "workspace");
     await mkdir(cwd, { recursive: true });
     return cwd;
+}
+
+function readSupervisorPolicy(options: ProcessRunOptions): unknown {
+    const input = options.extraFileDescriptorInputs?.[0] ?? options.initialStdin;
+    expect(input).toBeTypeOf("string");
+    return JSON.parse(String(input).trim());
 }
 
 function shellQuote(value: string): string {

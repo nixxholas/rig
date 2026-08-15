@@ -1,7 +1,11 @@
+import { PassThrough } from "node:stream";
+
 import type Dockerode from "dockerode";
+import { resolveLinuxSupervisorBinary } from "@slopus/happy-agent-supervisor";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DockerEnvironment } from "../../sources/docker/DockerEnvironment.js";
+import { DOCKER_SUPERVISOR_PATH } from "../../sources/docker/impl/createDockerSupervisorCommand.js";
 
 describe("DockerEnvironment", () => {
     const inspect = vi.fn();
@@ -46,8 +50,9 @@ describe("DockerEnvironment", () => {
             remove: vi.fn().mockResolvedValue(undefined),
             start: vi.fn().mockResolvedValue(undefined),
         } as unknown as Dockerode.Container;
+        const createContainer = vi.fn().mockResolvedValue(created);
         const managedDocker = {
-            createContainer: vi.fn().mockResolvedValue(created),
+            createContainer,
             getContainer: vi.fn(() => ({
                 inspect: vi.fn().mockRejectedValue({ statusCode: 404 }),
             })),
@@ -56,6 +61,7 @@ describe("DockerEnvironment", () => {
             {
                 image: "compute-dev:latest",
                 name: "managed-release-test",
+                architecture: "arm64",
                 workingDirectory: "/workspace",
             },
             "session-managed",
@@ -63,6 +69,19 @@ describe("DockerEnvironment", () => {
         );
 
         await environment.container();
+        expect(createContainer).toHaveBeenCalledWith(
+            expect.objectContaining({
+                HostConfig: expect.objectContaining({
+                    Mounts: expect.arrayContaining([
+                        expect.objectContaining({
+                            ReadOnly: true,
+                            Source: resolveLinuxSupervisorBinary("arm64"),
+                            Target: DOCKER_SUPERVISOR_PATH,
+                        }),
+                    ]),
+                }),
+            }),
+        );
         await environment.release();
 
         expect(created.remove).toHaveBeenCalledOnce();
@@ -87,6 +106,101 @@ describe("DockerEnvironment", () => {
         await environment.release();
 
         expect(attached.remove).not.toHaveBeenCalled();
+    });
+
+    it("fails closed for an attached container without the read-only supervisor mount", async () => {
+        const attached = {
+            inspect: vi.fn().mockResolvedValue({
+                Config: { Env: [] },
+                Mounts: [],
+                State: { Running: true },
+            }),
+        } as unknown as Dockerode.Container;
+        const attachedDocker = {
+            getContainer: vi.fn(() => attached),
+        } as unknown as Dockerode;
+        const environment = new DockerEnvironment(
+            { container: "developer-container", workingDirectory: "/workspace" },
+            "session-attached-restricted",
+            attachedDocker,
+        );
+
+        await expect(environment.supervisorBinary()).rejects.toThrow(
+            `read-only bind mount at ${DOCKER_SUPERVISOR_PATH}`,
+        );
+    });
+
+    it("probes an attached supervisor mount for the configured Linux architecture", async () => {
+        const exec = createSuccessfulExec();
+        const attached = {
+            exec: vi.fn().mockResolvedValue(exec),
+            inspect: vi.fn().mockResolvedValue({
+                Mounts: [
+                    {
+                        Destination: DOCKER_SUPERVISOR_PATH,
+                        RW: false,
+                        Source: resolveLinuxSupervisorBinary("amd64"),
+                        Type: "bind",
+                    },
+                ],
+                State: { Running: true },
+            }),
+            modem: createDockerModem(),
+        } as unknown as Dockerode.Container;
+        const attachedDocker = {
+            getContainer: vi.fn(() => attached),
+        } as unknown as Dockerode;
+        const environment = new DockerEnvironment(
+            {
+                architecture: "amd64",
+                container: "developer-container",
+                workingDirectory: "/workspace",
+            },
+            "session-attached-architecture",
+            attachedDocker,
+        );
+
+        await expect(environment.supervisorBinary()).resolves.toBe(DOCKER_SUPERVISOR_PATH);
+        expect((attached.exec as ReturnType<typeof vi.fn>).mock.calls[0]?.[0].Cmd).toEqual([
+            "/bin/sh",
+            "-c",
+            expect.stringContaining("--policy-fd 3"),
+            "happy-agent-supervisor-check",
+            DOCKER_SUPERVISOR_PATH,
+            "amd64",
+        ]);
+    });
+
+    it("rejects an attached read-only executable that is not the installed NPM artifact", async () => {
+        const attached = {
+            inspect: vi.fn().mockResolvedValue({
+                Mounts: [
+                    {
+                        Destination: DOCKER_SUPERVISOR_PATH,
+                        RW: false,
+                        Source: "/host/tools/fake-supervisor",
+                        Type: "bind",
+                    },
+                ],
+                State: { Running: true },
+            }),
+        } as unknown as Dockerode.Container;
+        const attachedDocker = {
+            getContainer: vi.fn(() => attached),
+        } as unknown as Dockerode;
+        const environment = new DockerEnvironment(
+            {
+                architecture: "arm64",
+                container: "developer-container",
+                workingDirectory: "/workspace",
+            },
+            "session-attached-fake-supervisor",
+            attachedDocker,
+        );
+
+        await expect(environment.supervisorBinary()).rejects.toThrow(
+            `mounted directly from ${resolveLinuxSupervisorBinary("arm64")}`,
+        );
     });
 
     it("coordinates concurrent creation of one shared managed container", async () => {
@@ -127,3 +241,34 @@ describe("DockerEnvironment", () => {
         expect(created.remove).toHaveBeenCalledOnce();
     });
 });
+
+function createSuccessfulExec(): Dockerode.Exec {
+    const stream = new PassThrough();
+    const exec = {
+        inspect: vi.fn().mockResolvedValue({ ExitCode: 0 }),
+        start: vi.fn(async () => {
+            setImmediate(() => stream.end());
+            return stream;
+        }),
+    };
+    return exec as unknown as Dockerode.Exec;
+}
+
+function createDockerModem(): Dockerode["modem"] {
+    return {
+        demuxStream(
+            source: NodeJS.ReadableStream,
+            stdout: NodeJS.WritableStream,
+            stderr: NodeJS.WritableStream,
+        ) {
+            source.on("data", (chunk) => {
+                stdout.write(chunk);
+                stderr.write(chunk);
+            });
+            source.once("end", () => {
+                stdout.end();
+                stderr.end();
+            });
+        },
+    } as unknown as Dockerode["modem"];
+}

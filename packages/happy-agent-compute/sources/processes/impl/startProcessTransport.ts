@@ -5,6 +5,7 @@ import { spawn as spawnPty } from "@lydell/node-pty";
 import type { Context } from "@steve.kite/stdlib";
 
 import { resolveSystemShell } from "./resolveSystemShell.js";
+import { killProcessTree } from "./killProcessTree.js";
 import type { ProcessStartOptions } from "../types.js";
 
 /**
@@ -20,6 +21,11 @@ export interface ProcessTransport {
     /** Whether stderr arrives separately. A terminal merges it into stdout. */
     readonly separatesStderr: boolean;
     endInput(data?: string | Uint8Array): void;
+    initialize(
+        data: string | Uint8Array | undefined,
+        handshake: ProcessStartOptions["initialStdinHandshake"],
+        extraFileDescriptorInputs: ProcessStartOptions["extraFileDescriptorInputs"],
+    ): Promise<void>;
     onError(listener: (error: Error) => void): void;
     onExit(listener: (code: number | null, signal: NodeJS.Signals | null) => void): void;
     onOutputEnd(listener: () => void): void;
@@ -56,6 +62,9 @@ export async function startProcessTransport<Result>(
     started: (ctx: Context, transport: ProcessTransport) => Result | PromiseLike<Result>,
 ): Promise<Awaited<Result>> {
     return await ctx.span("compute.process.spawn", async (ctx) => {
+        if (options.tty === true && (options.extraFileDescriptorInputs?.length ?? 0) > 0) {
+            throw new Error("A pseudo-terminal cannot inherit extra input descriptors.");
+        }
         const executable =
             options.args === undefined ? (options.shell ?? resolveSystemShell()) : options.command;
         const args =
@@ -66,7 +75,25 @@ export async function startProcessTransport<Result>(
                 : startPipeTransport(executable, args, options);
         // Attach lifecycle listeners before the traced callback yields. A command may exit in the
         // first microtask after spawn, and observing it must not depend on tracing latency.
-        return await started(ctx, transport);
+        let result: Result | PromiseLike<Result>;
+        try {
+            result = started(ctx, transport);
+            await transport.initialize(
+                options.initialStdin,
+                options.initialStdinHandshake,
+                options.extraFileDescriptorInputs,
+            );
+        } catch (error) {
+            try {
+                if (transport.pid !== null) {
+                    await killProcessTree(ctx, transport.pid, "SIGKILL");
+                }
+            } finally {
+                transport.release();
+            }
+            throw error;
+        }
+        return await result;
     });
 }
 
@@ -79,7 +106,12 @@ function startPipeTransport(
         cwd: options.cwd,
         detached: process.platform !== "win32",
         env: options.env ?? process.env,
-        stdio: ["pipe", "pipe", "pipe"],
+        stdio: [
+            "pipe",
+            "pipe",
+            "pipe",
+            ...(options.extraFileDescriptorInputs ?? []).map(() => "pipe" as const),
+        ],
         windowsHide: true,
     });
     child.stdin?.on("error", () => undefined);
@@ -88,6 +120,50 @@ function startPipeTransport(
         endInput(data) {
             if (child.stdin === null || child.stdin.destroyed) return;
             child.stdin.end(data);
+        },
+        async initialize(data, _handshake, extraFileDescriptorInputs) {
+            for (const [index, input] of (extraFileDescriptorInputs ?? []).entries()) {
+                const descriptor = child.stdio[index + 3];
+                if (descriptor === undefined || descriptor === null || !("end" in descriptor)) {
+                    throw new Error(
+                        `Could not write trusted startup input to descriptor ${String(index + 3)}.`,
+                    );
+                }
+                await new Promise<void>((resolve, reject) => {
+                    let settled = false;
+                    const fail = (error: Error) => {
+                        if (settled) return;
+                        settled = true;
+                        descriptor.removeListener("close", onClose);
+                        descriptor.removeListener("error", onError);
+                        descriptor.removeListener("finish", onFinish);
+                        reject(error);
+                    };
+                    const onClose = () => {
+                        descriptor.removeListener("error", onError);
+                    };
+                    const onError = (error: Error) => fail(error);
+                    const onFinish = () => {
+                        if (settled) return;
+                        settled = true;
+                        descriptor.removeListener("finish", onFinish);
+                        // Keep the one-shot error listener until close so a late EPIPE after
+                        // `finish` is consumed rather than becoming an uncaught exception.
+                        resolve();
+                    };
+                    descriptor.once("error", onError);
+                    descriptor.once("close", onClose);
+                    descriptor.once("finish", onFinish);
+                    descriptor.end(input);
+                });
+            }
+            if (data === undefined) return;
+            if (child.stdin === null || child.stdin.destroyed) {
+                throw new Error("Could not write trusted startup input to the command.");
+            }
+            // `false` is backpressure, not rejection: Node has accepted the whole chunk and will
+            // flush it in order before later caller-owned input.
+            child.stdin.write(data);
         },
         kind: "pipe",
         onError(listener) {
@@ -127,11 +203,15 @@ function startPipeTransport(
             child.stdout?.destroy();
             child.stderr?.destroy();
             child.stdin?.destroy();
+            for (const descriptor of child.stdio.slice(3)) descriptor?.destroy();
         },
         separatesStderr: true,
         write(data) {
-            if (child.stdin === null) return false;
-            return child.stdin.write(data);
+            if (child.stdin === null || child.stdin.destroyed) return false;
+            child.stdin.write(data);
+            // Writable.write() returning false only asks the producer to pause; the bytes were
+            // accepted. This API reports whether input was delivered, not stream backpressure.
+            return true;
         },
     };
 }
@@ -151,11 +231,77 @@ function startPtyTransport(
         name: "dumb",
         rows: PTY_ROWS,
     });
-    const disposables: { dispose: () => void }[] = [];
+    const stdoutListeners = new Set<(chunk: Buffer) => void>();
+    const exitListeners = new Set<(code: number | null, signal: NodeJS.Signals | null) => void>();
+    const outputEndListeners = new Set<() => void>();
     let exited = false;
+    let exitCode: number | null = null;
+    let startupState: "pending" | "waiting_ready" | "waiting_complete" | "ready" = "pending";
+    let startupOutput = "";
+    let startupInput: string | Uint8Array | undefined;
+    let startupHandshake: ProcessStartOptions["initialStdinHandshake"];
+    let resolveInitialization!: () => void;
+    let rejectInitialization!: (error: Error) => void;
+    const initialization = new Promise<void>((resolve, reject) => {
+        resolveInitialization = resolve;
+        rejectInitialization = reject;
+    });
+    const emitStdout = (data: string) => {
+        if (data.length === 0) return;
+        const chunk = Buffer.from(data);
+        for (const listener of stdoutListeners) listener(chunk);
+    };
+    const finishInitialization = () => {
+        startupState = "ready";
+        emitStdout(startupOutput);
+        startupOutput = "";
+        resolveInitialization();
+    };
+    const advanceHandshake = () => {
+        if (startupState === "waiting_ready") {
+            const marker = startupHandshake!.readyMarker;
+            const markerIndex = startupOutput.indexOf(marker);
+            if (markerIndex < 0) return;
+            const visiblePrefix = startupOutput.slice(0, markerIndex);
+            startupOutput = startupOutput.slice(markerIndex + marker.length);
+            emitStdout(visiblePrefix);
+            startupState = "waiting_complete";
+            if (startupInput !== undefined) pty.write(toPtyInput(startupInput));
+        }
+        if (startupState === "waiting_complete") {
+            const marker = startupHandshake!.completeMarker;
+            const markerIndex = startupOutput.indexOf(marker);
+            if (markerIndex < 0) return;
+            const visiblePrefix = startupOutput.slice(0, markerIndex);
+            startupOutput = startupOutput.slice(markerIndex + marker.length);
+            emitStdout(visiblePrefix);
+            finishInitialization();
+        }
+    };
+    const dataDisposable = pty.onData((data) => {
+        if (startupState === "ready") {
+            emitStdout(data);
+            return;
+        }
+        startupOutput += data;
+        advanceHandshake();
+    });
+    const exitDisposable = pty.onExit(({ exitCode: code }) => {
+        exited = true;
+        exitCode = code;
+        if (startupState !== "ready") {
+            emitStdout(startupOutput);
+            startupOutput = "";
+            rejectInitialization(
+                new Error("The command exited before trusted startup input was accepted."),
+            );
+        }
+        for (const listener of exitListeners) listener(code, null);
+        for (const listener of outputEndListeners) listener();
+    });
     const write = (data: string | Uint8Array): boolean => {
         if (exited) return false;
-        pty.write(typeof data === "string" ? data : Buffer.from(data).toString("utf8"));
+        pty.write(toPtyInput(data));
         return true;
     };
     return {
@@ -164,44 +310,65 @@ function startPtyTransport(
             // A terminal has no half-close; end-of-file is a character.
             if (!exited) pty.write("\u0004");
         },
+        async initialize(data, handshake) {
+            if (startupState !== "pending") {
+                throw new Error("The command transport was initialized more than once.");
+            }
+            startupInput = data;
+            startupHandshake = handshake;
+            if (exited) {
+                emitStdout(startupOutput);
+                startupOutput = "";
+                throw new Error("The command exited before trusted startup input was accepted.");
+            }
+            if (data === undefined) {
+                finishInitialization();
+            } else if (handshake === undefined) {
+                if (!write(data)) {
+                    throw new Error("Could not write trusted startup input to the command.");
+                }
+                finishInitialization();
+            } else {
+                startupState = "waiting_ready";
+                advanceHandshake();
+            }
+            await initialization;
+        },
         kind: "pty",
         onError() {
             // A pseudo-terminal reports failures as an exit, not an error event.
         },
         onExit(listener) {
-            disposables.push(
-                pty.onExit(({ exitCode }) => {
-                    exited = true;
-                    listener(exitCode, null);
-                }),
-            );
+            exitListeners.add(listener);
+            if (exited) queueMicrotask(() => listener(exitCode, null));
         },
         onOutputEnd(listener) {
             // The terminal closes with the command, so its exit is also the end
             // of its output.
-            disposables.push(
-                pty.onExit(() => {
-                    listener();
-                }),
-            );
+            outputEndListeners.add(listener);
+            if (exited) queueMicrotask(listener);
         },
         onStderr() {
             // A terminal merges stderr into the single stream.
         },
         onStdout(listener) {
-            disposables.push(
-                pty.onData((data) => {
-                    listener(Buffer.from(data));
-                }),
-            );
+            stdoutListeners.add(listener);
         },
         pid: pty.pid,
         release() {
-            for (const disposable of disposables.splice(0)) disposable.dispose();
+            dataDisposable.dispose();
+            exitDisposable.dispose();
+            stdoutListeners.clear();
+            exitListeners.clear();
+            outputEndListeners.clear();
         },
         separatesStderr: false,
         write,
     };
+}
+
+function toPtyInput(data: string | Uint8Array): string {
+    return typeof data === "string" ? data : Buffer.from(data).toString("utf8");
 }
 
 function shellArgs(shell: string, command: string): string[] {

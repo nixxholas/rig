@@ -23,6 +23,14 @@ export type ParseDockerProjectNetworkConfig = (
     files: readonly DockerProjectNetworkPolicyFile[],
 ) => ManagedNetworkConfig | undefined | Promise<ManagedNetworkConfig | undefined>;
 
+export interface DockerProjectManagedNetworkPolicyLifecycle {
+    /**
+     * Claims ownership of a newly created placeholder before the project parser runs. The caller
+     * can then coordinate cleanup with other commands that share the same container.
+     */
+    onPlaceholderCreated?: (networkPolicyFile: string) => void | Promise<void>;
+}
+
 /** What the backend learned while fixing a command's project network boundary. */
 export interface DockerProjectManagedNetworkPolicyState {
     absentNetworkPolicyFiles: readonly string[];
@@ -36,15 +44,16 @@ export interface DockerProjectManagedNetworkPolicyState {
  *
  * A restricted command sees ready files through read-only mounts. When no policy exists, the empty
  * hard-linked placeholder closes the creation race before the command's missing-path monitor starts.
- * The marker lives below the already protected bridge root, so the command cannot replace it.
+ * The marker lives below the already protected project root, so the command cannot replace it.
  */
 export async function loadDockerProjectManagedNetworkPolicyState(
     container: Dockerode.Container,
     cwd: string,
-    bridgeRoot: string,
+    projectRoot: string,
     placeholderMarkerPath: string,
     networkPolicyFiles: readonly string[],
     parseNetworkConfig?: ParseDockerProjectNetworkConfig,
+    lifecycle: DockerProjectManagedNetworkPolicyLifecycle = {},
 ): Promise<DockerProjectManagedNetworkPolicyState> {
     if (networkPolicyFiles.length === 0) {
         return {
@@ -58,13 +67,13 @@ export async function loadDockerProjectManagedNetworkPolicyState(
         "/bin/sh",
         "-c",
         [
-            "bridge_root=$1",
+            "project_root=$1",
             "marker=$2",
             "shift 2",
-            'case "$marker" in "$bridge_root"/.policy-*) ;; *) exit 46 ;; esac',
-            '[ -d "$bridge_root" ] && [ ! -L "$bridge_root" ] || exit 47',
+            'case "$marker" in "$project_root"/.policy-*) ;; *) exit 46 ;; esac',
+            '[ -d "$project_root" ] && [ ! -L "$project_root" ] || exit 47',
             "found=0",
-            'for path do [ -f "$path" ] && found=1; done',
+            'for path do [ ! -L "$path" ] || exit 48; [ -f "$path" ] && found=1; done',
             "placeholder=0",
             'if [ "$found" -eq 0 ]; then',
             '  if (umask 077; set -C; : > "$marker") 2>/dev/null; then',
@@ -72,7 +81,7 @@ export async function loadDockerProjectManagedNetworkPolicyState(
             "      placeholder=1",
             "    else",
             '      rm -f -- "$marker"',
-            '      for path do [ -f "$path" ] && found=1; done',
+            '      for path do [ ! -L "$path" ] || exit 48; [ -f "$path" ] && found=1; done',
             '      [ "$found" -eq 1 ] || exit 44',
             "    fi",
             "  else",
@@ -81,7 +90,7 @@ export async function loadDockerProjectManagedNetworkPolicyState(
             "fi",
             'if [ "$placeholder" -eq 1 ]; then printf "P"; else printf "N"; fi',
             "for path do",
-            '  if [ -f "$path" ]; then',
+            '  if [ -L "$path" ]; then exit 48; elif [ -f "$path" ]; then',
             '    printf "F\\0"; cat "$path"; printf "\\0"',
             "  else",
             '    printf "A\\0\\0"',
@@ -89,7 +98,7 @@ export async function loadDockerProjectManagedNetworkPolicyState(
             "done",
         ].join("\n"),
         "compute-policy",
-        bridgeRoot,
+        projectRoot,
         placeholderMarkerPath,
         ...paths,
     ]);
@@ -100,7 +109,15 @@ export async function loadDockerProjectManagedNetworkPolicyState(
     const placeholderNetworkPolicyFile = parsed.placeholderCreated
         ? networkPolicyFiles[0]
         : undefined;
+    let placeholderClaimed = false;
     try {
+        if (
+            placeholderNetworkPolicyFile !== undefined &&
+            lifecycle.onPlaceholderCreated !== undefined
+        ) {
+            placeholderClaimed = true;
+            await lifecycle.onPlaceholderCreated(placeholderNetworkPolicyFile);
+        }
         const network =
             parseNetworkConfig === undefined ? undefined : await parseNetworkConfig(parsed.files);
         return {
@@ -110,11 +127,11 @@ export async function loadDockerProjectManagedNetworkPolicyState(
             readyNetworkPolicyFiles: parsed.ready,
         };
     } catch (error) {
-        if (placeholderNetworkPolicyFile !== undefined) {
+        if (placeholderNetworkPolicyFile !== undefined && !placeholderClaimed) {
             await cleanupDockerNetworkPolicyPlaceholder(
                 container,
                 cwd,
-                bridgeRoot,
+                projectRoot,
                 placeholderMarkerPath,
                 placeholderNetworkPolicyFile,
             ).catch(() => undefined);
@@ -164,7 +181,7 @@ export function parseDockerNetworkPolicyOutput(
 export async function cleanupDockerNetworkPolicyPlaceholder(
     container: Dockerode.Container,
     cwd: string,
-    bridgeRoot: string,
+    projectRoot: string,
     placeholderMarkerPath: string,
     networkPolicyFile: string,
 ): Promise<void> {
@@ -174,20 +191,19 @@ export async function cleanupDockerNetworkPolicyPlaceholder(
         "-c",
         [
             "path=$1",
-            "bridge_root=$2",
+            "project_root=$2",
             "marker=$3",
-            'case "$marker" in "$bridge_root"/.policy-*) ;; *) exit 46 ;; esac',
-            '[ -d "$bridge_root" ] && [ ! -L "$bridge_root" ] || exit 47',
+            'case "$marker" in "$project_root"/.policy-*) ;; *) exit 46 ;; esac',
+            '[ -d "$project_root" ] && [ ! -L "$project_root" ] || exit 47',
             'if [ -f "$marker" ]; then',
-            '  if [ -f "$path" ] && [ "$path" -ef "$marker" ] && [ ! -s "$path" ]; then',
-            '    rm -f -- "$path"',
-            "  fi",
+            '  if [ ! -f "$path" ] || [ ! "$path" -ef "$marker" ]; then exit 48; fi',
+            '  if [ ! -s "$path" ]; then rm -f -- "$path"; fi',
             '  rm -f -- "$marker"',
             "fi",
         ].join("\n"),
         "compute-policy-cleanup",
         path,
-        bridgeRoot,
+        projectRoot,
         placeholderMarkerPath,
     ]);
     if (result.exitCode !== 0) {

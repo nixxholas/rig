@@ -27,7 +27,8 @@ describe("createJustBashCompute filesystem", () => {
     it("identifies its provider without retaining machine-wide permissions", () => {
         const compute = memoryCompute();
 
-        expect(compute.providerId).toBe("just-bash");
+        expect(compute.id).toBe("just-bash");
+        expect(compute.kind).toBe("emulated");
         expect("permissions" in compute).toBe(false);
     });
 

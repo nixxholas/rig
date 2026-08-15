@@ -4,6 +4,17 @@ import type { ComputeFileSystem } from "./ComputeFileSystem.js";
 import type { ComputeShell } from "./ComputeShell.js";
 
 /**
+ * What sort of machine a compute is, as opposed to which provider built it.
+ *
+ * There are only three shapes, and the difference between them is where the agent's mistakes land:
+ * `host` is the real computer a person is sitting at, `docker` is a container that can be thrown
+ * away, and `emulated` is not a machine at all but a shell answered in this process. A caller that
+ * has to reason about that — a warning, a confirmation, a refusal — asks this rather than
+ * enumerating provider ids, because the set of providers is open and the set of shapes is not.
+ */
+export type ComputeKind = "host" | "docker" | "emulated";
+
+/**
  * The machine an agent works on: one filesystem and one shell.
  *
  * Everything above this line — tools, features, the agent loop — is written once against this
@@ -22,9 +33,11 @@ import type { ComputeShell } from "./ComputeShell.js";
 export interface Compute {
     /**
      * The id of the provider that built this machine, for the rare caller that must say out loud
-     * which kind it got.
+     * which one it got.
      */
-    readonly providerId: string;
+    readonly id: string;
+    /** What sort of machine this is. */
+    readonly kind: ComputeKind;
     /** The directory the agent works in, in this machine's own paths. */
     readonly cwd: string;
     /** The filesystem. */

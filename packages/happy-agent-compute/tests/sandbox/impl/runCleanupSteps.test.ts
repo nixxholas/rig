@@ -9,7 +9,7 @@ describe("runCleanupSteps", () => {
         await expect(
             runCleanupSteps("managed network", [
                 async () => {
-                    throw new Error("bridge cleanup failed");
+                    throw new Error("resource cleanup failed");
                 },
                 laterCleanup,
             ]),

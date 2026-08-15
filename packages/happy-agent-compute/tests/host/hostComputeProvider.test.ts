@@ -37,7 +37,8 @@ describe("hostComputeProvider", () => {
                 hostPolicy: { protectedProjectFiles: ["agent-policy.toml"] },
             }),
         ).toBe(true);
-        expect(compute.providerId).toBe("host");
+        expect(compute.id).toBe("host");
+        expect(compute.kind).toBe("host");
         expect(compute.cwd).toBe(cwd);
         await compute.dispose(ctx);
     });

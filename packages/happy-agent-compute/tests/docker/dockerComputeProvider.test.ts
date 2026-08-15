@@ -52,7 +52,7 @@ describe("dockerComputeProvider", () => {
         };
 
         await expect(providers.create({} as Context, "docker", config)).resolves.toMatchObject({
-            providerId: "docker",
+            id: "docker",
         });
         expect(clientFactory).toHaveBeenCalledWith(config);
     });
@@ -66,7 +66,8 @@ describe("dockerComputeProvider", () => {
         const compute = await providers.create({} as Context, "docker", config);
 
         expect(clientFactory).toHaveBeenCalledWith(config);
-        expect(compute.providerId).toBe("docker");
+        expect(compute.id).toBe("docker");
+        expect(compute.kind).toBe("docker");
         expect(compute.cwd).toBe("/workspace");
     });
 

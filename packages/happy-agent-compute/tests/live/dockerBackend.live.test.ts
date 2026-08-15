@@ -147,11 +147,11 @@ describeLive("live Docker compute boundary", () => {
         );
     }, 60_000);
 
-    // The managed bridge reaches the host proxy through a bind-mounted Unix socket. Docker Desktop
-    // shows the macOS host's socket inside the container but cannot carry a connection to it, so
-    // this case proves nothing there and is left to the native-Linux lane that the release runs.
+    // The native supervisor's egress proxy runs inside the container. Docker Desktop does not
+    // provide the same Linux namespace behavior as a native Linux daemon, so this case stays in
+    // the native-Linux lane that the release runs.
     itOnNativeLinux(
-        "allows and denies real egress through the managed proxy bridge",
+        "allows and denies real egress through the native supervisor",
         async () => {
             const { compute } = await managedCompute();
             const request = proxyRequestCommand("example.com");
@@ -168,7 +168,6 @@ describeLive("live Docker compute boundary", () => {
             });
             expect(allowed.exitCode, JSON.stringify(allowed)).toBe(0);
             expect(allowed.stdout).toMatch(/^status:[1-5]\d\d$/mu);
-            expect(allowed.stderr).not.toContain("was denied by Rig's sandbox network policy");
 
             const denied = await compute.shell.run({
                 command: request,
@@ -182,9 +181,6 @@ describeLive("live Docker compute boundary", () => {
                 timeoutMs: 20_000,
             });
             expect(denied.exitCode, JSON.stringify(denied)).not.toBe(0);
-            expect(denied.stderr).toContain(
-                "Network access to example.com:443 was denied by Rig's sandbox network policy",
-            );
         },
         90_000,
     );

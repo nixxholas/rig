@@ -2,11 +2,7 @@
 
 export { createHostCompute, type HostComputeOptions } from "./createHostCompute.js";
 export { createHostFileSystem, type HostFileSystemOptions } from "./createHostFileSystem.js";
-export {
-    createHostShell,
-    type HostShellOptions,
-    type StartManagedNetwork,
-} from "./createHostShell.js";
+export { createHostShell, type HostShellOptions } from "./createHostShell.js";
 export {
     createProtectedPathMonitor,
     type ProtectedPathMonitor,

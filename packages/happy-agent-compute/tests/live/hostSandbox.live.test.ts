@@ -19,7 +19,7 @@ describeLive("live host operating-system sandbox boundary", () => {
     beforeAll(async () => {
         if (process.platform !== "darwin" && process.platform !== "linux") {
             throw new Error(
-                "HAPPY_AGENT_COMPUTE_LIVE_TEST=1 requires macOS Seatbelt or Linux Bubblewrap.",
+                "HAPPY_AGENT_COMPUTE_LIVE_TEST=1 requires the macOS or Linux native supervisor.",
             );
         }
 
@@ -217,8 +217,8 @@ async function makeWorkspace(): Promise<string> {
 }
 
 async function makeTemporaryDirectory(): Promise<string> {
-    // Seatbelt deliberately leaves the system temporary directory writable. A sibling under that
-    // directory therefore cannot prove the workspace boundary; keep the fixture beside this test.
+    // Keep the fixture beside the test so its outside-workspace target is explicit and independent
+    // from operating-system temporary-directory conventions.
     const directory = await mkdtemp(join(import.meta.dirname, ".host-live-"));
     temporaryDirectories.add(directory);
     return directory;

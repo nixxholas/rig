@@ -4,7 +4,7 @@ import { computePermissions } from "../../../sources/ComputePermissions.js";
 import { resolveDockerNetworkPermissions } from "../../../sources/docker/impl/resolveDockerNetworkPermissions.js";
 
 describe("resolveDockerNetworkPermissions", () => {
-    it("gives Workspace write unrestricted egress through the managed boundary", () => {
+    it("keeps unrestricted egress direct when local binding is withheld", () => {
         const resolved = resolveDockerNetworkPermissions(
             computePermissions("workspace_write", {
                 network: { egress: true, localBinding: false },
@@ -12,27 +12,22 @@ describe("resolveDockerNetworkPermissions", () => {
         );
 
         expect(resolved).toEqual({
-            directEgress: false,
-            managedPolicy: {
-                allowPrivateAddresses: true,
-                allowedDomains: [{ domain: "*" }],
-            },
+            directEgress: true,
+            managedPolicy: undefined,
         });
     });
 
-    it("keeps a command isolated when local binding is withheld", () => {
+    it("does not add a proxy merely to withhold local binding", () => {
         const resolved = resolveDockerNetworkPermissions(
             computePermissions("auto", {
                 network: { egress: true, localBinding: false },
             }),
         );
 
-        expect(resolved.directEgress).toBe(false);
-        expect(resolved.managedPolicy?.allowPrivateAddresses).toBe(true);
-        expect(resolved.managedPolicy?.allowedDomains).toEqual([{ domain: "*" }]);
+        expect(resolved).toEqual({ directEgress: true, managedPolicy: undefined });
     });
 
-    it("uses direct networking only when unrestricted egress and local binding are both granted", () => {
+    it("uses direct networking for unrestricted egress", () => {
         expect(
             resolveDockerNetworkPermissions(
                 computePermissions("workspace_write", {
@@ -40,6 +35,34 @@ describe("resolveDockerNetworkPermissions", () => {
                 }),
             ),
         ).toEqual({ directEgress: true, managedPolicy: undefined });
+    });
+
+    it("keeps an explicit empty project allow-list deny-all", () => {
+        expect(
+            resolveDockerNetworkPermissions(
+                computePermissions("workspace_write", {
+                    network: { egress: true, localBinding: true },
+                }),
+                {},
+            ),
+        ).toEqual({
+            directEgress: false,
+            managedPolicy: { allowedDomains: [] },
+        });
+    });
+
+    it("does not let a local-binding-only project policy silently open egress", () => {
+        expect(
+            resolveDockerNetworkPermissions(
+                computePermissions("workspace_write", {
+                    network: { egress: true, localBinding: true },
+                }),
+                { allowLocalBinding: false },
+            ),
+        ).toEqual({
+            directEgress: false,
+            managedPolicy: { allowedDomains: [] },
+        });
     });
 
     it("maps an allowed-host list into an exhaustive managed policy", () => {
@@ -62,6 +85,34 @@ describe("resolveDockerNetworkPermissions", () => {
                 ],
             },
         });
+    });
+
+    it("rejects a bare wildcard instead of silently changing open egress semantics", () => {
+        expect(() =>
+            resolveDockerNetworkPermissions(
+                computePermissions("auto", {
+                    network: {
+                        allowedHosts: ["*"],
+                        egress: true,
+                        localBinding: false,
+                    },
+                }),
+            ),
+        ).toThrow("bare '*'");
+    });
+
+    it("rejects a bare wildcard even when egress is disabled", () => {
+        expect(() =>
+            resolveDockerNetworkPermissions(
+                computePermissions("read_only", {
+                    network: {
+                        allowedHosts: ["*"],
+                        egress: false,
+                        localBinding: false,
+                    },
+                }),
+            ),
+        ).toThrow("bare '*'");
     });
 
     it("intersects operation hosts with the project network boundary", () => {

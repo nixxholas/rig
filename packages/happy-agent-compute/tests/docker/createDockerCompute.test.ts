@@ -20,7 +20,8 @@ describe("createDockerCompute", () => {
             sessionId: "session-1",
         });
 
-        expect(compute.providerId).toBe("docker");
+        expect(compute.id).toBe("docker");
+        expect(compute.kind).toBe("docker");
         expect(compute.cwd).toBe("/workspace");
         expect(compute.fs.cwd).toBe("/workspace");
         expect(compute.shell.cwd).toBe("/workspace");

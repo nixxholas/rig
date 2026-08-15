@@ -50,7 +50,8 @@ export function createJustBashComputeFromFileSystem(
 
     return {
         bash,
-        providerId: "just-bash",
+        id: "just-bash",
+        kind: "emulated",
         cwd,
         fs: createJustBashFileSystem(options.fileSystem, cwd, home, hostPolicy),
         rawFileSystem: options.fileSystem,

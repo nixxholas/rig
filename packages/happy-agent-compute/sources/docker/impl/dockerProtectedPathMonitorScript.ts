@@ -1,7 +1,7 @@
 /**
  * A wrapper that watches for a restricted command creating a path it must not.
  *
- * Bubblewrap can mount an existing protected path read-only, but it cannot forbid the creation of a
+ * The native supervisor can make an existing protected path read-only, but it cannot forbid the creation of a
  * path that does not exist yet — a restricted command that creates protected metadata for itself
  * would otherwise grant itself policy the next command trusts. This POSIX-shell wrapper watches the
  * named paths while the real command runs, deletes anything that appears, and fails an otherwise

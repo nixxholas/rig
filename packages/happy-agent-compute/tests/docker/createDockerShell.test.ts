@@ -295,6 +295,133 @@ describe("createDockerShell", () => {
         ).rejects.toThrow("does not run commands under a pseudo-terminal");
         expect(fake.foregroundCommands).toEqual([]);
     });
+
+    it("cleans an absent project policy when native network translation rejects it", async () => {
+        const bookkeepingCommands: string[][] = [];
+        const container = createBookkeepingDockerContainer(bookkeepingCommands);
+        const environment = {
+            config: { workingDirectory: "/workspace" },
+            container: async () => container,
+            supervisorBinary: async () => "/tools/happy-agent-sandbox",
+        } as unknown as DockerEnvironment;
+        const shell = createDockerShell(environment, {
+            hostPolicy: { networkPolicyFiles: ["agent-policy.toml"] },
+            parseNetworkConfig: () => ({ allowedDomains: ["example.com"] }),
+        });
+
+        await expect(
+            shell.startSession({
+                command: "true",
+                permissions: computePermissions("workspace_write", {
+                    network: { egress: true, localBinding: false },
+                }),
+            }),
+        ).rejects.toThrow("per-domain ports are not supported");
+        expect(bookkeepingCommands.some((command) => command[3] === "compute-policy-cleanup")).toBe(
+            true,
+        );
+    });
+
+    it("keeps an absent project policy reserved across shells sharing a container", async () => {
+        const bookkeepingCommands: string[][] = [];
+        const foregroundStreams: PassThrough[] = [];
+        const foregroundInputs: string[] = [];
+        const container = createBookkeepingDockerContainer(
+            bookkeepingCommands,
+            foregroundStreams,
+            false,
+            foregroundInputs,
+        );
+        const environment = {
+            config: { container: "shared", workingDirectory: "/workspace" },
+            container: async () => container,
+            supervisorBinary: async () => "/tools/happy-agent-sandbox",
+        } as unknown as DockerEnvironment;
+        const options = {
+            hostPolicy: { networkPolicyFiles: ["agent-policy.toml"] },
+            parseNetworkConfig: () => undefined,
+        };
+        const first = createDockerShell(environment, options);
+        const second = createDockerShell(environment, options);
+
+        await first.startSession({
+            command: "first",
+            permissions: computePermissions("workspace_write"),
+        });
+        await second.startSession({
+            command: "second",
+            permissions: computePermissions("workspace_write"),
+        });
+
+        const firstPolicy = JSON.parse(foregroundInputs[0]!.split("\n")[1]!) as {
+            deniedWritePaths: string[];
+        };
+        const secondPolicy = JSON.parse(foregroundInputs[1]!.split("\n")[1]!) as {
+            deniedWritePaths: string[];
+        };
+        const sharedMarker = firstPolicy.deniedWritePaths.find((path) =>
+            path.startsWith("/workspace/.policy-"),
+        );
+        expect(sharedMarker).toBeDefined();
+        expect(secondPolicy.deniedWritePaths).toContain(sharedMarker);
+
+        const cleanupCount = () =>
+            bookkeepingCommands.filter((command) => command[3] === "compute-policy-cleanup").length;
+        expect(cleanupCount()).toBe(0);
+
+        foregroundStreams[0]?.end();
+        await first.readSession(1, { waitMs: 1_000 });
+        expect(cleanupCount()).toBe(0);
+
+        foregroundStreams[1]?.end();
+        await second.readSession(1, { waitMs: 1_000 });
+        expect(cleanupCount()).toBe(1);
+    });
+
+    it("does not let a concurrent policy-parser failure remove another command's placeholder", async () => {
+        const bookkeepingCommands: string[][] = [];
+        const foregroundStreams: PassThrough[] = [];
+        const container = createBookkeepingDockerContainer(
+            bookkeepingCommands,
+            foregroundStreams,
+            false,
+        );
+        const environment = {
+            config: { container: "shared-parser", workingDirectory: "/workspace" },
+            container: async () => container,
+            supervisorBinary: async () => "/tools/happy-agent-sandbox",
+        } as unknown as DockerEnvironment;
+        let parseCalls = 0;
+        const options = {
+            hostPolicy: { networkPolicyFiles: ["agent-policy.toml"] },
+            parseNetworkConfig: () => {
+                parseCalls += 1;
+                if (parseCalls === 2) throw new Error("policy parser failed");
+                return undefined;
+            },
+        };
+        const first = createDockerShell(environment, options);
+        const second = createDockerShell(environment, options);
+
+        await first.startSession({
+            command: "first",
+            permissions: computePermissions("workspace_write"),
+        });
+        await expect(
+            second.startSession({
+                command: "second",
+                permissions: computePermissions("workspace_write"),
+            }),
+        ).rejects.toThrow("policy parser failed");
+
+        const cleanupCount = () =>
+            bookkeepingCommands.filter((command) => command[3] === "compute-policy-cleanup").length;
+        expect(cleanupCount()).toBe(0);
+
+        foregroundStreams[0]?.end();
+        await first.readSession(1, { waitMs: 1_000 });
+        expect(cleanupCount()).toBe(1);
+    });
 });
 
 function createFakeDockerEnvironment(
@@ -359,4 +486,59 @@ function createFakeDockerEnvironment(
         foregroundEnvironments,
         foregroundStreams,
     };
+}
+
+function createBookkeepingDockerContainer(
+    commands: string[][],
+    foregroundStreams: PassThrough[] = [],
+    autoEndForeground = true,
+    foregroundInputs: string[] = [],
+): Dockerode.Container {
+    return {
+        async exec(options: { AttachStdin?: boolean; Cmd?: string[] }) {
+            const command = options.Cmd ?? [];
+            commands.push(command);
+            const stream = new PassThrough();
+            if (options.AttachStdin === true) {
+                const inputIndex = foregroundInputs.length;
+                foregroundInputs.push("");
+                stream.on("data", (chunk: Buffer) => {
+                    foregroundInputs[inputIndex] += chunk.toString("utf8");
+                });
+                foregroundStreams.push(stream);
+            }
+            const output =
+                command[3] === "compute-policy"
+                    ? Buffer.from("PF\0\0")
+                    : command[3] === "compute-permission-paths"
+                      ? Buffer.from(`${"1\n".repeat(Math.max(0, command.length - 4))}`)
+                      : command[3] === "compute-denied-write-paths"
+                        ? Buffer.from(`${"0\n".repeat(Math.max(0, command.length - 4))}`)
+                        : Buffer.alloc(0);
+            return {
+                inspect: async () => ({ ExitCode: 0 }),
+                start: async () => {
+                    if (options.AttachStdin === true && !autoEndForeground) return stream;
+                    setImmediate(() => {
+                        if (output.length > 0) stream.write(output);
+                        stream.end();
+                    });
+                    return stream;
+                },
+            };
+        },
+        modem: {
+            demuxStream(
+                stream: NodeJS.ReadableStream,
+                stdout: NodeJS.WritableStream,
+                stderr: NodeJS.WritableStream,
+            ) {
+                stream.on("data", (chunk) => stdout.write(chunk));
+                stream.once("end", () => {
+                    stdout.end();
+                    stderr.end();
+                });
+            },
+        },
+    } as unknown as Dockerode.Container;
 }

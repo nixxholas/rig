@@ -25,7 +25,8 @@ describe("createHostCompute filesystem", () => {
     it("identifies its provider without retaining machine-wide permissions", async () => {
         const { compute } = await hostCompute();
 
-        expect(compute.providerId).toBe("host");
+        expect(compute.id).toBe("host");
+        expect(compute.kind).toBe("host");
         expect("permissions" in compute).toBe(false);
     });
 

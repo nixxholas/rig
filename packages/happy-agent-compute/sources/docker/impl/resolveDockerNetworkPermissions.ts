@@ -4,9 +4,10 @@ import type { ManagedNetworkPolicy } from "../../network/ManagedNetworkPolicy.js
 /**
  * Maps one operation's independent egress and listener grants onto Docker's two network paths.
  *
- * Direct container networking is safe only when both capabilities are granted and egress has no
- * host allow-list. Every other egress grant travels through the managed proxy inside an isolated
- * network namespace, including unrestricted egress represented by the proxy's `*` rule.
+ * Direct container networking is safe whenever egress has no host or project allow-list. The
+ * native supervisor enforces local-binding denial independently, so withholding listeners does
+ * not require a separate proxy solely because localBinding is false. The returned intermediate
+ * policy is translated into the native supervisor's network policy by the Docker shell.
  */
 export function resolveDockerNetworkPermissions(
     permissions: ComputePermissions,
@@ -15,14 +16,19 @@ export function resolveDockerNetworkPermissions(
     directEgress: boolean;
     managedPolicy: ManagedNetworkPolicy | undefined;
 } {
+    const allowedHosts = permissions.network.allowedHosts ?? [];
+    if (allowedHosts.includes("*")) {
+        throw new Error(
+            "Docker network allowedHosts cannot contain a bare '*'; leave allowedHosts empty for open egress.",
+        );
+    }
     if (!permissions.network.egress) {
         return { directEgress: false, managedPolicy: undefined };
     }
-    const allowedHosts = permissions.network.allowedHosts ?? [];
-    const directEgress =
-        permissions.network.localBinding &&
-        allowedHosts.length === 0 &&
-        projectPolicy === undefined;
+    // A present project policy is an allow-list even when it names no destinations. Treating an
+    // empty policy as absent would silently turn deny-all into unrestricted container networking.
+    const projectHostRestriction = projectPolicy !== undefined;
+    const directEgress = allowedHosts.length === 0 && !projectHostRestriction;
     if (directEgress) return { directEgress: true, managedPolicy: undefined };
 
     const operationRules =

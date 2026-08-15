@@ -6,9 +6,8 @@ import type { Context } from "@steve.kite/stdlib";
 import type { Compute } from "../Compute.js";
 import type { ComputeHostPolicy } from "../ComputeHostPolicy.js";
 import { NativeProcessManager } from "../processes/index.js";
-import type { ManagedNetworkInterceptor } from "../network/ManagedNetworkPolicy.js";
 import { createHostFileSystem } from "./createHostFileSystem.js";
-import { createHostShell, type StartManagedNetwork } from "./createHostShell.js";
+import { createHostShell } from "./createHostShell.js";
 import { HOST_SESSION_STOP_GRACE_MS } from "./impl/hostSessionLimits.js";
 
 export interface HostComputeOptions {
@@ -24,14 +23,11 @@ export interface HostComputeOptions {
     hostPolicy?: ComputeHostPolicy;
     /** The home directory used to expand `~` and to bound sensitive host reads. */
     home?: string;
-    networkInterceptor?: ManagedNetworkInterceptor;
     /**
      * Process lifetime manager shared with the caller. A supplied manager remains caller-owned
      * when this compute is disposed.
      */
     processManager?: NativeProcessManager;
-    /** Overrides how the managed network is started, for tests. */
-    startManagedNetwork?: StartManagedNetwork;
     platform?: NodeJS.Platform;
 }
 
@@ -67,16 +63,11 @@ export function createHostCompute(options: HostComputeOptions): Compute {
         ...(options.environment === undefined ? {} : { environment: options.environment }),
         ...(options.hostPolicy === undefined ? {} : { hostPolicy: options.hostPolicy }),
         homeDirectory: home,
-        ...(options.networkInterceptor === undefined
-            ? {}
-            : { networkInterceptor: options.networkInterceptor }),
-        ...(options.startManagedNetwork === undefined
-            ? {}
-            : { startManagedNetwork: options.startManagedNetwork }),
     });
 
     return {
-        providerId: "host",
+        id: "host",
+        kind: "host",
         cwd,
         fs,
         shell,

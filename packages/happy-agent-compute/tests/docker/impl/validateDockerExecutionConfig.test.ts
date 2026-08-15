@@ -52,6 +52,23 @@ describe("validateDockerExecutionConfig", () => {
         ).not.toThrow();
     });
 
+    it("accepts Linux supervisor architectures for emulated images", () => {
+        expect(() =>
+            validateDockerExecutionConfig({
+                architecture: "amd64",
+                image: "dev:local",
+                workingDirectory: "/workspace",
+            }),
+        ).not.toThrow();
+        expect(() =>
+            validateDockerExecutionConfig({
+                architecture: "mips64",
+                image: "dev:local",
+                workingDirectory: "/workspace",
+            }),
+        ).toThrow("Docker environment settings are not valid");
+    });
+
     it("validates the optional host policy as data", () => {
         expect(() =>
             validateDockerExecutionConfig({

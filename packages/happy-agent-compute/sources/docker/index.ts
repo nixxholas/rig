@@ -25,31 +25,22 @@ export { validateDockerExecutionConfig } from "./impl/validateDockerExecutionCon
 export { assertDockerReadPath } from "./impl/assertDockerReadPath.js";
 export { assertDockerWritePath } from "./impl/assertDockerWritePath.js";
 export { resolveDockerPath } from "./impl/resolveDockerPath.js";
-export { resolveDockerBindMountPath } from "./impl/resolveDockerBindMountPath.js";
 export { parseDockerPathStat } from "./impl/parseDockerPathStat.js";
 export { formatDockerTouchTimestamp } from "./impl/formatDockerTouchTimestamp.js";
 export { readDockerEnvironmentVariableNames } from "./impl/readDockerEnvironmentVariableNames.js";
 export { isDockerNotFoundError } from "./impl/isDockerNotFoundError.js";
 export { appendCappedChunk } from "./impl/appendCappedChunk.js";
 
-// The restricted-command sandbox and managed-network machinery inside the container.
+// Low-level Docker path and project-policy helpers. Restricted commands use the native supervisor
+// mounted by DockerEnvironment.
 export { runDockerExec, type DockerExecResult } from "./impl/runDockerExec.js";
-export { prepareDockerSandbox, type PreparedDockerSandbox } from "./impl/prepareDockerSandbox.js";
-export {
-    createDockerNetworkRelayScript,
-    createDockerSandboxCommand,
-} from "./impl/createDockerSandboxCommand.js";
 export { DOCKER_PROTECTED_PATH_MONITOR_SCRIPT } from "./impl/dockerProtectedPathMonitorScript.js";
-export {
-    DOCKER_NETWORK_BRIDGE_DIRECTORY,
-    prepareDockerNetworkBridgeHostRoot,
-} from "./impl/prepareDockerNetworkBridgeHostRoot.js";
-export { prepareDockerNetworkBridgeContainerRoot } from "./impl/prepareDockerNetworkBridgeContainerRoot.js";
 export {
     cleanupDockerNetworkPolicyPlaceholder,
     loadDockerProjectManagedNetworkPolicyState,
     parseDockerNetworkPolicyOutput,
     type DockerProjectNetworkPolicyFile,
+    type DockerProjectManagedNetworkPolicyLifecycle,
     type DockerProjectManagedNetworkPolicyState,
     type ParseDockerProjectNetworkConfig,
 } from "./impl/loadDockerProjectManagedNetworkPolicy.js";

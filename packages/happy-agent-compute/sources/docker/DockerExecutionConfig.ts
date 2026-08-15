@@ -1,4 +1,5 @@
 import { type Static, Type } from "@sinclair/typebox";
+import { linuxSupervisorArchitectureSchema } from "@slopus/happy-agent-supervisor";
 
 const exact = { additionalProperties: false } as const;
 const nonBlankString = Type.String({ minLength: 1, pattern: "\\S" });
@@ -30,6 +31,11 @@ export const dockerMountConfigSchema = Type.Object(
 export type DockerMountConfig = Static<typeof dockerMountConfigSchema>;
 
 const sharedDockerConfigProperties = {
+    /**
+     * Linux architecture of the container. Defaults to the current Node architecture; set it
+     * explicitly when Docker runs an emulated image (for example, linux/amd64 on an arm64 Mac).
+     */
+    architecture: Type.Optional(linuxSupervisorArchitectureSchema),
     hostPolicy: Type.Optional(dockerHostPolicyConfigSchema),
     socketPath: Type.Optional(nonBlankString),
     workingDirectory: absoluteContainerPath,

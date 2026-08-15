@@ -1,6 +1,10 @@
-import { isAbsolute, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { lstat } from "node:fs/promises";
+import { homedir } from "node:os";
+import { isAbsolute, join, normalize, relative, resolve } from "node:path";
 
 import type { Context } from "@steve.kite/stdlib";
+import { resolveSupervisorBinary } from "@slopus/happy-agent-supervisor";
 
 import type { ComputeHostPolicy } from "../ComputeHostPolicy.js";
 import { assertComputePermissions, type ComputePermissions } from "../ComputePermissions.js";
@@ -18,24 +22,28 @@ import {
     type ProcessRunResult,
     type ProcessStartOptions,
 } from "../processes/index.js";
-import { createSandboxedCommand } from "../sandbox/createSandboxedCommand.js";
 import { createToolEnvironment } from "../sandbox/impl/createToolEnvironment.js";
-import type { ProjectConfigPlaceholder } from "../sandbox/prepareProjectConfigPlaceholder.js";
-import { formatManagedNetworkDenial } from "../network/impl/formatManagedNetworkDenial.js";
+import { createHostPolicyPrivatePaths } from "../sandbox/impl/createHostPolicyPrivatePaths.js";
+import { createSensitiveReadPaths } from "../sandbox/impl/createSensitiveReadPaths.js";
+import { projectProtectedFileNames } from "../sandbox/impl/projectProtectedFileNames.js";
+import { quoteShellArgument } from "../sandbox/impl/quoteShellArgument.js";
+import { resolvePotentialPath } from "../sandbox/impl/resolvePotentialPath.js";
+import { resolveSupervisorProtectedPaths } from "../supervisor/resolveSupervisorProtectedPaths.js";
 import {
-    type ManagedNetworkBlockedRequest,
-    type ManagedNetworkInterceptor,
-    type ManagedNetworkPolicy,
-    type ManagedNetworkProxyHandle,
-} from "../network/ManagedNetworkPolicy.js";
-import {
-    type SandboxedProcessNetwork,
-    startSandboxedProcessNetwork,
-} from "../network/startSandboxedProcessNetwork.js";
+    createDirectSupervisorCommand,
+    createSupervisorCommand,
+    createSupervisorPolicy,
+    type DirectSupervisorCommand,
+    type SupervisorCommand,
+} from "../supervisor/index.js";
 import {
     createProtectedPathMonitor,
     type ProtectedPathMonitor,
 } from "./impl/createProtectedPathMonitor.js";
+import {
+    prepareHostProjectConfigPlaceholders,
+    type HostProjectConfigPlaceholder,
+} from "./impl/prepareHostProjectConfigPlaceholders.js";
 import {
     DEFAULT_HOST_COMMAND_TIMEOUT_MS,
     DEFAULT_HOST_MAX_OUTPUT_BYTES,
@@ -49,28 +57,6 @@ import {
     assertSecretsUnsupported,
 } from "./impl/assertHostCommandOptions.js";
 
-/** How a compute-owned managed network is started, so tests can inject a stub. */
-export type StartManagedNetwork = (
-    policy: ManagedNetworkPolicy | undefined,
-) => Promise<
-    | (Pick<SandboxedProcessNetwork, "close" | "proxy"> &
-          Partial<Pick<SandboxedProcessNetwork, "sandboxOptions" | "withProxyEnvironment">>)
-    | undefined
->;
-
-/**
- * A managed network normalized to a concrete shape.
- *
- * An injected {@link StartManagedNetwork} may omit `sandboxOptions` or `withProxyEnvironment`; the
- * shell fills those in once so the rest of the code never has to re-check them.
- */
-interface HostManagedNetwork {
-    sandboxOptions: SandboxedProcessNetwork["sandboxOptions"];
-    proxy?: ManagedNetworkProxyHandle;
-    close(): Promise<void>;
-    withProxyEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv;
-}
-
 export interface HostShellOptions {
     /** The context that owns the compute's process lifetime; sessions never retain a tool call. */
     ctx: Context;
@@ -81,13 +67,21 @@ export interface HostShellOptions {
     hostPolicy?: ComputeHostPolicy;
     /** The home directory used to identify universal private credential paths. */
     homeDirectory?: string;
-    networkInterceptor?: ManagedNetworkInterceptor;
-    /** Overrides how the managed network is started, for tests. */
-    startManagedNetwork?: StartManagedNetwork;
     /** How many commands may run at once before the oldest is evicted. Defaults to the host cap. */
     maxActiveSessions?: number;
     /** How many finished commands stay readable before the oldest is forgotten. */
     maxRetainedSessions?: number;
+}
+
+interface PreparedHostCommand {
+    args?: readonly string[];
+    command: string;
+    directSupervisorCommand?: DirectSupervisorCommand;
+    processCwd?: string;
+    projectConfigPlaceholders?: readonly HostProjectConfigPlaceholder[];
+    protectedCreatePaths?: readonly string[];
+    shell?: string;
+    supervisorCommand?: SupervisorCommand;
 }
 
 interface HostSession {
@@ -106,7 +100,6 @@ interface HostSession {
     evicted?: true;
     /** A read has already returned this session's final status. */
     exitObserved: boolean;
-    managedNetwork?: HostManagedNetwork;
     process: ManagedProcess;
     result?: ProcessRunResult;
     sessionId: number;
@@ -129,6 +122,7 @@ export function createHostShell(options: HostShellOptions): ComputeShell {
     const sessions = new Map<number, HostSession>();
     let nextSessionId = 1;
     let pendingSessionStarts = 0;
+    let canonicalWorkspace: Promise<string> | undefined;
     let onActiveSessionCountChange: ((count: number) => void) | undefined;
     let onSessionExit: ((exit: ComputeSessionExit) => void | Promise<void>) | undefined;
 
@@ -136,8 +130,13 @@ export function createHostShell(options: HostShellOptions): ComputeShell {
     const maxRetainedSessions = options.maxRetainedSessions ?? MAX_RETAINED_HOST_SESSIONS;
     const runCwd = (cwd: string | undefined) =>
         cwd === undefined ? options.cwd : isAbsolute(cwd) ? cwd : resolve(options.cwd, cwd);
-    const permissionPaths = (paths: readonly string[]) =>
-        paths.map((path) => (isAbsolute(path) ? path : resolve(options.cwd, path)));
+    const resolveCanonicalWorkspace = (): Promise<string> => {
+        canonicalWorkspace ??= resolvePotentialPath(options.cwd).catch((error: unknown) => {
+            canonicalWorkspace = undefined;
+            throw error;
+        });
+        return canonicalWorkspace;
+    };
     const activeSessionCount = () =>
         [...sessions.values()].filter((session) => session.result === undefined && !session.evicted)
             .length;
@@ -151,26 +150,114 @@ export function createHostShell(options: HostShellOptions): ComputeShell {
                 status: "running" as const,
             }));
 
-    const startManagedNetwork = async (
-        policy: ManagedNetworkPolicy | undefined,
-    ): Promise<HostManagedNetwork | undefined> => {
-        const managedNetwork =
-            options.startManagedNetwork === undefined
-                ? await startSandboxedProcessNetwork(
-                      policy,
-                      options.networkInterceptor === undefined
-                          ? {}
-                          : { networkInterceptor: options.networkInterceptor },
-                  )
-                : await options.startManagedNetwork(policy);
-        if (managedNetwork === undefined) return undefined;
+    const prepareCommand = async (
+        permissions: ComputePermissions,
+        command: string,
+        cwd: string,
+        shell: string,
+        tty: boolean,
+    ): Promise<PreparedHostCommand> => {
+        if (permissions.mode === "full_access") {
+            return { command, shell };
+        }
+        const canonicalCwd = await resolveCanonicalWorkspace();
+        const canonicalHome = await resolvePotentialPath(options.homeDirectory ?? homedir());
+        const privatePaths = absoluteHostPaths(
+            canonicalCwd,
+            createHostPolicyPrivatePaths(options.hostPolicy, options.environment),
+        );
+        const sensitiveReadPaths = absoluteHostPaths(
+            canonicalCwd,
+            createSensitiveReadPaths({
+                ...(options.environment === undefined ? {} : { environment: options.environment }),
+                ...(options.homeDirectory === undefined
+                    ? {}
+                    : { homeDirectory: options.homeDirectory }),
+                ...(options.hostPolicy === undefined ? {} : { hostPolicy: options.hostPolicy }),
+            }),
+        ).filter((path) => shouldDenySensitiveReadPath(path, canonicalCwd, canonicalHome));
+        const protectedNames = [".git", ...projectProtectedFileNames(options.hostPolicy)];
+        const protectedPaths =
+            permissions.mode === "read_only"
+                ? []
+                : protectedNames.map((name) => join(canonicalCwd, name));
+        const supervisorPath = resolveSupervisorBinary();
+        const supervisorProtectedPaths = resolveSupervisorProtectedPaths(supervisorPath);
+        const deniedWritePaths =
+            permissions.mode === "read_only"
+                ? []
+                : [
+                      ...(permissions.deniedWritePaths ?? []),
+                      ...privatePaths,
+                      ...(options.hostPolicy?.readableDirectories ?? []),
+                      ...protectedPaths,
+                      ...supervisorProtectedPaths,
+                  ];
+        const absoluteDeniedWritePaths = absoluteHostPaths(canonicalCwd, deniedWritePaths);
+        await rejectSymlinkedPaths(absoluteDeniedWritePaths);
+        const projectConfigPlaceholders = await prepareHostProjectConfigPlaceholders(
+            protectedPaths.slice(1),
+        );
+        let supervisorCommand: SupervisorCommand;
+        try {
+            const policy = createSupervisorPolicy({
+                cwd: canonicalCwd,
+                permissions,
+                deniedReadPaths: [
+                    ...(permissions.deniedReadPaths ?? []),
+                    ...privatePaths,
+                    ...sensitiveReadPaths,
+                ],
+                deniedWritePaths: existingHostPaths(canonicalCwd, deniedWritePaths),
+                ...(permissions.allowedReadPaths === undefined
+                    ? {}
+                    : { allowedReadPaths: permissions.allowedReadPaths }),
+                ...(permissions.allowedWritePaths === undefined
+                    ? {}
+                    : {
+                          allowedWritePaths: existingHostPaths(
+                              canonicalCwd,
+                              permissions.allowedWritePaths,
+                          ),
+                      }),
+            });
+            if (!tty) {
+                const directSupervisorCommand = createDirectSupervisorCommand({
+                    command: withWorkingDirectory(command, cwd),
+                    policy,
+                    shell,
+                    supervisorPath,
+                });
+                return {
+                    args: directSupervisorCommand.args,
+                    command: directSupervisorCommand.command,
+                    directSupervisorCommand,
+                    processCwd: canonicalCwd,
+                    projectConfigPlaceholders,
+                    protectedCreatePaths: absoluteDeniedWritePaths.filter(
+                        (path) => !existsHostPath(options.cwd, path),
+                    ),
+                };
+            }
+            supervisorCommand = createSupervisorCommand({
+                command: withWorkingDirectory(command, cwd),
+                policy,
+                shell,
+                supervisorPath,
+            });
+        } catch (error) {
+            await closeProjectConfigPlaceholders(projectConfigPlaceholders);
+            throw error;
+        }
         return {
-            sandboxOptions: managedNetwork.sandboxOptions ?? {},
-            ...(managedNetwork.proxy === undefined ? {} : { proxy: managedNetwork.proxy }),
-            close: () => managedNetwork.close(),
-            withProxyEnvironment(environment) {
-                return managedNetwork.withProxyEnvironment?.(environment) ?? environment;
-            },
+            args: supervisorCommand.args,
+            command: supervisorCommand.command,
+            processCwd: canonicalCwd,
+            projectConfigPlaceholders,
+            protectedCreatePaths: absoluteDeniedWritePaths.filter(
+                (path) => !existsHostPath(options.cwd, path),
+            ),
+            supervisorCommand,
         };
     };
 
@@ -346,7 +433,7 @@ export function createHostShell(options: HostShellOptions): ComputeShell {
         },
         readSession,
         async run(runOptions) {
-            const permissions = runOptions.permissions;
+            const permissions = snapshotPermissions(runOptions.permissions);
             assertComputePermissions(permissions);
             const mode = permissions.mode;
             assertCanUseCustomShell(mode, runOptions.shell);
@@ -360,119 +447,68 @@ export function createHostShell(options: HostShellOptions): ComputeShell {
                     ? {}
                     : { homeDirectory: options.homeDirectory }),
             });
-            const networkPolicy = toManagedNetworkPolicy(permissions);
-            const managedNetwork = await startManagedNetwork(networkPolicy);
-            let sandboxedCommand: Awaited<ReturnType<typeof createSandboxedCommand>>;
-            try {
-                sandboxedCommand = await createSandboxedCommand({
-                    command: runOptions.command,
-                    commandCwd: cwd,
-                    cwd: options.cwd,
-                    ...(options.environment === undefined
-                        ? {}
-                        : { environment: options.environment }),
-                    ...(options.hostPolicy === undefined ? {} : { hostPolicy: options.hostPolicy }),
-                    ...(options.homeDirectory === undefined
-                        ? {}
-                        : { homeDirectory: options.homeDirectory }),
-                    ...(permissions.allowedReadPaths === undefined
-                        ? {}
-                        : {
-                              additionalReadablePaths: permissionPaths(
-                                  permissions.allowedReadPaths,
-                              ),
-                          }),
-                    ...(permissions.allowedWritePaths === undefined
-                        ? {}
-                        : {
-                              additionalWritablePaths: permissionPaths(
-                                  permissions.allowedWritePaths,
-                              ),
-                          }),
-                    ...(permissions.deniedReadPaths === undefined
-                        ? {}
-                        : { deniedReadPaths: permissionPaths(permissions.deniedReadPaths) }),
-                    ...(permissions.deniedWritePaths === undefined
-                        ? {}
-                        : { deniedWritePaths: permissionPaths(permissions.deniedWritePaths) }),
-                    filesystemFullAccess: mode === "full_access",
-                    mode,
-                    networkAllowLocalBinding: permissions.network.localBinding,
-                    networkFullAccess: usesDirectEgress(permissions),
-                    ...managedNetwork?.sandboxOptions,
-                    ...(toolEnvironment.PATH === undefined ? {} : { path: toolEnvironment.PATH }),
-                    shell,
-                });
-            } catch (error) {
-                await managedNetwork?.close();
-                throw error;
-            }
+            const preparedCommand = await prepareCommand(
+                permissions,
+                runOptions.command,
+                cwd,
+                shell,
+                runOptions.tty === true,
+            );
             const commandEnvironment = toolEnvironment;
             const processRunOptions: ProcessRunOptions = {
-                command: sandboxedCommand.command,
-                cwd,
-                env: managedNetwork?.withProxyEnvironment(commandEnvironment) ?? commandEnvironment,
+                command: preparedCommand.command,
+                cwd: preparedCommand.processCwd ?? cwd,
+                env: commandEnvironment,
+                ...(preparedCommand.supervisorCommand === undefined
+                    ? {}
+                    : {
+                          initialStdin: preparedCommand.supervisorCommand.initialStdin,
+                          initialStdinHandshake:
+                              preparedCommand.supervisorCommand.initialStdinHandshake,
+                      }),
+                ...(preparedCommand.directSupervisorCommand === undefined
+                    ? {}
+                    : {
+                          extraFileDescriptorInputs:
+                              preparedCommand.directSupervisorCommand.extraFileDescriptorInputs,
+                      }),
                 timeoutMs: runOptions.timeoutMs ?? DEFAULT_HOST_COMMAND_TIMEOUT_MS,
                 maxOutputBytes: runOptions.maxOutputBytes ?? DEFAULT_HOST_MAX_OUTPUT_BYTES,
                 ...(runOptions.tty === undefined ? {} : { tty: runOptions.tty }),
             };
-            if (sandboxedCommand.args !== undefined) {
-                processRunOptions.args = sandboxedCommand.args;
-            } else {
-                processRunOptions.shell = shell;
-            }
-            let networkDenial: ManagedNetworkBlockedRequest | undefined;
-            const commandAbort = new AbortController();
-            const abortFromCaller = () => commandAbort.abort();
-            runOptions.signal?.addEventListener("abort", abortFromCaller, { once: true });
-            if (runOptions.signal?.aborted) commandAbort.abort();
-            const stopObservingNetworkDenials = managedNetwork?.proxy?.onBlockedRequest(
-                (request) => {
-                    networkDenial ??= request;
-                    commandAbort.abort();
-                },
-            );
-            if (runOptions.signal !== undefined || managedNetwork?.proxy !== undefined) {
-                processRunOptions.signal = commandAbort.signal;
+            if (preparedCommand.args !== undefined) {
+                processRunOptions.args = preparedCommand.args;
+            } else if (preparedCommand.shell !== undefined) {
+                processRunOptions.shell = preparedCommand.shell;
             }
 
             let protectedPathMonitor: ProtectedPathMonitor;
             try {
                 protectedPathMonitor = await createProtectedPathMonitor(
-                    sandboxedCommand.protectedCreatePaths ?? [],
+                    preparedCommand.protectedCreatePaths ?? [],
                 );
             } catch (error) {
-                await cleanUpCommandResources(
-                    { stop: async () => false },
-                    managedNetwork,
-                    sandboxedCommand.projectConfigPlaceholders,
-                );
+                await closePreparedCommandFiles(preparedCommand);
                 throw error;
             }
             let result: ProcessRunResult;
             let cleanup: CommandCleanupResult = { protectedPathViolation: false };
             try {
+                if (runOptions.signal !== undefined) processRunOptions.signal = runOptions.signal;
                 result = await options.processManager.run(options.ctx, processRunOptions);
             } finally {
-                stopObservingNetworkDenials?.();
-                runOptions.signal?.removeEventListener("abort", abortFromCaller);
                 cleanup = await cleanUpCommandResources(
                     protectedPathMonitor,
-                    managedNetwork,
-                    sandboxedCommand.projectConfigPlaceholders,
+                    preparedCommand.projectConfigPlaceholders,
                 );
             }
             const protectedPathMessage =
                 cleanup.protectedPathViolation && result.exitCode === 0
                     ? "Sandbox blocked creation of a protected project path.\n"
                     : "";
-            const networkDenialMessage =
-                networkDenial === undefined
-                    ? ""
-                    : formatManagedNetworkDenial(networkDenial, options.hostPolicy);
             return {
                 stdout: result.stdout,
-                stderr: `${result.stderr}${networkDenialMessage}${protectedPathMessage}${cleanup.errorMessage ?? ""}`,
+                stderr: `${result.stderr}${protectedPathMessage}${cleanup.errorMessage ?? ""}`,
                 ...(result.stdoutBytes === undefined ? {} : { stdoutBytes: result.stdoutBytes }),
                 ...(result.stderrBytes === undefined ? {} : { stderrBytes: result.stderrBytes }),
                 ...(result.stdoutOmittedBytes === undefined
@@ -482,7 +518,6 @@ export function createHostShell(options: HostShellOptions): ComputeShell {
                     ? {}
                     : { stderrOmittedBytes: result.stderrOmittedBytes }),
                 exitCode:
-                    networkDenial !== undefined ||
                     cleanup.errorMessage !== undefined ||
                     (cleanup.protectedPathViolation && result.exitCode === 0)
                         ? 1
@@ -493,7 +528,7 @@ export function createHostShell(options: HostShellOptions): ComputeShell {
         async startSession(runOptions) {
             // Validate before making room: a command that is never going to start must not cost the
             // user a running one.
-            const permissions = runOptions.permissions;
+            const permissions = snapshotPermissions(runOptions.permissions);
             assertComputePermissions(permissions);
             const mode = permissions.mode;
             assertCanUseCustomShell(mode, runOptions.shell);
@@ -509,83 +544,46 @@ export function createHostShell(options: HostShellOptions): ComputeShell {
                         ? {}
                         : { homeDirectory: options.homeDirectory }),
                 });
-                const networkPolicy = toManagedNetworkPolicy(permissions);
-                const managedNetwork = await startManagedNetwork(networkPolicy);
-                let sandboxedCommand: Awaited<ReturnType<typeof createSandboxedCommand>>;
-                try {
-                    sandboxedCommand = await createSandboxedCommand({
-                        command: runOptions.command,
-                        commandCwd: cwd,
-                        cwd: options.cwd,
-                        ...(options.environment === undefined
-                            ? {}
-                            : { environment: options.environment }),
-                        ...(options.hostPolicy === undefined
-                            ? {}
-                            : { hostPolicy: options.hostPolicy }),
-                        ...(options.homeDirectory === undefined
-                            ? {}
-                            : { homeDirectory: options.homeDirectory }),
-                        ...(permissions.allowedReadPaths === undefined
-                            ? {}
-                            : {
-                                  additionalReadablePaths: permissionPaths(
-                                      permissions.allowedReadPaths,
-                                  ),
-                              }),
-                        ...(permissions.allowedWritePaths === undefined
-                            ? {}
-                            : {
-                                  additionalWritablePaths: permissionPaths(
-                                      permissions.allowedWritePaths,
-                                  ),
-                              }),
-                        ...(permissions.deniedReadPaths === undefined
-                            ? {}
-                            : { deniedReadPaths: permissionPaths(permissions.deniedReadPaths) }),
-                        ...(permissions.deniedWritePaths === undefined
-                            ? {}
-                            : { deniedWritePaths: permissionPaths(permissions.deniedWritePaths) }),
-                        filesystemFullAccess: mode === "full_access",
-                        mode,
-                        networkAllowLocalBinding: permissions.network.localBinding,
-                        networkFullAccess: usesDirectEgress(permissions),
-                        ...managedNetwork?.sandboxOptions,
-                        ...(toolEnvironment.PATH === undefined
-                            ? {}
-                            : { path: toolEnvironment.PATH }),
-                        shell,
-                    });
-                } catch (error) {
-                    await managedNetwork?.close();
-                    throw error;
-                }
+                const preparedCommand = await prepareCommand(
+                    permissions,
+                    runOptions.command,
+                    cwd,
+                    shell,
+                    runOptions.tty === true,
+                );
                 const commandEnvironment = toolEnvironment;
                 const processStartOptions: ProcessStartOptions = {
-                    command: sandboxedCommand.command,
-                    cwd,
-                    env:
-                        managedNetwork?.withProxyEnvironment(commandEnvironment) ??
-                        commandEnvironment,
+                    command: preparedCommand.command,
+                    cwd: preparedCommand.processCwd ?? cwd,
+                    env: commandEnvironment,
+                    ...(preparedCommand.supervisorCommand === undefined
+                        ? {}
+                        : {
+                              initialStdin: preparedCommand.supervisorCommand.initialStdin,
+                              initialStdinHandshake:
+                                  preparedCommand.supervisorCommand.initialStdinHandshake,
+                          }),
+                    ...(preparedCommand.directSupervisorCommand === undefined
+                        ? {}
+                        : {
+                              extraFileDescriptorInputs:
+                                  preparedCommand.directSupervisorCommand.extraFileDescriptorInputs,
+                          }),
                     maxOutputBytes: runOptions.maxOutputBytes ?? DEFAULT_HOST_MAX_OUTPUT_BYTES,
                     ...(runOptions.tty === undefined ? {} : { tty: runOptions.tty }),
                 };
-                if (sandboxedCommand.args !== undefined) {
-                    processStartOptions.args = sandboxedCommand.args;
-                } else {
-                    processStartOptions.shell = shell;
+                if (preparedCommand.args !== undefined) {
+                    processStartOptions.args = preparedCommand.args;
+                } else if (preparedCommand.shell !== undefined) {
+                    processStartOptions.shell = preparedCommand.shell;
                 }
                 let protectedPathMonitor: ProtectedPathMonitor;
                 try {
                     protectedPathMonitor = await createProtectedPathMonitor(
-                        sandboxedCommand.protectedCreatePaths ?? [],
+                        preparedCommand.protectedCreatePaths ?? [],
                     );
                 } catch (error) {
-                    await cleanUpCommandResources(
-                        { stop: async () => false },
-                        managedNetwork,
-                        sandboxedCommand.projectConfigPlaceholders,
-                    );
+                    await closePreparedCommandFiles(preparedCommand);
                     throw error;
                 }
                 let process: ManagedProcess;
@@ -594,8 +592,7 @@ export function createHostShell(options: HostShellOptions): ComputeShell {
                 } catch (error) {
                     await cleanUpCommandResources(
                         protectedPathMonitor,
-                        managedNetwork,
-                        sandboxedCommand.projectConfigPlaceholders,
+                        preparedCommand.projectConfigPlaceholders,
                     );
                     throw error;
                 }
@@ -609,7 +606,6 @@ export function createHostShell(options: HostShellOptions): ComputeShell {
                     cwd,
                     exitObserved: false,
                     process,
-                    ...(managedNetwork === undefined ? {} : { managedNetwork }),
                     sessionId,
                     stderrOffset: 0,
                     stdoutOffset: 0,
@@ -626,46 +622,29 @@ export function createHostShell(options: HostShellOptions): ComputeShell {
                     );
                     session.timeout.unref();
                 }
-                let networkDenial: ManagedNetworkBlockedRequest | undefined;
-                const stopObservingNetworkDenials = managedNetwork?.proxy?.onBlockedRequest(
-                    (request) => {
-                        networkDenial ??= request;
-                        void process.kill(options.ctx, "SIGTERM", {
-                            forceAfterMs: HOST_SESSION_STOP_GRACE_MS,
-                        });
-                    },
-                );
                 sessions.set(sessionId, session);
                 onActiveSessionCountChange?.(activeSessionCount());
                 void completion.then(async (result) => {
                     if (session.timeout !== undefined) clearTimeout(session.timeout);
-                    stopObservingNetworkDenials?.();
                     const cleanup = await cleanUpCommandResources(
                         protectedPathMonitor,
-                        managedNetwork,
-                        sandboxedCommand.projectConfigPlaceholders,
+                        preparedCommand.projectConfigPlaceholders,
                     );
                     const protectedPathMessage =
                         cleanup.protectedPathViolation && result.exitCode === 0
                             ? "Sandbox blocked creation of a protected project path.\n"
                             : "";
-                    const networkDenialMessage =
-                        networkDenial === undefined
-                            ? ""
-                            : formatManagedNetworkDenial(networkDenial, options.hostPolicy);
-                    const completionStderrDelta = `${networkDenialMessage}${protectedPathMessage}${cleanup.errorMessage ?? ""}`;
+                    const completionStderrDelta = `${protectedPathMessage}${cleanup.errorMessage ?? ""}`;
                     if (completionStderrDelta !== "") {
                         session.completionStderrDelta = completionStderrDelta;
                     }
                     session.result = {
                         ...result,
                         exitCode:
-                            networkDenial !== undefined ||
                             cleanup.errorMessage !== undefined ||
                             (cleanup.protectedPathViolation && result.exitCode === 0)
                                 ? 1
                                 : result.exitCode,
-                        killed: networkDenial === undefined ? result.killed : false,
                         stderr: `${result.stderr}${completionStderrDelta}`,
                     };
                     const awaited = session.consumingWaiters > 0;
@@ -708,36 +687,6 @@ export function createHostShell(options: HostShellOptions): ComputeShell {
     };
 }
 
-/**
- * Uses the managed proxy only when an allow-list must be enforced, or when Linux needs isolated
- * networking to keep unrestricted egress separate from accepting incoming connections.
- */
-function toManagedNetworkPolicy(permissions: ComputePermissions): ManagedNetworkPolicy | undefined {
-    const allowedHosts = permissions.network.allowedHosts ?? [];
-    const proxyUnrestrictedEgress =
-        process.platform === "linux" &&
-        permissions.network.egress &&
-        !permissions.network.localBinding &&
-        allowedHosts.length === 0;
-    if (!permissions.network.egress || (allowedHosts.length === 0 && !proxyUnrestrictedEgress)) {
-        return undefined;
-    }
-    return {
-        ...(proxyUnrestrictedEgress ? { allowPrivateAddresses: true } : {}),
-        allowedDomains: (proxyUnrestrictedEgress ? ["*"] : allowedHosts).map((domain) => ({
-            domain,
-        })),
-    };
-}
-
-function usesDirectEgress(permissions: ComputePermissions): boolean {
-    return (
-        permissions.network.egress &&
-        (permissions.network.allowedHosts?.length ?? 0) === 0 &&
-        !(process.platform === "linux" && !permissions.network.localBinding)
-    );
-}
-
 interface CommandCleanupResult {
     errorMessage?: string;
     protectedPathViolation: boolean;
@@ -752,22 +701,16 @@ interface CommandCleanupResult {
  */
 async function cleanUpCommandResources(
     protectedPathMonitor: ProtectedPathMonitor,
-    managedNetwork: HostManagedNetwork | undefined,
-    projectConfigPlaceholders: readonly ProjectConfigPlaceholder[] | undefined,
+    projectConfigPlaceholders: readonly HostProjectConfigPlaceholder[] | undefined,
 ): Promise<CommandCleanupResult> {
-    const [protectedPathResult, managedNetworkResult, projectConfigResult] =
-        await Promise.allSettled([
-            protectedPathMonitor.stop(),
-            managedNetwork?.close() ?? Promise.resolve(),
-            Promise.all(
-                (projectConfigPlaceholders ?? []).map((placeholder) => placeholder.close()),
-            ),
-        ]);
-    const errors = [
-        ...(protectedPathResult.status === "rejected" ? [protectedPathResult.reason] : []),
-        ...(managedNetworkResult.status === "rejected" ? [managedNetworkResult.reason] : []),
-        ...(projectConfigResult.status === "rejected" ? [projectConfigResult.reason] : []),
-    ];
+    const results = await Promise.allSettled([
+        protectedPathMonitor.stop(),
+        ...(projectConfigPlaceholders ?? []).map((placeholder) => placeholder.close()),
+    ]);
+    const protectedPathResult = results[0]!;
+    const errors = results
+        .filter((result) => result.status === "rejected")
+        .map((result) => (result.status === "rejected" ? result.reason : undefined));
     return {
         ...(errors.length === 0
             ? {}
@@ -777,6 +720,100 @@ async function cleanUpCommandResources(
         protectedPathViolation:
             protectedPathResult.status === "fulfilled" ? protectedPathResult.value : true,
     };
+}
+
+async function closeProjectConfigPlaceholders(
+    placeholders: readonly HostProjectConfigPlaceholder[],
+): Promise<void> {
+    const results = await Promise.allSettled(
+        placeholders.map((placeholder) => placeholder.close()),
+    );
+    const errors = results
+        .filter((result) => result.status === "rejected")
+        .map((result) => (result.status === "rejected" ? result.reason : undefined));
+    if (errors.length > 0) {
+        throw new AggregateError(errors, "Could not clean up host project policy placeholders.");
+    }
+}
+
+async function closePreparedCommandFiles(prepared: PreparedHostCommand): Promise<void> {
+    await closeProjectConfigPlaceholders(prepared.projectConfigPlaceholders ?? []);
+}
+
+function absoluteHostPaths(cwd: string, paths: readonly string[]): string[] {
+    return [
+        ...new Set(paths.map((path) => (isAbsolute(path) ? normalize(path) : resolve(cwd, path)))),
+    ];
+}
+
+function withWorkingDirectory(command: string, cwd: string): string {
+    return `cd ${quoteShellArgument(cwd)} && ${command}`;
+}
+
+function snapshotPermissions(permissions: ComputePermissions): ComputePermissions {
+    return {
+        mode: permissions.mode,
+        network: {
+            egress: permissions.network.egress,
+            localBinding: permissions.network.localBinding,
+            ...(permissions.network.allowedHosts === undefined
+                ? {}
+                : { allowedHosts: [...permissions.network.allowedHosts] }),
+        },
+        ...(permissions.allowedReadPaths === undefined
+            ? {}
+            : { allowedReadPaths: [...permissions.allowedReadPaths] }),
+        ...(permissions.deniedReadPaths === undefined
+            ? {}
+            : { deniedReadPaths: [...permissions.deniedReadPaths] }),
+        ...(permissions.allowedWritePaths === undefined
+            ? {}
+            : { allowedWritePaths: [...permissions.allowedWritePaths] }),
+        ...(permissions.deniedWritePaths === undefined
+            ? {}
+            : { deniedWritePaths: [...permissions.deniedWritePaths] }),
+    };
+}
+
+function existsHostPath(cwd: string, path: string): boolean {
+    return existsSync(isAbsolute(path) ? path : resolve(cwd, path));
+}
+
+function existingHostPaths(cwd: string, paths: readonly string[]): string[] {
+    return absoluteHostPaths(cwd, paths).filter((path) => existsSync(path));
+}
+
+async function rejectSymlinkedPaths(paths: readonly string[]): Promise<void> {
+    for (const path of paths) {
+        try {
+            const metadata = await lstat(path);
+            if (metadata.isSymbolicLink()) {
+                throw new Error(
+                    `Restricted host commands cannot protect a symbolic-link path: ${path}.`,
+                );
+            }
+        } catch (error) {
+            if (error instanceof Error && "code" in error && error.code === "ENOENT") continue;
+            throw error;
+        }
+    }
+}
+
+function shouldDenySensitiveReadPath(path: string, cwd: string, homeDirectory: string): boolean {
+    const normalizedPath = normalize(path);
+    const normalizedHome = normalize(homeDirectory);
+    if (normalizedPath !== normalizedHome) return true;
+    const normalizedCwd = normalize(cwd);
+    // The package protects the home tree by default, but an ordinary workspace usually lives
+    // below it. Masking the whole home tree in that case would also mask the workspace. Keep all
+    // narrower credential paths in the policy, and only omit the broad home root for a strict
+    // descendant workspace; a workspace equal to or above home remains protected.
+    return !(normalizedCwd !== normalizedHome && isPathInside(normalizedHome, normalizedCwd));
+}
+
+function isPathInside(root: string, target: string): boolean {
+    const relativePath = relative(root, target);
+    return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
 }
 
 function errorToMessage(error: unknown): string {

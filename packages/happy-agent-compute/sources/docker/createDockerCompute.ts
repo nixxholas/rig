@@ -3,7 +3,6 @@ import type { Context } from "@steve.kite/stdlib";
 
 import type { Compute } from "../Compute.js";
 import { EMPTY_COMPUTE_HOST_POLICY, type ComputeHostPolicy } from "../ComputeHostPolicy.js";
-import type { ManagedNetworkInterceptor } from "../network/ManagedNetworkPolicy.js";
 import { runCleanupSteps } from "../sandbox/impl/runCleanupSteps.js";
 import { createDockerFileSystem } from "./createDockerFileSystem.js";
 import { createDockerShell } from "./createDockerShell.js";
@@ -22,8 +21,6 @@ export interface DockerComputeOptions {
     readonly hostPolicy?: ComputeHostPolicy;
     /** Environment variables injected into every command, such as the session's Git identity. */
     readonly environment?: Readonly<Record<string, string>>;
-    /** An optional HTTP interceptor the managed proxy consults. */
-    readonly networkInterceptor?: ManagedNetworkInterceptor;
     /** Interprets a project config file into a managed-network configuration. */
     readonly parseNetworkConfig?: ParseDockerProjectNetworkConfig;
     /** A pre-built dockerode client, mainly so tests can supply a fake. */
@@ -50,16 +47,14 @@ export function createDockerCompute(options: DockerComputeOptions): Compute {
     const shell = createDockerShell(environment, {
         hostPolicy,
         ...(options.environment === undefined ? {} : { baseEnvironment: options.environment }),
-        ...(options.networkInterceptor === undefined
-            ? {}
-            : { networkInterceptor: options.networkInterceptor }),
         ...(options.parseNetworkConfig === undefined
             ? {}
             : { parseNetworkConfig: options.parseNetworkConfig }),
     });
 
     return {
-        providerId: "docker",
+        id: "docker",
+        kind: "docker",
         cwd: environment.config.workingDirectory,
         fs: createDockerFileSystem(environment, hostPolicy),
         shell,
