@@ -204,6 +204,7 @@ import { isGlobalEventRoute } from "./isGlobalEventRoute.js";
 import { parseGlobalEventCursor } from "../global-event/parseGlobalEventCursor.js";
 import { parseGlobalEventLimit } from "./parseGlobalEventLimit.js";
 import { selectRecentSessionEvents } from "../protocol/projection/selectRecentSessionEvents.js";
+import { createEventIdFactory } from "../protocol/createEventIdFactory.js";
 import { SESSION_STREAM_TURN_LIMIT } from "../protocol/index.js";
 import { parseTimelineRequest } from "./parseTimelineRequest.js";
 import { sendJson } from "./sendJson.js";
@@ -258,11 +259,6 @@ import {
 } from "./AppletContextCapability.js";
 import { readHostedAppletIcon } from "./readHostedAppletIcon.js";
 import { describeAppletScopeNotAllowed } from "../slots/describeAppletScopeNotAllowed.js";
-import {
-    WorkletInvalidError,
-    WorkletNotFoundError,
-    type WorkletManager,
-} from "../worklets/index.js";
 import {
     installWorkletRequestSchema,
     revertWorkletRequestSchema,
@@ -416,8 +412,6 @@ export interface ProtocolHttpServerOptions {
     >;
     store?: SessionStore;
     taskDrain?: TaskDrain;
-    /** The daemon's running worklets. Absent when this daemon runs without them. */
-    worklets?: WorkletManager;
     secrets?: readonly EnvironmentSecretRegistration[];
     token: string;
 }
@@ -470,7 +464,6 @@ export async function createProtocolHttpServer(
         onStartInspector: options.onStartInspector,
         onStopInspector: options.onStopInspector,
         plugins: options.plugins,
-        ...(options.worklets === undefined ? {} : { worklets: options.worklets }),
     };
     // The persistent store caches sessions weakly; each open SSE stream needs its own strong lease.
     const sessionEventStreamLeases = new Set<SessionEventStreamLease>();
@@ -584,6 +577,8 @@ export async function createProtocolHttpServer(
 }
 
 const protocolP2pProxyShutdowns = new WeakMap<Server, AbortController>();
+const createWorkletCatalogVersion = createEventIdFactory();
+const WORKLET_HTTP_AGENT_ID = "$system";
 
 export function beginProtocolHttpServerShutdown(server: Server): void {
     protocolP2pProxyShutdowns.get(server)?.abort();
@@ -649,7 +644,6 @@ interface ProtocolServerRuntimeConfig {
               | "uninstall"
           >
         | undefined;
-    worklets?: WorkletManager;
 }
 
 interface AppliedDaemonSettings {
@@ -5918,19 +5912,17 @@ async function handleWorkletRequest(
     ctx: Context,
     runtimeConfig: ProtocolServerRuntimeConfig,
 ): Promise<void> {
-    const worklets = runtimeConfig.worklets;
+    const worklets = runtimeConfig.agents?.worklets;
     if (worklets === undefined) {
-        sendWorkletManagementError(
-            response,
-            503,
-            "worklet_not_found",
-            "This Rig daemon is running without worklets.",
-        );
+        sendAgentsModeUnavailable(response, "Worklets");
         return;
     }
     if (route.name === "worklets") {
         if (request.method === "GET") {
-            sendJson<ListWorkletsResponse>(response, 200, await worklets.catalog(ctx));
+            sendJson<ListWorkletsResponse>(response, 200, {
+                version: createWorkletCatalogVersion(),
+                worklets: await worklets.list(ctx, WORKLET_HTTP_AGENT_ID),
+            });
             return;
         }
         if (request.method !== "POST") {
@@ -5955,7 +5947,7 @@ async function handleWorkletRequest(
         }
         try {
             sendJson<WorkletResponse>(response, 201, {
-                worklet: await worklets.install(ctx, body),
+                worklet: await worklets.install(ctx, WORKLET_HTTP_AGENT_ID, body),
             });
         } catch (error) {
             sendWorkletFailure(response, error);
@@ -5967,23 +5959,12 @@ async function handleWorkletRequest(
             sendJson(response, 405, { error: "Method not allowed" });
             return;
         }
-        const icon = await worklets.readIcon(ctx, route.workletName, route.format);
-        if (icon.type !== "file") {
-            sendWorkletManagementError(
-                response,
-                404,
-                "worklet_not_found",
-                "Worklet icon not found.",
-            );
-            return;
-        }
-        response.writeHead(200, {
-            "cache-control": "private, max-age=31536000, immutable",
-            "content-length": icon.data.byteLength,
-            "content-type": icon.contentType,
-            "x-content-type-options": "nosniff",
-        });
-        response.end(icon.data);
+        sendWorkletManagementError(
+            response,
+            503,
+            "worklet_unavailable",
+            "Worklet icons are unavailable because the feature does not expose icon assets.",
+        );
         return;
     }
     if (route.name === "worklet-log") {
@@ -5992,8 +5973,30 @@ async function handleWorkletRequest(
             return;
         }
         try {
-            const log = await worklets.readLog(ctx, route.workletName);
-            sendJson<WorkletLogResponse>(response, 200, log);
+            const status = await worklets.status(ctx, WORKLET_HTTP_AGENT_ID, route.workletName);
+            if (status === undefined) {
+                sendWorkletManagementError(
+                    response,
+                    404,
+                    "worklet_not_found",
+                    `No worklet named ${JSON.stringify(route.workletName)} exists.`,
+                );
+                return;
+            }
+            if (status.detail?.includes("unavailable") === true) {
+                sendWorkletManagementError(
+                    response,
+                    503,
+                    "worklet_unavailable",
+                    "Worklet runtime logs are unavailable because no worklet runtime is configured.",
+                );
+                return;
+            }
+            const log = await worklets.readLogs(ctx, WORKLET_HTTP_AGENT_ID, route.workletName);
+            sendJson<WorkletLogResponse>(response, 200, {
+                log: log.lines.map((line) => line.text).join("\n"),
+                truncated: log.nextCursor !== undefined,
+            });
         } catch (error) {
             sendWorkletFailure(response, error);
         }
@@ -6001,7 +6004,7 @@ async function handleWorkletRequest(
     }
     if (route.name === "worklet") {
         if (request.method === "GET") {
-            const worklet = await worklets.get(ctx, route.workletName);
+            const worklet = await worklets.get(ctx, WORKLET_HTTP_AGENT_ID, route.workletName);
             if (worklet === undefined) {
                 sendWorkletManagementError(
                     response,
@@ -6019,7 +6022,7 @@ async function handleWorkletRequest(
             return;
         }
         try {
-            await worklets.uninstall(ctx, route.workletName);
+            await worklets.remove(ctx, WORKLET_HTTP_AGENT_ID, route.workletName);
             sendJson(response, 200, {});
         } catch (error) {
             sendWorkletFailure(response, error);
@@ -6049,7 +6052,7 @@ async function handleWorkletRequest(
         }
         try {
             sendJson<WorkletResponse>(response, 200, {
-                worklet: await worklets.update(ctx, route.workletName, body),
+                worklet: await worklets.update(ctx, WORKLET_HTTP_AGENT_ID, route.workletName, body),
             });
         } catch (error) {
             sendWorkletFailure(response, error);
@@ -6067,7 +6070,7 @@ async function handleWorkletRequest(
     }
     try {
         sendJson<WorkletResponse>(response, 200, {
-            worklet: await worklets.revert(ctx, route.workletName, body),
+            worklet: await worklets.revert(ctx, WORKLET_HTTP_AGENT_ID, route.workletName, body),
         });
     } catch (error) {
         sendWorkletFailure(response, error);
@@ -6075,15 +6078,12 @@ async function handleWorkletRequest(
 }
 
 function sendWorkletFailure(response: ServerResponse, error: unknown): void {
-    if (error instanceof WorkletInvalidError) {
-        sendWorkletManagementError(response, 400, "invalid_worklet", error.message);
+    const message = error instanceof Error ? error.message : "The worklet request failed.";
+    if (/\b(?:not found|does not exist)\b/iu.test(message)) {
+        sendWorkletManagementError(response, 404, "worklet_not_found", message);
         return;
     }
-    if (error instanceof WorkletNotFoundError) {
-        sendWorkletManagementError(response, 404, "worklet_not_found", error.message);
-        return;
-    }
-    throw error;
+    sendWorkletManagementError(response, 400, "invalid_worklet", message);
 }
 
 function sendInvalidWorkletBody(response: ServerResponse, error: unknown): void {
@@ -6107,7 +6107,7 @@ function sendInvalidWorkletBody(response: ServerResponse, error: unknown): void 
 function sendWorkletManagementError(
     response: ServerResponse,
     status: number,
-    code: WorkletManagementErrorCode,
+    code: WorkletManagementErrorCode | "worklet_unavailable",
     message: string,
 ): void {
     sendJson(response, status, { error: { code, message } });
