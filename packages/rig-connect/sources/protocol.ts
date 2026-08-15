@@ -8,6 +8,9 @@
  */
 
 import { Type, type Static } from "@sinclair/typebox";
+import type { WorkflowRun } from "@slopus/happy-agent-features";
+
+export type { WorkflowRun } from "@slopus/happy-agent-features";
 
 export type EventId = string;
 export type MutationId = string;
@@ -797,27 +800,6 @@ export interface McpServerSummary {
     toolCount: number;
 }
 
-export interface WorkflowRun {
-    agentCount: number;
-    code: string;
-    description: string;
-    error?: string;
-    finishedAt?: number;
-    logs: readonly string[];
-    name: string;
-    output?: unknown;
-    phase?: string;
-    runId: string;
-    startedAt: number;
-    status: "completed" | "error" | "running" | "stopped";
-    taskId: string;
-}
-
-export interface WorkflowRunUpdate extends Partial<Omit<WorkflowRun, "runId">> {
-    log?: string;
-    runId: string;
-}
-
 export interface GitFileChange {
     binary: boolean;
     deletions?: number;
@@ -1129,7 +1111,7 @@ export type InterpretedSessionEvent =
       >
     | BaseSessionEvent<"mcp_servers_changed", { servers: readonly McpServerSummary[] }>
     | BaseSessionEvent<"mutation_applied", { mutationId: MutationId }>
-    | BaseSessionEvent<"workflow_changed", { update: WorkflowRunUpdate }>
+    | BaseSessionEvent<"workflow_changed", { workflow: WorkflowRun }>
     | BaseSessionEvent<
           "scheduled_message_changed",
           { message: ScheduledMessage; mutationId?: MutationId }

@@ -87,6 +87,61 @@ export const agentHistory = sqliteTable(
     ],
 );
 
+/** Host-owned workflow state exposed through Happy Agent Features. */
+export const workflowRuns = sqliteTable(
+    "workflow_runs",
+    {
+        agentId: text("agent_id").notNull(),
+        id: text("id").notNull(),
+        workflow: text("workflow").notNull(),
+        status: text("status").notNull(),
+        createdAtMs: integer("created_at_ms").notNull(),
+        updatedAtMs: integer("updated_at_ms").notNull(),
+        runJson: text("run_json").notNull(),
+    },
+    (table) => [
+        primaryKey({ columns: [table.agentId, table.id] }),
+        index("workflow_runs_agent_status_id").on(table.agentId, table.status, table.id),
+    ],
+);
+
+export const workflowLogs = sqliteTable(
+    "workflow_logs",
+    {
+        agentId: text("agent_id").notNull(),
+        runId: text("run_id").notNull(),
+        position: integer("position").notNull(),
+        text: text("text").notNull(),
+    },
+    (table) => [
+        primaryKey({ columns: [table.agentId, table.runId, table.position] }),
+        foreignKey({
+            columns: [table.agentId, table.runId],
+            foreignColumns: [workflowRuns.agentId, workflowRuns.id],
+        }).onDelete("cascade"),
+    ],
+);
+
+export const workflowOperationReceipts = sqliteTable(
+    "workflow_operation_receipts",
+    {
+        agentId: text("agent_id").notNull(),
+        operationId: text("operation_id").notNull(),
+        receiptJson: text("receipt_json").notNull(),
+    },
+    (table) => [primaryKey({ columns: [table.agentId, table.operationId] })],
+);
+
+export const workflowMutationProofs = sqliteTable(
+    "workflow_mutation_proofs",
+    {
+        agentId: text("agent_id").notNull(),
+        operationId: text("operation_id").notNull(),
+        proofJson: text("proof_json").notNull(),
+    },
+    (table) => [primaryKey({ columns: [table.agentId, table.operationId] })],
+);
+
 export const rigDataIdentityTable = sqliteTable(
     "rig_data_identity",
     {

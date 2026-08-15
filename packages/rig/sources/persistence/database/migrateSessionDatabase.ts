@@ -65,6 +65,7 @@ import { agentMessageSubmissions } from "./migrations/57-agent-message-submissio
 import { removeExternalToolCalls } from "./migrations/58-remove-external-tool-calls.js";
 import { removeLegacyAgentRuntime } from "./migrations/59-remove-legacy-agent-runtime.js";
 import { appletFeatureCatalog } from "./migrations/60-applet-feature-catalog.js";
+import { workflowFeatureStore } from "./migrations/61-workflow-feature-store.js";
 
 interface MigrationContext {
     createDataEpoch: () => string;
@@ -137,6 +138,7 @@ const migrations: readonly SessionDatabaseMigration[] = [
     removeExternalToolCalls,
     removeLegacyAgentRuntime,
     appletFeatureCatalog,
+    workflowFeatureStore,
 ];
 export const SESSION_DATABASE_APPLICATION_ID = 0x52494733;
 export const RIG_DATA_IDENTITY_MIGRATION_INDEX = 19;

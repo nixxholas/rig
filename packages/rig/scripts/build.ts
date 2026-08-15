@@ -24,7 +24,6 @@ const externalPackages = [
     "@modelcontextprotocol/sdk",
     "@mongodb-js/zstd",
     "@number0/iroh",
-    "@pydantic/monty",
     "@slopus/happy-providers",
     "@slopus/ghostty-wasm",
     "@vscode/ripgrep",

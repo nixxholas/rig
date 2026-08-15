@@ -39,7 +39,6 @@ import type {
     UserMessage,
     RigProfile,
     WorkflowRun,
-    WorkflowRunUpdate,
 } from "./protocol.js";
 import { SERVICE_NOTICE_TEXT_MAX_LENGTH, systemNoticePayloadSchema } from "./protocol.js";
 import type {
@@ -984,30 +983,15 @@ export class ChatStore {
                 };
                 break;
             case "workflow_changed": {
-                const { update } = event.data as { update: WorkflowRunUpdate };
-                const existing = this.#session.workflows.find(
-                    (workflow) => workflow.runId === update.runId,
-                );
-                if (existing === undefined) {
-                    if (isCompleteWorkflowUpdate(update)) {
-                        this.#session = {
-                            ...this.#session,
-                            workflows: [...this.#session.workflows, workflowFromUpdate(update)],
-                        };
-                    }
-                    break;
-                }
-                const { log, ...fields } = update;
+                const { workflow: update } = event.data as { workflow: WorkflowRun };
                 this.#session = {
                     ...this.#session,
-                    workflows: this.#session.workflows.map((workflow) =>
-                        workflow.runId === update.runId
-                            ? {
-                                  ...workflow,
-                                  ...fields,
-                                  logs: log === undefined ? workflow.logs : [...workflow.logs, log],
-                              }
-                            : workflow,
+                    workflows: [
+                        ...this.#session.workflows.filter((workflow) => workflow.id !== update.id),
+                        update,
+                    ].sort(
+                        (left, right) =>
+                            right.createdAt - left.createdAt || left.id.localeCompare(right.id),
                     ),
                 };
                 break;
@@ -3498,42 +3482,6 @@ function applicationGit(git: GitChangeSnapshot): GitChangeSnapshot {
         ...snapshot,
         ...(branch === undefined ? {} : { branch }),
         revision: `${git.generation}:${String(git.version)}:${String(git.scannedAt)}`,
-    };
-}
-
-type CompleteWorkflowUpdate = WorkflowRunUpdate &
-    Required<
-        Pick<
-            WorkflowRun,
-            | "agentCount"
-            | "code"
-            | "description"
-            | "logs"
-            | "name"
-            | "startedAt"
-            | "status"
-            | "taskId"
-        >
-    >;
-
-function isCompleteWorkflowUpdate(update: WorkflowRunUpdate): update is CompleteWorkflowUpdate {
-    return (
-        typeof update.agentCount === "number" &&
-        typeof update.code === "string" &&
-        typeof update.description === "string" &&
-        Array.isArray(update.logs) &&
-        typeof update.name === "string" &&
-        typeof update.startedAt === "number" &&
-        typeof update.status === "string" &&
-        typeof update.taskId === "string"
-    );
-}
-
-function workflowFromUpdate(update: CompleteWorkflowUpdate): WorkflowRun {
-    const { log, ...workflow } = update;
-    return {
-        ...workflow,
-        logs: log === undefined ? workflow.logs : [...workflow.logs, log],
     };
 }
 

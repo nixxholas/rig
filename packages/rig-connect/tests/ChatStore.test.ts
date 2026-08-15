@@ -606,15 +606,13 @@ describe("ChatStore", () => {
             titleStatus: "generating",
             workflows: [
                 {
-                    agentCount: 1,
-                    code: "print('hi')",
-                    description: "Run it",
-                    logs: [],
-                    name: "demo",
-                    runId: "workflow-1",
+                    agentId: "agent-1",
+                    createdAt: 10,
+                    id: "workflow-1",
                     startedAt: 10,
                     status: "running",
-                    taskId: "task-1",
+                    updatedAt: 10,
+                    workflow: "demo",
                 },
             ],
             workflowsEnabled: true,
@@ -646,7 +644,16 @@ describe("ChatStore", () => {
         );
         store.apply(
             event("workflow_changed", {
-                update: { log: "halfway", runId: "workflow-1", phase: "Verify" },
+                workflow: {
+                    agentId: "agent-1",
+                    createdAt: 10,
+                    id: "workflow-1",
+                    output: "halfway",
+                    startedAt: 10,
+                    status: "running",
+                    updatedAt: 20,
+                    workflow: "demo",
+                },
             }),
         );
         store.apply(
@@ -667,7 +674,7 @@ describe("ChatStore", () => {
             sessionSecretIds: ["session-secret"],
             titleError: "Could not generate a title.",
             titleStatus: "error",
-            workflows: [expect.objectContaining({ logs: ["halfway"], phase: "Verify" })],
+            workflows: [expect.objectContaining({ output: "halfway", updatedAt: 20 })],
         });
     });
 

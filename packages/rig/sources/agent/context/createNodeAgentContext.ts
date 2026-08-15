@@ -7,7 +7,6 @@ import { createNodeBashContext } from "./createNodeBashContext.js";
 import { createNodeFileSystemContext } from "./createNodeFileSystemContext.js";
 import type { UserInputContext } from "./UserInputContext.js";
 import type { TaskContext } from "./TaskContext.js";
-import type { WorkflowContext } from "../../workflows/index.js";
 import {
     createPermissionContext,
     DEFAULT_PERMISSION_MODE,
@@ -31,7 +30,6 @@ export interface CreateNodeAgentContextOptions {
     secrets?: SessionSecretContext;
     tasks?: TaskContext;
     userInput?: UserInputContext;
-    workflows?: WorkflowContext;
 }
 
 export function createNodeAgentContext(
@@ -67,6 +65,5 @@ export function createNodeAgentContext(
     if (options.folders !== undefined) context.folders = options.folders;
     if (options.goals !== undefined) context.goals = options.goals;
     if (options.tasks !== undefined) context.tasks = options.tasks;
-    if (options.workflows !== undefined) context.workflows = options.workflows;
     return context;
 }

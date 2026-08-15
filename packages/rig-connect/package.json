@@ -29,7 +29,8 @@
         "test": "vitest run"
     },
     "dependencies": {
-        "@sinclair/typebox": "^0.34.49"
+        "@sinclair/typebox": "^0.34.49",
+        "@slopus/happy-agent-features": "workspace:*"
     },
     "devDependencies": {
         "@slopus/rig": "workspace:*",

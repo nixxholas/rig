@@ -6843,20 +6843,13 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     };
 
     const stopWorkflow = (sessionId: string, runId: string): MutationId => {
-        const workflows = sessionEntries.get(sessionId)?.store.session().workflows ?? [];
         return enqueueSessionUpdate(
             "stop_workflow",
             sessionId,
             `workflows/${encodeURIComponent(runId)}/stop`,
             "POST",
             {},
-            {
-                workflows: workflows.map((workflow) =>
-                    workflow.runId === runId
-                        ? { ...workflow, finishedAt: now(), status: "stopped" }
-                        : workflow,
-                ),
-            },
+            {},
         );
     };
 

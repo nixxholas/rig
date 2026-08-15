@@ -304,7 +304,7 @@ export type {
     ProviderUsageCredits,
     ProviderUsageWindow,
 } from "@slopus/happy-providers";
-export type { WorkflowRun, WorkflowRunStatus, WorkflowRunUpdate } from "../workflows/index.js";
+export type { WorkflowRun, WorkflowStatus } from "@slopus/happy-agent-features";
 export { isLiveGlobalEvent } from "./ProjectProtocol.js";
 export {
     discoverPluginCatalogRequestSchema,

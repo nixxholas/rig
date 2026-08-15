@@ -19,7 +19,7 @@ import type { PermissionMode } from "../permissions/index.js";
 import type { UserInputRequest, UserInputResponse } from "../user-input/index.js";
 import type { McpServerSummary } from "../mcp/index.js";
 import type { SessionTask } from "../tasks/index.js";
-import type { WorkflowRun, WorkflowRunUpdate } from "../workflows/index.js";
+import type { WorkflowRun } from "@slopus/happy-agent-features";
 import type { ChangeGoalStatusRequest, CreateGoalRequest, SessionGoal } from "../goals/index.js";
 import type { EventId } from "./EventId.js";
 import type { GitChangeSnapshot, PresenceSnapshot } from "./ProjectProtocol.js";
@@ -1540,6 +1540,6 @@ export type SubagentChangedEvent = BaseSessionEvent<
 export type WorkflowChangedEvent = BaseSessionEvent<
     "workflow_changed",
     {
-        update: WorkflowRunUpdate;
+        workflow: WorkflowRun;
     }
 >;
