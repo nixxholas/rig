@@ -9,7 +9,7 @@ import {
     readOptionalNumber,
     readOptionalString,
     readString,
-} from "../session/impl/sqliteRow.js";
+} from "../conversations/impl/sqliteRow.js";
 
 export async function queryScheduledMessages(
     ctx: Context,

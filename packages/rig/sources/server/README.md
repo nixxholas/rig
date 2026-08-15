@@ -7,7 +7,8 @@ logs, and diagnostics.
 
 Domain behavior does not live here:
 
-- `../session/` owns sessions and session stores.
+- `../conversations/` owns the persisted conversation catalog and protocol projection.
+- `../agent/` composes Agent Base with feature-owned behavior.
 - `../project/` owns projects and workspaces.
 - `../git/` owns Git repository state and worktrees.
 - `../global-event/` owns global-event queues and cursors.
@@ -24,8 +25,8 @@ runLocalProtocolServer
  +-- local socket, token, logs, diagnostics
  +-- createProtocolHttpServer
  |    +-- HTTP routes and WebSocket terminals
- |    +-- session and global-event streaming
- +-- session / project / git / global-event domain modules
+ |    +-- conversation and global-event streaming
+ +-- conversation / agent feature / project / git / global-event domain modules
  +-- model-catalog / file-search services
  +-- Happy and MCP lifecycle services
 ```

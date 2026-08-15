@@ -34,8 +34,8 @@ import {
 } from "../persistence/database/SessionTransactionContext.js";
 import { SqliteHappyCloudPersistence } from "../persistence/happy-cloud/SqliteHappyCloudPersistence.js";
 import { queryRigProfile } from "../persistence/profile/queryRigProfiles.js";
-import { querySecretRegistrations } from "../persistence/session/querySecretRegistrations.js";
-import { secretRegister } from "../persistence/session/secretRegister.js";
+import { querySecretRegistrations } from "../persistence/conversations/querySecretRegistrations.js";
+import { secretRegister } from "../persistence/conversations/secretRegister.js";
 import { querySlotScopeTargetExists } from "../persistence/slots/querySlotScopeTargetExists.js";
 import { PresenceStore, resolvePresences } from "../presence/index.js";
 import {

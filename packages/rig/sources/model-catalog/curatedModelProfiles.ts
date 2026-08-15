@@ -19,12 +19,7 @@ export function curatedModelProfiles(
 ): readonly ModelCatalogProfile[] {
     const ids =
         providerType === "claude"
-            ? [
-                  "anthropic/opus-5",
-                  "anthropic/sonnet-5",
-                  "anthropic/fable-5",
-                  "anthropic/opus-4-8",
-              ]
+            ? ["anthropic/opus-5", "anthropic/sonnet-5", "anthropic/fable-5", "anthropic/opus-4-8"]
             : providerType === "codex"
               ? [
                     "openai/gpt-5.6-sol",

@@ -77,10 +77,10 @@ import { RigProtocolFeature, type RigAgentConfiguration } from "./RigProtocolFea
 import type { RigProtocolProjection } from "./RigProtocolProjection.js";
 import { SqliteAgentPersistence } from "./persistence/SqliteAgentPersistence.js";
 import { RigGoalStorage } from "./persistence/RigGoalStorage.js";
-import { RigAppletCatalog } from "../persistence/applets/RigAppletCatalog.js";
-import { SqliteWorkflowStore } from "../persistence/workflows/SqliteWorkflowStore.js";
-import { RigWorkletCatalog } from "../persistence/worklets/RigWorkletCatalog.js";
-import { UnavailableWorkletRuntime } from "../host-runtime/worklets/UnavailableWorkletRuntime.js";
+import { RigAppletCatalog } from "./features/RigAppletCatalog.js";
+import { SqliteWorkflowStore } from "./features/SqliteWorkflowStore.js";
+import { RigWorkletCatalog } from "./features/RigWorkletCatalog.js";
+import { UnavailableWorkletRuntime } from "./features/UnavailableWorkletRuntime.js";
 import { resolveAppletRootDirectory } from "../config/resolveAppletRootDirectory.js";
 import type { ContentBlock, UserMessage } from "./types.js";
 

@@ -3,7 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { Value } from "@sinclair/typebox/value";
 import type { Context } from "@steve.kite/stdlib";
 
-import { DocumentError } from "../documents/DocumentRepository.js";
+import { DocumentError, type DocumentRepository } from "../documents/DocumentRepository.js";
 import {
     createDocumentRequestSchema,
     DOCUMENT_STATE_MAX_BYTES,
@@ -15,7 +15,6 @@ import {
     type DocumentUpdatePage,
     writeDocumentRequestSchema,
 } from "../protocol/index.js";
-import type { SessionStore } from "../session/SessionStore.js";
 import { sendJson } from "./sendJson.js";
 
 export interface DocumentRoute {
@@ -25,7 +24,10 @@ export interface DocumentRoute {
 
 export async function serveDocumentRequest(
     ctx: Context,
-    store: SessionStore,
+    store: Pick<
+        DocumentRepository,
+        "createDocument" | "documentUpdates" | "getDocument" | "writeDocument"
+    >,
     route: DocumentRoute,
     request: Pick<IncomingMessage, "headers" | "method">,
     response: ServerResponse,

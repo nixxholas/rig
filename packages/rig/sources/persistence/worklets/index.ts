@@ -1,1 +1,0 @@
-export { RigWorkletCatalog } from "./RigWorkletCatalog.js";

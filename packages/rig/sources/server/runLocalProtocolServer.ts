@@ -8,7 +8,7 @@ import {
 } from "./createProtocolHttpServer.js";
 import { DaemonLog } from "./DaemonLog.js";
 import { recordProviderFailure } from "./recordProviderFailure.js";
-import { configureSessionRequest } from "../session/configureSessionRequest.js";
+import { ConversationRepository, configureConversationRequest } from "../conversations/index.js";
 import {
     createDaemonStartupRequestListener,
     type DaemonStartupState,
@@ -22,7 +22,6 @@ import { markGitStateFromSessionEvent } from "../git/markGitStateFromSessionEven
 import { publishGitLiveEvent } from "../git/publishGitLiveEvent.js";
 import { prepareLocalServerDirectory } from "./prepareLocalServerDirectory.js";
 import { createP2pStatusChangedEvent } from "./createP2pStatusChangedEvent.js";
-import { PersistentSessionStore } from "../session/PersistentSessionStore.js";
 import { TrackedTaskDrain } from "../utils/TrackedTaskDrain.js";
 import { readLocalServerToken } from "./readLocalServerToken.js";
 import { removeStaleSocket } from "./removeStaleSocket.js";
@@ -33,7 +32,6 @@ import {
     writeDaemonSettings,
     writeP2pNodeSettings,
 } from "../config/index.js";
-import { MILLISECONDS_PER_DAY } from "../config/toolResultRetentionSettings.js";
 import { createConfiguredPresenceStore } from "../presence/index.js";
 import { createProviderQuotaService } from "../provider-services/createProviderQuotaService.js";
 import {
@@ -46,7 +44,7 @@ import { loadConfiguredProviderUsage } from "../provider-services/loadConfigured
 import { gracefulShutdown } from "../concurrency/index.js";
 import { disableUnavailableProviders } from "../provider-services/disableUnavailableProviders.js";
 import { resolveProviderDisabledReasons } from "../provider-services/resolveProviderDisabledReasons.js";
-import { getDaemonIdentity } from "../daemon/index.js";
+import { DaemonResources, getDaemonIdentity } from "../daemon/index.js";
 import { errorToMessage } from "../errorToMessage.js";
 import {
     acquireSqliteProcessLock,
@@ -68,8 +66,12 @@ import type { LocalServerPaths } from "./LocalServerPaths.js";
 import { writeDaemonCrashReport } from "./writeDaemonCrashReport.js";
 import type { PluginContext } from "../agent/context/PluginContext.js";
 import { RigAgentService } from "../agent/RigAgentService.js";
+import { SqliteRigProtocolProjection } from "../agent/persistence/SqliteRigProtocolProjection.js";
+import { SqliteServiceDatabase } from "../persistence/database/SqliteServiceDatabase.js";
+import { withDatabase } from "../persistence/databaseContext.js";
+import { querySubagentSummaries } from "../persistence/conversations/querySubagentSummaries.js";
+import { sharingStateReset } from "../persistence/sharing/index.js";
 import { PluginManager, PluginMcpRegistry } from "../plugins/index.js";
-import { WorkletManager, WorkletToolRegistry } from "../worklets/index.js";
 import { createGeneratedMediaStore, getGeneratedDirectory } from "../generated-media/index.js";
 import { createEventIdFactory, type GlobalLiveEvent, type P2pStatus } from "../protocol/index.js";
 import {
@@ -183,7 +185,6 @@ async function runOwnedLocalProtocolServer(
     }
 
     let startupState: DaemonStartupState = { status: "starting" };
-    let worklets: WorkletManager | undefined;
     let p2pNetwork: P2pNetwork | undefined;
     let p2pPairingService: P2pPairingService | undefined;
     let p2pProfileReplicator: P2pProfileReplicator | undefined;
@@ -196,7 +197,8 @@ async function runOwnedLocalProtocolServer(
     let happySyncService: HappySyncService | undefined;
     let happyLifecycle = Promise.resolve();
     let gitStateTracker: GitStateTracker | undefined;
-    let store: PersistentSessionStore | undefined;
+    let resources: DaemonResources | undefined;
+    let conversations: ConversationRepository | undefined;
     let agents: RigAgentService | undefined;
     let taskDrain: TrackedTaskDrain | undefined;
     let providerUsageTracker: ProviderUsageTracker | undefined;
@@ -242,36 +244,6 @@ async function runOwnedLocalProtocolServer(
                     "A Rig daemon background task failed while shutting down.",
                     { error: errorToMessage(failure.error), task: failure.name },
                 );
-            }
-            if (store !== undefined) {
-                try {
-                    await withWorkerContext("session-store-shutdown", (ctx) =>
-                        store!.prepareForShutdown(ctx, "shutdown"),
-                    );
-                } catch (error) {
-                    if (isDatabaseFailure(error)) fatalDatabaseFailure ??= error;
-                    daemonLog.record(
-                        "error",
-                        "daemon_shutdown_drain_failed",
-                        "Rig daemon could not finish draining interrupted sessions.",
-                        { error: errorToMessage(error) },
-                    );
-                }
-            }
-            if (store !== undefined) {
-                try {
-                    await withWorkerContext("remote-terminals-shutdown", (ctx) =>
-                        store!.remoteTerminals.close(ctx),
-                    );
-                } catch (error) {
-                    if (isDatabaseFailure(error)) fatalDatabaseFailure ??= error;
-                    daemonLog.record(
-                        "error",
-                        "daemon_remote_terminal_shutdown_failed",
-                        "Rig daemon could not close every remote terminal.",
-                        { error: errorToMessage(error) },
-                    );
-                }
             }
             const serverClosed = new Promise<void>((resolve) => {
                 server.close(() => resolve());
@@ -396,8 +368,8 @@ async function runOwnedLocalProtocolServer(
                 agents = undefined;
             });
         } finally {
-            if (store !== undefined) {
-                await withWorkerContext("session-store-close", (ctx) => store!.close(ctx));
+            if (resources !== undefined) {
+                await withWorkerContext("daemon-resources-close", (ctx) => resources!.close(ctx));
             }
             daemonLog.record("info", "daemon_stopped", "Rig daemon stopped.");
             uninstallProcessFailureLogging();
@@ -478,15 +450,22 @@ async function runOwnedLocalProtocolServer(
             resolveScope: (ownerInstanceId) => p2pCredentialRuntimeRegistry?.scope(ownerInstanceId),
         });
         const pluginMcpRegistry = new PluginMcpRegistry();
-        const workletToolRegistry = new WorkletToolRegistry();
         taskDrain = new TrackedTaskDrain();
         gitStateTracker = new GitStateTracker({
             // Snapshots ride the live channel, so they reach subscribers without ever entering the
             // durable log; branch and HEAD changes travel as ordinary project/workspace updates.
-            // No store means nobody received it, which is a delivery failure rather than a
+            // No resource owner means nobody received it, which is a delivery failure rather than a
             // silent success.
             onLiveEvent: (event) =>
-                store === undefined ? false : publishGitLiveEvent(store, event),
+                resources === undefined
+                    ? false
+                    : publishGitLiveEvent(
+                          {
+                              global: resources.globalEvents,
+                              live: resources.liveEvents,
+                          },
+                          event,
+                      ),
             onObserverError: (error, entity) => {
                 daemonLog.record(
                     "error",
@@ -513,9 +492,8 @@ async function runOwnedLocalProtocolServer(
                     // watching a conversation never has to open the project stream
                     // as well to see which files changed.
                     try {
-                        await store?.applyGitSnapshot(ctx, target, snapshot);
                         if (snapshot.comparison === "ready") {
-                            await store?.applyGitFacts(ctx, target, snapshot.facts);
+                            await resources?.projects.applyGitFacts(ctx, target, snapshot.facts);
                         }
                     } catch (error: unknown) {
                         if (isDatabaseFailure(error)) {
@@ -594,56 +572,24 @@ async function runOwnedLocalProtocolServer(
             uninstall: (ctx, request) =>
                 requirePluginManager(pluginManager).uninstall(ctx, request),
         };
-        store = await ctx.span("rig.daemon.session_store.open", () =>
-            PersistentSessionStore.open(ctx, {
+        resources = await ctx.span("rig.daemon.resources.open", () =>
+            DaemonResources.open(ctx, {
+                applets: {
+                    get: (...parameters) => {
+                        if (agents === undefined) {
+                            throw new Error("Applet lookup is unavailable while Rig is starting.");
+                        }
+                        return agents.applets.get(...parameters);
+                    },
+                },
                 databasePath: paths.databasePath,
                 ...(loadedConfig.config.docker === undefined
                     ? {}
                     : { defaultDocker: loadedConfig.config.docker }),
                 durableGlobalEventQueue: loadedConfig.config.settings.durableGlobalEventQueue,
-                toolResultRetentionMs:
-                    loadedConfig.config.settings.toolResultRetentionDays * MILLISECONDS_PER_DAY,
                 presence: createConfiguredPresenceStore(loadedConfig.config.presence),
                 localInstanceId: p2pIdentity.instanceId,
-                modelCatalog,
-                resolveModelCatalog: (ownerInstanceId) =>
-                    p2pCredentialRuntimeRegistry?.catalog(ownerInstanceId) ?? modelCatalog,
                 workspacesDirectory: getManagedWorkspacesDirectory(),
-                workspaceFeatures: {
-                    crossWorkspace: loadedConfig.config.features.crossWorkspace,
-                    workspaces: loadedConfig.config.features.workspaces,
-                },
-                ...(happyModule === undefined
-                    ? {}
-                    : {
-                          onSessionAccess: (session) => {
-                              const service = happySyncService;
-                              if (service?.shouldAttachOnAccess(session) !== true) return;
-                              void withWorkerContext("happy-session-access", (ctx) =>
-                                  service.attach(ctx, session),
-                              ).catch(rethrowDatabaseFailure);
-                          },
-                      }),
-                onSessionEvent: async (event, session) => {
-                    recordProviderFailure(daemonLog, event);
-                    if (happyModule !== undefined) {
-                        await withWorkerContext("happy-session-event", (ctx) =>
-                            happySyncService?.observe(ctx, event, session),
-                        );
-                    }
-                    if (store !== undefined && gitStateTracker !== undefined) {
-                        const identity = session?.projectIdentity();
-                        await withWorkerContext("git-session-event", (ctx) =>
-                            markGitStateFromSessionEvent(
-                                ctx,
-                                event,
-                                store!,
-                                gitStateTracker!,
-                                ...(identity === undefined ? [] : ([identity] as const)),
-                            ),
-                        );
-                    }
-                },
                 onWorkspaceBranchError: (error, projectId, workspaceId) => {
                     daemonLog.record(
                         "warning",
@@ -672,25 +618,75 @@ async function runOwnedLocalProtocolServer(
             }),
         );
         const agentSystemCtx = createProcessContext("agent-system");
+        const protocolProjection = new SqliteRigProtocolProjection({
+            database: resources.database,
+            publishDurable: async (eventCtx, event) => {
+                resources?.liveEvents.publish(event);
+                recordProviderFailure(daemonLog, event);
+                if (happyModule !== undefined) {
+                    await happySyncService?.observe(eventCtx, event);
+                }
+                if (
+                    resources !== undefined &&
+                    conversations !== undefined &&
+                    gitStateTracker !== undefined
+                ) {
+                    await markGitStateFromSessionEvent(
+                        eventCtx,
+                        event,
+                        {
+                            projects: resources.projects,
+                            resolveConversationScope: async (requestCtx, conversationId) => {
+                                const snapshot = await conversations?.readSnapshot(
+                                    requestCtx,
+                                    conversationId,
+                                );
+                                const scope = snapshot?.scope;
+                                return scope?.kind === "project" || scope?.kind === "workspace"
+                                    ? {
+                                          projectId: scope.projectId,
+                                          ...(scope.kind === "workspace"
+                                              ? { workspaceId: scope.workspaceId }
+                                              : {}),
+                                      }
+                                    : undefined;
+                            },
+                        },
+                        gitStateTracker,
+                    );
+                }
+            },
+            publishLive: (_eventCtx, event) => resources?.liveEvents.publish(event),
+            resolveModelCatalog: (_eventCtx, ownerInstanceId) =>
+                p2pCredentialRuntimeRegistry?.catalog(ownerInstanceId) ?? modelCatalog,
+        });
+        conversations = new ConversationRepository({
+            database: resources.database,
+            localInstanceId: resources.localInstanceId,
+            projection: protocolProjection,
+            resolveModelCatalog: (_requestCtx, ownerInstanceId) =>
+                p2pCredentialRuntimeRegistry?.catalog(ownerInstanceId) ?? modelCatalog,
+        });
         agents = await agentSystemCtx.span("rig.daemon.agent_system.open", () =>
             RigAgentService.open(agentSystemCtx, {
-                database: store!.database,
+                database: resources!.database,
                 modelCatalog,
+                projection: protocolProjection,
                 providers: availableProviders,
                 resolveInferenceMaxRetries: () => runtimeSettings.inferenceMaxRetries,
-                resolveSession: async (ctx, sessionId) =>
-                    await store?.get(ctx, sessionId, { loadAgentTree: false }),
             }),
         );
+        const activeAgents = agents;
         const githubSecretSync = new GitHubSecretSync({
             register: (secret) => {
                 void withWorkerContext("github-secret-register", async (ctx) => {
-                    await store?.registerSpecialSecret(ctx, secret);
+                    resources?.secrets.register(secret);
+                    await resources?.projects.retryRemoteProjects(ctx, secret.kind);
                 });
             },
             unregister: () => {
-                void withWorkerContext("github-secret-unregister", async (ctx) => {
-                    await store?.unregisterSpecialSecret(ctx, "github");
+                void withWorkerContext("github-secret-unregister", () => {
+                    resources?.secrets.unregisterSpecial("github");
                 });
             },
         });
@@ -709,8 +705,9 @@ async function runOwnedLocalProtocolServer(
             await githubSecretStartup;
             await githubSecretRefreshLoop;
         });
-        const activeStore = store;
-        const p2pPeerTrustStore = new P2pPeerTrustStore(activeStore);
+        const activeResources = resources;
+        const serviceDatabase = new SqliteServiceDatabase(activeResources.database);
+        const p2pPeerTrustStore = P2pPeerTrustStore.fromDatabase(activeResources.database);
         const trustedPeerIds = new Set(
             (
                 await ctx.span("rig.daemon.p2p.trusted_peers.load", () =>
@@ -768,7 +765,7 @@ async function runOwnedLocalProtocolServer(
             );
         }
         p2pCredentialStore = new P2pCredentialStore({
-            database: activeStore,
+            database: serviceDatabase,
             identity: p2pIdentity,
         });
         p2pCredentialRuntimeRegistry = await ctx.span(
@@ -785,22 +782,22 @@ async function runOwnedLocalProtocolServer(
                 }),
         );
         const profilesStore = new RigProfileStore({
-            database: activeStore,
+            database: serviceDatabase,
             localInstanceId: p2pIdentity.instanceId,
             publish: (_ctx, event) => {
-                activeStore.globalEventQueue.publishLive(event);
-                activeStore.liveEvents.publish(event);
+                activeResources.globalEvents.publishLive(event);
+                activeResources.liveEvents.publish(event);
                 p2pProfileReplicator?.syncProfile(_ctx, event.data.profileId, event.data.version);
             },
         });
         rigProfiles = profilesStore;
         const sharingLifecycle = new SharingLifecycleService({
-            database: activeStore,
+            database: serviceDatabase,
             open: (ctx) =>
                 SharingService.open(ctx, {
-                    database: activeStore,
+                    database: serviceDatabase,
                     directory: dirname(paths.databasePath),
-                    folders: activeStore,
+                    folders: activeResources.folders,
                     onError: (error) => {
                         if (isDatabaseFailure(error)) {
                             fatalDatabaseFailure ??= error;
@@ -816,18 +813,18 @@ async function runOwnedLocalProtocolServer(
                     },
                     profiles: profilesStore,
                     publish: (_ctx, event) => {
-                        activeStore.globalEventQueue.publishLive(event);
-                        activeStore.liveEvents.publish(event);
+                        activeResources.globalEvents.publishLive(event);
+                        activeResources.liveEvents.publish(event);
                     },
                 }),
             profiles: profilesStore,
             resetState: async (ctx) => {
                 await resetMurmurStore(dirname(paths.databasePath));
-                await activeStore.resetSharingState(ctx);
+                await sharingStateReset(withDatabase(ctx, activeResources.database), Date.now());
             },
         });
         sharing = sharingLifecycle;
-        const unsubscribeFolderSharing = activeStore.liveEvents.subscribe(({ event }) => {
+        const unsubscribeFolderSharing = activeResources.liveEvents.subscribe(({ event }) => {
             if (event.type === "folders_changed") {
                 void withWorkerContext("folder-sharing-change", (ctx) =>
                     sharingLifecycle.foldersChanged(ctx),
@@ -852,7 +849,7 @@ async function runOwnedLocalProtocolServer(
         onboarding = new OnboardingService({
             murmurConfigured: (ctx) => sharingLifecycle.configured(ctx),
             onboardMurmur: (ctx, request) => sharingLifecycle.onboardMurmur(ctx, request),
-            persistence: activeStore,
+            persistence: serviceDatabase,
             profileComplete: async (ctx) =>
                 (await profilesStore.list(ctx)).some(
                     (profile) => profile.parentInstanceId === p2pIdentity.instanceId,
@@ -923,8 +920,8 @@ async function runOwnedLocalProtocolServer(
                                 (peerId) => p2pNetwork?.peerApiAvailable(peerId) === true,
                                 createP2pStatusEventId(),
                             );
-                            activeStore.globalEventQueue.publishLive(event);
-                            activeStore.liveEvents.publish(event);
+                            activeResources.globalEvents.publishLive(event);
+                            activeResources.liveEvents.publish(event);
                             const connected = new Set(
                                 status.transports.flatMap((transport) =>
                                     transport.state === "ready"
@@ -1086,7 +1083,8 @@ async function runOwnedLocalProtocolServer(
             await p2pNetwork?.close();
         });
         const startedPluginManager = (pluginManager = new PluginManager({
-            ...(agents === undefined ? {} : { agents }),
+            agents: activeAgents,
+            conversations,
             daemonLog,
             ...(loadedConfig.config.docker === undefined
                 ? {}
@@ -1095,8 +1093,11 @@ async function runOwnedLocalProtocolServer(
             generatedMedia: createGeneratedMediaStore({
                 hostDirectory: getGeneratedDirectory(),
             }),
+            globalEvents: activeResources.globalEvents,
+            liveEvents: activeResources.liveEvents,
             mcpRegistry: pluginMcpRegistry,
-            store,
+            projects: activeResources.projects,
+            slots: activeResources.slots,
         }));
         let pluginsStarted: Promise<void> | undefined;
         postReadyTasks.push(() => {
@@ -1118,40 +1119,11 @@ async function runOwnedLocalProtocolServer(
             await withWorkerContext("plugins-shutdown", (ctx) => startedPluginManager.close(ctx));
             await pluginsStarted;
         });
-        const workletManager = new WorkletManager({
-            publish: (_ctx, event) => {
-                activeStore.globalEventQueue.publishLive(event);
-                activeStore.liveEvents.publish(event);
-            },
-            registry: workletToolRegistry,
-            store: store.worklets,
-        });
-        worklets = workletManager;
-        let workletsStarted: Promise<void> | undefined;
-        postReadyTasks.push(() => {
-            workletsStarted = withWorkerContext("worklets-startup", (ctx) =>
-                ctx.span("rig.daemon.worklets.start", () => workletManager.start(ctx)),
-            ).catch((error: unknown) => {
-                daemonLog.record(
-                    "error",
-                    "worklets_unavailable",
-                    "Rig could not start the worklets folder.",
-                    {
-                        error: errorToMessage(error),
-                        workletsDirectory: workletManager.directory,
-                    },
-                );
-            });
-        });
-        shutdown.register("worklets", async () => {
-            await withWorkerContext("worklets-shutdown", (ctx) => workletManager.close(ctx));
-            await workletsStarted;
-        });
         if (stopping) return;
         let happyStartup: Promise<void> | undefined;
         if (happyModule !== undefined && happyConfiguration !== undefined) {
             postReadyTasks.push(() => {
-                happyStartup = Promise.allSettled([p2pStartup, pluginsStarted, workletsStarted])
+                happyStartup = Promise.allSettled([p2pStartup, pluginsStarted])
                     .then(async () => {
                         if (stopping) return;
                         await withWorkerContext("happy-sync-startup", (ctx) =>
@@ -1164,39 +1136,54 @@ async function runOwnedLocalProtocolServer(
                                             happyModule.HappySyncService.open(ctx, {
                                                 ...(agents === undefined ? {} : { agents }),
                                                 configuration: happyConfiguration,
-                                                createSession: async (ctx, id, request) =>
-                                                    store!.createWithId(
+                                                createSession: async (ctx, id, request) => {
+                                                    await conversations!.createWithId(
                                                         ctx,
                                                         id,
-                                                        await configureSessionRequest(
+                                                        await configureConversationRequest(
                                                             request,
                                                             loadedConfig.config.docker,
                                                             () =>
-                                                                store!.queryProjectSettings(
+                                                                activeResources.projects.queryProjectSettings(
                                                                     ctx,
                                                                     request.cwd,
                                                                 ),
                                                         ),
-                                                    ),
-                                                database: store!.database,
-                                                getSubagents: async (ctx, sessionId) =>
-                                                    (await store?.listSubagents(ctx, sessionId)) ??
-                                                    [],
-                                                getProjectContext: async (ctx, session) => {
-                                                    const identity = session.projectIdentity();
-                                                    if (identity === undefined) return undefined;
-                                                    const project = await store?.getProject(
-                                                        ctx,
-                                                        identity.projectId,
                                                     );
+                                                },
+                                                conversations: conversations!,
+                                                database: activeResources.database,
+                                                getSubagents: async (ctx, sessionId) =>
+                                                    await querySubagentSummaries(
+                                                        withDatabase(ctx, activeResources.database),
+                                                        sessionId,
+                                                    ),
+                                                getProjectContext: async (ctx, conversationId) => {
+                                                    const scope = (
+                                                        await conversations!.readSnapshot(
+                                                            ctx,
+                                                            conversationId,
+                                                        )
+                                                    )?.scope;
+                                                    if (
+                                                        scope?.kind !== "project" &&
+                                                        scope?.kind !== "workspace"
+                                                    ) {
+                                                        return undefined;
+                                                    }
+                                                    const project =
+                                                        await activeResources.projects.getProject(
+                                                            ctx,
+                                                            scope.projectId,
+                                                        );
                                                     if (project === undefined) return undefined;
                                                     const workspace =
-                                                        identity.workspaceId === undefined
+                                                        scope.kind === "project"
                                                             ? undefined
-                                                            : await store?.getWorkspace(
+                                                            : await activeResources.projects.getWorkspace(
                                                                   ctx,
                                                                   project.id,
-                                                                  identity.workspaceId,
+                                                                  scope.workspaceId,
                                                               );
                                                     return {
                                                         project,
@@ -1208,15 +1195,15 @@ async function runOwnedLocalProtocolServer(
                                                 modelCatalog,
                                             }),
                                     );
-                                    if (stopping) return;
-                                    await ctx.span("rig.daemon.happy_sync.connect", () =>
-                                        openingService!.start(ctx),
-                                    );
-                                    if (stopping) return;
+                                    if (stopping) {
+                                        await openingService.close(ctx);
+                                        return;
+                                    }
+                                    await openingService.start(ctx);
                                     happySyncService = openingService;
-                                    openingService = undefined;
-                                } finally {
-                                    await openingService?.close(ctx);
+                                } catch (error) {
+                                    await openingService?.close(ctx).catch(() => undefined);
+                                    throw error;
                                 }
                             }),
                         );
@@ -1238,10 +1225,11 @@ async function runOwnedLocalProtocolServer(
             shutdown.register("Happy startup", async () => await happyStartup);
         }
         registerRigDebugRoot({
+            conversations,
             kind: "daemon",
             paths,
+            resources,
             server,
-            store,
         });
         if (stopping) {
             taskDrain.beginClose();
@@ -1252,20 +1240,16 @@ async function runOwnedLocalProtocolServer(
             createProtocolHttpServer(
                 ctx,
                 {
-                    ...(agents === undefined ? {} : { agents }),
+                    agents: activeAgents,
                     inferenceMaxRetries: runtimeSettings.inferenceMaxRetries,
                     ...(loadedConfig.config.docker === undefined
                         ? {}
                         : { defaultDocker: loadedConfig.config.docker }),
-                    ...(activeStore.globalEventQueue === undefined
-                        ? {}
-                        : { globalEventQueue: activeStore.globalEventQueue }),
                     ...(gitStateTracker === undefined ? {} : { gitStateTracker }),
                     modelCatalog,
                     ...(onboarding === undefined ? {} : { onboarding }),
                     resolveModelCatalog: (ownerInstanceId) =>
                         p2pCredentialRuntimeRegistry?.catalog(ownerInstanceId) ?? modelCatalog,
-                    happyCloud: activeStore.happyCloud,
                     resolveP2pNetwork: () => p2pNetwork,
                     resolveP2pPairing: () => p2pPairingService,
                     p2pNode: () => ({ ...p2pNode }),
@@ -1274,7 +1258,6 @@ async function runOwnedLocalProtocolServer(
                     ...(sharing === undefined ? {} : { sharing }),
                     replaceP2pCredentials: async (ctx, authenticatedOwnerId, envelope) => {
                         if (
-                            store === undefined ||
                             p2pCredentialRuntimeRegistry === undefined ||
                             p2pCredentialStore === undefined
                         ) {
@@ -1323,14 +1306,17 @@ async function runOwnedLocalProtocolServer(
                                       profiles: rigProfiles!,
                                       signal,
                                   });
-                                  return prepareRemoteWorkGitSecret(path, body, activeStore);
+                                  return prepareRemoteWorkGitSecret(
+                                      path,
+                                      body,
+                                      activeResources.secrets,
+                                  );
                               },
                           }),
                     canP2pPeerConfigure,
                     canP2pPeerProvision: isTrustedP2pPeer,
                     canP2pPeerUseRemoteWork: isTrustedP2pPeer,
                     plugins,
-                    ...(worklets === undefined ? {} : { worklets }),
                     getProviderQuota: (providerId, ownerInstanceId, credential) =>
                         credentialUsageRouter.quota(ownerInstanceId, providerId, credential),
                     listProviderUsage: async (ownerInstanceId) => {
@@ -1346,18 +1332,13 @@ async function runOwnedLocalProtocolServer(
                     },
                     onDaemonConfigChange: async (ctx, config) => {
                         await writeDaemonSettings(config.settings, {}, config.p2p.name);
-                        const globalEventQueue = await store?.setDurableGlobalEventQueue(
-                            ctx,
-                            config.settings.durableGlobalEventQueue,
-                        );
-                        if (globalEventQueue === undefined) return undefined;
                         runtimeSettings.inferenceMaxRetries = config.settings.inferenceMaxRetries;
                         p2pNode.name = config.p2p.name;
                         p2pNetwork?.setName(config.p2p.name);
                         if (p2pNetwork !== undefined) publishP2pStatus(p2pNetwork.status());
                         return {
                             inferenceMaxRetries: runtimeSettings.inferenceMaxRetries,
-                            globalEventQueue,
+                            globalEventQueue: activeResources.globalEvents,
                         };
                     },
                     ...(happyModule === undefined
@@ -1377,39 +1358,54 @@ async function runOwnedLocalProtocolServer(
                                           next = await happyModule.HappySyncService.open(ctx, {
                                               ...(agents === undefined ? {} : { agents }),
                                               configuration: nextConfiguration,
-                                              createSession: async (ctx, id, request) =>
-                                                  store!.createWithId(
+                                              createSession: async (ctx, id, request) => {
+                                                  await conversations!.createWithId(
                                                       ctx,
                                                       id,
-                                                      await configureSessionRequest(
+                                                      await configureConversationRequest(
                                                           request,
                                                           loadedConfig.config.docker,
                                                           () =>
-                                                              store!.queryProjectSettings(
+                                                              activeResources.projects.queryProjectSettings(
                                                                   ctx,
                                                                   request.cwd,
                                                               ),
                                                       ),
-                                                  ),
-                                              database: store!.database,
-                                              getSubagents: async (ctx, sessionId) =>
-                                                  (await store?.listSubagents(ctx, sessionId)) ??
-                                                  [],
-                                              getProjectContext: async (ctx, session) => {
-                                                  const identity = session.projectIdentity();
-                                                  if (identity === undefined) return undefined;
-                                                  const project = await store?.getProject(
-                                                      ctx,
-                                                      identity.projectId,
                                                   );
+                                              },
+                                              conversations: conversations!,
+                                              database: activeResources.database,
+                                              getSubagents: async (ctx, sessionId) =>
+                                                  await querySubagentSummaries(
+                                                      withDatabase(ctx, activeResources.database),
+                                                      sessionId,
+                                                  ),
+                                              getProjectContext: async (ctx, conversationId) => {
+                                                  const scope = (
+                                                      await conversations!.readSnapshot(
+                                                          ctx,
+                                                          conversationId,
+                                                      )
+                                                  )?.scope;
+                                                  if (
+                                                      scope?.kind !== "project" &&
+                                                      scope?.kind !== "workspace"
+                                                  ) {
+                                                      return undefined;
+                                                  }
+                                                  const project =
+                                                      await activeResources.projects.getProject(
+                                                          ctx,
+                                                          scope.projectId,
+                                                      );
                                                   if (project === undefined) return undefined;
                                                   const workspace =
-                                                      identity.workspaceId === undefined
+                                                      scope.kind === "project"
                                                           ? undefined
-                                                          : await store?.getWorkspace(
+                                                          : await activeResources.projects.getWorkspace(
                                                                 ctx,
                                                                 project.id,
-                                                                identity.workspaceId,
+                                                                scope.workspaceId,
                                                             );
                                                   return {
                                                       project,
@@ -1464,7 +1460,8 @@ async function runOwnedLocalProtocolServer(
                             return { stopped };
                         }),
                     onShutdown: () => stopServer("Shutdown requested through the daemon protocol."),
-                    store: activeStore,
+                    conversations: conversations!,
+                    resources: activeResources,
                     taskDrain: taskDrain!,
                     token,
                 },

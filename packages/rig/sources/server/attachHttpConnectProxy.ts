@@ -7,10 +7,14 @@ import { matchP2pPeerRoute } from "./matchP2pPeerRoute.js";
 import { proxyHttpRequest } from "./proxyHttpRequest.js";
 import { resolveHttpProxyProjectScope } from "./resolveHttpProxyProjectScope.js";
 import type { ProjectScope } from "../protocol/index.js";
-import type { SessionStore } from "../session/SessionStore.js";
+import type { ProjectRepository } from "../project/ProjectRepository.js";
 import { withWorkerContext } from "../observability/index.js";
 
-export function attachHttpConnectProxy(server: Server, token: string, store: SessionStore): void {
+export function attachHttpConnectProxy(
+    server: Server,
+    token: string,
+    store: Pick<ProjectRepository, "getProject" | "getWorkspace">,
+): void {
     const tunnels = new Set<Duplex>();
     const proxyServer = createServer(proxyHttpRequest);
     proxyServer.on("connect", (request, client, head) => {
@@ -41,7 +45,7 @@ async function handleHttpConnect(
     client: Duplex,
     head: Buffer,
     proxyServer: Server,
-    store: SessionStore,
+    store: Pick<ProjectRepository, "getProject" | "getWorkspace">,
     token: string,
     tunnels: Set<Duplex>,
 ): Promise<void> {

@@ -1,7 +1,5 @@
 import type { AgentContext } from "./AgentContext.js";
 import type { FolderContext } from "./FolderContext.js";
-import type { GoalContext } from "./GoalContext.js";
-import type { TaskContext } from "./TaskContext.js";
 import type { UserInputContext } from "./UserInputContext.js";
 import { createFileReadState } from "./FileReadState.js";
 import {
@@ -24,13 +22,11 @@ export interface CreateDockerAgentContextOptions {
     docker: DockerExecutionConfig;
     environment?: Readonly<Record<string, string>>;
     folders?: FolderContext;
-    goals?: GoalContext;
     permissionMode?: PermissionMode;
     plugins?: PluginContext;
     protectedPaths?: readonly string[];
     secrets?: SessionSecretContext;
     sessionId: string;
-    tasks?: TaskContext;
     userInput?: UserInputContext;
 }
 
@@ -58,7 +54,5 @@ export function createDockerAgentContext(options: CreateDockerAgentContextOption
     if (options.secrets !== undefined) context.secrets = options.secrets;
     if (options.userInput !== undefined) context.userInput = options.userInput;
     if (options.folders !== undefined) context.folders = options.folders;
-    if (options.goals !== undefined) context.goals = options.goals;
-    if (options.tasks !== undefined) context.tasks = options.tasks;
     return context;
 }

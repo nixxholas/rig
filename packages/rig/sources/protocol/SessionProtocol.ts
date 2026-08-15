@@ -18,8 +18,12 @@ import {
 import type { PermissionMode } from "../permissions/index.js";
 import type { UserInputRequest, UserInputResponse } from "../user-input/index.js";
 import type { McpServerSummary } from "../mcp/index.js";
-import type { SessionTask } from "../tasks/index.js";
-import type { GoalStatus, SessionGoal, WorkflowRun } from "@slopus/happy-agent-features";
+import type {
+    GoalStatus,
+    SessionGoal,
+    Task as SessionTask,
+    WorkflowRun,
+} from "@slopus/happy-agent-features";
 import type { EventId } from "./EventId.js";
 import type { GitChangeSnapshot, PresenceSnapshot } from "./ProjectProtocol.js";
 import type { DockerExecutionConfig } from "../execution/DockerExecutionConfig.js";

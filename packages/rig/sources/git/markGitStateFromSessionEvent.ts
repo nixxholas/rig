@@ -1,7 +1,15 @@
 import type { SessionEvent } from "../protocol/index.js";
 import type { GitStateTracker } from "./GitStateTracker.js";
 import { resolveGitTrackedEntity } from "./resolveGitTrackedEntity.js";
-import type { SessionStore } from "../session/SessionStore.js";
+import type { ProjectRepository } from "../project/ProjectRepository.js";
+
+export interface GitStateEventDependencies {
+    projects: Pick<ProjectRepository, "getProject" | "getWorkspace">;
+    resolveConversationScope(
+        ctx: Context,
+        conversationId: string,
+    ): Promise<{ projectId: string; workspaceId?: string } | undefined>;
+}
 
 /**
  * Marks a session's project or workspace as possibly changed when the agent does work.
@@ -19,7 +27,7 @@ import type { SessionStore } from "../session/SessionStore.js";
 export async function markGitStateFromSessionEvent(
     ctx: Context,
     event: SessionEvent,
-    store: SessionStore,
+    dependencies: GitStateEventDependencies,
     tracker: GitStateTracker,
     /**
      * The live session the observer was already handed. Re-fetching it would rebuild the whole
@@ -29,14 +37,14 @@ export async function markGitStateFromSessionEvent(
     live?: { projectId: string; workspaceId?: string },
 ): Promise<void> {
     if (!isWorkSignal(event)) return;
-    const loaded = live ?? (await store.get(ctx, event.sessionId))?.projectIdentity();
+    const loaded = live ?? (await dependencies.resolveConversationScope(ctx, event.sessionId));
     if (loaded === undefined) return;
-    const project = await store.getProject(ctx, loaded.projectId);
+    const project = await dependencies.projects.getProject(ctx, loaded.projectId);
     if (project === undefined) return;
     const workspace =
         loaded.workspaceId === undefined
             ? undefined
-            : await store.getWorkspace(ctx, loaded.projectId, loaded.workspaceId);
+            : await dependencies.projects.getWorkspace(ctx, loaded.projectId, loaded.workspaceId);
     const entity = resolveGitTrackedEntity(project, workspace);
     if (entity === undefined) return;
     tracker.markChanged(entity);

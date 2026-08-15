@@ -3,6 +3,8 @@ export {
     type ConversationCreationOptions,
     type ConversationRepositoryOptions,
 } from "./ConversationRepository.js";
+export { configureConversationRequest } from "./configureConversationRequest.js";
+export { ConversationConfigurationError } from "./ConversationConfigurationError.js";
 export {
     conversationAgentMetadataSchema,
     conversationExecutionConfigSchema,

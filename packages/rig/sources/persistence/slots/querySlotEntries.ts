@@ -10,7 +10,7 @@ import {
     type SlotEntryFilter,
 } from "../../protocol/SlotProtocol.js";
 import type { DatabaseScope } from "../Transaction.js";
-import { readNumber, readOptionalString, readString } from "../session/impl/sqliteRow.js";
+import { readNumber, readOptionalString, readString } from "../conversations/impl/sqliteRow.js";
 
 /**
  * Lists slot entries, oldest first. A scope-context filter matches `everywhere` entries plus the

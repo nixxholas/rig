@@ -51,7 +51,6 @@ const result = await build({
         main: "sources/main.ts",
         "plugin-docker-bootstrap": "sources/plugins/pluginDockerBootstrap.ts",
         "plugin-sdk-loader": "sources/plugins/happyPluginsLoader.ts",
-        "worklet-bootstrap": "sources/worklets/workletBootstrap.ts",
         readPackageVersion: "sources/readPackageVersion.ts",
     },
     external: externalPackages,

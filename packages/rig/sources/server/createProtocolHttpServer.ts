@@ -319,12 +319,12 @@ import type { SharingLifecycleServiceContract } from "../sharing/index.js";
 import type { DaemonResources } from "../daemon/DaemonResources.js";
 import type { ConversationRepository } from "../conversations/ConversationRepository.js";
 import { withDatabase } from "../persistence/databaseContext.js";
-import { querySubagentSummaries } from "../persistence/session/querySubagentSummaries.js";
+import { querySubagentSummaries } from "../persistence/conversations/querySubagentSummaries.js";
 import { queryTimelineAgents } from "../persistence/timeline/queryTimelineAgents.js";
 import { queryTimelineEvents } from "../persistence/timeline/queryTimelineEvents.js";
 import { buildTimeline } from "../timeline/index.js";
-import { secretRegister } from "../persistence/session/secretRegister.js";
-import { secretUnregister } from "../persistence/session/secretUnregister.js";
+import { secretRegister } from "../persistence/conversations/secretRegister.js";
+import { secretUnregister } from "../persistence/conversations/secretUnregister.js";
 
 export interface ProtocolHttpServerOptions {
     agents: RigAgentService;

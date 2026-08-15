@@ -280,7 +280,7 @@ export {
     type WriteDocumentRequest,
 } from "./DocumentProtocol.js";
 export type { McpServerSummary } from "../mcp/index.js";
-export type { SessionTask, TaskStatus } from "../tasks/index.js";
+export type { Task as SessionTask, TaskStatus } from "@slopus/happy-agent-features";
 export type {
     CreateRemoteTerminalRequest,
     CreateRemoteTerminalResponse,

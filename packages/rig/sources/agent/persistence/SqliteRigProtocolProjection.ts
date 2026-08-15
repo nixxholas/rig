@@ -13,15 +13,15 @@ import {
     type SessionConfigurationField,
     type SessionEvent,
 } from "../../protocol/index.js";
-import { querySessionMessageSubmission } from "../../persistence/session/querySessionMessageSubmission.js";
-import { queryRigProtocolConfigurationMutation } from "../../persistence/session/queryRigProtocolConfigurationMutation.js";
+import { querySessionMessageSubmission } from "../../persistence/conversations/querySessionMessageSubmission.js";
+import { queryRigProtocolConfigurationMutation } from "../../persistence/conversations/queryRigProtocolConfigurationMutation.js";
 import {
     queryRigProtocolProjectionRecord,
     type RigProtocolProjectionRecord,
-} from "../../persistence/session/queryRigProtocolProjectionRecord.js";
-import { sessionProjectProtocolEvent } from "../../persistence/session/sessionProjectProtocolEvent.js";
-import { sessionProjectProtocolMessage } from "../../persistence/session/sessionProjectProtocolMessage.js";
-import { sessionProjectRigAgentConfiguration } from "../../persistence/session/sessionProjectRigAgentConfiguration.js";
+} from "../../persistence/conversations/queryRigProtocolProjectionRecord.js";
+import { sessionProjectProtocolEvent } from "../../persistence/conversations/sessionProjectProtocolEvent.js";
+import { sessionProjectProtocolMessage } from "../../persistence/conversations/sessionProjectProtocolMessage.js";
+import { sessionProjectRigAgentConfiguration } from "../../persistence/conversations/sessionProjectRigAgentConfiguration.js";
 import type { SessionDatabase } from "../../persistence/database/SessionDatabase.js";
 import { deferSessionTransactionCommit } from "../../persistence/database/SessionTransactionContext.js";
 import { withDatabase } from "../../persistence/databaseContext.js";

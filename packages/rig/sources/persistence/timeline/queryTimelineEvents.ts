@@ -5,8 +5,8 @@ import type { Context } from "@steve.kite/stdlib";
 import type { SessionEvent } from "../../protocol/index.js";
 import { TIMELINE_EVENT_TYPES } from "../../timeline/index.js";
 import type { DatabaseScope } from "../Transaction.js";
-import { readSessionEventRow } from "../session/impl/sessionEventRow.js";
-import { readString } from "../session/impl/sqliteRow.js";
+import { readSessionEventRow } from "../conversations/impl/sessionEventRow.js";
+import { readString } from "../conversations/impl/sqliteRow.js";
 
 /**
  * The lifecycle events behind a timeline, narrowed in SQL before any payload is

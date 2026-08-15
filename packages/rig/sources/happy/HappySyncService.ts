@@ -180,12 +180,7 @@ export class HappySyncService {
     ): Promise<void> {
         const existing = this.#attaches.get(conversationId);
         if (existing !== undefined) return await existing;
-        const attachment = this.#attachSession(
-            ctx,
-            conversationId,
-            includeArchived,
-            knownSnapshot,
-        );
+        const attachment = this.#attachSession(ctx, conversationId, includeArchived, knownSnapshot);
         this.#attaches.set(conversationId, attachment);
         try {
             await attachment;
@@ -206,10 +201,7 @@ export class HappySyncService {
         const snapshot =
             knownSnapshot ?? (await this.#conversations.readSnapshot(ctx, conversationId));
         if (snapshot === undefined) return;
-        if (
-            snapshot.agent.type !== "primary" ||
-            (snapshot.archived && !includeArchived)
-        ) {
+        if (snapshot.agent.type !== "primary" || (snapshot.archived && !includeArchived)) {
             return;
         }
         let client = this.#clients.get(conversationId);

@@ -12,24 +12,24 @@ import { inReadTx } from "../persistence/inReadTx.js";
 import { inTx } from "../persistence/inTx.js";
 import { sessionEvents, sessionMessages, sessions } from "../persistence/database/schema.js";
 import { insertConversation } from "../persistence/conversations/insertConversation.js";
-import { querySessionAttachment } from "../persistence/session/querySessionAttachment.js";
-import { querySessionEvents } from "../persistence/session/querySessionEvents.js";
-import { querySessionHasEarlierTranscriptMessage } from "../persistence/session/querySessionHasEarlierTranscriptMessage.js";
-import { querySessionHasLaterTranscriptMessage } from "../persistence/session/querySessionHasLaterTranscriptMessage.js";
-import { querySessionIdByAgentId } from "../persistence/session/querySessionIdByAgentId.js";
-import { querySessionMessageSubmission } from "../persistence/session/querySessionMessageSubmission.js";
+import { querySessionAttachment } from "../persistence/conversations/querySessionAttachment.js";
+import { querySessionEvents } from "../persistence/conversations/querySessionEvents.js";
+import { querySessionHasEarlierTranscriptMessage } from "../persistence/conversations/querySessionHasEarlierTranscriptMessage.js";
+import { querySessionHasLaterTranscriptMessage } from "../persistence/conversations/querySessionHasLaterTranscriptMessage.js";
+import { querySessionIdByAgentId } from "../persistence/conversations/querySessionIdByAgentId.js";
+import { querySessionMessageSubmission } from "../persistence/conversations/querySessionMessageSubmission.js";
 import {
     querySessionMutationReceipt,
     type SessionMutationReceiptResult,
-} from "../persistence/session/querySessionMutationReceipt.js";
-import { querySessionOrderItems } from "../persistence/session/querySessionOrderItems.js";
-import { querySessionSummaries } from "../persistence/session/querySessionSummaries.js";
-import { querySessionTranscriptEvents } from "../persistence/session/querySessionTranscriptEvents.js";
-import { querySessionTranscriptPage } from "../persistence/session/querySessionTranscriptPage.js";
-import { querySessionTranscriptSince } from "../persistence/session/querySessionTranscriptSince.js";
-import { sessionMoveScope } from "../persistence/session/sessionMoveScope.js";
-import { sessionRecordMutationReceipt } from "../persistence/session/sessionRecordMutationReceipt.js";
-import { sessionSaveMessage } from "../persistence/session/sessionSaveMessage.js";
+} from "../persistence/conversations/querySessionMutationReceipt.js";
+import { querySessionOrderItems } from "../persistence/conversations/querySessionOrderItems.js";
+import { querySessionSummaries } from "../persistence/conversations/querySessionSummaries.js";
+import { querySessionTranscriptEvents } from "../persistence/conversations/querySessionTranscriptEvents.js";
+import { querySessionTranscriptPage } from "../persistence/conversations/querySessionTranscriptPage.js";
+import { querySessionTranscriptSince } from "../persistence/conversations/querySessionTranscriptSince.js";
+import { sessionMoveScope } from "../persistence/conversations/sessionMoveScope.js";
+import { sessionRecordMutationReceipt } from "../persistence/conversations/sessionRecordMutationReceipt.js";
+import { sessionSaveMessage } from "../persistence/conversations/sessionSaveMessage.js";
 import {
     createEventIdFactory,
     type Attachment,

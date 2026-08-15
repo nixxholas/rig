@@ -14,7 +14,7 @@ import { migrateSessionDatabase } from "../../persistence/database/migrateSessio
 import { openSessionDatabase } from "../../persistence/database/openSessionDatabase.js";
 import { agentHistory } from "../../persistence/database/schema.js";
 import { withDatabase } from "../../persistence/databaseContext.js";
-import { runSessionTransaction } from "../../session/SessionTransactionContext.js";
+import { runSessionTransaction } from "../../persistence/database/SessionTransactionContext.js";
 import { RigHistoryStore } from "../RigHistoryStore.js";
 
 const ctx = createTestRootContext().named("rig-history-store-test");

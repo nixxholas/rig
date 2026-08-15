@@ -2552,7 +2552,7 @@ export class CodingAssistantApp implements Component, Focusable {
             role: "event",
             title: "Tasks",
             text: this.#tasks
-                .map((task) => `#${task.id} · ${status[task.status]} · ${task.subject}`)
+                .map((task) => `#${task.id} · ${status[task.status]} · ${task.title}`)
                 .join("\n"),
         });
     }

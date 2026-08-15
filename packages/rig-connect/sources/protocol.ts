@@ -673,15 +673,15 @@ export interface InboxUserInput {
 }
 
 export interface SessionTask {
-    activeForm?: string;
-    blockedBy: readonly string[];
-    blocks: readonly string[];
-    description: string;
+    createdAt: number;
+    dependsOn: readonly string[];
+    detail?: string;
     id: string;
-    metadata?: Readonly<Record<string, unknown>>;
-    owner?: string;
+    ordering: number;
+    priority: "low" | "normal" | "high";
     status: "pending" | "in_progress" | "completed";
-    subject: string;
+    title: string;
+    updatedAt: number;
 }
 
 export interface SessionGoal {

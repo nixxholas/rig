@@ -22,7 +22,11 @@ export function bedrockCatalogProfiles(
     if (bearerToken === undefined) return undefined;
     const defaultRegion = config.region?.trim() || resolveBedrockRegion(env);
     const routes = BEDROCK_MODEL_ROUTES.filter((route) => {
-        const region = resolveBedrockModelRegion(route.model.id, defaultRegion, config.modelOverrides);
+        const region = resolveBedrockModelRegion(
+            route.model.id,
+            defaultRegion,
+            config.modelOverrides,
+        );
         return (
             resolveBedrockModelTransport(route, region, config.modelOverrides?.[route.model.id]) !==
             undefined

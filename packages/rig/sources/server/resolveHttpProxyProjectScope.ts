@@ -1,5 +1,5 @@
 import type { ProjectScope } from "../protocol/index.js";
-import type { SessionStore } from "../session/SessionStore.js";
+import type { ProjectRepository } from "../project/ProjectRepository.js";
 
 export type HttpProxyProjectScopeResolution =
     | { allowed: true }
@@ -8,7 +8,7 @@ export type HttpProxyProjectScopeResolution =
 export async function resolveHttpProxyProjectScope(
     ctx: Context,
     scope: ProjectScope,
-    store: SessionStore,
+    store: Pick<ProjectRepository, "getProject" | "getWorkspace">,
 ): Promise<HttpProxyProjectScopeResolution> {
     if ((await store.getProject(ctx, scope.projectId)) === undefined) {
         return {

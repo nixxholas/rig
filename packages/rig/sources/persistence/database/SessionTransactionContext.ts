@@ -3,10 +3,7 @@ import type { Context } from "@steve.kite/stdlib";
 
 import type { DatabaseScope, TX } from "../Transaction.js";
 import { inTx } from "../inTx.js";
-import {
-    getSessionDatabaseOwner,
-    type SessionDatabase,
-} from "./SessionDatabase.js";
+import { getSessionDatabaseOwner, type SessionDatabase } from "./SessionDatabase.js";
 
 interface TransactionState {
     readonly callbacks: Array<() => void | Promise<void>>;

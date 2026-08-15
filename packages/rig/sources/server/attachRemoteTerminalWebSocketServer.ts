@@ -7,13 +7,13 @@ import { WebSocketDuplex } from "../terminal/WebSocketDuplex.js";
 import { createNodeBinaryWebSocket } from "../terminal/createNodeBinaryWebSocket.js";
 import { isAuthorizedProtocolRequest } from "./isAuthorizedProtocolRequest.js";
 import { matchP2pPeerRoute } from "./matchP2pPeerRoute.js";
-import type { SessionStore } from "../session/SessionStore.js";
+import type { ProjectRemoteTerminalStore } from "../terminal/index.js";
 
 const MAX_WIRE_MESSAGE_BYTES = 4 * 1024 * 1024 + 20;
 
 export function attachRemoteTerminalWebSocketServer(options: {
     server: Server;
-    store: SessionStore;
+    remoteTerminals: ProjectRemoteTerminalStore;
     token: string;
 }): void {
     const webSocketServer = new WebSocketServer({
@@ -32,7 +32,7 @@ export function attachRemoteTerminalWebSocketServer(options: {
             rejectUpgrade(socket, 401, "Unauthorized");
             return;
         }
-        const terminal = options.store.remoteTerminals.get(route.scope, route.terminalId);
+        const terminal = options.remoteTerminals.get(route.scope, route.terminalId);
         if (terminal === undefined) {
             rejectUpgrade(socket, 404, "Not Found");
             return;

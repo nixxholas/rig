@@ -3,12 +3,10 @@ import type { ChatHistoryContext } from "./ChatHistoryContext.js";
 import type { FileReadState } from "./FileReadState.js";
 import type { FileSystemContext } from "./FileSystemContext.js";
 import type { FolderContext } from "./FolderContext.js";
-import type { GoalContext } from "./GoalContext.js";
 import type { PluginContext } from "./PluginContext.js";
 import type { SlotContext } from "./SlotContext.js";
 import type { SubagentContext } from "./SubagentContext.js";
 import type { UserInputContext } from "./UserInputContext.js";
-import type { TaskContext } from "./TaskContext.js";
 import type { PermissionContext } from "../../permissions/index.js";
 import type { SessionSecretContext } from "../../secrets/index.js";
 import type { AgentCommunicationContext } from "./AgentCommunicationContext.js";
@@ -28,7 +26,6 @@ export interface AgentContext {
     fileReads?: FileReadState;
     /** The folder tree, and the folder this chat files itself into. */
     folders?: FolderContext;
-    goals?: GoalContext;
     permissions?: PermissionContext;
     plugins?: PluginContext;
     providerUsage?: ProviderUsageContext;
@@ -36,7 +33,6 @@ export interface AgentContext {
     secrets?: SessionSecretContext;
     slots?: SlotContext;
     subagents?: SubagentContext;
-    tasks?: TaskContext;
     userInput?: UserInputContext;
     workspaces?: WorkspaceContext;
 }

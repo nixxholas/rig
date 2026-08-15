@@ -76,7 +76,6 @@ export type {
     FileSystemStat,
 } from "./context/FileSystemContext.js";
 export type { FolderContext } from "./context/FolderContext.js";
-export type { GoalContext } from "./context/GoalContext.js";
 export type {
     ChatHistoryAgentSummary,
     ChatHistoryContext,
@@ -84,7 +83,6 @@ export type {
     ChatHistoryRole,
 } from "./context/ChatHistoryContext.js";
 export type { UserInputContext } from "./context/UserInputContext.js";
-export type { TaskContext } from "./context/TaskContext.js";
 export type { SessionSecretContext } from "../secrets/index.js";
 export type {
     AvailableSubagentModel,
