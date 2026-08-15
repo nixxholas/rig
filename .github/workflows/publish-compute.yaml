@@ -9,13 +9,21 @@ on:
         tags:
             - "happy-agent-compute-v*"
     workflow_dispatch:
+        inputs:
+            release_tag:
+                description: Existing happy-agent-compute release tag to publish
+                required: true
+                type: string
 
 permissions:
     contents: read
 
 concurrency:
-    group: publish-compute-${{ github.ref }}
+    group: publish-compute-${{ inputs.release_tag || github.ref_name }}
     cancel-in-progress: false
+
+env:
+    RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
 
 jobs:
     sandbox:
@@ -37,6 +45,8 @@ jobs:
         steps:
             - name: Check out the release
               uses: actions/checkout@v6
+              with:
+                  ref: refs/tags/${{ inputs.release_tag || github.ref_name }}
 
             - name: Set up pnpm
               uses: pnpm/action-setup@v6
@@ -93,7 +103,9 @@ jobs:
 
     publish:
         name: Publish @slopus/happy-agent-compute
-        if: startsWith(github.ref, 'refs/tags/happy-agent-compute-v')
+        if: >-
+            startsWith(github.ref, 'refs/tags/happy-agent-compute-v') ||
+            (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
         needs: sandbox
         runs-on: ubuntu-24.04
         environment: npm
@@ -103,13 +115,14 @@ jobs:
             id-token: write
         env:
             RELEASE_PACKAGE: happy-agent-compute
-            RELEASE_DIST_TAG: ${{ contains(github.ref_name, '-beta.') && 'beta' || '' }}
+            RELEASE_DIST_TAG: ${{ contains(inputs.release_tag || github.ref_name, '-beta.') && 'beta' || '' }}
 
         steps:
-            - name: Check out the release tag
+            - name: Check out the release
               uses: actions/checkout@v6
               with:
                   fetch-depth: 0
+                  ref: refs/tags/${{ inputs.release_tag || github.ref_name }}
 
             - name: Verify the tagged commit is on main
               run: |
@@ -127,12 +140,17 @@ jobs:
                   node-version: "24"
                   package-manager-cache: false
 
+            - name: Install an npm that speaks trusted publishing
+              # OIDC publishing requires npm 11.5.1 or newer. Install the exact reviewed CLI with
+              # pnpm, then invoke npm directly so it can acquire GitHub's workload identity.
+              run: |
+                  pnpm add --global npm@11.18.0
+                  npm --version
+
             - name: Install dependencies
               run: pnpm install --frozen-lockfile
 
             - name: Verify the tag matches the package version
-              env:
-                  RELEASE_TAG: ${{ github.ref_name }}
               run: pnpm exec tsx scripts/validateReleaseTag.ts
 
             - name: Build the package
@@ -143,11 +161,11 @@ jobs:
                   package="@slopus/happy-agent-compute"
                   version="$(node -p "require('./packages/happy-agent-compute/package.json').version")"
                   distribution_tag="${RELEASE_DIST_TAG:-latest}"
-                  if pnpm dlx npm@11.18.0 view "${package}@${version}" version --registry https://registry.npmjs.org/ >/dev/null 2>&1; then
+                  if npm view "${package}@${version}" version --registry https://registry.npmjs.org/ >/dev/null 2>&1; then
                       echo "${package}@${version} is already published."
                   else
                       cd packages/happy-agent-compute
-                      pnpm dlx npm@11.18.0 publish \
+                      npm publish \
                           --access public \
                           --tag "${distribution_tag}" \
                           --provenance \
