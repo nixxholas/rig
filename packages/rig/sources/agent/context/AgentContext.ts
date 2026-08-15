@@ -6,7 +6,6 @@ import type { FolderContext } from "./FolderContext.js";
 import type { GoalContext } from "./GoalContext.js";
 import type { PluginContext } from "./PluginContext.js";
 import type { SlotContext } from "./SlotContext.js";
-import type { WorkletContext } from "./WorkletContext.js";
 import type { SubagentContext } from "./SubagentContext.js";
 import type { UserInputContext } from "./UserInputContext.js";
 import type { TaskContext } from "./TaskContext.js";
@@ -36,8 +35,6 @@ export interface AgentContext {
     scheduling?: SchedulingContext;
     secrets?: SessionSecretContext;
     slots?: SlotContext;
-    /** Managing the worklets installed on this machine. */
-    worklets?: WorkletContext;
     subagents?: SubagentContext;
     tasks?: TaskContext;
     userInput?: UserInputContext;

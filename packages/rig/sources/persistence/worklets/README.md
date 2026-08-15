@@ -1,8 +1,6 @@
 # Worklet persistence
 
-Small database operations for the global worklet catalog and its immutable version history.
-Runtime state, source trees, icons, logs, and durable worklet data live outside SQLite and are
-owned by the worklet store and manager.
-
-Callers compose these operations inside explicit transactions where a multi-row transition must be
-atomic.
+`RigWorkletCatalog` is the SQLite host port consumed by
+`WorkletsFeature`. The feature owns catalog behavior, filesystem installation,
+version changes, receipts, proofs, and events; Rig only supplies durable rows and
+the shared transaction boundary.

@@ -924,12 +924,10 @@ export const appletMutationProofs = sqliteTable("applet_mutation_proofs", {
 
 export const worklets = sqliteTable("worklets", {
     name: text("name").primaryKey(),
-    authorSessionId: text("author_session_id").notNull(),
-    sourceDescription: text("source_description"),
+    ownerAgentId: text("owner_agent_id").notNull(),
     currentVersion: integer("current_version").notNull(),
     createdAtMs: integer("created_at_ms").notNull(),
     updatedAtMs: integer("updated_at_ms").notNull(),
-    iconThumbhash: text("icon_thumbhash").notNull(),
 });
 
 export const workletVersions = sqliteTable(
@@ -939,13 +937,24 @@ export const workletVersions = sqliteTable(
             .notNull()
             .references(() => worklets.name, { onDelete: "cascade" }),
         version: integer("version").notNull(),
+        sourceRef: text("source_ref").notNull(),
         changeDescription: text("change_description").notNull(),
+        operationsJson: text("operations_json").notNull(),
         createdAtMs: integer("created_at_ms").notNull(),
-        description: text("description").notNull(),
-        permissionsJson: text("permissions_json").notNull(),
+        operationId: text("operation_id").notNull().unique(),
     },
     (table) => [primaryKey({ columns: [table.workletName, table.version] })],
 );
+
+export const workletMutationReceipts = sqliteTable("worklet_mutation_receipts", {
+    operationId: text("operation_id").primaryKey(),
+    receiptJson: text("receipt_json").notNull(),
+});
+
+export const workletMutationProofs = sqliteTable("worklet_mutation_proofs", {
+    operationId: text("operation_id").primaryKey(),
+    proofJson: text("proof_json").notNull(),
+});
 
 export const durableGlobalEvents = sqliteTable("durable_global_events", {
     cursor: text("cursor").primaryKey(),
