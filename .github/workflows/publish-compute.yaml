@@ -78,6 +78,12 @@ jobs:
             - name: Prove the just-bash permission boundary
               run: pnpm --filter @slopus/happy-agent-compute test:live:just-bash
 
+            - name: Build the container test image
+              if: matrix.docker
+              env:
+                  RIG_GYM_IMAGE: rig-gym:local
+              run: pnpm build:gym
+
             - name: Prove the container boundary
               # GitHub's macOS runners have no Docker daemon, so the container backend is proven on
               # Linux only.
