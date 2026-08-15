@@ -14,7 +14,7 @@ import {
     assertAppletMutationReceipt,
 } from "@slopus/happy-agent-features";
 import type { Context } from "@steve.kite/stdlib";
-import { and, eq, gt, sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { Value } from "@sinclair/typebox/value";
 import {
     appletCatalogMutationProofSchema,
@@ -34,6 +34,7 @@ import {
     runSessionTransaction,
 } from "../database/SessionTransactionContext.js";
 import { withDatabase } from "../databaseContext.js";
+import { inDatabase } from "../database/inDatabase.js";
 import { queryApplet } from "./queryApplet.js";
 
 /** Structural SQL port used by the feature-owned applet implementation. */
@@ -63,29 +64,36 @@ export class RigAppletCatalog implements AppletCatalog {
         ctx: Context,
         query: { readonly cursor?: string; readonly limit: number },
     ): Promise<AppletListPage> {
-        const databaseCtx = withDatabase(ctx, this.#database);
-        const rows = await databaseCtx.tx.all<{ name: string }>(
-            query.cursor === undefined
-                ? sql`SELECT name FROM applets ORDER BY name ASC LIMIT ${query.limit + 1}`
-                : sql`SELECT name FROM applets WHERE name > ${query.cursor} ORDER BY name ASC LIMIT ${query.limit + 1}`,
+        return await inDatabase(
+            withDatabase(ctx, this.#database),
+            "rig.sql.applets.catalog_list",
+            async (databaseCtx) => {
+                const rows = await databaseCtx.tx.all<{ name: string }>(
+                    query.cursor === undefined
+                        ? sql`SELECT name FROM applets ORDER BY name ASC LIMIT ${query.limit + 1}`
+                        : sql`SELECT name FROM applets WHERE name > ${query.cursor} ORDER BY name ASC LIMIT ${query.limit + 1}`,
+                );
+                const hasMore = rows.length > query.limit;
+                const selected = rows.slice(0, query.limit);
+                const found: Applet[] = [];
+                for (const row of selected) {
+                    const applet = await queryApplet(databaseCtx, row.name);
+                    if (applet === undefined) {
+                        throw new Error(
+                            `Applet catalog row ${JSON.stringify(row.name)} disappeared.`,
+                        );
+                    }
+                    assertApplet(applet);
+                    found.push(applet);
+                }
+                return {
+                    applets: found,
+                    limit: query.limit,
+                    hasMore,
+                    ...(hasMore ? { nextCursor: found.at(-1)!.name } : {}),
+                } as AppletListPage;
+            },
         );
-        const hasMore = rows.length > query.limit;
-        const selected = rows.slice(0, query.limit);
-        const found: Applet[] = [];
-        for (const row of selected) {
-            const applet = await queryApplet(databaseCtx, row.name);
-            if (applet === undefined) {
-                throw new Error(`Applet catalog row ${JSON.stringify(row.name)} disappeared.`);
-            }
-            assertApplet(applet);
-            found.push(applet);
-        }
-        return {
-            applets: found,
-            limit: query.limit,
-            hasMore,
-            ...(hasMore ? { nextCursor: found.at(-1)!.name } : {}),
-        } as AppletListPage;
     }
 
     async get(ctx: Context, name: string): Promise<Applet | undefined> {
