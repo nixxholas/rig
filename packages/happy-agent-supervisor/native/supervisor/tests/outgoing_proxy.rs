@@ -215,7 +215,10 @@ fn an_allowed_host_is_reachable_through_the_http_front_end() {
     let run = run_workload("http_forward", &["127.0.0.1"], &["http", "socks5"]);
     let stdout = assert_succeeded(&run);
 
-    assert!(stdout.contains("http-forward=origin-ok"), "stdout:\n{stdout}");
+    assert!(
+        stdout.contains("http-forward=origin-ok"),
+        "stdout:\n{stdout}"
+    );
     assert_eq!(run.origin_connections, 1);
 }
 
@@ -224,8 +227,14 @@ fn an_allowed_host_is_reachable_through_connect_and_socks() {
     let run = run_workload("tunnels", &["127.0.0.1"], &["http", "socks5"]);
     let stdout = assert_succeeded(&run);
 
-    assert!(stdout.contains("connect-tunnel=tunnelled"), "stdout:\n{stdout}");
-    assert!(stdout.contains("socks-tunnel=tunnelled"), "stdout:\n{stdout}");
+    assert!(
+        stdout.contains("connect-tunnel=tunnelled"),
+        "stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("socks-tunnel=tunnelled"),
+        "stdout:\n{stdout}"
+    );
     assert_eq!(run.origin_connections, 2);
 }
 
@@ -260,16 +269,25 @@ fn a_front_end_credential_that_is_missing_or_wrong_is_refused() {
 
     assert!(stdout.contains("no-credential=407"), "stdout:\n{stdout}");
     assert!(stdout.contains("wrong-credential=407"), "stdout:\n{stdout}");
-    assert!(stdout.contains("socks-without-authentication=255"), "stdout:\n{stdout}");
-    assert!(stdout.contains("socks-wrong-credential=1"), "stdout:\n{stdout}");
+    assert!(
+        stdout.contains("socks-without-authentication=255"),
+        "stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("socks-wrong-credential=1"),
+        "stdout:\n{stdout}"
+    );
     assert_eq!(run.origin_connections, 0);
 }
 
 #[test]
 fn the_workload_cannot_reach_the_destination_without_the_proxy() {
-    // Both sides are described, because a descriptor in the workload is either one the supervisor
-    // leaked or one this process was already holding when it spawned the supervisor, and only the
-    // two lists together say which. `--nocapture` shows this side on a passing run too.
+    // A descriptor in the workload is either one the supervisor leaked or one this process was
+    // already holding when it spawned the supervisor, and only the two lists together say which.
+    // The GitHub macOS runners hand the test process three `AF_SYSTEM` datagram sockets and two
+    // pipes, none of which it opened; the workload sees exactly those, at exactly those numbers.
+    // So the question this asks is what the supervisor added, and the answer must be nothing.
+    // `--nocapture` shows what the environment supplied on a passing run too.
     let held_here = describe_inherited_descriptors();
     eprintln!(
         "descriptors held by the test process: {}",
@@ -278,18 +296,22 @@ fn the_workload_cannot_reach_the_destination_without_the_proxy() {
     let run = run_workload("direct", &["127.0.0.1"], &["http", "socks5"]);
     let stdout = assert_succeeded(&run);
 
-    assert!(stdout.contains("direct-connect=refused"), "stdout:\n{stdout}");
-    let inherited = inherited_descriptors(&stdout);
     assert!(
-        inherited.is_empty(),
-        "the workload was given descriptors it has no use for: {}\n\nthe test process was already holding: {}\n\n\
-         Nothing the supervisor creates can be among them: the link to the egress process is a\n\
+        stdout.contains("direct-connect=refused"),
+        "stdout:\n{stdout}"
+    );
+    let added_by_the_supervisor: Vec<&str> = inherited_descriptors(&stdout)
+        .into_iter()
+        .filter(|description| !held_here.iter().any(|held| held == description))
+        .collect();
+    assert!(
+        added_by_the_supervisor.is_empty(),
+        "the supervisor gave the workload descriptors it has no use for: {}\n\nthe test process was already holding: {}\n\n\
+         Nothing the supervisor creates should be among them: the link to the egress process is a\n\
          close-on-exec socketpair, the front-ends are std `TcpListener`s, and the status pipe is\n\
-         `pipe2(O_CLOEXEC)`. A descriptor here that the test process also holds came from the\n\
-         environment, through cargo and libtest, and this assertion is the thing that is wrong\n\
-         rather than the supervisor. One the test process does not hold is the supervisor's, and it\n\
-         should be fixed where it is created.",
-        as_list(&inherited),
+         `pipe2(O_CLOEXEC)`. Fix it where the descriptor is created, in the way Codex clears and\n\
+         relocates the single descriptor it means to pass on.",
+        as_list(&added_by_the_supervisor),
         as_list(&held_here)
     );
     assert_eq!(run.origin_connections, 0);
@@ -327,7 +349,10 @@ fn a_transfer_larger_than_one_window_completes_in_both_directions() {
     let run = run_workload("large_transfer", &["127.0.0.1"], &["socks5"]);
     let stdout = assert_succeeded(&run);
 
-    assert!(stdout.contains("large-transfer=1048576"), "stdout:\n{stdout}");
+    assert!(
+        stdout.contains("large-transfer=1048576"),
+        "stdout:\n{stdout}"
+    );
 }
 
 #[test]
@@ -337,7 +362,10 @@ fn only_the_requested_front_ends_are_offered() {
 
     assert!(stdout.contains("http-proxy=unset"), "stdout:\n{stdout}");
     assert!(stdout.contains("all-proxy=socks5h"), "stdout:\n{stdout}");
-    assert!(stdout.contains("all-proxy-credentials=present"), "stdout:\n{stdout}");
+    assert!(
+        stdout.contains("all-proxy-credentials=present"),
+        "stdout:\n{stdout}"
+    );
     assert!(stdout.contains("no-proxy=empty"), "stdout:\n{stdout}");
 }
 
@@ -376,8 +404,7 @@ fn proxy_workload_process() {
         "denied" => {
             println!("connect-denied={}", connect_status(DENIED_HOST, 443));
 
-            let forwarded =
-                http_proxy_request(&format!("http://{DENIED_HOST}/probe"), DENIED_HOST);
+            let forwarded = http_proxy_request(&format!("http://{DENIED_HOST}/probe"), DENIED_HOST);
             println!(
                 "forward-denied={}",
                 status_code(forwarded.lines().next().unwrap_or_default())
@@ -386,7 +413,10 @@ fn proxy_workload_process() {
             println!("socks-denied={}", socks_reply(DENIED_HOST, 443));
         }
         "private_address" => {
-            println!("connect-private={}", connect_status("localhost", origin_port));
+            println!(
+                "connect-private={}",
+                connect_status("localhost", origin_port)
+            );
             println!("socks-private={}", socks_reply("localhost", origin_port));
         }
         "credentials" => {
@@ -395,7 +425,10 @@ fn proxy_workload_process() {
                 &mut client,
                 format!("CONNECT 127.0.0.1:{origin_port} HTTP/1.1\r\n\r\n").as_bytes(),
             );
-            println!("no-credential={}", status_code(&read_head_line(&mut client)));
+            println!(
+                "no-credential={}",
+                status_code(&read_head_line(&mut client))
+            );
 
             let wrong = proxy(HTTP_PROXY);
             let mut client = connect_to(wrong.address.clone());
@@ -407,7 +440,10 @@ fn proxy_workload_process() {
                 )
                 .as_bytes(),
             );
-            println!("wrong-credential={}", status_code(&read_head_line(&mut client)));
+            println!(
+                "wrong-credential={}",
+                status_code(&read_head_line(&mut client))
+            );
 
             let mut socks = connect_to(proxy(ALL_PROXY).address);
             write_all(&mut socks, &[5, 1, 0]);
@@ -420,7 +456,11 @@ fn proxy_workload_process() {
             write_all(&mut socks, &[5, 1, 2]);
             let mut greeting = [0_u8; 2];
             read_exact(&mut socks, &mut greeting);
-            assert_eq!(greeting, [5, 2], "the SOCKS front-end must demand a credential");
+            assert_eq!(
+                greeting,
+                [5, 2],
+                "the SOCKS front-end must demand a credential"
+            );
             let mut authentication = vec![1, credential.user.len() as u8];
             authentication.extend_from_slice(credential.user.as_bytes());
             authentication.push(b"not-the-secret".len() as u8);
@@ -597,7 +637,11 @@ fn socks_greet(host: &str, port: u16) -> (TcpStream, [u8; 10]) {
     write_all(&mut socks, &[5, 1, 2]);
     let mut greeting = [0_u8; 2];
     read_exact(&mut socks, &mut greeting);
-    assert_eq!(greeting, [5, 2], "the SOCKS front-end must demand a credential");
+    assert_eq!(
+        greeting,
+        [5, 2],
+        "the SOCKS front-end must demand a credential"
+    );
     let mut authentication = vec![1, endpoint.user.len() as u8];
     authentication.extend_from_slice(endpoint.user.as_bytes());
     authentication.push(endpoint.secret.len() as u8);
@@ -831,8 +875,6 @@ fn as_list(descriptions: &[impl AsRef<str>]) -> String {
         .collect()
 }
 
-
-
 fn read_head_line(stream: &mut TcpStream) -> String {
     let mut line = Vec::new();
     let mut byte = [0_u8; 1];
@@ -854,7 +896,11 @@ fn read_head_line(stream: &mut TcpStream) -> String {
 }
 
 fn status_code(status_line: &str) -> String {
-    status_line.split(' ').nth(1).unwrap_or_default().to_string()
+    status_line
+        .split(' ')
+        .nth(1)
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn write_all(stream: &mut TcpStream, bytes: &[u8]) {
@@ -872,8 +918,7 @@ fn read_exact(stream: &mut TcpStream, buffer: &mut [u8]) {
 /// The workload has to speak the client half of the credential itself, which is the whole point of
 /// delivering it in the proxy address.
 fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut text = String::new();
     for chunk in bytes.chunks(3) {
         let packed = (u32::from(chunk[0]) << 16)

@@ -289,6 +289,16 @@ fn workload_process() {
             );
         }
         #[cfg(target_os = "linux")]
+        "supervisor-memory" => {
+            // PID 1 in this namespace is the supervisor's namespace init, running as the same
+            // mapped user, so nothing but the non-dumpable flag stands between them.
+            let error = fs::File::open("/proc/1/mem")
+                .err()
+                .unwrap_or_else(|| panic!("the workload could read the supervisor's memory"));
+            assert_eq!(error.raw_os_error(), Some(libc::EACCES));
+            println!("supervisor-memory=refused");
+        }
+        #[cfg(target_os = "linux")]
         "signal" => unsafe {
             libc::raise(libc::SIGTERM);
         },
@@ -330,23 +340,20 @@ fn the_workload_is_given_the_environment_the_caller_wrote() {
 #[test]
 fn the_workload_cannot_read_the_supervisor_it_runs_under() {
     let boundary = TestBoundary::new(false, false);
-    // PID 1 in the workload's namespace is the supervisor's namespace init, and the workload runs
-    // as the same mapped user, so nothing but the non-dumpable flag stands between them.
-    let output = boundary.run(&[
-        "/bin/sh",
-        "-c",
-        "if : < /proc/1/mem 2>/dev/null; then exit 91; fi; printf supervisor-memory=refused",
-    ]);
+    // The open is attempted in the workload helper rather than in a shell. `dash` treats a failed
+    // redirection on a special builtin as fatal to the whole script, so the shell form reported the
+    // very refusal it was looking for as the script's own failure.
+    let output = workload(&boundary, "supervisor-memory", &[]);
 
     assert!(
         output.status.success(),
-        "the workload could read the supervisor's memory (exit {:?})\nstderr:\n{}",
-        output.status.code(),
+        "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        "supervisor-memory=refused"
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("supervisor-memory=refused"),
+        "stdout:\n{}",
+        String::from_utf8_lossy(&output.stdout)
     );
     println!("supervisor-memory=refused");
 }
