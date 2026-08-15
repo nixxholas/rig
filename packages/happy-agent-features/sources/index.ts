@@ -961,3 +961,6 @@ export * from "./workspaces/index.js";
 
 // Projects: repositories registered on demand, with their own bounded settings.
 export * from "./projects/index.js";
+
+// Scheduling: durable waits, and messages an agent asks to be delivered later.
+export * from "./scheduling/index.js";

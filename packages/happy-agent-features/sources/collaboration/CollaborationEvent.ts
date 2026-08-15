@@ -11,7 +11,6 @@ import {
     collaborationMessageSchema,
     collaborationObligationIdSchema,
     collaborationObligationSchema,
-    collaborationScheduleSchema,
 } from "./CollaborationMessage.js";
 
 export const collaborationEventIdSchema = Type.String({
@@ -60,14 +59,6 @@ export const collaborationEventSchema = Type.Union([
             type: Type.Literal("reply_answered"),
             obligationId: collaborationObligationIdSchema,
             answerMessageId: collaborationMessageIdSchema,
-        },
-        { additionalProperties: false },
-    ),
-    Type.Object(
-        {
-            ...eventEnvelope,
-            type: Type.Literal("schedule_created"),
-            schedule: collaborationScheduleSchema,
         },
         { additionalProperties: false },
     ),

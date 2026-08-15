@@ -29,7 +29,7 @@ an agent.
 
 - [Applets](sources/applets/README.md) — import, version, inspect, and remove host-managed applets.
 - [Collaboration](sources/collaboration/README.md) — create collaborators, exchange durable
-  messages, wait for replies, and schedule delivery.
+  messages, and wait for replies.
 - [Compute](sources/compute/README.md) — provider-neutral filesystem and shell tools over a
   host-supplied machine.
 - [Goal](sources/goal/README.md) — durable long-running objectives, continuation, failure
@@ -46,6 +46,8 @@ an agent.
   events.
 - [Projects](sources/projects/README.md) — repositories registered on demand, with bounded
   settings and durable rename and archival.
+- [Scheduling](sources/scheduling/README.md) — durable waits an agent can take, and messages it
+  asks to be delivered to itself later.
 - [Search](sources/search/README.md) — bounded common web fetch plus explicit vendor search
   wrappers.
 - [Secrets](sources/secrets/README.md) — safe secret metadata, keyed replay fingerprints,

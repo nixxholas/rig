@@ -1,7 +1,7 @@
 import { Type, type Static } from "@sinclair/typebox";
 import { agentConfigSchema } from "@slopus/happy-agent-base";
 
-/** The largest timestamp accepted by collaboration persistence and host scheduling. */
+/** The largest timestamp accepted by collaboration persistence. */
 export const COLLABORATION_MAX_TIMESTAMP = 8_640_000_000_000_000;
 
 /** IDs used by the collaboration roster and by Agent Base. */

@@ -19,12 +19,6 @@ export const collaborationObligationIdSchema = Type.String({
     pattern: "^[a-z][a-z0-9-]*$",
 });
 
-export const collaborationScheduleIdSchema = Type.String({
-    minLength: 2,
-    maxLength: 128,
-    pattern: "^[a-z][a-z0-9-]*$",
-});
-
 export const collaborationMessageTextSchema = Type.String({
     minLength: 1,
     maxLength: 50_000,
@@ -188,47 +182,6 @@ export const collaborationWaitToolInputSchema = Type.Omit(collaborationWaitInput
     "operationId",
 ]);
 
-/** A host-owned durable scheduled delivery. No timer or queue is owned by the feature. */
-export const collaborationScheduleSchema = Type.Object(
-    {
-        id: collaborationScheduleIdSchema,
-        ownerAgentId: collaborationAgentIdSchema,
-        targetAgentId: collaborationAgentIdSchema,
-        message: collaborationMessageTextSchema,
-        dueAt: Type.Integer({ minimum: 0, maximum: COLLABORATION_MAX_TIMESTAMP }),
-        status: Type.Union([
-            Type.Literal("pending"),
-            Type.Literal("delivered"),
-            Type.Literal("undelivered"),
-            Type.Literal("cancelled"),
-        ]),
-        createdAt: Type.Integer({ minimum: 0, maximum: COLLABORATION_MAX_TIMESTAMP }),
-        updatedAt: Type.Integer({ minimum: 0, maximum: COLLABORATION_MAX_TIMESTAMP }),
-        deliveredAt: Type.Optional(
-            Type.Integer({ minimum: 0, maximum: COLLABORATION_MAX_TIMESTAMP }),
-        ),
-        failure: Type.Optional(Type.String({ minLength: 1, maxLength: 2_000 })),
-    },
-    { additionalProperties: false },
-);
-
-export const collaborationScheduleInputSchema = Type.Object(
-    {
-        operationId: Type.Optional(collaborationOperationIdSchema),
-        id: Type.Optional(collaborationScheduleIdSchema),
-        targetAgentId: collaborationAgentIdSchema,
-        message: collaborationMessageTextSchema,
-        dueAt: Type.Integer({ minimum: 0, maximum: COLLABORATION_MAX_TIMESTAMP }),
-    },
-    { additionalProperties: false },
-);
-
-/** Model input omits feature-owned schedule and operation identities. */
-export const collaborationScheduleToolInputSchema = Type.Omit(collaborationScheduleInputSchema, [
-    "operationId",
-    "id",
-]);
-
 export const collaborationSendResultSchema = Type.Object(
     {
         message: collaborationMessageSchema,
@@ -239,7 +192,6 @@ export const collaborationSendResultSchema = Type.Object(
 
 export type CollaborationMessageId = Static<typeof collaborationMessageIdSchema>;
 export type CollaborationObligationId = Static<typeof collaborationObligationIdSchema>;
-export type CollaborationScheduleId = Static<typeof collaborationScheduleIdSchema>;
 export type CollaborationMessage = Static<typeof collaborationMessageSchema>;
 export type CollaborationObligationStatus = Static<typeof collaborationObligationStatusSchema>;
 export type CollaborationObligation = Static<typeof collaborationObligationSchema>;
@@ -253,7 +205,4 @@ export type CollaborationReplyInput = Static<typeof collaborationReplyInputSchem
 export type CollaborationReplyToolInput = Static<typeof collaborationReplyToolInputSchema>;
 export type CollaborationWaitInput = Static<typeof collaborationWaitInputSchema>;
 export type CollaborationWaitToolInput = Static<typeof collaborationWaitToolInputSchema>;
-export type CollaborationSchedule = Static<typeof collaborationScheduleSchema>;
-export type CollaborationScheduleInput = Static<typeof collaborationScheduleInputSchema>;
-export type CollaborationScheduleToolInput = Static<typeof collaborationScheduleToolInputSchema>;
 export type CollaborationSendResult = Static<typeof collaborationSendResultSchema>;

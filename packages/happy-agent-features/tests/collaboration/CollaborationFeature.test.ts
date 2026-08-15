@@ -4,7 +4,6 @@ import { createRootContext, type Context } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
 import {
-    COLLABORATION_MAX_TIMESTAMP,
     collaborationAgentSchema,
     collaborationCreateInputSchema,
     type CollaborationAgent,
@@ -13,10 +12,8 @@ import type { CollaborationEvent } from "../../sources/collaboration/Collaborati
 import { CollaborationFeature } from "../../sources/collaboration/CollaborationFeature.js";
 import {
     collaborationMessageSchema,
-    collaborationScheduleSchema,
     type CollaborationMessage,
     type CollaborationObligation,
-    type CollaborationSchedule,
     type CollaborationSendResult,
 } from "../../sources/collaboration/CollaborationMessage.js";
 import {
@@ -35,7 +32,6 @@ import {
     CollaborationFeature as RootCollaborationFeature,
     collaborationAgentSchema as rootCollaborationAgentSchema,
     collaborationMutationReceiptSchema as rootCollaborationMutationReceiptSchema,
-    scheduleMessageTool as rootScheduleMessageTool,
 } from "../../sources/index.js";
 
 const baseCtx = createRootContext().named("happy-agent-features-collaboration");
@@ -46,7 +42,6 @@ class Host implements CollaborationRoster, CollaborationStore, CollaborationBrok
     readonly messages = new Map<string, CollaborationMessage>();
     readonly obligations = new Map<string, CollaborationObligation>();
     readonly receipts = new Map<string, CollaborationMutationReceipt>();
-    readonly schedules = new Map<string, CollaborationSchedule>();
     readonly sent: Array<{ readonly target: string; readonly id: string }> = [];
     readonly transactions: string[] = [];
     readonly postCommit: Array<(ctx: Context) => void | Promise<void>> = [];
@@ -243,35 +238,6 @@ class Host implements CollaborationRoster, CollaborationStore, CollaborationBrok
         return clone(obligation)!;
     }
 
-    async schedule(
-        _ctx: Context,
-        _actingAgentId: string,
-        request: {
-            readonly id: string;
-            readonly ownerAgentId: string;
-            readonly targetAgentId: string;
-            readonly message: string;
-            readonly dueAt: number;
-        },
-    ): Promise<CollaborationSchedule> {
-        const scheduled: CollaborationSchedule = {
-            ...request,
-            status: "pending",
-            createdAt: request.dueAt,
-            updatedAt: request.dueAt,
-        };
-        this.schedules.set(scheduled.id, clone(scheduled)!);
-        return clone(scheduled)!;
-    }
-
-    async getSchedule(
-        _ctx: Context,
-        _actingAgentId: string,
-        id: string,
-    ): Promise<CollaborationSchedule | undefined> {
-        return clone(this.schedules.get(id));
-    }
-
     async flush(ctx: Context = baseCtx): Promise<void> {
         const callback = this.postCommit.shift();
         if (callback === undefined) throw new Error("No post-commit callback.");
@@ -298,7 +264,6 @@ class Host implements CollaborationRoster, CollaborationStore, CollaborationBrok
             messages: new Map([...this.messages].map(([key, value]) => [key, clone(value)!])),
             obligations: new Map([...this.obligations].map(([key, value]) => [key, clone(value)!])),
             receipts: new Map([...this.receipts].map(([key, value]) => [key, clone(value)!])),
-            schedules: new Map([...this.schedules].map(([key, value]) => [key, clone(value)!])),
         };
     }
 
@@ -308,7 +273,6 @@ class Host implements CollaborationRoster, CollaborationStore, CollaborationBrok
         restore(this.messages, snapshot.messages);
         restore(this.obligations, snapshot.obligations);
         restore(this.receipts, snapshot.receipts);
-        restore(this.schedules, snapshot.schedules);
     }
 }
 
@@ -346,7 +310,6 @@ function feature(
         operationIdFactory: () => `operation${++sequence}`,
         messageIdFactory: () => `message${++sequence}`,
         obligationIdFactory: () => `obligation${++sequence}`,
-        scheduleIdFactory: () => `schedule${++sequence}`,
         eventIdFactory: () => `event${++sequence}`,
         clock: () => 1_000 + sequence,
         ...(options.maxOutputCharacters === undefined
@@ -392,7 +355,6 @@ describe("CollaborationFeature", () => {
         expect(RootCollaborationFeature).toBe(CollaborationFeature);
         expect(rootCollaborationAgentSchema).toBe(collaborationAgentSchema);
         expect(rootCollaborationMutationReceiptSchema).toBe(collaborationMutationReceiptSchema);
-        expect(rootScheduleMessageTool).toBeTypeOf("function");
     });
 
     it("uses caller-supplied Agent Base IDs and metadata inside one shared host transaction", async () => {
@@ -492,31 +454,6 @@ describe("CollaborationFeature", () => {
         expect(waited.status).toBe("answered");
     });
 
-    it("delegates scheduling to the durable broker and replays its receipt", async () => {
-        const host = new Host();
-        const collaboration = feature(host);
-        await createRoot(collaboration, "owner");
-        await createChild(collaboration, "owner", "child");
-
-        const input = {
-            operationId: "schedule-once",
-            id: "schedule-once",
-            targetAgentId: "child",
-            message: "later",
-            dueAt: 2_000,
-        };
-        const first = await collaboration.scheduleMessage(baseCtx, "owner", input);
-        const replay = await collaboration.scheduleMessage(baseCtx, "owner", input);
-        expect(replay).toEqual(first);
-        expect(Value.Check(collaborationScheduleSchema, first)).toBe(true);
-        await expect(
-            collaboration.scheduleMessage(baseCtx, "owner", {
-                ...input,
-                dueAt: 2_001,
-            }),
-        ).rejects.toThrow("reused with different input");
-    });
-
     it("rolls back roster, receipt, and events when a host write fails", async () => {
         const host = new Host();
         const events: CollaborationEvent[] = [];
@@ -604,22 +541,6 @@ describe("CollaborationFeature", () => {
         ).rejects.toThrow("requested responder");
     });
 
-    it("does not expose scheduling to subagents", async () => {
-        const host = new Host();
-        const collaboration = feature(host);
-        await createRoot(collaboration, "owner");
-        await createChild(collaboration, "owner", "child");
-
-        const rootTools = await collaboration.tools(baseCtx, {
-            agent: { id: "owner" },
-        } as never);
-        const childTools = await collaboration.tools(baseCtx, {
-            agent: { id: "child" },
-        } as never);
-        expect(rootTools.map((tool) => tool.name)).toContain("schedule_message");
-        expect(childTools.map((tool) => tool.name)).not.toContain("schedule_message");
-    });
-
     it("keeps durable identities out of model tool inputs and waits outside transactions", async () => {
         const host = new Host();
         const collaboration = feature(host);
@@ -646,8 +567,6 @@ describe("CollaborationFeature", () => {
         expect(properties("reply_to_agent_message")).not.toHaveProperty("messageId");
         expect(properties("reply_to_agent_message")).not.toHaveProperty("operationId");
         expect(properties("wait_for_reply")).not.toHaveProperty("operationId");
-        expect(properties("schedule_message")).not.toHaveProperty("id");
-        expect(properties("schedule_message")).not.toHaveProperty("operationId");
 
         const request = await collaboration.sendMessage(baseCtx, "owner", {
             operationId: "wait-outside-request",
@@ -816,7 +735,7 @@ describe("CollaborationFeature", () => {
         expect(configHost.agents).toHaveLength(0);
     });
 
-    it("rejects altered reply receipts and unbounded schedule times", async () => {
+    it("rejects altered reply receipts", async () => {
         const host = new Host();
         const collaboration = feature(host, { authorize: true });
         await createRoot(collaboration, "owner");
@@ -852,15 +771,6 @@ describe("CollaborationFeature", () => {
         await expect(collaboration.replyMessage(baseCtx, "responder", replyInput)).rejects.toThrow(
             "receipt disagrees",
         );
-
-        await expect(
-            collaboration.scheduleMessage(baseCtx, "owner", {
-                operationId: "too-far",
-                targetAgentId: "responder",
-                message: "later",
-                dueAt: COLLABORATION_MAX_TIMESTAMP + 1,
-            }),
-        ).rejects.toThrow("schedule message");
     });
 });
 

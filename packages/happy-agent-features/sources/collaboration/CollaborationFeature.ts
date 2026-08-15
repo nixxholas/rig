@@ -41,9 +41,6 @@ import {
     collaborationObligationPageQuerySchema,
     collaborationObligationSchema,
     collaborationReplyInputSchema,
-    collaborationScheduleIdSchema,
-    collaborationScheduleInputSchema,
-    collaborationScheduleSchema,
     collaborationSendInputSchema,
     collaborationSendResultSchema,
     collaborationWaitInputSchema,
@@ -52,8 +49,6 @@ import {
     type CollaborationObligationPage,
     type CollaborationObligationPageQuery,
     type CollaborationReplyInput,
-    type CollaborationSchedule,
-    type CollaborationScheduleInput,
     type CollaborationSendInput,
     type CollaborationSendResult,
     type CollaborationWaitInput,
@@ -63,7 +58,6 @@ import {
     assertCollaborationBrokerAgentResult,
     assertCollaborationMutationReceipt,
     assertCollaborationObligationPage,
-    assertCollaborationSchedule,
     assertCollaborationTransactionChange,
     assertCollaborationVoidResult,
     collaborationAuthorizationSchema,
@@ -84,7 +78,6 @@ import {
 import { createAgentTool } from "./tools/create_agent.js";
 import { listAgentsTool } from "./tools/list_agents.js";
 import { replyToMessageTool } from "./tools/reply_to_message.js";
-import { scheduleMessageTool } from "./tools/schedule_message.js";
 import { sendMessageTool } from "./tools/send_message.js";
 import { waitForReplyTool } from "./tools/wait_for_reply.js";
 
@@ -112,10 +105,6 @@ const obligationIdFactorySchema = Type.Function(
     [collaborationContextSchema, collaborationAgentIdSchema],
     Type.Union([collaborationObligationIdSchema, Type.Promise(collaborationObligationIdSchema)]),
 );
-const scheduleIdFactorySchema = Type.Function(
-    [collaborationContextSchema, collaborationAgentIdSchema],
-    Type.Union([collaborationScheduleIdSchema, Type.Promise(collaborationScheduleIdSchema)]),
-);
 const eventFactorySchema = Type.Function(
     [collaborationContextSchema, collaborationAgentIdSchema],
     Type.Union([collaborationEventIdSchema, Type.Promise(collaborationEventIdSchema)]),
@@ -131,7 +120,6 @@ const collaborationFeatureOptionsSchema = Type.Object(
         operationIdFactory: Type.Optional(operationFactorySchema),
         messageIdFactory: Type.Optional(messageIdFactorySchema),
         obligationIdFactory: Type.Optional(obligationIdFactorySchema),
-        scheduleIdFactory: Type.Optional(scheduleIdFactorySchema),
         eventIdFactory: Type.Optional(eventFactorySchema),
         clock: Type.Optional(
             Type.Function([], Type.Integer({ minimum: 0, maximum: COLLABORATION_MAX_TIMESTAMP })),
@@ -158,11 +146,10 @@ const CREATE_OPERATION = "create";
 const SEND_OPERATION = "send";
 const REPLY_OPERATION = "reply";
 const WAIT_OPERATION = "wait";
-const SCHEDULE_OPERATION = "schedule";
 
 /**
  * Collaboration is a host capability, not an agent manager. The roster, message store, broker,
- * transaction, timers, queues, and receipt retention all belong to the host.
+ * transaction, and receipt retention all belong to the host.
  */
 export class CollaborationFeature implements AgentFeature {
     readonly name = "collaboration";
@@ -176,7 +163,6 @@ export class CollaborationFeature implements AgentFeature {
     readonly #operationIdFactory: NonNullable<CollaborationFeatureOptions["operationIdFactory"]>;
     readonly #messageIdFactory: NonNullable<CollaborationFeatureOptions["messageIdFactory"]>;
     readonly #obligationIdFactory: NonNullable<CollaborationFeatureOptions["obligationIdFactory"]>;
-    readonly #scheduleIdFactory: NonNullable<CollaborationFeatureOptions["scheduleIdFactory"]>;
     readonly #eventIdFactory: NonNullable<CollaborationFeatureOptions["eventIdFactory"]>;
     readonly #clock: NonNullable<CollaborationFeatureOptions["clock"]>;
     readonly #maxPageSize: number;
@@ -197,8 +183,6 @@ export class CollaborationFeature implements AgentFeature {
             validated.messageIdFactory ?? ((_ctx, _acting) => generatedId("m"));
         this.#obligationIdFactory =
             validated.obligationIdFactory ?? ((_ctx, _acting) => generatedId("o"));
-        this.#scheduleIdFactory =
-            validated.scheduleIdFactory ?? ((_ctx, _acting) => generatedId("s"));
         this.#eventIdFactory = validated.eventIdFactory ?? ((_ctx, _acting) => generatedId("e"));
         this.#clock = validated.clock ?? (() => Date.now());
         this.#maxPageSize = validated.maxPageSize ?? DEFAULT_PAGE_SIZE;
@@ -725,130 +709,8 @@ export class CollaborationFeature implements AgentFeature {
         return await this.waitForReply(ctx, actingAgentId, inputOrObligationId);
     }
 
-    async scheduleMessage(
-        ctx: Context,
-        actingAgentId: string,
-        input: CollaborationScheduleInput,
-    ): Promise<CollaborationSchedule> {
-        this.#assertAgentId(actingAgentId, "acting agent");
-        this.#assertInput(collaborationScheduleInputSchema, input, "schedule message");
-        await this.#readRequiredAgent(ctx, actingAgentId);
-        const operationId = await this.#operationId(
-            ctx,
-            actingAgentId,
-            SCHEDULE_OPERATION,
-            input.operationId ?? input.id,
-        );
-        const id =
-            input.id ??
-            (await this.#callScopedId(
-                ctx,
-                actingAgentId,
-                "schedule.id",
-                this.#scheduleIdFactory,
-                collaborationScheduleIdSchema,
-                "schedule",
-            ));
-        const fingerprint = this.#fingerprint(SCHEDULE_OPERATION, actingAgentId, {
-            ...input,
-            id,
-            operationId,
-        });
-        await this.#bindOperationFingerprint(ctx, actingAgentId, SCHEDULE_OPERATION, fingerprint);
-        const change = await this.#commit(
-            ctx,
-            actingAgentId,
-            SCHEDULE_OPERATION,
-            operationId,
-            fingerprint,
-            async (txCtx) => {
-                await this.#readRequiredAgent(txCtx, actingAgentId);
-                const target = await this.#readRequiredAgent(txCtx, input.targetAgentId);
-                await this.#authorize(txCtx, actingAgentId, target, "schedule");
-                const receipt = await this.#readReceipt(
-                    txCtx,
-                    actingAgentId,
-                    SCHEDULE_OPERATION,
-                    operationId,
-                    fingerprint,
-                );
-                if (receipt !== undefined) {
-                    const result = this.#receiptSchedule(receipt);
-                    const current = await this.#readSchedule(txCtx, actingAgentId, result.id);
-                    if (
-                        current === undefined ||
-                        !sameScheduleIdentity(current, result) ||
-                        current.ownerAgentId !== actingAgentId
-                    ) {
-                        throw new Error("Collaboration schedule receipt disagrees with the host.");
-                    }
-                    return this.#change(
-                        SCHEDULE_OPERATION,
-                        actingAgentId,
-                        operationId,
-                        current,
-                        false,
-                        [],
-                    );
-                }
-                const scheduledRaw: unknown = this.#broker.schedule(txCtx, actingAgentId, {
-                    id,
-                    ownerAgentId: actingAgentId,
-                    targetAgentId: input.targetAgentId,
-                    message: input.message,
-                    dueAt: input.dueAt,
-                });
-                const scheduled = await requirePromise(
-                    scheduledRaw,
-                    "Collaboration broker schedule",
-                );
-                assertCollaborationSchedule(scheduled);
-                if (
-                    scheduled.id !== id ||
-                    scheduled.ownerAgentId !== actingAgentId ||
-                    scheduled.targetAgentId !== input.targetAgentId ||
-                    scheduled.message !== input.message ||
-                    scheduled.dueAt !== input.dueAt
-                ) {
-                    throw new Error("Collaboration broker returned a substituted schedule.");
-                }
-                const event = await this.#event(txCtx, {
-                    type: "schedule_created",
-                    actingAgentId,
-                    schedule: scheduled,
-                });
-                await this.#announce(txCtx, event);
-                await this.#writeReceipt(txCtx, {
-                    kind: SCHEDULE_OPERATION,
-                    operationId,
-                    actingAgentId,
-                    fingerprint,
-                    result: scheduled,
-                });
-                return this.#change(
-                    SCHEDULE_OPERATION,
-                    actingAgentId,
-                    operationId,
-                    scheduled,
-                    true,
-                    [event],
-                );
-            },
-        );
-        this.#assertSchedule(change.result);
-        return structuredClone(change.result);
-    }
-
-    async schedule(
-        ctx: Context,
-        actingAgentId: string,
-        input: CollaborationScheduleInput,
-    ): Promise<CollaborationSchedule> {
-        return await this.scheduleMessage(ctx, actingAgentId, input);
-    }
-
     readonly tools = async (
-        ctx: Context,
+        _ctx: Context,
         scope: AgentFeatureScope,
     ): Promise<readonly AnyAgentTool[]> => {
         const tools: AnyAgentTool[] = [
@@ -858,12 +720,6 @@ export class CollaborationFeature implements AgentFeature {
             replyToMessageTool(this, scope.agent.id),
             waitForReplyTool(this, scope.agent.id),
         ];
-        const current = await this.#readAgent(ctx, scope.agent.id);
-        // Scheduled delivery is a root-agent capability. A missing roster row is not enough
-        // evidence that this agent is a root, so fail closed until the host projection exists.
-        if (current?.parentId === null) {
-            tools.push(scheduleMessageTool(this, scope.agent.id));
-        }
         return tools;
     };
 
@@ -1263,11 +1119,6 @@ export class CollaborationFeature implements AgentFeature {
                   readonly actingAgentId: string;
                   readonly obligationId: string;
                   readonly answerMessageId: string;
-              }
-            | {
-                  readonly type: "schedule_created";
-                  readonly actingAgentId: string;
-                  readonly schedule: CollaborationSchedule;
               },
     ): Promise<CollaborationEvent> {
         const eventId = await this.#eventIdFactory(ctx, payload.actingAgentId);
@@ -1787,17 +1638,6 @@ export class CollaborationFeature implements AgentFeature {
         }
     }
 
-    async #readSchedule(
-        ctx: Context,
-        actingAgentId: string,
-        id: string,
-    ): Promise<CollaborationSchedule | undefined> {
-        const raw: unknown = this.#broker.getSchedule(ctx, actingAgentId, id);
-        const value = await requirePromise(raw, "Collaboration broker getSchedule");
-        if (value !== undefined) this.#assertSchedule(value);
-        return value === undefined ? undefined : structuredClone(value);
-    }
-
     /** Render a complete roster page while keeping every returned identity and cursor visible. */
     formatAgentPageForModel(page: CollaborationAgentPage): string {
         assertCollaborationAgentPage(page);
@@ -1947,20 +1787,6 @@ export class CollaborationFeature implements AgentFeature {
         }
     }
 
-    #assertSchedule(value: unknown): asserts value is CollaborationSchedule {
-        this.#assertValue(collaborationScheduleSchema, value, "schedule");
-        const schedule = value as CollaborationSchedule;
-        if (
-            schedule.createdAt > schedule.updatedAt ||
-            (schedule.status === "delivered" && schedule.deliveredAt === undefined) ||
-            (schedule.status !== "delivered" && schedule.deliveredAt !== undefined) ||
-            (schedule.status === "undelivered" && schedule.failure === undefined) ||
-            (schedule.status !== "undelivered" && schedule.failure !== undefined)
-        ) {
-            throw new Error("Collaboration schedule state invariants are invalid.");
-        }
-    }
-
     #assertSendResult(value: unknown): asserts value is CollaborationSendResult {
         this.#assertValue(collaborationSendResultSchema, value, "send result");
         this.#assertMessage((value as CollaborationSendResult).message);
@@ -1974,10 +1800,6 @@ export class CollaborationFeature implements AgentFeature {
         return receipt.result;
     }
 
-    #receiptSchedule(receipt: CollaborationMutationReceipt): CollaborationSchedule {
-        this.#assertSchedule(receipt.result);
-        return receipt.result;
-    }
 }
 
 function validateOptions(options: unknown): CollaborationFeatureOptions {
@@ -2004,8 +1826,6 @@ function validateOptions(options: unknown): CollaborationFeatureOptions {
             "config",
             "send",
             "wait",
-            "schedule",
-            "getSchedule",
         ]),
         ...(source.authorization === undefined
             ? {}
@@ -2152,16 +1972,6 @@ function sameAgentIdentity(left: CollaborationAgent, right: CollaborationAgent):
     );
 }
 
-function sameScheduleIdentity(left: CollaborationSchedule, right: CollaborationSchedule): boolean {
-    return (
-        left.id === right.id &&
-        left.ownerAgentId === right.ownerAgentId &&
-        left.targetAgentId === right.targetAgentId &&
-        left.message === right.message &&
-        left.dueAt === right.dueAt
-    );
-}
-
 function assertKindResult(
     kind: CollaborationMutationKind,
     result: unknown,
@@ -2171,7 +1981,6 @@ function assertKindResult(
         ((kind === SEND_OPERATION || kind === REPLY_OPERATION) &&
             Value.Check(collaborationSendResultSchema, result)) ||
         (kind === WAIT_OPERATION && Value.Check(collaborationObligationSchema, result)) ||
-        (kind === SCHEDULE_OPERATION && Value.Check(collaborationScheduleSchema, result)) ||
         (kind === "status" && Value.Check(collaborationAgentSchema, result));
     if (!valid) {
         throw new Error(`Collaboration transaction returned an invalid ${kind} result.`);

@@ -21,8 +21,6 @@ import {
     collaborationObligationPageQuerySchema,
     collaborationObligationPageSchema,
     collaborationObligationSchema,
-    collaborationScheduleIdSchema,
-    collaborationScheduleSchema,
     collaborationSendResultSchema,
     type CollaborationObligationPage,
 } from "./CollaborationMessage.js";
@@ -47,7 +45,6 @@ export const collaborationAuthorizationActionSchema = Type.Union([
     Type.Literal("send"),
     Type.Literal("reply"),
     Type.Literal("wait"),
-    Type.Literal("schedule"),
 ]);
 
 /**
@@ -108,17 +105,6 @@ export const collaborationBrokerAgentResultSchema = Type.Object(
     { additionalProperties: false },
 );
 
-export const collaborationBrokerScheduleRequestSchema = Type.Object(
-    {
-        id: collaborationScheduleIdSchema,
-        ownerAgentId: collaborationAgentIdSchema,
-        targetAgentId: collaborationAgentIdSchema,
-        message: Type.String({ minLength: 1, maxLength: 50_000 }),
-        dueAt: Type.Integer({ minimum: 0 }),
-    },
-    { additionalProperties: false },
-);
-
 /** Structural Agent Base/host broker capability used by Collaboration. */
 export const collaborationBrokerSchema = Type.Object(
     {
@@ -146,18 +132,6 @@ export const collaborationBrokerSchema = Type.Object(
                 collaborationObligationIdSchema,
             ],
             Type.Promise(collaborationObligationSchema),
-        ),
-        schedule: Type.Function(
-            [
-                collaborationContextSchema,
-                collaborationAgentIdSchema,
-                collaborationBrokerScheduleRequestSchema,
-            ],
-            Type.Promise(collaborationScheduleSchema),
-        ),
-        getSchedule: Type.Function(
-            [collaborationContextSchema, collaborationAgentIdSchema, collaborationScheduleIdSchema],
-            Type.Promise(Type.Union([collaborationScheduleSchema, Type.Undefined()])),
         ),
     },
     { additionalProperties: false },
@@ -191,7 +165,6 @@ export const collaborationMutationKindSchema = Type.Union([
     Type.Literal("send"),
     Type.Literal("reply"),
     Type.Literal("wait"),
-    Type.Literal("schedule"),
     Type.Literal("status"),
 ]);
 
@@ -199,7 +172,6 @@ export const collaborationMutationResultSchema = Type.Union([
     collaborationAgentSchema,
     collaborationSendResultSchema,
     collaborationObligationSchema,
-    collaborationScheduleSchema,
 ]);
 
 /**
@@ -343,14 +315,6 @@ export function assertCollaborationBrokerAgentResult(
 ): asserts value is Static<typeof collaborationBrokerAgentResultSchema> {
     if (!Value.Check(collaborationBrokerAgentResultSchema, value)) {
         throw new Error("Collaboration broker returned an invalid agent result.");
-    }
-}
-
-export function assertCollaborationSchedule(
-    value: unknown,
-): asserts value is Static<typeof collaborationScheduleSchema> {
-    if (!Value.Check(collaborationScheduleSchema, value)) {
-        throw new Error("Collaboration broker returned an invalid schedule.");
     }
 }
 

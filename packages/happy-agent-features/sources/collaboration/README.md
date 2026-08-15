@@ -2,9 +2,9 @@
 
 Lets one agent create, message, and wait on other agents as durable collaborators, so a model can
 delegate work to a team of agents instead of doing everything in one conversation. Collaboration is
-a host capability, not an agent manager: the roster, message store, broker, transaction, timers,
-queues, and receipt retention all belong to the host. The feature only validates input, drives the
-host's transaction boundary, and shapes what the model sees.
+a host capability, not an agent manager: the roster, message store, broker, transaction, and receipt
+retention all belong to the host. The feature only validates input, drives the host's transaction
+boundary, and shapes what the model sees.
 
 ```ts
 import { Agent } from "@slopus/happy-agent-base";
@@ -13,7 +13,7 @@ import { CollaborationFeature } from "@slopus/happy-agent-features";
 const collaboration = new CollaborationFeature({
     roster, // CollaborationRoster: readAgent, writeAgent, listAgents
     store, // CollaborationStore: transaction, afterCommit, message/obligation/receipt CRUD
-    broker, // CollaborationBroker: create, config, send, wait, schedule, getSchedule
+    broker, // CollaborationBroker: create, config, send, wait
     authorization, // optional CollaborationAuthorization: authorize(ctx, acting, target, action)
 });
 const agent = await Agent.create(ctx, { ...options, features: [collaboration] });
@@ -28,12 +28,10 @@ distinguish it.
 ## Tools
 
 The feature exposes `create_agent`, `list_agents`, `send_agent_message`, `reply_to_agent_message`,
-and `wait_for_reply` to every agent. `schedule_message` is added only for a root agent — one whose
-roster row has `parentId: null` — because scheduled delivery is a root-agent capability; a missing
-roster row is not read as evidence of being root, so the tool stays absent until the projection
-exists. Every tool is `durable: true` and answers `shouldReviewInAutoMode: () => false`, so none of
-them go through Auto-mode review; each simply calls the matching method on `CollaborationFeature`
-with the calling agent's own ID as the acting agent.
+and `wait_for_reply` to every agent. Every tool is `durable: true` and answers
+`shouldReviewInAutoMode: () => false`, so none of them go through Auto-mode review; each simply
+calls the matching method on `CollaborationFeature` with the calling agent's own ID as the acting
+agent.
 
 - **`create_agent`** — creates a collaborator with a durable role and roster entry. Parameters mirror
   `CollaborationCreateInput` minus `operationId` and `id`: `config` (an `agentConfig`), and optional
@@ -52,16 +50,13 @@ with the calling agent's own ID as the acting agent.
 - **`wait_for_reply`** — blocks until a collaborator answers one of the caller's own reply
   obligations. Parameter: `obligationId`. The host owns the durable wait and may suspend the tool
   call across a restart; returns the settled `CollaborationObligation`.
-- **`schedule_message`** — schedules a message for a collaborator at a host-owned due time, with no
-  timer or queue owned by the feature. Parameters: `targetAgentId`, `message`, `dueAt` (epoch
-  milliseconds). Returns the created `CollaborationSchedule`.
 
 Every mutating tool (`create_agent`, `send_agent_message`, `reply_to_agent_message`,
-`schedule_message`, and the write side of `wait_for_reply`) is idempotent by construction: the
-feature generates a durable `operationId` (persisted in the calling agent's own `AgentKV` when one
-is attached to the context) and a canonical input fingerprint before ever running the host
-transaction, so a retried tool call with the same input replays the original result instead of
-repeating the effect, while a retry with different input for the same operation is rejected.
+and the write side of `wait_for_reply`) is idempotent by construction: the feature generates a
+durable `operationId` (persisted in the calling agent's own `AgentKV` when one is attached to the
+context) and a canonical input fingerprint before ever running the host transaction, so a retried
+tool call with the same input replays the original result instead of repeating the effect, while a
+retry with different input for the same operation is rejected.
 Authorization for anything not already settled by durable ownership — a self-owned root, or the
 owner of a target's ancestor chain — is delegated to the host's `authorize` callback; a missing
 policy is never treated as a grant.
@@ -89,8 +84,6 @@ into host storage).
 - `waitForReply` / `wait(ctx, actingAgentId, input: CollaborationWaitInput | obligationId):
   Promise<CollaborationObligation>` — `wait` is an alias; both accept either the full input object or
   a bare obligation ID string.
-- `scheduleMessage` / `schedule(ctx, actingAgentId, input: CollaborationScheduleInput):
-  Promise<CollaborationSchedule>` — `schedule` is an alias for `scheduleMessage`.
 - `formatAgentPageForModel(page: CollaborationAgentPage): string` — the same rendering `list_agents`
   uses, exposed so a host can reuse it outside the tool.
 
@@ -100,10 +93,10 @@ and `metadata` in step with the agent's own metadata changes), `beforeAgentLoopT
 agent `"active"`), and `afterAgentSettledTransact` (marks it `"idle"`).
 
 Every mutation that changes durable state emits a `CollaborationEvent` — `agent_created`,
-`agent_status_changed`, `message_sent` (optionally carrying the opened `obligation`),
-`reply_answered`, or `schedule_created` — carrying `eventId`, `at`, and `actingAgentId`. Events reach
-an optional `listener` passed in `CollaborationFeatureOptions`: `onEventTransactional` runs inside
-the host's mutating transaction, and `onEvent` runs after it commits, via the host's `afterCommit`
+`agent_status_changed`, `message_sent` (optionally carrying the opened `obligation`), or
+`reply_answered` — carrying `eventId`, `at`, and `actingAgentId`. Events reach an optional
+`listener` passed in `CollaborationFeatureOptions`: `onEventTransactional` runs inside the host's
+mutating transaction, and `onEvent` runs after it commits, via the host's `afterCommit`
 registration. A throw from `onEvent` is reported to `onPostCommitError` rather than surfacing back
 into the tool call, since the mutation has already committed.
 
@@ -126,17 +119,12 @@ inside the host's own `transaction`:
   `(actingAgentId, operationId)`, holding `kind`, `fingerprint`, and the mutation's `result`. Read
   before every mutating operation runs and written once it commits, so a retried call with a matching
   fingerprint returns the stored result instead of re-executing.
-- **Schedules** (via `broker.schedule`/`broker.getSchedule`) — `CollaborationSchedule` rows
-  (`id`, `ownerAgentId`, `targetAgentId`, `message`, `dueAt`, `status` of `"pending" | "delivered" |
-  "undelivered" | "cancelled"`, timestamps, optional `failure`). Delivery timing, retries, and the
-  actual send are entirely the host broker's responsibility; the feature only records that a
-  schedule was created.
 - **Per-agent call-scoping** — when the context carries an `AgentKV` (`agentKV(ctx)` from
   `@slopus/happy-agent-base`), the feature stores, under keys such as `operation.create`,
-  `operation.send`, `create.agentId`, `send.messageId`, `schedule.id`, an `{ operationId,
-  fingerprint }` record or a generated ID, scoped to the calling agent. This lets a durable operation
-  or tool ID survive a retry even when the caller supplies none; when no `AgentKV` is attached, IDs
-  are simply regenerated by the configured factories on every call.
+  `operation.send`, `create.agentId`, and `send.messageId`, an `{ operationId, fingerprint }`
+  record or a generated ID, scoped to the calling agent. This lets a durable operation or tool ID
+  survive a retry even when the caller supplies none; when no `AgentKV` is attached, IDs are simply
+  regenerated by the configured factories on every call.
 
 Every timestamp is bounded to `COLLABORATION_MAX_TIMESTAMP` (`8_640_000_000_000_000`, the ECMAScript
 date maximum). Metadata objects (agent, message, and protocol) are bounded in depth (8), item and
