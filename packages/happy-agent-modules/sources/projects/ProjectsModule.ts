@@ -1,8 +1,6 @@
 import {
     type AgentModule,
     type AgentModuleScope,
-    type AgentStorageTransaction,
-    type AgentToolCall,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
@@ -68,7 +66,6 @@ import {
     assertProjectRenameResult,
     assertProjectSettingsUpdateResult,
     assertProjectStoreMutationResult,
-    assertProjectTransactionChange,
     createProjectStore,
     projectMigrations,
     projectAuthorizationSchema,
@@ -88,7 +85,6 @@ import {
     type ProjectStoreMutationResult,
     type ProjectStoreRenameInput,
     type ProjectStoreSettingsUpdateInput,
-    type ProjectTransactionChange,
 } from "./ProjectStore.js";
 import {
     archiveProjectTool,
@@ -123,10 +119,6 @@ export const projectPostCommitErrorSchema = Type.Function(
     [projectContextSchema, projectEventSchema, Type.Unknown()],
     Type.Union([Type.Void(), Type.Promise(Type.Void())]),
 );
-const projectTransactionSchema = Type.Unsafe<AgentStorageTransaction>(
-    Type.Function([Type.Unknown(), Type.Unknown()], Type.Promise(Type.Unknown())),
-);
-
 const projectMaxPageSizeSchema = Type.Integer({
     minimum: 1,
     maximum: MAX_PROJECT_PAGE_SIZE,
@@ -138,7 +130,6 @@ const projectMaxOutputSchema = Type.Integer({
 
 export const projectModuleOptionsSchema = Type.Object(
     {
-        transaction: Type.Optional(projectTransactionSchema),
         authorization: Type.Optional(projectAuthorizationSchema),
         idFactory: Type.Optional(projectIdFactorySchema),
         eventIdFactory: Type.Optional(projectEventIdFactorySchema),
@@ -151,14 +142,12 @@ export const projectModuleOptionsSchema = Type.Object(
     { additionalProperties: false },
 );
 
-export type ProjectModuleOptions = Omit<
-    Static<typeof projectModuleOptionsSchema>,
-    "transaction"
-> & {
-    readonly transaction?: AgentStorageTransaction;
-};
+export type ProjectModuleOptions = Static<typeof projectModuleOptionsSchema>;
 
-type ProjectChange = ProjectTransactionChange;
+type ProjectChange = {
+    readonly result: ProjectStoreMutationResult;
+    readonly event?: ProjectEvent;
+};
 
 export class ProjectsModule implements AgentModule {
     readonly name = "projects";
@@ -176,7 +165,7 @@ export class ProjectsModule implements AgentModule {
 
     constructor(options: ProjectModuleOptions) {
         assertProjectModuleOptions(options);
-        this.#store = createProjectStore(options.transaction);
+        this.#store = createProjectStore();
         this.#authorization = options.authorization;
         this.#idFactory =
             options.idFactory ??
@@ -209,14 +198,13 @@ export class ProjectsModule implements AgentModule {
         ctx: Context,
         agentId: string,
         input: ProjectCreateInput,
-        call?: AgentToolCall<typeof projectSchema>,
     ): Promise<Project> {
         this.#assertAgentId(agentId);
         this.#assertInput(projectCreateInputSchema, input, "project creation");
         const normalized = structuredClone(input);
         const projectId = normalized.id ?? (await this.#newIdentity(ctx, agentId));
 
-        const change = await this.#runTransaction(ctx, agentId, async (txCtx) => {
+        const change = await this.#runTransaction(ctx, async (txCtx) => {
             const storeInput: ProjectStoreCreateInput = {
                 id: projectId,
                 ownerAgentId: agentId,
@@ -238,7 +226,6 @@ export class ProjectsModule implements AgentModule {
                     changed: false,
                     project: structuredClone(before),
                 };
-                await call?.commit(txCtx, structuredClone(result.project));
                 return { result };
             }
 
@@ -266,7 +253,6 @@ export class ProjectsModule implements AgentModule {
                   })
                 : undefined;
             if (event !== undefined) await this.#observe(txCtx, event);
-            await call?.commit(txCtx, structuredClone(result.project));
             return { result, ...(event === undefined ? {} : { event }) };
         });
         return structuredClone(requireProjectFromResult(change.result));
@@ -276,14 +262,13 @@ export class ProjectsModule implements AgentModule {
         ctx: Context,
         agentId: string,
         input: ProjectEnsureInput,
-        call?: AgentToolCall<typeof projectEnsureResultSchema>,
     ): Promise<ProjectEnsureResult> {
         this.#assertAgentId(agentId);
         this.#assertInput(projectEnsureInputSchema, input, "project ensure");
         const normalized = structuredClone(input);
         const candidateId = await this.#newIdentity(ctx, agentId);
 
-        const change = await this.#runTransaction(ctx, agentId, async (txCtx) => {
+        const change = await this.#runTransaction(ctx, async (txCtx) => {
             const storeInput: ProjectStoreEnsureInput = {
                 id: candidateId,
                 ownerAgentId: agentId,
@@ -337,7 +322,6 @@ export class ProjectsModule implements AgentModule {
                   })
                 : undefined;
             if (event !== undefined) await this.#observe(txCtx, event);
-            await call?.commit(txCtx, structuredClone(result));
             return { result, ...(event === undefined ? {} : { event }) };
         });
         if (!Value.Check(projectEnsureResultSchema, change.result)) {
@@ -499,26 +483,16 @@ export class ProjectsModule implements AgentModule {
         return await this.#rename(ctx, agentId, input);
     }
 
-    async renameFromTool(
-        ctx: Context,
-        agentId: string,
-        input: ProjectRenameInput,
-        call: AgentToolCall<typeof projectSchema>,
-    ): Promise<Project> {
-        return await this.#rename(ctx, agentId, input, call);
-    }
-
     async #rename(
         ctx: Context,
         agentId: string,
         input: ProjectRenameInput,
-        call?: AgentToolCall<typeof projectSchema>,
     ): Promise<Project> {
         this.#assertAgentId(agentId);
         this.#assertInput(projectRenameInputSchema, input, "project rename");
         const normalized = structuredClone(input);
 
-        const change = await this.#runTransaction(ctx, agentId, async (txCtx) => {
+        const change = await this.#runTransaction(ctx, async (txCtx) => {
             const before = await this.#getRequired(txCtx, agentId, normalized.projectId);
             await this.#authorize(txCtx, agentId, before.ownerAgentId, "rename");
             const storeInput: ProjectStoreRenameInput = {
@@ -553,7 +527,6 @@ export class ProjectsModule implements AgentModule {
                   })
                 : undefined;
             if (event !== undefined) await this.#observe(txCtx, event);
-            await call?.commit(txCtx, structuredClone(result.project));
             return { result, ...(event === undefined ? {} : { event }) };
         });
         return structuredClone(requireProjectFromResult(change.result));
@@ -563,12 +536,11 @@ export class ProjectsModule implements AgentModule {
         ctx: Context,
         agentId: string,
         projectId: string,
-        call?: AgentToolCall<typeof projectSchema>,
     ): Promise<Project> {
         this.#assertAgentId(agentId);
         this.#assertId(projectId);
 
-        const change = await this.#runTransaction(ctx, agentId, async (txCtx) => {
+        const change = await this.#runTransaction(ctx, async (txCtx) => {
             const before = await this.#getRequired(txCtx, agentId, projectId);
             await this.#authorize(txCtx, agentId, before.ownerAgentId, "archive");
             const storeInput: ProjectStoreArchiveInput = { projectId };
@@ -599,7 +571,6 @@ export class ProjectsModule implements AgentModule {
                   })
                 : undefined;
             if (event !== undefined) await this.#observe(txCtx, event);
-            await call?.commit(txCtx, structuredClone(result.project));
             return { result, ...(event === undefined ? {} : { event }) };
         });
         return structuredClone(requireProjectFromResult(change.result));
@@ -632,27 +603,17 @@ export class ProjectsModule implements AgentModule {
         return await this.#updateSettings(ctx, agentId, input);
     }
 
-    async updateSettingsFromTool(
-        ctx: Context,
-        agentId: string,
-        input: ProjectSettingsUpdateInput,
-        call: AgentToolCall<typeof projectSettingsUpdateResultSchema>,
-    ): Promise<ProjectSettingsUpdateResult> {
-        return await this.#updateSettings(ctx, agentId, input, call);
-    }
-
     async #updateSettings(
         ctx: Context,
         agentId: string,
         input: ProjectSettingsUpdateInput,
-        call?: AgentToolCall<typeof projectSettingsUpdateResultSchema>,
     ): Promise<ProjectSettingsUpdateResult> {
         this.#assertAgentId(agentId);
         this.#assertInput(projectSettingsUpdateInputSchema, input, "project settings update");
         assertProjectSettings(input.settings);
         const normalized = structuredClone(input);
 
-        const change = await this.#runTransaction(ctx, agentId, async (txCtx) => {
+        const change = await this.#runTransaction(ctx, async (txCtx) => {
             const beforeProject = await this.#getRequired(txCtx, agentId, normalized.projectId);
             await this.#authorize(txCtx, agentId, beforeProject.ownerAgentId, "settings_update");
             const beforeSettings = await this.#readSettingsInTransaction(
@@ -704,7 +665,6 @@ export class ProjectsModule implements AgentModule {
                   })
                 : undefined;
             if (event !== undefined) await this.#observe(txCtx, event);
-            await call?.commit(txCtx, structuredClone(result));
             return { result, ...(event === undefined ? {} : { event }) };
         });
         if (!Value.Check(projectSettingsUpdateResultSchema, change.result)) {
@@ -851,23 +811,9 @@ export class ProjectsModule implements AgentModule {
 
     async #runTransaction(
         ctx: Context,
-        agentId: string,
         work: (txCtx: Context) => Promise<ProjectChange>,
     ): Promise<ProjectChange> {
-        let expected: ProjectChange | undefined;
-        const raw = await requirePromise(
-            this.#store.transaction(ctx, agentId, async (txCtx) => {
-                const change = await work(txCtx);
-                expected = deepFreeze(structuredClone(change));
-                return structuredClone(expected);
-            }),
-            "Project store transaction",
-        );
-        assertProjectTransactionChange(raw);
-        if (expected === undefined || !sameJson(raw, expected)) {
-            throw new Error("Project transaction returned a substituted change.");
-        }
-        return raw;
+        return await ctx.inTx(async (txCtx) => await work(txCtx));
     }
 
     async #newIdentity(ctx: Context, agentId: string): Promise<string> {

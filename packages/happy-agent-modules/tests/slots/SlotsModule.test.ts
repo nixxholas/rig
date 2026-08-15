@@ -2,7 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import { moduleDatabase } from "../support/moduleDatabase.js";
 import { SlotsModule } from "../../sources/slots/SlotsModule.js";
-import { SLOTS_MIGRATION_KEY, slotsMigrations } from "../../sources/slots/SlotDatabase.js";
+import {
+    SLOTS_IDEMPOTENCY_REMOVAL_MIGRATION_KEY,
+    SLOTS_MIGRATION_KEY,
+    slotsMigrations,
+} from "../../sources/slots/SlotDatabase.js";
 
 describe("SlotsModule", () => {
     const options = () => {
@@ -21,7 +25,10 @@ describe("SlotsModule", () => {
         const database = moduleDatabase(slotsMigrations, "slots-test");
         await database.ready;
         try {
-            expect(slotsMigrations.map(([key]) => key)).toEqual([SLOTS_MIGRATION_KEY]);
+            expect(slotsMigrations.map(([key]) => key)).toEqual([
+                SLOTS_MIGRATION_KEY,
+                SLOTS_IDEMPOTENCY_REMOVAL_MIGRATION_KEY,
+            ]);
             const module = new SlotsModule(options());
             const created = await module.create(database.context, "agent-a", {
                 slot: "status-line",
@@ -68,18 +75,136 @@ describe("SlotsModule", () => {
         }
     });
 
-    it("rejects injected persistence options", () => {
+    it("uses Agent Base transactional tools and the call ID without committing manually", async () => {
+        const database = moduleDatabase(slotsMigrations, "slots-tool-commit-test");
+        await database.ready;
+        const module = new SlotsModule(options());
+        const call = (id: string) =>
+            ({
+                id,
+                providerCallId: `provider-${id}`,
+                kv: {},
+                commit: async () => {
+                    throw new Error("Slots tools must not commit manually.");
+                },
+            }) as never;
+
+        try {
+            const tools = module.tools(database.context, { agent: { id: "agent-a" } } as Parameters<
+                SlotsModule["tools"]
+            >[1]);
+            const execute = (name: string) => {
+                const tool = tools.find((candidate) => candidate.name === name);
+                if (tool?.execute === undefined) throw new Error(`Missing tool ${name}`);
+                expect(tool.transactional).toBe(true);
+                return tool.execute as (
+                    ctx: typeof database.context,
+                    input: never,
+                    call: never,
+                ) => Promise<unknown>;
+            };
+
+            await expect(
+                execute("create_slot")(
+                    database.context,
+                    {
+                        slot: "status-line",
+                        scope: "everywhere",
+                        content: { type: "text", markdown: "ready" },
+                        description: "A status",
+                        purpose: "Show readiness",
+                    } as never,
+                    call("create-call"),
+                ),
+            ).resolves.toEqual({
+                entry: expect.objectContaining({ id: "create-call" }),
+            });
+            await expect(
+                execute("update_slot")(
+                    database.context,
+                    { id: "create-call", purpose: "Show current readiness" } as never,
+                    call("update-call"),
+                ),
+            ).resolves.toEqual({
+                entry: expect.objectContaining({
+                    id: "create-call",
+                    purpose: "Show current readiness",
+                }),
+            });
+            await expect(
+                execute("reorder_slots")(
+                    database.context,
+                    { entryIds: ["create-call"] } as never,
+                    call("reorder-call"),
+                ),
+            ).resolves.toEqual(
+                expect.objectContaining({
+                    entries: [expect.objectContaining({ id: "create-call" })],
+                }),
+            );
+            await expect(
+                execute("remove_slot")(
+                    database.context,
+                    { id: "create-call" } as never,
+                    call("remove-call"),
+                ),
+            ).resolves.toEqual({ removed: true });
+        } finally {
+            database.close();
+        }
+    });
+
+    it("rolls back direct mutations when transactional observation fails", async () => {
+        const database = moduleDatabase(slotsMigrations, "slots-rollback-test");
+        await database.ready;
+        const module = new SlotsModule({
+            ...options(),
+            listener: {
+                onEventTransactional: async () => {
+                    throw new Error("reject mutation");
+                },
+            },
+        });
+
+        try {
+            await expect(
+                module.create(database.context, "agent-a", {
+                    id: "rolled-back-slot",
+                    slot: "status-line",
+                    scope: "everywhere",
+                    content: { type: "text", markdown: "not committed" },
+                    description: "A rejected status",
+                    purpose: "Exercise transaction rollback",
+                }),
+            ).rejects.toThrow("reject mutation");
+            await expect(
+                module.get(database.context, "agent-a", "rolled-back-slot"),
+            ).resolves.toBeUndefined();
+        } finally {
+            database.close();
+        }
+    });
+
+    it("rejects injected transaction and store options", () => {
         expect(
             () =>
                 new SlotsModule({
-                    ...options(),
+                    publisher: async () => undefined,
+                } as never),
+        ).toThrow("options are invalid");
+        expect(
+            () =>
+                new SlotsModule({
+                    scopeResolver: async () => true,
+                    publisher: async () => undefined,
                     transaction: async () => undefined,
                 } as never),
         ).toThrow("options are invalid");
         expect(
             () =>
                 new SlotsModule({
-                    ...options(),
+                    scopeResolver: async () => true,
+                    publisher: async () => undefined,
                     store: {},
                 } as never),
         ).toThrow("options are invalid");

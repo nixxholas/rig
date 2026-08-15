@@ -17,7 +17,7 @@ export function waitTool(scheduling: SchedulingModule, agentId: string) {
         durable: true,
         shouldReviewInAutoMode: () => false,
         execute: async (ctx, input: SchedulingWaitToolInput, call) =>
-            await scheduling.waitFromTool(ctx, agentId, input, call),
+            await scheduling.wait(ctx, agentId, { ...input, id: call.id }),
         toLLM: (result) => [{ type: "text", text: scheduling.formatWaitForModel(result) }],
     });
 }

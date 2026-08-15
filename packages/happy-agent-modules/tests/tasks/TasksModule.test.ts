@@ -4,41 +4,29 @@ import { TasksModule } from "../../sources/tasks/TasksModule.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
 
 describe("TasksModule durable tools", () => {
-    it("uses the tool-call ID and commits each mutation inside its state transaction", async () => {
-        let database!: ReturnType<typeof moduleDatabase>;
-        let transactionDepth = 0;
+    it("uses the tool-call ID and marks each mutation transactional", async () => {
         let eventId = 0;
         const tasks = new TasksModule({
-            transaction: async (ctx, work) => {
-                transactionDepth += 1;
-                try {
-                    return await work(ctx, database.database);
-                } finally {
-                    transactionDepth -= 1;
-                }
-            },
             clock: () => 123,
             eventIdFactory: () => `event-${++eventId}`,
         });
-        database = moduleDatabase(tasks.migrations, "tasks-tool-commit-test");
+        const database = moduleDatabase(tasks.migrations, "tasks-tool-commit-test");
         await database.ready;
 
         try {
-            const commitDepths: number[] = [];
-            const commits: unknown[] = [];
             const call = (id: string) =>
                 ({
                     id,
                     providerCallId: `provider-${id}`,
                     kv: {},
-                    commit: async (_ctx: unknown, result: unknown) => {
-                        commitDepths.push(transactionDepth);
-                        commits.push(result);
-                        return result;
-                    },
                 }) as never;
             const scope = { agent: { id: "agent-a" } } as Parameters<TasksModule["tools"]>[1];
             const [create, , , update, complete] = tasks.tools(database.context, scope);
+            expect([create?.transactional, update?.transactional, complete?.transactional]).toEqual([
+                true,
+                true,
+                true,
+            ]);
 
             const created = await create!.execute(
                 database.context,
@@ -60,12 +48,6 @@ describe("TasksModule durable tools", () => {
                 call("call-complete-1"),
             );
             expect(completed.task.status).toBe("completed");
-            expect(commitDepths).toEqual([1, 1, 1]);
-            expect(commits).toEqual([
-                { task: created.task },
-                { task: updated.task },
-                { task: completed.task },
-            ]);
 
             await expect(
                 create!.execute(
@@ -74,20 +56,17 @@ describe("TasksModule durable tools", () => {
                     call("call-task-1"),
                 ),
             ).rejects.toThrow('Task "call-task-1" already exists.');
-            expect(commits).toHaveLength(3);
         } finally {
             database.close();
         }
     });
 
     it("treats an existing public task ID as a conflict even for identical input", async () => {
-        let database!: ReturnType<typeof moduleDatabase>;
         const tasks = new TasksModule({
-            transaction: async (ctx, work) => await work(ctx, database.database),
             clock: () => 123,
             eventIdFactory: () => "event-1",
         });
-        database = moduleDatabase(tasks.migrations, "tasks-existing-id-test");
+        const database = moduleDatabase(tasks.migrations, "tasks-existing-id-test");
         await database.ready;
 
         try {

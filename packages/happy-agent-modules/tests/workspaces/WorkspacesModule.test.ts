@@ -35,9 +35,7 @@ describe("WorkspacesModule", () => {
         ).toBe(true);
     });
 
-    it("commits durable mutation tools inside one transaction using the call ID", async () => {
-        let database!: ReturnType<typeof moduleDatabase>;
-        let transactionDepth = 0;
+    it("uses transactional database tools and keeps host transfer non-durable", async () => {
         let identityCount = 0;
         let createdWorkspace:
             | {
@@ -52,14 +50,6 @@ describe("WorkspacesModule", () => {
             | undefined;
         const hostOperationIds: string[] = [];
         const workspaces = new WorkspacesModule({
-            transaction: async (ctx, work) => {
-                transactionDepth += 1;
-                try {
-                    return await work(ctx);
-                } finally {
-                    transactionDepth -= 1;
-                }
-            },
             idFactory: () => `workspace-${++identityCount}`,
             eventIdFactory: () => `event-${identityCount}`,
             clock: () => 123,
@@ -79,22 +69,15 @@ describe("WorkspacesModule", () => {
                 },
             },
         });
-        database = moduleDatabase(workspaces.migrations, "workspaces-tool-commit-test");
+        const database = moduleDatabase(workspaces.migrations, "workspaces-tool-commit-test");
         await database.ready;
 
         try {
-            const commitDepths: number[] = [];
-            const commits: unknown[] = [];
             const call = (id: string) =>
                 ({
                     id,
                     providerCallId: `provider-${id}`,
                     kv: {},
-                    commit: async (_ctx: unknown, result: unknown) => {
-                        commitDepths.push(transactionDepth);
-                        commits.push(result);
-                        return result;
-                    },
                 }) as never;
             const scope = {
                 agent: { id: "agent-a" },
@@ -104,26 +87,27 @@ describe("WorkspacesModule", () => {
                 scope,
             );
 
-            createdWorkspace = await create!.execute(
+            const created = await create!.execute(
                 database.context,
                 { name: "Durable workspace", projectRef: "project-a" },
                 call("call-create"),
             );
+            createdWorkspace = created;
             const transferred = await transfer!.execute(
                 database.context,
-                { targetWorkspaceId: createdWorkspace.id },
+                { targetWorkspaceId: created.id },
                 call("call-transfer"),
             );
             const archived = await archive!.execute(
                 database.context,
-                { workspaceId: createdWorkspace.id },
+                { workspaceId: created.id },
                 call("call-archive"),
             );
 
             expect(identityCount).toBe(1);
             expect(hostOperationIds).toEqual(["call-transfer"]);
-            expect(commitDepths).toEqual([1, 1, 1]);
-            expect(commits).toEqual([createdWorkspace, transferred, archived]);
+            expect([create!.transactional, archive!.transactional]).toEqual([true, true]);
+            expect(transfer!.durable).toBe(false);
             expect([list!.durable, get!.durable, branchMetadata!.durable]).toEqual([
                 false,
                 false,
@@ -135,10 +119,13 @@ describe("WorkspacesModule", () => {
     });
 
     it("drops the obsolete replay tables in a forward migration", async () => {
-        const database = moduleDatabase(workspaceMigrations, "workspaces-drop-replay-test");
+        const database = moduleDatabase([], "workspaces-drop-replay-test");
         await database.ready;
 
         try {
+            for (const [, migrate] of workspaceMigrations) {
+                await migrate(database.context, database.database);
+            }
             const rows = await agentDatabaseRows<{ readonly name: string }>(
                 database.database,
                 sql`SELECT name FROM sqlite_master

@@ -1,10 +1,5 @@
 import { sql } from "drizzle-orm";
-import {
-    agentDatabaseRows,
-    type AgentDatabase,
-    type AgentDatabaseFacade,
-    type AgentStorageTransaction,
-} from "@slopus/happy-agent-base";
+import { agentDatabaseRows } from "@slopus/happy-agent-base";
 import { describe, expect, it } from "vitest";
 
 import { GoalModule } from "../../sources/goal/GoalModule.js";
@@ -12,72 +7,54 @@ import { moduleDatabase } from "../support/moduleDatabase.js";
 import { recordingAgents } from "./recordingAgents.js";
 
 function goalTestModule(name: string) {
-    let transactions = 0;
-    let inTransaction = false;
-    const database = moduleDatabase(
-        new GoalModule({
-            transaction: async () => {
-                throw new Error("bootstrap transaction is never called");
-            },
-        }).migrations,
-        name,
-    );
-    const transaction: AgentStorageTransaction = async (ctx, work) => {
-        transactions += 1;
-        inTransaction = true;
-        try {
-            return await work(
-                ctx,
-                database.database as AgentDatabaseFacade<AgentDatabase>,
-            );
-        } finally {
-            inTransaction = false;
-        }
-    };
+    let rejectStatusChange = false;
     const module = new GoalModule({
-        transaction,
+        listener: {
+            onEventTransactional: (_ctx, event) => {
+                if (rejectStatusChange && event.type === "goal_status_changed") {
+                    throw new Error("reject status change");
+                }
+            },
+        },
         idFactory: () => "public-lifecycle",
         eventIdFactory: () => "event-id",
         clock: () => 123,
     });
+    const database = moduleDatabase(module.migrations, name);
     return {
         database,
         module,
-        transactions: () => transactions,
-        inTransaction: () => inTransaction,
+        rejectStatusChanges: () => {
+            rejectStatusChange = true;
+        },
     };
 }
 
 describe("GoalModule", () => {
-    it("keeps only current goal state and performs each public operation in one transaction", async () => {
+    it("uses ctx.db and rolls back a rejected multi-step public mutation", async () => {
         const test = goalTestModule("goal-state-test");
         await test.database.ready;
         const agents = recordingAgents();
         await test.module.beforeStart(test.database.context, agents.ref);
         try {
-            const goal = await test.module.setGoal(
-                test.database.context,
-                "agent-a",
-                "  ship it  ",
-            );
+            const goal = await test.module.setGoal(test.database.context, "agent-a", "  ship it  ");
             expect(goal).toEqual({
                 createdAt: 123,
                 objective: "ship it",
                 status: "active",
                 updatedAt: 123,
             });
-            expect(test.transactions()).toBe(1);
-
-            await test.module.changeGoalStatus(
-                test.database.context,
-                "agent-a",
-                "complete",
+            test.rejectStatusChanges();
+            await expect(
+                test.module.changeGoalStatus(test.database.context, "agent-a", "complete"),
+            ).rejects.toThrow("reject status change");
+            await expect(test.module.goal(test.database.context, "agent-a")).resolves.toMatchObject(
+                { status: "active" },
             );
-            expect(test.transactions()).toBe(2);
+
             await expect(test.module.clearGoal(test.database.context, "agent-a")).resolves.toBe(
                 true,
             );
-            expect(test.transactions()).toBe(3);
 
             const rows = await agentDatabaseRows<{ state_key: string }>(
                 test.database.database,
@@ -89,31 +66,21 @@ describe("GoalModule", () => {
         }
     });
 
-    it("uses call.id for the lifecycle and commits the durable result inside the mutation transaction", async () => {
-        const test = goalTestModule("goal-tool-commit-test");
+    it("uses call.id for lifecycle identity and leaves durable completion to transactional tools", async () => {
+        const test = goalTestModule("goal-transactional-tool-test");
         await test.database.ready;
         const agents = recordingAgents();
         await test.module.beforeStart(test.database.context, agents.ref);
-        let committed = 0;
         try {
-            const result = await test.module.createGoalFromTool(
+            const activation = await test.module.setGoal(
                 test.database.context,
                 "agent-tool",
                 "ship it",
-                {
-                    id: "call-cuid2",
-                    commit: async (_ctx, value) => {
-                        expect(test.inTransaction()).toBe(true);
-                        committed += 1;
-                        return value;
-                    },
-                },
-                async () => undefined,
+                "call-cuid2",
             );
 
-            expect(result.goal.status).toBe("active");
-            expect(committed).toBe(1);
-            expect(test.transactions()).toBe(1);
+            expect(activation.goal.status).toBe("active");
+            expect(activation.lifecycleId).toBe("call-cuid2");
             const rows = await agentDatabaseRows<{ value_json: string }>(
                 test.database.database,
                 sql`SELECT value_json
@@ -123,6 +90,16 @@ describe("GoalModule", () => {
             expect(JSON.parse(rows[0]?.value_json ?? "null")).toMatchObject({
                 id: "call-cuid2",
             });
+
+            const tools = test.module.tools(test.database.context, {
+                agent: { id: "agent-tool" },
+            } as never);
+            expect(tools.map((tool) => [tool.name, tool.durable, tool.transactional])).toEqual([
+                ["create_goal", true, true],
+                ["get_goal", true, true],
+                ["update_goal", true, true],
+                ["clear_goal", true, true],
+            ]);
         } finally {
             test.database.close();
         }

@@ -23,9 +23,11 @@ Pausing, resuming, and clearing a goal are controlled by the user.`,
         ),
         returnType: Type.Object({ goal: sessionGoalSchema }),
         durable: true,
+        transactional: true,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, { status }, call) =>
-            await goals.updateGoalFromTool(ctx, agentId, status, call),
+        execute: async (ctx, { status }) => ({
+            goal: await goals.changeGoalStatus(ctx, agentId, status),
+        }),
         toLLM: ({ goal }) => [
             {
                 type: "text",

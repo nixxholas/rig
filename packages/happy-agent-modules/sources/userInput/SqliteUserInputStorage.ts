@@ -1,14 +1,7 @@
-import { AsyncLocalStorage } from "node:async_hooks";
-
 import {
-    agentDatabase,
     agentDatabaseRows,
     agentDatabaseRun,
-    type AgentDatabase,
-    type AgentDatabaseFacade,
     type AgentModuleMigration,
-    type AgentStorageTransaction,
-    withAgentDatabase,
 } from "@slopus/happy-agent-base";
 import { sql } from "drizzle-orm";
 import { Value } from "@sinclair/typebox/value";
@@ -22,7 +15,7 @@ import {
     type UserInputRequest,
     type UserInputRequestId,
 } from "./UserInputRequest.js";
-import { type UserInputStore, type UserInputTransactionChange } from "./UserInputStore.js";
+import { type UserInputStore } from "./UserInputStore.js";
 
 /** UserInputModule owns these rows and installs them through AgentStorage migrations. */
 export const userInputMigrations: readonly AgentModuleMigration[] = [
@@ -79,25 +72,7 @@ export const userInputMigrations: readonly AgentModuleMigration[] = [
     ],
 ];
 
-export interface SqliteUserInputStorageOptions<Database extends AgentDatabase = AgentDatabase> {
-    /**
-     * Optional for Agent Base hooks, which already carry the active database in their context.
-     * Public calls made without an active database must provide this host transaction.
-     */
-    readonly transaction?: AgentStorageTransaction<Database>;
-}
-
-export function createSqliteUserInputStorage<Database extends AgentDatabase = AgentDatabase>(
-    options: SqliteUserInputStorageOptions<Database>,
-): UserInputStore {
-    const activeTransactions = new AsyncLocalStorage<true>();
-    const dbFor = (ctx: Context): AgentDatabaseFacade<Database> =>
-        (agentDatabase(ctx) ??
-            (() => {
-                throw new Error(
-                    "User input database access requires an AgentStorage transaction context.",
-                );
-            })()) as AgentDatabaseFacade<Database>;
+export function createSqliteUserInputStorage(): UserInputStore {
     const text = (value: unknown): string => JSON.stringify(value);
     const parse = (value: unknown, label: string): unknown => {
         if (typeof value !== "string") throw new Error(`User input ${label} is not JSON text.`);
@@ -117,7 +92,7 @@ export function createSqliteUserInputStorage<Database extends AgentDatabase = Ag
         requestId: UserInputRequestId,
     ): Promise<UserInputRequest | undefined> => {
         const rows = await agentDatabaseRows<RequestRow>(
-            dbFor(ctx),
+            ctx.db,
             sql`SELECT request_json FROM happy_user_input_requests
                 WHERE id = ${requestId} LIMIT 1`,
         );
@@ -125,7 +100,7 @@ export function createSqliteUserInputStorage<Database extends AgentDatabase = Ag
     };
     const writeRequest = async (ctx: Context, request: UserInputRequest): Promise<void> => {
         await agentDatabaseRun(
-            dbFor(ctx),
+            ctx.db,
             sql`INSERT INTO happy_user_input_requests
                 (id, asking_agent_id, status, created_at, updated_at, request_json)
                 VALUES (
@@ -161,7 +136,7 @@ export function createSqliteUserInputStorage<Database extends AgentDatabase = Ag
                   ? sql` AND status = 'pending'`
                   : sql` AND status <> 'pending'`;
         const rows = await agentDatabaseRows<RequestRow>(
-            dbFor(ctx),
+            ctx.db,
             sql`SELECT request_json FROM happy_user_input_requests
                 WHERE 1 = 1${asking}${status}
                 ORDER BY created_at, id
@@ -176,37 +151,10 @@ export function createSqliteUserInputStorage<Database extends AgentDatabase = Ag
             ...(rows.length > limit ? { nextCursor: String(offset + requests.length) } : {}),
         };
     };
-    const inTransaction = async <Result>(
-        ctx: Context,
-        work: (txCtx: Context) => Promise<Result>,
-    ): Promise<Result> => {
-        if (activeTransactions.getStore() === true) return await work(ctx);
-        const transaction = options.transaction;
-        if (transaction === undefined) {
-            throw new Error(
-                "User input database access requires an active Agent Base database or host transaction.",
-            );
-        }
-        return await transaction(ctx, async (txCtx, database) => {
-            const activeCtx = withAgentDatabase(txCtx, database);
-            return await activeTransactions.run(true, async () => await work(activeCtx));
-        });
-    };
-    const readRequestInTransaction = (ctx: Context, requestId: UserInputRequestId) =>
-        inTransaction(ctx, (txCtx) => readRequest(txCtx, requestId));
-    const writeRequestInTransaction = (ctx: Context, request: UserInputRequest) =>
-        inTransaction(ctx, (txCtx) => writeRequest(txCtx, request));
-    const listRequestsInTransaction = (ctx: Context, agentId: string, query: UserInputListQuery) =>
-        inTransaction(ctx, (txCtx) => listRequests(txCtx, agentId, query));
     return {
-        transaction: async (
-            ctx: Context,
-            _agentId: string,
-            work: (txCtx: Context) => Promise<UserInputTransactionChange>,
-        ) => await inTransaction(ctx, work),
-        readRequest: readRequestInTransaction,
-        writeRequest: writeRequestInTransaction,
-        listRequests: listRequestsInTransaction,
+        readRequest,
+        writeRequest,
+        listRequests,
     } as UserInputStore;
 }
 

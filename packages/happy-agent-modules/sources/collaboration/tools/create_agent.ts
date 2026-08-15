@@ -16,9 +16,10 @@ export function createAgentTool(collaboration: CollaborationModule, thisAgentId:
         parameters: collaborationCreateToolInputSchema,
         returnType: collaborationAgentSchema,
         durable: true,
+        transactional: true,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, input: CollaborationCreateToolInput) =>
-            await collaboration.createAgent(ctx, thisAgentId, input),
+        execute: async (ctx, input: CollaborationCreateToolInput, call) =>
+            await collaboration.createAgent(ctx, thisAgentId, { ...input, id: call.id }),
         toLLM: (agent) => [
             {
                 type: "text",

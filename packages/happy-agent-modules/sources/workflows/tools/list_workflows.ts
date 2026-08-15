@@ -15,6 +15,7 @@ export function listWorkflowsTool(module: WorkflowsModule, agentId: string) {
         parameters: workflowPageQuerySchema,
         returnType: workflowPageSchema,
         durable: true,
+        transactional: true,
         shouldReviewInAutoMode: () => false,
         execute: async (ctx, query: WorkflowPageQuery) => await module.list(ctx, agentId, query),
         toLLM: (page) => [

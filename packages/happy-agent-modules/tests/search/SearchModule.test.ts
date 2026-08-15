@@ -132,8 +132,8 @@ describe("SearchModule", () => {
 
         const tools = search.tools(ctx, scope(AGENT_ID));
         expect(tools.map((tool) => tool.name)).toEqual(["web_search", "web_fetch"]);
-        await tools[0]!.execute(ctx, { query: "rig" });
-        await tools[1]!.execute(ctx, { url: "https://example.test/one" });
+        await tools[0]!.execute(ctx, { query: "rig" }, undefined as never);
+        await tools[1]!.execute(ctx, { url: "https://example.test/one" }, undefined as never);
         expect(backend.searchCalls.at(-1)?.agentId).toBe(AGENT_ID);
         expect(backend.fetchCalls.at(-1)?.agentId).toBe(AGENT_ID);
     });

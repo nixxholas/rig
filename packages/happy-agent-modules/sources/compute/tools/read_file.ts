@@ -53,13 +53,14 @@ export function readFileTool(compute: Compute, reads: FileReadLog) {
         }),
         // Reading the same file again reads the same file.
         durable: true,
+        transactional: true,
         describeAutoPermissionAction: ({ path }) =>
             describeComputePathAction(compute, path, "reading"),
         shouldReviewInAutoMode: ({ path }, ctx) =>
             shouldReviewComputePath(compute, path, { write: false }, ctx),
         shouldRunInFullAccessInAutoMode: ({ path }, ctx) =>
             shouldReviewComputePath(compute, path, { write: false }, ctx),
-        execute: async (ctx, { path, offset, limit }, call) => {
+        execute: async (ctx, { path, offset, limit }) => {
             const permissions = computePermissions(agentPermissionMode(ctx));
             const filePath = resolveComputePath(path, compute.cwd, compute.fs.home);
             const stat = await compute.fs.stat(permissions, filePath);
@@ -82,12 +83,8 @@ export function readFileTool(compute: Compute, reads: FileReadLog) {
                 total_lines: lines.length,
                 truncated: bounded.truncated || startLine - 1 + selected.length < lines.length,
             };
-            return await reads.recordAndCommit(
-                ctx,
-                filePath,
-                stat.mtimeMs,
-                async (txCtx) => await call.commit(txCtx, result),
-            );
+            await reads.record(ctx, filePath, stat.mtimeMs);
+            return result;
         },
         toLLM: (result) => [
             {

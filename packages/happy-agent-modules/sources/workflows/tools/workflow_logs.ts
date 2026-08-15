@@ -14,6 +14,7 @@ export function workflowLogsTool(module: WorkflowsModule, agentId: string) {
         parameters: workflowLogQuerySchema,
         returnType: workflowLogPageSchema,
         durable: true,
+        transactional: true,
         shouldReviewInAutoMode: () => false,
         execute: async (ctx, input: WorkflowLogQuery) => await module.logs(ctx, agentId, input),
         toLLM: (page) => [

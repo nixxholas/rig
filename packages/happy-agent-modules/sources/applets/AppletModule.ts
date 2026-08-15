@@ -60,7 +60,6 @@ import {
 } from "./AppletEvent.js";
 import {
     appletCatalogCreateInputSchema,
-    appletCatalogMutationResultSchema,
     appletCatalogOperationSchema,
     appletCatalogRevertInputSchema,
     appletCatalogUpdateInputSchema,
@@ -160,8 +159,6 @@ type AppletChange<Result> = {
     readonly event?: AppletEvent;
 };
 
-type AppletCompletion<Result> = (ctx: Context, applet: Applet) => Promise<Result>;
-
 type AppletOperationKind = AppletCatalogOperation;
 
 const appletOperationSchema = Type.Object(
@@ -184,7 +181,6 @@ type StageRegistration = {
  * it is removed and any target moved aside is restored.
  */
 type StagedImport = {
-    readonly operationId: string;
     readonly stagingPath: string;
     readonly targetPath: string;
     readonly orphanPath?: string;
@@ -291,7 +287,6 @@ export class AppletModule implements AgentModule {
                 version: 1,
                 sourcePath: input.path,
                 ...(input.iconPath === undefined ? {} : { iconPath: input.iconPath }),
-                operationId: operation.operationId,
             });
             let registration: StageRegistration | undefined;
             try {
@@ -455,7 +450,6 @@ export class AppletModule implements AgentModule {
                 version: targetVersion,
                 sourcePath: input.path,
                 ...(input.iconPath === undefined ? {} : { iconPath: input.iconPath }),
-                operationId: operation.operationId,
             });
             let registration: StageRegistration | undefined;
             try {
@@ -509,12 +503,11 @@ export class AppletModule implements AgentModule {
         });
     }
 
-    async revert<Result = Applet>(
+    async revert(
         ctx: Context,
         name: string,
         input: AppletRevertInput,
-        complete?: AppletCompletion<Result>,
-    ): Promise<Result> {
+    ): Promise<Applet> {
         assertName(name);
         assertInput(appletRevertInputSchema, input, "applet revert");
         const operation = await this.#operation(ctx, "revert", input.operationId);
@@ -546,10 +539,7 @@ export class AppletModule implements AgentModule {
                 );
                 await this.#observe(txCtx, event);
             }
-            const result =
-                complete === undefined
-                    ? (structuredClone(mutation.applet) as Result)
-                    : await complete(txCtx, structuredClone(mutation.applet));
+            const result = structuredClone(mutation.applet);
             return event === undefined ? { result } : { result, event };
         });
     }
@@ -784,7 +774,7 @@ export class AppletModule implements AgentModule {
     ): Promise<Result> {
         let expected: AppletChange<Result> | undefined;
         const transactionResult = await requirePromise(
-            this.#catalog.transaction(ctx, async (txCtx) => {
+            ctx.inTx(async (txCtx) => {
                 const callbackResult = work(txCtx);
                 const change = await requirePromise<AppletChange<Result>>(
                     callbackResult,
@@ -793,7 +783,7 @@ export class AppletModule implements AgentModule {
                 expected = deepFreeze(structuredClone(change));
                 return change;
             }),
-            `Applet catalog ${operation} transaction`,
+            `Applet ${operation} transaction`,
         );
         if (expected === undefined || !sameValue(transactionResult, expected)) {
             throw new Error(`Applet ${operation} transaction returned a substituted result.`);
@@ -815,129 +805,6 @@ export class AppletModule implements AgentModule {
         const result = await this.#get(ctx, name);
         if (result === undefined) throw new Error(`Applet "${name}" was not found.`);
         return result;
-    }
-
-    async #readReceipt(
-        ctx: Context,
-        operation: AppletOperation,
-        name: string,
-        input: AppletImportInput | AppletUpdateInput | AppletRevertInput | undefined,
-    ): Promise<AppletCatalogMutationReceipt | undefined> {
-        const raw = await requirePromise(
-            this.#catalog.readReceipt(ctx, operation.operationId),
-            "Applet catalog readReceipt",
-        );
-        const proof = await requirePromise(
-            this.#catalog.readMutationProof(ctx, operation.operationId),
-            "Applet catalog readMutationProof",
-        );
-        if (raw === undefined) {
-            if (proof !== undefined) {
-                throw new Error("Applet catalog has a mutation proof without its receipt.");
-            }
-            return undefined;
-        }
-        assertAppletMutationReceipt(raw);
-        if (proof === undefined) {
-            throw new Error("Applet catalog is missing the immutable mutation proof.");
-        }
-        assertAppletMutationProof(proof);
-        if (
-            raw.operation !== operation.kind ||
-            raw.name !== name ||
-            raw.operationId !== operation.operationId ||
-            raw.fingerprint !== operation.fingerprint
-        ) {
-            throw new Error("Applet operation identity was reused with different input.");
-        }
-        if (!sameValue(raw, proof)) {
-            throw new Error(
-                "Applet replay receipt does not match the immutable mutation proof or authoritative catalog state.",
-            );
-        }
-        const authoritative = await this.#get(ctx, name);
-        this.#assertReplayMutation(raw, operation, name, input, authoritative);
-        return structuredClone(raw);
-    }
-
-    async #writeReceipt(
-        ctx: Context,
-        operation: AppletOperation,
-        name: string,
-        mutation: AppletCatalogMutationResult,
-        before?: Applet,
-    ): Promise<void> {
-        const receipt = {
-            operation: operation.kind,
-            name,
-            operationId: operation.operationId,
-            fingerprint: operation.fingerprint,
-            beforeExists: before !== undefined,
-            beforeCurrentVersion: before?.currentVersion ?? 0,
-            result: structuredClone(mutation),
-        } satisfies AppletCatalogMutationReceipt;
-        if (!Value.Check(appletCatalogMutationReceiptSchema, receipt)) {
-            throw new Error("Applet module created an invalid mutation receipt.");
-        }
-        const expected = deepFreeze(structuredClone(receipt));
-        const returned = await requirePromise(
-            this.#catalog.writeReceipt(ctx, expected),
-            "Applet catalog writeReceipt",
-        );
-        if (returned !== undefined) {
-            throw new Error("Applet catalog writeReceipt must resolve to undefined.");
-        }
-        const retained = await requirePromise(
-            this.#catalog.readReceipt(ctx, expected.operationId),
-            "Applet catalog readReceipt after write",
-        );
-        if (retained === undefined) {
-            throw new Error("Applet catalog writeReceipt did not durably retain the receipt.");
-        }
-        assertAppletMutationReceipt(retained);
-        if (!sameValue(retained, expected)) {
-            throw new Error("Applet catalog writeReceipt returned a mismatched receipt.");
-        }
-    }
-
-    async #writeMutationProof(
-        ctx: Context,
-        operation: AppletOperation,
-        name: string,
-        mutation: AppletCatalogMutationResult,
-        before?: Applet,
-    ): Promise<void> {
-        const proof = {
-            operation: operation.kind,
-            name,
-            operationId: operation.operationId,
-            fingerprint: operation.fingerprint,
-            beforeExists: before !== undefined,
-            beforeCurrentVersion: before?.currentVersion ?? 0,
-            result: structuredClone(mutation),
-        } satisfies AppletCatalogMutationProof;
-        if (!Value.Check(appletCatalogMutationProofSchema, proof)) {
-            throw new Error("Applet module created an invalid mutation proof.");
-        }
-        const expected = deepFreeze(structuredClone(proof));
-        const returned = await requirePromise(
-            this.#catalog.writeMutationProof(ctx, expected),
-            "Applet catalog writeMutationProof",
-        );
-        if (returned !== undefined) {
-            throw new Error("Applet catalog writeMutationProof must resolve to undefined.");
-        }
-        const retained = await requirePromise(
-            this.#catalog.readMutationProof(ctx, expected.operationId),
-            "Applet catalog readMutationProof after write",
-        );
-        if (retained === undefined) {
-            throw new Error("Applet catalog writeMutationProof did not durably retain the proof.");
-        }
-        assertAppletMutationProof(retained);
-        if (!sameValue(retained, expected)) {
-            throw new Error("Applet catalog writeMutationProof returned a mismatched proof.");
-        }
     }
 
     async #catalogCreate(
@@ -1012,7 +879,6 @@ export class AppletModule implements AgentModule {
             readonly version: number;
             readonly sourcePath: string;
             readonly iconPath?: string;
-            readonly operationId: string;
         },
     ): Promise<StagedImport> {
         const bounds = {
@@ -1044,7 +910,6 @@ export class AppletModule implements AgentModule {
                     iconUrl = appletIconUrl(input.name);
                 }
                 return {
-                    operationId: input.operationId,
                     stagingPath,
                     targetPath,
                     ...(orphanPath === undefined ? {} : { orphanPath }),
@@ -1069,7 +934,6 @@ export class AppletModule implements AgentModule {
             await mkdir(stagingPath);
             const copied = await copyAppletTree(input.sourcePath, stagingPath, bounds);
             return {
-                operationId: input.operationId,
                 stagingPath,
                 targetPath,
                 fileCount: copied.fileCount,
@@ -1128,8 +992,7 @@ export class AppletModule implements AgentModule {
     /**
      * Catalog deletion commits before installed files are removed. Registering
      * cleanup on the transaction keeps a rollback from deleting a still-live
-     * applet, while durable replays can retry cleanup if an earlier post-commit
-     * filesystem operation was interrupted.
+     * applet.
      */
     #registerRemoval(ctx: Context, name: string, event?: AppletEvent): void {
         afterCommit(ctx, async (postCommitCtx) => {
@@ -1233,54 +1096,13 @@ export class AppletModule implements AgentModule {
     async #operation(
         ctx: Context,
         kind: AppletOperationKind,
-        key: string,
         requested: string | undefined,
-        requestFingerprint: string,
     ): Promise<AppletOperation> {
-        if (!Value.Check(appletFingerprintSchema, requestFingerprint)) {
-            throw new Error("Applet operation fingerprint is invalid.");
-        }
-        const operationId = await this.#operationId(ctx, key, requested, requestFingerprint);
-        const operation = { kind, operationId, fingerprint: requestFingerprint };
+        const operationId = requested ?? (await this.#newOperationId(ctx));
+        assertOperationId(operationId);
+        const operation = { kind, operationId };
         assertInput(appletOperationSchema, operation, "applet operation");
         return operation;
-    }
-
-    async #operationId(
-        ctx: Context,
-        key: string,
-        requested: string | undefined,
-        requestFingerprint: string,
-    ): Promise<string> {
-        if (requested !== undefined) {
-            assertOperationId(requested);
-            return requested;
-        }
-        const kv = agentKV(ctx);
-        if (kv === undefined) {
-            return await this.#newOperationId(ctx);
-        }
-        return await kv.transaction(ctx, async (scope, txCtx) => {
-            const current = await scope.read(txCtx, key);
-            if (current !== undefined) {
-                if (!Value.Check(appletOperationReceiptSchema, current)) {
-                    throw new Error("Stored applet operation receipt is invalid.");
-                }
-                const receipt = current as AppletOperationReceipt;
-                if (receipt.fingerprint !== requestFingerprint) {
-                    throw new Error(
-                        "The applet operation identity was already used for different input.",
-                    );
-                }
-                return receipt.id;
-            }
-            const operationId = await this.#newOperationId(txCtx);
-            await scope.write(txCtx, key, {
-                id: operationId,
-                fingerprint: requestFingerprint,
-            } satisfies AppletOperationReceipt);
-            return operationId;
-        });
     }
 
     async #newOperationId(ctx: Context): Promise<string> {
@@ -1468,115 +1290,6 @@ export class AppletModule implements AgentModule {
         }
     }
 
-    #assertReplayMutation(
-        receipt: AppletCatalogMutationReceipt,
-        operation: AppletOperation,
-        name: string,
-        input: AppletImportInput | AppletUpdateInput | AppletRevertInput | undefined,
-        authoritative: Applet | undefined,
-    ): void {
-        const mutation = receipt.result;
-        assertAppletMutation(mutation);
-        if (
-            mutation.operation !== operation.kind ||
-            mutation.name !== name ||
-            mutation.operationId !== operation.operationId
-        ) {
-            throw new Error("Applet catalog replay returned a different operation.");
-        }
-        if (
-            (!receipt.beforeExists && receipt.beforeCurrentVersion !== 0) ||
-            (receipt.beforeExists && receipt.beforeCurrentVersion < 1)
-        ) {
-            throw new Error("Applet replay has an invalid before-state marker.");
-        }
-        if (mutation.operation === "remove") {
-            if (
-                mutation.targetVersion !== 0 ||
-                mutation.currentVersion !== 0 ||
-                mutation.applet !== undefined ||
-                mutation.changed !== receipt.beforeExists ||
-                mutation.removed !== receipt.beforeExists ||
-                authoritative !== undefined
-            ) {
-                throw new Error(
-                    "Applet remove replay did not match the authoritative catalog state.",
-                );
-            }
-            return;
-        }
-        const applet = mutation.applet;
-        if (
-            mutation.targetVersion < 1 ||
-            mutation.currentVersion !== applet.currentVersion ||
-            !applet.versions.some((version) => version.version === mutation.targetVersion)
-        ) {
-            throw new Error("Applet replay returned invalid current/target semantics.");
-        }
-        if (authoritative === undefined || !sameValue(applet, authoritative)) {
-            throw new Error("Applet replay did not match the authoritative catalog state.");
-        }
-        if (operation.kind === "create") {
-            const requested = requireImportInput(input);
-            const initial = applet.versions[0];
-            if (!mutation.changed) {
-                throw new Error("Applet create replay has invalid first-version semantics.");
-            }
-            if (
-                receipt.beforeExists ||
-                receipt.beforeCurrentVersion !== 0 ||
-                mutation.targetVersion !== 1 ||
-                mutation.currentVersion !== 1 ||
-                applet.versions.length !== 1 ||
-                initial?.changeDescription !== "Initial import" ||
-                initial.operationId !== operation.operationId ||
-                applet.name !== requested.name ||
-                applet.authorSessionId !== requested.authorSessionId ||
-                applet.description !== requested.description ||
-                applet.purpose !== requested.purpose ||
-                !sameValue(applet.allowedScopes, requested.allowedScopes ?? ["global"]) ||
-                !sameOptionalField(applet, "sourceDescription", requested.sourceDescription)
-            ) {
-                throw new Error("Applet create replay returned a different durable result.");
-            }
-            return;
-        }
-        if (operation.kind === "update") {
-            const requested = requireUpdateInput(input);
-            const appended = applet.versions.find(
-                (version) => version.version === mutation.targetVersion,
-            );
-            if (
-                !receipt.beforeExists ||
-                receipt.beforeCurrentVersion < 1 ||
-                !mutation.changed ||
-                mutation.targetVersion !== applet.versions.length ||
-                mutation.currentVersion !== mutation.targetVersion ||
-                appended === undefined ||
-                appended.operationId !== operation.operationId ||
-                appended.changeDescription !== requested.changeDescription ||
-                applet.description !== (requested.description ?? applet.description) ||
-                applet.purpose !== (requested.purpose ?? applet.purpose) ||
-                !sameValue(applet.allowedScopes, requested.allowedScopes ?? applet.allowedScopes) ||
-                (requested.sourceDescription !== undefined &&
-                    !sameOptionalField(applet, "sourceDescription", requested.sourceDescription))
-            ) {
-                throw new Error("Applet update replay returned a different durable result.");
-            }
-            return;
-        }
-        const requested = requireRevertInput(input);
-        if (
-            !receipt.beforeExists ||
-            receipt.beforeCurrentVersion < 1 ||
-            mutation.targetVersion !== requested.version ||
-            applet.currentVersion !== requested.version ||
-            mutation.changed !== (receipt.beforeCurrentVersion !== requested.version)
-        ) {
-            throw new Error("Applet revert replay returned a different durable result.");
-        }
-    }
-
     #now(): number {
         const at = this.#clock();
         if (!Value.Check(appletTimestampSchema, at)) {
@@ -1633,48 +1346,6 @@ function sameValue(left: unknown, right: unknown): boolean {
     );
 }
 
-function fingerprint(value: unknown): string {
-    const encoded = JSON.stringify(canonicalizeFingerprint(value));
-    if (encoded === undefined || encoded.length === 0 || encoded.length > 16_000) {
-        throw new Error("Applet operation input exceeds the durable receipt bound.");
-    }
-    return encoded;
-}
-
-function normalizeImportInput(input: AppletImportInput): unknown {
-    return {
-        name: input.name,
-        description: input.description,
-        purpose: input.purpose,
-        authorSessionId: input.authorSessionId,
-        path: input.path,
-        ...(input.iconPath === undefined ? {} : { iconPath: input.iconPath }),
-        allowedScopes: input.allowedScopes ?? ["global"],
-        ...(input.sourceDescription === undefined
-            ? {}
-            : { sourceDescription: input.sourceDescription }),
-    };
-}
-
-function normalizeUpdateInput(name: string, input: AppletUpdateInput): unknown {
-    return {
-        name,
-        path: input.path,
-        changeDescription: input.changeDescription,
-        ...(input.allowedScopes === undefined ? {} : { allowedScopes: input.allowedScopes }),
-        ...(input.description === undefined ? {} : { description: input.description }),
-        ...(input.purpose === undefined ? {} : { purpose: input.purpose }),
-        ...(input.sourceDescription === undefined
-            ? {}
-            : { sourceDescription: input.sourceDescription }),
-        ...(input.iconPath === undefined ? {} : { iconPath: input.iconPath }),
-    };
-}
-
-function normalizeRevertInput(name: string, input: AppletRevertInput): unknown {
-    return { name, version: input.version };
-}
-
 function requireImportInput(value: unknown): AppletImportInput {
     assertInput<AppletImportInput>(appletImportInputSchema, value, "applet import");
     return value;
@@ -1687,33 +1358,6 @@ function requireUpdateInput(value: unknown): AppletUpdateInput {
 
 function requireRevertInput(value: unknown): AppletRevertInput {
     assertInput<AppletRevertInput>(appletRevertInputSchema, value, "applet revert");
-    return value;
-}
-
-function mutationApplet(mutation: AppletCatalogMutationResult): Applet {
-    if (mutation.operation === "remove") {
-        throw new Error("Applet mutation does not contain an applet result.");
-    }
-    return mutation.applet;
-}
-
-function mutationRemoved(mutation: AppletCatalogMutationResult): boolean {
-    if (mutation.operation !== "remove") {
-        throw new Error("Applet mutation does not contain a removal result.");
-    }
-    return mutation.removed;
-}
-
-function canonicalizeFingerprint(value: unknown): unknown {
-    if (Array.isArray(value)) return value.map((item) => canonicalizeFingerprint(item));
-    if (value !== null && typeof value === "object") {
-        return Object.fromEntries(
-            Object.entries(value as Record<string, unknown>)
-                .filter(([, item]) => item !== undefined)
-                .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-                .map(([key, item]) => [key, canonicalizeFingerprint(item)]),
-        );
-    }
     return value;
 }
 
@@ -1835,7 +1479,6 @@ export function assertAppletModuleOptions(value: unknown): asserts value is Appl
 }
 
 void appletListPageSchema;
-void appletCatalogMutationResultSchema;
 void appletCatalogUpdateInputSchema;
 void appletCatalogRevertInputSchema;
 void appletAssetSchema;

@@ -14,7 +14,7 @@ that work, so the record and the thing recorded become durable together.
 import { Agent } from "@slopus/happy-agent-base";
 import { HistoryModule } from "@slopus/happy-agent-modules";
 
-const history = new HistoryModule({ transaction });
+const history = new HistoryModule();
 const agent = await Agent.create(ctx, { ...options, modules: [history] });
 ```
 
@@ -33,8 +33,8 @@ failure is then swallowed and the record is dropped.
 The only tool the module exposes. It reads or searches the durable history for the calling agent,
 or for another agent when `target` is given and `resolveTarget` (or self-access) allows it.
 Reading changes nothing and reaches nothing outside the agent's own store, so the tool is
-`durable: true` and `shouldReviewInAutoMode` always returns `false` — there is nothing to review.
-The page read and Agent Base tool-result completion share one transaction.
+`durable: true`, `transactional: true`, and `shouldReviewInAutoMode` always returns `false` —
+there is nothing to review. Agent Base owns the page-read and result transaction.
 
 Arguments:
 

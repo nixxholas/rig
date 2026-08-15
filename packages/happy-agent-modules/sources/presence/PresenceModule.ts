@@ -1,14 +1,13 @@
 import {
-    agentKV,
     type AgentModule,
     type AgentModuleScope,
-    type AgentStorageTransaction,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { afterCommit, type Context } from "@steve.kite/stdlib";
 
+import { createPresenceDatabase, presenceMigrations } from "./PresenceDatabase.js";
 import {
     presenceContextSchema,
     presenceEventSchema,
@@ -30,44 +29,20 @@ import {
     type TemporaryPresenceInput,
 } from "./PresenceState.js";
 import {
-    assertPresenceMutationReceipt,
     assertPresenceScheduleResult,
     assertPresenceStateResult,
-    assertPresenceTransactionChange,
-    presenceFingerprintSchema,
-    presenceOperationIdSchema,
-    type PresenceMutationReceipt,
     type PresenceReader,
     type PresenceScheduleStore,
     type PresenceStore,
-    type PresenceTransactionChange,
 } from "./PresenceStore.js";
-import { createPresenceDatabase, presenceMigrations } from "./PresenceDatabase.js";
 import { getPresenceTool } from "./tools/get_presence.js";
 import { setPresenceTool } from "./tools/set_presence.js";
 
 const scheduleIdSchema = Type.String({ minLength: 1, maxLength: 128 });
 const nonNegativeIntegerSchema = Type.Integer({ minimum: 0 });
 const voidOrPromiseVoidSchema = Type.Union([Type.Void(), Type.Promise(Type.Void())]);
-const presenceMutationKindSchema = Type.Union([
-    Type.Literal("set_presence"),
-    Type.Literal("clear_presence"),
-    Type.Literal("set_schedule"),
-    Type.Literal("clear_schedule"),
-]);
-const presenceMutationOptionsSchema = Type.Object(
+export const presenceModuleOptionsSchema = Type.Object(
     {
-        operationId: Type.Optional(presenceOperationIdSchema),
-    },
-    { additionalProperties: false },
-);
-const presenceTransactionSchema = Type.Unsafe<AgentStorageTransaction>(
-    Type.Function([presenceContextSchema, Type.Unknown()], Type.Promise(Type.Unknown())),
-);
-
-const presenceModuleOptionsSchema = Type.Object(
-    {
-        transaction: Type.Optional(presenceTransactionSchema),
         clock: Type.Optional(Type.Function([], nonNegativeIntegerSchema)),
         listener: Type.Optional(presenceModuleListenerSchema),
         allowModelMutation: Type.Optional(Type.Boolean()),
@@ -82,29 +57,18 @@ const presenceModuleOptionsSchema = Type.Object(
     { additionalProperties: false },
 );
 
-export { presenceModuleOptionsSchema, presenceMutationOptionsSchema };
-export type PresenceModuleOptions = Omit<
-    Static<typeof presenceModuleOptionsSchema>,
-    "transaction"
-> & {
-    readonly transaction?: AgentStorageTransaction;
-};
-export type PresenceMutationOptions = Static<typeof presenceMutationOptionsSchema>;
+export type PresenceModuleOptions = Static<typeof presenceModuleOptionsSchema>;
 
-type PresenceMutationKind = Static<typeof presenceMutationKindSchema>;
-type PresenceMutationOperation = {
-    readonly kind: PresenceMutationKind;
-    readonly operationId: string;
-    readonly fingerprint: string;
+type PresenceChange<Result> = {
+    readonly result: Result;
+    readonly event?: PresenceEvent;
 };
-
-type PresenceChange = PresenceTransactionChange;
 
 /**
  * One shared, host-configured presence capability for every agent in a system.
  *
- * The module owns durable state, receipts, migrations, validation, operation identity, and event
- * semantics. Agent Base supplies the active database and outer transaction context.
+ * Agent Base owns durable tool settlement. Presence owns only its domain state, validation,
+ * transactions, and event semantics; it keeps no operation identities or replay ledger.
  */
 export class PresenceModule implements AgentModule, PresenceReader {
     readonly name = "presence";
@@ -118,7 +82,7 @@ export class PresenceModule implements AgentModule, PresenceReader {
 
     constructor(options: PresenceModuleOptions = {}) {
         const validated = validateOptions(options);
-        this.#store = createPresenceDatabase(validated.transaction);
+        this.#store = createPresenceDatabase();
         this.#clock = validated.clock ?? Date.now;
         this.#listener = validated.listener;
         this.#allowModelMutation = validated.allowModelMutation ?? false;
@@ -128,9 +92,7 @@ export class PresenceModule implements AgentModule, PresenceReader {
 
     /** Read the host-resolved effective presence at the injected clock instant. */
     async read(ctx: Context): Promise<PresenceState | undefined> {
-        const value = await this.#store.transaction(ctx, (txCtx) =>
-            this.#store.read(txCtx, this.#now()),
-        );
+        const value = await this.#store.read(ctx, this.#now());
         if (value !== undefined) assertPresenceState(value);
         return value === undefined ? undefined : cloneValue(value);
     }
@@ -143,249 +105,143 @@ export class PresenceModule implements AgentModule, PresenceReader {
     async setPresence(
         ctx: Context,
         input: PresenceState | PresenceToolInput,
-        options?: PresenceMutationOptions,
     ): Promise<PresenceState> {
-        const validatedOptions = validateMutationOptions(options);
         assertPresenceState(input);
-        const state = normalizePresenceState(input);
-        const operation = await this.#operation(
-            ctx,
-            "set_presence",
-            fingerprintOf(state),
-            validatedOptions?.operationId,
-        );
-        const change = await this.#change(
-            ctx,
-            operation,
-            state,
-            async (txCtx, previous, eventId, at) => {
-                if (previous !== undefined && samePresenceState(previous, state)) {
-                    return {
-                        kind: operation.kind,
-                        operationId: operation.operationId,
-                        result: cloneValue(state),
-                        changed: false,
-                    };
-                }
-                await this.#store.set(txCtx, cloneValue(state));
-                return {
-                    kind: operation.kind,
-                    operationId: operation.operationId,
-                    result: cloneValue(state),
-                    changed: true,
-                    event: {
-                        type: "presence_changed",
-                        eventId,
-                        at,
-                        previous: previous === undefined ? null : cloneValue(previous),
-                        current: cloneValue(state),
-                    },
-                };
-            },
-        );
-        assertPresenceStateResult(change.result);
-        return cloneValue(change.result);
+        const requested = normalizePresenceState(input);
+        const result = await this.#mutate(ctx, async (txCtx, eventId, at) => {
+            const previous = await this.#readConfigured(txCtx);
+            if (previous !== undefined && samePresenceState(previous, requested)) {
+                return { result: cloneValue(requested) };
+            }
+
+            await this.#store.set(txCtx, cloneValue(requested));
+            return {
+                result: cloneValue(requested),
+                event: {
+                    type: "presence_changed",
+                    eventId,
+                    at,
+                    previous: previous === undefined ? null : cloneValue(previous),
+                    current: cloneValue(requested),
+                },
+            };
+        });
+        assertPresenceStateResult(result);
+        return cloneValue(result);
     }
 
-    /** Remove the configured presence, idempotently. */
-    async clear(ctx: Context, options?: PresenceMutationOptions): Promise<boolean> {
-        const validatedOptions = validateMutationOptions(options);
-        const operation = await this.#operation(
-            ctx,
-            "clear_presence",
-            "clear",
-            validatedOptions?.operationId,
-        );
-        const change = await this.#change(
-            ctx,
-            operation,
-            undefined,
-            async (txCtx, previous, eventId, at) => {
-                if (previous === undefined) {
-                    return {
-                        kind: operation.kind,
-                        operationId: operation.operationId,
-                        result: false,
-                        changed: false,
-                    };
-                }
-                await this.#store.clear(txCtx);
-                return {
-                    kind: operation.kind,
-                    operationId: operation.operationId,
-                    result: true,
-                    changed: true,
-                    event: {
-                        type: "presence_cleared",
-                        eventId,
-                        at,
-                        previous: cloneValue(previous),
-                    },
-                };
-            },
-        );
-        if (typeof change.result !== "boolean") {
-            throw new Error("Presence transaction returned an invalid clear result.");
-        }
-        return change.result;
+    /** Remove the configured presence, returning false when there was nothing to clear. */
+    async clear(ctx: Context): Promise<boolean> {
+        const result = await this.#mutate(ctx, async (txCtx, eventId, at) => {
+            const previous = await this.#readConfigured(txCtx);
+            if (previous === undefined) return { result: false };
+
+            await this.#store.clear(txCtx);
+            return {
+                result: true,
+                event: {
+                    type: "presence_cleared",
+                    eventId,
+                    at,
+                    previous: cloneValue(previous),
+                },
+            };
+        });
+        return result;
     }
 
-    /** Set a temporary value; expiration and fallback are interpreted by the host store. */
+    /** Set a temporary value; expiration and fallback are interpreted by the database. */
     async setTemporary(
         ctx: Context,
         input: TemporaryPresenceInput,
-        options?: PresenceMutationOptions,
     ): Promise<PresenceState> {
-        const validatedOptions = validateMutationOptions(options);
         assertTemporaryPresenceInput(input);
-        const state = normalizePresenceState({
-            status: input.status,
-            ...(input.message === undefined ? {} : { message: input.message }),
-            effectiveFrom: input.effectiveFrom ?? this.#now(),
-            expiresAt: input.expiresAt,
-            ...(input.fallback === undefined ? {} : { fallback: input.fallback }),
-        } as PresenceState);
-        return await this.setPresence(ctx, state, validatedOptions);
+        return await this.setPresence(
+            ctx,
+            normalizePresenceState({
+                status: input.status,
+                ...(input.message === undefined ? {} : { message: input.message }),
+                effectiveFrom: input.effectiveFrom ?? this.#now(),
+                expiresAt: input.expiresAt,
+                ...(input.fallback === undefined ? {} : { fallback: input.fallback }),
+            } as PresenceState),
+        );
     }
 
     async listSchedules(ctx: Context): Promise<readonly PresenceSchedule[]> {
         const scheduleStore = this.#scheduleStore();
-        return await this.#store.transaction(ctx, txCtx =>
-            this.#readSchedules(txCtx, scheduleStore, this.#maxSchedules),
-        );
+        return await this.#readSchedules(ctx, scheduleStore, this.#maxSchedules);
     }
 
     async setSchedule(
         ctx: Context,
         input: PresenceScheduleInput,
-        options?: PresenceMutationOptions,
     ): Promise<PresenceSchedule> {
-        const validatedOptions = validateMutationOptions(options);
         assertPresenceScheduleInput(input);
         const scheduleStore = this.#scheduleStore();
-        const schedule = normalizeScheduleInput(input);
-        const operation = await this.#operation(
-            ctx,
-            "set_schedule",
-            fingerprintOf(schedule),
-            validatedOptions?.operationId,
-        );
-        const change = await this.#change(
-            ctx,
-            operation,
-            schedule,
-            async (txCtx, _previous, eventId, at) => {
-                const existing = await scheduleStore.find(txCtx, cloneValue(schedule));
-                if (existing !== undefined) {
-                    assertPresenceSchedule(existing);
-                    assertCanonicalSchedule(existing);
-                    if (!sameSchedule(existing, schedule)) {
-                        throw new Error(
-                            "Presence schedule identity lookup returned a different schedule.",
-                        );
-                    }
-                    return {
-                        kind: operation.kind,
-                        operationId: operation.operationId,
-                        result: cloneValue(existing),
-                        changed: false,
-                    };
-                }
+        const requested = normalizeScheduleInput(input);
+        const result = await this.#mutate(ctx, async (txCtx, eventId, at) => {
+            const existing = await this.#readSchedules(
+                txCtx,
+                scheduleStore,
+                this.#maxSchedules,
+            );
+            const duplicate = existing.find((candidate) => sameSchedule(candidate, requested));
+            if (duplicate !== undefined) {
+                return { result: cloneValue(duplicate) };
+            }
+            if (existing.length >= this.#maxSchedules) {
+                throw new Error("Presence schedule limit reached.");
+            }
 
-                const existingSchedules = await this.#readSchedules(
-                    txCtx,
-                    scheduleStore,
-                    this.#maxSchedules,
-                );
-                const duplicate = existingSchedules.find((candidate) =>
-                    sameSchedule(candidate, schedule),
-                );
-                if (duplicate !== undefined) {
-                    return {
-                        kind: operation.kind,
-                        operationId: operation.operationId,
-                        result: cloneValue(duplicate),
-                        changed: false,
-                    };
-                }
-                if (existingSchedules.length >= this.#maxSchedules) {
-                    throw new Error("Presence schedule limit reached.");
-                }
-                const stored = await scheduleStore.set(
-                    txCtx,
-                    cloneValue(schedule),
-                    globalThis.crypto.randomUUID(),
-                );
-                assertPresenceScheduleResult(stored);
-                assertCanonicalSchedule(stored);
-                if (!sameSchedule(stored, schedule)) {
-                    throw new Error("Presence store returned a different schedule.");
-                }
-                if (existingSchedules.some((candidate) => candidate.id === stored.id)) {
-                    throw new Error("Presence store returned a colliding schedule ID.");
-                }
-                return {
-                    kind: operation.kind,
-                    operationId: operation.operationId,
-                    result: cloneValue(stored),
-                    changed: true,
-                    event: {
-                        type: "presence_schedule_set",
-                        eventId,
-                        at,
-                        schedule: cloneValue(stored),
-                    },
-                };
-            },
-        );
-        assertPresenceScheduleResult(change.result);
-        return cloneValue(change.result);
+            const stored = await scheduleStore.set(
+                txCtx,
+                cloneValue(requested),
+                globalThis.crypto.randomUUID(),
+            );
+            assertPresenceScheduleResult(stored);
+            assertCanonicalSchedule(stored);
+            if (!sameSchedule(stored, requested)) {
+                throw new Error("Presence database returned a different schedule.");
+            }
+            if (existing.some((candidate) => candidate.id === stored.id)) {
+                throw new Error("Presence database returned a colliding schedule ID.");
+            }
+            return {
+                result: cloneValue(stored),
+                event: {
+                    type: "presence_schedule_set",
+                    eventId,
+                    at,
+                    schedule: cloneValue(stored),
+                },
+            };
+        });
+        assertPresenceScheduleResult(result);
+        return cloneValue(result);
     }
 
-    async clearSchedule(
-        ctx: Context,
-        scheduleId: string,
-        options?: PresenceMutationOptions,
-    ): Promise<boolean> {
-        const validatedOptions = validateMutationOptions(options);
+    async clearSchedule(ctx: Context, scheduleId: string): Promise<boolean> {
         if (!Value.Check(scheduleIdSchema, scheduleId)) {
             throw new Error("Presence schedule ID is invalid.");
         }
         const scheduleStore = this.#scheduleStore();
-        const operation = await this.#operation(
-            ctx,
-            "clear_schedule",
-            scheduleId,
-            validatedOptions?.operationId,
-        );
-        const change = await this.#change(
-            ctx,
-            operation,
-            undefined,
-            async (txCtx, _previous, eventId, at) => {
-                const removed = await scheduleStore.clear(txCtx, scheduleId);
-                return {
-                    kind: operation.kind,
-                    operationId: operation.operationId,
-                    result: removed,
-                    changed: removed,
-                    ...(removed
-                        ? {
-                              event: {
-                                  type: "presence_schedule_cleared" as const,
-                                  eventId,
-                                  at,
-                                  scheduleId,
-                              },
-                          }
-                        : {}),
-                };
-            },
-        );
-        if (typeof change.result !== "boolean") {
-            throw new Error("Presence transaction returned an invalid schedule clear result.");
-        }
-        return change.result;
+        return await this.#mutate(ctx, async (txCtx, eventId, at) => {
+            const removed = await scheduleStore.clear(txCtx, scheduleId);
+            return {
+                result: removed,
+                ...(removed
+                    ? {
+                          event: {
+                              type: "presence_schedule_cleared" as const,
+                              eventId,
+                              at,
+                              scheduleId,
+                          },
+                      }
+                    : {}),
+            };
+        });
     }
 
     readonly instructions = async (ctx: Context, _scope: AgentModuleScope): Promise<string> => {
@@ -400,158 +256,35 @@ export class PresenceModule implements AgentModule, PresenceReader {
         return tools;
     };
 
-    async #change(
+    async #mutate<Result>(
         ctx: Context,
-        operation: PresenceMutationOperation,
-        requested: PresenceState | PresenceScheduleInput | undefined,
         decide: (
             txCtx: Context,
-            previous: PresenceState | undefined,
             eventId: string,
             at: number,
-        ) => Promise<PresenceChange>,
-    ): Promise<PresenceChange> {
+        ) => Promise<PresenceChange<Result>>,
+    ): Promise<Result> {
         const eventId = globalThis.crypto.randomUUID();
-        if (!Value.Check(presenceOperationIdSchema, eventId)) {
-            throw new Error("Presence event identity is invalid.");
-        }
         const at = this.#now();
-        let expected: PresenceChange | undefined;
-        const transactionRaw = this.#store.transaction(ctx, async (txCtx) => {
-            const receipt = await this.#readReceipt(txCtx, operation, requested);
-            if (receipt !== undefined) {
-                const replayed: PresenceChange = {
-                    kind: operation.kind,
-                    operationId: operation.operationId,
-                    result: cloneResultForKind(operation.kind, receipt.result),
-                    changed: false,
-                };
-                expected = cloneAndFreezeChange(replayed);
-                return replayed;
-            }
-
-            const previous = await this.#store.readConfigured(txCtx);
-            if (previous !== undefined) assertPresenceState(previous);
-
-            const decided = await decide(
-                txCtx,
-                previous === undefined ? undefined : cloneValue(previous),
-                eventId,
-                at,
-            );
-            assertPresenceTransactionChange(decided);
-            assertExactChange(decided, operation, operation.kind, at);
-
+        return await ctx.inTx(async (txCtx) => {
+            const decided = await decide(txCtx, eventId, at);
             const event =
                 decided.event === undefined ? undefined : cloneAndFreezeEvent(decided.event);
-            const normalized: PresenceChange = {
-                kind: decided.kind,
-                operationId: decided.operationId,
-                result: cloneResultForKind(operation.kind, decided.result),
-                changed: decided.changed,
-                ...(event === undefined ? {} : { event }),
-            };
-            assertExactChange(normalized, operation, operation.kind, at);
-            expected = cloneAndFreezeChange(normalized);
-
             if (event !== undefined) {
                 await invokeVoid(
                     this.#listener?.onEventTransactional?.(txCtx, event),
                     "Presence transactional listener",
                 );
-            }
-            if (event !== undefined) {
                 afterCommit(txCtx, (postCommitCtx) => this.#notifyPostCommit(postCommitCtx, event));
             }
-
-            const receiptToWrite: PresenceMutationReceipt = {
-                kind: operation.kind,
-                operationId: operation.operationId,
-                fingerprint: operation.fingerprint,
-                result: cloneResultForKind(operation.kind, normalized.result),
-            };
-            await this.#store.writeReceipt(txCtx, receiptToWrite);
-            return normalized;
+            return cloneValue(decided.result);
         });
-        const returned = await transactionRaw;
-        assertPresenceTransactionChange(returned);
-        if (expected === undefined) {
-            throw new Error("Presence transaction did not produce a change.");
-        }
-        assertExactChange(returned, operation, operation.kind, at, expected);
-        return returned;
     }
 
-    async #readReceipt(
-        ctx: Context,
-        operation: PresenceMutationOperation,
-        requested: PresenceState | PresenceScheduleInput | undefined,
-    ): Promise<PresenceMutationReceipt | undefined> {
-        const receipt = await this.#store.readReceipt(ctx, operation.operationId);
-        if (receipt === undefined) return undefined;
-        assertPresenceMutationReceipt(receipt);
-        if (
-            receipt.kind !== operation.kind ||
-            receipt.operationId !== operation.operationId ||
-            receipt.fingerprint !== operation.fingerprint
-        ) {
-            throw new Error("Presence mutation operation ID was reused with different input.");
-        }
-        assertReplayResult(operation.kind, receipt.result, requested);
-        return receipt;
-    }
-
-    async #operation(
-        ctx: Context,
-        kind: PresenceMutationKind,
-        fingerprint: string,
-        requested?: string,
-    ): Promise<PresenceMutationOperation> {
-        if (!Value.Check(presenceFingerprintSchema, fingerprint)) {
-            throw new Error("Presence mutation fingerprint is invalid.");
-        }
-        const operationId = await this.#operationId(
-            ctx,
-            `presence.${kind}.operation_id`,
-            requested,
-        );
-        return { kind, operationId, fingerprint };
-    }
-
-    async #operationId(ctx: Context, key: string, requested?: string): Promise<string> {
-        if (requested !== undefined && !Value.Check(presenceOperationIdSchema, requested)) {
-            throw new Error("Presence operation identity is invalid.");
-        }
-        const kv = agentKV(ctx);
-        if (kv === undefined) {
-            const generated = requested ?? globalThis.crypto.randomUUID();
-            if (!Value.Check(presenceOperationIdSchema, generated)) {
-                throw new Error("Presence operation identity is invalid.");
-            }
-            return generated;
-        }
-        const generated = await kv.transaction(ctx, async (scope, txCtx) => {
-            const stored = await scope.read(txCtx, key);
-            if (stored !== undefined) {
-                if (!Value.Check(presenceOperationIdSchema, stored)) {
-                    throw new Error("Stored presence operation identity is invalid.");
-                }
-                if (requested !== undefined && stored !== requested) {
-                    throw new Error("Presence operation identity cannot change during a retry.");
-                }
-                return stored;
-            }
-            const operationId = requested ?? globalThis.crypto.randomUUID();
-            if (!Value.Check(presenceOperationIdSchema, operationId)) {
-                throw new Error("Presence operation identity is invalid.");
-            }
-            await scope.write(txCtx, key, operationId);
-            return operationId;
-        });
-        if (!Value.Check(presenceOperationIdSchema, generated)) {
-            throw new Error("Presence operation identity is invalid.");
-        }
-        return generated;
+    async #readConfigured(ctx: Context): Promise<PresenceState | undefined> {
+        const previous = await this.#store.readConfigured(ctx);
+        if (previous !== undefined) assertPresenceState(previous);
+        return previous === undefined ? undefined : cloneValue(previous);
     }
 
     #scheduleStore(): PresenceScheduleStore {
@@ -565,18 +298,19 @@ export class PresenceModule implements AgentModule, PresenceReader {
     ): Promise<readonly PresenceSchedule[]> {
         const schedules = await scheduleStore.list(ctx, { limit });
         if (!Value.Check(Type.Array(presenceScheduleSchema, { maxItems: 10_000 }), schedules)) {
-            throw new Error("Presence store returned an invalid schedule list.");
+            throw new Error("Presence database returned an invalid schedule list.");
         }
         if (schedules.length > limit) {
-            throw new Error("Presence store returned more schedules than requested.");
+            throw new Error("Presence database returned more schedules than requested.");
         }
+
         const ids = new Set<string>();
         const cloned: PresenceSchedule[] = [];
         for (const schedule of schedules) {
             assertPresenceSchedule(schedule);
             assertCanonicalSchedule(schedule);
             if (ids.has(schedule.id)) {
-                throw new Error("Presence store returned duplicate schedule IDs.");
+                throw new Error("Presence database returned duplicate schedule IDs.");
             }
             ids.add(schedule.id);
             cloned.push(cloneValue(schedule));
@@ -612,21 +346,10 @@ export class PresenceModule implements AgentModule, PresenceReader {
 }
 
 function validateOptions(options: unknown): PresenceModuleOptions {
-    if (typeof options !== "object" || options === null) {
-        throw new Error("Presence module options contain unknown or invalid keys.");
-    }
     if (!Value.Check(presenceModuleOptionsSchema, options)) {
         throw new Error("Presence module options contain unknown or invalid keys.");
     }
     return options as PresenceModuleOptions;
-}
-
-function validateMutationOptions(options: unknown): PresenceMutationOptions | undefined {
-    if (options === undefined) return undefined;
-    if (!Value.Check(presenceMutationOptionsSchema, options)) {
-        throw new Error("Presence mutation options contain unknown or invalid keys.");
-    }
-    return options as PresenceMutationOptions;
 }
 
 function normalizePresenceState(state: PresenceState): PresenceState {
@@ -716,89 +439,15 @@ function formatPresenceInstruction(state: PresenceState): string {
         : `Current user presence: ${label} — ${state.message}.`;
 }
 
-function fingerprintOf(value: PresenceState | PresenceScheduleInput): string {
-    const fingerprint = JSON.stringify(value);
-    if (!Value.Check(presenceFingerprintSchema, fingerprint)) {
-        throw new Error("Presence mutation fingerprint is invalid.");
-    }
-    return fingerprint;
-}
-
-function cloneValue<T>(value: T): T {
-    return structuredClone(value);
-}
-
-function cloneResultForKind(
-    kind: PresenceMutationKind,
-    value: PresenceTransactionChange["result"],
-): PresenceTransactionChange["result"] {
-    switch (kind) {
-        case "set_presence":
-            assertPresenceStateResult(value);
-            return cloneValue(value);
-        case "set_schedule":
-            assertPresenceScheduleResult(value);
-            assertCanonicalSchedule(value);
-            return cloneValue(value);
-        case "clear_presence":
-        case "clear_schedule":
-            if (typeof value !== "boolean") {
-                throw new Error("Presence transaction returned an invalid boolean result.");
-            }
-            return value;
-    }
-}
-
-function assertReplayResult(
-    kind: PresenceMutationKind,
-    result: PresenceMutationReceipt["result"],
-    requested: PresenceState | PresenceScheduleInput | undefined,
-): void {
-    switch (kind) {
-        case "set_presence":
-            assertPresenceStateResult(result);
-            if (requested === undefined || !samePresenceState(result, requested as PresenceState)) {
-                throw new Error(
-                    "Presence mutation receipt returned a different presence state than requested.",
-                );
-            }
-            return;
-        case "set_schedule":
-            assertPresenceScheduleResult(result);
-            assertCanonicalSchedule(result);
-            if (
-                requested === undefined ||
-                !sameSchedule(result, requested as PresenceScheduleInput)
-            ) {
-                throw new Error(
-                    "Presence mutation receipt returned a different schedule than requested.",
-                );
-            }
-            return;
-        case "clear_presence":
-        case "clear_schedule":
-            if (typeof result !== "boolean") {
-                throw new Error("Presence mutation receipt returned an invalid clear result.");
-            }
-            return;
-    }
-}
-
 function cloneAndFreezeEvent(event: PresenceEvent): PresenceEvent {
     if (!Value.Check(presenceEventSchema, event)) {
         throw new Error("Presence module created an invalid event.");
     }
-    const cloned = cloneValue(event);
-    if (!Value.Check(presenceEventSchema, cloned)) {
-        throw new Error("Presence module created an invalid cloned event.");
-    }
-    return deepFreeze(cloned);
+    return deepFreeze(cloneValue(event));
 }
 
-function cloneAndFreezeChange(change: PresenceChange): PresenceChange {
-    const cloned = cloneValue(change);
-    assertPresenceTransactionChange(cloned);
-    return deepFreeze(cloned);
+function cloneValue<T>(value: T): T {
+    return structuredClone(value);
 }
 
 function deepFreeze<T>(value: T): T {
@@ -811,101 +460,12 @@ function deepFreeze<T>(value: T): T {
     return Object.freeze(value);
 }
 
-function assertExactChange(
-    value: PresenceChange,
-    operation: PresenceMutationOperation,
-    kind: PresenceMutationKind,
-    at: number,
-    expected?: PresenceChange,
-): void {
-    assertPresenceTransactionChange(value);
-    if (value.kind !== kind || value.operationId !== operation.operationId) {
-        throw new Error("Presence transaction returned a different operation identity.");
-    }
-    cloneResultForKind(kind, value.result);
-    if (expected !== undefined) {
-        if (value.changed !== expected.changed) {
-            throw new Error("Presence transaction returned a different changed result.");
-        }
-        if (!sameResult(kind, value.result, expected.result)) {
-            throw new Error("Presence transaction returned a different mutation result.");
-        }
-        if (!sameEvent(value.event, expected.event)) {
-            throw new Error("Presence transaction returned a different event.");
-        }
-        return;
-    }
-    if (value.event !== undefined) {
-        if (value.event.at !== at || value.event.eventId.length === 0) {
-            throw new Error("Presence transaction returned an invalid event identity.");
-        }
-        if (!value.changed) {
-            throw new Error("Presence transaction returned an event for an unchanged result.");
-        }
-    } else if (value.changed) {
-        throw new Error("Presence transaction omitted the event for a changed result.");
-    }
-}
-
-function sameResult(
-    kind: PresenceMutationKind,
-    left: PresenceTransactionChange["result"],
-    right: PresenceTransactionChange["result"],
-): boolean {
-    switch (kind) {
-        case "set_presence":
-            return samePresenceState(left as PresenceState, right as PresenceState);
-        case "set_schedule":
-            return sameStoredSchedule(left as PresenceSchedule, right as PresenceSchedule);
-        case "clear_presence":
-        case "clear_schedule":
-            return left === right;
-    }
-}
-
-function sameEvent(left: PresenceEvent | undefined, right: PresenceEvent | undefined): boolean {
-    if (left === undefined || right === undefined) return left === right;
-    if (left.type !== right.type || left.eventId !== right.eventId || left.at !== right.at) {
-        return false;
-    }
-    switch (left.type) {
-        case "presence_changed":
-            return (
-                right.type === "presence_changed" &&
-                samePresenceState(left.current, right.current) &&
-                ((left.previous === null && right.previous === null) ||
-                    (left.previous !== null &&
-                        right.previous !== null &&
-                        samePresenceState(left.previous, right.previous)))
-            );
-        case "presence_cleared":
-            return (
-                right.type === "presence_cleared" &&
-                samePresenceState(left.previous, right.previous)
-            );
-        case "presence_schedule_set":
-            return (
-                right.type === "presence_schedule_set" &&
-                sameStoredSchedule(left.schedule, right.schedule)
-            );
-        case "presence_schedule_cleared":
-            return (
-                right.type === "presence_schedule_cleared" && left.scheduleId === right.scheduleId
-            );
-    }
-}
-
-function sameStoredSchedule(left: PresenceSchedule, right: PresenceSchedule): boolean {
-    return left.id === right.id && sameSchedule(left, right);
-}
-
-async function invokeVoid(value: unknown, operation: string): Promise<void> {
-    if (value === undefined) return;
-    if (!(value instanceof Promise)) {
-        throw new Error(`${operation} must return undefined or Promise<void>.`);
-    }
+async function invokeVoid(
+    value: void | Promise<void> | undefined,
+    label: string,
+): Promise<void> {
     const resolved = await value;
     if (resolved !== undefined) {
-        throw new Error(`${operation} Promise must resolve to undefined.`);
+        throw new Error(`${label} must return undefined.`);
     }
 }

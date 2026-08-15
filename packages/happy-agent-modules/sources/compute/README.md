@@ -50,16 +50,16 @@ must never be echoed back into `edit_file`). `path` may be absolute or relative 
 directory; `offset` (1-based line) and `limit` page through a longer file. Up to 2,000 lines and
 60,000 characters come back at once; a truncated answer says so and tells the model to read on
 with `offset`. The read is recorded in the agent's `FileReadLog` under the file's `mtimeMs`, which
-is what later earns the right to change it. Marked `durable`: reading the same file again reads
-the same file, so a call interrupted mid-turn can simply be retried.
+is what later earns the right to change it. Marked `durable`: the read authorization and tool
+result commit together, so an interrupted call can be retried without leaving half of that state.
 
 ### `write_file`
 
 Creates a file or replaces one whole, creating missing parent directories. An existing file must
 have been read first and must not have changed on disk since (`FileReadLog.assertRead`); a file
 that does not exist yet needs no prior read, since there is nothing to lose. A successful write
-records itself as a read, so a following edit is not refused as stale. `durable`: the same content
-written twice leaves the same file.
+records itself as a read, so a following edit is not refused as stale. Deliberately not durable:
+the filesystem write cannot commit atomically with the tool result.
 
 ### `edit_file`
 
@@ -125,8 +125,8 @@ reaches nothing the command could not already reach inside its own sandbox.
 
 Stops a running command and everything it started, asking first and forcing a moment later.
 Stopping one that already ended is not an error — the answer simply says `stopped: false`.
-`durable`: stopping something already stopped stops nothing. Needs no review, for the same reason
-as `read_command_output`: it only ends work Rig itself started.
+Deliberately not durable: process state cannot commit atomically with the tool result. Needs no
+review, for the same reason as `read_command_output`: it only ends work Rig itself started.
 
 ## Principles
 

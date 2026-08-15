@@ -4,20 +4,9 @@ import { HistoryModule } from "../../sources/history/HistoryModule.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
 
 describe("HistoryModule durability", () => {
-    it("commits a durable read result inside the one history transaction", async () => {
-        let database!: ReturnType<typeof moduleDatabase>;
-        let transactionDepth = 0;
-        const history = new HistoryModule({
-            transaction: async (ctx, work) => {
-                transactionDepth += 1;
-                try {
-                    return await work(ctx, database.database);
-                } finally {
-                    transactionDepth -= 1;
-                }
-            },
-        });
-        database = moduleDatabase(history.migrations, "history-tool-commit-test");
+    it("marks the durable read tool transactional", async () => {
+        const history = new HistoryModule();
+        const database = moduleDatabase(history.migrations, "history-tool-commit-test");
         await database.ready;
 
         try {
@@ -31,20 +20,14 @@ describe("HistoryModule durability", () => {
                 agent: { id: "agent-a" },
             } as Parameters<HistoryModule["tools"]>[1];
             const [tool] = history.tools(database.context, scope);
-            let committed: unknown;
             const result = await tool!.execute(database.context, {}, {
                 id: "call-history-1",
                 providerCallId: "provider-history-1",
                 kv: {},
-                commit: async (_ctx: unknown, value: unknown) => {
-                    expect(transactionDepth).toBe(1);
-                    committed = value;
-                    return value;
-                },
             } as never);
 
             expect(tool!.durable).toBe(true);
-            expect(result).toBe(committed);
+            expect(tool!.transactional).toBe(true);
             expect(result).toMatchObject({
                 matched_messages: 1,
                 returned_messages: 1,
@@ -57,11 +40,8 @@ describe("HistoryModule durability", () => {
     });
 
     it("treats a reused record ID as a conflict instead of a replay no-op", async () => {
-        let database!: ReturnType<typeof moduleDatabase>;
-        const history = new HistoryModule({
-            transaction: async (ctx, work) => await work(ctx, database.database),
-        });
-        database = moduleDatabase(history.migrations, "history-record-conflict-test");
+        const history = new HistoryModule();
+        const database = moduleDatabase(history.migrations, "history-record-conflict-test");
         await database.ready;
 
         try {

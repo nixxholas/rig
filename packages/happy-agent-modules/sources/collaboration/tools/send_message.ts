@@ -16,9 +16,13 @@ export function sendMessageTool(collaboration: CollaborationModule, actingAgentI
         parameters: collaborationSendToolInputSchema,
         returnType: collaborationSendResultSchema,
         durable: true,
+        transactional: true,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, input: CollaborationSendToolInput) =>
-            await collaboration.sendMessage(ctx, actingAgentId, input),
+        execute: async (ctx, input: CollaborationSendToolInput, call) =>
+            await collaboration.sendMessage(ctx, actingAgentId, {
+                ...input,
+                messageId: call.id,
+            }),
         toLLM: ({ message, obligation }) => [
             {
                 type: "text",

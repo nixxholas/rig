@@ -1,8 +1,6 @@
 import {
     type AgentModule,
     type AgentModuleScope,
-    type AgentStorageTransaction,
-    type AgentToolCall,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
@@ -40,6 +38,7 @@ import {
     type SchedulingScheduleInput,
     type SchedulingSchedulePage,
     type SchedulingSchedulePageQuery,
+    type SchedulingScheduleToolInput,
     type SchedulingScheduledMessage,
     type SchedulingWaitInput,
     type SchedulingWaitRecord,
@@ -130,12 +129,8 @@ export const schedulingPostCommitErrorSchema = Type.Function(
     Type.Union([Type.Void(), Type.Promise(Type.Void())]),
 );
 
-const schedulingTransactionSchema = Type.Unsafe<AgentStorageTransaction>(
-    Type.Function([], Type.Any()),
-);
 export const schedulingModuleOptionsSchema = Type.Object(
     {
-        transaction: Type.Optional(schedulingTransactionSchema),
         scheduler: schedulingSchedulerSchema,
         authorization: Type.Optional(schedulingAuthorizationSchema),
         scheduleMessagePolicy: Type.Optional(schedulingMessagePolicySchema),
@@ -170,8 +165,6 @@ export type SchedulingAuthorizationAction = Static<
 export type SchedulingAuthorization = Static<typeof schedulingAuthorizationSchema>;
 export type SchedulingMessagePolicy = Static<typeof schedulingMessagePolicySchema>;
 
-type Complete<Result> = (ctx: Context, result: Result) => Promise<Result>;
-
 export class SchedulingModule implements AgentModule {
     readonly name = "scheduling";
     readonly migrations = schedulingMigrations;
@@ -193,9 +186,7 @@ export class SchedulingModule implements AgentModule {
 
     constructor(options: SchedulingModuleOptions) {
         const validated = validateOptions(options);
-        this.#store = createSqliteSchedulingStorage(
-            validated.transaction === undefined ? {} : { transaction: validated.transaction },
-        );
+        this.#store = createSqliteSchedulingStorage();
         this.#scheduler = validated.scheduler;
         this.#authorization = validated.authorization;
         this.#scheduleMessagePolicy = validated.scheduleMessagePolicy;
@@ -239,22 +230,7 @@ export class SchedulingModule implements AgentModule {
         agentId: string,
         input: SchedulingWaitInput,
     ): Promise<SchedulingWaitResult> {
-        return await this.#wait(ctx, agentId, input, "wait", identity);
-    }
-
-    async waitFromTool(
-        ctx: Context,
-        agentId: string,
-        input: Omit<SchedulingWaitInput, "id">,
-        call: AgentToolCall<typeof schedulingWaitResultSchema>,
-    ): Promise<SchedulingWaitResult> {
-        return await this.#wait(
-            ctx,
-            agentId,
-            { ...input, id: call.id },
-            "wait",
-            async (txCtx, result) => await call.commit(txCtx, result),
-        );
+        return await this.#wait(ctx, agentId, input, "wait");
     }
 
     async waitUntil(
@@ -262,22 +238,7 @@ export class SchedulingModule implements AgentModule {
         agentId: string,
         input: SchedulingWaitUntilInput,
     ): Promise<SchedulingWaitResult> {
-        return await this.#wait(ctx, agentId, input, "wait_until", identity);
-    }
-
-    async waitUntilFromTool(
-        ctx: Context,
-        agentId: string,
-        input: Omit<SchedulingWaitUntilInput, "id">,
-        call: AgentToolCall<typeof schedulingWaitResultSchema>,
-    ): Promise<SchedulingWaitResult> {
-        return await this.#wait(
-            ctx,
-            agentId,
-            { ...input, id: call.id },
-            "wait_until",
-            async (txCtx, result) => await call.commit(txCtx, result),
-        );
+        return await this.#wait(ctx, agentId, input, "wait_until");
     }
 
     async schedule(
@@ -285,21 +246,7 @@ export class SchedulingModule implements AgentModule {
         agentId: string,
         input: SchedulingScheduleInput,
     ): Promise<SchedulingScheduledMessage> {
-        return await this.#schedule(ctx, agentId, input, identity);
-    }
-
-    async scheduleFromTool(
-        ctx: Context,
-        agentId: string,
-        input: Omit<SchedulingScheduleInput, "id" | "targetAgentId">,
-        call: AgentToolCall<typeof schedulingScheduledMessageSchema>,
-    ): Promise<SchedulingScheduledMessage> {
-        return await this.#schedule(
-            ctx,
-            agentId,
-            { ...input, id: call.id, targetAgentId: agentId } as SchedulingScheduleInput,
-            async (txCtx, result) => await call.commit(txCtx, result),
-        );
+        return await this.#schedule(ctx, agentId, input);
     }
 
     async cancelSchedule(
@@ -308,21 +255,7 @@ export class SchedulingModule implements AgentModule {
         input: SchedulingCancelInput | string,
     ): Promise<SchedulingScheduledMessage> {
         const normalized = typeof input === "string" ? { scheduleId: input } : input;
-        return await this.#cancelSchedule(ctx, agentId, normalized, identity);
-    }
-
-    async cancelScheduleFromTool(
-        ctx: Context,
-        agentId: string,
-        input: SchedulingCancelInput,
-        call: AgentToolCall<typeof schedulingScheduledMessageSchema>,
-    ): Promise<SchedulingScheduledMessage> {
-        return await this.#cancelSchedule(
-            ctx,
-            agentId,
-            input,
-            async (txCtx, result) => await call.commit(txCtx, result),
-        );
+        return await this.#cancelSchedule(ctx, agentId, normalized);
     }
 
     async listSchedulePage(
@@ -330,21 +263,7 @@ export class SchedulingModule implements AgentModule {
         agentId: string,
         query: SchedulingSchedulePageQuery = {},
     ): Promise<SchedulingSchedulePage> {
-        return await this.#listSchedulePage(ctx, agentId, query, identity);
-    }
-
-    async listSchedulePageFromTool(
-        ctx: Context,
-        agentId: string,
-        query: SchedulingSchedulePageQuery,
-        call: AgentToolCall<typeof schedulingSchedulePageSchema>,
-    ): Promise<SchedulingSchedulePage> {
-        return await this.#listSchedulePage(
-            ctx,
-            agentId,
-            query,
-            async (txCtx, result) => await call.commit(txCtx, result),
-        );
+        return await this.#listSchedulePage(ctx, agentId, query);
     }
 
     async listSchedule(
@@ -362,7 +281,7 @@ export class SchedulingModule implements AgentModule {
     ): Promise<SchedulingScheduledMessage | undefined> {
         this.#assertAgentId(agentId, "acting agent");
         this.#assertId(scheduleId, "schedule");
-        return await this.#store.transaction(ctx, async (txCtx) => {
+        return await ctx.inTx(async (txCtx) => {
             const schedule = await this.#readSchedule(txCtx, agentId, scheduleId);
             if (schedule === undefined) return undefined;
             await this.#authorize(txCtx, agentId, schedule.senderAgentId, "read");
@@ -403,7 +322,7 @@ export class SchedulingModule implements AgentModule {
     ): Promise<SchedulingScheduledMessage> {
         this.#assertAgentId(agentId, "acting agent");
         this.#assertInput(schedulingDeliveryOutcomeInputSchema, input, "delivery outcome");
-        return await this.#store.transaction(ctx, async (txCtx) => {
+        return await ctx.inTx(async (txCtx) => {
             const before = await this.#readRequiredSchedule(txCtx, agentId, input.scheduleId);
             await this.#authorize(txCtx, agentId, before.senderAgentId, "delivery");
             if (before.status !== "pending") return structuredClone(before);
@@ -499,7 +418,6 @@ export class SchedulingModule implements AgentModule {
         ctx: Context,
         agentId: string,
         input: SchedulingScheduleInput,
-        complete: Complete<SchedulingScheduledMessage>,
     ): Promise<SchedulingScheduledMessage> {
         this.#assertAgentId(agentId, "acting agent");
         this.#assertInput(schedulingScheduleInputSchema, input, "schedule message");
@@ -510,9 +428,12 @@ export class SchedulingModule implements AgentModule {
         const targetAgentId = input.targetAgentId ?? agentId;
         this.#assertAgentId(targetAgentId, "target agent");
         await this.#authorize(ctx, agentId, targetAgentId, "schedule");
-        return await this.#store.transaction(ctx, async (txCtx) => {
+        return await ctx.inTx(async (txCtx) => {
             const id = input.id ?? (await this.#newIdentity(txCtx, agentId));
             this.#assertId(id, "schedule");
+            if ((await this.#readSchedule(txCtx, agentId, id)) !== undefined) {
+                throw new Error(`Scheduled message "${id}" already exists.`);
+            }
             const dueAt = this.#dueAtFromSchedule(this.#now(txCtx, agentId), input);
             const raw = await this.#scheduler.schedule(txCtx, agentId, {
                 id,
@@ -540,7 +461,7 @@ export class SchedulingModule implements AgentModule {
                 schedule: raw,
             });
             await this.#announce(txCtx, event);
-            return await complete(txCtx, structuredClone(raw));
+            return structuredClone(raw);
         });
     }
 
@@ -548,15 +469,14 @@ export class SchedulingModule implements AgentModule {
         ctx: Context,
         agentId: string,
         input: SchedulingCancelInput,
-        complete: Complete<SchedulingScheduledMessage>,
     ): Promise<SchedulingScheduledMessage> {
         this.#assertAgentId(agentId, "acting agent");
         this.#assertInput(schedulingCancelInputSchema, input, "schedule cancellation");
-        return await this.#store.transaction(ctx, async (txCtx) => {
+        return await ctx.inTx(async (txCtx) => {
             const before = await this.#readRequiredSchedule(txCtx, agentId, input.scheduleId);
             await this.#authorize(txCtx, agentId, before.senderAgentId, "cancel");
             if (before.status !== "pending") {
-                return await complete(txCtx, structuredClone(before));
+                return structuredClone(before);
             }
             const raw = await this.#scheduler.cancel(txCtx, agentId, input);
             assertSchedulingScheduledMessage(raw);
@@ -568,7 +488,7 @@ export class SchedulingModule implements AgentModule {
                 schedule: raw,
             });
             await this.#announce(txCtx, event);
-            return await complete(txCtx, structuredClone(raw));
+            return structuredClone(raw);
         });
     }
 
@@ -576,7 +496,6 @@ export class SchedulingModule implements AgentModule {
         ctx: Context,
         agentId: string,
         query: SchedulingSchedulePageQuery,
-        complete: Complete<SchedulingSchedulePage>,
     ): Promise<SchedulingSchedulePage> {
         this.#assertAgentId(agentId, "acting agent");
         this.#assertInput(schedulingSchedulePageQuerySchema, query, "schedule page query");
@@ -586,7 +505,7 @@ export class SchedulingModule implements AgentModule {
         }
         const senderAgentId = query.senderAgentId ?? agentId;
         await this.#authorize(ctx, agentId, senderAgentId, "list");
-        return await this.#store.transaction(ctx, async (txCtx) => {
+        return await ctx.inTx(async (txCtx) => {
             const page = await this.#store.listSchedules(txCtx, agentId, {
                 ...query,
                 limit,
@@ -602,10 +521,7 @@ export class SchedulingModule implements AgentModule {
                     throw new Error("Scheduling page returned a message outside the sender filter.");
                 }
             }
-            return await complete(
-                txCtx,
-                structuredClone(this.#fitSchedulePage(page, query.cursor)),
-            );
+            return structuredClone(this.#fitSchedulePage(page, query.cursor));
         });
     }
 
@@ -614,7 +530,6 @@ export class SchedulingModule implements AgentModule {
         agentId: string,
         input: SchedulingWaitInput | SchedulingWaitUntilInput,
         kind: "wait" | "wait_until",
-        complete: Complete<SchedulingWaitResult>,
     ): Promise<SchedulingWaitResult> {
         this.#assertAgentId(agentId, "acting agent");
         this.#assertInput(
@@ -624,7 +539,7 @@ export class SchedulingModule implements AgentModule {
         );
         const id = input.id ?? (await this.#newIdentity(ctx, agentId));
         this.#assertId(id, "wait");
-        const claimed = await this.#store.transaction(ctx, async (txCtx) => {
+        const claimed = await ctx.inTx(async (txCtx) => {
             const existing = await this.#readWait(txCtx, agentId, id);
             if (existing !== undefined) {
                 if (existing.kind !== kind) {
@@ -632,7 +547,7 @@ export class SchedulingModule implements AgentModule {
                 }
                 return existing.status === "waiting"
                     ? structuredClone(existing)
-                    : await complete(txCtx, resultFromWait(existing));
+                    : resultFromWait(existing);
             }
             const startedAt = this.#now(txCtx, agentId);
             const dueAt =
@@ -666,10 +581,10 @@ export class SchedulingModule implements AgentModule {
         assertSchedulingWaitRecord(claimed);
         const settlement = await this.#scheduler.wait(ctx, agentId, id);
         assertSchedulingSettlement(settlement);
-        return await this.#store.transaction(ctx, async (txCtx) => {
+        return await ctx.inTx(async (txCtx) => {
             const before = await this.#readRequiredWait(txCtx, agentId, id);
             if (before.status !== "waiting") {
-                return await complete(txCtx, resultFromWait(before));
+                return resultFromWait(before);
             }
             const terminal = terminalWaitFromSettlement(
                 before,
@@ -685,7 +600,7 @@ export class SchedulingModule implements AgentModule {
                 result,
             });
             await this.#announce(txCtx, event);
-            return await complete(txCtx, result);
+            return result;
         });
     }
 
@@ -1183,10 +1098,6 @@ function methodView(value: unknown, keys: readonly string[]): unknown {
     if (prototype === Object.prototype || prototype === null) return value;
     const source = value as Record<string, unknown>;
     return Object.fromEntries(keys.map((key) => [key, source[key]]));
-}
-
-async function identity<Result>(_ctx: Context, result: Result): Promise<Result> {
-    return result;
 }
 
 function resultFromWait(wait: SchedulingWaitRecord): SchedulingWaitResult {

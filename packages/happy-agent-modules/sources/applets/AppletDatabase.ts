@@ -1,15 +1,10 @@
 import { sql } from "drizzle-orm";
 import {
-    agentKV,
-    agentDatabase,
     agentDatabaseRows,
     agentDatabaseRun,
-    withAgentDatabase,
-    type AgentDatabase,
-    type AgentDatabaseFacade,
 } from "@slopus/happy-agent-base";
 import { Value } from "@sinclair/typebox/value";
-import { withAfterCommit, type Context } from "@steve.kite/stdlib";
+import type { Context } from "@steve.kite/stdlib";
 
 import {
     appletCatalogCreateInputSchema,
@@ -38,12 +33,7 @@ export const APPLETS_MIGRATION_KEY = "001-applets-catalog";
 export const APPLETS_REMOVE_IDEMPOTENCY_MIGRATION_KEY = "002-remove-applet-idempotency";
 
 type JsonRow = { readonly value_json: string };
-type DatabaseRoot = AgentDatabase & {
-    transaction: <Result>(
-        work: (database: AgentDatabaseFacade<AgentDatabase>) => Promise<Result>,
-    ) => Promise<Result>;
-};
-export type AppletDatabase = Omit<AppletCatalog, "afterCommit" | "onRollback">;
+export type AppletDatabase = AppletCatalog;
 
 /**
  * The applet database is a thin SQL view owned by the applet module. It keeps
@@ -51,44 +41,13 @@ export type AppletDatabase = Omit<AppletCatalog, "afterCommit" | "onRollback">;
  * module tables.
  */
 export function createAppletDatabase(): AppletDatabase {
-    const databaseFor = (ctx: Context): AgentDatabase => {
-        const database = agentDatabase(ctx);
-        if (database === undefined) {
-            throw new Error("Applets module requires an Agent Base database context.");
-        }
-        return database;
-    };
-    const transaction = async <Result>(
-        ctx: Context,
-        work: (ctx: Context) => Promise<Result>,
-    ): Promise<Result> => {
-        const kv = agentKV(ctx);
-        if (kv !== undefined) {
-            return await kv.transaction(ctx, async (_scope, txCtx) => await work(txCtx));
-        }
-        const root = databaseFor(ctx) as DatabaseRoot;
-        if (typeof root.transaction !== "function") {
-            return await work(ctx);
-        }
-        let drain: (() => Promise<void>) | undefined;
-        const result = await root.transaction(async (database) => {
-            const [commitCtx, runAfterCommit] = withAfterCommit(ctx);
-            drain = runAfterCommit;
-            return await work(withAgentDatabase(commitCtx, database));
-        });
-        await drain?.();
-        return result;
-    };
-
     const read = async <Value>(
         ctx: Context,
         query: ReturnType<typeof sql>,
         label: string,
         validate: (value: unknown) => asserts value is Value,
     ): Promise<Value | undefined> => {
-        const row = (
-            await agentDatabaseRows<JsonRow>(databaseFor(ctx), query)
-        )[0];
+        const row = (await agentDatabaseRows<JsonRow>(ctx.db, query))[0];
         if (row === undefined) return undefined;
         let parsed: unknown;
         try {
@@ -112,7 +71,6 @@ export function createAppletDatabase(): AppletDatabase {
         );
 
     return {
-        transaction,
         list: async (ctx, query) => {
             if (!ValueCheck(appletListQuerySchema, query)) {
                 throw new Error("Applet list query is invalid.");
@@ -128,7 +86,7 @@ export function createAppletDatabase(): AppletDatabase {
                 throw new Error("Applet list cursor is invalid.");
             }
             const rows = await agentDatabaseRows<JsonRow>(
-                databaseFor(ctx),
+                ctx.db,
                 sql`SELECT applet_json AS value_json
                     FROM ${sql.raw(APPLET_TABLE)}
                     ORDER BY name
@@ -186,7 +144,7 @@ export function createAppletDatabase(): AppletDatabase {
             };
             assertApplet(applet);
             await agentDatabaseRun(
-                databaseFor(ctx),
+                ctx.db,
                 sql`INSERT INTO ${sql.raw(APPLET_TABLE)} (name, applet_json)
                     VALUES (${applet.name}, ${JSON.stringify(applet)})`,
             );
@@ -241,7 +199,7 @@ export function createAppletDatabase(): AppletDatabase {
             };
             assertApplet(applet);
             await agentDatabaseRun(
-                databaseFor(ctx),
+                ctx.db,
                 sql`UPDATE ${sql.raw(APPLET_TABLE)}
                     SET applet_json = ${JSON.stringify(applet)}
                     WHERE name = ${name}`,
@@ -279,7 +237,7 @@ export function createAppletDatabase(): AppletDatabase {
             assertApplet(applet);
             if (changed) {
                 await agentDatabaseRun(
-                    databaseFor(ctx),
+                    ctx.db,
                     sql`UPDATE ${sql.raw(APPLET_TABLE)}
                         SET applet_json = ${JSON.stringify(applet)}
                         WHERE name = ${name}`,
@@ -304,7 +262,7 @@ export function createAppletDatabase(): AppletDatabase {
             const existing = await get(ctx, name);
             if (existing !== undefined) {
                 await agentDatabaseRun(
-                    databaseFor(ctx),
+                    ctx.db,
                     sql`DELETE FROM ${sql.raw(APPLET_TABLE)} WHERE name = ${name}`,
                 );
             }
@@ -316,7 +274,6 @@ export function createAppletDatabase(): AppletDatabase {
                 currentVersion: 0,
                 changed: existing !== undefined,
                 removed: existing !== undefined,
-                ...(existing === undefined ? {} : { applet: existing }),
             };
             assertAppletMutation(result);
             return result;

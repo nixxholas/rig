@@ -4,7 +4,7 @@ import { defineAgentTool } from "@slopus/happy-agent-base";
 import {
     slotContentSchema,
     slotDescriptionSchema,
-    slotEntrySchema,
+    slotEntryResultSchema,
     slotIdSchema,
     slotNameSchema,
     slotPurposeSchema,
@@ -23,11 +23,6 @@ const updateSlotToolInputSchema = Type.Object(
     { additionalProperties: false, minProperties: 2 },
 );
 
-const updateSlotToolResultSchema = Type.Object(
-    { entry: slotEntrySchema },
-    { additionalProperties: false },
-);
-
 /** Update mutable entry fields while keeping its scope and author fixed. */
 export function updateSlotTool(slots: SlotsModule, agentId: string) {
     return defineAgentTool({
@@ -35,8 +30,9 @@ export function updateSlotTool(slots: SlotsModule, agentId: string) {
         description:
             "Update a persistent slot entry's slot, content, description, or purpose. Its scope, target, and author are fixed after creation.",
         parameters: updateSlotToolInputSchema,
-        returnType: updateSlotToolResultSchema,
+        returnType: slotEntryResultSchema,
         durable: true,
+        transactional: true,
         shouldReviewInAutoMode: () => false,
         execute: async (ctx, input: { id: string } & SlotUpdateInput) => ({
             entry: await slots.update(ctx, agentId, input.id, withoutId(input)),

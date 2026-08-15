@@ -12,6 +12,7 @@ export function setPresenceTool(presence: PresenceModule) {
         parameters: presenceToolInputSchema,
         returnType: Type.Object({ presence: presenceStateSchema }, { additionalProperties: false }),
         durable: true,
+        transactional: true,
         shouldReviewInAutoMode: () => false,
         execute: async (ctx, input) => ({
             presence: await presence.setPresence(ctx, input),

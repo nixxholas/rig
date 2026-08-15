@@ -1,10 +1,8 @@
 import { sql } from "drizzle-orm";
 import {
-    agentDatabase,
     agentDatabaseRows,
     agentDatabaseRun,
     type AgentDatabase,
-    type AgentStorageTransaction,
 } from "@slopus/happy-agent-base";
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
@@ -19,7 +17,7 @@ import {
     projectSettingsSchema,
     type Project,
 } from "./Project.js";
-import { projectContextSchema, projectEventSchema } from "./ProjectEvent.js";
+import { projectContextSchema } from "./ProjectEvent.js";
 import {
     projectPageQuerySchema,
     projectPageSchema,
@@ -134,18 +132,6 @@ export const projectStoreMutationResultSchema = Type.Union([
     projectSettingsUpdateResultSchema,
 ]);
 
-export const projectTransactionChangeSchema = Type.Object(
-    {
-        result: projectStoreMutationResultSchema,
-        event: Type.Optional(projectEventSchema),
-    },
-    { additionalProperties: false },
-);
-
-const projectTransactionWorkSchema = Type.Function(
-    [projectContextSchema],
-    Type.Promise(projectTransactionChangeSchema),
-);
 export const projectAuthorizationActionSchema = Type.Union([
     Type.Literal("list"),
     Type.Literal("get"),
@@ -174,10 +160,6 @@ export const projectAuthorizationSchema = Type.Function(
  */
 export const projectStoreSchema = Type.Object(
     {
-        transaction: Type.Function(
-            [projectContextSchema, projectAgentIdSchema, projectTransactionWorkSchema],
-            Type.Promise(projectTransactionChangeSchema),
-        ),
         create: Type.Function(
             [projectContextSchema, projectAgentIdSchema, projectStoreCreateInputSchema],
             Type.Promise(projectCreateResultSchema),
@@ -230,7 +212,6 @@ export type ProjectRenameResult = Static<typeof projectRenameResultSchema>;
 export type ProjectArchiveResult = Static<typeof projectArchiveResultSchema>;
 export type ProjectSettingsUpdateResult = Static<typeof projectSettingsUpdateResultSchema>;
 export type ProjectStoreMutationResult = Static<typeof projectStoreMutationResultSchema>;
-export type ProjectTransactionChange = Static<typeof projectTransactionChangeSchema>;
 export type ProjectAuthorizationAction = Static<typeof projectAuthorizationActionSchema>;
 export type ProjectAuthorization = Static<typeof projectAuthorizationSchema>;
 
@@ -291,14 +272,6 @@ export function assertProjectStoreMutationResult(
 ): asserts value is ProjectStoreMutationResult {
     if (!Value.Check(projectStoreMutationResultSchema, value)) {
         throw new Error("Project store returned an invalid mutation result.");
-    }
-}
-
-export function assertProjectTransactionChange(
-    value: unknown,
-): asserts value is ProjectTransactionChange {
-    if (!Value.Check(projectTransactionChangeSchema, value)) {
-        throw new Error("Project store returned an invalid transaction change.");
     }
 }
 
@@ -395,28 +368,12 @@ export const projectMigrations = [
     ],
 ] as const;
 
-export function createProjectStore(transaction?: AgentStorageTransaction): ProjectStore {
+export function createProjectStore(): ProjectStore {
     const databaseFor = (ctx: Context): AgentDatabase => {
-        const database = agentDatabase(ctx);
-        if (database === undefined) {
-            throw new Error("Projects module requires an Agent Base database context.");
-        }
-        return database;
-    };
-
-    const runTransaction = async (
-        ctx: Context,
-        _agentId: string,
-        work: (txCtx: Context) => Promise<ProjectTransactionChange>,
-    ): Promise<ProjectTransactionChange> => {
-        if (transaction === undefined) {
-            return await work(ctx);
-        }
-        return await transaction(ctx, async (txCtx) => await work(txCtx));
+        return ctx.db;
     };
 
     return {
-        transaction: runTransaction,
         create: async (ctx, actingAgentId, input) => {
             const at = Date.now();
             const project: Project = {

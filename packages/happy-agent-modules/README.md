@@ -52,8 +52,8 @@ an agent.
   asks to be delivered to itself later.
 - [Search](sources/search/README.md) — bounded common web fetch plus explicit vendor search
   wrappers.
-- [Secrets](sources/secrets/README.md) — safe secret metadata, keyed replay fingerprints,
-  attachments, and a host-only resolver.
+- [Secrets](sources/secrets/README.md) — safe secret metadata, attachments, and a host-only
+  resolver.
 - [Skills](sources/skills/README.md) — live user and project skills discovered through the
   agent's compute.
 - [Slots](sources/slots/README.md) — durable named values with ordering and bounded paging.
@@ -75,13 +75,13 @@ Each module document describes:
 
 - the exact tools exposed to the model and their permission/durability behavior;
 - the public methods available to hosts;
-- the storage, receipt, proof, paging, output, and event contracts the host must implement.
+- the storage, paging, output, and event contracts involved.
 
 ## Design rules
 
 - Runtime validation uses TypeBox schemas, with TypeScript types derived through `Static`.
-- Mutating tools are durable wherever their effect can be replayed safely. A reused operation
-  identity with different input is rejected.
+- Mutating tools are transactional when their whole effect fits one database transaction and
+  non-durable when they cross an external boundary that cannot be committed atomically.
 - Host stores remain authoritative. Module code validates every host response before returning
   a clone or formatting it for the model.
 - Transactional listeners run with the mutation. Post-commit listeners run only after durable

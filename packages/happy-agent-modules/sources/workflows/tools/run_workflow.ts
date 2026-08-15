@@ -14,10 +14,10 @@ export function runWorkflowTool(module: WorkflowsModule, agentId: string) {
             "Start a host-managed workflow. The host owns runtime, processes, filesystem, and permissions.",
         parameters: workflowLaunchToolInputSchema,
         returnType: workflowRunSchema,
-        durable: true,
+        durable: false,
         shouldReviewInAutoMode: () => false,
         execute: async (ctx, input: WorkflowLaunchToolInput, call) =>
-            await module.launchForTool(ctx, agentId, input, call),
+            await module.launchForTool(ctx, agentId, input, call.id),
         toLLM: (run) => [{ type: "text", text: module.formatRunForModel(run) }],
     });
 }

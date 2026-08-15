@@ -3,7 +3,6 @@ import {
     agentDatabaseRun,
     type AgentDatabase,
     type AgentDatabaseFacade,
-    type AgentStorageTransaction,
     type AgentBaseInference,
     type AgentBaseInferenceStart,
     type AgentBaseTurn,
@@ -78,13 +77,6 @@ const usageReadQuerySchema = Type.Object(
 );
 const usageModuleOptionsSchema = Type.Object(
     {
-        transaction: Type.Function(
-            [
-                usageContextSchema,
-                Type.Function([usageContextSchema, Type.Unknown()], Type.Promise(Type.Unknown())),
-            ],
-            Type.Promise(Type.Unknown()),
-        ),
         clock: Type.Optional(usageClockSchema),
         idFactory: Type.Optional(usageIdFactorySchema),
         listener: Type.Optional(usageModuleListenerSchema),
@@ -121,8 +113,8 @@ type UsagePending = Static<typeof usagePendingSchema>;
  * Advisory provider usage accounting for one AgentSystem.
  *
  * The module owns its bounded records in a module-owned table. The host
- * supplies only the common AgentStorage transaction; Agent Base supplies the
- * durable inference and turn identities used as record IDs.
+ * uses the database carried by the context; Agent Base supplies the durable
+ * inference and turn identities used as record IDs.
  */
 export class UsageModule implements AgentModule {
     readonly name = "usage";
@@ -165,7 +157,6 @@ export class UsageModule implements AgentModule {
             },
         ],
     ] as const;
-    readonly #transactionFn: AgentStorageTransaction;
     readonly #clock: NonNullable<UsageModuleOptions["clock"]>;
     readonly #idFactory: NonNullable<UsageModuleOptions["idFactory"]>;
     readonly #listener: UsageModuleOptions["listener"];
@@ -176,7 +167,6 @@ export class UsageModule implements AgentModule {
 
     constructor(options: UsageModuleOptions) {
         const validated = validateOptions(options);
-        this.#transactionFn = validated.transaction as AgentStorageTransaction;
         this.#clock = validated.clock ?? (() => Date.now());
         this.#idFactory =
             validated.idFactory ??
@@ -242,13 +232,7 @@ export class UsageModule implements AgentModule {
             throw new Error(`Usage page limit cannot exceed ${this.#maxPageSize}.`);
         }
         const cursor = query.cursor ?? 0;
-        const page = await this.#transaction(ctx, async (_txCtx, database) => {
-            return await new UsageDatabase(database).read(
-                agentId,
-                { cursor, limit },
-                this.#maxPageSize,
-            );
-        });
+        const page = await new UsageDatabase().read(ctx, agentId, { cursor, limit }, this.#maxPageSize);
         assertUsagePage(page, agentId, cursor, limit);
         return cloneValue(page);
     }
@@ -264,16 +248,15 @@ export class UsageModule implements AgentModule {
             throw new Error(`Usage group limit cannot exceed ${this.#maxGroups}.`);
         }
         const cursor = query.cursor ?? 0;
-        const summary = await this.#transaction(ctx, async (_txCtx, database) => {
-            return await new UsageDatabase(database).aggregate(
-                {
-                    ...(query.agentId === undefined ? {} : { agentId: query.agentId }),
-                    cursor,
-                    maxGroups,
-                },
+        const summary = await new UsageDatabase().aggregate(
+            ctx,
+            {
+                ...(query.agentId === undefined ? {} : { agentId: query.agentId }),
+                cursor,
                 maxGroups,
-            );
-        });
+            },
+            maxGroups,
+        );
         assertUsageSummary(summary, query.agentId, cursor, maxGroups);
         return cloneValue(summary);
     }
@@ -565,7 +548,7 @@ export class UsageModule implements AgentModule {
     async #record(ctx: Context, scope: AgentModuleScope, record: UsageRecord): Promise<void> {
         assertUsageRecord(record);
         const detachedRecord = deepFreeze(cloneValue(record));
-        await new UsageDatabase(scope.database).record(detachedRecord);
+        await new UsageDatabase().record(ctx, detachedRecord);
         const event = cloneAndFreezeEvent({
             type: "usage_recorded",
             eventId: detachedRecord.id,
@@ -580,8 +563,8 @@ export class UsageModule implements AgentModule {
         if (agentId !== undefined) assertAgentId(agentId);
         const target: UsageResetTarget = agentId ?? null;
         const eventId = await this.#newId(ctx, target ?? "all-agents", "reset");
-        return await this.#transaction(ctx, async (txCtx, database) => {
-            const removed = await new UsageDatabase(database).reset(target);
+        return await ctx.inTx(async (txCtx) => {
+            const removed = await new UsageDatabase().reset(txCtx, target);
             const event =
                 removed > 0
                     ? cloneAndFreezeEvent({
@@ -668,12 +651,6 @@ export class UsageModule implements AgentModule {
         }
     }
 
-    async #transaction<Result>(
-        ctx: Context,
-        work: (ctx: Context, database: AgentDatabaseFacade<AgentDatabase>) => Promise<Result>,
-    ): Promise<Result> {
-        return await this.#transactionFn(ctx, work);
-    }
 }
 
 function validateOptions(options: unknown): UsageModuleOptions {

@@ -12,9 +12,10 @@ export function ensureProjectTool(projects: ProjectsModule, agentId: string) {
         parameters: projectEnsureToolInputSchema,
         returnType: projectEnsureResultSchema,
         durable: true,
+        transactional: true,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, input: ProjectEnsureToolInput, call) =>
-            await projects.ensure(ctx, agentId, input, call),
+        execute: async (ctx, input: ProjectEnsureToolInput) =>
+            await projects.ensure(ctx, agentId, input),
         toLLM: (result: ProjectEnsureResult) => [
             {
                 type: "text",

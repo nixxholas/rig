@@ -1,11 +1,9 @@
 import {
-    agentDatabase,
     agentDatabaseRows,
     agentDatabaseRun,
-    type AgentDatabase,
     type AgentModuleMigration,
-    type AgentStorageTransaction,
 } from "@slopus/happy-agent-base";
+import { Value } from "@sinclair/typebox/value";
 import { sql } from "drizzle-orm";
 import type { Context } from "@steve.kite/stdlib";
 
@@ -15,7 +13,6 @@ import {
     type PresenceScheduleInput,
 } from "./PresenceSchedule.js";
 import { presenceStateSchema, type PresenceState } from "./PresenceState.js";
-import { Value } from "@sinclair/typebox/value";
 
 export const PRESENCE_MIGRATION_KEY = "001-presence";
 export const PRESENCE_RECEIPTS_REMOVED_MIGRATION_KEY = "002-remove-presence-receipts";
@@ -64,10 +61,6 @@ export const presenceMigrations: readonly AgentModuleMigration[] = [
 ];
 
 export interface PresenceDatabase {
-    readonly transaction: <Result>(
-        ctx: Context,
-        work: (ctx: Context) => Promise<Result>,
-    ) => Promise<Result>;
     readonly read: (ctx: Context, at: number) => Promise<PresenceState | undefined>;
     readonly readConfigured: (ctx: Context) => Promise<PresenceState | undefined>;
     readonly set: (ctx: Context, state: PresenceState) => Promise<void>;
@@ -82,36 +75,14 @@ export interface PresenceDatabase {
             input: PresenceScheduleInput,
             id: string,
         ) => Promise<PresenceSchedule>;
-        readonly find: (
-            ctx: Context,
-            input: PresenceScheduleInput,
-        ) => Promise<PresenceSchedule | undefined>;
         readonly clear: (ctx: Context, id: string) => Promise<boolean>;
     };
 }
 
-export function createPresenceDatabase(
-    transaction: AgentStorageTransaction,
-): PresenceDatabase {
-    const dbFor = (ctx: Context): AgentDatabase => {
-        const database = agentDatabase(ctx);
-        if (database === undefined) {
-            throw new Error("Presence module requires an Agent Base database context.");
-        }
-        return database;
-    };
-
-    const databaseFor = (ctx: Context): AgentDatabase => dbFor(ctx);
-    const runTransaction = async <Result>(
-        ctx: Context,
-        work: (ctx: Context) => Promise<Result>,
-    ): Promise<Result> => {
-        return await transaction(ctx, async (transactionCtx) => work(transactionCtx));
-    };
-
+export function createPresenceDatabase(): PresenceDatabase {
     const readConfigured = async (ctx: Context): Promise<PresenceState | undefined> => {
         const rows = await agentDatabaseRows<{ state_json: string }>(
-            databaseFor(ctx),
+            ctx.db,
             sql`SELECT state_json FROM ${sql.raw(PRESENCE_TABLE)}
                 WHERE singleton_id = 1 LIMIT 1`,
         );
@@ -128,7 +99,7 @@ export function createPresenceDatabase(
         options: { readonly limit: number },
     ): Promise<readonly PresenceSchedule[]> => {
         const rows = await agentDatabaseRows<{ schedule_json: string }>(
-            databaseFor(ctx),
+            ctx.db,
             sql`SELECT schedule_json FROM ${sql.raw(SCHEDULE_TABLE)}
                 ORDER BY id LIMIT ${options.limit}`,
         );
@@ -153,35 +124,15 @@ export function createPresenceDatabase(
                 throw new Error("Presence database received an invalid schedule.");
             }
             await agentDatabaseRun(
-                databaseFor(ctx),
+                ctx.db,
                 sql`INSERT INTO ${sql.raw(SCHEDULE_TABLE)} (id, schedule_json)
                     VALUES (${schedule.id}, ${JSON.stringify(schedule)})`,
             );
             return schedule as PresenceSchedule;
         },
-        find: async (
-            ctx: Context,
-            input: PresenceScheduleInput,
-        ): Promise<PresenceSchedule | undefined> => {
-            const rows = await agentDatabaseRows<{ schedule_json: string }>(
-                databaseFor(ctx),
-                sql`SELECT schedule_json FROM ${sql.raw(SCHEDULE_TABLE)}
-                    ORDER BY id`,
-            );
-            for (const row of rows) {
-                const value = parseJson(row.schedule_json, "presence schedule");
-                if (!Value.Check(presenceScheduleSchema, value)) {
-                    throw new Error("Presence database contains an invalid schedule.");
-                }
-                const schedule = value as PresenceSchedule;
-                if (sameSchedule(schedule, input)) return structuredClone(schedule);
-            }
-            return undefined;
-        },
         clear: async (ctx: Context, id: string): Promise<boolean> => {
-            const database = databaseFor(ctx);
             const rows = await agentDatabaseRows<{ id: string }>(
-                database,
+                ctx.db,
                 sql`DELETE FROM ${sql.raw(SCHEDULE_TABLE)}
                     WHERE id = ${id}
                     RETURNING id`,
@@ -191,7 +142,6 @@ export function createPresenceDatabase(
     } as const;
 
     return {
-        transaction: runTransaction,
         readConfigured,
         read: async (ctx, at) => {
             const configured = await readConfigured(ctx);
@@ -210,7 +160,7 @@ export function createPresenceDatabase(
         },
         set: async (ctx, state) => {
             await agentDatabaseRun(
-                databaseFor(ctx),
+                ctx.db,
                 sql`INSERT INTO ${sql.raw(PRESENCE_TABLE)} (singleton_id, state_json)
                     VALUES (1, ${JSON.stringify(state)})
                     ON CONFLICT (singleton_id)
@@ -219,7 +169,7 @@ export function createPresenceDatabase(
         },
         clear: async (ctx) => {
             await agentDatabaseRun(
-                databaseFor(ctx),
+                ctx.db,
                 sql`DELETE FROM ${sql.raw(PRESENCE_TABLE)} WHERE singleton_id = 1`,
             );
         },
@@ -262,18 +212,6 @@ async function effectiveSchedule(
 
 function minutes(value: string): number {
     return Number(value.slice(0, 2)) * 60 + Number(value.slice(3));
-}
-
-function sameSchedule(left: PresenceSchedule, right: PresenceScheduleInput): boolean {
-    return (
-        left.days.length === right.days.length &&
-        left.days.every((day, index) => day === right.days[index]) &&
-        left.startTime === right.startTime &&
-        left.endTime === right.endTime &&
-        left.timeZone === right.timeZone &&
-        left.presence.status === right.presence.status &&
-        left.presence.message === right.presence.message
-    );
 }
 
 function parseJson(value: string, label: string): unknown {

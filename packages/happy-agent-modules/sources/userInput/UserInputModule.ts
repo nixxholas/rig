@@ -54,19 +54,17 @@ import {
 } from "./UserInputEvent.js";
 import {
     assertUserInputPage,
-    assertUserInputTransactionChange,
     assertUserInputVoidResult,
     userInputAuthorizationSchema,
     userInputBrokerSchema,
     userInputPresencePolicySchema,
-    userInputStoreSchema,
     type UserInputAuthorization,
     type UserInputAuthorizationAction,
     type UserInputBroker,
     type UserInputPresencePolicy,
     type UserInputStore,
-    type UserInputTransactionChange,
 } from "./UserInputStore.js";
+import { createSqliteUserInputStorage, userInputMigrations } from "./SqliteUserInputStorage.js";
 import { requestUserInputTool } from "./tools/request_user_input.js";
 
 const DEFAULT_PAGE_SIZE = 50;
@@ -96,7 +94,6 @@ export const userInputClockSchema = Type.Function(
 
 export const userInputModuleOptionsSchema = Type.Object(
     {
-        store: userInputStoreSchema,
         broker: userInputBrokerSchema,
         presence: Type.Optional(userInputPresencePolicySchema),
         authorization: Type.Optional(userInputAuthorizationSchema),
@@ -146,17 +143,14 @@ export const userInputPostCommitErrorSchema = Type.Function(
 );
 
 export type UserInputModuleOptions = Static<typeof userInputModuleOptionsSchema>;
-export type UserInputToolCommit = (
-    ctx: Context,
-    request: UserInputRequest,
-) => Promise<UserInputRequest>;
 
 /**
  * One shared user-input capability serves every agent. Request rows are the only durable
- * module state. Durable tool completion is owned by Agent Base through call.commit.
+ * module state.
  */
 export class UserInputModule implements AgentModule {
     readonly name = "userInput";
+    readonly migrations = userInputMigrations;
 
     readonly #store: UserInputStore;
     readonly #broker: UserInputBroker;
@@ -180,7 +174,7 @@ export class UserInputModule implements AgentModule {
 
     constructor(options: UserInputModuleOptions) {
         const validated = validateOptions(options);
-        this.#store = validated.store;
+        this.#store = createSqliteUserInputStorage();
         this.#broker = validated.broker;
         this.#presence = validated.presence;
         this.#authorization = validated.authorization;
@@ -227,51 +221,10 @@ export class UserInputModule implements AgentModule {
         this.#assertAskBounds(input);
         const id = requestId ?? await this.#newIdentity(ctx, agentId);
         this.#assertValue(userInputRequestIdSchema, id, "request identity");
-        const change = await this.#transaction(ctx, agentId, (txCtx) =>
+        const request = await ctx.inTx((txCtx) =>
             this.#createOrResume(txCtx, agentId, id, structuredClone(input)),
         );
-        return structuredClone(change.result);
-    }
-
-    /**
-     * Durable request_user_input execution has exactly two durable boundaries: create/resume,
-     * then settle plus Agent Base completion. The broker wait is deliberately between them.
-     */
-    async requestFromTool(
-        ctx: Context,
-        agentId: string,
-        requestId: string,
-        input: UserInputAskInput,
-        commit: UserInputToolCommit,
-    ): Promise<UserInputRequest> {
-        this.#assertAgentId(agentId);
-        this.#assertValue(userInputRequestIdSchema, requestId, "request identity");
-        this.#assertInput(userInputAskInputSchema, input, "user input request");
-        this.#assertAskBounds(input);
-        const normalized = structuredClone(input);
-        const initial = await this.#transaction(ctx, agentId, async (txCtx) => {
-            const change = await this.#createOrResume(txCtx, agentId, requestId, normalized);
-            if (!isUserInputTerminal(change.result)) return change;
-            const committed = await commit(txCtx, structuredClone(change.result));
-            this.#assertRequest(committed);
-            return this.#change("ask", agentId, committed, change.changed, change.events);
-        });
-        if (isUserInputTerminal(initial.result)) return structuredClone(initial.result);
-
-        const immediate = await this.#immediateWaitOutcome(ctx, agentId, initial.result);
-        if (immediate !== undefined) {
-            return await this.#settleToolWait(ctx, agentId, requestId, immediate, commit);
-        }
-
-        const waited = await this.#waitOutsideTransaction(ctx, agentId, requestId);
-        return await this.#transaction(ctx, agentId, async (txCtx) => {
-            const current = await this.#readRequiredRequest(txCtx, requestId);
-            await this.#authorize(txCtx, agentId, current.askingAgentId, "wait");
-            this.#assertWaitResult(current, waited, initial.result.askingAgentId);
-            const committed = await commit(txCtx, structuredClone(current));
-            this.#assertRequest(committed);
-            return this.#change("wait", agentId, committed, false, []);
-        }).then((change) => structuredClone(change.result));
+        return structuredClone(request);
     }
 
     async wait(
@@ -295,10 +248,10 @@ export class UserInputModule implements AgentModule {
 
         const immediate = await this.#immediateWaitOutcome(ctx, agentId, current);
         if (immediate !== undefined) {
-            const change = await this.#transaction(ctx, agentId, (txCtx) =>
+            const request = await ctx.inTx((txCtx) =>
                 this.#settlePending(txCtx, agentId, input.requestId, immediate),
             );
-            return structuredClone(change.result);
+            return structuredClone(request);
         }
 
         const waited = await this.#waitOutsideTransaction(ctx, agentId, input.requestId);
@@ -318,12 +271,12 @@ export class UserInputModule implements AgentModule {
         if (answerCharacters(input.answer) > this.#maxAnswerCharacters) {
             throw new Error("User input answer exceeds its configured bound.");
         }
-        const change = await this.#transaction(ctx, agentId, async (txCtx) => {
+        const request = await ctx.inTx(async (txCtx) => {
             const current = await this.#readRequiredRequest(txCtx, input.requestId);
             await this.#authorize(txCtx, agentId, current.askingAgentId, "answer");
             assertUserInputAnswer(input.answer, current.options);
             if (isUserInputTerminal(current)) {
-                return this.#change("answer", agentId, current, false, []);
+                return current;
             }
             const at = this.#now(ctx, agentId);
             const answered: UserInputRequest = {
@@ -336,12 +289,11 @@ export class UserInputModule implements AgentModule {
             return await this.#persistTransition(
                 txCtx,
                 agentId,
-                "answer",
                 "user_input_answered",
                 answered,
             );
         });
-        return structuredClone(change.result);
+        return structuredClone(request);
     }
 
     async cancel(
@@ -354,11 +306,11 @@ export class UserInputModule implements AgentModule {
         if (input.reason.length > this.#maxCancelReasonCharacters) {
             throw new Error("User input cancellation reason exceeds its configured bound.");
         }
-        const change = await this.#transaction(ctx, agentId, async (txCtx) => {
+        const request = await ctx.inTx(async (txCtx) => {
             const current = await this.#readRequiredRequest(txCtx, input.requestId);
             await this.#authorize(txCtx, agentId, current.askingAgentId, "cancel");
             if (isUserInputTerminal(current)) {
-                return this.#change("cancel", agentId, current, false, []);
+                return current;
             }
             const cancelled = this.#terminalRequest(
                 current,
@@ -368,12 +320,11 @@ export class UserInputModule implements AgentModule {
             return await this.#persistTransition(
                 txCtx,
                 agentId,
-                "cancel",
                 "user_input_cancelled",
                 cancelled,
             );
         });
-        return structuredClone(change.result);
+        return structuredClone(request);
     }
 
     async complete(
@@ -383,27 +334,26 @@ export class UserInputModule implements AgentModule {
     ): Promise<UserInputRequest> {
         this.#assertAgentId(agentId);
         this.#assertInput(userInputCompleteInputSchema, input, "user input completion");
-        const change = await this.#transaction(ctx, agentId, async (txCtx) => {
+        const request = await ctx.inTx(async (txCtx) => {
             const current = await this.#readRequiredRequest(txCtx, input.requestId);
             await this.#authorize(txCtx, agentId, current.askingAgentId, "complete");
             if (isUserInputTerminal(current)) {
                 if (input.outcome === "timed_out") {
                     this.#assertTimeout(current, input.deadlineAt, this.#now(ctx, agentId));
                 }
-                return this.#change("complete", agentId, current, false, []);
+                return current;
             }
             const terminal = this.#terminalRequest(current, input, this.#now(ctx, agentId));
             return await this.#persistTransition(
                 txCtx,
                 agentId,
-                "complete",
                 terminal.status === "cancelled"
                     ? "user_input_cancelled"
                     : "user_input_completed",
                 terminal,
             );
         });
-        return structuredClone(change.result);
+        return structuredClone(request);
     }
 
     async listPage(
@@ -532,11 +482,11 @@ export class UserInputModule implements AgentModule {
         agentId: string,
         requestId: string,
         input: UserInputAskInput,
-    ): Promise<UserInputTransactionChange> {
+    ): Promise<UserInputRequest> {
         const current = await this.#readRequest(ctx, requestId);
         if (current !== undefined) {
             this.#assertSameRequest(current, input, requestId, agentId);
-            return this.#change("ask", agentId, current, false, []);
+            return current;
         }
         const at = this.#now(ctx, agentId);
         const request: UserInputRequest = {
@@ -554,32 +504,7 @@ export class UserInputModule implements AgentModule {
         await this.#writeRequest(ctx, request);
         const event = await this.#newEvent(ctx, agentId, "user_input_requested", request);
         await this.#announce(ctx, event);
-        return this.#change("ask", agentId, request, true, [event]);
-    }
-
-    async #settleToolWait(
-        ctx: Context,
-        agentId: string,
-        requestId: string,
-        outcome: { readonly outcome: "away" } | {
-            readonly outcome: "timed_out";
-            readonly deadlineAt: number;
-        },
-        commit: UserInputToolCommit,
-    ): Promise<UserInputRequest> {
-        const change = await this.#transaction(ctx, agentId, async (txCtx) => {
-            const settled = await this.#settlePending(txCtx, agentId, requestId, outcome);
-            const committed = await commit(txCtx, structuredClone(settled.result));
-            this.#assertRequest(committed);
-            return this.#change(
-                "wait",
-                agentId,
-                committed,
-                settled.changed,
-                settled.events,
-            );
-        });
-        return structuredClone(change.result);
+        return request;
     }
 
     async #settlePending(
@@ -590,17 +515,16 @@ export class UserInputModule implements AgentModule {
             readonly outcome: "timed_out";
             readonly deadlineAt: number;
         },
-    ): Promise<UserInputTransactionChange> {
+    ): Promise<UserInputRequest> {
         const current = await this.#readRequiredRequest(ctx, requestId);
         await this.#authorize(ctx, agentId, current.askingAgentId, "wait");
         if (isUserInputTerminal(current)) {
-            return this.#change("wait", agentId, current, false, []);
+            return current;
         }
         const terminal = this.#terminalRequest(current, outcome, this.#now(ctx, agentId));
         return await this.#persistTransition(
             ctx,
             agentId,
-            "wait",
             "user_input_completed",
             terminal,
         );
@@ -609,52 +533,14 @@ export class UserInputModule implements AgentModule {
     async #persistTransition(
         ctx: Context,
         agentId: string,
-        kind: UserInputTransactionChange["kind"],
         eventType: UserInputEvent["type"],
         request: UserInputRequest,
-    ): Promise<UserInputTransactionChange> {
+    ): Promise<UserInputRequest> {
         this.#assertRequest(request);
         await this.#writeRequest(ctx, request);
         const event = await this.#newEvent(ctx, agentId, eventType, request);
         await this.#announce(ctx, event);
-        return this.#change(kind, agentId, request, true, [event]);
-    }
-
-    async #transaction(
-        ctx: Context,
-        actingAgentId: string,
-        work: (txCtx: Context) => Promise<UserInputTransactionChange>,
-    ): Promise<UserInputTransactionChange> {
-        let expected: UserInputTransactionChange | undefined;
-        const returned = await this.#store.transaction(ctx, actingAgentId, async (txCtx) => {
-            const change = await work(txCtx);
-            assertUserInputTransactionChange(change);
-            expected = cloneAndFreeze(change);
-            return change;
-        });
-        assertUserInputTransactionChange(returned);
-        if (expected === undefined || !sameValue(returned, expected)) {
-            throw new Error("User input store transaction returned a substituted change.");
-        }
-        return structuredClone(returned);
-    }
-
-    #change(
-        kind: UserInputTransactionChange["kind"],
-        actingAgentId: string,
-        result: UserInputRequest,
-        changed: boolean,
-        events: readonly UserInputEvent[],
-    ): UserInputTransactionChange {
-        const change: UserInputTransactionChange = {
-            kind,
-            actingAgentId,
-            result: structuredClone(result),
-            changed,
-            events: events.map((event) => cloneAndFreeze(event)),
-        };
-        assertUserInputTransactionChange(change);
-        return change;
+        return request;
     }
 
     async #newEvent(
@@ -1118,12 +1004,6 @@ function validateOptions(options: unknown): UserInputModuleOptions {
     const source = options as Record<string, unknown>;
     const view: Record<string, unknown> = {
         ...source,
-        store: methodView(source.store, [
-            "transaction",
-            "readRequest",
-            "writeRequest",
-            "listRequests",
-        ]),
         broker: methodView(source.broker, ["wait"]),
     };
     if (source.presence !== undefined) {

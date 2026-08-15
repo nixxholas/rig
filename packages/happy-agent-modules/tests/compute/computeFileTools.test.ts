@@ -7,18 +7,18 @@ import { computeToolset } from "./support/computeTools.js";
 const ctx = createRootContext().named("happy-agent-modules-compute-files");
 
 /** A machine holding a small project, and the tools of one agent working on it. */
-function project() {
+async function project() {
     const compute = new FakeCompute();
     compute.write("/workspace/readme.md", "# Project\n\nIt does a thing.\n");
     compute.write("/workspace/sources/main.ts", "export function main() {\n    return 1;\n}\n");
     compute.write("/workspace/sources/util.ts", "export const NAME = 'util';\n");
     compute.write("/workspace/sources/data.json", '{"name":"util"}\n');
-    return { compute, ...computeToolset(ctx, compute) };
+    return { compute, ...(await computeToolset(ctx, compute)) };
 }
 
 describe("compute file tools", () => {
     it("reads a file, numbered, and remembers having read it", async () => {
-        const { compute, tool } = project();
+        const { compute, tool } = await project();
 
         const read = await tool("read_file").execute(ctx, { path: "sources/util.ts" });
 
@@ -39,7 +39,7 @@ describe("compute file tools", () => {
     });
 
     it("refuses to edit a file this agent never read", async () => {
-        const { tool } = project();
+        const { tool } = await project();
 
         await expect(
             tool("edit_file").execute(ctx, {
@@ -51,7 +51,7 @@ describe("compute file tools", () => {
     });
 
     it("refuses to edit a file that changed after it was read", async () => {
-        const { compute, tool } = project();
+        const { compute, tool } = await project();
         await tool("read_file").execute(ctx, { path: "sources/main.ts" });
 
         // Somebody else edits the file in the meantime.
@@ -67,7 +67,7 @@ describe("compute file tools", () => {
     });
 
     it("refuses an edit whose text is not unique unless every occurrence is meant", async () => {
-        const { compute, tool } = project();
+        const { compute, tool } = await project();
         compute.write("/workspace/sources/twice.ts", "const a = 1;\nconst a = 1;\n");
         await tool("read_file").execute(ctx, { path: "sources/twice.ts" });
 
@@ -90,7 +90,7 @@ describe("compute file tools", () => {
     });
 
     it("creates a file, and lets it be edited straight away", async () => {
-        const { compute, tool } = project();
+        const { compute, tool } = await project();
 
         const written = await tool("write_file").execute(ctx, {
             path: "sources/new.ts",
@@ -114,7 +114,7 @@ describe("compute file tools", () => {
     });
 
     it("refuses to overwrite a file this agent never read", async () => {
-        const { tool } = project();
+        const { tool } = await project();
 
         await expect(
             tool("write_file").execute(ctx, { path: "readme.md", content: "gone" }),
@@ -122,7 +122,7 @@ describe("compute file tools", () => {
     });
 
     it("passes on the machine's refusal to write", async () => {
-        const { compute, tool } = project();
+        const { compute, tool } = await project();
         compute.readOnly = true;
 
         await expect(
@@ -132,7 +132,7 @@ describe("compute file tools", () => {
     });
 
     it("lists one directory, marking the directories in it", async () => {
-        const { tool } = project();
+        const { tool } = await project();
 
         const listed = await tool("list_directory").execute(ctx, {});
 
@@ -141,7 +141,7 @@ describe("compute file tools", () => {
     });
 
     it("finds files by pattern, most recently changed first", async () => {
-        const { compute, tool } = project();
+        const { compute, tool } = await project();
         compute.write("/workspace/sources/newest.ts", "export const newest = true;\n");
 
         const found = await tool("find_files").execute(ctx, { pattern: "**/*.ts" });
@@ -156,7 +156,7 @@ describe("compute file tools", () => {
     });
 
     it("searches file contents, and says where each match is", async () => {
-        const { tool } = project();
+        const { tool } = await project();
 
         const searched = await tool("search_files").execute(ctx, {
             pattern: "util",
@@ -171,7 +171,7 @@ describe("compute file tools", () => {
     });
 
     it("says how much of a long file it left out", async () => {
-        const { compute, tool } = project();
+        const { compute, tool } = await project();
         const line = "x".repeat(80);
         compute.write(
             "/workspace/sources/long.ts",

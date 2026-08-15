@@ -33,24 +33,13 @@ export function updateTaskTool(tasks: TasksModule, agentId: string) {
         parameters: updateTaskInputSchema,
         returnType: Type.Object({ task: taskSchema }),
         durable: true,
+        transactional: true,
         shouldReviewInAutoMode: () => false,
         execute: async (
             ctx,
             { id, ...changes }: { id: string } & TaskUpdateInput,
-            call,
         ) => {
-            const task = await tasks.update(
-                ctx,
-                agentId,
-                id,
-                changes,
-                async (txCtx, updated) =>
-                    (
-                        await call.commit(txCtx, {
-                            task: updated,
-                        })
-                    ).task,
-            );
+            const task = await tasks.update(ctx, agentId, id, changes);
             return { task };
         },
         toLLM: ({ task }) => [

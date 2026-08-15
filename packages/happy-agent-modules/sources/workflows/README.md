@@ -1,158 +1,64 @@
 # Workflows
 
-A way for the model to start and track work the host runs, not the agent. A workflow is a
-named, host-defined process — a build, a deployment, a data job, anything with its own runtime,
-queue, and permissions — that the model can launch, watch, pause, and read logs from without the
-agent ever touching a process or a filesystem itself. The module owns identity, idempotency,
-paging, and model-facing formatting; the host owns everything about how a workflow actually runs.
+Workflows lets an agent start and inspect work performed by a host runtime. The module owns the
+durable run catalog, bounded reads, lifecycle validation, and model-facing formatting. The host
+runtime owns execution, processes, files, queues, and permissions.
 
 ```ts
-import { Agent } from "@slopus/happy-agent-base";
-import { WorkflowsModule } from "@slopus/happy-agent-modules";
-
-const workflows = new WorkflowsModule({ runtime: hostWorkflowRuntime });
-const agent = await Agent.create(ctx, { ...options, modules: [workflows] });
+const workflows = new WorkflowsModule({
+    runtime: hostWorkflowRuntime,
+});
 ```
 
-`runtime` is the only required option. It is the narrow external runner capability; workflow runs,
-receipts, proofs, and logs are owned by the module database. Everything else is optional:
-`idFactory` and `eventIdFactory` override the default `crypto.randomUUID()` identity generators,
-`clock` overrides `Date.now`, `listener` receives `workflow_started` / `workflow_updated` /
-`workflow_cancelled` events, `maxPageSize` and `maxLogLines` bound paging, `maxOutputCharacters`
-bounds every string handed back to the model, and `onPostCommitError` observes a listener failure
-after commit without turning a committed operation into a failure.
+`runtime` implements `launch`, `cancel`, `resume`, and `wait`. Database operations use the root or
+active transaction facade from `ctx.db`; short persistence steps compose through `ctx.inTx(...)`.
+Optional factories control public operation and event IDs; optional listeners observe lifecycle
+events.
 
-## Tools it provides to the model
+## Durable tool completion
 
-Every tool is `durable: true` and answers `shouldReviewInAutoMode` with `false`: the module
-never touches a process, a file, or the network itself, so nothing it does needs Auto-mode
-review. All of them are bound to one `agentId` — the agent's own ID, `scope.agent.id` — so a
-model can only ever see and act on that agent's own runs.
+The module does not maintain an idempotency ledger. There are no workflow fingerprints, receipts,
+mutation proofs, or call-scoped operation records.
 
-- **`run_workflow`** — `{ workflow, input? }`. Starts a workflow by name with an optional input
-  string (bounded to 20,000 characters). The tool never accepts an `operationId`; the module
-  allocates one itself in durable, call-scoped storage so a retried tool call replays instead of
-  double-launching. Returns the new (or replayed) `WorkflowRun`, rendered as an identity line,
-  status, and any output/error the run already carries.
-- **`list_workflows`** — `{ cursor?, from?, limit?, includeTerminal? }`. Lists a bounded page of this
-  agent's runs. `limit` is capped by both the configured `maxPageSize` and by how many rows can
-  actually fit inside `maxOutputCharacters`; the module shrinks the page rather than truncating a
-  row, and only ever returns a page whose declared `nextCursor` both advances past the request and
-  exposes at least one complete run. Each row renders as `id: workflow [status]`.
-- **`workflow_status`** — `{ id }`. Reads one run by ID and reports "Workflow run was not found."
-  when it does not exist for this agent, rather than an error.
-- **`cancel_workflow`** — `{ id }`. Requests cancellation of one run. Idempotent the same way as
-  launch: the module allocates its own `operationId`, so calling it twice for the same run
-  replays the first cancellation instead of issuing a second one.
-- **`resume_workflow`** — `{ id }`. Resumes one paused or cancelled run, with the same
-  self-allocated idempotency as `cancel_workflow`.
-- **`wait_workflow`** — `{ id }`. Blocks, through the host's own broker, until a run reaches a
-  terminal or `unavailable` status. The module asserts the store actually returned a terminal
-  status before handing it back — a store that wakes early is a contract violation, not a valid
-  workflow state to show the model.
-- **`workflow_logs`** — `{ id, cursor?, from?, limit? }`. Reads a bounded page of log lines (each line
-  capped at 4,000 characters, at most `MAX_WORKFLOW_LOG_LINES` = 500 lines per page, and further
-  capped by `maxLogLines` and by the output-character budget). Rendered as the run ID, one line
-  per log line — truncated with an ellipsis if a line does not fit the remaining budget — and a
-  cursor suffix when more logs remain.
+`run_workflow`, `cancel_workflow`, and `resume_workflow` pass the stable Agent Base `call.id`
+directly to the runtime as `operationId`. The host operation runs outside a database transaction;
+the module then stores its returned run in a short transaction. These tools are non-durable because
+an interrupted host operation cannot be atomically committed with its durable tool result.
 
-All seven read/mutate tools reuse the same underlying module methods a host would call directly
-(`launchForTool`, `listPage`, `status`, `cancelForTool`, `resumeForTool`, `wait`, `logs`); the
-tools differ only in which fields the model is allowed to pass — none of them expose `operationId`
-or `agentId` — and in how the result is rendered to text via `formatRunForModel`,
-`formatPageForModel`, and `formatLogsForModel`.
+`wait_workflow` is likewise non-durable and never holds a database transaction while waiting on
+the host broker. Once the broker returns, the module opens one short transaction that persists the
+terminal run.
 
-## External functions
+The bounded database-only read tools are durable and `transactional: true`, so Agent Base owns
+their single transaction and commits their returned result normally.
 
-`WorkflowsModule` exposes these methods to hosts and other API callers, each taking `ctx` and the
-target `agentId` explicitly (the tools above always pass the owning agent's own ID):
+Public `launch`, `cancel`, and `resume` calls may supply `operationId`; otherwise `idFactory`
+generates one. Reusing an existing launch ID is a conflict, not a module replay path.
 
-- **`launch(ctx, agentId, WorkflowLaunchInput)`** → `Promise<WorkflowRun>`. The full host-facing
-  entry point: accepts an optional `operationId` for host-supplied idempotency (the tool variant
-  never exposes this). Normalizes line endings in `input`, derives a canonical fingerprint of the
-  request, and resolves or allocates the operation ID through call-scoped `AgentKV`. Inside one
-  the module transaction, it replays an existing run with the same ID if the fingerprint matches
-  (throwing if the same ID was reused with different input), or calls the external runtime,
-  builds a `workflow_started` event, calls the listener transactionally, and registers a
-  post-commit notification through stdlib `afterCommit`.
-- **`launchForTool(ctx, agentId, WorkflowLaunchToolInput)`** → `Promise<WorkflowRun>`. Same as
-  `launch` but validates against the tool-restricted input schema (no `operationId`); this is what
-  `run_workflow` calls.
-- **`status(ctx, agentId, id)`** → `Promise<WorkflowRun | undefined>`. Reads one run and verifies
-  both its ID and owning agent before returning a clone.
-- **`list(ctx, agentId, WorkflowPageQuery)`** → `Promise<WorkflowPage>`. Clamps the requested
-  limit to the module's configured and output-budget-derived bounds, verifies exact offset
-  paging in either direction, and returns the complete page with total and adjacent cursors.
-- **`cancel(ctx, agentId, WorkflowMutationInput)`** →
-  `Promise<WorkflowMutationResult>`. Accepts an optional host-supplied `operationId`; runs the same
-  transactional replay-or-mutate-then-notify sequence as `launch`, emitting `workflow_cancelled`
-  when a cancellation actually changes state.
-- **`cancelForTool(ctx, agentId, WorkflowMutationToolInput)`** → `Promise<WorkflowMutationResult>`.
-  Tool-restricted `cancel`, used by `cancel_workflow`.
-- **`resume(ctx, agentId, WorkflowMutationInput)`** → `Promise<WorkflowMutationResult>`. Same shape
-  as `cancel`, emitting `workflow_updated` on an actual state change.
-- **`resumeForTool(ctx, agentId, WorkflowMutationToolInput)`** → `Promise<WorkflowMutationResult>`.
-  Tool-restricted `resume`, used by `resume_workflow`.
-- **`wait(ctx, agentId, id)`** → `Promise<WorkflowRun>`. Delegates to the external runtime and asserts the
-  returned run is in a terminal or `unavailable` status.
-- **`logs(ctx, agentId, WorkflowLogQuery)`** → `Promise<WorkflowLogPage>`. Bounds the requested
-  limit, verifies the database answered for the right run and agent, and eagerly renders the page
-  through `formatLogsForModel` so a page that cannot fit the output budget fails here rather than
-  at tool-call time.
-- **`formatPageForModel`**, **`formatRunForModel`**, **`formatLogsForModel`** — the exact text
-  rendering used by the tools, exposed so a host preview can match what the model sees.
+## Tools
 
-Every method validates its `agentId` and input against the corresponding TypeBox schema, asserts
-the database/runtime response actually belongs to that agent and that run ID, and returns a
-`structuredClone` so a caller can never mutate the module's internal state through the result.
+- `run_workflow` starts one named workflow.
+- `list_workflows` returns a bounded page of runs.
+- `workflow_status` reads one run.
+- `cancel_workflow` cancels a non-terminal run.
+- `resume_workflow` resumes a paused run.
+- `wait_workflow` waits for a terminal or unavailable result.
+- `workflow_logs` returns a bounded page of log lines.
 
-The `listener` option (`WorkflowModuleListener`) is the only way to observe state changes:
-`onEventTransactional` runs inside the same module database transaction as the mutation (its context is
-`txCtx`, so it can itself write durable state atomically with the run change), and `onEvent` runs
-afterward, registered through stdlib `afterCommit`. A throwing `onEvent` is caught and handed to
-`onPostCommitError`, and never propagates back into the committed operation. `WorkflowEvent` is one
-of `workflow_started`, `workflow_updated`, or `workflow_cancelled`, each carrying `agentId`,
-`eventId`, `at`, and the full `run`.
+Every tool is scoped to `scope.agent.id`. Inputs, runtime results, persisted results, pagination,
+and lifecycle transitions are validated before they reach the model.
 
-## Storage
+## Persistence and migrations
 
-The module owns the durable workflow run, log, receipt, and proof tables through its ordered
-Agent Base migration. The external runtime remains responsible for process lifecycle and
-execution; the module never starts a process or owns a queue.
+The current tables are:
 
-The one thing the module persists itself is the call-scoped identity for operation IDs it
-allocates on the model's behalf, so a retried `run_workflow` / `cancel_workflow` / `resume_workflow`
-tool call replays rather than repeating the action. It writes this through `agentKV(ctx)` — the
-agent's own transactional key-value store from `@slopus/happy-agent-base` — using one key per
-operation kind (the KV is already scoped to the calling agent):
+- `happy_agent_module_workflow_runs`
+- `happy_agent_module_workflow_logs`
 
-- `workflow_launch_operation_id`
-- `workflow_cancel_operation_id`
-- `workflow_resume_operation_id`
+Migration `001-workflows-runs` remains immutable. Migration
+`002-workflows-drop-replay-evidence` removes the obsolete receipt and proof tables introduced by
+the first migration.
 
-Each key holds a `WorkflowCallOperation`: `{ operationId, fingerprint }`. The fingerprint is a
-lowercase SHA-256 digest of a bounded canonical encoding of the agent ID, operation kind, and
-request payload: the canonical input is capped at `MAX_WORKFLOW_OPERATION_CANONICAL_BYTES`
-(256,000 bytes), while the digest is exactly
-`MAX_WORKFLOW_OPERATION_FINGERPRINT_LENGTH` (64) characters. On a second call, the module reads
-the existing identity inside an `agentKV` transaction: a matching fingerprint returns the stored
-`operationId` for replay, and a mismatched one throws. If no `agentKV` is available, the module
-allocates a fresh ID per call and relies only on an explicitly supplied host operation ID for
-replay.
-
-Every durable mutation is also bound inside the module database by a
-`WorkflowOperationReceipt` and a separately retained, append-only `WorkflowMutationProof`.
-Receipt and proof must both exist and agree on operation, owner, operation ID, fingerprint,
-target, before/after state, and exact result before replay is accepted; partial evidence or a run
-without evidence is rejected.
-
-Every value the module hands out — `WorkflowRun`, `WorkflowPage`, `WorkflowLogPage`,
-`WorkflowMutationResult`, receipts, and proofs — is read from and written through the host's
-the module database, validated against its TypeBox schema and checked for semantic consistency and
-ownership before ever reaching the model. Field bounds enforced throughout —
-`MAX_WORKFLOW_ID_LENGTH` (96), `MAX_WORKFLOW_AGENT_ID_LENGTH` (256), `MAX_WORKFLOW_NAME_LENGTH`
-(96), `MAX_WORKFLOW_INPUT_LENGTH` (20,000), `MAX_WORKFLOW_ERROR_LENGTH` (4,000),
-`MAX_WORKFLOW_OUTPUT_CHARACTERS` (20,000), `MAX_WORKFLOW_PAGE_SIZE` (100), `MAX_WORKFLOW_LOG_LINES`
-(500), `MAX_WORKFLOW_LOG_LINE_LENGTH` (4,000) — exist so that even the smallest configured output
-budget can still show one complete run identity and its pagination marker; retention of runs and
-logs beyond those bounds is entirely the host store's own concern.
+Transactional listeners run inside the mutation transaction. Post-commit listeners are advisory:
+their failures are bounded and reported through `onPostCommitError` without changing the already
+committed result.

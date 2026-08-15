@@ -114,7 +114,6 @@ export {
     assertProjectSettingsUpdateResult,
     assertProjectStore,
     assertProjectStoreMutationResult,
-    assertProjectTransactionChange,
     createProjectStore,
     projectMigrations,
     projectArchiveResultSchema,
@@ -131,7 +130,6 @@ export {
     projectStoreRenameInputSchema,
     projectStoreSchema,
     projectStoreSettingsUpdateInputSchema,
-    projectTransactionChangeSchema,
     type ProjectArchiveResult,
     type ProjectAuthorization,
     type ProjectAuthorizationAction,
@@ -146,7 +144,6 @@ export {
     type ProjectStoreMutationResult,
     type ProjectStoreRenameInput,
     type ProjectStoreSettingsUpdateInput,
-    type ProjectTransactionChange,
 } from "./ProjectStore.js";
 export { archiveProjectInputSchema, archiveProjectTool } from "./tools/archive_project.js";
 export { createProjectTool } from "./tools/create_project.js";

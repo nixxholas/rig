@@ -12,9 +12,9 @@ export function clearGoalTool(goals: GoalModule, agentId: string) {
         parameters: Type.Object({}, { additionalProperties: false }),
         returnType: Type.Object({ cleared: Type.Boolean() }),
         durable: true,
+        transactional: true,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, _args, call) =>
-            await goals.clearGoalFromTool(ctx, agentId, call),
+        execute: async (ctx) => ({ cleared: await goals.clearGoal(ctx, agentId) }),
         toLLM: ({ cleared }) => [
             {
                 type: "text",

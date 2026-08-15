@@ -14,7 +14,7 @@ export function invokeWorkletOperationTool(module: WorkletsModule, agentId: stri
             "Invoke one operation declared by a worklet with bounded JSON arguments. The host owns wake/sleep and runtime execution.",
         parameters: workletInvocationInputSchema,
         returnType: workletInvocationResultSchema,
-        durable: true,
+        durable: false,
         shouldReviewInAutoMode: () => false,
         execute: async (ctx, input: WorkletInvocationInput) =>
             await module.invokeOperation(ctx, agentId, input),

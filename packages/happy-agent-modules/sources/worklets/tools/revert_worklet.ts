@@ -26,11 +26,12 @@ export function revertWorkletTool(module: WorkletsModule, agentId: string) {
         parameters: revertWorkletInputSchema,
         returnType: Type.Object({ worklet: workletSchema }),
         durable: true,
+        transactional: true,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, input: RevertWorkletInput) => {
+        execute: async (ctx, input: RevertWorkletInput, call) => {
             const { name, version } = input;
             const normalized: WorkletToolRevertInput = { version };
-            return { worklet: await module.revert(ctx, agentId, name, normalized) };
+            return await module.revertForTool(ctx, agentId, name, normalized, call);
         },
         toLLM: ({ worklet }) => [
             {

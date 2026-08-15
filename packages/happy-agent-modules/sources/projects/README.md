@@ -26,8 +26,8 @@ const projects = new ProjectsModule();
 - `update_project_settings` replaces bounded recursive JSON settings.
 
 All tools are durable and provider-neutral, and all opt out of Auto permission
-review. Mutation tools complete with `call.commit` inside the same database
-transaction as the catalog or settings change.
+review. Mutation tools set `transactional: true`; Agent Base commits their
+returned result with the catalog or settings change.
 
 ## Public API
 
@@ -51,9 +51,8 @@ can render the same bounded text used by tools.
 ## Host boundary
 
 The module owns the `projects` and `project_settings` tables through its ordered
-Agent Base migrations. Direct host calls may inject an
-`AgentStorageTransaction`; module hooks use the database and transaction
-carried by their Agent Base scope.
+Agent Base migrations. Database operations use `ctx.db`, and multi-step
+mutations compose with `ctx.inTx(...)`.
 
 Agent Base owns durable tool-call completion. The module does not maintain a
 second receipt, fingerprint, proof, or replay system. Concurrent ensure calls

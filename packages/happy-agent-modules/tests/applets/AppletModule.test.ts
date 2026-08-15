@@ -3,319 +3,36 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { Value } from "@sinclair/typebox/value";
-import { createRootContext, type Context } from "@steve.kite/stdlib";
+import { agentDatabaseRows } from "@slopus/happy-agent-base";
+import type { Context } from "@steve.kite/stdlib";
+import { sql } from "drizzle-orm";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
     appletCurrentResultSchema,
     appletSchema,
-    type Applet,
     type AppletImportInput,
-    type AppletListPage,
 } from "../../sources/applets/Applet.js";
 import type { AppletEvent } from "../../sources/applets/AppletEvent.js";
+import { APPLET_TABLE } from "../../sources/applets/AppletDatabase.js";
 import { AppletModule } from "../../sources/applets/AppletModule.js";
-import type {
-    AppletCatalog,
-    AppletCatalogCreateResult,
-    AppletCatalogMutationProof,
-    AppletCatalogMutationReceipt,
-    AppletCatalogMutationResult,
-    AppletCatalogRemoveResult,
-    AppletCatalogRevertResult,
-    AppletCatalogUpdateResult,
-} from "../../sources/applets/AppletStore.js";
+import { moduleDatabase, type ModuleDatabase } from "../support/moduleDatabase.js";
 
-const ctx = createRootContext().named("applets-module-test");
+let ctx: Context;
 const temporaryDirectories: string[] = [];
+const databases: ModuleDatabase[] = [];
 const PNG_1X1 = Buffer.from("89504e470d0a1a0a0000000d494844520000000100000001", "hex");
 
 afterEach(async () => {
     const paths = temporaryDirectories.splice(0);
     await Promise.all(paths.map(async (path) => await rm(path, { force: true, recursive: true })));
+    for (const database of databases.splice(0)) database.close();
 });
-
-class FakeAppletCatalog {
-    readonly rows = new Map<string, Applet>();
-    readonly operationReceipts = new Map<string, AppletCatalogMutationResult>();
-    readonly catalogReceipts = new Map<string, AppletCatalogMutationReceipt>();
-    readonly catalogProofs = new Map<string, AppletCatalogMutationProof>();
-    readonly #afterCommitCallbacks: Array<(postCommitCtx: Context) => void | Promise<void>> = [];
-    readonly #rollbackCallbacks: Array<(rollbackCtx: Context) => void | Promise<void>> = [];
-    #depth = 0;
-    #rowsSnapshot = new Map<string, Applet>();
-    #operationReceiptSnapshot = new Map<string, AppletCatalogMutationResult>();
-    #catalogReceiptSnapshot = new Map<string, AppletCatalogMutationReceipt>();
-    #catalogProofSnapshot = new Map<string, AppletCatalogMutationProof>();
-
-    readonly contract: AppletCatalog = {
-        transaction: this.transaction.bind(this),
-        afterCommit: this.afterCommit.bind(this),
-        onRollback: this.onRollback.bind(this),
-        list: this.list.bind(this),
-        get: this.get.bind(this),
-        create: this.create.bind(this),
-        update: this.update.bind(this),
-        revert: this.revert.bind(this),
-        remove: this.remove.bind(this),
-        readReceipt: this.readReceipt.bind(this),
-        writeReceipt: this.writeReceipt.bind(this),
-        readMutationProof: this.readMutationProof.bind(this),
-        writeMutationProof: this.writeMutationProof.bind(this),
-        current: this.current.bind(this),
-    };
-
-    async transaction<Result>(
-        transactionCtx: Context,
-        work: (txCtx: Context) => Promise<Result>,
-    ): Promise<Result> {
-        if (this.#depth === 0) {
-            this.#rowsSnapshot = cloneMap(this.rows);
-            this.#operationReceiptSnapshot = cloneMap(this.operationReceipts);
-            this.#catalogReceiptSnapshot = cloneMap(this.catalogReceipts);
-            this.#catalogProofSnapshot = cloneMap(this.catalogProofs);
-        }
-        this.#depth++;
-        try {
-            const result = await work(transactionCtx);
-            this.#depth--;
-            if (this.#depth === 0) {
-                const callbacks = this.#afterCommitCallbacks.splice(0);
-                this.#rollbackCallbacks.length = 0;
-                for (const callback of callbacks) await callback(transactionCtx);
-            }
-            return result;
-        } catch (error: unknown) {
-            this.#depth--;
-            if (this.#depth === 0) {
-                replaceMap(this.rows, this.#rowsSnapshot);
-                replaceMap(this.operationReceipts, this.#operationReceiptSnapshot);
-                replaceMap(this.catalogReceipts, this.#catalogReceiptSnapshot);
-                replaceMap(this.catalogProofs, this.#catalogProofSnapshot);
-                const callbacks = this.#rollbackCallbacks.splice(0);
-                this.#afterCommitCallbacks.length = 0;
-                for (const callback of callbacks) await callback(transactionCtx);
-            }
-            throw error;
-        }
-    }
-
-    afterCommit(
-        _transactionCtx: Context,
-        callback: (postCommitCtx: Context) => void | Promise<void>,
-    ): void {
-        this.#afterCommitCallbacks.push(callback);
-    }
-
-    onRollback(
-        _transactionCtx: Context,
-        callback: (rollbackCtx: Context) => void | Promise<void>,
-    ): void {
-        this.#rollbackCallbacks.push(callback);
-    }
-
-    async list(
-        _ctx: Context,
-        query: { readonly limit: number; readonly cursor?: string },
-    ): Promise<AppletListPage> {
-        const start = query.cursor === undefined ? 0 : Number(query.cursor);
-        const applets = [...this.rows.values()]
-            .sort((left, right) => left.name.localeCompare(right.name))
-            .slice(start, start + query.limit)
-            .map((applet) => structuredClone(applet));
-        const hasMore = start + applets.length < this.rows.size;
-        return hasMore
-            ? {
-                  applets,
-                  limit: query.limit,
-                  hasMore: true,
-                  nextCursor: String(start + applets.length),
-              }
-            : { applets, limit: query.limit, hasMore: false };
-    }
-
-    async get(_ctx: Context, name: string): Promise<Applet | undefined> {
-        const applet = this.rows.get(name);
-        return applet === undefined ? undefined : structuredClone(applet);
-    }
-
-    async create(
-        _ctx: Context,
-        input: Parameters<AppletCatalog["create"]>[1],
-    ): Promise<AppletCatalogCreateResult> {
-        const key = `create:${input.name}:${input.operationId}`;
-        const receipt = this.operationReceipts.get(key);
-        if (receipt !== undefined) return structuredClone(receipt) as AppletCatalogCreateResult;
-        if (this.rows.has(input.name)) throw new Error("Applet already exists.");
-
-        const applet: Applet = {
-            name: input.name,
-            description: input.description,
-            purpose: input.purpose,
-            authorSessionId: input.authorSessionId,
-            allowedScopes: input.allowedScopes ?? ["global"],
-            ...(input.sourceDescription === undefined
-                ? {}
-                : { sourceDescription: input.sourceDescription }),
-            ...(input.iconThumbhash === undefined ? {} : { iconThumbhash: input.iconThumbhash }),
-            ...(input.iconUrl === undefined ? {} : { iconUrl: input.iconUrl }),
-            currentVersion: 1,
-            versions: [structuredClone(input.initialVersion)],
-            createdAt: input.initialVersion.createdAt,
-            updatedAt: input.initialVersion.createdAt,
-        };
-        this.rows.set(applet.name, applet);
-        const result: AppletCatalogCreateResult = {
-            operation: "create",
-            name: applet.name,
-            operationId: input.operationId,
-            targetVersion: 1,
-            currentVersion: 1,
-            changed: true,
-            applet: structuredClone(applet),
-        };
-        this.operationReceipts.set(key, result);
-        return structuredClone(result);
-    }
-
-    async update(
-        _ctx: Context,
-        name: string,
-        input: Parameters<AppletCatalog["update"]>[2],
-    ): Promise<AppletCatalogUpdateResult> {
-        const key = `update:${name}:${input.operationId}`;
-        const receipt = this.operationReceipts.get(key);
-        if (receipt !== undefined) return structuredClone(receipt) as AppletCatalogUpdateResult;
-        const current = this.rows.get(name);
-        if (current === undefined) throw new Error("missing applet");
-        if (input.version !== current.versions.length + 1) throw new Error("wrong target version");
-
-        const updated = structuredClone(current);
-        updated.currentVersion = input.version;
-        updated.updatedAt = input.createdAt;
-        updated.versions.push({
-            version: input.version,
-            changeDescription: input.changeDescription,
-            createdAt: input.createdAt,
-            operationId: input.operationId,
-        });
-        if (input.description !== undefined) updated.description = input.description;
-        if (input.purpose !== undefined) updated.purpose = input.purpose;
-        if (input.allowedScopes !== undefined) updated.allowedScopes = input.allowedScopes;
-        if (input.sourceDescription !== undefined) {
-            updated.sourceDescription = input.sourceDescription;
-        }
-        if (input.iconThumbhash !== undefined) updated.iconThumbhash = input.iconThumbhash;
-        if (input.iconUrl !== undefined) updated.iconUrl = input.iconUrl;
-        this.rows.set(name, updated);
-
-        const result: AppletCatalogUpdateResult = {
-            operation: "update",
-            name,
-            operationId: input.operationId,
-            targetVersion: input.version,
-            currentVersion: input.version,
-            changed: true,
-            applet: structuredClone(updated),
-        };
-        this.operationReceipts.set(key, result);
-        return structuredClone(result);
-    }
-
-    async revert(
-        _ctx: Context,
-        name: string,
-        input: Parameters<AppletCatalog["revert"]>[2],
-    ): Promise<AppletCatalogRevertResult> {
-        const key = `revert:${name}:${input.operationId}`;
-        const receipt = this.operationReceipts.get(key);
-        if (receipt !== undefined) return structuredClone(receipt) as AppletCatalogRevertResult;
-        const current = this.rows.get(name);
-        if (current === undefined) throw new Error("missing applet");
-
-        const reverted = structuredClone(current);
-        const changed = current.currentVersion !== input.version;
-        reverted.currentVersion = input.version;
-        if (changed) reverted.updatedAt++;
-        this.rows.set(name, reverted);
-        const result: AppletCatalogRevertResult = {
-            operation: "revert",
-            name,
-            operationId: input.operationId,
-            targetVersion: input.version,
-            currentVersion: input.version,
-            changed,
-            applet: structuredClone(reverted),
-        };
-        this.operationReceipts.set(key, result);
-        return structuredClone(result);
-    }
-
-    async remove(
-        _ctx: Context,
-        name: string,
-        operationId: string,
-    ): Promise<AppletCatalogRemoveResult> {
-        const key = `remove:${name}:${operationId}`;
-        const receipt = this.operationReceipts.get(key);
-        if (receipt !== undefined) return structuredClone(receipt) as AppletCatalogRemoveResult;
-        const changed = this.rows.delete(name);
-        const result: AppletCatalogRemoveResult = {
-            operation: "remove",
-            name,
-            operationId,
-            targetVersion: 0,
-            currentVersion: 0,
-            changed,
-            removed: changed,
-        };
-        this.operationReceipts.set(key, result);
-        return structuredClone(result);
-    }
-
-    async readReceipt(
-        _ctx: Context,
-        operationId: string,
-    ): Promise<AppletCatalogMutationReceipt | undefined> {
-        const receipt = this.catalogReceipts.get(operationId);
-        return receipt === undefined ? undefined : structuredClone(receipt);
-    }
-
-    async writeReceipt(_ctx: Context, receipt: AppletCatalogMutationReceipt): Promise<void> {
-        this.catalogReceipts.set(receipt.operationId, structuredClone(receipt));
-    }
-
-    async readMutationProof(
-        _ctx: Context,
-        operationId: string,
-    ): Promise<AppletCatalogMutationProof | undefined> {
-        const proof = this.catalogProofs.get(operationId);
-        return proof === undefined ? undefined : structuredClone(proof);
-    }
-
-    async writeMutationProof(_ctx: Context, proof: AppletCatalogMutationProof): Promise<void> {
-        this.catalogProofs.set(proof.operationId, structuredClone(proof));
-    }
-
-    async current(_ctx: Context, name: string) {
-        const applet = this.rows.get(name);
-        return applet?.versions.find((version) => version.version === applet.currentVersion);
-    }
-}
-
-function cloneMap<Key, Value>(source: ReadonlyMap<Key, Value>): Map<Key, Value> {
-    return new Map([...source].map(([key, value]) => [key, structuredClone(value)]));
-}
-
-function replaceMap<Key, Value>(target: Map<Key, Value>, source: ReadonlyMap<Key, Value>): void {
-    target.clear();
-    for (const [key, value] of source) target.set(key, structuredClone(value));
-}
 
 interface AppletFixture {
     readonly directory: string;
     readonly rootDirectory: string;
-    readonly catalog: FakeAppletCatalog;
+    readonly database: ModuleDatabase;
     readonly applets: AppletModule;
     readonly source: (
         name: string,
@@ -330,12 +47,10 @@ async function fixture(
     const directory = await mkdtemp(join(tmpdir(), "rig-applet-module-"));
     temporaryDirectories.push(directory);
     const rootDirectory = join(directory, "Applets");
-    const catalog = new FakeAppletCatalog();
     let operation = 0;
     let event = 0;
     let now = 100;
     const applets = new AppletModule({
-        catalog: catalog.contract,
         rootDirectory,
         idFactory: () => `operation-${++operation}`,
         eventIdFactory: () => `event-${++event}`,
@@ -343,10 +58,17 @@ async function fixture(
         clock: () => now++,
         ...overrides,
     });
+    const database = moduleDatabase([], "applets-module-test");
+    databases.push(database);
+    await database.ready;
+    for (const [, migrate] of applets.migrations) {
+        await migrate(database.context, database.database);
+    }
+    ctx = database.context;
     return {
         directory,
         rootDirectory,
-        catalog,
+        database,
         applets,
         source: async (name, files) => {
             const sourcePath = join(directory, name);
@@ -459,24 +181,6 @@ describe("AppletModule filesystem ownership", () => {
         });
     });
 
-    it("keeps installed files when an outer transaction rolls removal back", async () => {
-        const test = await fixture();
-        const sourcePath = await test.source("source-v1", { "index.html": "still installed" });
-        await test.applets.import(ctx, importInput(sourcePath));
-
-        await expect(
-            test.catalog.transaction(ctx, async (outerCtx) => {
-                await test.applets.remove(outerCtx, "demo-applet");
-                throw new Error("outer rollback");
-            }),
-        ).rejects.toThrow("outer rollback");
-
-        await expect(test.applets.get(ctx, "demo-applet")).resolves.toBeDefined();
-        await expect(
-            readFile(join(test.rootDirectory, "demo-applet", "v1", "index.html"), "utf8"),
-        ).resolves.toBe("still installed");
-    });
-
     it("reads real text and binary asset bytes from an installed version", async () => {
         const test = await fixture();
         const binary = Buffer.from([0, 1, 2, 250, 255]);
@@ -545,7 +249,7 @@ describe("AppletModule filesystem ownership", () => {
         await expect(test.applets.import(ctx, importInput(sourcePath))).rejects.toThrow(
             "may not contain symbolic links",
         );
-        expect(test.catalog.rows.size).toBe(0);
+        await expect(test.applets.list(ctx)).resolves.toEqual([]);
         await expect(readdir(join(test.rootDirectory, "demo-applet"))).rejects.toMatchObject({
             code: "ENOENT",
         });
@@ -572,10 +276,13 @@ describe("AppletModule filesystem ownership", () => {
         },
     ])("enforces the $label source import bound", async ({ files, bounds, message }) => {
         const test = await fixture(bounds);
-        const sourcePath = await test.source("bounded-source", files);
+        const sourcePath = await test.source(
+            "bounded-source",
+            files as unknown as Readonly<Record<string, string | Buffer>>,
+        );
 
         await expect(test.applets.import(ctx, importInput(sourcePath))).rejects.toThrow(message);
-        expect(test.catalog.rows.size).toBe(0);
+        await expect(test.applets.list(ctx)).resolves.toEqual([]);
         await expect(readdir(join(test.rootDirectory, "demo-applet"))).rejects.toMatchObject({
             code: "ENOENT",
         });
@@ -591,7 +298,7 @@ describe("AppletModule filesystem ownership", () => {
         await expect(test.applets.import(ctx, importInput(sourcePath))).rejects.toThrow(
             "per-file byte",
         );
-        expect(test.catalog.rows.size).toBe(0);
+        await expect(test.applets.list(ctx)).resolves.toEqual([]);
         expect(await readdir(test.rootDirectory)).toEqual([]);
     });
 
@@ -611,26 +318,41 @@ describe("AppletModule filesystem ownership", () => {
             "listener failed",
         );
         expect(events).toHaveLength(1);
-        expect(test.catalog.rows.size).toBe(0);
+        await expect(test.applets.list(ctx)).resolves.toEqual([]);
         expect(await readdir(test.rootDirectory)).toEqual([]);
     });
 
-    it("replays explicit durable operation identities without importing another version", async () => {
+    it("treats a repeated direct import as a conflict instead of replaying a receipt", async () => {
         const test = await fixture();
         const sourcePath = await test.source("source-v1", { "index.html": "stable" });
-        const request = importInput(sourcePath, { operationId: "durable-create" });
+        const request = importInput(sourcePath, { operationId: "direct-create" });
 
-        const created = await test.applets.import(ctx, request);
-        await expect(test.applets.import(ctx, request)).resolves.toEqual(created);
-        await expect(
-            test.applets.import(ctx, { ...request, description: "changed request" }),
-        ).rejects.toThrow("reused with different input");
+        await test.applets.import(ctx, request);
+        await expect(test.applets.import(ctx, request)).rejects.toThrow("already exists");
         expect(await readdir(join(test.rootDirectory, "demo-applet"))).toEqual(["v1"]);
+    });
+
+    it("keeps the immutable migration and drops the obsolete idempotency tables in 002", async () => {
+        const test = await fixture();
+
+        expect(test.applets.migrations.map(([key]) => key)).toEqual([
+            "001-applets-catalog",
+            "002-remove-applet-idempotency",
+        ]);
+        const tables = await agentDatabaseRows<{ name: string }>(
+            ctx.db,
+            sql`SELECT name
+                FROM sqlite_master
+                WHERE type = 'table' AND name LIKE 'happy_agent_module_applet%'
+                ORDER BY name`,
+        );
+        expect(tables.map(({ name }) => name)).toEqual([APPLET_TABLE]);
     });
 
     it("keeps direct operations and the eight common tools on the same catalog and filesystem", async () => {
         const test = await fixture();
         const sourcePath = await test.source("source-v1", { "index.html": "from tool" });
+        const updatedSourcePath = await test.source("source-v2", { "index.html": "updated" });
         const tools = test.applets.tools(ctx, { agent: { id: "agent-1" } } as never);
 
         expect(tools.map((tool) => tool.name)).toEqual([
@@ -643,20 +365,129 @@ describe("AppletModule filesystem ownership", () => {
             "remove_applet",
             "read_applet_asset",
         ]);
-        const created = await tools[0]!.execute(ctx, {
-            name: "demo-applet",
-            description: "Demo applet",
-            purpose: "test applet",
-            path: sourcePath,
-        });
+        const call = (id: string) =>
+            ({
+                id,
+                providerCallId: `provider-${id}`,
+                kv: {},
+                commit: async (_ctx: unknown, result: unknown) => result,
+            }) as never;
+        const created = await tools[0]!.execute(
+            ctx,
+            {
+                name: "demo-applet",
+                description: "Demo applet",
+                purpose: "test applet",
+                path: sourcePath,
+            },
+            call("call-create"),
+        );
         expect(created.applet.authorSessionId).toBe("author-for-agent-1");
+        expect(created.applet.versions[0]!.operationId).toBe("call-create");
         expect(
             await readFile(join(test.rootDirectory, "demo-applet", "v1", "index.html"), "utf8"),
         ).toBe("from tool");
-        expect((await tools[2]!.execute(ctx, { limit: 10 })).applets).toEqual([created.applet]);
-        expect((await tools[3]!.execute(ctx, { name: "demo-applet" })).applet).toEqual(
+        expect((await tools[2]!.execute(ctx, { limit: 10 }, call("call-list"))).applets).toEqual([
             created.applet,
+        ]);
+        expect(
+            (await tools[3]!.execute(ctx, { name: "demo-applet" }, call("call-get"))).applet,
+        ).toEqual(created.applet);
+        const updated = await tools[4]!.execute(
+            ctx,
+            {
+                name: "demo-applet",
+                path: updatedSourcePath,
+                changeDescription: "Updated through the tool",
+            },
+            call("call-update"),
         );
+        expect(updated.applet.versions[1]!.operationId).toBe("call-update");
+        expect(tools.map((tool) => tool.durable)).toEqual([
+            false,
+            false,
+            true,
+            true,
+            false,
+            true,
+            false,
+            true,
+        ]);
+        expect(tools.map((tool) => tool.transactional ?? false)).toEqual([
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            false,
+        ]);
+    });
+
+    it("lets Agent Base own the durable revert transaction and result commit", async () => {
+        const test = await fixture();
+        const sourceV1 = await test.source("source-v1", { "index.html": "one" });
+        const sourceV2 = await test.source("source-v2", { "index.html": "two" });
+        await test.applets.import(ctx, importInput(sourceV1));
+        await test.applets.update(ctx, "demo-applet", {
+            path: sourceV2,
+            changeDescription: "Second version",
+        });
+        const tools = test.applets.tools(ctx, { agent: { id: "agent-1" } } as never);
+        const revert = tools.find((tool) => tool.name === "revert_applet")!;
+        const result = await ctx.inTx(
+            async (txCtx) =>
+                await revert.execute(
+                    txCtx,
+                    { name: "demo-applet", version: 1 },
+                    {
+                        id: "call-revert",
+                        providerCallId: "provider-revert",
+                        kv: {},
+                        commit: async () => {
+                            throw new Error("module must not commit the result");
+                        },
+                    } as never,
+                ),
+        );
+
+        expect(revert.durable).toBe(true);
+        expect(revert.transactional).toBe(true);
+        expect(result.applet.currentVersion).toBe(1);
+    });
+
+    it("respects an outer Agent Base transaction rollback", async () => {
+        const test = await fixture();
+        const sourceV1 = await test.source("source-v1", { "index.html": "one" });
+        const sourceV2 = await test.source("source-v2", { "index.html": "two" });
+        await test.applets.import(ctx, importInput(sourceV1));
+        await test.applets.update(ctx, "demo-applet", {
+            path: sourceV2,
+            changeDescription: "Second version",
+        });
+        const revert = test.applets
+            .tools(ctx, { agent: { id: "agent-1" } } as never)
+            .find((tool) => tool.name === "revert_applet")!;
+
+        await expect(
+            ctx.inTx(async (txCtx) => {
+                await revert.execute(
+                    txCtx,
+                    { name: "demo-applet", version: 1 },
+                    {
+                        id: "call-revert",
+                        providerCallId: "provider-revert",
+                        kv: {},
+                        commit: async (_commitCtx: unknown, value: unknown) => value,
+                    } as never,
+                );
+                throw new Error("outer transaction failed");
+            }),
+        ).rejects.toThrow("outer transaction failed");
+        await expect(test.applets.get(ctx, "demo-applet")).resolves.toMatchObject({
+            currentVersion: 2,
+        });
     });
 
     it("keeps the current-version runtime schema strict", () => {

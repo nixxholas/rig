@@ -21,7 +21,6 @@ import {
     type AgentDatabase,
     type AgentDatabaseFacade,
     type AgentModuleMigration,
-    type AgentStorageTransaction,
 } from "@slopus/happy-agent-base";
 
 import {
@@ -81,13 +80,6 @@ const nonNegativeIntegerSchema = Type.Integer({ maximum: 1_000_000, minimum: 0 }
 const DEFAULT_TOOL_OUTPUT_LIMIT = 16_000;
 const HISTORY_TABLE = "happy_agent_module_history";
 
-const historyTransactionSchema = Type.Function(
-    [
-        historyContextSchema,
-        Type.Function([historyContextSchema, Type.Unknown()], Type.Promise(Type.Unknown())),
-    ],
-    Type.Promise(Type.Unknown()),
-);
 const historyAppendListenerSchema = Type.Function(
     [
         historyContextSchema,
@@ -99,7 +91,6 @@ const historyAppendListenerSchema = Type.Function(
 
 const historyModuleOptionsSchema = Type.Object(
     {
-        transaction: Type.Optional(historyTransactionSchema),
         resolveTarget: Type.Optional(
             Type.Function(
                 [historyContextSchema, Type.String(), Type.String()],
@@ -126,7 +117,6 @@ const historyModuleOptionsSchema = Type.Object(
 export { historyModuleOptionsSchema };
 /** What a history module is built with. */
 export type HistoryModuleOptions = Static<typeof historyModuleOptionsSchema>;
-type HistoryTransaction = AgentStorageTransaction<AgentDatabase>;
 
 /**
  * The agent's own record of what happened, which it can read back.
@@ -149,11 +139,6 @@ type HistoryTransaction = AgentStorageTransaction<AgentDatabase>;
 export class HistoryModule implements AgentModule {
     readonly name = "history";
 
-    /**
-     * Direct host calls run through the AgentStorage transaction integration. Agent hooks use the
-     * transaction database handed to them in AgentModuleScope and never call this function.
-     */
-    readonly #transaction: HistoryTransaction | undefined;
     readonly #resolveTarget:
         | ((
               ctx: Context,
@@ -201,7 +186,6 @@ export class HistoryModule implements AgentModule {
         if (!Value.Check(historyModuleOptionsSchema, options)) {
             throw new Error("History module options are invalid.");
         }
-        this.#transaction = options.transaction as HistoryTransaction | undefined;
         this.#resolveTarget = options.resolveTarget;
         const toolOutputLimit = options.toolOutputLimit ?? DEFAULT_TOOL_OUTPUT_LIMIT;
         if (!Value.Check(nonNegativeIntegerSchema, toolOutputLimit)) {
@@ -229,9 +213,7 @@ export class HistoryModule implements AgentModule {
         if (!Value.Check(historyMessageSchema, normalized)) {
             throw new Error("The history module produced an invalid message.");
         }
-        await this.#direct(ctx, (txCtx, database) =>
-            this.#append(txCtx, database, agentId, normalized),
-        );
+        await this.#direct(ctx, (txCtx) => this.#append(txCtx, agentId, normalized));
     }
 
     /** Everything an agent's history holds, oldest first. */
@@ -247,8 +229,8 @@ export class HistoryModule implements AgentModule {
         if (!Value.Check(historyQuerySchema, input)) {
             throw new Error("The history reader received an invalid page query.");
         }
-        const page = await this.#direct(ctx, (txCtx, database) =>
-            this.#readPage(txCtx, database, agentId, {
+        const page = await this.#direct(ctx, (txCtx) =>
+            this.#readPage(txCtx, agentId, {
                 limit: boundedLimit(query.limit ?? DEFAULT_READER_LIMIT),
                 ...(query.from === undefined ? {} : { from: query.from }),
             }),
@@ -264,8 +246,8 @@ export class HistoryModule implements AgentModule {
      * full totals.
      */
     async stats(ctx: Context, agentId: string): Promise<HistoryStats> {
-        const page = await this.#direct(ctx, (txCtx, database) =>
-            this.#readPage(txCtx, database, agentId, {
+        const page = await this.#direct(ctx, (txCtx) =>
+            this.#readPage(txCtx, agentId, {
                 from: "start",
                 limit: 1,
             }),
@@ -281,30 +263,9 @@ export class HistoryModule implements AgentModule {
         if (!Value.Check(historyQuerySchema, query)) {
             throw new Error("The history reader received an invalid page query.");
         }
-        return await this.#direct(ctx, (txCtx, database) =>
-            this.#readPage(txCtx, database, agentId, toStoreQuery(query)),
+        return await this.#direct(ctx, (txCtx) =>
+            this.#readPage(txCtx, agentId, toStoreQuery(query)),
         );
-    }
-
-    /**
-     * Read one page and complete a durable tool call inside the same storage transaction.
-     *
-     * Agent Base owns retry identity and result completion; History only composes that completion
-     * with the authoritative read.
-     */
-    async readFromTool<Result>(
-        ctx: Context,
-        agentId: string,
-        query: HistoryQuery,
-        complete: (txCtx: Context, page: HistoryPage) => Promise<Result>,
-    ): Promise<Result> {
-        if (!Value.Check(historyQuerySchema, query)) {
-            throw new Error("The history reader received an invalid page query.");
-        }
-        return await this.#direct(ctx, async (txCtx, database) => {
-            const page = await this.#readPage(txCtx, database, agentId, toStoreQuery(query));
-            return await complete(txCtx, page);
-        });
     }
 
     readonly tools = (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => [
@@ -352,7 +313,7 @@ export class HistoryModule implements AgentModule {
         scope: AgentModuleScope,
         accepted: AgentBaseAcceptedMessage,
     ): Promise<void> => {
-        await this.#append(ctx, scope.database, scope.agent.id, {
+        await this.#append(ctx, scope.agent.id, {
             at: Date.now(),
             blocks: accepted.message.content.map(toHistoryOutputBlock),
             recordId: createRecordId(),
@@ -402,7 +363,7 @@ export class HistoryModule implements AgentModule {
         if (!Value.Check(historyToolResultBlockSchema, toolResultBlock)) {
             throw new Error("History module received an invalid tool result.");
         }
-        await this.#append(ctx, scope.database, scope.agent.id, {
+        await this.#append(ctx, scope.agent.id, {
             at: Date.now(),
             blocks: [toolResultBlock],
             recordId: createRecordId(),
@@ -453,7 +414,7 @@ export class HistoryModule implements AgentModule {
             await scope.runKV.delete(ctx, PENDING_BLOCKS_KEY);
             return;
         }
-        await this.#append(ctx, scope.database, scope.agent.id, ...messages);
+        await this.#append(ctx, scope.agent.id, ...messages);
         await scope.runKV.delete(ctx, PENDING_BLOCKS_KEY);
     };
 
@@ -469,7 +430,7 @@ export class HistoryModule implements AgentModule {
     ): Promise<void> => {
         const blocks = await this.#pendingBlocks(ctx, scope);
         if (blocks.length === 0) return;
-        await this.#append(ctx, scope.database, scope.agent.id, {
+        await this.#append(ctx, scope.agent.id, {
             at: Date.now(),
             blocks,
             recordId: createRecordId(),
@@ -509,7 +470,6 @@ export class HistoryModule implements AgentModule {
 
     async #append(
         ctx: Context,
-        database: AgentDatabaseFacade<AgentDatabase>,
         agentId: string,
         ...messages: readonly HistoryMessage[]
     ): Promise<void> {
@@ -522,7 +482,7 @@ export class HistoryModule implements AgentModule {
         }
         try {
             const countRows = await agentDatabaseRows<{ count: number | string }>(
-                database,
+                ctx.db,
                 sql`SELECT COUNT(*) AS count
                     FROM ${sql.raw(HISTORY_TABLE)}
                     WHERE agent_id = ${agentId}`,
@@ -532,7 +492,7 @@ export class HistoryModule implements AgentModule {
                 throw new Error("The history module reached its record limit.");
             }
             const positionRows = await agentDatabaseRows<{ position: number | string }>(
-                database,
+                ctx.db,
                 sql`SELECT COALESCE(MAX(position), -1) + 1 AS position
                     FROM ${sql.raw(HISTORY_TABLE)}
                     WHERE agent_id = ${agentId}`,
@@ -548,7 +508,7 @@ export class HistoryModule implements AgentModule {
                     historyMessageSearchParts(message).join("\n"),
                 );
                 await agentDatabaseRun(
-                    database,
+                    ctx.db,
                     sql`INSERT INTO ${sql.raw(HISTORY_TABLE)} (
                             agent_id,
                             position,
@@ -587,8 +547,7 @@ export class HistoryModule implements AgentModule {
     }
 
     async #readPage(
-        _ctx: Context,
-        database: AgentDatabaseFacade<AgentDatabase>,
+        ctx: Context,
         agentId: string,
         query: HistoryStoreQuery,
     ): Promise<HistoryPage> {
@@ -600,12 +559,12 @@ export class HistoryModule implements AgentModule {
         }
         const requestedLimit = boundedLimit(query.limit);
         const filters = historyWhere(agentId, query);
-        const totalStats = await readHistoryStats(database, sql`agent_id = ${agentId}`);
-        const matchedStats = await readHistoryStats(database, filters);
+        const totalStats = await readHistoryStats(ctx.db, sql`agent_id = ${agentId}`);
+        const matchedStats = await readHistoryStats(ctx.db, filters);
         const totalMessages = totalStats.messages;
         const matchedMessages = matchedStats.messages;
         const maxRows = await agentDatabaseRows<{ position: number | string | null }>(
-            database,
+            ctx.db,
             sql`SELECT MAX(position) AS position
                 FROM ${sql.raw(HISTORY_TABLE)}
                 WHERE agent_id = ${agentId}`,
@@ -624,7 +583,7 @@ export class HistoryModule implements AgentModule {
         const selectedRows =
             query.from === "end"
                 ? await agentDatabaseRows<HistoryRow>(
-                      database,
+                      ctx.db,
                       sql`SELECT position, record_id, message_json
                           FROM ${sql.raw(HISTORY_TABLE)}
                           WHERE ${filters}
@@ -632,7 +591,7 @@ export class HistoryModule implements AgentModule {
                           LIMIT ${requestedLimit}`,
                   )
                 : await agentDatabaseRows<HistoryRow>(
-                      database,
+                      ctx.db,
                       sql`SELECT position, record_id, message_json
                           FROM ${sql.raw(HISTORY_TABLE)}
                           WHERE ${sql.join([filters, sql`position >= ${anchor}`], sql` AND `)}
@@ -645,21 +604,21 @@ export class HistoryModule implements AgentModule {
         const startIndex =
             query.from === "end"
                 ? Math.max(0, matchedMessages - requestedLimit)
-                : await countHistoryRows(database, sql`(${filters}) AND position < ${anchor}`);
+                : await countHistoryRows(ctx.db, sql`(${filters}) AND position < ${anchor}`);
         const selectedFirstPosition = messages[0]?.position;
         const lastSelectedPosition = messages.at(-1)?.position;
         const nextCursor =
             query.from === "end" || lastSelectedPosition === undefined
                 ? undefined
                 : await firstHistoryPosition(
-                      database,
+                      ctx.db,
                       sql`(${filters}) AND position > ${lastSelectedPosition}`,
                   );
         const previousOffset = Math.max(0, startIndex - requestedLimit);
         const previousCursor =
             matchedMessages > messages.length &&
             (query.from === "end" || query.cursor !== undefined || startIndex > 0)
-                ? await historyPositionAt(database, filters, previousOffset)
+                ? await historyPositionAt(ctx.db, filters, previousOffset)
                 : undefined;
         const cursor =
             selectedFirstPosition ?? (query.from === "end" ? archiveEnd : (query.cursor ?? 0));
@@ -778,14 +737,9 @@ export class HistoryModule implements AgentModule {
 
     async #direct<Result>(
         ctx: Context,
-        work: (txCtx: Context, database: AgentDatabaseFacade<AgentDatabase>) => Promise<Result>,
+        work: (txCtx: Context) => Promise<Result>,
     ): Promise<Result> {
-        if (this.#transaction === undefined) {
-            throw new Error(
-                "History direct operations require an AgentStorageTransaction integration.",
-            );
-        }
-        return await this.#transaction(ctx, work);
+        return await ctx.inTx(work);
     }
 
     #scheduleAppendNotification(

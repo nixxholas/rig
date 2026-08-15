@@ -11,11 +11,7 @@ export function createGoalTool(
     goals: GoalModule,
     agentId: string,
     maxOutputCharacters: number,
-    observeActiveLifecycle: (
-        ctx: Context,
-        goal: SessionGoal,
-        lifecycleId: string,
-    ) => Promise<void>,
+    observeActiveLifecycle: (ctx: Context, goal: SessionGoal, lifecycleId: string) => Promise<void>,
 ) {
     return defineAgentTool({
         name: "create_goal",
@@ -29,15 +25,18 @@ Do not infer a goal from an ordinary task. A new goal cannot replace an unfinish
         ),
         returnType: Type.Object({ goal: sessionGoalSchema }),
         durable: true,
+        transactional: true,
         shouldReviewInAutoMode: () => false,
         execute: async (ctx, { objective }, call) =>
-            await goals.createGoalFromTool(
-                ctx,
-                agentId,
-                objective,
-                call,
-                observeActiveLifecycle,
-            ),
+            await ctx.inTx(async (txCtx) => {
+                const activation = await goals.setGoal(txCtx, agentId, objective, call.id);
+                await observeActiveLifecycle(
+                    txCtx,
+                    activation.goal,
+                    activation.lifecycleId,
+                );
+                return { goal: activation.goal };
+            }),
         toLLM: ({ goal }) => [
             { type: "text", text: formatGoalForModel(goal, maxOutputCharacters) },
         ],

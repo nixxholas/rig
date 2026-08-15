@@ -154,8 +154,9 @@ export function readAgentHistoryTool(history: HistoryModule, agentId: string) {
         }),
         // Reading history changes nothing and reaches nothing outside the agent's own store.
         durable: true,
+        transactional: true,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, args, call) => {
+        execute: async (ctx, args) => {
             if (args.cursor !== undefined && args.from !== undefined) {
                 throw new Error("Use either cursor or from, not both.");
             }
@@ -171,46 +172,39 @@ export function readAgentHistoryTool(history: HistoryModule, agentId: string) {
                     "History access is limited to the current agent unless the host authorizes a related target.",
                 );
             }
-            return await history.readFromTool(
-                ctx,
-                target,
-                {
-                    ...(args.cursor === undefined ? {} : { cursor: args.cursor }),
-                    ...(from === undefined ? {} : { from }),
-                    limit: args.limit ?? 100,
-                    ...(args.query === undefined ? {} : { query: args.query }),
-                    ...(args.roles === undefined ? {} : { roles: args.roles }),
+            const page = await history.read(ctx, target, {
+                ...(args.cursor === undefined ? {} : { cursor: args.cursor }),
+                ...(from === undefined ? {} : { from }),
+                limit: args.limit ?? 100,
+                ...(args.query === undefined ? {} : { query: args.query }),
+                ...(args.roles === undefined ? {} : { roles: args.roles }),
+            });
+            const formatted = formatHistoryPage(page, {
+                fromEnd: from === "end",
+                includeTools: args.include_tools !== false,
+            });
+            const cursor = page.messages[formatted.startIndex]?.position ?? page.cursor;
+            const next =
+                formatted.startIndex + formatted.consumedMessages < page.messages.length
+                    ? page.messages[formatted.startIndex + formatted.consumedMessages]?.position
+                    : page.nextCursor;
+            const previous =
+                formatted.startIndex > 0 ? page.messages[0]?.position : page.previousCursor;
+            return {
+                cursor,
+                history: formatted.history,
+                matched_messages: page.matchedMessages,
+                ...(next === undefined ? {} : { next_cursor: next }),
+                ...(previous === undefined ? {} : { previous_cursor: previous }),
+                returned_messages: formatted.consumedMessages,
+                stats: {
+                    matched: toStats(page.matchedStats),
+                    returned: toStats(formatted.stats),
+                    total: toStats(page.totalStats),
                 },
-                async (txCtx, page) => {
-                    const formatted = formatHistoryPage(page, {
-                        fromEnd: from === "end",
-                        includeTools: args.include_tools !== false,
-                    });
-                    const cursor = page.messages[formatted.startIndex]?.position ?? page.cursor;
-                    const next =
-                        formatted.startIndex + formatted.consumedMessages < page.messages.length
-                            ? page.messages[formatted.startIndex + formatted.consumedMessages]
-                                  ?.position
-                            : page.nextCursor;
-                    const previous =
-                        formatted.startIndex > 0 ? page.messages[0]?.position : page.previousCursor;
-                    return await call.commit(txCtx, {
-                        cursor,
-                        history: formatted.history,
-                        matched_messages: page.matchedMessages,
-                        ...(next === undefined ? {} : { next_cursor: next }),
-                        ...(previous === undefined ? {} : { previous_cursor: previous }),
-                        returned_messages: formatted.consumedMessages,
-                        stats: {
-                            matched: toStats(page.matchedStats),
-                            returned: toStats(formatted.stats),
-                            total: toStats(page.totalStats),
-                        },
-                        target: page.agentId,
-                        total_messages: page.totalMessages,
-                    });
-                },
-            );
+                target: page.agentId,
+                total_messages: page.totalMessages,
+            };
         },
         toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
     });

@@ -1,6 +1,5 @@
 import {
     agentConfigSchema,
-    type AgentStorageTransaction,
     type AgentModule,
     type AgentModuleScope,
     type AgentMetadataChange,
@@ -55,18 +54,15 @@ import {
     assertCollaborationAgentPage,
     assertCollaborationBrokerAgentResult,
     assertCollaborationObligationPage,
-    assertCollaborationTransactionChange,
     assertCollaborationVoidResult,
     collaborationAuthorizationSchema,
     collaborationBrokerSchema,
     collaborationBrokerSendOptionsSchema,
     collaborationContextSchema,
-    collaborationMutationResultSchema,
     type CollaborationAuthorization,
     type CollaborationBroker,
     type CollaborationRoster,
     type CollaborationStore,
-    type CollaborationTransactionChange,
 } from "./CollaborationStore.js";
 import { createAgentTool } from "./tools/create_agent.js";
 import { listAgentsTool } from "./tools/list_agents.js";
@@ -96,13 +92,8 @@ const eventFactorySchema = Type.Function(
     Type.Union([collaborationEventIdSchema, Type.Promise(collaborationEventIdSchema)]),
 );
 
-const collaborationTransactionSchema = Type.Unsafe<AgentStorageTransaction>(
-    Type.Function([], Type.Any()),
-);
-
 const collaborationModuleOptionsSchema = Type.Object(
     {
-        transaction: Type.Optional(collaborationTransactionSchema),
         broker: collaborationBrokerSchema,
         authorization: Type.Optional(collaborationAuthorizationSchema),
         idFactory: Type.Optional(idFactorySchema),
@@ -155,9 +146,7 @@ export class CollaborationModule implements AgentModule {
 
     constructor(options: CollaborationModuleOptions) {
         const validated = validateOptions(options);
-        const storage = createSqliteCollaborationStorage(
-            validated.transaction === undefined ? {} : { transaction: validated.transaction },
-        );
+        const storage = createSqliteCollaborationStorage();
         this.#roster = storage.roster;
         this.#store = storage.store;
         this.#broker = validated.broker;
@@ -188,7 +177,6 @@ export class CollaborationModule implements AgentModule {
         ctx: Context,
         actingAgentId: string,
         input: CollaborationCreateInput,
-        commit?: CollaborationResultCommit<CollaborationAgent>,
     ): Promise<CollaborationAgent> {
         this.#assertAgentId(actingAgentId, "acting agent");
         if (input !== null && typeof input === "object") {
@@ -199,91 +187,92 @@ export class CollaborationModule implements AgentModule {
             }
         }
         this.#assertInput(collaborationCreateInputSchema, input, "create agent");
-        const id = input.id ?? (await this.#generatedId(ctx, actingAgentId, this.#idFactory, collaborationAgentIdSchema, "agent"));
+        const id =
+            input.id ??
+            (await this.#generatedId(
+                ctx,
+                actingAgentId,
+                this.#idFactory,
+                collaborationAgentIdSchema,
+                "agent",
+            ));
 
-        const change = await this.#commit(
-            ctx,
-            actingAgentId,
-            async (txCtx) => {
-                const actor = await this.#readAgent(txCtx, actingAgentId);
-                const parentId =
-                    input.parentId === undefined
-                        ? actor === undefined
-                            ? null
-                            : actingAgentId
-                        : input.parentId;
-                if (actor === undefined) {
-                    if (id !== actingAgentId || parentId !== null) {
-                        throw new Error(
-                            "A missing acting agent may create only its own root collaborator.",
-                        );
-                    }
-                } else if (parentId === null) {
-                    throw new Error("An existing agent may create only an owned child.");
-                } else {
-                    const parent = await this.#readRequiredAgent(txCtx, parentId);
-                    await this.#authorize(txCtx, actingAgentId, parent, "create");
+        return await ctx.inTx(async (txCtx) => {
+            const actor = await this.#readAgent(txCtx, actingAgentId);
+            const parentId =
+                input.parentId === undefined
+                    ? actor === undefined
+                        ? null
+                        : actingAgentId
+                    : input.parentId;
+            if (actor === undefined) {
+                if (id !== actingAgentId || parentId !== null) {
+                    throw new Error(
+                        "A missing acting agent may create only its own root collaborator.",
+                    );
                 }
+            } else if (parentId === null) {
+                throw new Error("An existing agent may create only an owned child.");
+            } else {
+                const parent = await this.#readRequiredAgent(txCtx, parentId);
+                await this.#authorize(txCtx, actingAgentId, parent, "create");
+            }
 
-                const metadata = mergedMetadata(input.config.metadata, input.metadata);
-                const config = {
-                    ...input.config,
-                    ...(metadata === undefined ? {} : { metadata }),
-                };
-                this.#assertValue(agentConfigSchema, config, "Agent Base configuration");
-                const expectedConfig = structuredClone(config);
+            const metadata = mergedMetadata(input.config.metadata, input.metadata);
+            const config = {
+                ...input.config,
+                ...(metadata === undefined ? {} : { metadata }),
+            };
+            this.#assertValue(agentConfigSchema, config, "Agent Base configuration");
+            const expectedConfig = structuredClone(config);
 
-                const existing = await this.#readAgent(txCtx, id);
-                if (existing !== undefined) {
-                    throw new Error(`Collaborator "${id}" already exists.`);
-                }
+            const existing = await this.#readAgent(txCtx, id);
+            if (existing !== undefined) {
+                throw new Error(`Collaborator "${id}" already exists.`);
+            }
 
-                const createdRaw: unknown = this.#broker.create(
-                    txCtx,
-                    structuredClone(expectedConfig),
-                    {
-                        id,
-                        parent: parentId,
-                    },
-                );
-                const created = await requirePromise(createdRaw, "Collaboration broker create");
-                assertCollaborationBrokerAgentResult(created);
-                if (created.id !== id) {
-                    throw new Error("Agent Base did not preserve the requested collaborator ID.");
-                }
-                await this.#assertBrokerConfig(txCtx, id, expectedConfig);
-
-                const at = this.#now();
-                const roster: CollaborationAgent = {
+            const createdRaw: unknown = this.#broker.create(
+                txCtx,
+                structuredClone(expectedConfig),
+                {
                     id,
-                    ownerAgentId: actingAgentId,
-                    parentId,
-                    ...(input.role === undefined ? {} : { role: input.role }),
-                    ...(input.groupId === undefined ? {} : { groupId: input.groupId }),
-                    ...(input.title === undefined ? {} : { title: input.title }),
-                    ...(metadata === undefined ? {} : { metadata }),
-                    status: "idle",
-                    createdAt: at,
-                    updatedAt: at,
-                };
-                this.#assertAgent(roster);
-                await this.#writeAgent(txCtx, roster);
-                const persisted = await this.#readRequiredAgent(txCtx, id);
-                if (!sameValue(persisted, roster)) {
-                    throw new Error("Collaboration roster substituted the created agent.");
-                }
-                const event = await this.#event(txCtx, {
-                    type: "agent_created",
-                    actingAgentId,
-                    agent: roster,
-                });
-                await this.#announce(txCtx, event);
-                return this.#change(roster, true, [event]);
-            },
-            commit,
-        );
-        this.#assertAgent(change.result);
-        return structuredClone(change.result);
+                    parent: parentId,
+                },
+            );
+            const created = await requirePromise(createdRaw, "Collaboration broker create");
+            assertCollaborationBrokerAgentResult(created);
+            if (created.id !== id) {
+                throw new Error("Agent Base did not preserve the requested collaborator ID.");
+            }
+            await this.#assertBrokerConfig(txCtx, id, expectedConfig);
+
+            const at = this.#now();
+            const roster: CollaborationAgent = {
+                id,
+                ownerAgentId: actingAgentId,
+                parentId,
+                ...(input.role === undefined ? {} : { role: input.role }),
+                ...(input.groupId === undefined ? {} : { groupId: input.groupId }),
+                ...(input.title === undefined ? {} : { title: input.title }),
+                ...(metadata === undefined ? {} : { metadata }),
+                status: "idle",
+                createdAt: at,
+                updatedAt: at,
+            };
+            this.#assertAgent(roster);
+            await this.#writeAgent(txCtx, roster);
+            const persisted = await this.#readRequiredAgent(txCtx, id);
+            if (!sameValue(persisted, roster)) {
+                throw new Error("Collaboration roster substituted the created agent.");
+            }
+            const event = await this.#event(txCtx, {
+                type: "agent_created",
+                actingAgentId,
+                agent: roster,
+            });
+            await this.#announce(txCtx, event);
+            return structuredClone(roster);
+        });
     }
 
     async getAgent(
@@ -350,7 +339,6 @@ export class CollaborationModule implements AgentModule {
         ctx: Context,
         actingAgentId: string,
         input: CollaborationSendInput,
-        commit?: CollaborationResultCommit<CollaborationSendResult>,
     ): Promise<CollaborationSendResult> {
         this.#assertAgentId(actingAgentId, "acting agent");
         if (input !== null && typeof input === "object" && "metadata" in input) {
@@ -360,21 +348,20 @@ export class CollaborationModule implements AgentModule {
         if ("replyTo" in input) {
             throw new Error("Use replyMessage for a directed reply.");
         }
-        return await this.#send(ctx, actingAgentId, input, "send", commit);
+        return await this.#send(ctx, actingAgentId, input, "send");
     }
 
     async replyMessage(
         ctx: Context,
         actingAgentId: string,
         input: CollaborationReplyInput,
-        commit?: CollaborationResultCommit<CollaborationSendResult>,
     ): Promise<CollaborationSendResult> {
         this.#assertAgentId(actingAgentId, "acting agent");
         if (input !== null && typeof input === "object" && "metadata" in input) {
             assertBoundedMetadata(input.metadata);
         }
         this.#assertInput(collaborationReplyInputSchema, input, "reply message");
-        return await this.#send(ctx, actingAgentId, input, "reply", commit);
+        return await this.#send(ctx, actingAgentId, input, "reply");
     }
 
     /** Alias kept descriptive for host callers. */
@@ -448,7 +435,6 @@ export class CollaborationModule implements AgentModule {
         ctx: Context,
         actingAgentId: string,
         inputOrObligationId: CollaborationWaitInput | string,
-        commit?: CollaborationResultCommit<CollaborationObligation>,
     ): Promise<CollaborationObligation> {
         this.#assertAgentId(actingAgentId, "acting agent");
         const input =
@@ -456,6 +442,14 @@ export class CollaborationModule implements AgentModule {
                 ? { obligationId: inputOrObligationId }
                 : inputOrObligationId;
         this.#assertInput(collaborationWaitInputSchema, input, "wait");
+
+        await ctx.inTx(async (txCtx) => {
+            await this.#readRequiredAgent(txCtx, actingAgentId);
+            const obligation = await this.#readRequiredObligation(txCtx, input.obligationId);
+            if (obligation.requesterAgentId !== actingAgentId) {
+                throw new Error("An agent may wait only for its own reply obligations.");
+            }
+        });
 
         const waitedRaw: unknown = this.#broker.wait(ctx, actingAgentId, input.obligationId);
         const waited = await requirePromise(waitedRaw, "Collaboration broker wait");
@@ -468,31 +462,22 @@ export class CollaborationModule implements AgentModule {
             throw new Error("Collaboration broker returned an invalid wait result.");
         }
 
-        const change = await this.#commit(
-            ctx,
-            actingAgentId,
-            async (txCtx) => {
-                await this.#readRequiredAgent(txCtx, actingAgentId);
-                const current = await this.#readRequiredObligation(txCtx, input.obligationId);
-                if (current.requesterAgentId !== actingAgentId) {
-                    throw new Error("An agent may wait only for its own reply obligations.");
-                }
-                if (current.status === "pending") {
-                    throw new Error(
-                        "Collaboration broker wait completed without persisting the obligation.",
-                    );
-                }
-                if (!sameValue(current, waited)) {
-                    throw new Error(
-                        "Collaboration wait result disagrees with the host obligation.",
-                    );
-                }
-                return this.#change(current, false, []);
-            },
-            commit,
-        );
-        this.#assertObligation(change.result);
-        return structuredClone(change.result);
+        return await ctx.inTx(async (txCtx) => {
+            await this.#readRequiredAgent(txCtx, actingAgentId);
+            const current = await this.#readRequiredObligation(txCtx, input.obligationId);
+            if (current.requesterAgentId !== actingAgentId) {
+                throw new Error("An agent may wait only for its own reply obligations.");
+            }
+            if (current.status === "pending") {
+                throw new Error(
+                    "Collaboration broker wait completed without persisting the obligation.",
+                );
+            }
+            if (!sameValue(current, waited)) {
+                throw new Error("Collaboration wait result disagrees with the host obligation.");
+            }
+            return structuredClone(current);
+        });
     }
 
     async wait(
@@ -558,7 +543,6 @@ export class CollaborationModule implements AgentModule {
         actingAgentId: string,
         input: CollaborationSendInput | CollaborationReplyInput,
         kind: "send" | "reply",
-        commit?: CollaborationResultCommit<CollaborationSendResult>,
     ): Promise<CollaborationSendResult> {
         const recipientId = input.toAgentId;
         const messageId =
@@ -570,93 +554,103 @@ export class CollaborationModule implements AgentModule {
                 collaborationMessageIdSchema,
                 "message",
             ));
-        const change = await this.#commit(
-            ctx,
-            actingAgentId,
-            async (txCtx) => {
-                await this.#readRequiredAgent(txCtx, actingAgentId);
-                const recipient = await this.#readRequiredAgent(txCtx, recipientId);
-                await this.#authorize(txCtx, actingAgentId, recipient, kind);
+        return await ctx.inTx(async (txCtx) => {
+            await this.#readRequiredAgent(txCtx, actingAgentId);
+            const recipient = await this.#readRequiredAgent(txCtx, recipientId);
+            await this.#authorize(txCtx, actingAgentId, recipient, kind);
 
-                const replyTo = "replyTo" in input ? input.replyTo : undefined;
-                let existingObligation: CollaborationObligation | undefined;
-                if (replyTo !== undefined) {
-                    existingObligation = await this.#readRequiredObligation(txCtx, replyTo);
-                    if (existingObligation.responderAgentId !== actingAgentId) {
-                        throw new Error("Only the requested responder may answer this obligation.");
-                    }
-                    if (existingObligation.requesterAgentId !== recipientId) {
-                        throw new Error("A reply must be sent to the requesting agent.");
-                    }
-                    if (existingObligation.status !== "pending") {
-                        throw new Error("The reply obligation is no longer pending.");
-                    }
+            const replyTo = "replyTo" in input ? input.replyTo : undefined;
+            let existingObligation: CollaborationObligation | undefined;
+            if (replyTo !== undefined) {
+                existingObligation = await this.#readRequiredObligation(txCtx, replyTo);
+                if (existingObligation.responderAgentId !== actingAgentId) {
+                    throw new Error("Only the requested responder may answer this obligation.");
                 }
-                const obligationId =
-                    replyTo !== undefined || !("expectReply" in input) || input.expectReply !== true
-                        ? undefined
-                        : await this.#generatedId(
-                              txCtx,
-                              actingAgentId,
-                              this.#obligationIdFactory,
-                              collaborationObligationIdSchema,
-                              "obligation",
-                          );
-                const at = this.#now();
-                const messageMetadata = collaborationMessageMetadata(
-                    input.metadata,
+                if (existingObligation.requesterAgentId !== recipientId) {
+                    throw new Error("A reply must be sent to the requesting agent.");
+                }
+                if (existingObligation.status !== "pending") {
+                    throw new Error("The reply obligation is no longer pending.");
+                }
+            }
+            const obligationId =
+                replyTo !== undefined || !("expectReply" in input) || input.expectReply !== true
+                    ? undefined
+                    : await this.#generatedId(
+                          txCtx,
+                          actingAgentId,
+                          this.#obligationIdFactory,
+                          collaborationObligationIdSchema,
+                          "obligation",
+                      );
+            const at = this.#now();
+            const messageMetadata = collaborationMessageMetadata(
+                input.metadata,
+                messageId,
+                actingAgentId,
+                recipientId,
+                obligationId,
+                replyTo,
+            );
+            const message: CollaborationMessage = {
+                id: messageId,
+                fromAgentId: actingAgentId,
+                toAgentId: recipientId,
+                text: input.text,
+                ...(replyTo === undefined ? {} : { replyTo }),
+                ...(obligationId === undefined ? {} : { obligationId }),
+                metadata: messageMetadata,
+                createdAt: at,
+            };
+            this.#assertMessage(message);
+            const existing = await this.#readMessage(txCtx, messageId);
+            if (existing !== undefined) {
+                throw new Error(`Message "${messageId}" already exists.`);
+            }
+            const brokerOptions = {
+                id: messageId,
+                metadata: messageMetadata,
+            };
+            this.#assertValue(
+                collaborationBrokerSendOptionsSchema,
+                brokerOptions,
+                "broker send options",
+            );
+            const sendRaw: unknown = this.#broker.send(
+                txCtx,
+                recipientId,
+                {
+                    role: "user",
+                    content: [{ type: "text", text: input.text }],
+                },
+                brokerOptions,
+            );
+            assertCollaborationVoidResult(
+                await requirePromise(sendRaw, "Collaboration broker send"),
+                "broker send",
+            );
+            await this.#writeMessage(txCtx, message);
+            const persistedMessage = await this.#readRequiredMessage(txCtx, messageId);
+            if (!sameValue(persistedMessage, message)) {
+                throw new Error("Collaboration store substituted the sent message.");
+            }
+
+            let obligation: CollaborationObligation | undefined;
+            if (obligationId !== undefined) {
+                obligation = {
+                    id: obligationId,
+                    requesterAgentId: actingAgentId,
+                    responderAgentId: recipientId,
                     messageId,
-                    actingAgentId,
-                    recipientId,
-                    obligationId,
-                    replyTo,
-                );
-                const message: CollaborationMessage = {
-                    id: messageId,
-                    fromAgentId: actingAgentId,
-                    toAgentId: recipientId,
-                    text: input.text,
-                    ...(replyTo === undefined ? {} : { replyTo }),
-                    ...(obligationId === undefined ? {} : { obligationId }),
-                    metadata: messageMetadata,
+                    status: "pending",
                     createdAt: at,
+                    updatedAt: at,
                 };
-                this.#assertMessage(message);
-                const existing = await this.#readMessage(txCtx, messageId);
-                if (existing !== undefined) {
-                    throw new Error(`Message "${messageId}" already exists.`);
-                }
-                const brokerOptions = {
-                    id: messageId,
-                    metadata: messageMetadata,
-                };
-                this.#assertValue(
-                    collaborationBrokerSendOptionsSchema,
-                    brokerOptions,
-                    "broker send options",
-                );
-                const sendRaw: unknown = this.#broker.send(
-                    txCtx,
-                    recipientId,
-                    {
-                        role: "user",
-                        content: [{ type: "text", text: input.text }],
-                    },
-                    brokerOptions,
-                );
-                assertCollaborationVoidResult(
-                    await requirePromise(sendRaw, "Collaboration broker send"),
-                    "broker send",
-                );
-                await this.#writeMessage(txCtx, message);
-                const persistedMessage = await this.#readRequiredMessage(txCtx, messageId);
-                if (!sameValue(persistedMessage, message)) {
-                    throw new Error("Collaboration store substituted the sent message.");
-                }
-
-                let obligation: CollaborationObligation | undefined;
-                if (obligationId !== undefined) {
-                    obligation = {
+                this.#assertObligation(obligation);
+                await this.#writeObligation(txCtx, obligation);
+                obligation = await this.#readRequiredObligation(txCtx, obligationId);
+                if (
+                    !sameValue(obligation, {
                         id: obligationId,
                         requesterAgentId: actingAgentId,
                         responderAgentId: recipientId,
@@ -664,66 +658,47 @@ export class CollaborationModule implements AgentModule {
                         status: "pending",
                         createdAt: at,
                         updatedAt: at,
-                    };
-                    this.#assertObligation(obligation);
-                    await this.#writeObligation(txCtx, obligation);
-                    obligation = await this.#readRequiredObligation(txCtx, obligationId);
-                    if (
-                        !sameValue(obligation, {
-                            id: obligationId,
-                            requesterAgentId: actingAgentId,
-                            responderAgentId: recipientId,
-                            messageId,
-                            status: "pending",
-                            createdAt: at,
-                            updatedAt: at,
-                        })
-                    ) {
-                        throw new Error("Collaboration store substituted the reply obligation.");
-                    }
-                } else if (existingObligation !== undefined) {
-                    const answered: CollaborationObligation = {
-                        ...existingObligation,
-                        status: "answered",
-                        answerMessageId: messageId,
-                        updatedAt: at,
-                    };
-                    this.#assertObligation(answered);
-                    await this.#writeObligation(txCtx, answered);
-                    obligation = await this.#readRequiredObligation(txCtx, answered.id);
-                    if (!sameValue(obligation, answered)) {
-                        throw new Error("Collaboration store substituted the answered obligation.");
-                    }
+                    })
+                ) {
+                    throw new Error("Collaboration store substituted the reply obligation.");
                 }
-                const result = {
-                    message: persistedMessage,
-                    ...(obligation === undefined ? {} : { obligation }),
+            } else if (existingObligation !== undefined) {
+                const answered: CollaborationObligation = {
+                    ...existingObligation,
+                    status: "answered",
+                    answerMessageId: messageId,
+                    updatedAt: at,
                 };
-                this.#assertSendResult(result);
-                const event = await this.#event(txCtx, {
-                    type: "message_sent",
-                    actingAgentId,
-                    message: persistedMessage,
-                    ...(obligation === undefined ? {} : { obligation }),
-                });
-                await this.#announce(txCtx, event);
-                const events: CollaborationEvent[] = [event];
-                if (existingObligation !== undefined && obligation !== undefined) {
-                    const answerEvent = await this.#event(txCtx, {
-                        type: "reply_answered",
-                        actingAgentId,
-                        obligationId: obligation.id,
-                        answerMessageId: messageId,
-                    });
-                    await this.#announce(txCtx, answerEvent);
-                    events.push(answerEvent);
+                this.#assertObligation(answered);
+                await this.#writeObligation(txCtx, answered);
+                obligation = await this.#readRequiredObligation(txCtx, answered.id);
+                if (!sameValue(obligation, answered)) {
+                    throw new Error("Collaboration store substituted the answered obligation.");
                 }
-                return this.#change(result, true, events);
-            },
-            commit,
-        );
-        this.#assertSendResult(change.result);
-        return structuredClone(change.result);
+            }
+            const result = {
+                message: persistedMessage,
+                ...(obligation === undefined ? {} : { obligation }),
+            };
+            this.#assertSendResult(result);
+            const event = await this.#event(txCtx, {
+                type: "message_sent",
+                actingAgentId,
+                message: persistedMessage,
+                ...(obligation === undefined ? {} : { obligation }),
+            });
+            await this.#announce(txCtx, event);
+            if (existingObligation !== undefined && obligation !== undefined) {
+                const answerEvent = await this.#event(txCtx, {
+                    type: "reply_answered",
+                    actingAgentId,
+                    obligationId: obligation.id,
+                    answerMessageId: messageId,
+                });
+                await this.#announce(txCtx, answerEvent);
+            }
+            return structuredClone(result);
+        });
     }
 
     async #setStatus(
@@ -751,67 +726,6 @@ export class CollaborationModule implements AgentModule {
             status,
         });
         await this.#announce(ctx, event);
-    }
-
-    async #commit(
-        ctx: Context,
-        actingAgentId: string,
-        kind: CollaborationMutationKind,
-        operationId: string,
-        fingerprint: string,
-        decide: (txCtx: Context) => Promise<CollaborationTransactionChange>,
-    ): Promise<CollaborationTransactionChange> {
-        let expected: CollaborationTransactionChange | undefined;
-        const raw: unknown = this.#store.transaction(ctx, actingAgentId, async (txCtx) => {
-            const decided = await decide(txCtx);
-            assertCollaborationTransactionChange(decided);
-            if (
-                decided.kind !== kind ||
-                decided.operationId !== operationId ||
-                decided.actingAgentId !== actingAgentId
-            ) {
-                throw new Error(
-                    "Collaboration transaction returned a different operation identity.",
-                );
-            }
-            expected = cloneAndFreezeChange(decided);
-            return decided;
-        });
-        const returned = await requirePromise(raw, "Collaboration store transaction");
-        assertCollaborationTransactionChange(returned);
-        if (expected === undefined || !sameValue(returned, expected)) {
-            throw new Error("Collaboration store transaction returned a substituted change.");
-        }
-        if (
-            returned.kind !== kind ||
-            returned.operationId !== operationId ||
-            returned.actingAgentId !== actingAgentId
-        ) {
-            throw new Error("Collaboration transaction returned a different operation identity.");
-        }
-        this.#assertValue(collaborationFingerprintSchema, fingerprint, "fingerprint");
-        assertKindResult(kind, returned.result);
-        return structuredClone(returned);
-    }
-
-    #change(
-        kind: CollaborationMutationKind,
-        actingAgentId: string,
-        operationId: string,
-        result: Static<typeof collaborationMutationResultSchema>,
-        changed: boolean,
-        events: readonly CollaborationEvent[],
-    ): CollaborationTransactionChange {
-        const change = {
-            kind,
-            operationId,
-            actingAgentId,
-            result: structuredClone(result),
-            changed,
-            events: events.map((event) => cloneAndFreezeEvent(event)),
-        };
-        assertCollaborationTransactionChange(change);
-        return change;
     }
 
     async #event(
@@ -878,188 +792,6 @@ export class CollaborationModule implements AgentModule {
         }
     }
 
-    async #readReceipt(
-        ctx: Context,
-        actingAgentId: string,
-        kind: CollaborationMutationKind,
-        operationId: string,
-        fingerprint: string,
-    ): Promise<CollaborationMutationReceipt | undefined> {
-        const raw: unknown = this.#store.readReceipt(ctx, actingAgentId, operationId);
-        const value = await requirePromise(raw, "Collaboration store readReceipt");
-        if (value === undefined) return undefined;
-        assertCollaborationMutationReceipt(value);
-        this.#assertReceipt(value);
-        if (
-            value.kind !== kind ||
-            value.operationId !== operationId ||
-            value.actingAgentId !== actingAgentId ||
-            value.fingerprint !== fingerprint
-        ) {
-            throw new Error(
-                `Collaboration operation "${operationId}" was reused with different input.`,
-            );
-        }
-        return structuredClone(value);
-    }
-
-    async #writeReceipt(ctx: Context, receipt: CollaborationMutationReceipt): Promise<void> {
-        assertCollaborationMutationReceipt(receipt);
-        this.#assertReceipt(receipt);
-        const expected = structuredClone(receipt);
-        const raw: unknown = this.#store.writeReceipt(ctx, structuredClone(expected));
-        assertCollaborationVoidResult(
-            await requirePromise(raw, "Collaboration store writeReceipt"),
-            "store writeReceipt",
-        );
-        const persistedRaw: unknown = this.#store.readReceipt(
-            ctx,
-            expected.actingAgentId,
-            expected.operationId,
-        );
-        const persisted = await requirePromise(
-            persistedRaw,
-            "Collaboration store readReceipt after write",
-        );
-        assertCollaborationMutationReceipt(persisted);
-        this.#assertReceipt(persisted);
-        if (!sameValue(persisted, expected)) {
-            throw new Error("Collaboration store substituted the mutation receipt.");
-        }
-    }
-
-    async #replayCreatedAgent(
-        ctx: Context,
-        actingAgentId: string,
-        receipt: CollaborationMutationReceipt,
-        input: CollaborationCreateInput,
-        id: string,
-    ): Promise<CollaborationAgent> {
-        this.#assertAgent(receipt.result);
-        if (receipt.result.id !== id || receipt.result.ownerAgentId !== actingAgentId) {
-            throw new Error("Collaboration create receipt belongs to another agent.");
-        }
-        const current = await this.#readRequiredAgent(ctx, id);
-        if (!sameAgentIdentity(current, receipt.result)) {
-            throw new Error(
-                "Collaboration create receipt disagrees with the authoritative roster.",
-            );
-        }
-        const metadata = mergedMetadata(input.config.metadata, input.metadata);
-        const expectedConfig = {
-            ...input.config,
-            ...(metadata === undefined ? {} : { metadata }),
-        };
-        await this.#assertBrokerConfig(ctx, id, expectedConfig);
-        return current;
-    }
-
-    async #replayMessage(
-        ctx: Context,
-        actingAgentId: string,
-        receipt: CollaborationMutationReceipt,
-        _sender: CollaborationAgent,
-        recipientId: string,
-        messageId: string,
-        kind: "send" | "reply",
-        input: CollaborationSendInput | CollaborationReplyInput,
-    ): Promise<CollaborationSendResult> {
-        this.#assertSendResult(receipt.result);
-        const message = await this.#readRequiredMessage(ctx, messageId);
-        if (
-            message.fromAgentId !== actingAgentId ||
-            message.toAgentId !== recipientId ||
-            !sameValue(
-                message.metadata,
-                collaborationMessageMetadata(
-                    input.metadata,
-                    receipt.operationId,
-                    messageId,
-                    actingAgentId,
-                    recipientId,
-                    message.obligationId,
-                    "replyTo" in input ? input.replyTo : undefined,
-                ),
-            )
-        ) {
-            throw new Error(
-                "Collaboration message receipt disagrees with the authoritative message.",
-            );
-        }
-        const expected = await this.#resultForMessage(
-            ctx,
-            message,
-            "replyTo" in input ? input.replyTo : undefined,
-            message.obligationId,
-        );
-        if (
-            !sameValue(expected.message, receipt.result.message) ||
-            (expected.obligation === undefined) !== (receipt.result.obligation === undefined) ||
-            (expected.obligation !== undefined &&
-                receipt.result.obligation !== undefined &&
-                !sameValue(expected.obligation, receipt.result.obligation))
-        ) {
-            throw new Error("Collaboration message receipt disagrees with the host result.");
-        }
-        if (kind === "reply" && ("replyTo" in input ? message.replyTo !== input.replyTo : true)) {
-            throw new Error("Collaboration reply receipt targets another obligation.");
-        }
-        return expected;
-    }
-
-    async #resultForMessage(
-        ctx: Context,
-        message: CollaborationMessage,
-        replyTo: string | undefined,
-        obligationId: string | undefined,
-    ): Promise<CollaborationSendResult> {
-        const expectedObligationId = obligationId ?? replyTo;
-        const obligation =
-            expectedObligationId === undefined
-                ? undefined
-                : await this.#readRequiredObligation(ctx, expectedObligationId);
-        if (
-            obligationId !== undefined &&
-            obligation !== undefined &&
-            obligation.messageId !== message.id
-        ) {
-            throw new Error("Collaboration message refers to another obligation.");
-        }
-        if (replyTo !== undefined && message.replyTo !== replyTo) {
-            throw new Error("Collaboration reply refers to another obligation.");
-        }
-        const result = {
-            message,
-            ...(obligation === undefined ? {} : { obligation }),
-        };
-        this.#assertSendResult(result);
-        return result;
-    }
-
-    async #assertExistingCreation(
-        ctx: Context,
-        actingAgentId: string,
-        existing: CollaborationAgent,
-        input: CollaborationCreateInput,
-        id: string,
-        parentId: string | null,
-        metadata: CollaborationMetadata | undefined,
-        config: Static<typeof agentConfigSchema>,
-    ): Promise<void> {
-        if (
-            existing.id !== id ||
-            existing.ownerAgentId !== actingAgentId ||
-            existing.parentId !== parentId ||
-            existing.role !== input.role ||
-            existing.groupId !== input.groupId ||
-            existing.title !== input.title ||
-            !sameValue(existing.metadata ?? null, metadata ?? null)
-        ) {
-            throw new Error(`Agent "${id}" already exists with different values.`);
-        }
-        await this.#assertBrokerConfig(ctx, id, config);
-    }
-
     async #assertBrokerConfig(
         ctx: Context,
         id: string,
@@ -1080,23 +812,6 @@ export class CollaborationModule implements AgentModule {
         if (!sameValue(detached, expected)) {
             throw new Error(`Agent "${id}" has a different Agent Base configuration.`);
         }
-    }
-
-    #assertReceipt(receipt: CollaborationMutationReceipt): void {
-        const encoded = new TextEncoder().encode(receipt.fingerprint);
-        if (encoded.byteLength > 65_536) {
-            throw new Error("Collaboration receipt fingerprint exceeds its encoded byte bound.");
-        }
-        let parsed: unknown;
-        try {
-            parsed = JSON.parse(receipt.fingerprint);
-        } catch {
-            throw new Error("Collaboration receipt fingerprint is not canonical JSON.");
-        }
-        if (canonicalString(parsed) !== receipt.fingerprint) {
-            throw new Error("Collaboration receipt fingerprint is not canonical.");
-        }
-        assertKindResult(receipt.kind, receipt.result);
     }
 
     async #authorize(
@@ -1132,91 +847,16 @@ export class CollaborationModule implements AgentModule {
         }
     }
 
-    async #operationId(
+    async #generatedId<ValueSchema extends TSchema>(
         ctx: Context,
         actingAgentId: string,
-        kind: string,
-        requested: string | undefined,
-    ): Promise<string> {
-        if (requested !== undefined) {
-            this.#assertValue(collaborationOperationIdSchema, requested, "operation identity");
-        }
-        const key = `operation.${kind}`;
-        const kv = agentKV(ctx);
-        if (kv !== undefined) {
-            const stored = await kv.read(ctx, key);
-            if (stored !== undefined) {
-                this.#assertValue(operationReceiptSchema, stored, "stored operation identity");
-                const typed = stored as Static<typeof operationReceiptSchema>;
-                if (requested !== undefined && requested !== typed.operationId) {
-                    throw new Error("The retry supplied a different operation identity.");
-                }
-                return typed.operationId;
-            }
-            const generated = requested ?? (await this.#operationIdFactory(ctx, actingAgentId));
-            this.#assertValue(collaborationOperationIdSchema, generated, "operation identity");
-            await kv.write(ctx, key, { operationId: generated, fingerprint: "" });
-            return generated;
-        }
-        const generated = requested ?? (await this.#operationIdFactory(ctx, actingAgentId));
-        this.#assertValue(collaborationOperationIdSchema, generated, "operation identity");
-        return generated;
-    }
-
-    async #bindOperationFingerprint(
-        ctx: Context,
-        _actingAgentId: string,
-        kind: string,
-        fingerprint: string,
-    ): Promise<void> {
-        this.#assertValue(collaborationFingerprintSchema, fingerprint, "fingerprint");
-        const kv = agentKV(ctx);
-        if (kv === undefined) return;
-        const key = `operation.${kind}`;
-        const stored = await kv.read(ctx, key);
-        this.#assertValue(operationReceiptSchema, stored, "stored operation identity");
-        const typed = stored as Static<typeof operationReceiptSchema>;
-        if (typed.fingerprint !== "" && typed.fingerprint !== fingerprint) {
-            throw new Error("The retry supplied different collaboration input.");
-        }
-        if (typed.fingerprint === "") {
-            await kv.write(ctx, key, { ...typed, fingerprint });
-        }
-    }
-
-    async #callScopedId<ValueSchema extends TSchema>(
-        ctx: Context,
-        actingAgentId: string,
-        key: string,
         factory: (ctx: Context, actingAgentId: string) => string | Promise<string>,
         schema: ValueSchema,
         label: string,
     ): Promise<string> {
-        const kv = agentKV(ctx);
-        if (kv !== undefined) {
-            const stored = await kv.read(ctx, key);
-            if (stored !== undefined) {
-                this.#assertValue(schema, stored, `stored ${label} identity`);
-                return stored as string;
-            }
-            const generated = await factory(ctx, actingAgentId);
-            this.#assertValue(schema, generated, `${label} identity`);
-            await kv.write(ctx, key, generated);
-            return generated;
-        }
         const generated = await factory(ctx, actingAgentId);
         this.#assertValue(schema, generated, `${label} identity`);
         return generated;
-    }
-
-    #fingerprint(kind: string, actingAgentId: string, input: unknown): string {
-        const value = canonicalString({ kind, actingAgentId, input });
-        const encoded = new TextEncoder().encode(value);
-        if (encoded.byteLength > 65_536) {
-            throw new Error("Collaboration mutation fingerprint exceeds its encoded byte bound.");
-        }
-        this.#assertValue(collaborationFingerprintSchema, value, "fingerprint");
-        return value;
     }
 
     #now(): number {
@@ -1511,11 +1151,6 @@ export class CollaborationModule implements AgentModule {
             this.#assertObligation((value as CollaborationSendResult).obligation);
         }
     }
-
-    #receiptObligation(receipt: CollaborationMutationReceipt): CollaborationObligation {
-        this.#assertObligation(receipt.result);
-        return receipt.result;
-    }
 }
 
 function validateOptions(options: unknown): CollaborationModuleOptions {
@@ -1586,7 +1221,6 @@ function mergedMetadata(
 
 function collaborationMessageMetadata(
     inputMetadata: CollaborationMetadata | undefined,
-    operationId: string,
     messageId: string,
     fromAgentId: string,
     toAgentId: string,
@@ -1596,7 +1230,6 @@ function collaborationMessageMetadata(
     const metadata = {
         ...inputMetadata,
         collaboration: {
-            operationId,
             messageId,
             fromAgentId,
             toAgentId,
@@ -1646,9 +1279,19 @@ function visitMetadata(value: unknown, depth: number, seen: WeakSet<object>): vo
 }
 
 function canonicalString(value: unknown): string {
-    const result = deterministicStringify(value);
+    const result = JSON.stringify(sortCanonicalValue(value));
     if (typeof result !== "string") throw new Error("Collaboration value is not canonical JSON.");
     return result;
+}
+
+function sortCanonicalValue(value: unknown): unknown {
+    if (Array.isArray(value)) return value.map(sortCanonicalValue);
+    if (!isRecord(value)) return value;
+    return Object.fromEntries(
+        Object.keys(value)
+            .sort()
+            .map((key) => [key, sortCanonicalValue(value[key])]),
+    );
 }
 
 function sameValue(left: unknown, right: unknown): boolean {
@@ -1656,33 +1299,6 @@ function sameValue(left: unknown, right: unknown): boolean {
         return canonicalString(left) === canonicalString(right);
     } catch {
         return false;
-    }
-}
-
-function sameAgentIdentity(left: CollaborationAgent, right: CollaborationAgent): boolean {
-    return (
-        left.id === right.id &&
-        left.ownerAgentId === right.ownerAgentId &&
-        left.parentId === right.parentId &&
-        left.role === right.role &&
-        left.groupId === right.groupId &&
-        left.title === right.title &&
-        left.createdAt === right.createdAt
-    );
-}
-
-function assertKindResult(
-    kind: CollaborationMutationKind,
-    result: unknown,
-): asserts result is Static<typeof collaborationMutationResultSchema> {
-    const valid =
-        (kind === CREATE_OPERATION && Value.Check(collaborationAgentSchema, result)) ||
-        ((kind === SEND_OPERATION || kind === REPLY_OPERATION) &&
-            Value.Check(collaborationSendResultSchema, result)) ||
-        (kind === WAIT_OPERATION && Value.Check(collaborationObligationSchema, result)) ||
-        (kind === "status" && Value.Check(collaborationAgentSchema, result));
-    if (!valid) {
-        throw new Error(`Collaboration transaction returned an invalid ${kind} result.`);
     }
 }
 
@@ -1694,14 +1310,6 @@ function cloneAndFreezeEvent(event: CollaborationEvent): CollaborationEvent {
     if (!Value.Check(collaborationEventSchema, cloned)) {
         throw new Error("Collaboration module created an invalid cloned event.");
     }
-    return deepFreeze(cloned);
-}
-
-function cloneAndFreezeChange(
-    change: CollaborationTransactionChange,
-): CollaborationTransactionChange {
-    const cloned = structuredClone(change);
-    assertCollaborationTransactionChange(cloned);
     return deepFreeze(cloned);
 }
 

@@ -7,9 +7,9 @@ Agent Base database. Host Git, filesystem, and process operations remain behind
 a narrow optional service. What a workspace actually is, and how creating, transferring, or
 archiving one is carried out, is entirely the host's decision.
 
-Durable mutation tools use Agent Base's stable cuid2 call ID as the host operation identity and
-call `AgentToolCall.commit` inside the same transaction as the catalog mutation. The module keeps
-no separate replay ledger.
+Catalog-only mutation tools use Agent Base's stable cuid2 call ID and declare
+`transactional: true`. Transfers cross into the host, retain `call.id` as their operation
+identity, and are non-durable because that external effect cannot be committed atomically.
 
 ```ts
 import { Agent } from "@slopus/happy-agent-base";
@@ -31,8 +31,7 @@ durable transaction has already committed.
 
 - **`create_workspace`** — `{ projectRef?, name, baseRef? }`. Creates one workspace owned by the
   calling agent. `projectRef` and `baseRef` are opaque strings the host interprets; `name` is
-  required. The tool passes its stable call ID to the host operation and atomically commits the
-  result with the catalog change.
+  required. Agent Base commits the result with the catalog change.
 - **`list_workspaces`** — `{ projectRef?, includeArchived?, cursor?, limit? }`. Lists a page of the
   calling agent's workspaces, capped at `maxPageSize` (100 by default). `cursor` is an opaque
   decimal offset returned as `nextCursor`; passing it back continues from exactly where the last
@@ -58,9 +57,9 @@ Governing principles across all six tools:
 
 - All use `shouldReviewInAutoMode: () => false` — Auto permission mode never reviews them, since
   they act only through the host store rather than the local sandbox.
-- `create_workspace`, `transfer_workspace`, and `archive_workspace` are durable. They pass
-  `call.id` as their operation ID and call `call.commit` inside the catalog mutation transaction.
-  The three read tools are non-durable because a current catalog or Git read does not need replay.
+- `create_workspace` and `archive_workspace` are durable transactional tools.
+  `transfer_workspace` is non-durable because it crosses the host boundary. The three read tools
+  are non-durable because a current catalog or Git read does not need replay.
 - Every result the store returns is re-validated against its schema and cross-checked against a
   fresh authoritative read (`store.get`) before it is trusted; a mismatch throws rather than
   passing bad state to the model.
@@ -114,10 +113,8 @@ mutation that already happened.
 
 The module owns the `workspaces` table through its ordered Agent Base migrations. A forward-only
 migration removes the obsolete workspace receipt and proof tables.
-Direct host calls may inject an `AgentStorageTransaction`; module tools read the active database
-from their Agent Base scope. Post-commit notification uses stdlib
-`afterCommit(ctx, ...)`.
+Every runtime database operation uses `ctx.db`; direct multi-step mutations use `ctx.inTx`.
+Post-commit notification uses stdlib `afterCommit(ctx, ...)`.
 
-Each mutation performs one read-decide-write-reconcile transaction. Tool completion is part of
-that transaction; direct callers may omit the completion callback when they do not need Agent Base
-tool durability.
+Each catalog mutation performs one read-decide-write-reconcile transaction. Agent Base owns
+transactional tool completion.

@@ -21,6 +21,7 @@ export function reorderSlotsTool(slots: SlotsModule, agentId: string) {
         parameters: reorderSlotsToolInputSchema,
         returnType: slotPageSchema,
         durable: true,
+        transactional: true,
         shouldReviewInAutoMode: () => false,
         execute: async (ctx, input: { entryIds: SlotReorderInput }): Promise<SlotPage> =>
             await slots.reorderPage(ctx, agentId, input.entryIds),

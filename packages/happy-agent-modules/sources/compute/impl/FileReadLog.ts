@@ -54,21 +54,6 @@ export class FileReadLog {
         });
     }
 
-    /** Commit a read authorization and its durable tool result in one transaction. */
-    async recordAndCommit<Result>(
-        ctx: Context,
-        path: string,
-        mtimeMs: number,
-        commit: (txCtx: Context) => Promise<Result>,
-    ): Promise<Result> {
-        return await this.#lock.runInLock(ctx, this.#agentId, async (lockCtx) => {
-            return await this.#kv.transaction(lockCtx, async (_kv, txCtx) => {
-                await this.#record(txCtx, path, mtimeMs);
-                return await commit(txCtx);
-            });
-        });
-    }
-
     /**
      * Refuse a change to a file this agent has not read, or has read and something else has
      * changed since. A file that does not exist yet is nobody's work to lose, so creating one

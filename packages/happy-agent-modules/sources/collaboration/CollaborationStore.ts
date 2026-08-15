@@ -11,7 +11,6 @@ import {
     collaborationMetadataSchema,
     type CollaborationAgentPage,
 } from "./CollaborationAgent.js";
-import { collaborationEventSchema } from "./CollaborationEvent.js";
 import {
     collaborationMessageIdSchema,
     collaborationMessageSchema,
@@ -19,7 +18,6 @@ import {
     collaborationObligationPageQuerySchema,
     collaborationObligationPageSchema,
     collaborationObligationSchema,
-    collaborationSendResultSchema,
     type CollaborationObligationPage,
 } from "./CollaborationMessage.js";
 
@@ -131,7 +129,7 @@ export const collaborationBrokerSchema = Type.Object(
     { additionalProperties: false },
 );
 
-/** The authoritative host roster. It is separate from message/receipt persistence. */
+/** The authoritative host roster. It is separate from message persistence. */
 export const collaborationRosterSchema = Type.Object(
     {
         readAgent: Type.Function(
@@ -154,50 +152,12 @@ export const collaborationRosterSchema = Type.Object(
     { additionalProperties: false },
 );
 
-export const collaborationMutationKindSchema = Type.Union([
-    Type.Literal("create"),
-    Type.Literal("send"),
-    Type.Literal("reply"),
-    Type.Literal("wait"),
-    Type.Literal("status"),
-]);
-
-export const collaborationMutationResultSchema = Type.Union([
-    collaborationAgentSchema,
-    collaborationSendResultSchema,
-    collaborationObligationSchema,
-]);
-
 /**
- * A closed mutation envelope. The module snapshots this value before returning from the
- * transaction callback and rejects a host adapter that substitutes or mutates it afterwards.
- */
-export const collaborationTransactionChangeSchema = Type.Object(
-    {
-        result: collaborationMutationResultSchema,
-        changed: Type.Boolean(),
-        events: Type.Array(collaborationEventSchema, { maxItems: 8 }),
-    },
-    { additionalProperties: false },
-);
-
-/**
- * Internal collaboration persistence contract. Public modules construct this boundary from
- * Agent Base's Drizzle database and transaction integration.
+ * Internal collaboration persistence contract. Every operation reads the database facade carried
+ * by the context, so a caller's `ctx.inTx` boundary is respected automatically.
  */
 export const collaborationStoreSchema = Type.Object(
     {
-        transaction: Type.Function(
-            [
-                collaborationContextSchema,
-                collaborationAgentIdSchema,
-                Type.Function(
-                    [collaborationContextSchema],
-                    Type.Promise(collaborationTransactionChangeSchema),
-                ),
-            ],
-            Type.Promise(collaborationTransactionChangeSchema),
-        ),
         readMessage: Type.Function(
             [collaborationContextSchema, collaborationMessageIdSchema],
             Type.Promise(Type.Union([collaborationMessageSchema, Type.Undefined()])),
@@ -229,9 +189,6 @@ export const collaborationStoreSchema = Type.Object(
 export type CollaborationAuthorization = Static<typeof collaborationAuthorizationSchema>;
 export type CollaborationBroker = Static<typeof collaborationBrokerSchema>;
 export type CollaborationRoster = Static<typeof collaborationRosterSchema>;
-export type CollaborationMutationKind = Static<typeof collaborationMutationKindSchema>;
-export type CollaborationMutationResult = Static<typeof collaborationMutationResultSchema>;
-export type CollaborationTransactionChange = Static<typeof collaborationTransactionChangeSchema>;
 export type CollaborationStore = Static<typeof collaborationStoreSchema>;
 
 export function assertCollaborationAgentPage(
@@ -247,14 +204,6 @@ export function assertCollaborationObligationPage(
 ): asserts value is CollaborationObligationPage {
     if (!Value.Check(collaborationObligationPageSchema, value)) {
         throw new Error("Collaboration store returned an invalid obligation page.");
-    }
-}
-
-export function assertCollaborationTransactionChange(
-    value: unknown,
-): asserts value is CollaborationTransactionChange {
-    if (!Value.Check(collaborationTransactionChangeSchema, value)) {
-        throw new Error("Collaboration store transaction returned an invalid change.");
     }
 }
 

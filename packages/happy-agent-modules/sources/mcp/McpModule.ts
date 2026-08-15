@@ -3,7 +3,6 @@ import {
     agentDatabaseRun,
     type AgentModule,
     type AgentModuleScope,
-    type AgentStorageTransaction,
     type AgentDatabase,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
@@ -80,10 +79,6 @@ import { mcpResultToContentBlocks } from "./mcpResultToContentBlocks.js";
 
 const DEFAULT_PAGE_SIZE = 50;
 const DEFAULT_OUTPUT_CHARACTERS = 12_000;
-const mcpTransactionContextSchema = Type.Unsafe<Context>(
-    Type.Object({}, { additionalProperties: false }),
-);
-
 const outputCharactersSchema = Type.Integer({
     minimum: MIN_MCP_OUTPUT_CHARACTERS,
     maximum: MAX_MCP_OUTPUT_CHARACTERS,
@@ -115,19 +110,11 @@ export const mcpModuleOptionsSchema = Type.Object(
         maxPageSize: Type.Optional(
             Type.Integer({ minimum: 1, maximum: MAX_MCP_PAGE_SIZE }),
         ),
-        transaction: Type.Optional(
-            Type.Function(
-                [mcpTransactionContextSchema, Type.Unknown()],
-                Type.Promise(Type.Unknown()),
-            ),
-        ),
         userInput: Type.Optional(mcpUserInputServiceSchema),
     },
     { additionalProperties: false },
 );
-export type McpModuleOptions = Omit<Static<typeof mcpModuleOptionsSchema>, "transaction"> & {
-    transaction?: AgentStorageTransaction;
-};
+export type McpModuleOptions = Static<typeof mcpModuleOptionsSchema>;
 
 /**
  * One shared MCP capability serves every agent.  Rig supplies the host; this class owns the
@@ -138,7 +125,6 @@ export class McpModule implements AgentModule {
     readonly migrations = [mcpMigration];
 
     readonly #host: McpHost;
-    readonly #transaction: AgentStorageTransaction | undefined;
     readonly #userInput: McpUserInputService | undefined;
     readonly #maxPageSize: number;
     readonly #maxOutputCharacters: number;
@@ -150,7 +136,6 @@ export class McpModule implements AgentModule {
         }
         assertMcpHost(checked.host);
         this.#host = options.host;
-        this.#transaction = options.transaction;
         this.#userInput = options.userInput;
         this.#maxPageSize = options.maxPageSize ?? DEFAULT_PAGE_SIZE;
         this.#maxOutputCharacters = options.maxOutputCharacters ?? DEFAULT_OUTPUT_CHARACTERS;
@@ -165,15 +150,14 @@ export class McpModule implements AgentModule {
         ctx: Context,
         scope: AgentModuleScope,
     ): Promise<void> => {
-        if (this.#transaction === undefined) return;
         const servers = await this.#listAllServers(
             ctx,
             scope.agent.id,
             scope.agent.permissionMode,
         );
-        await this.#transaction(ctx, async (_txCtx, database) => {
+        await ctx.inTx(async (txCtx) => {
             await agentDatabaseRun(
-                database,
+                txCtx.db,
                 sql`DELETE FROM mcp_module_index WHERE agent_id = ${scope.agent.id}`,
             );
             for (const server of servers) {
@@ -194,7 +178,7 @@ export class McpModule implements AgentModule {
                     throw new Error("MCP server index entry is invalid.");
                 }
                 await agentDatabaseRun(
-                    database,
+                    txCtx.db,
                     sql`INSERT INTO mcp_module_index
                         (agent_id, name, fingerprint, status, tool_count, error_message, updated_at)
                         VALUES (${entry.agentId}, ${entry.name}, ${entry.fingerprint ?? null},

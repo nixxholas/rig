@@ -26,6 +26,7 @@ function stored<Value>(value: Value): Value {
  * key-value store, with transactions that stage their effects and apply them at commit.
  */
 export class InMemoryPersistence implements AgentPersistence {
+    readonly database = undefined as never;
     readonly records: AgentRecord[] = [];
     readonly values = new Map<string, unknown>();
 

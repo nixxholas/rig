@@ -1,16 +1,15 @@
-import { AgentKV, AgentStorage } from "@slopus/happy-agent-base";
+import { AgentStorage } from "@slopus/happy-agent-base";
 
-import { InMemoryPersistence } from "./InMemoryPersistence.js";
+import { moduleDatabase } from "./moduleDatabase.js";
 
 /** One collection's storage, with each agent's store kept so a test can look inside it. */
 export interface AgentWorld {
     readonly storage: AgentStorage;
-    readonly stores: Map<string, InMemoryPersistence>;
 }
 
 /** Storage standing in for a collection's, giving every agent its own isolated store. */
-export function agentWorld(): AgentWorld {
-    const stores = new Map<string, InMemoryPersistence>();
+export async function agentWorld(): Promise<AgentWorld> {
+    const database = moduleDatabase([], "agent-world");
     let locked = false;
     const storage = new AgentStorage({
         acquireLock: () => {
@@ -23,14 +22,8 @@ export function agentWorld(): AgentWorld {
                 },
             });
         },
-        kv: new AgentKV(new InMemoryPersistence(), "shared."),
-        persistence: (agentId) => {
-            const existing = stores.get(agentId);
-            if (existing !== undefined) return existing;
-            const created = new InMemoryPersistence();
-            stores.set(agentId, created);
-            return created;
-        },
+        database: database.database,
     });
-    return { storage, stores };
+    await storage.migrate(database.context, []);
+    return { storage };
 }

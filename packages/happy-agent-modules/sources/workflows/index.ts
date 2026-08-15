@@ -80,12 +80,9 @@ export {
     assertWorkflowMutationResult,
     assertWorkflowPage,
     assertWorkflowRun,
-    assertWorkflowTransactionChange,
-    workflowTransactionChangeSchema,
     workflowRuntimeSchema,
     workflowStoreSchema,
     type WorkflowRuntime,
-    type WorkflowTransactionChange,
     type WorkflowStore,
 } from "./WorkflowStore.js";
 export {

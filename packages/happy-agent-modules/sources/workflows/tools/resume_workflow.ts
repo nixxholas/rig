@@ -14,10 +14,10 @@ export function resumeWorkflowTool(module: WorkflowsModule, agentId: string) {
             "Resume one paused host-managed workflow run. A running run is an unchanged no-op.",
         parameters: workflowMutationToolInputSchema,
         returnType: workflowMutationResultSchema,
-        durable: true,
+        durable: false,
         shouldReviewInAutoMode: () => false,
         execute: async (ctx, input: WorkflowMutationToolInput, call) =>
-            await module.resumeForTool(ctx, agentId, input, call),
+            await module.resumeForTool(ctx, agentId, input, call.id),
         toLLM: (result) => [{ type: "text", text: module.formatRunForModel(result.run) }],
     });
 }

@@ -93,33 +93,22 @@ export {
     userInputIdFactorySchema,
     userInputPostCommitErrorSchema,
     type UserInputModuleOptions,
-    type UserInputToolCommit,
 } from "./UserInputModule.js";
 export {
     assertUserInputContext,
     assertUserInputPage,
-    assertUserInputStore,
-    assertUserInputTransactionChange,
     assertUserInputVoidResult,
     userInputAuthorizationActionSchema,
     userInputAuthorizationSchema,
     userInputBrokerSchema,
-    userInputChangeKindSchema,
     userInputPresencePolicySchema,
-    userInputStoreSchema,
-    userInputTransactionChangeSchema,
     type UserInputAuthorization,
     type UserInputAuthorizationAction,
     type UserInputBroker,
-    type UserInputChangeKind,
     type UserInputPresencePolicy,
-    type UserInputStore,
-    type UserInputStoreAskInput,
-    type UserInputTransactionChange,
 } from "./UserInputStore.js";
 export { requestUserInputTool } from "./tools/request_user_input.js";
 export {
     createSqliteUserInputStorage,
     userInputMigrations,
-    type SqliteUserInputStorageOptions,
 } from "./SqliteUserInputStorage.js";

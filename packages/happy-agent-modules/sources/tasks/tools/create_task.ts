@@ -30,19 +30,10 @@ export function createTaskTool(tasks: TasksModule, agentId: string) {
         parameters: taskToolCreateInputSchema,
         returnType: Type.Object({ task: taskSchema }),
         durable: true,
+        transactional: true,
         shouldReviewInAutoMode: () => false,
         execute: async (ctx, input: TaskCreateInput, call) => {
-            const task = await tasks.create(
-                ctx,
-                agentId,
-                { ...input, id: call.id },
-                async (txCtx, created) =>
-                    (
-                        await call.commit(txCtx, {
-                            task: created,
-                        })
-                    ).task,
-            );
+            const task = await tasks.create(ctx, agentId, { ...input, id: call.id });
             return { task };
         },
         toLLM: ({ task }) => [

@@ -306,42 +306,13 @@ export const slotReorderInputSchema = Type.Array(slotIdSchema, {
     uniqueItems: true,
 });
 
-/** A caller-owned identity for one durable mutation attempt. */
-export const slotOperationIdSchema = Type.String({
-    minLength: 1,
-    maxLength: MAX_SLOT_ID_LENGTH,
-    pattern: "^[^\\u0000\\r\\n]+$",
-});
-
-/** Fingerprints are fixed-size SHA-256 digests of bounded canonical operation input. */
-export const slotOperationFingerprintSchema = Type.String({
-    minLength: 64,
-    maxLength: 64,
-    pattern: "^[a-f0-9]{64}$",
-});
-
-/** The four mutations that have durable retry receipts. */
-export const slotMutationOperationSchema = Type.Union([
-    Type.Literal("create"),
-    Type.Literal("update"),
-    Type.Literal("reorder"),
-    Type.Literal("remove"),
-]);
-
-/** Optional identity supplied by direct callers; tools allocate this durably. */
-export const slotMutationOptionsSchema = Type.Object(
-    {
-        operationId: Type.Optional(slotOperationIdSchema),
-    },
+export const slotEntryResultSchema = Type.Object(
+    { entry: slotEntrySchema },
     { additionalProperties: false },
 );
 
-/** State retained in call-scoped AgentKV while a durable tool call is retried. */
-export const slotOperationStateSchema = Type.Object(
-    {
-        id: slotOperationIdSchema,
-        fingerprint: slotOperationFingerprintSchema,
-    },
+export const slotRemoveResultSchema = Type.Object(
+    { removed: Type.Boolean() },
     { additionalProperties: false },
 );
 
@@ -357,11 +328,8 @@ export type SlotEntry = Static<typeof slotEntrySchema>;
 export type SlotCreateInput = Static<typeof slotCreateInputSchema>;
 export type SlotUpdateInput = Static<typeof slotUpdateInputSchema>;
 export type SlotReorderInput = Static<typeof slotReorderInputSchema>;
-export type SlotOperationId = Static<typeof slotOperationIdSchema>;
-export type SlotOperationFingerprint = Static<typeof slotOperationFingerprintSchema>;
-export type SlotMutationOperation = Static<typeof slotMutationOperationSchema>;
-export type SlotMutationOptions = Static<typeof slotMutationOptionsSchema>;
-export type SlotOperationState = Static<typeof slotOperationStateSchema>;
+export type SlotEntryResult = Static<typeof slotEntryResultSchema>;
+export type SlotRemoveResult = Static<typeof slotRemoveResultSchema>;
 export type SlotOrdering = Static<typeof slotOrderingSchema>;
 export type SlotTimestamp = Static<typeof slotTimestampSchema>;
 

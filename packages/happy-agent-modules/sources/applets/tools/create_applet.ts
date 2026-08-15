@@ -16,10 +16,10 @@ export function createAppletTool(applets: AppletModule, agentId: string) {
             "Create an applet by installing a source folder. Give an absolute path to the folder; it is verified and copied into the applets directory as version 1.",
         parameters: appletToolImportInputSchema,
         returnType: Type.Object({ applet: appletSchema }),
-        durable: true,
+        durable: false,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, input: AppletToolImportInput) => ({
-            applet: await applets.createForAgent(ctx, agentId, input),
+        execute: async (ctx, input: AppletToolImportInput, call) => ({
+            applet: await applets.createForAgent(ctx, agentId, input, call.id),
         }),
         toLLM: ({ applet }) => [
             {

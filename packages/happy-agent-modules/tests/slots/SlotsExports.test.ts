@@ -1,45 +1,46 @@
 import { Value } from "@sinclair/typebox/value";
 import { describe, expect, it } from "vitest";
+import * as SlotExports from "../../sources/slots/Slot.js";
+import * as SlotStoreExports from "../../sources/slots/SlotStore.js";
 
 import {
     MAX_SLOT_ENTRIES,
     slotCreateInputSchema,
-    slotCursorSchema,
-    slotDetailCursorSchema,
-    slotDetailPageSchema,
-    slotDetailQuerySchema,
-    slotMutationOperationSchema,
-    slotMutationOptionsSchema,
-    slotMutationProofSchema,
     slotOrderingSchema,
+    slotReorderInputSchema,
+    slotScopeReferenceSchema,
+    slotUpdateInputSchema,
+    type SlotCreateInput,
+    type SlotOrdering,
+    type SlotReorderInput,
+    type SlotScopeReference,
+    type SlotUpdateInput,
+} from "../../sources/slots/Slot.js";
+import {
+    slotCursorSchema,
     slotPageQueryEverywhereSchema,
     slotPageQueryNoScopeSchema,
     slotPageQueryProjectSchema,
     slotPageQuerySchema,
     slotPageQuerySessionSchema,
     slotPageQueryWorkspaceSchema,
-    slotReorderInputSchema,
-    slotScopeReferenceSchema,
-    slotUpdateInputSchema,
-    type SlotCreateInput,
     type SlotCursor,
-    type SlotDetailCursor,
-    type SlotDetailQuery,
-    type SlotMutationOperation,
-    type SlotMutationOptions,
-    type SlotOrdering,
     type SlotPageQueryEverywhere,
     type SlotPageQueryNoScope,
     type SlotPageQueryProject,
     type SlotPageQuerySession,
     type SlotPageQueryWorkspace,
-    type SlotReorderInput,
-    type SlotScopeReference,
-    type SlotUpdateInput,
-} from "../../sources/index.js";
+} from "../../sources/slots/SlotPage.js";
+import {
+    slotDetailCursorSchema,
+    slotDetailPageSchema,
+    slotDetailQuerySchema,
+    type SlotDetailCursor,
+    type SlotDetailQuery,
+} from "../../sources/slots/SlotDetailPage.js";
 
 describe("public slot exports", () => {
-    it("exports every input, operation, ordering, and cursor contract", () => {
+    it("exports domain, ordering, and cursor contracts without replay contracts", () => {
         const create: SlotCreateInput = {
             slot: "status-line",
             scope: "everywhere",
@@ -49,8 +50,6 @@ describe("public slot exports", () => {
         };
         const update: SlotUpdateInput = { purpose: "Show current readiness" };
         const reorder: SlotReorderInput = ["entry-1"];
-        const operation: SlotMutationOperation = "create";
-        const options: SlotMutationOptions = { operationId: "operation-1" };
         const ordering: SlotOrdering = 0;
         const cursor: SlotCursor = 1;
         const detailCursor: SlotDetailCursor = 1;
@@ -68,8 +67,6 @@ describe("public slot exports", () => {
         expect(Value.Check(slotCreateInputSchema, create)).toBe(true);
         expect(Value.Check(slotUpdateInputSchema, update)).toBe(true);
         expect(Value.Check(slotReorderInputSchema, reorder)).toBe(true);
-        expect(Value.Check(slotMutationOperationSchema, operation)).toBe(true);
-        expect(Value.Check(slotMutationOptionsSchema, options)).toBe(true);
         expect(Value.Check(slotOrderingSchema, ordering)).toBe(true);
         expect(Value.Check(slotCursorSchema, cursor)).toBe(true);
         expect(Value.Check(slotCursorSchema, 0)).toBe(true);
@@ -84,17 +81,10 @@ describe("public slot exports", () => {
                 entry: null,
             }),
         ).toBe(true);
-        expect(
-            Value.Check(slotMutationProofSchema, {
-                agentId: "agent-1",
-                operation: "remove",
-                operationId: "remove-1",
-                fingerprint: "0".repeat(64),
-                entryId: "entry-1",
-                before: null,
-                removed: false,
-            }),
-        ).toBe(true);
+        expect("slotMutationOptionsSchema" in SlotExports).toBe(false);
+        expect("slotOperationStateSchema" in SlotExports).toBe(false);
+        expect("slotMutationProofSchema" in SlotStoreExports).toBe(false);
+        expect("slotOperationReceiptSchema" in SlotStoreExports).toBe(false);
         expect(Value.Check(slotScopeReferenceSchema, reference)).toBe(true);
         expect(Value.Check(slotPageQuerySchema, noScope)).toBe(true);
         expect(Value.Check(slotPageQueryNoScopeSchema, noScope)).toBe(true);

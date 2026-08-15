@@ -4,6 +4,7 @@ import {
     type AgentModuleMigration,
     type AgentModule,
     type AgentModuleScope,
+    type AgentToolCall,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
 import { sql } from "drizzle-orm";
@@ -55,8 +56,10 @@ import {
     type WorkletLogQuery,
     type WorkletRevertInput,
     type WorkletStatus,
+    type WorkletToolInstallInput,
+    type WorkletToolRevertInput,
+    type WorkletToolUpdateInput,
     type WorkletUpdateInput,
-    type WorkletVersion,
 } from "./Worklet.js";
 import {
     MAX_WORKLET_EVENT_ID_LENGTH,
@@ -78,7 +81,6 @@ import {
     assertWorkletRuntimeLogQuery,
     assertWorkletStage,
     assertWorkletStatus,
-    assertWorkletTransactionChange,
     workletRuntimeSchema,
     workletStageInputSchema,
     workletStageSchema,
@@ -90,7 +92,6 @@ import {
     type WorkletRuntimeInvocationRequest,
     type WorkletRuntimeLogQuery,
     type WorkletStage,
-    type WorkletTransactionChange,
 } from "./WorkletStore.js";
 import {
     WORKLETS_MIGRATION_KEY,
@@ -279,9 +280,7 @@ type WorkletOperationRequest =
     | Omit<Extract<WorkletOperation, { kind: "revert" }>, "agentId" | "operationId">
     | Omit<Extract<WorkletOperation, { kind: "remove" }>, "agentId" | "operationId">;
 
-type WorkletCompletion = (ctx: Context, worklet: Worklet) => Promise<void>;
-
-type ModuleChange = WorkletTransactionChange;
+type WorkletToolCall = Pick<AgentToolCall, "id">;
 
 type StageRegistration = {
     readonly rollbackNow: (ctx: Context) => Promise<void>;
@@ -404,21 +403,37 @@ export class WorkletsModule implements AgentModule {
         agentId: string,
         input: WorkletInstallInput,
     ): Promise<Worklet> {
+        return await this.#install(ctx, agentId, input);
+    }
+
+    async installForTool(
+        ctx: Context,
+        agentId: string,
+        input: WorkletToolInstallInput,
+        call: WorkletToolCall,
+    ): Promise<{ readonly worklet: Worklet }> {
+        this.#assertOperationId(call.id);
+        const worklet = await this.#install(ctx, agentId, {
+            ...input,
+            operationId: call.id,
+        });
+        return { worklet };
+    }
+
+    async #install(
+        ctx: Context,
+        agentId: string,
+        input: WorkletInstallInput,
+    ): Promise<Worklet> {
         this.#assertAgentId(agentId);
         this.#assertInput(workletInstallInputSchema, input, "worklet install");
-        const normalized = { name: input.name, sourceRef: input.sourceRef };
         const operation = await this.#operation(
             ctx,
             agentId,
-            { kind: "install", ...normalized },
-            INSTALL_OPERATION_KEY,
+            { kind: "install", name: input.name, sourceRef: input.sourceRef },
             input.operationId,
-            fingerprint({ agentId, operation: "install", ...normalized }),
         );
-        const result = await this.#runTransaction(ctx, "install", async (txCtx) => {
-            const replay = await this.#readReplay(txCtx, operation);
-            if (replay !== undefined) return { result: replay };
-
+        return await ctx.inTx(async (txCtx) => {
             const before = await this.#getCatalog(txCtx, input.name);
             if (before !== undefined) {
                 await this.#authorize(txCtx, agentId, before.ownerAgentId, "install");
@@ -462,8 +477,6 @@ export class WorkletsModule implements AgentModule {
                     createdAt,
                     stage,
                 });
-                const proof = this.#proof(operation, before, after, raw);
-                await this.#writeEvidence(txCtx, operation, proof, raw);
                 const event = await this.#newEvent(
                     txCtx,
                     agentId,
@@ -476,16 +489,12 @@ export class WorkletsModule implements AgentModule {
                     event,
                     stageRegistration,
                 );
-                return { result: raw, event };
+                return structuredClone(after);
             } catch (error: unknown) {
                 if (stage !== undefined) await this.#rollbackStage(txCtx, stage);
                 throw error;
             }
         });
-        if (result.operation !== "install") {
-            throw new Error("Worklet install returned the wrong operation.");
-        }
-        return structuredClone(result.worklet);
     }
 
     async listPage(
@@ -613,25 +622,45 @@ export class WorkletsModule implements AgentModule {
         name: string,
         input: WorkletUpdateInput,
     ): Promise<Worklet> {
+        return await this.#update(ctx, agentId, name, input);
+    }
+
+    async updateForTool(
+        ctx: Context,
+        agentId: string,
+        name: string,
+        input: WorkletToolUpdateInput,
+        call: WorkletToolCall,
+    ): Promise<{ readonly worklet: Worklet }> {
+        this.#assertOperationId(call.id);
+        const worklet = await this.#update(ctx, agentId, name, {
+            ...input,
+            operationId: call.id,
+        });
+        return { worklet };
+    }
+
+    async #update(
+        ctx: Context,
+        agentId: string,
+        name: string,
+        input: WorkletUpdateInput,
+    ): Promise<Worklet> {
         this.#assertAgentId(agentId);
         this.#assertName(name);
         this.#assertInput(workletUpdateInputSchema, input, "worklet update");
-        const normalized = {
-            name,
-            sourceRef: input.sourceRef,
-            changeDescription: input.changeDescription,
-        };
         const operation = await this.#operation(
             ctx,
             agentId,
-            { kind: "update", ...normalized },
-            UPDATE_OPERATION_KEY,
+            {
+                kind: "update",
+                name,
+                sourceRef: input.sourceRef,
+                changeDescription: input.changeDescription,
+            },
             input.operationId,
-            fingerprint({ agentId, operation: "update", ...normalized }),
         );
-        const result = await this.#runTransaction(ctx, "update", async (txCtx) => {
-            const replay = await this.#readReplay(txCtx, operation);
-            if (replay !== undefined) return { result: replay };
+        return await ctx.inTx(async (txCtx) => {
             const before = await this.#getCatalog(txCtx, name);
             if (before === undefined) throw new Error(`Worklet "${name}" was not found.`);
             await this.#authorize(txCtx, agentId, before.ownerAgentId, "update");
@@ -672,8 +701,6 @@ export class WorkletsModule implements AgentModule {
                     createdAt,
                     stage,
                 });
-                const proof = this.#proof(operation, before, after, raw);
-                await this.#writeEvidence(txCtx, operation, proof, raw);
                 const event = await this.#newEvent(
                     txCtx,
                     agentId,
@@ -686,19 +713,39 @@ export class WorkletsModule implements AgentModule {
                     event,
                     stageRegistration,
                 );
-                return { result: raw, event };
+                return structuredClone(after);
             } catch (error: unknown) {
                 if (stage !== undefined) await this.#rollbackStage(txCtx, stage);
                 throw error;
             }
         });
-        if (result.operation !== "update") {
-            throw new Error("Worklet update returned the wrong operation.");
-        }
-        return structuredClone(result.worklet);
     }
 
     async revert(
+        ctx: Context,
+        agentId: string,
+        name: string,
+        input: WorkletRevertInput,
+    ): Promise<Worklet> {
+        return await this.#revert(ctx, agentId, name, input);
+    }
+
+    async revertForTool(
+        ctx: Context,
+        agentId: string,
+        name: string,
+        input: WorkletToolRevertInput,
+        call: WorkletToolCall,
+    ): Promise<{ readonly worklet: Worklet }> {
+        this.#assertOperationId(call.id);
+        const worklet = await this.#revert(ctx, agentId, name, {
+            ...input,
+            operationId: call.id,
+        });
+        return { worklet };
+    }
+
+    async #revert(
         ctx: Context,
         agentId: string,
         name: string,
@@ -711,18 +758,9 @@ export class WorkletsModule implements AgentModule {
             ctx,
             agentId,
             { kind: "revert", name, version: input.version },
-            REVERT_OPERATION_KEY,
             input.operationId,
-            fingerprint({
-                agentId,
-                operation: "revert",
-                name,
-                version: input.version,
-            }),
         );
-        const result = await this.#runTransaction(ctx, "revert", async (txCtx) => {
-            const replay = await this.#readReplay(txCtx, operation);
-            if (replay !== undefined) return { result: replay };
+        return await ctx.inTx(async (txCtx) => {
             const before = await this.#getCatalog(txCtx, name);
             if (before === undefined) throw new Error(`Worklet "${name}" was not found.`);
             await this.#authorize(txCtx, agentId, before.ownerAgentId, "revert");
@@ -758,8 +796,6 @@ export class WorkletsModule implements AgentModule {
                     targetVersion: input.version,
                     stage,
                 });
-                const proof = this.#proof(operation, before, after, raw);
-                await this.#writeEvidence(txCtx, operation, proof, raw);
                 if (!raw.changed) {
                     await this.#registerStagePostCommit(
                         txCtx,
@@ -767,7 +803,7 @@ export class WorkletsModule implements AgentModule {
                         undefined,
                         stageRegistration,
                     );
-                    return { result: raw };
+                    return structuredClone(after);
                 }
                 const event = await this.#newEvent(
                     txCtx,
@@ -785,16 +821,12 @@ export class WorkletsModule implements AgentModule {
                     event,
                     stageRegistration,
                 );
-                return { result: raw, event };
+                return structuredClone(after);
             } catch (error: unknown) {
                 if (stage !== undefined) await this.#rollbackStage(txCtx, stage);
                 throw error;
             }
         });
-        if (result.operation !== "revert") {
-            throw new Error("Worklet revert returned the wrong operation.");
-        }
-        return structuredClone(result.worklet);
     }
 
     async remove(
@@ -810,22 +842,9 @@ export class WorkletsModule implements AgentModule {
             ctx,
             agentId,
             { kind: "remove", name },
-            REMOVE_OPERATION_KEY,
             operationId,
-            fingerprint({ agentId, operation: "remove", name }),
         );
-        const result = await this.#runTransaction(ctx, "remove", async (txCtx) => {
-            const replay = await this.#readReplay(txCtx, operation);
-            if (replay !== undefined) {
-                if (replay.operation !== "remove") {
-                    throw new Error("Worklet remove replay returned the wrong operation.");
-                }
-                const current = await this.#getCatalog(txCtx, name);
-                if (current === undefined) {
-                    await this.#reconcileFilesystem(txCtx, name, undefined);
-                }
-                return { result: replay };
-            }
+        const result = await ctx.inTx(async (txCtx) => {
             const before = await this.#getCatalog(txCtx, name);
             if (before !== undefined) {
                 await this.#authorize(txCtx, agentId, before.ownerAgentId, "remove");
@@ -838,9 +857,7 @@ export class WorkletsModule implements AgentModule {
                 name,
                 targetVersion: 0,
             });
-            const proof = this.#proof(operation, before, after, raw);
-            await this.#writeEvidence(txCtx, operation, proof, raw);
-            if (!raw.changed) return { result: raw };
+            if (!raw.changed) return raw;
             if (before === undefined) {
                 throw new Error("Worklet remove changed an absent worklet.");
             }
@@ -856,7 +873,7 @@ export class WorkletsModule implements AgentModule {
             );
             await this.#observeTransactional(txCtx, event);
             await this.#registerRemovePostCommit(txCtx, name, event);
-            return { result: raw, event };
+            return raw;
         });
         if (result.operation !== "remove") {
             throw new Error("Worklet remove returned the wrong operation.");
@@ -1203,91 +1220,24 @@ export class WorkletsModule implements AgentModule {
         return text;
     }
 
-    async #runTransaction(
-        ctx: Context,
-        operation: string,
-        work: (txCtx: Context) => Promise<ModuleChange>,
-    ): Promise<WorkletCatalogMutationResult> {
-        let expected: ModuleChange | undefined;
-        const raw = await requirePromise(
-            this.#catalog.transaction.call(this.#catalog, ctx, async (txCtx) => {
-                const change = await work(txCtx);
-                expected = deepFreeze(structuredClone(change));
-                return change;
-            }),
-            `Worklet ${operation} transaction`,
-        );
-        assertWorkletTransactionChange(raw);
-        if (expected === undefined || !sameValue(raw, expected)) {
-            throw new Error(`Worklet ${operation} transaction returned a substituted result.`);
-        }
-        return structuredClone(expected.result);
-    }
-
     async #operation(
         ctx: Context,
         agentId: string,
         request: WorkletOperationRequest,
-        key: string,
         requested: string | undefined,
-        requestFingerprint: string,
     ): Promise<WorkletOperation> {
-        if (!Value.Check(workletFingerprintSchema, requestFingerprint)) {
-            throw new Error("Worklet operation fingerprint is invalid.");
-        }
-        const operationId = await this.#operationId(
-            ctx,
-            agentId,
-            key,
-            requested,
-            requestFingerprint,
-        );
+        const operationId =
+            requested === undefined
+                ? await this.#newId(ctx, agentId)
+                : requested;
+        this.#assertOperationId(operationId);
         const operation = {
             ...request,
             agentId,
             operationId,
-            fingerprint: requestFingerprint,
         };
         this.#assertInput(workletOperationSchema, operation, "worklet operation");
         return operation;
-    }
-
-    async #operationId(
-        ctx: Context,
-        agentId: string,
-        key: string,
-        requested: string | undefined,
-        requestFingerprint: string,
-    ): Promise<string> {
-        if (requested !== undefined) {
-            this.#assertOperationId(requested);
-            return requested;
-        }
-        const kv = agentKV(ctx);
-        if (kv === undefined) {
-            throw new Error(
-                "Worklet host mutations require an operationId outside a durable tool call.",
-            );
-        }
-        const state = await kv.update(ctx, key, async (current) => {
-            if (current !== undefined) {
-                if (!Value.Check(callOperationStateSchema, current)) {
-                    throw new Error("Stored worklet operation identity is invalid.");
-                }
-                if (current.fingerprint !== requestFingerprint) {
-                    throw new Error(
-                        "The durable worklet operation identity was reused for different input.",
-                    );
-                }
-                return current;
-            }
-            const id = await this.#newId(ctx, agentId);
-            return { id, fingerprint: requestFingerprint };
-        });
-        if (!Value.Check(callOperationStateSchema, state)) {
-            throw new Error("Stored worklet operation identity is invalid.");
-        }
-        return state.id;
     }
 
     async #newId(ctx: Context, agentId: string): Promise<string> {
@@ -1330,455 +1280,6 @@ export class WorkletsModule implements AgentModule {
             throw new Error("Worklet module created an invalid event.");
         }
         return deepFreeze(structuredClone(event));
-    }
-
-    async #readReplay(
-        ctx: Context,
-        operation: WorkletOperation,
-    ): Promise<WorkletCatalogMutationResult | undefined> {
-        const receiptRaw = await requirePromise(
-            this.#catalog.readReceipt.call(this.#catalog, ctx, operation.operationId),
-            "Worklet catalog readReceipt",
-        );
-        const proofRaw = await requirePromise(
-            this.#catalog.readMutationProof.call(
-                this.#catalog,
-                ctx,
-                operation.operationId,
-            ),
-            "Worklet catalog readMutationProof",
-        );
-        if (receiptRaw === undefined && proofRaw === undefined) return undefined;
-        if (receiptRaw === undefined || proofRaw === undefined) {
-            throw new Error("Worklet operation evidence is incomplete.");
-        }
-        assertWorkletReceipt(receiptRaw);
-        assertWorkletProof(proofRaw);
-        if (
-            receiptRaw.operation !== operation.kind ||
-            proofRaw.operation !== operation.kind ||
-            receiptRaw.agentId !== operation.agentId ||
-            proofRaw.agentId !== operation.agentId ||
-            receiptRaw.operationId !== operation.operationId ||
-            proofRaw.operationId !== operation.operationId ||
-            receiptRaw.fingerprint !== operation.fingerprint ||
-            proofRaw.fingerprint !== operation.fingerprint ||
-            receiptRaw.name !== proofRaw.name ||
-            receiptRaw.name !== operation.name
-        ) {
-            throw new Error("Worklet operation identity was reused with different input.");
-        }
-        if (!sameProofResult(receiptRaw.result, proofRaw.result)) {
-            throw new Error("Worklet replay receipt does not match its immutable proof.");
-        }
-        if (
-            receiptRaw.beforeExists !== (proofRaw.before !== null) ||
-            receiptRaw.beforeCurrentVersion !== (proofRaw.before?.currentVersion ?? 0)
-        ) {
-            throw new Error("Worklet replay receipt does not match its immutable before-state.");
-        }
-        const settledResult = await this.#expandReceiptResult(ctx, receiptRaw);
-        this.#assertReplayEvidence(operation, settledResult, proofRaw);
-        // Reconciliation is deliberately observational. A later opposite
-        // transition must not be undone by replaying an already-committed
-        // operation (for example, replaying a removal after recreation).
-        const authoritative = await this.#getCatalog(ctx, operation.name);
-        this.#assertReplayAuthoritative(operation, settledResult, proofRaw, authoritative);
-        if (authoritative !== undefined) {
-            await this.#authorize(
-                ctx,
-                operation.agentId,
-                authoritative.ownerAgentId,
-                this.#authorizationAction(operation.kind),
-            );
-        }
-        const ownerAgentId = proofRaw.after?.ownerAgentId ?? proofRaw.before?.ownerAgentId;
-        if (ownerAgentId !== undefined && ownerAgentId !== authoritative?.ownerAgentId) {
-            await this.#authorize(
-                ctx,
-                operation.agentId,
-                ownerAgentId,
-                this.#authorizationAction(operation.kind),
-            );
-        }
-        return structuredClone(settledResult);
-    }
-
-    async #expandReceiptResult(
-        ctx: Context,
-        receipt: WorkletCatalogMutationReceipt,
-    ): Promise<WorkletCatalogMutationResult> {
-        return await this.#expandReceiptResultAt(ctx, receipt, new Set(), 0);
-    }
-
-    async #expandReceiptResultAt(
-        ctx: Context,
-        receipt: WorkletCatalogMutationReceipt,
-        ancestors: ReadonlySet<string>,
-        depth: number,
-    ): Promise<WorkletCatalogMutationResult> {
-        if (depth > MAX_WORKLET_VERSIONS) {
-            throw new Error("Worklet replay history exceeds its bounded depth.");
-        }
-        if (ancestors.has(receipt.operationId)) {
-            throw new Error("Worklet replay history contains a cycle.");
-        }
-        const nextAncestors = new Set(ancestors);
-        nextAncestors.add(receipt.operationId);
-        const compact = receipt.result;
-        if (compact.operation === "remove") {
-            const result: WorkletCatalogMutationResult = {
-                operation: compact.operation,
-                name: compact.name,
-                operationId: compact.operationId,
-                targetVersion: compact.targetVersion,
-                currentVersion: compact.currentVersion,
-                changed: compact.changed,
-                removed: compact.removed,
-            };
-            assertWorkletMutation(result);
-            return result;
-        }
-
-        if (compact.operation === "install") {
-            const version = structuredClone(compact.version);
-            const worklet: Worklet = {
-                name: compact.worklet.name,
-                ownerAgentId: compact.worklet.ownerAgentId,
-                currentVersion: compact.currentVersion,
-                operations: structuredClone(version.operations),
-                versions: [version],
-                createdAt: compact.worklet.createdAt,
-                updatedAt: compact.worklet.updatedAt,
-            };
-            const result: WorkletCatalogMutationResult = {
-                operation: compact.operation,
-                name: compact.name,
-                operationId: compact.operationId,
-                targetVersion: compact.targetVersion,
-                currentVersion: compact.currentVersion,
-                changed: compact.changed,
-                worklet,
-            };
-            assertWorkletMutation(result);
-            if (!sameValue(workletStateIdentity(worklet), compact.worklet)) {
-                throw new Error("Worklet replay receipt has a mismatched settled worklet.");
-            }
-            return result;
-        }
-
-        const parentReceiptRaw = await requirePromise(
-            this.#catalog.readReceipt.call(
-                this.#catalog,
-                ctx,
-                compact.historyOperationId,
-            ),
-            "Worklet catalog readReceipt for replay history",
-        );
-        if (parentReceiptRaw === undefined) {
-            throw new Error("Worklet replay receipt is missing its history predecessor.");
-        }
-        assertWorkletReceipt(parentReceiptRaw);
-        if (
-            parentReceiptRaw.name !== compact.name ||
-            parentReceiptRaw.result.operation === "remove"
-        ) {
-            throw new Error("Worklet replay receipt history targets another worklet.");
-        }
-        const previousResult = await this.#expandReceiptResultAt(
-            ctx,
-            parentReceiptRaw,
-            nextAncestors,
-            depth + 1,
-        );
-        if (!("worklet" in previousResult)) {
-            throw new Error("Worklet replay receipt history has no worklet state.");
-        }
-
-        let worklet: Worklet;
-        if (compact.operation === "update") {
-            const version = structuredClone(compact.version);
-            worklet = {
-                ...structuredClone(previousResult.worklet),
-                currentVersion: compact.currentVersion,
-                operations: structuredClone(version.operations),
-                versions: [...structuredClone(previousResult.worklet.versions), version],
-                updatedAt: compact.worklet.updatedAt,
-            };
-        } else {
-            const target = previousResult.worklet.versions.find(
-                (version) => version.version === compact.targetVersion,
-            );
-            if (target === undefined) {
-                throw new Error("Worklet replay receipt is missing its reverted version.");
-            }
-            worklet = {
-                ...structuredClone(previousResult.worklet),
-                currentVersion: compact.currentVersion,
-                operations: structuredClone(target.operations),
-                updatedAt: compact.worklet.updatedAt,
-            };
-        }
-        const result: WorkletCatalogMutationResult = {
-            operation: compact.operation,
-            name: compact.name,
-            operationId: compact.operationId,
-            targetVersion: compact.targetVersion,
-            currentVersion: compact.currentVersion,
-            changed: compact.changed,
-            worklet,
-        };
-        assertWorkletMutation(result);
-        if (!sameValue(workletStateIdentity(worklet), compact.worklet)) {
-            throw new Error("Worklet replay receipt has a mismatched settled worklet.");
-        }
-        return result;
-    }
-
-    #assertReplayAuthoritative(
-        operation: WorkletOperation,
-        settledResult: WorkletCatalogMutationResult,
-        proof: WorkletCatalogMutationProof,
-        authoritative: Worklet | undefined,
-    ): void {
-        if (authoritative === undefined || operation.kind === "remove") return;
-        if (
-            proof.after === null ||
-            authoritative.name !== operation.name ||
-            !("worklet" in settledResult)
-        ) {
-            throw new Error("Worklet replay returned an unrelated authoritative record.");
-        }
-        const expected = settledResult.worklet;
-        const generationChanged =
-            authoritative.versions[0]?.operationId !== expected.versions[0]?.operationId;
-        if (generationChanged) {
-            // A remove followed by a legitimate reinstall starts a new
-            // generation. The old durable call is settled and must be
-            // returned without applying it to the new row.
-            return;
-        }
-        const historyExtends =
-            authoritative.ownerAgentId === expected.ownerAgentId &&
-            authoritative.createdAt === expected.createdAt &&
-            authoritative.versions.length >= expected.versions.length &&
-            sameValue(
-                authoritative.versions.slice(0, expected.versions.length),
-                expected.versions,
-            );
-        if (!historyExtends) {
-            throw new Error(
-                "Worklet replay did not match the authoritative catalog record.",
-            );
-        }
-        if (
-            authoritative.versions.length === expected.versions.length &&
-            authoritative.currentVersion === expected.currentVersion &&
-            !sameValue(workletStateIdentity(authoritative), proof.after)
-        ) {
-            throw new Error(
-                "Worklet replay did not match the authoritative catalog record.",
-            );
-        }
-    }
-
-    #assertReplayEvidence(
-        operation: WorkletOperation,
-        settledResult: WorkletCatalogMutationResult,
-        proof: WorkletCatalogMutationProof,
-    ): void {
-        const result = settledResult;
-        const proofResult = proof.result;
-        if (
-            result.operation !== operation.kind ||
-            proofResult.operation !== operation.kind ||
-            result.name !== operation.name ||
-            proofResult.name !== result.name ||
-            proofResult.operationId !== result.operationId
-        ) {
-            throw new Error("Worklet replay evidence has a different operation target.");
-        }
-        if (operation.kind === "remove") {
-            if (
-                proof.after !== null ||
-                (proof.before !== null && proof.before.name !== operation.name) ||
-                ("worklet" in result) ||
-                ("worklet" in proofResult) ||
-                result.removed !== result.changed ||
-                result.changed !== (proof.before !== null) ||
-                result.targetVersion !== 0 ||
-                result.currentVersion !== 0
-            ) {
-                throw new Error("Worklet remove replay evidence is inconsistent.");
-            }
-            return;
-        }
-        if (
-            proof.after === null ||
-            !("worklet" in result) ||
-            !("worklet" in proofResult)
-        ) {
-            throw new Error("Worklet replay evidence is missing its resulting worklet.");
-        }
-        const after = proof.after;
-        const afterRecord = result.worklet;
-        if (!sameValue(after, workletStateIdentity(afterRecord))) {
-            throw new Error("Worklet replay evidence does not match its after-state.");
-        }
-        if (
-            after.name !== operation.name ||
-            result.targetVersion !== after.currentVersion ||
-            result.currentVersion !== after.currentVersion
-        ) {
-            throw new Error("Worklet replay evidence has an invalid target version.");
-        }
-        if (operation.kind === "install") {
-            const initial = afterRecord.versions[0];
-            if (
-                proof.before !== null ||
-                result.changed !== true ||
-                result.targetVersion !== 1 ||
-                after.ownerAgentId !== operation.agentId ||
-                after.currentVersion !== 1 ||
-                after.versionCount !== 1 ||
-                after.updatedAt !== after.createdAt ||
-                initial?.operationId !== operation.operationId ||
-                initial.sourceRef !== operation.sourceRef ||
-                initial.changeDescription !== "Initial install"
-            ) {
-                throw new Error("Worklet install replay evidence does not match the request.");
-            }
-            return;
-        }
-        if (proof.before === null || proof.before.name !== after.name) {
-            throw new Error("Worklet replay evidence is missing its before-state.");
-        }
-        if (operation.kind === "update") {
-            const appended = afterRecord.versions.at(-1);
-            if (
-                result.changed !== true ||
-                result.targetVersion !== after.versionCount ||
-                after.versionCount !== proof.before.versionCount + 1 ||
-                after.ownerAgentId !== proof.before.ownerAgentId ||
-                after.createdAt !== proof.before.createdAt ||
-                appended?.createdAt !== after.updatedAt ||
-                appended?.operationId !== operation.operationId ||
-                appended.sourceRef !== operation.sourceRef ||
-                appended.changeDescription !== operation.changeDescription
-            ) {
-                throw new Error("Worklet update replay evidence does not match the request.");
-            }
-            return;
-        }
-        if (
-            result.targetVersion !== operation.version ||
-            after.currentVersion !== operation.version ||
-            result.changed !== (proof.before.currentVersion !== operation.version) ||
-            after.ownerAgentId !== proof.before.ownerAgentId ||
-            after.createdAt !== proof.before.createdAt ||
-            after.updatedAt !== proof.before.updatedAt
-        ) {
-            throw new Error("Worklet revert replay evidence does not match the request.");
-        }
-    }
-
-    #proof(
-        operation: WorkletOperation,
-        before: Worklet | undefined,
-        after: Worklet | undefined,
-        result: WorkletCatalogMutationResult,
-    ): WorkletCatalogMutationProof {
-        const proof: WorkletCatalogMutationProof = {
-            operation: operation.kind,
-            agentId: operation.agentId,
-            name: "worklet" in result ? result.worklet.name : result.name,
-            operationId: operation.operationId,
-            fingerprint: operation.fingerprint,
-            before: before === undefined ? null : workletStateIdentity(before),
-            after: after === undefined ? null : workletStateIdentity(after),
-            changed: result.changed,
-            result: compactProofResult(result),
-        };
-        assertWorkletProof(proof);
-        return proof;
-    }
-
-    async #writeEvidence(
-        ctx: Context,
-        operation: WorkletOperation,
-        proof: WorkletCatalogMutationProof,
-        settledResult: WorkletCatalogMutationResult,
-    ): Promise<void> {
-        assertWorkletProof(proof);
-        assertWorkletMutation(settledResult);
-        if (
-            proof.agentId !== operation.agentId ||
-            proof.operationId !== operation.operationId ||
-            proof.operation !== operation.kind ||
-            proof.fingerprint !== operation.fingerprint
-        ) {
-            throw new Error("Worklet mutation proof does not match its operation.");
-        }
-        const receipt: WorkletCatalogMutationReceipt = {
-            operation: proof.operation,
-            agentId: proof.agentId,
-            name: proof.name,
-            operationId: proof.operationId,
-            fingerprint: proof.fingerprint,
-            beforeExists: proof.before !== null,
-            beforeCurrentVersion: proof.before?.currentVersion ?? 0,
-            result: compactReceiptResult(settledResult),
-        };
-        assertWorkletReceipt(receipt);
-        const expectedProof = deepFreeze(structuredClone(proof));
-        await invokePromiseVoid(
-            this.#catalog.writeMutationProof.call(
-                this.#catalog,
-                ctx,
-                structuredClone(expectedProof),
-            ),
-            "Worklet catalog writeMutationProof",
-        );
-        const retainedProof = await requirePromise(
-            this.#catalog.readMutationProof.call(
-                this.#catalog,
-                ctx,
-                operation.operationId,
-            ),
-            "Worklet catalog readMutationProof after write",
-        );
-        if (retainedProof === undefined) {
-            throw new Error("Worklet catalog did not retain the mutation proof.");
-        }
-        assertWorkletProof(retainedProof);
-        if (!sameValue(retainedProof, expectedProof)) {
-            throw new Error("Worklet catalog retained a mismatched mutation proof.");
-        }
-
-        const expectedReceipt = deepFreeze(structuredClone(receipt));
-        await invokePromiseVoid(
-            this.#catalog.writeReceipt.call(
-                this.#catalog,
-                ctx,
-                structuredClone(expectedReceipt),
-            ),
-            "Worklet catalog writeReceipt",
-        );
-        const retainedReceipt = await requirePromise(
-            this.#catalog.readReceipt.call(
-                this.#catalog,
-                ctx,
-                operation.operationId,
-            ),
-            "Worklet catalog readReceipt after write",
-        );
-        if (retainedReceipt === undefined) {
-            throw new Error("Worklet catalog did not retain the replay receipt.");
-        }
-        assertWorkletReceipt(retainedReceipt);
-        if (!sameValue(retainedReceipt, expectedReceipt)) {
-            throw new Error("Worklet catalog retained a mismatched replay receipt.");
-        }
     }
 
     #assertMutation(
@@ -2315,10 +1816,6 @@ export class WorkletsModule implements AgentModule {
         }
     }
 
-    #authorizationAction(kind: WorkletCatalogOperation): WorkletAuthorizationAction {
-        return kind;
-    }
-
     #assertAgentId(value: unknown): asserts value is string {
         if (!Value.Check(workletAgentIdSchema, value)) {
             throw new Error("Worklet agent ID is invalid.");
@@ -2375,84 +1872,6 @@ function formatWorkletStatusState(state: WorkletStatus["state"]): string {
         case "failed":
             return "failed";
     }
-}
-
-function compactProofResult(
-    result: WorkletCatalogMutationResult,
-): WorkletCatalogMutationProofResult {
-    if (!("worklet" in result)) {
-        return structuredClone(result) as WorkletCatalogMutationProofResult;
-    }
-    return {
-        ...result,
-        worklet: workletStateIdentity(result.worklet),
-    } as WorkletCatalogMutationProofResult;
-}
-
-function compactReceiptResult(
-    result: WorkletCatalogMutationResult,
-): WorkletCatalogMutationReceiptResult {
-    if (result.operation === "remove") {
-        return structuredClone(result) as WorkletCatalogMutationReceiptResult;
-    }
-    const identity = workletStateIdentity(result.worklet);
-    if (result.operation === "install") {
-        const version: WorkletVersion | undefined = result.worklet.versions[0];
-        if (version === undefined) {
-            throw new Error("Worklet install result has no initial version.");
-        }
-        return {
-            ...result,
-            worklet: identity,
-            version: structuredClone(version),
-        } as WorkletCatalogMutationReceiptResult;
-    }
-    if (result.operation === "update") {
-        const version = result.worklet.versions.at(-1);
-        const previousVersion = result.worklet.versions.at(-2);
-        if (version === undefined || previousVersion === undefined) {
-            throw new Error("Worklet update result has no version predecessor.");
-        }
-        return {
-            ...result,
-            worklet: identity,
-            version: structuredClone(version),
-            historyOperationId: previousVersion.operationId,
-        } as WorkletCatalogMutationReceiptResult;
-    }
-    const latestVersion = result.worklet.versions.at(-1);
-    if (latestVersion === undefined) {
-        throw new Error("Worklet revert result has no version history.");
-    }
-    return {
-        ...result,
-        worklet: identity,
-        historyOperationId: latestVersion.operationId,
-    } as WorkletCatalogMutationReceiptResult;
-}
-
-function fingerprint(value: unknown): string {
-    const encoded = JSON.stringify(canonicalize(value));
-    if (
-        encoded === undefined ||
-        new TextEncoder().encode(encoded).byteLength > 16_000
-    ) {
-        throw new Error("Worklet operation input exceeds the durable receipt bound.");
-    }
-    return createHash("sha256").update(encoded).digest("hex");
-}
-
-function canonicalize(value: unknown): unknown {
-    if (Array.isArray(value)) return value.map((item) => canonicalize(item));
-    if (value !== null && typeof value === "object") {
-        return Object.fromEntries(
-            Object.entries(value as Record<string, unknown>)
-                .filter(([, item]) => item !== undefined)
-                .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-                .map(([key, item]) => [key, canonicalize(item)]),
-        );
-    }
-    return value;
 }
 
 function assertBoundedJson(
@@ -2626,36 +2045,6 @@ function sameValue(left: unknown, right: unknown): boolean {
                 sameValue(leftRecord[key], rightRecord[key]),
         )
     );
-}
-
-function sameProofResult(
-    result: WorkletCatalogMutationReceiptResult,
-    proofResult: WorkletCatalogMutationProofResult,
-): boolean {
-    if ("worklet" in result || "worklet" in proofResult) {
-        if (!("worklet" in result) || !("worklet" in proofResult)) return false;
-        const receiptRest = {
-            operation: result.operation,
-            name: result.name,
-            operationId: result.operationId,
-            targetVersion: result.targetVersion,
-            currentVersion: result.currentVersion,
-            changed: result.changed,
-        };
-        const proofRest = {
-            operation: proofResult.operation,
-            name: proofResult.name,
-            operationId: proofResult.operationId,
-            targetVersion: proofResult.targetVersion,
-            currentVersion: proofResult.currentVersion,
-            changed: proofResult.changed,
-        };
-        return (
-            sameValue(receiptRest, proofRest) &&
-            sameValue(result.worklet, proofResult.worklet)
-        );
-    }
-    return sameValue(result, proofResult);
 }
 
 function safeJsonStringify(value: unknown): string {

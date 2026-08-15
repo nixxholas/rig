@@ -1,10 +1,7 @@
 import { sql } from "drizzle-orm";
 import {
-    agentDatabase,
     agentDatabaseRows,
     agentDatabaseRun,
-    type AgentDatabase,
-    type AgentStorageTransaction,
 } from "@slopus/happy-agent-base";
 import type { Context } from "@steve.kite/stdlib";
 import { Value } from "@sinclair/typebox/value";
@@ -48,25 +45,7 @@ type CountRow = { readonly count: number | string };
 type LogRow = { readonly position: number | string; readonly text: string };
 export type WorkflowDatabase = WorkflowStore;
 
-export function createWorkflowDatabase(
-    runtime: WorkflowRuntime,
-    inTransaction: AgentStorageTransaction,
-): WorkflowDatabase {
-    const databaseFor = (ctx: Context): AgentDatabase => {
-        const database = agentDatabase(ctx);
-        if (database === undefined) {
-            throw new Error("Workflows module requires an Agent Base database context.");
-        }
-        return database;
-    };
-    const transaction = async <Result>(
-        ctx: Context,
-        _agentId: string,
-        work: (ctx: Context) => Promise<Result>,
-    ): Promise<Result> => {
-        return await inTransaction(ctx, async (txCtx) => await work(txCtx));
-    };
-
+export function createWorkflowDatabase(runtime: WorkflowRuntime): WorkflowDatabase {
     const decode = <ValueType>(
         row: JsonRow,
         label: string,
@@ -89,7 +68,7 @@ export function createWorkflowDatabase(
     ): Promise<WorkflowRun | undefined> => {
         const row = (
             await agentDatabaseRows<JsonRow>(
-                databaseFor(ctx),
+                ctx.db,
                 sql`SELECT run_json AS value_json
                     FROM ${sql.raw(WORKFLOW_RUNS_TABLE)}
                     WHERE agent_id = ${agentId} AND id = ${id}
@@ -101,10 +80,9 @@ export function createWorkflowDatabase(
 
     const writeRun = async (ctx: Context, run: WorkflowRun, mode: "insert" | "update") => {
         assertWorkflowRun(run);
-        const database = databaseFor(ctx);
         if (mode === "insert") {
             await agentDatabaseRun(
-                database,
+                ctx.db,
                 sql`INSERT INTO ${sql.raw(WORKFLOW_RUNS_TABLE)}
                     (agent_id, id, workflow, status, created_at, updated_at, run_json)
                     VALUES (
@@ -115,7 +93,7 @@ export function createWorkflowDatabase(
             return;
         }
         await agentDatabaseRun(
-            database,
+            ctx.db,
             sql`UPDATE ${sql.raw(WORKFLOW_RUNS_TABLE)}
                 SET workflow = ${run.workflow}, status = ${run.status},
                     created_at = ${run.createdAt}, updated_at = ${run.updatedAt},
@@ -134,7 +112,6 @@ export function createWorkflowDatabase(
         if (run.agentId !== agentId || run.id !== request.operationId) {
             throw new Error("Workflow runtime returned an unrelated launch.");
         }
-        await writeRun(ctx, run, "insert");
         return structuredClone(run);
     };
 
@@ -157,12 +134,10 @@ export function createWorkflowDatabase(
         ) {
             throw new Error("Workflow runtime returned an unrelated mutation.");
         }
-        await writeRun(ctx, result.run, "update");
         return structuredClone(result);
     };
 
     return {
-        transaction,
         launch: async (ctx, agentId, request) => {
             if (
                 !Value.Check(workflowAgentIdSchema, agentId) ||
@@ -193,20 +168,22 @@ export function createWorkflowDatabase(
                 query.includeTerminal === false
                     ? sql`AND status NOT IN ('completed', 'failed', 'cancelled', 'unavailable')`
                     : sql``;
-            const database = databaseFor(ctx);
             const countRows = await agentDatabaseRows<CountRow>(
-                database,
+                ctx.db,
                 sql`SELECT COUNT(*) AS count
                     FROM ${sql.raw(WORKFLOW_RUNS_TABLE)}
                     WHERE agent_id = ${agentId} ${terminalPredicate}`,
             );
             const total = Number(countRows[0]?.count ?? 0);
-            const requested = query.from === "end"
-                ? Math.max(0, total - limit)
-                : ("cursor" in query ? query.cursor ?? 0 : 0);
+            const requested =
+                query.from === "end"
+                    ? Math.max(0, total - limit)
+                    : "cursor" in query
+                      ? (query.cursor ?? 0)
+                      : 0;
             const offset = Math.max(0, Math.min(requested, total));
             const rows = await agentDatabaseRows<JsonRow>(
-                database,
+                ctx.db,
                 sql`SELECT run_json AS value_json
                     FROM ${sql.raw(WORKFLOW_RUNS_TABLE)}
                     WHERE agent_id = ${agentId} ${terminalPredicate}
@@ -220,9 +197,7 @@ export function createWorkflowDatabase(
                 runs,
                 totalRuns: total,
                 ...(offset > 0 ? { previousCursor: Math.max(0, offset - limit) } : {}),
-                ...(offset + runs.length < total
-                    ? { nextCursor: offset + runs.length }
-                    : {}),
+                ...(offset + runs.length < total ? { nextCursor: offset + runs.length } : {}),
             };
             assertWorkflowPage(page);
             return page;
@@ -261,7 +236,11 @@ export function createWorkflowDatabase(
         },
         save: async (ctx, run) => {
             assertWorkflowRun(run);
-            await writeRun(ctx, run, "update");
+            await writeRun(
+                ctx,
+                run,
+                (await readRun(ctx, run.agentId, run.id)) === undefined ? "insert" : "update",
+            );
         },
         logs: async (ctx, agentId, query) => {
             if (
@@ -272,21 +251,23 @@ export function createWorkflowDatabase(
             }
             const run = await readRun(ctx, agentId, query.id);
             if (run === undefined) throw new Error("Workflow run was not found.");
-            const database = databaseFor(ctx);
             const countRows = await agentDatabaseRows<CountRow>(
-                database,
+                ctx.db,
                 sql`SELECT COUNT(*) AS count
                     FROM ${sql.raw(WORKFLOW_LOGS_TABLE)}
                     WHERE agent_id = ${agentId} AND run_id = ${query.id}`,
             );
             const totalLines = Number(countRows[0]?.count ?? 0);
             const limit = Math.min(query.limit ?? 200, 500);
-            const requested = query.from === "end"
-                ? Math.max(0, totalLines - limit)
-                : ("cursor" in query ? query.cursor ?? 0 : 0);
+            const requested =
+                query.from === "end"
+                    ? Math.max(0, totalLines - limit)
+                    : "cursor" in query
+                      ? (query.cursor ?? 0)
+                      : 0;
             const cursor = Math.max(0, Math.min(requested, totalLines));
             const rawLines = await agentDatabaseRows<LogRow>(
-                database,
+                ctx.db,
                 sql`SELECT position, text
                     FROM ${sql.raw(WORKFLOW_LOGS_TABLE)}
                     WHERE agent_id = ${agentId} AND run_id = ${query.id}

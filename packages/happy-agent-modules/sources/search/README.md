@@ -41,12 +41,13 @@ collection; `agentId` is threaded through to the backend on each call.
   the title and content as far as they fit `maxOutputCharacters`, with a `[Content truncated.]`
   marker when the model-visible text or the underlying content was cut.
 
-Both tools are `durable: true` and set `shouldReviewInAutoMode: () => false`, so they run without
-an Auto-mode review — the module treats outbound search and fetch as read-only network calls, not
-actions on the sandboxed machine. Neither tool touches the filesystem or a compute; everything they
-do goes through the injected backend. The URL is always the identity that is kept intact: formatting
-never truncates or drops a URL to make room for a title, snippet, or continuation cursor, so every
-row the model is shown remains one it can act on or follow.
+Both tools are `durable: false` because retrying an interrupted backend call could repeat billed
+or externally observable work. They set `shouldReviewInAutoMode: () => false`, so they run without
+an Auto-mode review — the module treats outbound search and fetch as network reads, not actions on
+the sandboxed machine. Neither tool touches the filesystem or a compute; everything they do goes
+through the injected backend. The URL is always the identity that is kept intact: formatting never
+truncates or drops a URL to make room for a title, snippet, or continuation cursor, so every row
+the model is shown remains one it can act on or follow.
 
 ## External functions
 

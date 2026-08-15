@@ -33,16 +33,13 @@ export function detachSecretTool(secrets: SecretsModule, actingAgentId: string) 
         parameters: detachSecretInputSchema,
         returnType: detachSecretResultSchema,
         durable: true,
+        transactional: true,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, input: DetachSecretInput, call): Promise<DetachSecretResult> =>
-            await call.kv.transaction(ctx, async (_kv, txCtx) => {
-                const result = {
-                    detached: await secrets.detach(txCtx, actingAgentId, input),
-                    scopeRef: input.scopeRef,
-                    secretId: input.secretId,
-                };
-                return await call.commit(txCtx, result);
-            }),
+        execute: async (ctx, input: DetachSecretInput): Promise<DetachSecretResult> => ({
+            detached: await secrets.detach(ctx, actingAgentId, input),
+            scopeRef: input.scopeRef,
+            secretId: input.secretId,
+        }),
         toLLM: ({ detached, scopeRef, secretId }) => [
             {
                 type: "text" as const,

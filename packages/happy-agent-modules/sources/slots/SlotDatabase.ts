@@ -1,8 +1,6 @@
 import {
-    agentDatabase,
     agentDatabaseRows,
     agentDatabaseRun,
-    type AgentDatabase,
     type AgentModuleMigration,
 } from "@slopus/happy-agent-base";
 import { Type } from "@sinclair/typebox";
@@ -113,14 +111,6 @@ export interface SlotDatabase {
 }
 
 export function createSlotDatabase(): SlotDatabase {
-    const databaseFor = (ctx: Context): AgentDatabase => {
-        const database = agentDatabase(ctx);
-        if (database === undefined) {
-            throw new Error("Slots module requires an Agent Base database context.");
-        }
-        return database;
-    };
-
     const readEntry = (row: SlotRow): SlotEntry => {
         const entry = {
             id: row.id,
@@ -156,7 +146,7 @@ export function createSlotDatabase(): SlotDatabase {
         const limit = query.limit ?? 100;
         const cursor = query.cursor ?? 0;
         const rows = await agentDatabaseRows<SlotRow>(
-            databaseFor(ctx),
+            ctx.db,
             sql`SELECT id, author_agent_id, slot, scope, scope_ref, content_json,
                        description, purpose, ordering, created_at, updated_at
                 FROM ${sql.raw(SLOTS_TABLE)}
@@ -181,7 +171,7 @@ export function createSlotDatabase(): SlotDatabase {
         id: string,
     ): Promise<SlotEntry | undefined> => {
         const rows = await agentDatabaseRows<SlotRow>(
-            databaseFor(ctx),
+            ctx.db,
             sql`SELECT id, author_agent_id, slot, scope, scope_ref, content_json,
                        description, purpose, ordering, created_at, updated_at
                 FROM ${sql.raw(SLOTS_TABLE)} WHERE id = ${id} LIMIT 1`,
@@ -198,7 +188,7 @@ export function createSlotDatabase(): SlotDatabase {
             throw new Error("Slots database received invalid create input.");
         }
         const rows = await agentDatabaseRows<{ ordering: number | string }>(
-            databaseFor(ctx),
+            ctx.db,
             sql`SELECT COALESCE(MAX(ordering), -1) + 1 AS ordering
                 FROM ${sql.raw(SLOTS_TABLE)}`,
         );
@@ -213,7 +203,7 @@ export function createSlotDatabase(): SlotDatabase {
             throw new Error("Slots database entry is invalid.");
         }
         await agentDatabaseRun(
-            databaseFor(ctx),
+            ctx.db,
             sql`INSERT INTO ${sql.raw(SLOTS_TABLE)}
                 (id, author_agent_id, slot, scope, scope_ref, content_json,
                  description, purpose, ordering, created_at, updated_at)
@@ -243,7 +233,7 @@ export function createSlotDatabase(): SlotDatabase {
             throw new Error("Slots database entry is invalid.");
         }
         await agentDatabaseRun(
-            databaseFor(ctx),
+            ctx.db,
             sql`UPDATE ${sql.raw(SLOTS_TABLE)}
                 SET slot = ${next.slot}, content_json = ${JSON.stringify(next.content)},
                     description = ${next.description}, purpose = ${next.purpose},
@@ -264,7 +254,7 @@ export function createSlotDatabase(): SlotDatabase {
             if (entry === undefined) throw new Error(`Slot entry "${id}" does not exist.`);
             const updatedAt = Date.now();
             await agentDatabaseRun(
-                databaseFor(ctx),
+                ctx.db,
                 sql`UPDATE ${sql.raw(SLOTS_TABLE)}
                     SET ordering = ${ordering}, updated_at = ${updatedAt}
                     WHERE id = ${id}`,
@@ -282,11 +272,11 @@ export function createSlotDatabase(): SlotDatabase {
         const entry = await get(ctx, agentId, id);
         if (entry === undefined) return undefined;
         await agentDatabaseRun(
-            databaseFor(ctx),
+            ctx.db,
             sql`DELETE FROM ${sql.raw(SLOTS_TABLE)} WHERE id = ${id}`,
         );
         await agentDatabaseRun(
-            databaseFor(ctx),
+            ctx.db,
             sql`UPDATE ${sql.raw(SLOTS_TABLE)}
                 SET ordering = ordering - 1
                 WHERE ordering > ${entry.ordering}`,

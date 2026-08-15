@@ -41,14 +41,10 @@ import {
     type WorkletLogPage,
     type WorkletStatus,
 } from "./Worklet.js";
-import { workletEventSchema, type WorkletEvent } from "./WorkletEvent.js";
 
 const opaqueContextSchema = Type.Unsafe<Context>(
     Type.Object({}, { additionalProperties: true }),
 );
-const unknownPromiseSchema = Type.Promise(Type.Unknown());
-const transactionWorkSchema = Type.Function([opaqueContextSchema], unknownPromiseSchema);
-
 export const workletStageInputSchema = Type.Object(
     {
         name: workletNameSchema,
@@ -176,21 +172,9 @@ export const workletCatalogMutationResultSchema = Type.Union([
     workletCatalogRemoveResultSchema,
 ]);
 
-export const workletTransactionChangeSchema = Type.Object(
-    {
-        result: workletCatalogMutationResultSchema,
-        event: Type.Optional(workletEventSchema),
-    },
-    { additionalProperties: false },
-);
-
 /** Module-owned worklet database surface for durable metadata. */
 export const workletCatalogSchema = Type.Object(
     {
-        transaction: Type.Function(
-            [opaqueContextSchema, transactionWorkSchema],
-            unknownPromiseSchema,
-        ),
         list: Type.Function(
             [opaqueContextSchema, workletListQuerySchema],
             Type.Promise(workletListPageSchema),
@@ -300,9 +284,6 @@ export type WorkletCatalogRevertResult = Extract<
 export type WorkletCatalogRemoveResult = Extract<
     WorkletCatalogMutationResult,
     { operation: "remove" }
->;
-export type WorkletTransactionChange = Static<
-    typeof workletTransactionChangeSchema
 >;
 export type WorkletRuntimeLogQuery = Static<
     typeof workletRuntimeLogQuerySchema
@@ -557,15 +538,6 @@ export function assertWorkletStage(value: unknown): asserts value is WorkletStag
         throw new Error("Worklet catalog returned an invalid staging result.");
     }
     assertWorkletOperationList(value.operations);
-}
-
-export function assertWorkletTransactionChange(
-    value: unknown,
-): asserts value is WorkletTransactionChange {
-    if (!Value.Check(workletTransactionChangeSchema, value)) {
-        throw new Error("Worklet catalog transaction returned an invalid change.");
-    }
-    assertWorkletMutation(value.result);
 }
 
 export function assertWorkletRuntimeLogQuery(

@@ -32,17 +32,10 @@ export function attachSecretTool(secrets: SecretsModule, actingAgentId: string) 
             parameters: attachSecretInputSchema,
             returnType: attachSecretResultSchema,
             durable: true,
+            transactional: true,
             shouldReviewInAutoMode: () => false,
-            execute: async (ctx, input: AttachSecretInput, call): Promise<AttachSecretResult> => {
-                return await call.kv.transaction(ctx, async (_kv, txCtx) => {
-                    const result = await secrets.attachWithReference(
-                        txCtx,
-                        actingAgentId,
-                        input,
-                    );
-                    return await call.commit(txCtx, result);
-                });
-            },
+            execute: async (ctx, input: AttachSecretInput): Promise<AttachSecretResult> =>
+                await secrets.attachWithReference(ctx, actingAgentId, input),
             toLLM: ({ attachment, secret }) => [
                 {
                     type: "text" as const,

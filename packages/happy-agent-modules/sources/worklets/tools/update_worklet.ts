@@ -29,11 +29,12 @@ export function updateWorkletTool(module: WorkletsModule, agentId: string) {
         parameters: updateWorkletInputSchema,
         returnType: Type.Object({ worklet: workletSchema }),
         durable: true,
+        transactional: true,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, input: UpdateWorkletInput) => {
+        execute: async (ctx, input: UpdateWorkletInput, call) => {
             const { name, ...rest } = input;
             const normalized: WorkletToolUpdateInput = rest;
-            return { worklet: await module.update(ctx, agentId, name, normalized) };
+            return await module.updateForTool(ctx, agentId, name, normalized, call);
         },
         toLLM: ({ worklet }) => [
             {

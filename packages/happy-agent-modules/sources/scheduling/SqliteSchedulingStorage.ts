@@ -1,14 +1,8 @@
-import { AsyncLocalStorage } from "node:async_hooks";
-
 import {
-    agentDatabase,
     agentDatabaseRows,
     agentDatabaseRun,
     type AgentDatabase,
-    type AgentDatabaseFacade,
     type AgentModuleMigration,
-    type AgentStorageTransaction,
-    withAgentDatabase,
 } from "@slopus/happy-agent-base";
 import { sql } from "drizzle-orm";
 import { Value } from "@sinclair/typebox/value";
@@ -93,27 +87,19 @@ export const schedulingMigrations: readonly AgentModuleMigration[] = [
             await agentDatabaseRun(database, sql`DROP TABLE IF EXISTS happy_scheduling_proofs`);
         },
     ],
+    [
+        "003-remove-scheduling-operation-state",
+        async (_ctx, database) => {
+            await agentDatabaseRun(database, sql`DROP TABLE IF EXISTS happy_scheduling_receipts`);
+            await agentDatabaseRun(database, sql`DROP TABLE IF EXISTS happy_scheduling_proofs`);
+        },
+    ],
 ];
 
-export interface SqliteSchedulingStorageOptions<Database extends AgentDatabase = AgentDatabase> {
-    /**
-     * Optional for Agent Base hooks, which already carry the active database in their context.
-     * Public calls made without an active database must provide this host transaction.
-     */
-    readonly transaction?: AgentStorageTransaction<Database>;
-}
-
-export function createSqliteSchedulingStorage<Database extends AgentDatabase = AgentDatabase>(
-    options: SqliteSchedulingStorageOptions<Database>,
-): SchedulingStore {
-    const activeTransactions = new AsyncLocalStorage<true>();
-    const dbFor = (ctx: Context): AgentDatabaseFacade<Database> =>
-        (agentDatabase(ctx) ??
-            (() => {
-                throw new Error(
-                    "Scheduling database access requires an AgentStorage transaction context.",
-                );
-            })()) as AgentDatabaseFacade<Database>;
+export function createSqliteSchedulingStorage<
+    Database extends AgentDatabase = AgentDatabase,
+>(): SchedulingStore {
+    const dbFor = (ctx: Context): Database => ctx.db as Database;
     const parse = (value: unknown, label: string): unknown => {
         if (typeof value !== "string") throw new Error(`Scheduling ${label} is not JSON text.`);
         try {
@@ -229,43 +215,13 @@ export function createSqliteSchedulingStorage<Database extends AgentDatabase = A
             ...(rows.length > limit ? { nextCursor: String(offset + schedules.length) } : {}),
         };
     };
-    const inTransaction = async <Result>(
-        ctx: Context,
-        work: (txCtx: Context) => Promise<Result>,
-    ): Promise<Result> => {
-        if (activeTransactions.getStore() === true) return await work(ctx);
-        const transaction = options.transaction;
-        if (transaction === undefined) {
-            throw new Error(
-                "Scheduling database access requires an active Agent Base database or host transaction.",
-            );
-        }
-        return await transaction(ctx, async (txCtx, database) => {
-            const activeCtx = withAgentDatabase(txCtx, database);
-            return await activeTransactions.run(true, async () => await work(activeCtx));
-        });
-    };
-    const readWaitInTransaction = (ctx: Context, agentId: string, id: string) =>
-        inTransaction(ctx, (txCtx) => readWait(txCtx, agentId, id));
-    const writeWaitInTransaction = (ctx: Context, wait: SchedulingWaitRecord) =>
-        inTransaction(ctx, (txCtx) => writeWait(txCtx, wait));
-    const readScheduleInTransaction = (ctx: Context, agentId: string, id: string) =>
-        inTransaction(ctx, (txCtx) => readSchedule(txCtx, agentId, id));
-    const writeScheduleInTransaction = (ctx: Context, schedule: SchedulingScheduledMessage) =>
-        inTransaction(ctx, (txCtx) => writeSchedule(txCtx, schedule));
-    const listSchedulesInTransaction = (
-        ctx: Context,
-        agentId: string,
-        query: SchedulingSchedulePageQuery,
-    ) => inTransaction(ctx, (txCtx) => listSchedules(txCtx, agentId, query));
     return {
-        transaction: inTransaction,
-        readWait: readWaitInTransaction,
-        writeWait: writeWaitInTransaction,
-        readSchedule: readScheduleInTransaction,
-        writeSchedule: writeScheduleInTransaction,
-        listSchedules: listSchedulesInTransaction,
-    } as SchedulingStore;
+        readWait,
+        writeWait,
+        readSchedule,
+        writeSchedule,
+        listSchedules,
+    };
 }
 
 interface WaitRow {

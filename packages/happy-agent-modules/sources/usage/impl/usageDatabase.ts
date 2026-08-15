@@ -2,10 +2,9 @@ import { sql } from "drizzle-orm";
 import {
     agentDatabaseRows,
     agentDatabaseRun,
-    type AgentDatabase,
-    type AgentDatabaseFacade,
 } from "@slopus/happy-agent-base";
 import { Value } from "@sinclair/typebox/value";
+import type { Context } from "@steve.kite/stdlib";
 
 import {
     MAX_USAGE_RECORDS,
@@ -24,20 +23,19 @@ import {
 const RECORDS_TABLE = "happy_agent_usage_records";
 
 export class UsageDatabase {
-    readonly #database: AgentDatabase;
-
-    constructor(database: AgentDatabaseFacade<AgentDatabase>) {
-        this.#database = database;
-    }
-
-    async read(agentId: string, query: UsagePageQuery, maxPageSize: number): Promise<UsagePage> {
+    async read(
+        ctx: Context,
+        agentId: string,
+        query: UsagePageQuery,
+        maxPageSize: number,
+    ): Promise<UsagePage> {
         if (!Value.Check(usagePageQuerySchema, query)) {
             throw new Error("Usage page query is invalid.");
         }
         const cursor = query.cursor ?? 0;
         const limit = query.limit ?? maxPageSize;
         const rows = await agentDatabaseRows<{ record_json: string; total: number | string }>(
-            this.#database,
+            ctx.db,
             sql`SELECT record_json,
                        (SELECT COUNT(*) FROM ${sql.raw(RECORDS_TABLE)}
                         WHERE agent_id = ${agentId}) AS total
@@ -63,12 +61,16 @@ export class UsageDatabase {
         return structuredClone(page);
     }
 
-    async aggregate(query: UsageAggregateQuery, maxGroups: number): Promise<UsageSummary> {
+    async aggregate(
+        ctx: Context,
+        query: UsageAggregateQuery,
+        maxGroups: number,
+    ): Promise<UsageSummary> {
         if (!Value.Check(usageAggregateQuerySchema, query)) {
             throw new Error("Usage aggregate query is invalid.");
         }
         const rows = await agentDatabaseRows<{ record_json: string }>(
-            this.#database,
+            ctx.db,
             query.agentId === undefined
                 ? sql`SELECT record_json
                       FROM ${sql.raw(RECORDS_TABLE)}
@@ -163,18 +165,18 @@ export class UsageDatabase {
         return structuredClone(summary);
     }
 
-    async record(record: UsageRecord): Promise<void> {
+    async record(ctx: Context, record: UsageRecord): Promise<void> {
         if (!Value.Check(usageRecordSchema, record)) {
             throw new Error("Usage record is invalid.");
         }
         await agentDatabaseRun(
-            this.#database,
+            ctx.db,
             sql`INSERT INTO ${sql.raw(RECORDS_TABLE)}
                     (record_id, agent_id, finished_at, kind, record_json)
                 VALUES (${record.id}, ${record.agentId}, ${record.finishedAt}, ${record.kind}, ${JSON.stringify(record)})`,
         );
         await agentDatabaseRun(
-            this.#database,
+            ctx.db,
             sql`DELETE FROM ${sql.raw(RECORDS_TABLE)}
                 WHERE record_id IN (
                     SELECT record_id FROM ${sql.raw(RECORDS_TABLE)}
@@ -184,9 +186,9 @@ export class UsageDatabase {
         );
     }
 
-    async reset(agentId: string | null): Promise<number> {
+    async reset(ctx: Context, agentId: string | null): Promise<number> {
         const rows = await agentDatabaseRows<{ count: number | string }>(
-            this.#database,
+            ctx.db,
             agentId === null
                 ? sql`SELECT COUNT(*) AS count FROM ${sql.raw(RECORDS_TABLE)}`
                 : sql`SELECT COUNT(*) AS count FROM ${sql.raw(RECORDS_TABLE)}
@@ -194,7 +196,7 @@ export class UsageDatabase {
         );
         const count = Math.min(MAX_USAGE_RECORDS, Number(rows[0]?.count ?? 0));
         await agentDatabaseRun(
-            this.#database,
+            ctx.db,
             agentId === null
                 ? sql`DELETE FROM ${sql.raw(RECORDS_TABLE)}`
                 : sql`DELETE FROM ${sql.raw(RECORDS_TABLE)} WHERE agent_id = ${agentId}`,

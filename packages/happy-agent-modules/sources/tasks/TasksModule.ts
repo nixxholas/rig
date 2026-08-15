@@ -2,7 +2,6 @@ import {
     agentDatabaseRun,
     type AgentDatabase,
     type AgentDatabaseFacade,
-    type AgentStorageTransaction,
     type AgentModule,
     type AgentModuleScope,
     type AnyAgentTool,
@@ -77,13 +76,6 @@ const opaqueContextSchema = Type.Any();
 const opaqueResultSchema = Type.Any();
 const tasksModuleOptionsSchema = Type.Object(
     {
-        transaction: Type.Function(
-            [
-                opaqueContextSchema,
-                Type.Function([opaqueContextSchema, Type.Unknown()], Type.Promise(Type.Unknown())),
-            ],
-            Type.Promise(Type.Unknown()),
-        ),
         maxTasks: Type.Optional(maxTasksSchema),
         defaultPriority: Type.Optional(taskPrioritySchema),
         listener: Type.Optional(taskModuleListenerSchema),
@@ -120,16 +112,12 @@ interface TaskUpdateCandidate {
     readonly changed: boolean;
 }
 
-type TaskCommit = (ctx: Context, task: Task) => Task | Promise<Task>;
-
 /**
  * A bounded persistent task list.
  *
  * One instance serves all agents in a collection. Every agent's list is kept under that agent's
- * module-owned table, and each mutation uses the host transaction as the read-decide-write
- * boundary.
- * The module owns no database, filesystem, or agent lifecycle; a host only supplies AgentStorage
- * and may project TaskEvents into its own API.
+ * module-owned table, and each mutation uses the context database transaction as the
+ * read-decide-write boundary. The module owns no database, filesystem, or agent lifecycle.
  */
 export class TasksModule implements AgentModule {
     readonly name = "tasks";
@@ -148,7 +136,6 @@ export class TasksModule implements AgentModule {
         ],
     ] as const;
 
-    readonly #transaction: AgentStorageTransaction;
     readonly #maxTasks: number;
     readonly #defaultPriority: TaskPriority;
     readonly #listener: TaskModuleListener | undefined;
@@ -163,7 +150,6 @@ export class TasksModule implements AgentModule {
 
     constructor(options: TasksModuleOptions) {
         assertTasksModuleOptions(options);
-        this.#transaction = options.transaction as AgentStorageTransaction;
         this.#maxTasks = options.maxTasks ?? DEFAULT_MAX_TASKS;
         if (!Value.Check(maxTasksSchema, this.#maxTasks)) {
             throw new Error(`Tasks maxTasks must be an integer from 1 to ${MAX_TASKS}.`);
@@ -277,7 +263,6 @@ export class TasksModule implements AgentModule {
         ctx: Context,
         agentId: string,
         input: TaskCreateInput,
-        commit?: TaskCommit,
     ): Promise<Task> {
         this.#assertAgentId(agentId);
         this.#assertInput(taskCreateInputSchema, input, "create");
@@ -312,7 +297,7 @@ export class TasksModule implements AgentModule {
                 result: task,
                 event: this.#event({ type: "task_created", agentId, task }, eventId, at),
             };
-        }, commit);
+        });
         return change.result;
     }
 
@@ -322,7 +307,6 @@ export class TasksModule implements AgentModule {
         agentId: string,
         taskId: string,
         changes: TaskUpdateInput,
-        commit?: TaskCommit,
     ): Promise<Task> {
         this.#assertAgentId(agentId);
         this.#assertTaskId(taskId);
@@ -351,7 +335,7 @@ export class TasksModule implements AgentModule {
                 result: candidate.task,
                 event,
             };
-        }, commit);
+        });
         return change.result;
     }
 
@@ -360,7 +344,6 @@ export class TasksModule implements AgentModule {
         ctx: Context,
         agentId: string,
         taskId: string,
-        commit?: TaskCommit,
     ): Promise<Task> {
         this.#assertAgentId(agentId);
         this.#assertTaskId(taskId);
@@ -378,7 +361,7 @@ export class TasksModule implements AgentModule {
                 result: task,
                 event: this.#event({ type: "task_completed", agentId, task }, eventId, at),
             };
-        }, commit);
+        });
         return change.result;
     }
 
@@ -539,16 +522,15 @@ export class TasksModule implements AgentModule {
         ) =>
             | Promise<TaskChange<Result> & { readonly tasks?: readonly Task[] }>
             | (TaskChange<Result> & { readonly tasks?: readonly Task[] }),
-        commit?: (txCtx: Context, result: Result) => Result | Promise<Result>,
     ): Promise<TaskChange<Result>> {
         const eventId = await this.#eventIdFactory(ctx, agentId);
         this.#assertEventId(eventId);
         const at = this.#timestamp();
-        const changed = await this.#transaction(ctx, async (txCtx, database) => {
-            const store = taskKV(database as AgentDatabaseFacade<AgentDatabase>, agentId);
-            // The host transaction is the serialization boundary for the complete
-            // read-decide-write-and-commit operation. The module deliberately keeps no
-            // authoritative per-agent state in memory.
+        const changed = await ctx.inTx(async (txCtx) => {
+            const store = taskKV(agentId);
+            // The context transaction is the serialization boundary for the complete
+            // read-decide-write operation. The module deliberately keeps no authoritative
+            // per-agent state in memory.
             const tasks = await this.#readFromKV(txCtx, store);
             const decided = await decide(txCtx, tasks, eventId, at);
             const event = decided.event;
@@ -574,26 +556,13 @@ export class TasksModule implements AgentModule {
                 await this.#listener?.onEventTransactional?.(txCtx, event);
                 afterCommit(txCtx, (postCommitCtx) => this.#notifyPostCommit(postCommitCtx, event));
             }
-            return {
-                ...decided,
-                result:
-                    commit === undefined
-                        ? decided.result
-                        : await commit(txCtx, decided.result),
-            };
+            return decided;
         });
         return changed;
     }
 
     async #read(ctx: Context, agentId: string): Promise<readonly Task[]> {
-        return await this.#transaction(
-            ctx,
-            async (txCtx, database) =>
-                await this.#readFromKV(
-                    txCtx,
-                    taskKV(database as AgentDatabaseFacade<AgentDatabase>, agentId),
-                ),
-        );
+        return await this.#readFromKV(ctx, taskKV(agentId));
     }
 
     async #readFromKV(ctx: Context, kv: ReturnType<typeof taskKV>): Promise<readonly Task[]> {
@@ -955,7 +924,7 @@ function hasCycle(tasks: readonly Task[]): boolean {
 export function assertTasksModuleOptions(value: unknown): asserts value is TasksModuleOptions {
     if (!Value.Check(tasksModuleOptionsSchema, value)) {
         throw new Error(
-            "Tasks module options are invalid; check the transaction and listener contracts.",
+            "Tasks module options are invalid; check the listener and configuration contracts.",
         );
     }
 }

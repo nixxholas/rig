@@ -7,7 +7,7 @@ import {
 } from "../WorkspaceTransfer.js";
 import type { WorkspacesModule } from "../WorkspacesModule.js";
 
-/** Ask the host to schedule a durable session transfer into another workspace. */
+/** Ask the host to schedule a session transfer into another workspace. */
 export function transferWorkspaceTool(workspaces: WorkspacesModule, agentId: string) {
     return defineAgentTool({
         name: "transfer_workspace",
@@ -15,15 +15,10 @@ export function transferWorkspaceTool(workspaces: WorkspacesModule, agentId: str
             "Transfer this agent or session into an existing workspace. The host owns snapshot, checkout, and filesystem behavior; use the returned state to follow the transfer.",
         parameters: workspaceSessionTransferToolInputSchema,
         returnType: workspaceTransferResultSchema,
-        durable: true,
+        durable: false,
         shouldReviewInAutoMode: () => false,
         execute: async (ctx, input: WorkspaceSessionTransferInput, call) =>
-            await workspaces.transfer(
-                ctx,
-                agentId,
-                { ...input, operationId: call.id },
-                async (txCtx, result) => await call.commit(txCtx, result),
-            ),
+            await workspaces.transfer(ctx, agentId, { ...input, operationId: call.id }),
         toLLM: (result) => [
             {
                 type: "text",

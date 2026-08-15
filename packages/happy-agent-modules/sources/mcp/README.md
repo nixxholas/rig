@@ -3,7 +3,7 @@
 MCP servers exposed to an agent through a host-owned boundary. `McpModule` does not create an SDK
 client, open a socket, spawn a process, resolve a path, load credentials, or own a live client.
 The host supplies those narrow protocol operations through `McpHost`; the module owns a bounded
-per-agent server index migration when an Agent Storage transaction is supplied.
+per-agent server index in the database carried by the current context.
 
 ```ts
 import { Agent } from "@slopus/happy-agent-base";
@@ -11,7 +11,6 @@ import { McpModule } from "@slopus/happy-agent-modules";
 
 const mcp = new McpModule({
   host: rigMcpHost,
-  transaction: agentStorage.transaction,
   userInput: rigUserInput,
 });
 const agent = await Agent.create(ctx, { ...options, modules: [mcp] });

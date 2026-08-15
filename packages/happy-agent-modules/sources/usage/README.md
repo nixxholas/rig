@@ -9,12 +9,12 @@ Lifecycle records join Agent Base's existing completion transactions instead of 
 import { Agent } from "@slopus/happy-agent-base";
 import { UsageModule } from "@slopus/happy-agent-modules";
 
-const usage = new UsageModule({ transaction });
+const usage = new UsageModule();
 const agent = await Agent.create(ctx, { ...options, modules: [usage] });
 ```
 
-One instance serves every agent in a collection; the module owns its tables and the host injects
-only the common `AgentStorageTransaction`.
+One instance serves every agent in a collection. The module owns its tables and uses the database
+carried by the current context.
 
 ## Tools
 

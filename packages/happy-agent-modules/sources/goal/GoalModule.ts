@@ -5,9 +5,6 @@ import {
     agentId as agentRunningInside,
     agentDatabaseRun,
     type AgentBaseInference,
-    type AgentDatabase,
-    type AgentDatabaseFacade,
-    type AgentStorageTransaction,
     type AgentModule,
     type AgentModuleAction,
     type AgentModuleScope,
@@ -49,7 +46,6 @@ import {
     goalStatusSchema,
     goalTimestampSchema,
     MAX_GOAL_OUTPUT_CHARACTERS,
-    sessionGoalSchema,
     type GoalStatus,
     type SessionGoal,
 } from "./SessionGoal.js";
@@ -78,13 +74,6 @@ const goalOutputCharactersSchema = Type.Integer({
     minimum: 256,
     maximum: MAX_GOAL_OUTPUT_CHARACTERS,
 });
-const goalTransactionSchema = Type.Function(
-    [
-        goalContextSchema,
-        Type.Function([goalContextSchema, Type.Unknown()], Type.Promise(Type.Unknown())),
-    ],
-    Type.Promise(Type.Unknown()),
-);
 const goalIdFactorySchema = Type.Function(
     [goalContextSchema, goalAgentIdSchema],
     Type.Union([goalOperationIdSchema, Type.Promise(goalOperationIdSchema)]),
@@ -105,7 +94,6 @@ const goalObserverErrorSchema = Type.String({ minLength: 1, maxLength: 500 });
 
 export const goalModuleOptionsSchema = Type.Object(
     {
-        transaction: goalTransactionSchema,
         listener: Type.Optional(goalModuleListenerSchema),
         idFactory: Type.Optional(goalIdFactorySchema),
         eventIdFactory: Type.Optional(goalEventIdFactorySchema),
@@ -123,33 +111,25 @@ export const goalModuleOptionsSchema = Type.Object(
 
 export type GoalModuleOptions = Static<typeof goalModuleOptionsSchema>;
 
-type GoalToolCall<Result> = {
-    readonly id: string;
-    commit(ctx: Context, result: Result): Promise<Result>;
-};
-
-type GoalSetCompletion<Result> = (
-    ctx: Context,
-    goal: SessionGoal,
-    lifecycleId: string,
-) => Promise<Result>;
-type GoalStatusCompletion<Result> = (ctx: Context, goal: SessionGoal) => Promise<Result>;
-type GoalClearCompletion<Result> = (ctx: Context, cleared: boolean) => Promise<Result>;
+interface GoalActivation {
+    readonly goal: SessionGoal;
+    readonly lifecycleId: string;
+}
 
 /**
  * Shared persistent goal state plus the hooks that keep an active goal moving.
  *
  * Goal owns only current domain state. Durable tool settlement belongs to Agent Base and is
- * committed with the mutation through `AgentToolCall.commit`; Goal keeps no replay ledger.
+ * committed with each transactional tool; Goal keeps no replay ledger.
  */
 export class GoalModule implements AgentModule {
     readonly name = "goal";
     readonly migrations = [
         [
             "001-goal-state",
-            async (_ctx: Context, database: AgentDatabaseFacade<AgentDatabase>): Promise<void> => {
+            async (ctx: Context): Promise<void> => {
                 await agentDatabaseRun(
-                    database,
+                    ctx.db,
                     sql`CREATE TABLE IF NOT EXISTS happy_agent_goal_state (
                         agent_id TEXT NOT NULL,
                         state_key TEXT NOT NULL,
@@ -161,7 +141,6 @@ export class GoalModule implements AgentModule {
         ],
     ] as const;
 
-    readonly #transaction: AgentStorageTransaction;
     readonly #listener: GoalModuleListener | undefined;
     readonly #idFactory: NonNullable<GoalModuleOptions["idFactory"]>;
     readonly #eventIdFactory: NonNullable<GoalModuleOptions["eventIdFactory"]>;
@@ -172,7 +151,6 @@ export class GoalModule implements AgentModule {
 
     constructor(options: GoalModuleOptions) {
         assertGoalModuleOptions(options);
-        this.#transaction = options.transaction as AgentStorageTransaction;
         this.#listener = options.listener;
         this.#idFactory = options.idFactory ?? (() => globalThis.crypto.randomUUID());
         this.#eventIdFactory = options.eventIdFactory ?? (() => globalThis.crypto.randomUUID());
@@ -188,23 +166,26 @@ export class GoalModule implements AgentModule {
 
     async goal(ctx: Context, agentId: string): Promise<SessionGoal | undefined> {
         this.#assertAgentId(agentId);
-        return await this.#transaction(ctx, async (txCtx, database) => {
-            return await readGoal(
-                txCtx,
-                goalKV(database as AgentDatabaseFacade<AgentDatabase>, agentId),
-                agentId,
-            );
-        });
+        return await readGoal(ctx, goalKV(agentId), agentId);
     }
 
-    async setGoal(ctx: Context, agentId: string, objective: string): Promise<SessionGoal> {
-        return await this.#setGoal(
-            ctx,
-            agentId,
-            objective,
-            undefined,
-            async (_txCtx, goal) => goal,
+    async setGoal(ctx: Context, agentId: string, objective: string): Promise<SessionGoal>;
+    async setGoal(
+        ctx: Context,
+        agentId: string,
+        objective: string,
+        lifecycleId: string,
+    ): Promise<GoalActivation>;
+    async setGoal(
+        ctx: Context,
+        agentId: string,
+        objective: string,
+        lifecycleId?: string,
+    ): Promise<SessionGoal | GoalActivation> {
+        const activation = await ctx.inTx(
+            async (txCtx) => await this.#setGoal(txCtx, agentId, objective, lifecycleId),
         );
+        return lifecycleId === undefined ? activation.goal : activation;
     }
 
     async changeGoalStatus(
@@ -212,72 +193,13 @@ export class GoalModule implements AgentModule {
         agentId: string,
         status: GoalStatus,
     ): Promise<SessionGoal> {
-        return await this.#changeGoalStatus(
-            ctx,
-            agentId,
-            status,
-            async (_txCtx, goal) => goal,
+        return await ctx.inTx(
+            async (txCtx) => await this.#changeGoalStatus(txCtx, agentId, status),
         );
     }
 
     async clearGoal(ctx: Context, agentId: string): Promise<boolean> {
-        return await this.#clearGoal(ctx, agentId, async (_txCtx, cleared) => cleared);
-    }
-
-    async createGoalFromTool(
-        ctx: Context,
-        agentId: string,
-        objective: string,
-        call: GoalToolCall<{ readonly goal: SessionGoal }>,
-        observe: (ctx: Context, goal: SessionGoal, lifecycleId: string) => Promise<void>,
-    ): Promise<{ readonly goal: SessionGoal }> {
-        return await this.#setGoal(
-            ctx,
-            agentId,
-            objective,
-            call.id,
-            async (txCtx, goal, lifecycleId) => {
-                await observe(txCtx, goal, lifecycleId);
-                return await call.commit(txCtx, { goal });
-            },
-        );
-    }
-
-    async getGoalFromTool(
-        ctx: Context,
-        agentId: string,
-        call: GoalToolCall<{ readonly goal: SessionGoal | null }>,
-    ): Promise<{ readonly goal: SessionGoal | null }> {
-        this.#assertAgentId(agentId);
-        return await this.#transaction(ctx, async (txCtx, database) => {
-            const goal = await readGoal(
-                txCtx,
-                goalKV(database as AgentDatabaseFacade<AgentDatabase>, agentId),
-                agentId,
-            );
-            return await call.commit(txCtx, { goal: goal ?? null });
-        });
-    }
-
-    async updateGoalFromTool(
-        ctx: Context,
-        agentId: string,
-        status: "complete" | "blocked",
-        call: GoalToolCall<{ readonly goal: SessionGoal }>,
-    ): Promise<{ readonly goal: SessionGoal }> {
-        return await this.#changeGoalStatus(ctx, agentId, status, async (txCtx, goal) => {
-            return await call.commit(txCtx, { goal });
-        });
-    }
-
-    async clearGoalFromTool(
-        ctx: Context,
-        agentId: string,
-        call: GoalToolCall<{ readonly cleared: boolean }>,
-    ): Promise<{ readonly cleared: boolean }> {
-        return await this.#clearGoal(ctx, agentId, async (txCtx, cleared) => {
-            return await call.commit(txCtx, { cleared });
-        });
+        return await ctx.inTx(async (txCtx) => await this.#clearGoal(txCtx, agentId));
     }
 
     readonly tools = (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => [
@@ -287,11 +209,7 @@ export class GoalModule implements AgentModule {
             this.#maxOutputCharacters,
             async (toolCtx, goal, lifecycleId) => {
                 if (agentRunningInside(toolCtx) !== scope.agent.id) return;
-                await scope.runKV.write(
-                    toolCtx,
-                    GOAL_OBSERVED_LIFECYCLE_ID_KEY,
-                    lifecycleId,
-                );
+                await scope.runKV.write(toolCtx, GOAL_OBSERVED_LIFECYCLE_ID_KEY, lifecycleId);
             },
         ),
         getGoalTool(this, scope.agent.id, this.#maxOutputCharacters),
@@ -299,7 +217,7 @@ export class GoalModule implements AgentModule {
         clearGoalTool(this, scope.agent.id),
     ];
 
-    readonly afterInference = async (
+    readonly afterInferenceTransact = async (
         ctx: Context,
         scope: AgentModuleScope,
         inference: AgentBaseInference,
@@ -311,39 +229,29 @@ export class GoalModule implements AgentModule {
         await scope.runKV.write(ctx, GOAL_LAST_INFERENCE_KEY, value);
     };
 
-    readonly beforeAgentLoop = async (ctx: Context, scope: AgentModuleScope): Promise<void> => {
-        await this.#transaction(ctx, async (txCtx, database) => {
-            const state = await readGoalAuthoritativeState(
-                txCtx,
-                goalKV(database as AgentDatabaseFacade<AgentDatabase>, scope.agent.id),
-                scope.agent.id,
-            );
-            await scope.runKV.delete(txCtx, GOAL_CONTINUATION_ID_KEY);
-            if (state.goal?.status !== "active") {
-                await scope.runKV.delete(txCtx, GOAL_OBSERVED_LIFECYCLE_ID_KEY);
-            } else {
-                const lifecycle = state.lifecycle;
-                if (lifecycle === undefined) {
-                    throw new Error("An active Goal requires its exact lifecycle sidecar.");
-                }
-                await scope.runKV.write(
-                    txCtx,
-                    GOAL_OBSERVED_LIFECYCLE_ID_KEY,
-                    lifecycle.id,
-                );
+    readonly beforeAgentLoopTransact = async (
+        ctx: Context,
+        scope: AgentModuleScope,
+    ): Promise<void> => {
+        const state = await readGoalAuthoritativeState(ctx, goalKV(scope.agent.id), scope.agent.id);
+        await scope.runKV.delete(ctx, GOAL_CONTINUATION_ID_KEY);
+        if (state.goal?.status !== "active") {
+            await scope.runKV.delete(ctx, GOAL_OBSERVED_LIFECYCLE_ID_KEY);
+        } else {
+            const lifecycle = state.lifecycle;
+            if (lifecycle === undefined) {
+                throw new Error("An active Goal requires its exact lifecycle sidecar.");
             }
-        });
+            await scope.runKV.write(ctx, GOAL_OBSERVED_LIFECYCLE_ID_KEY, lifecycle.id);
+        }
     };
 
     readonly afterAgentLoop = async (
         ctx: Context,
         scope: AgentModuleScope,
     ): Promise<readonly AgentModuleAction[] | undefined> => {
-        const continuation = await this.#transaction(ctx, async (txCtx, database) => {
-            const kv = goalKV(
-                database as AgentDatabaseFacade<AgentDatabase>,
-                scope.agent.id,
-            );
+        const continuation = await ctx.inTx(async (txCtx) => {
+            const kv = goalKV(scope.agent.id);
             const observed = await scope.runKV.read(txCtx, GOAL_OBSERVED_LIFECYCLE_ID_KEY);
             if (observed === undefined) return undefined;
             if (!Value.Check(goalOperationIdSchema, observed)) {
@@ -407,13 +315,12 @@ export class GoalModule implements AgentModule {
         ];
     };
 
-    async #setGoal<Result>(
+    async #setGoal(
         ctx: Context,
         agentId: string,
         objective: string,
         requestedLifecycleId: string | undefined,
-        complete: GoalSetCompletion<Result>,
-    ): Promise<Result> {
+    ): Promise<GoalActivation> {
         this.#assertAgentId(agentId);
         const normalized = normalizeGoalObjective(objective);
         if (
@@ -422,125 +329,108 @@ export class GoalModule implements AgentModule {
         ) {
             throw new Error("Goal lifecycle ID is invalid.");
         }
-        return await this.#transaction(ctx, async (txCtx, database) => {
-            const kv = goalKV(database as AgentDatabaseFacade<AgentDatabase>, agentId);
-            const state = await readGoalAuthoritativeState(txCtx, kv, agentId);
-            const existing = state.goal;
-            if (existing !== undefined && existing.status !== "complete") {
-                if (existing.status === "active" && existing.objective === normalized) {
-                    const lifecycle = state.lifecycle;
-                    if (lifecycle === undefined) {
-                        throw new Error("An active Goal requires its exact lifecycle sidecar.");
-                    }
-                    return await complete(txCtx, structuredClone(existing), lifecycle.id);
+        const kv = goalKV(agentId);
+        const state = await readGoalAuthoritativeState(ctx, kv, agentId);
+        const existing = state.goal;
+        if (existing !== undefined && existing.status !== "complete") {
+            if (existing.status === "active" && existing.objective === normalized) {
+                const lifecycle = state.lifecycle;
+                if (lifecycle === undefined) {
+                    throw new Error("An active Goal requires its exact lifecycle sidecar.");
                 }
-                throw new Error(
-                    "This agent already has an unfinished goal. Complete or clear it before starting another.",
-                );
+                return {
+                    goal: structuredClone(existing),
+                    lifecycleId: lifecycle.id,
+                };
             }
-            const external = agentRunningInside(ctx) !== agentId;
-            this.#assertCanActivateExternally(external);
-            const lifecycleId =
-                requestedLifecycleId ??
-                (await this.#factoryValue<string>(
-                    this.#idFactory(txCtx, agentId),
-                    goalOperationIdSchema,
-                    "Goal lifecycle ID",
-                ));
-            const at = await this.#timestamp(txCtx);
-            const goal: SessionGoal = {
-                createdAt: at,
-                objective: normalized,
-                status: "active",
-                updatedAt: at,
-            };
-            await writeGoal(txCtx, kv, goal);
-            await this.#activate(txCtx, kv, lifecycleId, goal, external);
-            await this.#publishEvent(
-                txCtx,
-                await this.#event(txCtx, { type: "goal_set", agentId, goal }),
+            throw new Error(
+                "This agent already has an unfinished goal. Complete or clear it before starting another.",
             );
-            await this.#wakeExternalActivation(txCtx, agentId, lifecycleId, goal, external);
-            return await complete(txCtx, structuredClone(goal), lifecycleId);
-        });
+        }
+        const external = agentRunningInside(ctx) !== agentId;
+        this.#assertCanActivateExternally(external);
+        const lifecycleId =
+            requestedLifecycleId ??
+            (await this.#factoryValue<string>(
+                this.#idFactory(ctx, agentId),
+                goalOperationIdSchema,
+                "Goal lifecycle ID",
+            ));
+        const at = await this.#timestamp(ctx);
+        const goal: SessionGoal = {
+            createdAt: at,
+            objective: normalized,
+            status: "active",
+            updatedAt: at,
+        };
+        await writeGoal(ctx, kv, goal);
+        await this.#activate(ctx, kv, lifecycleId, goal, external);
+        await this.#publishEvent(ctx, await this.#event(ctx, { type: "goal_set", agentId, goal }));
+        await this.#wakeExternalActivation(ctx, agentId, lifecycleId, goal, external);
+        return { goal: structuredClone(goal), lifecycleId };
     }
 
-    async #changeGoalStatus<Result>(
+    async #changeGoalStatus(
         ctx: Context,
         agentId: string,
         status: GoalStatus,
-        complete: GoalStatusCompletion<Result>,
-    ): Promise<Result> {
+    ): Promise<SessionGoal> {
         this.#assertAgentId(agentId);
         this.#assertStatus(status);
-        return await this.#transaction(ctx, async (txCtx, database) => {
-            const kv = goalKV(database as AgentDatabaseFacade<AgentDatabase>, agentId);
-            const state = await readGoalAuthoritativeState(txCtx, kv, agentId);
-            const existing = state.goal;
-            if (existing === undefined) throw new Error("This agent does not have a goal.");
-            if (existing.status === status) {
-                return await complete(txCtx, structuredClone(existing));
-            }
-            const external = agentRunningInside(ctx) !== agentId;
-            if (status === "active") this.#assertCanActivateExternally(external);
-            const goal: SessionGoal = {
-                ...existing,
-                status,
-                updatedAt: await this.#timestamp(txCtx),
-            };
-            await writeGoal(txCtx, kv, goal);
-            let lifecycleId: string | undefined;
-            if (status === "active") {
-                lifecycleId = await this.#factoryValue<string>(
-                    this.#idFactory(txCtx, agentId),
-                    goalOperationIdSchema,
-                    "Goal lifecycle ID",
-                );
-                await this.#activate(txCtx, kv, lifecycleId, goal, external);
-            } else {
-                await this.#deactivate(txCtx, kv);
-            }
-            await this.#publishEvent(
-                txCtx,
-                await this.#event(txCtx, {
-                    type: "goal_status_changed",
-                    agentId,
-                    goal,
-                }),
+        const kv = goalKV(agentId);
+        const state = await readGoalAuthoritativeState(ctx, kv, agentId);
+        const existing = state.goal;
+        if (existing === undefined) throw new Error("This agent does not have a goal.");
+        if (existing.status === status) {
+            return structuredClone(existing);
+        }
+        const external = agentRunningInside(ctx) !== agentId;
+        if (status === "active") this.#assertCanActivateExternally(external);
+        const goal: SessionGoal = {
+            ...existing,
+            status,
+            updatedAt: await this.#timestamp(ctx),
+        };
+        await writeGoal(ctx, kv, goal);
+        let lifecycleId: string | undefined;
+        if (status === "active") {
+            lifecycleId = await this.#factoryValue<string>(
+                this.#idFactory(ctx, agentId),
+                goalOperationIdSchema,
+                "Goal lifecycle ID",
             );
-            if (lifecycleId !== undefined) {
-                await this.#wakeExternalActivation(
-                    txCtx,
-                    agentId,
-                    lifecycleId,
-                    goal,
-                    external,
-                );
-            }
-            return await complete(txCtx, structuredClone(goal));
-        });
+            await this.#activate(ctx, kv, lifecycleId, goal, external);
+        } else {
+            await this.#deactivate(ctx, kv);
+        }
+        await this.#publishEvent(
+            ctx,
+            await this.#event(ctx, {
+                type: "goal_status_changed",
+                agentId,
+                goal,
+            }),
+        );
+        if (lifecycleId !== undefined) {
+            await this.#wakeExternalActivation(ctx, agentId, lifecycleId, goal, external);
+        }
+        return structuredClone(goal);
     }
 
-    async #clearGoal<Result>(
-        ctx: Context,
-        agentId: string,
-        complete: GoalClearCompletion<Result>,
-    ): Promise<Result> {
+    async #clearGoal(ctx: Context, agentId: string): Promise<boolean> {
         this.#assertAgentId(agentId);
-        return await this.#transaction(ctx, async (txCtx, database) => {
-            const kv = goalKV(database as AgentDatabaseFacade<AgentDatabase>, agentId);
-            const state = await readGoalAuthoritativeState(txCtx, kv, agentId);
-            const cleared = state.goal !== undefined;
-            if (cleared) {
-                await clearStoredGoal(txCtx, kv);
-                await this.#deactivate(txCtx, kv);
-                await this.#publishEvent(
-                    txCtx,
-                    await this.#event(txCtx, { type: "goal_cleared", agentId }),
-                );
-            }
-            return await complete(txCtx, cleared);
-        });
+        const kv = goalKV(agentId);
+        const state = await readGoalAuthoritativeState(ctx, kv, agentId);
+        const cleared = state.goal !== undefined;
+        if (cleared) {
+            await clearStoredGoal(ctx, kv);
+            await this.#deactivate(ctx, kv);
+            await this.#publishEvent(
+                ctx,
+                await this.#event(ctx, { type: "goal_cleared", agentId }),
+            );
+        }
+        return cleared;
     }
 
     async #activate(
@@ -629,11 +519,7 @@ export class GoalModule implements AgentModule {
     }
 
     async #timestamp(_ctx: Context): Promise<number> {
-        return await this.#factoryValue<number>(
-            this.#clock(),
-            goalTimestampSchema,
-            "Goal clock",
-        );
+        return await this.#factoryValue<number>(this.#clock(), goalTimestampSchema, "Goal clock");
     }
 
     async #factoryValue<T>(
@@ -726,11 +612,7 @@ export function assertGoalModuleOptions(value: unknown): asserts value is GoalMo
     }
 }
 
-function continuationMessageId(
-    agentId: string,
-    lifecycleId: string,
-    goal: SessionGoal,
-): string {
+function continuationMessageId(agentId: string, lifecycleId: string, goal: SessionGoal): string {
     return hashMessageId([
         "goal-external-wake",
         agentId,
@@ -769,7 +651,11 @@ function deepFreeze<T>(value: T): T {
 
 function normalizeObserverError(error: unknown): string {
     try {
-        if (error instanceof Error && typeof error.message === "string" && error.message.length > 0) {
+        if (
+            error instanceof Error &&
+            typeof error.message === "string" &&
+            error.message.length > 0
+        ) {
             return error.message.slice(0, 500);
         }
         const converted = String(error);

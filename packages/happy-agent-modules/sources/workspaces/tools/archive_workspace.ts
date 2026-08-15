@@ -18,15 +18,10 @@ export function archiveWorkspaceTool(workspaces: WorkspacesModule, agentId: stri
         parameters: archiveWorkspaceInputSchema,
         returnType: workspaceSchema,
         durable: true,
+        transactional: true,
         shouldReviewInAutoMode: () => false,
         execute: async (ctx, { workspaceId }, call) =>
-            await workspaces.archive(
-                ctx,
-                agentId,
-                workspaceId,
-                { operationId: call.id },
-                async (txCtx, workspace) => await call.commit(txCtx, workspace),
-            ),
+            await workspaces.archive(ctx, agentId, workspaceId, { operationId: call.id }),
         toLLM: (workspace) => [
             {
                 type: "text",

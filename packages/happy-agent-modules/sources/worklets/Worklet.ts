@@ -131,7 +131,7 @@ export const workletVersionSchema = Type.Object(
             maxItems: MAX_WORKLET_OPERATIONS,
         }),
         createdAt: workletTimestampSchema,
-        /** Module-owned operation identity used for replay-safe installation. */
+        /** Stable identity of the host call or durable tool call that added this version. */
         operationId: workletAgentIdSchema,
     },
     { additionalProperties: false },
@@ -192,7 +192,7 @@ export const workletInstallInputSchema = Type.Object(
     {
         name: workletNameSchema,
         sourceRef: workletSourceRefSchema,
-        /** Optional for direct host calls; durable tools allocate it in Agent KV. */
+        /** Optional for direct host calls; durable tools use their supplied call ID. */
         operationId: Type.Optional(workletAgentIdSchema),
     },
     { additionalProperties: false },
@@ -202,7 +202,7 @@ export const workletUpdateInputSchema = Type.Object(
     {
         sourceRef: workletSourceRefSchema,
         changeDescription: workletChangeDescriptionSchema,
-        /** Optional for direct host calls; durable tools allocate it in Agent KV. */
+        /** Optional for direct host calls; durable tools use their supplied call ID. */
         operationId: Type.Optional(workletAgentIdSchema),
     },
     { additionalProperties: false },
@@ -211,7 +211,7 @@ export const workletUpdateInputSchema = Type.Object(
 export const workletRevertInputSchema = Type.Object(
     {
         version: workletVersionNumberSchema,
-        /** Optional for direct host calls; durable tools allocate it in Agent KV. */
+        /** Optional for direct host calls; durable tools use their supplied call ID. */
         operationId: Type.Optional(workletAgentIdSchema),
     },
     { additionalProperties: false },

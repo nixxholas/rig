@@ -16,10 +16,10 @@ export function installWorkletTool(module: WorkletsModule, agentId: string) {
         parameters: workletToolInstallInputSchema,
         returnType: Type.Object({ worklet: workletSchema }),
         durable: true,
+        transactional: true,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, input: WorkletToolInstallInput) => ({
-            worklet: await module.install(ctx, agentId, input),
-        }),
+        execute: async (ctx, input: WorkletToolInstallInput, call) =>
+            await module.installForTool(ctx, agentId, input, call),
         toLLM: ({ worklet }) => [
             {
                 type: "text",

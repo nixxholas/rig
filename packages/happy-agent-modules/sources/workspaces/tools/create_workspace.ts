@@ -7,7 +7,7 @@ import {
 } from "../Workspace.js";
 import type { WorkspacesModule } from "../WorkspacesModule.js";
 
-/** Create one host-managed workspace and commit its result with the catalog mutation. */
+/** Create one host-managed workspace. */
 export function createWorkspaceTool(workspaces: WorkspacesModule, agentId: string) {
     return defineAgentTool({
         name: "create_workspace",
@@ -16,14 +16,10 @@ export function createWorkspaceTool(workspaces: WorkspacesModule, agentId: strin
         parameters: workspaceCreateToolInputSchema,
         returnType: workspaceSchema,
         durable: true,
+        transactional: true,
         shouldReviewInAutoMode: () => false,
         execute: async (ctx, input: WorkspaceCreateToolInput, call) =>
-            await workspaces.create(
-                ctx,
-                agentId,
-                { ...input, operationId: call.id },
-                async (txCtx, workspace) => await call.commit(txCtx, workspace),
-            ),
+            await workspaces.create(ctx, agentId, { ...input, operationId: call.id }),
         toLLM: (workspace) => [
             {
                 type: "text",

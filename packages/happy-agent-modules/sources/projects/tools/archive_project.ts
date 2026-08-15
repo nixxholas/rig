@@ -17,9 +17,10 @@ export function archiveProjectTool(projects: ProjectsModule, agentId: string) {
         parameters: archiveProjectInputSchema,
         returnType: projectSchema,
         durable: true,
+        transactional: true,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, { projectId }, call) =>
-            await projects.archive(ctx, agentId, projectId, call),
+        execute: async (ctx, { projectId }) =>
+            await projects.archive(ctx, agentId, projectId),
         toLLM: (project) => [
             {
                 type: "text",

@@ -18,7 +18,6 @@ import {
     type WorkflowPage,
     type WorkflowRun,
 } from "./Workflow.js";
-import { workflowEventSchema } from "./WorkflowEvent.js";
 
 /** External runner capability. Durable run state is owned by WorkflowsModule. */
 export const workflowRuntimeSchema = Type.Object(
@@ -55,24 +54,6 @@ export const workflowRuntimeSchema = Type.Object(
             ],
             Type.Promise(workflowRunSchema),
         ),
-        save: Type.Function(
-            [
-                Type.Unsafe<Context>(Type.Object({}, { additionalProperties: false })),
-                workflowRunSchema,
-            ],
-            Type.Promise(Type.Void()),
-        ),
-    },
-    { additionalProperties: false },
-);
-
-export const workflowTransactionChangeSchema = Type.Object(
-    {
-        agentId: workflowAgentIdSchema,
-        operationId: workflowIdSchema,
-        run: workflowRunSchema,
-        changed: Type.Boolean(),
-        event: Type.Optional(workflowEventSchema),
     },
     { additionalProperties: false },
 );
@@ -80,17 +61,6 @@ export const workflowTransactionChangeSchema = Type.Object(
 /** Module-owned workflow database surface plus the external runner capability. */
 export const workflowStoreSchema = Type.Object(
     {
-        transaction: Type.Function(
-            [
-                Type.Unsafe<Context>(Type.Object({}, { additionalProperties: false })),
-                workflowAgentIdSchema,
-                Type.Function(
-                    [Type.Unsafe<Context>(Type.Object({}, { additionalProperties: false }))],
-                    Type.Promise(workflowTransactionChangeSchema),
-                ),
-            ],
-            Type.Promise(workflowTransactionChangeSchema),
-        ),
         launch: Type.Function(
             [
                 Type.Unsafe<Context>(Type.Object({}, { additionalProperties: false })),
@@ -139,6 +109,13 @@ export const workflowStoreSchema = Type.Object(
             ],
             Type.Promise(workflowRunSchema),
         ),
+        save: Type.Function(
+            [
+                Type.Unsafe<Context>(Type.Object({}, { additionalProperties: false })),
+                workflowRunSchema,
+            ],
+            Type.Promise(Type.Void()),
+        ),
         logs: Type.Function(
             [
                 Type.Unsafe<Context>(Type.Object({}, { additionalProperties: false })),
@@ -153,7 +130,6 @@ export const workflowStoreSchema = Type.Object(
 
 export type WorkflowStore = Static<typeof workflowStoreSchema>;
 export type WorkflowRuntime = Static<typeof workflowRuntimeSchema>;
-export type WorkflowTransactionChange = Static<typeof workflowTransactionChangeSchema>;
 
 export function assertWorkflowRun(value: unknown): asserts value is WorkflowRun {
     if (!Value.Check(workflowRunSchema, value)) {
@@ -201,14 +177,4 @@ export function assertWorkflowMutationResult(
         throw new Error("Workflow store returned an invalid mutation result.");
     }
     assertWorkflowRun(value.run);
-}
-
-export function assertWorkflowTransactionChange(
-    value: unknown,
-): asserts value is WorkflowTransactionChange {
-    if (!Value.Check(workflowTransactionChangeSchema, value)) {
-        throw new Error("Workflow store transaction returned an invalid change.");
-    }
-    assertWorkflowRun(value.run);
-    if (value.event !== undefined) assertWorkflowRun(value.event.run);
 }

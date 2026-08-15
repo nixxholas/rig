@@ -15,9 +15,10 @@ export function cancelScheduledMessageTool(scheduling: SchedulingModule, agentId
         parameters: schedulingCancelToolInputSchema,
         returnType: schedulingScheduledMessageSchema,
         durable: true,
+        transactional: true,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, input: SchedulingCancelInput, call) =>
-            await scheduling.cancelScheduleFromTool(ctx, agentId, input, call),
+        execute: async (ctx, input: SchedulingCancelInput) =>
+            await scheduling.cancelSchedule(ctx, agentId, input),
         toLLM: (schedule) => [
             { type: "text", text: scheduling.formatCancellationForModel(schedule) },
         ],

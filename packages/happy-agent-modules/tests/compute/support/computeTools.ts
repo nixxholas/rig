@@ -18,7 +18,9 @@ import {
 export interface ComputeToolset {
     readonly module: ComputeModule;
     readonly tools: readonly AnyAgentTool[];
-    readonly tool: (name: string) => AnyAgentTool;
+    readonly tool: (name: string) => Omit<AnyAgentTool, "execute"> & {
+        readonly execute: (ctx: Context, input: any, call?: AgentToolCall) => Promise<any>;
+    };
     readonly call: AgentToolCall;
 }
 
@@ -110,7 +112,14 @@ export async function computeToolset(
         tool: (name) => {
             const found = tools.find((candidate) => candidate.name === name);
             if (found === undefined) throw new Error(`The module offers no tool called ${name}.`);
-            return found;
+            return {
+                ...found,
+                execute: async (
+                    executeCtx: Context,
+                    input: any,
+                    providedCall?: AgentToolCall,
+                ) => await found.execute(executeCtx, input, providedCall ?? call),
+            };
         },
     };
 }

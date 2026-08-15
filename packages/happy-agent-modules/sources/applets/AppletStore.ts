@@ -32,8 +32,6 @@ import {
  * arbitrary primitive values.
  */
 const opaqueContextSchema = Type.Unsafe<Context>(Type.Object({}, { additionalProperties: true }));
-const unknownPromiseSchema = Type.Promise(Type.Unknown());
-const transactionWorkSchema = Type.Function([opaqueContextSchema], unknownPromiseSchema);
 
 const mutationIdentityFields = {
     name: appletNameSchema,
@@ -172,10 +170,6 @@ const catalogListQuerySchema = Type.Object(
 /** Module-owned applet database surface. */
 export const appletCatalogSchema = Type.Object(
     {
-        transaction: Type.Function(
-            [opaqueContextSchema, transactionWorkSchema],
-            unknownPromiseSchema,
-        ),
         list: Type.Function(
             [opaqueContextSchema, catalogListQuerySchema],
             Type.Promise(appletListPageSchema),

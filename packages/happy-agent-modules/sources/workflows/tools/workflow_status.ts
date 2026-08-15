@@ -14,6 +14,7 @@ export function workflowStatusTool(module: WorkflowsModule, agentId: string) {
         parameters: inputSchema,
         returnType: Type.Union([workflowRunSchema, Type.Undefined()]),
         durable: true,
+        transactional: true,
         shouldReviewInAutoMode: () => false,
         execute: async (ctx, input: Input) => await module.status(ctx, agentId, input.id),
         toLLM: (run) => [

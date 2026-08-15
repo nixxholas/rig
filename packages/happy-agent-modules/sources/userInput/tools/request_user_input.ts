@@ -41,20 +41,15 @@ export function requestUserInputTool(userInput: UserInputModule, agentId: string
             "Ask the human a question with the Markdown context they need, then wait for an explicit answer, cancellation, away, or timeout outcome. This request is durable across daemon restarts. To read more detail from a completed request, call this tool with its requestId and an optional cursor.",
         parameters: requestUserInputToolInputSchema,
         returnType: requestUserInputToolResultSchema,
-        durable: true,
+        durable: false,
         shouldReviewInAutoMode: () => false,
         execute: async (ctx, input: RequestUserInputToolInput, call) => {
             if ("requestId" in input) {
                 const { requestId, ...query } = input;
                 return await userInput.getPage(ctx, agentId, requestId, query);
             }
-            return await userInput.requestFromTool(
-                ctx,
-                agentId,
-                call.id,
-                input,
-                async (txCtx, result) => await call.commit(txCtx, result),
-            );
+            const request = await userInput.ask(ctx, agentId, input, call.id);
+            return await userInput.wait(ctx, agentId, request.id);
         },
         toLLM: (request) => [
             {

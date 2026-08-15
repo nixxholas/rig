@@ -191,12 +191,12 @@ describe("McpModule", () => {
         expect(direct).toBeDefined();
         expect(dynamic).toBeDefined();
         if (direct === undefined || dynamic === undefined) throw new Error("MCP tools missing.");
-        const directResult = await direct.execute(ctx, {});
+        const directResult = await direct.execute(ctx, {}, undefined as never);
         const dynamicResult = await dynamic.execute(ctx, {
             arguments: {},
             name: "publish_release",
             server: "deployment_service",
-        });
+        }, undefined as never);
         expect(direct.isError?.(directResult)).toBe(true);
         expect(dynamic.isError?.(dynamicResult)).toBe(true);
         expect(direct.toLLM(directResult)).toEqual([

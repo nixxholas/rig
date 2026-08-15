@@ -7,7 +7,6 @@ export {
     collaborationMigrations,
     createSqliteCollaborationStorage,
     type SqliteCollaborationStorage,
-    type SqliteCollaborationStorageOptions,
 } from "./SqliteCollaborationStorage.js";
 export * from "./tools/create_agent.js";
 export * from "./tools/list_agents.js";

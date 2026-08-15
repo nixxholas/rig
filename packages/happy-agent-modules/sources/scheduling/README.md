@@ -1,13 +1,11 @@
 # Scheduling
 
-Scheduling is a provider-neutral module for an agent's own time. It owns its durable tables,
-receipts, and proofs through Agent Base migrations. The host supplies the AgentStorage transaction
-function and the external wait/delivery scheduler; that transaction passes the active Drizzle
-facade to module work.
+Scheduling is a provider-neutral module for an agent's own time. It owns its durable wait and
+scheduled-message tables through Agent Base migrations. Every database operation uses the active
+Drizzle facade from `ctx.db`; the host supplies only the external wait/delivery scheduler.
 
 ```ts
 const scheduling = new SchedulingModule({
-    transaction, // optional host AgentStorageTransaction for direct calls
     scheduler, // host-owned start/wait/schedule/cancel/delivery operations
 });
 ```
@@ -21,16 +19,19 @@ the calling agent itself. A host caller can pass `targetAgentId`, but cross-agen
 denied unless the injected authorization policy grants it.
 
 Waits claim a durable record in a short transaction, suspend through the host scheduler outside
-that transaction, and receipt the authoritative terminal record in a second short transaction.
-New chat messages interrupt the host wait. Results are explicitly `elapsed` or `interrupted` and
-include the actual elapsed milliseconds, which the model rendering turns into human-readable
-English.
+that transaction, and settle the authoritative terminal record in a second short transaction.
+New chat messages interrupt the host wait. Results are explicitly `elapsed` or
+`interrupted` and include the actual elapsed milliseconds, which the model rendering turns into
+human-readable English.
 
 Scheduled messages have `pending`, `delivered`, `undelivered`, and `cancelled` states. Delivery
 attempts, failure details, retention, and process recovery belong to the host. The module exposes
 `schedule`, `cancelSchedule`, `listSchedulePage`/`listSchedule`, `getSchedule`/`getSchedulePage`,
-and `reportDeliveryOutcome`. All durable
-mutations use operation IDs, fingerprints, receipts, and immutable mutation proofs.
+and `reportDeliveryOutcome`. Scheduling does not maintain a second receipt, proof, fingerprint,
+replay, or operation-state layer. Single-transaction model tools set `transactional: true`, so
+Agent Base commits their durable results when execution returns. Waits cannot do that because the
+host wait remains outside the narrow start and settle transactions; their terminal scheduling
+record commits before the tool's separately managed durable result.
 
 Transactional and post-commit listeners receive one detached, deeply frozen event object for each
 changed mutation: `wait_started`, `wait_finished`, `message_scheduled`,

@@ -14,10 +14,9 @@ export function waitWorkflowTool(module: WorkflowsModule, agentId: string) {
             "Wait through the host workflow broker until a run reaches a terminal or unavailable state. The host provides durability and wakeup.",
         parameters: inputSchema,
         returnType: workflowRunSchema,
-        durable: true,
+        durable: false,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, input: Input, call) =>
-            await module.waitForTool(ctx, agentId, input.id, call),
+        execute: async (ctx, input: Input) => await module.waitForTool(ctx, agentId, input.id),
         toLLM: (run) => [{ type: "text", text: module.formatRunForModel(run) }],
     });
 }

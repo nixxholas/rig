@@ -13,13 +13,13 @@ export function importAppletTool(applets: AppletModule, agentId: string) {
     return defineAgentTool({
         name: "import_applet",
         description:
-            "Install a source folder as an applet. Give an absolute path to the folder; it is verified and copied in as version 1. The module assigns a durable retry identity.",
+            "Install a source folder as an applet. Give an absolute path to the folder; it is verified and copied in as version 1.",
         parameters: appletToolImportInputSchema,
         returnType: Type.Object({ applet: appletSchema }),
-        durable: true,
+        durable: false,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, input: AppletToolImportInput) => ({
-            applet: await applets.importForAgent(ctx, agentId, input),
+        execute: async (ctx, input: AppletToolImportInput, call) => ({
+            applet: await applets.importForAgent(ctx, agentId, input, call.id),
         }),
         toLLM: ({ applet }) => [
             {

@@ -92,7 +92,7 @@ async function permissionAgent(
         readonly refusalsBeforeStopping?: number;
     } = {},
 ) {
-    const world = agentWorld();
+    const world = await agentWorld();
     const provider = new ScriptedProvider(script);
     const permissions = new PermissionsModule({
         ...(options.reviewer === undefined ? {} : { reviewer: options.reviewer }),
@@ -270,7 +270,7 @@ describe("PermissionsModule", () => {
             outcome: "denied",
             reason: "Not authorized.",
         }));
-        const world = agentWorld();
+        const world = await agentWorld();
         const provider = new ScriptedProvider([
             [
                 { type: "toolcall_start", callId: "call-1", name: "publish" },
@@ -322,7 +322,7 @@ describe("PermissionsModule", () => {
     it("enforces the mode a steered message made effective", async () => {
         ran.length = 0;
         const events: PermissionEvent[] = [];
-        const world = agentWorld();
+        const world = await agentWorld();
         const provider = new ScriptedProvider([
             textTurn("noted"),
             toolCallTurn("call-1", "look", "{}"),

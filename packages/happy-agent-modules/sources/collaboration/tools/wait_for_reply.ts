@@ -15,7 +15,7 @@ export function waitForReplyTool(collaboration: CollaborationModule, agentId: st
             "Wait until a collaborator answers one of this agent's pending reply obligations. The host owns the durable wait and may suspend this tool across restarts.",
         parameters: collaborationWaitToolInputSchema,
         returnType: collaborationObligationSchema,
-        durable: true,
+        durable: false,
         shouldReviewInAutoMode: () => false,
         execute: async (ctx, input: CollaborationWaitToolInput) =>
             await collaboration.waitForReply(ctx, agentId, input),

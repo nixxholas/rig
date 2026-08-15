@@ -30,17 +30,21 @@ const updateAppletInputSchema = Type.Object(
 );
 
 /** Import a new source version and update host-owned metadata. */
-export function updateAppletTool(applets: AppletModule, _agentId: string) {
+export function updateAppletTool(applets: AppletModule, agentId: string) {
     return defineAgentTool({
         name: "update_applet",
         description:
             "Import a new source version for an applet and optionally update its metadata.",
         parameters: updateAppletInputSchema,
         returnType: Type.Object({ applet: appletSchema }),
-        durable: true,
+        durable: false,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, { name, ...input }: { name: string } & AppletToolUpdateInput) => ({
-            applet: await applets.updateForAgent(ctx, _agentId, name, input),
+        execute: async (
+            ctx,
+            { name, ...input }: { name: string } & AppletToolUpdateInput,
+            call,
+        ) => ({
+            applet: await applets.updateForAgent(ctx, agentId, name, input, call.id),
         }),
         toLLM: ({ applet }) => [
             {

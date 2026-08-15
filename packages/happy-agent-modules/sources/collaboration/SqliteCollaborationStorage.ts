@@ -1,14 +1,7 @@
-import { AsyncLocalStorage } from "node:async_hooks";
-
 import {
-    agentDatabase,
     agentDatabaseRows,
     agentDatabaseRun,
-    type AgentDatabase,
-    type AgentDatabaseFacade,
     type AgentModuleMigration,
-    type AgentStorageTransaction,
-    withAgentDatabase,
 } from "@slopus/happy-agent-base";
 import { sql } from "drizzle-orm";
 import { Value } from "@sinclair/typebox/value";
@@ -28,10 +21,7 @@ import {
     type CollaborationObligationPage,
     type CollaborationObligationPageQuery,
 } from "./CollaborationMessage.js";
-import type {
-    CollaborationRoster,
-    CollaborationStore,
-} from "./CollaborationStore.js";
+import type { CollaborationRoster, CollaborationStore } from "./CollaborationStore.js";
 
 /**
  * The durable part of collaboration is deliberately implemented here, beside the module, rather
@@ -119,35 +109,20 @@ export const collaborationMigrations: readonly AgentModuleMigration[] = [
     [
         "002-drop-collaboration-receipts",
         async (_ctx, database) => {
-            await agentDatabaseRun(database, sql`DROP TABLE IF EXISTS happy_collaboration_receipts`);
+            await agentDatabaseRun(
+                database,
+                sql`DROP TABLE IF EXISTS happy_collaboration_receipts`,
+            );
         },
     ],
 ];
-
-export interface SqliteCollaborationStorageOptions<Database extends AgentDatabase = AgentDatabase> {
-    /**
-     * Optional for Agent Base hooks, which already carry the active database in their context.
-     * Public calls made without an active database must provide this host transaction.
-     */
-    readonly transaction?: AgentStorageTransaction<Database>;
-}
 
 export interface SqliteCollaborationStorage {
     readonly roster: CollaborationRoster;
     readonly store: CollaborationStore;
 }
 
-export function createSqliteCollaborationStorage<Database extends AgentDatabase = AgentDatabase>(
-    options: SqliteCollaborationStorageOptions<Database>,
-): SqliteCollaborationStorage {
-    const activeTransactions = new AsyncLocalStorage<true>();
-    const dbFor = (ctx: Context): AgentDatabaseFacade<Database> =>
-        (agentDatabase(ctx) ??
-            (() => {
-                throw new Error(
-                    "Collaboration database access requires an AgentStorage transaction context.",
-                );
-            })()) as AgentDatabaseFacade<Database>;
+export function createSqliteCollaborationStorage(): SqliteCollaborationStorage {
     const json = (value: unknown): string => JSON.stringify(value);
     const parse = (value: unknown, label: string): unknown => {
         if (typeof value !== "string") throw new Error(`Collaboration ${label} is not JSON text.`);
@@ -220,7 +195,7 @@ export function createSqliteCollaborationStorage<Database extends AgentDatabase 
     };
     const readAgent = async (ctx: Context, id: string): Promise<CollaborationAgent | undefined> => {
         const rows = await agentDatabaseRows<AgentRow>(
-            dbFor(ctx),
+            ctx.db,
             sql`SELECT id, owner_agent_id, parent_id, role, group_id, title, metadata_json,
                        status, created_at, updated_at
                 FROM happy_collaboration_agents WHERE id = ${id} LIMIT 1`,
@@ -229,7 +204,7 @@ export function createSqliteCollaborationStorage<Database extends AgentDatabase 
     };
     const writeAgent = async (ctx: Context, agent: CollaborationAgent): Promise<void> => {
         await agentDatabaseRun(
-            dbFor(ctx),
+            ctx.db,
             sql`INSERT INTO happy_collaboration_agents
                 (id, owner_agent_id, parent_id, role, group_id, title, metadata_json, status, created_at, updated_at)
                 VALUES (
@@ -266,7 +241,7 @@ export function createSqliteCollaborationStorage<Database extends AgentDatabase 
                 ? sql``
                 : sql` AND owner_agent_id = ${query.ownerAgentId}`;
         const rows = await agentDatabaseRows<AgentRow>(
-            dbFor(ctx),
+            ctx.db,
             sql`SELECT id, owner_agent_id, parent_id, role, group_id, title, metadata_json,
                        status, created_at, updated_at
                 FROM happy_collaboration_agents
@@ -286,7 +261,7 @@ export function createSqliteCollaborationStorage<Database extends AgentDatabase 
         id: string,
     ): Promise<CollaborationMessage | undefined> => {
         const rows = await agentDatabaseRows<MessageRow>(
-            dbFor(ctx),
+            ctx.db,
             sql`SELECT id, from_agent_id, to_agent_id, text, reply_to, obligation_id,
                        metadata_json, created_at
                 FROM happy_collaboration_messages WHERE id = ${id} LIMIT 1`,
@@ -295,7 +270,7 @@ export function createSqliteCollaborationStorage<Database extends AgentDatabase 
     };
     const writeMessage = async (ctx: Context, message: CollaborationMessage): Promise<void> => {
         await agentDatabaseRun(
-            dbFor(ctx),
+            ctx.db,
             sql`INSERT INTO happy_collaboration_messages
                 (id, from_agent_id, to_agent_id, text, reply_to, obligation_id, metadata_json, created_at)
                 VALUES (
@@ -318,7 +293,7 @@ export function createSqliteCollaborationStorage<Database extends AgentDatabase 
         id: string,
     ): Promise<CollaborationObligation | undefined> => {
         const rows = await agentDatabaseRows<ObligationRow>(
-            dbFor(ctx),
+            ctx.db,
             sql`SELECT id, requester_agent_id, responder_agent_id, message_id, status,
                        answer_message_id, created_at, updated_at
                 FROM happy_collaboration_obligations WHERE id = ${id} LIMIT 1`,
@@ -330,7 +305,7 @@ export function createSqliteCollaborationStorage<Database extends AgentDatabase 
         obligation: CollaborationObligation,
     ): Promise<void> => {
         await agentDatabaseRun(
-            dbFor(ctx),
+            ctx.db,
             sql`INSERT INTO happy_collaboration_obligations
                 (id, requester_agent_id, responder_agent_id, message_id, status, answer_message_id, created_at, updated_at)
                 VALUES (
@@ -366,7 +341,7 @@ export function createSqliteCollaborationStorage<Database extends AgentDatabase 
                 ? sql``
                 : sql` AND responder_agent_id = ${query.responderAgentId}`;
         const rows = await agentDatabaseRows<ObligationRow>(
-            dbFor(ctx),
+            ctx.db,
             sql`SELECT id, requester_agent_id, responder_agent_id, message_id, status,
                        answer_message_id, created_at, updated_at
                 FROM happy_collaboration_obligations
@@ -381,60 +356,17 @@ export function createSqliteCollaborationStorage<Database extends AgentDatabase 
             ...(rows.length > limit ? { nextCursor: String(offset + obligations.length) } : {}),
         };
     };
-    const inTransaction = async <Result>(
-        ctx: Context,
-        work: (txCtx: Context) => Promise<Result>,
-    ): Promise<Result> => {
-        if (activeTransactions.getStore() === true) return await work(ctx);
-        const transaction = options.transaction;
-        if (transaction === undefined) {
-            throw new Error(
-                "Collaboration database access requires an active Agent Base database or host transaction.",
-            );
-        }
-        return await transaction(ctx, async (txCtx, database) => {
-            const activeCtx = withAgentDatabase(txCtx, database);
-            return await activeTransactions.run(true, async () => await work(activeCtx));
-        });
-    };
-    const readAgentInTransaction = (ctx: Context, id: string) =>
-        inTransaction(ctx, (txCtx) => readAgent(txCtx, id));
-    const writeAgentInTransaction = (ctx: Context, value: CollaborationAgent) =>
-        inTransaction(ctx, (txCtx) => writeAgent(txCtx, value));
-    const listAgentsInTransaction = (
-        ctx: Context,
-        actingAgentId: string,
-        query: CollaborationAgentPageQuery,
-    ) => inTransaction(ctx, (txCtx) => listAgents(txCtx, actingAgentId, query));
-    const readMessageInTransaction = (ctx: Context, id: string) =>
-        inTransaction(ctx, (txCtx) => readMessage(txCtx, id));
-    const writeMessageInTransaction = (ctx: Context, value: CollaborationMessage) =>
-        inTransaction(ctx, (txCtx) => writeMessage(txCtx, value));
-    const readObligationInTransaction = (ctx: Context, id: string) =>
-        inTransaction(ctx, (txCtx) => readObligation(txCtx, id));
-    const writeObligationInTransaction = (ctx: Context, value: CollaborationObligation) =>
-        inTransaction(ctx, (txCtx) => writeObligation(txCtx, value));
-    const listObligationsInTransaction = (
-        ctx: Context,
-        actingAgentId: string,
-        query: CollaborationObligationPageQuery,
-    ) => inTransaction(ctx, (txCtx) => listObligations(txCtx, actingAgentId, query));
     const store = {
-        transaction: async (
-            ctx: Context,
-            _actingAgentId: string,
-            work: (txCtx: Context) => Promise<unknown>,
-        ) => await inTransaction(ctx, work),
-        readMessage: readMessageInTransaction,
-        writeMessage: writeMessageInTransaction,
-        readObligation: readObligationInTransaction,
-        writeObligation: writeObligationInTransaction,
-        listObligations: listObligationsInTransaction,
+        readMessage,
+        writeMessage,
+        readObligation,
+        writeObligation,
+        listObligations,
     } as CollaborationStore;
     const roster = {
-        readAgent: readAgentInTransaction,
-        writeAgent: writeAgentInTransaction,
-        listAgents: listAgentsInTransaction,
+        readAgent,
+        writeAgent,
+        listAgents,
     } as CollaborationRoster;
     return { roster, store };
 }

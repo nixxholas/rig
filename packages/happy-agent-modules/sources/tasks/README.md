@@ -10,15 +10,13 @@ pursuing, tasks are the checklist it keeps while pursuing it.
 import { Agent } from "@slopus/happy-agent-base";
 import { TasksModule } from "@slopus/happy-agent-modules";
 
-const tasks = new TasksModule({
-    transaction, // shared AgentStorage transaction supplied by the host
-});
+const tasks = new TasksModule();
 const agent = await Agent.create(ctx, { ...options, modules: [tasks] });
 ```
 
-`transaction` is required; everything else — `maxTasks`, `defaultPriority`,
-`listener`, `idFactory`, `clock`, `maxOutputCharacters`, `maxPageSize`, `onPostCommitError`,
-`eventIdFactory` — is optional and defaulted. One `TasksModule` instance serves every agent in a
+Every option — `maxTasks`, `defaultPriority`, `listener`, `idFactory`, `clock`,
+`maxOutputCharacters`, `maxPageSize`, `onPostCommitError`, and `eventIdFactory` — is optional and
+defaulted. One `TasksModule` instance serves every agent in a
 collection; each agent's list lives under its module-owned table, so different agents never see
 each other's tasks.
 
@@ -31,8 +29,8 @@ machine, so nothing here needs Auto review.
 
 - **`create_task`** — `{ title, detail?, priority?, dependsOn? }`. Creates one task and returns
   `{ task }`. The stable cuid2 tool-call ID becomes the task ID. The task write and durable tool
-  result commit in the same transaction, so a completed call is never replayed; an existing task ID
-  is always a conflict. Creation is refused past the configured `maxTasks`, for an unknown
+  result are committed by Agent Base in the same transaction; an existing task ID is always a
+  conflict. Creation is refused past the configured `maxTasks`, for an unknown
   dependency, a self-dependency, or a dependency cycle.
 - **`list_tasks`** — `{ offset?, limit? }`, both optional and bounded (`limit` up to `maxPageSize`,
   50 by default, 100 at most). Returns a `TaskPage`: `tasks`, `offset`, `limit`, `total`, and an
@@ -99,15 +97,15 @@ advisory reporting).
 
 ## Storage
 
-The module owns its `happy_agent_task_state` table. The host supplies only the common
-`AgentStorageTransaction`; public methods use that transaction and lifecycle hooks use the active
-`scope.database`. No host store or database client is injected.
+The module owns its `happy_agent_task_state` table. Runtime operations use `ctx.db`, and direct
+multi-step mutations use the nested-safe `ctx.inTx` boundary. No host store, transaction function,
+or database client is injected.
 
 - **Task list** — one bounded JSON row in `happy_agent_task_state`. The value
   is the complete `Task[]` for the agent, matching `taskListSchema` (at most `MAX_TASKS`, 500,
   items; the configured `maxTasks`, 100 by default, is enforced on top of that). Every mutation
-  reads and writes it inside the shared host transaction. Mutating tools also commit their result
-  in that transaction; the module owns no replay receipts or call-scoped idempotency keys.
+  reads and writes it inside the context transaction. Mutating tools declare
+  `transactional: true`, so Agent Base commits the state and tool result together.
 
 A stored `Task` is `{ id, title, detail?, status, priority, dependsOn, createdAt, updatedAt,
 ordering }`. Every write is re-validated against `taskListSchema` plus these invariants: task ids

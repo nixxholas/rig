@@ -15,9 +15,10 @@ export function renameProjectTool(projects: ProjectsModule, agentId: string) {
         parameters: projectRenameToolInputSchema,
         returnType: projectSchema,
         durable: true,
+        transactional: true,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, input: ProjectRenameToolInput, call) =>
-            await projects.renameFromTool(ctx, agentId, input, call),
+        execute: async (ctx, input: ProjectRenameToolInput) =>
+            await projects.rename(ctx, agentId, input),
         toLLM: (project) => [
             {
                 type: "text",

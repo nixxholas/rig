@@ -1,10 +1,7 @@
 import {
-    agentDatabase,
     agentDatabaseRows,
     agentDatabaseRun,
-    type AgentDatabase,
     type AgentModuleMigration,
-    type AgentStorageTransaction,
 } from "@slopus/happy-agent-base";
 import { sql } from "drizzle-orm";
 import type { Context } from "@steve.kite/stdlib";
@@ -80,10 +77,6 @@ export const secretsMigrations: readonly AgentModuleMigration[] = [
 ];
 
 export interface SecretDatabase {
-    readonly transaction: <Result>(
-        ctx: Context,
-        work: (ctx: Context) => Promise<Result>,
-    ) => Promise<Result>;
     readonly list: (
         ctx: Context,
         agentId: SecretAgentId,
@@ -133,25 +126,7 @@ export interface SecretDatabase {
     ) => Promise<SecretHostEnvironment>;
 }
 
-export function createSecretDatabase(
-    transaction?: AgentStorageTransaction,
-): SecretDatabase {
-    const dbFor = (ctx: Context): AgentDatabase => {
-        const database = agentDatabase(ctx);
-        if (database === undefined) {
-            throw new Error("Secrets module requires an Agent Base database context.");
-        }
-        return database;
-    };
-    const databaseFor = (ctx: Context): AgentDatabase => dbFor(ctx);
-    const runTransaction = async <Result>(
-        ctx: Context,
-        work: (ctx: Context) => Promise<Result>,
-    ): Promise<Result> => {
-        if (transaction === undefined) return await work(ctx);
-        return await transaction(ctx, async (transactionCtx) => work(transactionCtx));
-    };
-
+export function createSecretDatabase(): SecretDatabase {
     const rowReference = (row: SecretRow): SecretReference => {
         const environment = parseEnvironment(row.environment_json);
         const reference = {
@@ -178,7 +153,7 @@ export function createSecretDatabase(
         secretId: string,
     ): Promise<SecretRow | undefined> => {
         const rows = await agentDatabaseRows<SecretRow>(
-            databaseFor(ctx),
+            ctx.db,
             sql`SELECT owner_agent_id, id, description, environment_json, revision,
                        available_to_model, kind
                 FROM ${sql.raw(SECRETS_TABLE)}
@@ -189,7 +164,6 @@ export function createSecretDatabase(
     };
 
     return {
-        transaction: runTransaction,
         list: async (ctx, agentId, query) => {
             const cursor = query.cursor ?? 0;
             const clauses = [sql`owner_agent_id = ${agentId}`];
@@ -204,7 +178,7 @@ export function createSecretDatabase(
                 );
             }
             const rows = await agentDatabaseRows<SecretRow>(
-                databaseFor(ctx),
+                ctx.db,
                 sql`SELECT s.owner_agent_id, s.id, s.description, s.environment_json,
                            s.revision, s.available_to_model, s.kind
                     FROM ${sql.raw(SECRETS_TABLE)} s
@@ -229,7 +203,7 @@ export function createSecretDatabase(
         },
         attachment: async (ctx, agentId, input) => {
             const rows = await agentDatabaseRows<{ secret_id: string }>(
-                databaseFor(ctx),
+                ctx.db,
                 sql`SELECT secret_id FROM ${sql.raw(ATTACHMENTS_TABLE)}
                     WHERE owner_agent_id = ${agentId}
                       AND scope_ref = ${input.scopeRef}
@@ -255,7 +229,7 @@ export function createSecretDatabase(
                       ? incrementRevision(previous.revision)
                       : previous.revision;
             await agentDatabaseRun(
-                databaseFor(ctx),
+                ctx.db,
                 sql`INSERT INTO ${sql.raw(SECRETS_TABLE)}
                     (owner_agent_id, id, description, environment_json, revision,
                      available_to_model, kind)
@@ -301,7 +275,7 @@ export function createSecretDatabase(
                 ? incrementRevision(previous.revision)
                 : previous.revision;
             await agentDatabaseRun(
-                databaseFor(ctx),
+                ctx.db,
                 sql`UPDATE ${sql.raw(SECRETS_TABLE)}
                     SET description = ${description},
                         environment_json = ${JSON.stringify(environment)},
@@ -321,12 +295,12 @@ export function createSecretDatabase(
             const previous = await rowFor(ctx, agentId, secretId);
             if (previous === undefined) return { operation: "remove", removed: false, secretId };
             await agentDatabaseRun(
-                databaseFor(ctx),
+                ctx.db,
                 sql`DELETE FROM ${sql.raw(ATTACHMENTS_TABLE)}
                     WHERE owner_agent_id = ${agentId} AND secret_id = ${secretId}`,
             );
             await agentDatabaseRun(
-                databaseFor(ctx),
+                ctx.db,
                 sql`DELETE FROM ${sql.raw(SECRETS_TABLE)}
                     WHERE owner_agent_id = ${agentId} AND id = ${secretId}`,
             );
@@ -343,7 +317,7 @@ export function createSecretDatabase(
                 throw new Error("The secret reference does not exist.");
             }
             const existing = await agentDatabaseRows<{ secret_id: string }>(
-                databaseFor(ctx),
+                ctx.db,
                 sql`SELECT secret_id FROM ${sql.raw(ATTACHMENTS_TABLE)}
                     WHERE owner_agent_id = ${agentId}
                       AND scope_ref = ${input.scopeRef}
@@ -351,7 +325,7 @@ export function createSecretDatabase(
                     LIMIT 1`,
             );
             await agentDatabaseRun(
-                databaseFor(ctx),
+                ctx.db,
                 sql`INSERT INTO ${sql.raw(ATTACHMENTS_TABLE)}
                     (owner_agent_id, scope_ref, secret_id)
                     VALUES (${agentId}, ${input.scopeRef}, ${input.secretId})
@@ -367,7 +341,7 @@ export function createSecretDatabase(
         },
         detach: async (ctx, agentId, input) => {
             const rows = await agentDatabaseRows<{ secret_id: string }>(
-                databaseFor(ctx),
+                ctx.db,
                 sql`DELETE FROM ${sql.raw(ATTACHMENTS_TABLE)}
                     WHERE owner_agent_id = ${agentId}
                       AND scope_ref = ${input.scopeRef}
@@ -390,7 +364,7 @@ export function createSecretDatabase(
                 );
             }
             const rows = await agentDatabaseRows<{ environment_json: string }>(
-                databaseFor(ctx),
+                ctx.db,
                 sql`SELECT s.environment_json
                     FROM ${sql.raw(ATTACHMENTS_TABLE)} a
                     JOIN ${sql.raw(SECRETS_TABLE)} s

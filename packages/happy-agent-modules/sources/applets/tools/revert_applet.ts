@@ -25,9 +25,14 @@ export function revertAppletTool(applets: AppletModule, agentId: string) {
         parameters: revertAppletToolInputSchema,
         returnType: Type.Object({ applet: appletSchema }),
         durable: true,
+        transactional: true,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, { name, version }: { name: string } & AppletToolRevertInput) => ({
-            applet: await applets.revertForAgent(ctx, agentId, name, { version }),
+        execute: async (
+            ctx,
+            { name, version }: { name: string } & AppletToolRevertInput,
+            call,
+        ) => ({
+            applet: await applets.revertForAgent(ctx, agentId, name, { version }, call.id),
         }),
         toLLM: ({ applet }) => [
             {

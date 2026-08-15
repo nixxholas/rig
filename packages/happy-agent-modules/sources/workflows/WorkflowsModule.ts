@@ -1,12 +1,9 @@
 import { sql } from "drizzle-orm";
 import {
     agentDatabaseRun,
-    type AgentDatabase,
     type AgentModule,
     type AgentModuleMigration,
     type AgentModuleScope,
-    type AgentStorageTransaction,
-    type AgentToolCall,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
@@ -59,10 +56,8 @@ import {
     assertWorkflowMutationResult,
     assertWorkflowPage,
     assertWorkflowRun,
-    assertWorkflowTransactionChange,
     workflowRuntimeSchema,
     type WorkflowRuntime,
-    type WorkflowTransactionChange,
 } from "./WorkflowStore.js";
 import {
     WORKFLOWS_MIGRATION_KEY,
@@ -87,19 +82,6 @@ const maxOutputSchema = Type.Integer({
 });
 const workflowModuleOptionsSchema = Type.Object(
     {
-        transaction: Type.Function(
-            [
-                Type.Unsafe<Context>(Type.Object({}, { additionalProperties: false })),
-                Type.Function(
-                    [
-                        Type.Unsafe<Context>(Type.Object({}, { additionalProperties: false })),
-                        Type.Unknown(),
-                    ],
-                    Type.Promise(Type.Unknown()),
-                ),
-            ],
-            Type.Promise(Type.Unknown()),
-        ),
         runtime: workflowRuntimeSchema,
         idFactory: Type.Optional(
             Type.Function(
@@ -149,10 +131,6 @@ const PAGE_CURSOR_SUFFIX = `\nprev:${MAX_WORKFLOW_CURSOR}\nnext:${MAX_WORKFLOW_C
 const LOG_CURSOR_SUFFIX = `\nprev:${MAX_WORKFLOW_CURSOR}\nnext:${MAX_WORKFLOW_CURSOR}`;
 const DROP_WORKFLOW_REPLAY_TABLES_MIGRATION_KEY = "002-workflows-drop-replay-evidence";
 
-type RunToolCall = Pick<AgentToolCall<typeof workflowRunSchema>, "id" | "commit">;
-type MutationToolCall = Pick<AgentToolCall<typeof workflowMutationResultSchema>, "id" | "commit">;
-type Complete<Result> = (ctx: Context, result: Result) => Promise<Result>;
-
 export class WorkflowsModule implements AgentModule {
     readonly name = "workflows";
     readonly #store: WorkflowDatabase;
@@ -171,9 +149,9 @@ export class WorkflowsModule implements AgentModule {
     readonly migrations: readonly AgentModuleMigration[] = [
         [
             WORKFLOWS_MIGRATION_KEY,
-            async (_ctx, database) => {
+            async (ctx) => {
                 await agentDatabaseRun(
-                    database as AgentDatabase,
+                    ctx.db,
                     sql`CREATE TABLE IF NOT EXISTS ${sql.raw(WORKFLOW_RUNS_TABLE)} (
                         agent_id TEXT NOT NULL,
                         id TEXT NOT NULL,
@@ -186,12 +164,12 @@ export class WorkflowsModule implements AgentModule {
                     )`,
                 );
                 await agentDatabaseRun(
-                    database as AgentDatabase,
+                    ctx.db,
                     sql`CREATE INDEX IF NOT EXISTS ${sql.raw(`${WORKFLOW_RUNS_TABLE}_agent_status_id`)}
                         ON ${sql.raw(WORKFLOW_RUNS_TABLE)} (agent_id, status, id)`,
                 );
                 await agentDatabaseRun(
-                    database as AgentDatabase,
+                    ctx.db,
                     sql`CREATE TABLE IF NOT EXISTS ${sql.raw(WORKFLOW_LOGS_TABLE)} (
                         agent_id TEXT NOT NULL,
                         run_id TEXT NOT NULL,
@@ -201,7 +179,7 @@ export class WorkflowsModule implements AgentModule {
                     )`,
                 );
                 await agentDatabaseRun(
-                    database as AgentDatabase,
+                    ctx.db,
                     sql`CREATE TABLE IF NOT EXISTS ${sql.raw(WORKFLOW_RECEIPTS_TABLE)} (
                         agent_id TEXT NOT NULL,
                         operation_id TEXT NOT NULL,
@@ -210,7 +188,7 @@ export class WorkflowsModule implements AgentModule {
                     )`,
                 );
                 await agentDatabaseRun(
-                    database as AgentDatabase,
+                    ctx.db,
                     sql`CREATE TABLE IF NOT EXISTS ${sql.raw(WORKFLOW_PROOFS_TABLE)} (
                         agent_id TEXT NOT NULL,
                         operation_id TEXT NOT NULL,
@@ -222,13 +200,13 @@ export class WorkflowsModule implements AgentModule {
         ],
         [
             DROP_WORKFLOW_REPLAY_TABLES_MIGRATION_KEY,
-            async (_ctx, database) => {
+            async (ctx) => {
                 await agentDatabaseRun(
-                    database as AgentDatabase,
+                    ctx.db,
                     sql`DROP TABLE IF EXISTS ${sql.raw(WORKFLOW_RECEIPTS_TABLE)}`,
                 );
                 await agentDatabaseRun(
-                    database as AgentDatabase,
+                    ctx.db,
                     sql`DROP TABLE IF EXISTS ${sql.raw(WORKFLOW_PROOFS_TABLE)}`,
                 );
             },
@@ -239,10 +217,7 @@ export class WorkflowsModule implements AgentModule {
         if (!Value.Check(workflowModuleOptionsSchema, options)) {
             throw new Error("Workflow module options are invalid.");
         }
-        this.#store = createWorkflowDatabase(
-            options.runtime as WorkflowRuntime,
-            options.transaction as AgentStorageTransaction,
-        );
+        this.#store = createWorkflowDatabase(options.runtime as WorkflowRuntime);
         this.#idFactory = options.idFactory ?? (() => globalThis.crypto.randomUUID());
         this.#eventIdFactory = options.eventIdFactory ?? (() => globalThis.crypto.randomUUID());
         this.#clock = options.clock ?? Date.now;
@@ -299,7 +274,6 @@ export class WorkflowsModule implements AgentModule {
             ctx,
             agentId,
             { ...normalized, operationId },
-            async (_txCtx, run) => run,
         );
     }
 
@@ -307,11 +281,11 @@ export class WorkflowsModule implements AgentModule {
         ctx: Context,
         agentId: string,
         input: WorkflowLaunchToolInput,
-        call: RunToolCall,
+        callId: string,
     ): Promise<WorkflowRun> {
         this.#assertAgentId(agentId);
         this.#assertInput(workflowLaunchToolInputSchema, input, "workflow launch tool");
-        this.#assertId(call.id);
+        this.#assertId(callId);
         const normalizedInput = normalizeWorkflowInput(input.input);
         return await this.#launch(
             ctx,
@@ -319,9 +293,8 @@ export class WorkflowsModule implements AgentModule {
             {
                 workflow: input.workflow,
                 ...(normalizedInput === undefined ? {} : { input: normalizedInput }),
-                operationId: call.id,
+                operationId: callId,
             },
-            async (txCtx, run) => await call.commit(txCtx, run),
         );
     }
 
@@ -368,9 +341,9 @@ export class WorkflowsModule implements AgentModule {
         ctx: Context,
         agentId: string,
         input: WorkflowMutationToolInput,
-        call: MutationToolCall,
+        callId: string,
     ): Promise<WorkflowMutationResult> {
-        return await this.#toolMutation(ctx, agentId, input, call, "cancel");
+        return await this.#toolMutation(ctx, agentId, input, callId, "cancel");
     }
 
     async resume(
@@ -385,35 +358,23 @@ export class WorkflowsModule implements AgentModule {
         ctx: Context,
         agentId: string,
         input: WorkflowMutationToolInput,
-        call: MutationToolCall,
+        callId: string,
     ): Promise<WorkflowMutationResult> {
-        return await this.#toolMutation(ctx, agentId, input, call, "resume");
+        return await this.#toolMutation(ctx, agentId, input, callId, "resume");
     }
 
     async wait(ctx: Context, agentId: string, id: string): Promise<WorkflowRun> {
-        return await this.#wait(ctx, agentId, id, async (_txCtx, run) => run);
+        return await this.#wait(ctx, agentId, id);
     }
 
-    async waitForTool(
-        ctx: Context,
-        agentId: string,
-        id: string,
-        call: RunToolCall,
-    ): Promise<WorkflowRun> {
-        this.#assertId(call.id);
-        return await this.#wait(
-            ctx,
-            agentId,
-            id,
-            async (txCtx, run) => await call.commit(txCtx, run),
-        );
+    async waitForTool(ctx: Context, agentId: string, id: string): Promise<WorkflowRun> {
+        return await this.#wait(ctx, agentId, id);
     }
 
     async #wait(
         ctx: Context,
         agentId: string,
         id: string,
-        complete: Complete<WorkflowRun>,
     ): Promise<WorkflowRun> {
         this.#assertAgentId(agentId);
         this.#assertId(id);
@@ -423,25 +384,15 @@ export class WorkflowsModule implements AgentModule {
         if (!isWorkflowTerminalStatus(run.status)) {
             throw new Error("Workflow wait returned before a terminal or unavailable status.");
         }
-        let completed: WorkflowRun | undefined;
-        const change = await this.#transaction(ctx, agentId, async (txCtx) => {
+        const persisted = await ctx.inTx(async (txCtx) => {
             await this.#saveStoreRun(txCtx, run);
             const persisted = await this.#getStoreRun(txCtx, agentId, id);
             if (persisted === undefined || !sameWorkflowRunObject(persisted, run)) {
                 throw new Error("Workflow wait result was not persisted.");
             }
-            completed = await complete(txCtx, structuredClone(persisted));
-            return {
-                agentId,
-                operationId: id,
-                run: persisted,
-                changed: false,
-            };
+            return persisted;
         });
-        if (completed === undefined || !sameWorkflowRunObject(completed, change.run)) {
-            throw new Error("Workflow wait completion returned a substituted run.");
-        }
-        return structuredClone(completed);
+        return structuredClone(persisted);
     }
 
     async logs(ctx: Context, agentId: string, query: WorkflowLogQuery): Promise<WorkflowLogPage> {
@@ -520,50 +471,39 @@ export class WorkflowsModule implements AgentModule {
         ctx: Context,
         agentId: string,
         request: WorkflowLaunchRequest,
-        complete: Complete<WorkflowRun>,
     ): Promise<WorkflowRun> {
-        let completed: WorkflowRun | undefined;
-        const change = await this.#transaction(ctx, agentId, async (txCtx) => {
-            const existing = await this.#getStoreRun(txCtx, agentId, request.operationId);
-            if (existing !== undefined) {
-                throw new Error(`Workflow run "${request.operationId}" already exists.`);
-            }
-            const launched = await this.#launchStoreRun(
-                txCtx,
-                agentId,
-                structuredClone(request),
-            );
-            assertRunOwner(launched, agentId, "Workflow runtime returned a run for another agent.");
-            assertLaunchResult(launched, request);
+        const existing = await this.#getStoreRun(ctx, agentId, request.operationId);
+        if (existing !== undefined) {
+            throw new Error(`Workflow run "${request.operationId}" already exists.`);
+        }
+        const launched = await this.#launchStoreRun(ctx, agentId, structuredClone(request));
+        assertRunOwner(launched, agentId, "Workflow runtime returned a run for another agent.");
+        assertLaunchResult(launched, request);
+        const persisted = await ctx.inTx(async (txCtx) => {
+            await this.#saveStoreRun(txCtx, launched);
             const persisted = await this.#getStoreRun(txCtx, agentId, request.operationId);
             if (persisted === undefined) {
-                throw new Error("Workflow runtime did not persist the launched run.");
+                throw new Error("Workflow launch result was not persisted.");
             }
             assertRunOwner(
                 persisted,
                 agentId,
-                "Workflow runtime persisted a run for another agent.",
+                "Workflow launch persisted a run for another agent.",
             );
             assertLaunchResult(persisted, request);
             if (!sameWorkflowRunObject(launched, persisted)) {
-                throw new Error("Workflow runtime returned a launch different from storage.");
+                throw new Error("Workflow launch result differs from storage.");
             }
-            const event = await this.#createEvent(txCtx, "workflow_started", agentId, persisted);
-            completed = await complete(txCtx, structuredClone(persisted));
-            return {
-                agentId,
-                operationId: request.operationId,
-                run: persisted,
-                changed: true,
-                event,
-            };
+            await this.#createEvent(txCtx, "workflow_started", agentId, persisted);
+            return persisted;
         });
-        assertRunOwner(change.run, agentId, "Workflow transaction returned another agent's run.");
-        assertRunId(change.run, request.operationId, "Workflow transaction returned the wrong run.");
-        if (completed === undefined || !sameWorkflowRunObject(completed, change.run)) {
-            throw new Error("Workflow launch completion returned a substituted run.");
-        }
-        return structuredClone(completed);
+        assertRunOwner(persisted, agentId, "Workflow transaction returned another agent's run.");
+        assertRunId(
+            persisted,
+            request.operationId,
+            "Workflow transaction returned the wrong run.",
+        );
+        return structuredClone(persisted);
     }
 
     async #publicMutation(
@@ -580,7 +520,6 @@ export class WorkflowsModule implements AgentModule {
             agentId,
             { id: input.id, operationId },
             operation,
-            async (_txCtx, result) => result,
         );
     }
 
@@ -588,18 +527,17 @@ export class WorkflowsModule implements AgentModule {
         ctx: Context,
         agentId: string,
         input: WorkflowMutationToolInput,
-        call: MutationToolCall,
+        callId: string,
         operation: "cancel" | "resume",
     ): Promise<WorkflowMutationResult> {
         this.#assertAgentId(agentId);
         this.#assertInput(workflowMutationToolInputSchema, input, `workflow ${operation} tool`);
-        this.#assertId(call.id);
+        this.#assertId(callId);
         return await this.#mutate(
             ctx,
             agentId,
-            { id: input.id, operationId: call.id },
+            { id: input.id, operationId: callId },
             operation,
-            async (txCtx, result) => await call.commit(txCtx, result),
         );
     }
 
@@ -608,100 +546,37 @@ export class WorkflowsModule implements AgentModule {
         agentId: string,
         request: WorkflowMutationRequest,
         operation: "cancel" | "resume",
-        complete: Complete<WorkflowMutationResult>,
     ): Promise<WorkflowMutationResult> {
-        let completed: WorkflowMutationResult | undefined;
-        const change = await this.#transaction(ctx, agentId, async (txCtx) => {
-            const current = await this.#getStoreRun(txCtx, agentId, request.id);
-            if (current === undefined) throw new Error("Workflow mutation target was not found.");
-            assertRunOwner(current, agentId, "Workflow store returned another agent's run.");
-            assertRunId(current, request.id, "Workflow store returned the wrong run.");
-            let mutation: WorkflowMutationResult;
-            let after: WorkflowRun;
-            if (workflowMutationInvokesRuntime(current, operation)) {
-                mutation = await this.#mutateStoreRun(
+        const current = await this.#getStoreRun(ctx, agentId, request.id);
+        if (current === undefined) throw new Error("Workflow mutation target was not found.");
+        assertRunOwner(current, agentId, "Workflow store returned another agent's run.");
+        assertRunId(current, request.id, "Workflow store returned the wrong run.");
+        if (!workflowMutationInvokesRuntime(current, operation)) {
+            return { agentId, operationId: request.operationId, run: structuredClone(current), changed: false };
+        }
+        const mutation = await this.#mutateStoreRun(ctx, agentId, structuredClone(request), operation);
+        assertMutationOwner(mutation, agentId, request);
+        const changed = assertMutationTransition(current, mutation.run, request.id, operation);
+        if (mutation.changed !== changed) {
+            throw new Error("Workflow runtime result did not match the stored transition.");
+        }
+        return await ctx.inTx(async (txCtx) => {
+            await this.#saveStoreRun(txCtx, mutation.run);
+            if (changed) {
+                await this.#createEvent(
                     txCtx,
+                    operation === "cancel" ? "workflow_cancelled" : "workflow_updated",
                     agentId,
-                    structuredClone(request),
-                    operation,
+                    mutation.run,
                 );
-                assertMutationOwner(mutation, agentId, request);
-                const persisted = await this.#getStoreRun(txCtx, agentId, request.id);
-                if (persisted === undefined) {
-                    throw new Error("Workflow runtime removed its target run.");
-                }
-                after = persisted;
-            } else {
-                after = structuredClone(current);
-                mutation = {
-                    agentId,
-                    operationId: request.operationId,
-                    run: after,
-                    changed: false,
-                };
             }
-            const changed = assertMutationTransition(current, after, request.id, operation);
-            if (
-                mutation.changed !== changed ||
-                mutation.operationId !== request.operationId ||
-                !sameWorkflowRunObject(mutation.run, after)
-            ) {
-                throw new Error("Workflow runtime result did not match the stored transition.");
-            }
-            const result: WorkflowMutationResult = {
-                agentId,
-                operationId: request.operationId,
-                run: structuredClone(after),
-                changed,
-            };
-            completed = await complete(txCtx, structuredClone(result));
-            if (!changed) {
-                return {
-                    agentId,
-                    operationId: request.operationId,
-                    run: after,
-                    changed: false,
-                };
-            }
-            const event = await this.#createEvent(
-                txCtx,
-                operation === "cancel" ? "workflow_cancelled" : "workflow_updated",
-                agentId,
-                after,
-            );
             return {
                 agentId,
                 operationId: request.operationId,
-                run: after,
-                changed: true,
-                event,
+                run: structuredClone(mutation.run),
+                changed,
             };
         });
-        if (
-            completed === undefined ||
-            completed.agentId !== agentId ||
-            completed.operationId !== request.operationId ||
-            completed.changed !== change.changed ||
-            !sameWorkflowRunObject(completed.run, change.run)
-        ) {
-            throw new Error(`Workflow ${operation} completion returned a substituted result.`);
-        }
-        return structuredClone(completed);
-    }
-
-    async #transaction(
-        ctx: Context,
-        agentId: string,
-        work: (txCtx: Context) => Promise<WorkflowTransactionChange>,
-    ): Promise<WorkflowTransactionChange> {
-        const raw: unknown = Reflect.apply(this.#store.transaction, this.#store, [
-            ctx,
-            agentId,
-            work,
-        ]);
-        const resolved = await workflowStorePromise(raw, "transaction");
-        assertWorkflowTransactionChange(resolved);
-        return resolved;
     }
 
     async #launchStoreRun(
@@ -1164,7 +1039,8 @@ function assertExactOffsetCursors(
     if (cursor !== expectedCursor || visibleCount !== expectedCount) {
         throw new Error(`${label} page did not return the exact requested offset window.`);
     }
-    if (nextCursor !== expectedNext) throw new Error(`${label} page returned an invalid next cursor.`);
+    if (nextCursor !== expectedNext)
+        throw new Error(`${label} page returned an invalid next cursor.`);
     if (previousCursor !== expectedPrevious) {
         throw new Error(`${label} page returned an invalid previous cursor.`);
     }

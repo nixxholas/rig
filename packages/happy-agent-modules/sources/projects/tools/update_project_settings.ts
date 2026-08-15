@@ -18,9 +18,10 @@ export function updateProjectSettingsTool(projects: ProjectsModule, agentId: str
         parameters: projectSettingsUpdateToolInputSchema,
         returnType: projectSettingsUpdateResultSchema,
         durable: true,
+        transactional: true,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, input: ProjectSettingsUpdateToolInput, call) =>
-            await projects.updateSettingsFromTool(ctx, agentId, input, call),
+        execute: async (ctx, input: ProjectSettingsUpdateToolInput) =>
+            await projects.updateSettings(ctx, agentId, input),
         toLLM: (result: ProjectSettingsUpdateResult) => [
             {
                 type: "text",

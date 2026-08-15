@@ -7,7 +7,6 @@ import {
     type AgentDatabase,
     type AgentModule,
     type AgentModuleScope,
-    type AgentStorageTransaction,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
 import { Type, type Static } from "@sinclair/typebox";
@@ -35,10 +34,6 @@ import { assertHappyHost, happyHostSchema, type HappyHost } from "./HappyHost.js
 
 const exact = { additionalProperties: false } as const;
 const contextSchema = Type.Unsafe<Context>(Type.Object({}, exact));
-const transactionSchema = Type.Function(
-    [contextSchema, Type.Unknown()],
-    Type.Promise(Type.Unknown()),
-);
 const eventListenerSchema = Type.Function(
     [contextSchema, happyModuleEventSchema],
     Type.Union([Type.Void(), Type.Promise(Type.Void())]),
@@ -58,13 +53,10 @@ export const happyModuleOptionsSchema = Type.Object(
         idFactory: Type.Optional(idFactorySchema),
         listener: Type.Optional(eventListenerSchema),
         onPostCommitError: Type.Optional(errorListenerSchema),
-        transaction: transactionSchema,
     },
     exact,
 );
-export type HappyModuleOptions = Omit<Static<typeof happyModuleOptionsSchema>, "transaction"> & {
-    transaction: AgentStorageTransaction;
-};
+export type HappyModuleOptions = Static<typeof happyModuleOptionsSchema>;
 
 const migration = [
     "001-happy-state",
@@ -96,15 +88,12 @@ const migration = [
     },
 ] as const;
 
-type Completion<Result> = (ctx: Context, result: Result) => Promise<Result>;
-
 /** Durable notifications and status updates for Happy clients. */
 export class HappyModule implements AgentModule {
     readonly name = "happy";
     readonly migrations = [migration];
 
     readonly #host: HappyHost;
-    readonly #transaction: AgentStorageTransaction;
     readonly #clock: () => number;
     readonly #idFactory: () => string;
     readonly #eventIdFactory: () => string;
@@ -118,7 +107,6 @@ export class HappyModule implements AgentModule {
         }
         assertHappyHost(checked.host);
         this.#host = checked.host;
-        this.#transaction = checked.transaction;
         this.#clock = checked.clock ?? Date.now;
         this.#idFactory = checked.idFactory ?? (() => `happy-${randomUUID()}`);
         this.#eventIdFactory = checked.eventIdFactory ?? (() => `happy-event-${randomUUID()}`);
@@ -129,7 +117,7 @@ export class HappyModule implements AgentModule {
     async notify(ctx: Context, agentId: string, input: HappyNotificationInput): Promise<HappyNotification> {
         assertAgentId(agentId);
         assertInput(happyNotificationInputSchema, input, "Happy notification input");
-        return await this.#transaction(ctx, async (txCtx, database) => {
+        return await ctx.inTx(async (txCtx) => {
             const notification: HappyNotification = {
                 body: input.body,
                 createdAt: this.#clock(),
@@ -139,7 +127,7 @@ export class HappyModule implements AgentModule {
             };
             assertInput(happyNotificationSchema, notification, "Happy notification");
             await agentDatabaseRun(
-                database,
+                txCtx.db,
                 sql`INSERT INTO happy_module_notifications
                     (agent_id, operation_id, notification_id, title, body, level, created_at)
                     VALUES (${agentId}, ${notification.id}, ${notification.id},
@@ -161,20 +149,10 @@ export class HappyModule implements AgentModule {
     }
 
     async setStatus(ctx: Context, agentId: string, input: HappyStatusInput): Promise<HappyStatusRecord> {
-        return await this.#setStatus(ctx, agentId, input, this.#idFactory());
-    }
-
-    async #setStatus(
-        ctx: Context,
-        agentId: string,
-        input: HappyStatusInput,
-        operationId: string,
-        complete?: Completion<HappyStatusRecord>,
-    ): Promise<HappyStatusRecord> {
         assertAgentId(agentId);
         assertInput(happyStatusInputSchema, input, "Happy status input");
-        return await this.#transaction(ctx, async (txCtx, database) => {
-            const previous = await this.#findStatus(database, agentId);
+        return await ctx.inTx(async (txCtx) => {
+            const previous = await this.#findStatus(txCtx, agentId);
             const current: HappyStatusRecord = {
                 agentId,
                 status: input.status,
@@ -185,10 +163,10 @@ export class HappyModule implements AgentModule {
                 previous !== undefined && sameStatus(previous, current) ? previous : current;
             if (result === current) {
                 await agentDatabaseRun(
-                    database,
+                    txCtx.db,
                     sql`INSERT INTO happy_module_status
                         (agent_id, operation_id, status, message, updated_at)
-                        VALUES (${agentId}, ${operationId}, ${current.status},
+                        VALUES (${agentId}, ${this.#idFactory()}, ${current.status},
                             ${current.message ?? null}, ${current.updatedAt})
                         ON CONFLICT (agent_id) DO UPDATE SET status = excluded.status,
                             operation_id = excluded.operation_id,
@@ -206,15 +184,13 @@ export class HappyModule implements AgentModule {
                     assertInput(happyDeliveryResultSchema, delivery, "Happy delivery result");
                 });
             }
-            return complete === undefined ? result : await complete(txCtx, result);
+            return result;
         });
     }
 
     async getStatus(ctx: Context, agentId: string): Promise<HappyStatusRecord | undefined> {
         assertAgentId(agentId);
-        return await this.#transaction(ctx, async (_txCtx, database) =>
-            await this.#findStatus(database, agentId),
-        );
+        return await this.#findStatus(ctx, agentId);
     }
 
     async listNotifications(
@@ -226,15 +202,13 @@ export class HappyModule implements AgentModule {
         if (!Number.isInteger(limit) || limit < 1 || limit > MAX_HAPPY_NOTIFICATIONS) {
             throw new Error("Happy notification limit is invalid.");
         }
-        const rows = await this.#transaction(ctx, async (_txCtx, database) =>
-            await agentDatabaseRows<NotificationRow>(
-                database,
-                sql`SELECT notification_id, title, body, level, created_at
-                    FROM happy_module_notifications
-                    WHERE agent_id = ${agentId}
-                    ORDER BY created_at DESC
-                    LIMIT ${limit}`,
-            ),
+        const rows = await agentDatabaseRows<NotificationRow>(
+            ctx.db,
+            sql`SELECT notification_id, title, body, level, created_at
+                FROM happy_module_notifications
+                WHERE agent_id = ${agentId}
+                ORDER BY created_at DESC
+                LIMIT ${limit}`,
         );
         return rows.map((row) => parseNotification(row));
     }
@@ -249,6 +223,7 @@ export class HappyModule implements AgentModule {
             parameters: happyNotificationToolInputSchema,
             returnType: happyNotificationSchema,
             durable: false,
+            transactional: true,
             shouldReviewInAutoMode: () => false,
             execute: async (ctx, input) => await this.notify(ctx, scope.agent.id, input),
             toLLM: (result) => [{ type: "text", text: formatNotification(result) }],
@@ -259,15 +234,10 @@ export class HappyModule implements AgentModule {
             parameters: happyStatusToolInputSchema,
             returnType: happyStatusRecordSchema,
             durable: true,
+            transactional: true,
             shouldReviewInAutoMode: () => false,
-            execute: async (ctx, input, call) =>
-                await this.#setStatus(
-                    ctx,
-                    scope.agent.id,
-                    input,
-                    call.id,
-                    async (txCtx, result) => await call.commit(txCtx, result),
-                ),
+            execute: async (ctx, input) =>
+                await this.setStatus(ctx, scope.agent.id, input),
             toLLM: (result) => [{ type: "text", text: formatStatus(result) }],
         }),
         defineAgentTool({
@@ -282,11 +252,11 @@ export class HappyModule implements AgentModule {
     ];
 
     async #findStatus(
-        database: AgentDatabase,
+        ctx: Context,
         agentId: string,
     ): Promise<HappyStatusRecord | undefined> {
         const rows = await agentDatabaseRows<StatusRow>(
-            database,
+            ctx.db,
             sql`SELECT agent_id, operation_id, status, message, updated_at
                 FROM happy_module_status WHERE agent_id = ${agentId} LIMIT 1`,
         );
@@ -333,7 +303,6 @@ function materializeOptions(options: HappyModuleOptions): HappyModuleOptions {
     return {
         ...options,
         host: { notify: options.host.notify, setStatus: options.host.setStatus },
-        transaction: options.transaction,
     };
 }
 

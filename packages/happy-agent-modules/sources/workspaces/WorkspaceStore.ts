@@ -1,10 +1,8 @@
 import { sql } from "drizzle-orm";
 import {
-    agentDatabase,
     agentDatabaseRows,
     agentDatabaseRun,
     type AgentDatabase,
-    type AgentStorageTransaction,
 } from "@slopus/happy-agent-base";
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
@@ -107,10 +105,6 @@ export const workspaceTransactionChangeSchema = Type.Object(
     { additionalProperties: false },
 );
 
-const workspaceTransactionWorkSchema = Type.Function(
-    [workspaceContextSchema],
-    Type.Promise(workspaceTransactionChangeSchema),
-);
 export const workspaceAuthorizationActionSchema = Type.Union([
     Type.Literal("list"),
     Type.Literal("get"),
@@ -141,10 +135,6 @@ export type WorkspaceAuthorization = Static<typeof workspaceAuthorizationSchema>
  */
 export const workspaceStoreSchema = Type.Object(
     {
-        transaction: Type.Function(
-            [workspaceContextSchema, workspaceAgentIdSchema, workspaceTransactionWorkSchema],
-            Type.Promise(workspaceTransactionChangeSchema),
-        ),
         create: Type.Function(
             [
                 workspaceContextSchema,
@@ -300,7 +290,6 @@ export type WorkspaceHost = Static<typeof workspaceHostSchema>;
 
 type WorkspaceStoreOptions = {
     readonly host?: WorkspaceHost;
-    readonly transaction?: AgentStorageTransaction;
 };
 
 type WorkspaceRow = {
@@ -380,26 +369,7 @@ export const workspaceMigrations = [
 ] as const;
 
 export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): WorkspaceStore {
-    const databaseFor = (ctx: Context): AgentDatabase => {
-        const database = agentDatabase(ctx);
-        if (database === undefined) {
-            throw new Error("Workspaces module requires an Agent Base database context.");
-        }
-        return database;
-    };
-    const runTransaction = async (
-        ctx: Context,
-        _agentId: string,
-        work: (txCtx: Context) => Promise<WorkspaceTransactionChange>,
-    ): Promise<WorkspaceTransactionChange> => {
-        if (options.transaction === undefined) {
-            return await work(ctx);
-        }
-        return await options.transaction(ctx, async (txCtx) => await work(txCtx));
-    };
-
     return {
-        transaction: runTransaction,
         create: async (ctx, actingAgentId, input, operation) => {
             const at = Date.now();
             const workspace: Workspace = {
@@ -414,7 +384,7 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
             };
             assertWorkspace(workspace);
             await agentDatabaseRun(
-                databaseFor(ctx),
+                ctx.db,
                 sql`INSERT INTO ${sql.raw(WORKSPACES_TABLE)} (
                     id, owner_agent_id, project_ref, base_ref, name, status,
                     created_at, updated_at, archived_at
@@ -435,7 +405,7 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
         list: async (ctx, _agentId, query) => {
             const offset = query.cursor === undefined ? 0 : Number(query.cursor);
             const limit = query.limit ?? 50;
-            const database = databaseFor(ctx);
+            const database = ctx.db;
             const rows = await agentDatabaseRows<WorkspaceRow>(
                 database,
                 query.projectRef === undefined
@@ -463,7 +433,7 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
         },
         get: async (ctx, _agentId, workspaceId) => {
             const rows = await agentDatabaseRows<WorkspaceRow>(
-                databaseFor(ctx),
+                ctx.db,
                 sql`SELECT * FROM ${sql.raw(WORKSPACES_TABLE)}
                     WHERE id = ${workspaceId} LIMIT 1`,
             );
@@ -471,7 +441,7 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
             return row === undefined ? undefined : workspaceFromRow(row);
         },
         transfer: async (ctx, actingAgentId, input, operation) => {
-            const database = databaseFor(ctx);
+            const database = ctx.db;
             const hostResult =
                 options.host === undefined
                     ? undefined
@@ -517,7 +487,7 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
             return result;
         },
         archive: async (ctx, actingAgentId, input, operation) => {
-            const database = databaseFor(ctx);
+            const database = ctx.db;
             const before = await readWorkspace(database, input.workspaceId);
             if (before === undefined)
                 throw new Error(`Workspace "${input.workspaceId}" was not found.`);

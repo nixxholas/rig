@@ -1,14 +1,9 @@
 import { sql } from "drizzle-orm";
 import {
-    agentKV,
-    agentDatabase,
     agentDatabaseRows,
     agentDatabaseRun,
-    withAgentDatabase,
-    type AgentDatabase,
-    type AgentDatabaseFacade,
 } from "@slopus/happy-agent-base";
-import { withAfterCommit, type Context } from "@steve.kite/stdlib";
+import type { Context } from "@steve.kite/stdlib";
 import { Value } from "@sinclair/typebox/value";
 
 import {
@@ -42,50 +37,16 @@ export const WORKLETS_DROP_REPLAY_EVIDENCE_MIGRATION_KEY =
     "002-worklets-drop-replay-evidence";
 
 type JsonRow = { readonly value_json: string };
-type DatabaseRoot = AgentDatabase & {
-    transaction: <Result>(
-        work: (database: AgentDatabaseFacade<AgentDatabase>) => Promise<Result>,
-    ) => Promise<Result>;
-};
-export type WorkletDatabase = Omit<WorkletCatalog, "afterCommit" | "onRollback">;
+export type WorkletDatabase = WorkletCatalog;
 
 export function createWorkletDatabase(): WorkletDatabase {
-    const databaseFor = (ctx: Context): AgentDatabase => {
-        const database = agentDatabase(ctx);
-        if (database === undefined) {
-            throw new Error("Worklets module requires an Agent Base database context.");
-        }
-        return database;
-    };
-    const transaction = async <Result>(
-        ctx: Context,
-        work: (ctx: Context) => Promise<Result>,
-    ): Promise<Result> => {
-        const kv = agentKV(ctx);
-        if (kv !== undefined) {
-            return await kv.transaction(ctx, async (_scope, txCtx) => await work(txCtx));
-        }
-        const root = databaseFor(ctx) as DatabaseRoot;
-        if (typeof root.transaction !== "function") {
-            return await work(ctx);
-        }
-        let drain: (() => Promise<void>) | undefined;
-        const result = await root.transaction(async (database) => {
-            const [commitCtx, runAfterCommit] = withAfterCommit(ctx);
-            drain = runAfterCommit;
-            return await work(withAgentDatabase(commitCtx, database));
-        });
-        await drain?.();
-        return result;
-    };
-
     const readJson = async <ValueType>(
         ctx: Context,
         query: ReturnType<typeof sql>,
         label: string,
         validate: (value: unknown) => asserts value is ValueType,
     ): Promise<ValueType | undefined> => {
-        const row = (await agentDatabaseRows<JsonRow>(databaseFor(ctx), query))[0];
+        const row = (await agentDatabaseRows<JsonRow>(ctx.db, query))[0];
         if (row === undefined) return undefined;
         let parsed: unknown;
         try {
@@ -109,7 +70,6 @@ export function createWorkletDatabase(): WorkletDatabase {
         );
 
     return {
-        transaction,
         list: async (ctx, query) => {
             if (!Value.Check(workletListQuerySchema, query)) {
                 throw new Error("Worklet list query is invalid.");
@@ -118,7 +78,7 @@ export function createWorkletDatabase(): WorkletDatabase {
             const requested = query.cursor ?? 0;
             const offset = Number.isSafeInteger(requested) && requested >= 0 ? requested : 0;
             const rows = await agentDatabaseRows<JsonRow>(
-                databaseFor(ctx),
+                ctx.db,
                 sql`SELECT worklet_json AS value_json
                     FROM ${sql.raw(WORKLET_TABLE)}
                     ORDER BY name
@@ -169,7 +129,7 @@ export function createWorkletDatabase(): WorkletDatabase {
             };
             assertWorklet(worklet);
             await agentDatabaseRun(
-                databaseFor(ctx),
+                ctx.db,
                 sql`INSERT INTO ${sql.raw(WORKLET_TABLE)} (name, worklet_json)
                     VALUES (${worklet.name}, ${JSON.stringify(worklet)})`,
             );
@@ -218,7 +178,7 @@ export function createWorkletDatabase(): WorkletDatabase {
             };
             assertWorklet(worklet);
             await agentDatabaseRun(
-                databaseFor(ctx),
+                ctx.db,
                 sql`UPDATE ${sql.raw(WORKLET_TABLE)}
                     SET worklet_json = ${JSON.stringify(worklet)}
                     WHERE name = ${name}`,
@@ -258,7 +218,7 @@ export function createWorkletDatabase(): WorkletDatabase {
             assertWorklet(worklet);
             if (changed) {
                 await agentDatabaseRun(
-                    databaseFor(ctx),
+                    ctx.db,
                     sql`UPDATE ${sql.raw(WORKLET_TABLE)}
                         SET worklet_json = ${JSON.stringify(worklet)}
                         WHERE name = ${name}`,
@@ -286,7 +246,7 @@ export function createWorkletDatabase(): WorkletDatabase {
             const existing = await get(ctx, name);
             if (existing !== undefined) {
                 await agentDatabaseRun(
-                    databaseFor(ctx),
+                    ctx.db,
                     sql`DELETE FROM ${sql.raw(WORKLET_TABLE)} WHERE name = ${name}`,
                 );
             }

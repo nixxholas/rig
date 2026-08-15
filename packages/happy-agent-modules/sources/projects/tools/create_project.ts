@@ -16,8 +16,9 @@ export function createProjectTool(projects: ProjectsModule, agentId: string) {
         returnType: projectSchema,
         durable: true,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, input: ProjectCreateToolInput, call) =>
-            await projects.create(ctx, agentId, input, call),
+        transactional: true,
+        execute: async (ctx, input: ProjectCreateToolInput) =>
+            await projects.create(ctx, agentId, input),
         toLLM: (project) => [
             {
                 type: "text",

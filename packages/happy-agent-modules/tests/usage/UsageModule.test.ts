@@ -1,13 +1,11 @@
-import { agentDatabaseRows, type AgentStorageTransaction } from "@slopus/happy-agent-base";
-import { createRootContext, withAfterCommit, type Context } from "@steve.kite/stdlib";
+import { agentDatabaseRows } from "@slopus/happy-agent-base";
+import { withAfterCommit, type Context } from "@steve.kite/stdlib";
 import { sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 
 import { UsageModule } from "../../sources/usage/UsageModule.js";
 import type { UsageEvent } from "../../sources/usage/UsageEvent.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
-
-const ctx = createRootContext().named("usage-module-test");
 
 class FakeKV {
     readonly values = new Map<string, unknown>();
@@ -43,7 +41,10 @@ function scope(database: ReturnType<typeof moduleDatabase>["database"], runKV: F
     } as never;
 }
 
-async function inCompletion(work: (txCtx: Context) => Promise<void>): Promise<void> {
+async function inCompletion(
+    ctx: Context,
+    work: (txCtx: Context) => Promise<void>,
+): Promise<void> {
     const [txCtx, drain] = withAfterCommit(ctx);
     await work(txCtx);
     await drain();
@@ -52,18 +53,10 @@ async function inCompletion(work: (txCtx: Context) => Promise<void>): Promise<vo
 describe("UsageModule", () => {
     it("uses Base inference and turn IDs inside the ambient completion transaction", async () => {
         const database = moduleDatabase([], "usage-base-identities");
-        let transactionCalls = 0;
-        const transaction: AgentStorageTransaction = async (transactionCtx, work) => {
-            transactionCalls++;
-            const [txCtx, drain] = withAfterCommit(transactionCtx);
-            const result = await work(txCtx, database.database);
-            await drain();
-            return result;
-        };
+        const ctx = database.context;
         let now = 100;
         const events: UsageEvent[] = [];
         const module = new UsageModule({
-            transaction,
             clock: () => now,
             listener: {
                 onEventTransactional: (_eventCtx, event) => {
@@ -89,7 +82,7 @@ describe("UsageModule", () => {
             contextTokens: undefined,
         });
         now = 150;
-        await inCompletion(async (txCtx) => {
+        await inCompletion(ctx, async (txCtx) => {
             await module.afterInferenceTransact!(txCtx, agentScope, {
                 loopId: "loop-1",
                 turnId: "turn-base-id",
@@ -100,7 +93,7 @@ describe("UsageModule", () => {
             });
         });
         now = 175;
-        await inCompletion(async (txCtx) => {
+        await inCompletion(ctx, async (txCtx) => {
             await module.afterTurnTransact!(txCtx, agentScope, {
                 loopId: "loop-1",
                 turnId: "turn-base-id",
@@ -109,9 +102,7 @@ describe("UsageModule", () => {
             });
         });
 
-        expect(transactionCalls).toBe(0);
         const page = await module.readPage(ctx, "agent-1");
-        expect(transactionCalls).toBe(1);
         expect(page.records).toMatchObject([
             {
                 id: "inference-base-id",
@@ -140,15 +131,9 @@ describe("UsageModule", () => {
 
     it("drops reset receipts and performs each reset as an ordinary mutation", async () => {
         const database = moduleDatabase([], "usage-reset");
-        const transaction: AgentStorageTransaction = async (transactionCtx, work) => {
-            const [txCtx, drain] = withAfterCommit(transactionCtx);
-            const result = await work(txCtx, database.database);
-            await drain();
-            return result;
-        };
+        const ctx = database.context;
         let nextEventId = 0;
         const module = new UsageModule({
-            transaction,
             clock: () => 100,
             idFactory: () => `reset-event-${nextEventId++}`,
         });
@@ -176,7 +161,7 @@ describe("UsageModule", () => {
             inferenceId: "inference-1",
             contextTokens: undefined,
         });
-        await inCompletion(async (txCtx) => {
+        await inCompletion(ctx, async (txCtx) => {
             await module.afterInferenceTransact!(txCtx, agentScope, {
                 loopId: "loop-1",
                 turnId: "turn-1",
@@ -194,7 +179,7 @@ describe("UsageModule", () => {
             inferenceId: "inference-2",
             contextTokens: undefined,
         });
-        await inCompletion(async (txCtx) => {
+        await inCompletion(ctx, async (txCtx) => {
             await module.afterInferenceTransact!(txCtx, agentScope, {
                 loopId: "loop-2",
                 turnId: "turn-2",

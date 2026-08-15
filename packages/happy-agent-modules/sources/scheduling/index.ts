@@ -120,5 +120,4 @@ export { waitUntilTool } from "./tools/wait_until.js";
 export {
     createSqliteSchedulingStorage,
     schedulingMigrations,
-    type SqliteSchedulingStorageOptions,
 } from "./SqliteSchedulingStorage.js";

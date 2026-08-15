@@ -1,7 +1,6 @@
 import {
     type AgentModule,
     type AgentModuleScope,
-    type AgentStorageTransaction,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
@@ -82,10 +81,6 @@ const eventFactorySchema = Type.Function(
 );
 
 const clockSchema = Type.Function([], secretEventTimestampSchema);
-const secretTransactionSchema = Type.Unsafe<AgentStorageTransaction>(
-    Type.Function([secretContextSchema, Type.Unknown()], Type.Promise(Type.Unknown())),
-);
-
 const postCommitErrorSchema = Type.Function(
     [secretContextSchema, secretEventSchema, Type.Unknown()],
     Type.Union([Type.Void(), Type.Promise(Type.Unknown())]),
@@ -93,7 +88,6 @@ const postCommitErrorSchema = Type.Function(
 
 const secretModuleOptionsSchema = Type.Object(
     {
-        transaction: Type.Optional(secretTransactionSchema),
         resolveForHost: Type.Optional(secretResolverSchema),
         idFactory: Type.Optional(idFactorySchema),
         eventIdFactory: Type.Optional(eventFactorySchema),
@@ -114,12 +108,7 @@ const secretModuleOptionsSchema = Type.Object(
 
 /** Public constructor validation schema. */
 export { secretModuleOptionsSchema };
-export type SecretsModuleOptions = Omit<
-    Static<typeof secretModuleOptionsSchema>,
-    "transaction"
-> & {
-    readonly transaction?: AgentStorageTransaction;
-};
+export type SecretsModuleOptions = Static<typeof secretModuleOptionsSchema>;
 
 type SecretIdFactory = Static<typeof idFactorySchema>;
 type SecretEventFactory = Static<typeof eventFactorySchema>;
@@ -157,7 +146,7 @@ export class SecretsModule implements AgentModule {
 
     constructor(options: SecretsModuleOptions = {}) {
         assertSecretsModuleOptions(options);
-        this.#store = createSecretDatabase(options.transaction);
+        this.#store = createSecretDatabase();
         this.#resolver = options.resolveForHost;
         this.#idFactory = options.idFactory ?? (() => globalThis.crypto.randomUUID());
         this.#eventIdFactory = options.eventIdFactory ?? (() => globalThis.crypto.randomUUID());
@@ -191,9 +180,7 @@ export class SecretsModule implements AgentModule {
         this.#assertInput(secretListInputSchema, query, "list query");
         await this.#authorizeOperation(ctx, actingAgentId, "list", query.scopeRef);
         const normalized = this.#listQuery(query);
-        const page = await this.#store.transaction(ctx, (txCtx) =>
-            this.#readPage(txCtx, actingAgentId, normalized),
-        );
+        const page = await this.#readPage(ctx, actingAgentId, normalized);
         for (let count = page.secrets.length; count >= 1; count -= 1) {
             const candidate: SecretPage = {
                 secrets: page.secrets.slice(0, count),
@@ -222,9 +209,7 @@ export class SecretsModule implements AgentModule {
         this.#assertAgentId(actingAgentId);
         this.#assertSecretId(secretId);
         await this.#authorizeOperation(ctx, actingAgentId, "reference");
-        const value = await this.#store.transaction(ctx, txCtx =>
-            this.#reference(txCtx, actingAgentId, secretId),
-        );
+        const value = await this.#reference(ctx, actingAgentId, secretId);
         if (value === undefined) return undefined;
         const reference = this.#normalizeReference(value);
         if (reference.id !== secretId) {
@@ -558,13 +543,11 @@ export class SecretsModule implements AgentModule {
         }
         const environment =
             this.#resolver === undefined
-                ? await this.#store.transaction(ctx, txCtx =>
-                      this.#store.resolveForHost(
-                          txCtx,
-                          actingAgentId,
-                          scopeRef,
-                          secretIds === undefined ? undefined : structuredClone(secretIds),
-                      ),
+                ? await this.#store.resolveForHost(
+                      ctx,
+                      actingAgentId,
+                      scopeRef,
+                      secretIds === undefined ? undefined : structuredClone(secretIds),
                   )
                 : await this.#resolver(
                       ctx,
@@ -710,7 +693,7 @@ export class SecretsModule implements AgentModule {
         _operation: string,
         work: (txCtx: Context) => Promise<SecretChange<Result>>,
     ): Promise<Result> {
-        return await this.#store.transaction(ctx, async (txCtx) => {
+        return await ctx.inTx(async (txCtx) => {
             const change = await work(txCtx);
             if (change.event !== undefined) {
                 await this.#observe(txCtx, change.event);

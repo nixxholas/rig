@@ -1,7 +1,6 @@
 import {
     type AgentModule,
     type AgentModuleScope,
-    type AgentStorageTransaction,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
 import { Type, type Static } from "@sinclair/typebox";
@@ -113,9 +112,6 @@ export const workspacePostCommitErrorSchema = Type.Function(
     [workspaceContextSchema, workspaceEventSchema, Type.Unknown()],
     Type.Union([Type.Void(), Type.Promise(Type.Void())]),
 );
-const workspaceTransactionSchema = Type.Unsafe<AgentStorageTransaction>(
-    Type.Function([Type.Unknown(), Type.Unknown()], Type.Promise(Type.Unknown())),
-);
 const workspaceMaxPageSizeSchema = Type.Integer({
     minimum: 1,
     maximum: MAX_WORKSPACE_PAGE_SIZE,
@@ -127,7 +123,6 @@ const workspaceMaxOutputSchema = Type.Integer({
 
 export const workspaceModuleOptionsSchema = Type.Object(
     {
-        transaction: Type.Optional(workspaceTransactionSchema),
         host: Type.Optional(workspaceHostSchema),
         authorization: Type.Optional(workspaceAuthorizationSchema),
         idFactory: Type.Optional(workspaceIdFactorySchema),
@@ -141,19 +136,13 @@ export const workspaceModuleOptionsSchema = Type.Object(
     { additionalProperties: false },
 );
 
-export type WorkspaceModuleOptions = Omit<
-    Static<typeof workspaceModuleOptionsSchema>,
-    "transaction"
-> & {
-    readonly transaction?: AgentStorageTransaction;
-};
+export type WorkspaceModuleOptions = Static<typeof workspaceModuleOptionsSchema>;
 
 type WorkspaceChange = WorkspaceTransactionChange;
 type WorkspaceOperation = {
     readonly kind: WorkspaceMutationOperation;
     readonly operationId: string;
 };
-type WorkspaceCommit<Result> = (ctx: Context, result: Result) => Result | Promise<Result>;
 
 export class WorkspacesModule implements AgentModule {
     readonly name = "workspaces";
@@ -173,7 +162,6 @@ export class WorkspacesModule implements AgentModule {
         assertWorkspaceModuleOptions(options);
         this.#store = createWorkspaceStore({
             ...(options.host === undefined ? {} : { host: options.host }),
-            ...(options.transaction === undefined ? {} : { transaction: options.transaction }),
         });
         this.#authorization = options.authorization;
         this.#idFactory =
@@ -205,7 +193,6 @@ export class WorkspacesModule implements AgentModule {
         ctx: Context,
         agentId: string,
         input: WorkspaceCreateInput,
-        commit?: WorkspaceCommit<Workspace>,
     ): Promise<Workspace> {
         this.#assertAgentId(agentId);
         this.#assertInput(workspaceCreateInputSchema, input, "workspace creation");
@@ -253,9 +240,6 @@ export class WorkspacesModule implements AgentModule {
                 throw new Error("Workspace create changed flag is not authoritative.");
             }
             const result = structuredClone(raw);
-            if (commit !== undefined) {
-                await commit(txCtx, structuredClone(after));
-            }
             if (changed) {
                 const event = await this.#newEvent(txCtx, agentId, {
                     type: "workspace_created",
@@ -377,7 +361,6 @@ export class WorkspacesModule implements AgentModule {
         ctx: Context,
         agentId: string,
         input: WorkspaceTransferInput,
-        commit?: WorkspaceCommit<WorkspaceTransferResult>,
     ): Promise<WorkspaceTransferResult> {
         this.#assertAgentId(agentId);
         this.#assertInput(workspaceTransferInputSchema, input, "workspace transfer");
@@ -488,9 +471,6 @@ export class WorkspacesModule implements AgentModule {
             } else if (reconciledResult.changed !== expectedChanged) {
                 throw new Error("Workspace transfer changed flag is not authoritative.");
             }
-            if (commit !== undefined) {
-                await commit(txCtx, structuredClone(reconciledResult));
-            }
             if (reconciledResult.changed) {
                 const event =
                     reconciledResult.state === "scheduled"
@@ -520,7 +500,6 @@ export class WorkspacesModule implements AgentModule {
         agentId: string,
         workspaceId: string,
         options?: WorkspaceArchiveOptions,
-        commit?: WorkspaceCommit<Workspace>,
     ): Promise<Workspace> {
         this.#assertAgentId(agentId);
         this.#assertId(workspaceId, "workspace");
@@ -558,9 +537,6 @@ export class WorkspacesModule implements AgentModule {
                 throw new Error("Workspace archive changed flag is not authoritative.");
             }
             const result = structuredClone(raw);
-            if (commit !== undefined) {
-                await commit(txCtx, structuredClone(after));
-            }
             if (changed) {
                 const event = await this.#newEvent(txCtx, agentId, {
                     type: "workspace_archived",
@@ -806,7 +782,7 @@ export class WorkspacesModule implements AgentModule {
     ): Promise<WorkspaceChange> {
         let expected: WorkspaceChange | undefined;
         const raw = await requirePromise(
-            this.#store.transaction(ctx, agentId, async (txCtx) => {
+            ctx.inTx(async (txCtx) => {
                 const change = await work(txCtx);
                 expected = deepFreeze(structuredClone(change));
                 return structuredClone(expected);

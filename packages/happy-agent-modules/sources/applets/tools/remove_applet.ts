@@ -16,9 +16,10 @@ export function removeAppletTool(applets: AppletModule, agentId: string) {
         description: "Remove an applet from the host catalog.",
         parameters: removeAppletInputSchema,
         returnType: Type.Boolean(),
-        durable: true,
+        durable: false,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, { name }) => await applets.removeForAgent(ctx, agentId, name),
+        execute: async (ctx, { name }, call) =>
+            await applets.removeForAgent(ctx, agentId, name, call.id),
         toLLM: (removed) => [{ type: "text", text: applets.formatRemovalForModel(removed) }],
     });
 }

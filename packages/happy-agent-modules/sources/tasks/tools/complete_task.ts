@@ -14,19 +14,10 @@ export function completeTaskTool(tasks: TasksModule, agentId: string) {
         parameters: completeTaskInputSchema,
         returnType: Type.Object({ task: taskSchema }),
         durable: true,
+        transactional: true,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, { id }, call) => {
-            const task = await tasks.complete(
-                ctx,
-                agentId,
-                id,
-                async (txCtx, completed) =>
-                    (
-                        await call.commit(txCtx, {
-                            task: completed,
-                        })
-                    ).task,
-            );
+        execute: async (ctx, { id }) => {
+            const task = await tasks.complete(ctx, agentId, id);
             return { task };
         },
         toLLM: ({ task }) => [

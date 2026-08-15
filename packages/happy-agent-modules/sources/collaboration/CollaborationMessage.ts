@@ -108,7 +108,7 @@ const collaborationSendCommonProperties = {
 
 /**
  * A send either starts a reply obligation or is a plain message. Replies have their own public
- * operation so callers cannot accidentally answer an unrelated obligation.
+ * input so callers cannot accidentally answer an unrelated obligation.
  */
 export const collaborationSendInputSchema = Type.Union([
     Type.Object(
@@ -127,7 +127,7 @@ export const collaborationSendInputSchema = Type.Union([
     ),
 ]);
 
-/** Model input omits module-owned operation and message identities. */
+/** Model input omits the module-owned message identity. */
 export const collaborationSendToolInputSchema = Type.Union([
     Type.Object(
         {
@@ -160,7 +160,7 @@ export const collaborationReplyInputSchema = Type.Object(
     { additionalProperties: false },
 );
 
-/** Model input omits module-owned operation and message identities. */
+/** Model input omits the module-owned message identity. */
 export const collaborationReplyToolInputSchema = Type.Omit(collaborationReplyInputSchema, [
     "messageId",
 ]);
@@ -172,7 +172,7 @@ export const collaborationWaitInputSchema = Type.Object(
     { additionalProperties: false },
 );
 
-/** Model input omits the module-owned durable operation identity. */
+/** Model input contains only the reply obligation identity supplied by the caller. */
 export const collaborationWaitToolInputSchema = collaborationWaitInputSchema;
 
 export const collaborationSendResultSchema = Type.Object(

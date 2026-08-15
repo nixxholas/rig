@@ -72,9 +72,10 @@ race grants no privilege Rig was withholding.
 ## Module database and runtime
 
 The module owns durable worklet rows, contiguous version history, the
-current-version pointer, replay receipts, immutable mutation proofs, bounded
-catalog paging, and its ordered database migration. It does not stage, commit,
-or roll back source imports through an injected catalog — the module owns the
+current-version pointer, bounded catalog paging, and its ordered database
+migrations. The follow-up migration drops the obsolete receipt and proof
+tables without rewriting the original migration. The module does not stage,
+commit, or roll back source imports through an injected catalog — it owns the
 filesystem.
 
 `WorkletRuntime` reports bounded status and logs and invokes one declared
@@ -83,8 +84,7 @@ declaration before crossing this boundary.
 
 ## Common tools
 
-All nine tools are provider-neutral, durable, and do not request Auto-mode
-review:
+All nine tools are provider-neutral and do not request Auto-mode review:
 
 - `install_worklet`
 - `list_worklets`
@@ -105,31 +105,17 @@ the model-facing formatter.
 
 ## Durability and access
 
-Install, update, revert, and remove receive a module-owned operation identity.
-When a durable tool omits it, the module allocates and retains the identity
-and request fingerprint in the call-scoped Agent Base `AgentKV`. The module
-database stores a replay receipt and an independent before/after proof. Replays
-verify both pieces of evidence and inspect the authoritative database without
-reapplying the transition or repeating the filesystem work. A later opposite
-transition is preserved; replay returns the original durable result and never
-removes or reinstalls the newer state. A host call outside a durable tool must
-provide its own operation ID; the module will not mint a retry identity
-without a call-scoped `AgentKV`.
+Install, update, and revert are durable tools. They use Agent Base's supplied
+cuid2 call ID as the worklet operation identity and set `transactional: true`,
+so Agent Base owns the single transaction covering execution, validation,
+rendering, durable writes, and result completion. Direct host mutations use
+the same nested-safe `ctx.inTx` boundary. The module has no receipt, proof,
+fingerprint, or operation-state layer of its own.
 
-Proofs retain compact state identities and full-record fingerprints. Receipts
-retain only the settled state identity plus the introduced version (and a
-pointer to its preceding version receipt); replay reconstructs the original
-result from that bounded chain after checking the authoritative database. This
-keeps receipt storage proportional to the version history rather than copying
-the complete history into every receipt. Catalog list pages are also bounded
-by an aggregate encoded-byte cap, reducing an oversized page before it is
-returned to an agent.
-
-Removal cleanup is recoverable from that durable receipt and proof: if a
-process exits before its post-commit cleanup callback runs, replaying the
-settled removal observes the absent database row and schedules the code
-reconciliation again. A recreated worklet is a new generation and is left
-untouched.
+Remove and invoke are `durable: false`. Removing includes post-commit
+filesystem cleanup, while invocation crosses into an external runtime; neither
+boundary can promise safe replay from the module database alone. Catalog list
+pages remain bounded by an aggregate encoded-byte cap.
 
 Every changed mutation emits one frozen event. The same event object is handed
 to `onEventTransactional` inside the module database transaction and to `onEvent` only

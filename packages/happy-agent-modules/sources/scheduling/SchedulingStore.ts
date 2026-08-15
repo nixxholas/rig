@@ -12,6 +12,7 @@ import {
     schedulingScheduledMessageSchema,
     schedulingTimestampSchema,
     schedulingWaitRecordSchema,
+    schedulingWaitResultSchema,
     schedulingWaitSettlementSchema,
     type SchedulingCancelInput,
     type SchedulingScheduledMessage,
@@ -78,17 +79,8 @@ export const schedulingSchedulerSchema = Type.Object(
     { additionalProperties: false },
 );
 
-const transactionWorkSchema = Type.Function(
-    [schedulingContextSchema],
-    Type.Promise(Type.Unknown()),
-);
-
 export const schedulingStoreSchema = Type.Object(
     {
-        transaction: Type.Function(
-            [schedulingContextSchema, transactionWorkSchema],
-            Type.Promise(Type.Unknown()),
-        ),
         readWait: Type.Function(
             [schedulingContextSchema, schedulingAgentIdSchema, schedulingMessageIdSchema],
             Type.Promise(Type.Union([schedulingWaitRecordSchema, Type.Undefined()])),
@@ -113,13 +105,7 @@ export const schedulingStoreSchema = Type.Object(
     { additionalProperties: false },
 );
 
-type StoredSchedulingStore = Static<typeof schedulingStoreSchema>;
-export type SchedulingStore = Omit<StoredSchedulingStore, "transaction"> & {
-    readonly transaction: <Result>(
-        ctx: Context,
-        work: (txCtx: Context) => Promise<Result>,
-    ) => Promise<Result>;
-};
+export type SchedulingStore = Static<typeof schedulingStoreSchema>;
 
 export type SchedulingWaitClaimRequest = Static<typeof schedulingWaitClaimRequestSchema>;
 export type SchedulingScheduleRequest = Static<typeof schedulingScheduleRequestSchema>;
