@@ -1,18 +1,19 @@
 import { io, type Socket } from "socket.io-client";
 import type { Context } from "@steve.kite/stdlib";
 
+import type { AgentContext } from "../agent/index.js";
 import type { ImageBlock } from "../agent/types.js";
 import type { RigAgentService } from "../agent/RigAgentService.js";
+import type { ConversationRepository } from "../conversations/ConversationRepository.js";
 import type {
     AbortRunResponse,
     ModelCatalog,
+    ProtocolSession,
     Project,
     ProjectWorkspace,
     SubagentSummary,
 } from "../protocol/index.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
-import type { InMemorySession } from "../session/InMemorySession.js";
-import type { UserInputRequest } from "../user-input/index.js";
 import { readPackageVersion } from "../readPackageVersion.js";
 import { isPermissionMode } from "../permissions/index.js";
 import { withWorkerContext } from "../observability/index.js";
@@ -56,6 +57,7 @@ interface HappySocket {
 export interface HappySessionClientOptions {
     agents?: RigAgentService;
     configuration: HappyConnectionConfiguration;
+    conversations: ConversationRepository;
     fetch?: Fetch;
     getSubagents?: (
         ctx: Context,
@@ -64,19 +66,27 @@ export interface HappySessionClientOptions {
     modelCatalog?: ModelCatalog;
     projectContext?: (ctx: Context) => HappyProjectContext | Promise<HappyProjectContext>;
     repository: HappySyncRepository;
-    session: InMemorySession;
+    resolveExternalControlContext?: (
+        ctx: Context,
+        conversationId: string,
+    ) => AgentContext | Promise<AgentContext>;
+    sessionId: string;
     socketFactory?: (url: string, options: Parameters<typeof io>[1]) => HappySocket;
 }
 
 export class HappySessionClient {
     readonly #agents: RigAgentService | undefined;
     readonly #configuration: HappyConnectionConfiguration;
+    readonly #conversations: ConversationRepository;
     readonly #fetch: Fetch;
     readonly #getSubagents: NonNullable<HappySessionClientOptions["getSubagents"]>;
     readonly #modelCatalog: ModelCatalog | undefined;
     readonly #projectContext: HappySessionClientOptions["projectContext"];
     readonly #repository: HappySyncRepository;
-    readonly #session: InMemorySession;
+    readonly #resolveExternalControlContext:
+        | HappySessionClientOptions["resolveExternalControlContext"]
+        | undefined;
+    readonly #sessionId: string;
     readonly #socketFactory: NonNullable<HappySessionClientOptions["socketFactory"]>;
     #archivePromise: Promise<void> | undefined;
     #archiving = false;
@@ -106,12 +116,14 @@ export class HappySessionClient {
     constructor(options: HappySessionClientOptions) {
         this.#agents = options.agents;
         this.#configuration = options.configuration;
+        this.#conversations = options.conversations;
         this.#fetch = options.fetch ?? fetch;
         this.#getSubagents = options.getSubagents ?? (() => []);
         this.#modelCatalog = options.modelCatalog;
         this.#projectContext = options.projectContext;
         this.#repository = options.repository;
-        this.#session = options.session;
+        this.#resolveExternalControlContext = options.resolveExternalControlContext;
+        this.#sessionId = options.sessionId;
         this.#socketFactory =
             options.socketFactory ?? ((url, socketOptions) => io(url, socketOptions) as Socket);
     }
@@ -159,7 +171,7 @@ export class HappySessionClient {
     }
 
     async enqueue(ctx: Context, messages: readonly HappySessionProtocolMessage[]): Promise<void> {
-        await this.#repository.enqueue(ctx, this.#session.id, messages);
+        await this.#repository.enqueue(ctx, this.#sessionId, messages);
         this.kick(ctx);
     }
 
@@ -198,7 +210,7 @@ export class HappySessionClient {
         ctx: Context,
         timeoutMs = HTTP_TIMEOUT_MS,
     ): Promise<string | undefined> {
-        const current = (await this.#repository.getSession(ctx, this.#session.id))?.remoteSessionId;
+        const current = (await this.#repository.getSession(ctx, this.#sessionId))?.remoteSessionId;
         if (current !== undefined) return Promise.resolve(current);
         if (this.#closed) return Promise.resolve(undefined);
         this.kick(ctx);
@@ -227,7 +239,7 @@ export class HappySessionClient {
                         await this.#flushOutbox(ctx, state);
                         if (!this.#archiving) await this.#fetchIncoming(ctx, state);
                         await this.#syncMetadata(ctx, state);
-                        this.#sendKeepAlive(state.remoteSessionId!);
+                        await this.#sendKeepAlive(ctx, state.remoteSessionId!);
                         await this.#syncAgentState(ctx, state);
                         return true;
                     } catch (error) {
@@ -236,14 +248,14 @@ export class HappySessionClient {
                         return false;
                     }
                 },
-                { sessionId: this.#session.id },
+                { sessionId: this.#sessionId },
             );
             if (!completed) return;
         } while (this.#needsAnotherSync && !this.#closed);
     }
 
     async #ensureRemoteSession(ctx: Context): Promise<HappySessionState | undefined> {
-        const current = await this.#repository.getSession(ctx, this.#session.id);
+        const current = await this.#repository.getSession(ctx, this.#sessionId);
         if (current === undefined) return undefined;
         if (this.#metadataVersion !== undefined && current.remoteSessionId !== undefined) {
             return current;
@@ -287,10 +299,10 @@ export class HappySessionClient {
             this.#lastMetadata = JSON.stringify(metadata);
             this.#metadataBase = { ...metadata };
         }
-        await this.#repository.setRemoteSession(ctx, this.#session.id, remoteSessionId);
+        await this.#repository.setRemoteSession(ctx, this.#sessionId, remoteSessionId);
         for (const resolve of this.#remoteSessionWaiters) resolve(remoteSessionId);
         this.#remoteSessionWaiters.clear();
-        return this.#repository.getSession(ctx, this.#session.id);
+        return this.#repository.getSession(ctx, this.#sessionId);
     }
 
     #ensureSocket(remoteSessionId: string): void {
@@ -315,7 +327,7 @@ export class HappySessionClient {
             void withWorkerContext(
                 "happy-session-socket-connect",
                 (ctx) => this.#kickAndWait(ctx),
-                { sessionId: this.#session.id },
+                { sessionId: this.#sessionId },
             ).catch(rethrowDatabaseFailure);
         });
         socket.on(
@@ -324,12 +336,12 @@ export class HappySessionClient {
                 void withWorkerContext(
                     "happy-session-rpc",
                     (ctx) => this.#handleRpcRequest(ctx, remoteSessionId, request, callback),
-                    { sessionId: this.#session.id },
+                    { sessionId: this.#sessionId },
                 ).catch(rethrowDatabaseFailure),
         );
         socket.on("update", () => {
             void withWorkerContext("happy-session-update", (ctx) => this.#kickAndWait(ctx), {
-                sessionId: this.#session.id,
+                sessionId: this.#sessionId,
             }).catch(rethrowDatabaseFailure);
         });
         this.#socket = socket;
@@ -338,7 +350,7 @@ export class HappySessionClient {
 
     async #flushOutbox(ctx: Context, state: HappySessionState): Promise<void> {
         while (!this.#closed) {
-            const pending = await this.#repository.pending(ctx, this.#session.id, 50);
+            const pending = await this.#repository.pending(ctx, this.#sessionId, 50);
             if (pending.length === 0) return;
             await this.#request(
                 ctx,
@@ -355,7 +367,7 @@ export class HappySessionClient {
             );
             await this.#repository.acknowledge(
                 ctx,
-                this.#session.id,
+                this.#sessionId,
                 pending.map((message) => message.localId),
             );
         }
@@ -363,7 +375,7 @@ export class HappySessionClient {
 
     async #fetchIncoming(ctx: Context, state: HappySessionState): Promise<void> {
         let afterSequence =
-            (await this.#repository.getSession(ctx, this.#session.id))?.lastRemoteSeq ?? 0;
+            (await this.#repository.getSession(ctx, this.#sessionId))?.lastRemoteSeq ?? 0;
         while (!this.#closed) {
             const url = new URL(
                 `${this.#configuration.serverUrl}/v3/sessions/${encodeURIComponent(state.remoteSessionId!)}/messages`,
@@ -380,7 +392,7 @@ export class HappySessionClient {
                 if (canCommit) {
                     await this.#repository.updateLastRemoteSeq(
                         ctx,
-                        this.#session.id,
+                        this.#sessionId,
                         maximumSequence,
                     );
                 }
@@ -412,7 +424,7 @@ export class HappySessionClient {
                     withWorkerContext(
                         "happy-attachment-download",
                         (downloadCtx) => this.#downloadAttachment(downloadCtx, state, incoming),
-                        { messageId: message.id, sessionId: this.#session.id },
+                        { messageId: message.id, sessionId: this.#sessionId },
                     ).catch(() => undefined),
                 );
             }
@@ -421,7 +433,12 @@ export class HappySessionClient {
         const messageId = `happy:${message.id}`;
         const attachments = await Promise.all(this.#pendingAttachments.values());
         this.#pendingAttachments.clear();
-        if (hasSubmittedMessage(this.#session, messageId)) return true;
+        if (
+            (await this.#conversations.messageSubmission(ctx, this.#sessionId, messageId)) !==
+            undefined
+        ) {
+            return true;
+        }
         await this.#applySelection(ctx, incoming.meta);
         const imageBlocks = attachments.filter(
             (attachment): attachment is ImageBlock => attachment !== undefined,
@@ -438,7 +455,7 @@ export class HappySessionClient {
             displayText: incoming.text,
             text: incoming.text,
         };
-        await this.#requireAgents().deliverMessage(ctx, this.#session, request);
+        await this.#requireAgents().deliverMessage(ctx, this.#sessionId, request);
         return true;
     }
 
@@ -453,7 +470,7 @@ export class HappySessionClient {
     ): Promise<void> {
         if (isPermissionMode(selection.permissionMode)) {
             try {
-                await this.#requireAgents().changePermissionMode(ctx, this.#session, {
+                await this.#requireAgents().changePermissionMode(ctx, this.#sessionId, {
                     permissionMode: selection.permissionMode,
                 });
             } catch (error) {
@@ -463,7 +480,7 @@ export class HappySessionClient {
         }
         try {
             if (selection.modelId !== undefined && selection.modelId !== "default") {
-                await this.#requireAgents().changeModel(ctx, this.#session, {
+                await this.#requireAgents().changeModel(ctx, this.#sessionId, {
                     ...(selection.effort === undefined ? {} : { effort: selection.effort }),
                     modelId: selection.modelId,
                     ...(selection.providerId === undefined
@@ -471,7 +488,7 @@ export class HappySessionClient {
                         : { providerId: selection.providerId }),
                 });
             } else if (selection.effort !== undefined) {
-                await this.#requireAgents().changeEffort(ctx, this.#session, {
+                await this.#requireAgents().changeEffort(ctx, this.#sessionId, {
                     effort: selection.effort,
                 });
             }
@@ -528,7 +545,7 @@ export class HappySessionClient {
         request: unknown,
         callback: (response: string) => void,
     ): Promise<void> {
-        const state = await this.#repository.getSession(ctx, this.#session.id);
+        const state = await this.#repository.getSession(ctx, this.#sessionId);
         if (state === undefined) {
             callback("");
             return;
@@ -556,13 +573,13 @@ export class HappySessionClient {
                     response = await handleHappySessionRpc({
                         abort: () => this.#abortFromHappy(ctx),
                         archive: async () => {
-                            await this.#session.setArchived(ctx, true);
+                            await this.#conversations.archive(ctx, this.#sessionId, true);
                             return { success: true };
                         },
                         answerQuestion: (requestId, answers) =>
                             this.#answerQuestion(ctx, requestId, answers),
                         cancelQuestion: (requestId) => this.#cancelQuestion(ctx, requestId),
-                        context: () => this.#session.externalControlContext(ctx),
+                        context: () => this.#externalControlContext(ctx),
                         method: request.method.slice(prefix.length),
                         params,
                     });
@@ -576,7 +593,7 @@ export class HappySessionClient {
     }
 
     #abortFromHappy(ctx: Context): Promise<AbortRunResponse> {
-        return this.#requireAgents().abort(ctx, this.#session);
+        return this.#requireAgents().abort(ctx, this.#sessionId);
     }
 
     async #syncMetadata(ctx: Context, state: HappySessionState): Promise<void> {
@@ -636,7 +653,7 @@ export class HappySessionClient {
         ) {
             return;
         }
-        const pending = this.#session.clientSnapshot().pendingUserInputs ?? [];
+        const pending = (await this.#snapshot(_ctx)).pendingUserInputs ?? [];
         const pendingRequestIds = new Set(pending.map((request) => request.requestId));
         for (const requestId of this.#questionFirstSeen.keys()) {
             if (!pendingRequestIds.has(requestId)) this.#questionFirstSeen.delete(requestId);
@@ -720,7 +737,7 @@ export class HappySessionClient {
     }
 
     async #metadata(ctx: Context): Promise<HappySessionMetadata> {
-        const snapshot = this.#session.clientSnapshot({ includeTools: true });
+        const snapshot = await this.#snapshot(ctx);
         const context = await this.#projectContext?.(ctx);
         const title = snapshot.title ?? "Rig session";
         if (title !== this.#summaryTitle) {
@@ -728,7 +745,7 @@ export class HappySessionClient {
             this.#summaryUpdatedAt = Date.now();
         }
         return createHappySessionMetadata({
-            activity: this.#session.activity(),
+            activity: snapshot.activity,
             configuration: this.#configuration,
             ...(this.#modelCatalog === undefined ? {} : { modelCatalog: this.#modelCatalog }),
             session: snapshot,
@@ -750,14 +767,14 @@ export class HappySessionClient {
                                 },
                             }),
                   }),
-            subagents: await this.#getSubagents(ctx, this.#session.id),
+            subagents: await this.#getSubagents(ctx, this.#sessionId),
             summaryUpdatedAt: this.#summaryUpdatedAt,
         });
     }
 
-    #sendKeepAlive(remoteSessionId: string): void {
+    async #sendKeepAlive(ctx: Context, remoteSessionId: string): Promise<void> {
         if (this.#archiving) return;
-        const activity = this.#session.activity();
+        const activity = (await this.#snapshot(ctx)).activity;
         this.#socket?.emit("session-alive", {
             activity,
             sid: remoteSessionId,
@@ -771,7 +788,7 @@ export class HappySessionClient {
         try {
             await this.#kickAndWait();
             await this.#sendSessionEnd(ctx);
-            const remoteSessionId = (await this.#repository.getSession(ctx, this.#session.id))
+            const remoteSessionId = (await this.#repository.getSession(ctx, this.#sessionId))
                 ?.remoteSessionId;
             if (remoteSessionId !== undefined) {
                 await this.#request(
@@ -790,7 +807,7 @@ export class HappySessionClient {
 
     async #sendSessionEnd(ctx: Context): Promise<void> {
         if (this.#sentSessionEnd) return;
-        const remoteSessionId = (await this.#repository.getSession(ctx, this.#session.id))
+        const remoteSessionId = (await this.#repository.getSession(ctx, this.#sessionId))
             ?.remoteSessionId;
         if (remoteSessionId === undefined || this.#socket === undefined) return;
         this.#sentSessionEnd = true;
@@ -826,7 +843,7 @@ export class HappySessionClient {
         this.#retryTimer = setTimeout(() => {
             this.#retryTimer = undefined;
             void withWorkerContext("happy-session-retry", (ctx) => this.#kickAndWait(ctx), {
-                sessionId: this.#session.id,
+                sessionId: this.#sessionId,
             }).catch(rethrowDatabaseFailure);
         }, SYNC_RETRY_DELAY_MS);
         this.#retryTimer.unref();
@@ -841,9 +858,24 @@ export class HappySessionClient {
         if (this.#agents !== undefined) return this.#agents;
         throw new Error("Agent control is unavailable for this Happy session.");
     }
+
+    async #externalControlContext(ctx: Context): Promise<AgentContext> {
+        if (this.#resolveExternalControlContext !== undefined) {
+            return await this.#resolveExternalControlContext(ctx, this.#sessionId);
+        }
+        throw new Error("Happy file and shell access is unavailable for this conversation.");
+    }
+
+    async #snapshot(ctx: Context): Promise<ProtocolSession> {
+        const snapshot = await this.#conversations.readSnapshot(ctx, this.#sessionId);
+        if (snapshot === undefined) {
+            throw new Error(`The conversation '${this.#sessionId}' no longer exists.`);
+        }
+        return snapshot;
+    }
 }
 
-function isWorkingActivity(kind: ReturnType<InMemorySession["activity"]>["kind"]): boolean {
+function isWorkingActivity(kind: ProtocolSession["activity"]["kind"]): boolean {
     return (
         kind === "queued" ||
         kind === "thinking" ||
@@ -922,10 +954,6 @@ function isHappyRemoteMessage(value: unknown): value is HappyRemoteMessage {
         value.content.t === "encrypted" &&
         typeof value.content.c === "string"
     );
-}
-
-function hasSubmittedMessage(session: InMemorySession, messageId: string): boolean {
-    return session.events.messageSubmission(messageId) !== undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, any> {

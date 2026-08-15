@@ -3,13 +3,14 @@ import { createHash } from "node:crypto";
 import type {
     CreateSessionRequest,
     ModelCatalog,
+    ProtocolSession,
     SessionEvent,
     SubagentSummary,
 } from "../protocol/index.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import { rethrowDatabaseFailure } from "../persistence/rethrowDatabaseFailure.js";
-import type { InMemorySession } from "../session/InMemorySession.js";
 import { isLiveOnlySessionEvent } from "../protocol/projection/isLiveOnlySessionEvent.js";
+import type { ConversationRepository } from "../conversations/ConversationRepository.js";
 import { HappyMachineClient } from "./HappyMachineClient.js";
 import {
     HappySessionClient,
@@ -24,6 +25,7 @@ import type { Context } from "@steve.kite/stdlib";
 import { withWorkerContext } from "../observability/index.js";
 import type { SessionDatabase } from "../persistence/database/SessionDatabase.js";
 import type { RigAgentService } from "../agent/RigAgentService.js";
+import type { AgentContext } from "../agent/index.js";
 
 const MAX_BACKFILLED_MESSAGES = 10_000;
 const MAX_MAPPED_EVENTS = 4_096;
@@ -37,7 +39,8 @@ export interface HappySyncServiceOptions {
         ctx: Context,
         id: string,
         request: CreateSessionRequest,
-    ) => InMemorySession | Promise<InMemorySession>;
+    ) => void | Promise<void>;
+    conversations: ConversationRepository;
     database: SessionDatabase;
     fetch?: typeof fetch;
     getSubagents?: (
@@ -46,11 +49,15 @@ export interface HappySyncServiceOptions {
     ) => readonly SubagentSummary[] | Promise<readonly SubagentSummary[]>;
     getProjectContext?: (
         ctx: Context,
-        session: InMemorySession,
+        conversationId: string,
     ) => HappyProjectContext | Promise<HappyProjectContext>;
     modelCatalog?: ModelCatalog;
     maxPendingMessagesPerSession?: number;
     socketFactory?: HappySessionClientOptions["socketFactory"];
+    resolveExternalControlContext?: (
+        ctx: Context,
+        conversationId: string,
+    ) => AgentContext | Promise<AgentContext>;
 }
 
 export class HappySyncService {
@@ -64,6 +71,7 @@ export class HappySyncService {
     readonly #pendingReattachments = new Set<string>();
     #closed = false;
     readonly #configuration: HappyConnectionConfiguration;
+    readonly #conversations: ConversationRepository;
     readonly #credentialFingerprint: string;
     readonly #createSession: HappySyncServiceOptions["createSession"];
     readonly #fetch: typeof fetch | undefined;
@@ -73,10 +81,14 @@ export class HappySyncService {
     readonly #machineClient: HappyMachineClient | undefined;
     readonly #repository: HappySyncRepository;
     readonly #socketFactory: HappySessionClientOptions["socketFactory"];
+    readonly #resolveExternalControlContext:
+        | HappySyncServiceOptions["resolveExternalControlContext"]
+        | undefined;
 
     private constructor(options: HappySyncServiceOptions, repository: HappySyncRepository) {
         this.#agents = options.agents;
         this.#configuration = options.configuration;
+        this.#conversations = options.conversations;
         this.#credentialFingerprint = fingerprint(options.configuration);
         this.#createSession = options.createSession;
         this.#fetch = options.fetch;
@@ -85,6 +97,7 @@ export class HappySyncService {
         this.#modelCatalog = options.modelCatalog;
         this.#repository = repository;
         this.#socketFactory = options.socketFactory;
+        this.#resolveExternalControlContext = options.resolveExternalControlContext;
         if (
             options.configuration.machineId !== undefined &&
             options.createSession !== undefined &&
@@ -102,8 +115,8 @@ export class HappySyncService {
                         withWorkerContext("happy-machine-spawn-session", (ctx) =>
                             handleHappySpawnSession({
                                 createSession: async (id, request) => {
-                                    const session = await this.#createSession!(ctx, id, request);
-                                    await this.attach(ctx, session);
+                                    await this.#createSession!(ctx, id, request);
+                                    await this.attach(ctx, id);
                                 },
                                 machineId: options.configuration.machineId!,
                                 modelCatalog: options.modelCatalog!,
@@ -134,121 +147,147 @@ export class HappySyncService {
         return new HappySyncService(options, repository);
     }
 
-    async attach(ctx: Context, session: InMemorySession): Promise<void> {
-        if (this.#clients.has(session.id)) return;
-        const closure = this.#detachedClientClosures.get(session.id);
-        if (closure !== undefined && !session.isArchived()) {
-            this.#scheduleReattach(session, closure);
+    async attach(ctx: Context, conversationId: string): Promise<void> {
+        if (this.#clients.has(conversationId)) return;
+        const snapshot = await this.#conversations.readSnapshot(ctx, conversationId);
+        if (snapshot === undefined) return;
+        const closure = this.#detachedClientClosures.get(conversationId);
+        if (closure !== undefined && !snapshot.archived) {
+            this.#scheduleReattach(conversationId, closure);
             return;
         }
-        await this.#attachOnce(ctx, session, false);
+        await this.#attachOnce(ctx, conversationId, false, snapshot);
     }
 
     /** Lets the access hot path avoid creating a worker for an already synchronized session. */
-    shouldAttachOnAccess(session: InMemorySession): boolean {
-        if (this.#closed || this.#clients.has(session.id) || this.#attaches.has(session.id)) {
+    shouldAttachOnAccess(conversationId: string): boolean {
+        if (
+            this.#closed ||
+            this.#clients.has(conversationId) ||
+            this.#attaches.has(conversationId)
+        ) {
             return false;
         }
-        if (session.agentMetadata().type !== "primary" || session.isArchived()) return false;
-        if (this.#pendingReattachments.has(session.id)) return false;
-        return (this.#attachRetryAfter.get(session.id) ?? 0) <= Date.now();
+        if (this.#pendingReattachments.has(conversationId)) return false;
+        return (this.#attachRetryAfter.get(conversationId) ?? 0) <= Date.now();
     }
 
     async #attachOnce(
         ctx: Context,
-        session: InMemorySession,
+        conversationId: string,
         includeArchived: boolean,
+        knownSnapshot?: ProtocolSession,
     ): Promise<void> {
-        const existing = this.#attaches.get(session.id);
+        const existing = this.#attaches.get(conversationId);
         if (existing !== undefined) return await existing;
-        const attachment = this.#attachSession(ctx, session, includeArchived);
-        this.#attaches.set(session.id, attachment);
+        const attachment = this.#attachSession(
+            ctx,
+            conversationId,
+            includeArchived,
+            knownSnapshot,
+        );
+        this.#attaches.set(conversationId, attachment);
         try {
             await attachment;
         } finally {
-            if (this.#attaches.get(session.id) === attachment) {
-                this.#attaches.delete(session.id);
+            if (this.#attaches.get(conversationId) === attachment) {
+                this.#attaches.delete(conversationId);
             }
         }
     }
 
     async #attachSession(
         ctx: Context,
-        session: InMemorySession,
+        conversationId: string,
         includeArchived: boolean,
+        knownSnapshot?: ProtocolSession,
     ): Promise<void> {
-        if (this.#closed || this.#clients.has(session.id)) return;
+        if (this.#closed || this.#clients.has(conversationId)) return;
+        const snapshot =
+            knownSnapshot ?? (await this.#conversations.readSnapshot(ctx, conversationId));
+        if (snapshot === undefined) return;
         if (
-            session.agentMetadata().type !== "primary" ||
-            (session.isArchived() && !includeArchived)
+            snapshot.agent.type !== "primary" ||
+            (snapshot.archived && !includeArchived)
         ) {
             return;
         }
-        let client = this.#clients.get(session.id);
+        let client = this.#clients.get(conversationId);
         if (client === undefined) {
-            if ((this.#attachRetryAfter.get(session.id) ?? 0) > Date.now()) return;
+            if ((this.#attachRetryAfter.get(conversationId) ?? 0) > Date.now()) return;
             try {
                 const encryption = this.#configuration.credentials.encryption;
                 const state = await this.#repository.ensureSession(ctx, {
                     credentialFingerprint: this.#credentialFingerprint,
                     ...(encryption.type === "legacy" ? { encryptionKey: encryption.secret } : {}),
                     encryptionVariant: encryption.type,
-                    sessionId: session.id,
+                    sessionId: conversationId,
                 });
                 if (this.#closed) return;
                 client = new HappySessionClient({
                     ...(this.#agents === undefined ? {} : { agents: this.#agents }),
                     configuration: this.#configuration,
+                    conversations: this.#conversations,
                     ...(this.#fetch === undefined ? {} : { fetch: this.#fetch }),
                     getSubagents: (ctx, sessionId) => this.#getSubagents(ctx, sessionId),
                     ...(this.#getProjectContext === undefined
                         ? {}
                         : {
-                              projectContext: (ctx) => this.#getProjectContext?.(ctx, session),
+                              projectContext: (ctx) =>
+                                  this.#getProjectContext?.(ctx, conversationId),
                           }),
                     ...(this.#modelCatalog === undefined
                         ? {}
                         : { modelCatalog: this.#modelCatalog }),
                     repository: this.#repository,
-                    session,
+                    ...(this.#resolveExternalControlContext === undefined
+                        ? {}
+                        : { resolveExternalControlContext: this.#resolveExternalControlContext }),
+                    sessionId: conversationId,
                     ...(this.#socketFactory === undefined
                         ? {}
                         : { socketFactory: this.#socketFactory }),
                 });
-                this.#clients.set(session.id, client);
+                this.#clients.set(conversationId, client);
                 if (!includeArchived) {
+                    const events = await this.#conversations.events(ctx, conversationId);
                     const backfill = mapSessionEvents(
-                        session,
+                        events,
                         state.historyBackfilled ? state.projectedEventId : undefined,
                     );
-                    this.#messageMappers.set(session.id, backfill.mapper);
+                    this.#messageMappers.set(conversationId, backfill.mapper);
                     if (!state.historyBackfilled) {
                         await this.#repository.enqueueInitialBackfill(
                             ctx,
-                            session.id,
+                            conversationId,
                             backfill.messages,
-                            latestDurableEventId(session),
+                            latestDurableEventId(events),
                         );
                     } else if (backfill.cursorFound) {
-                        await this.#enqueueRecovered(ctx, session, client, backfill.projections);
-                    } else if (state.projectedEventId !== latestDurableEventId(session)) {
+                        await this.#enqueueRecovered(
+                            ctx,
+                            conversationId,
+                            client,
+                            backfill.projections,
+                        );
+                    } else if (state.projectedEventId !== latestDurableEventId(events)) {
                         const reason = `Happy projection cursor '${state.projectedEventId ?? "none"}' is outside the bounded session event window.`;
-                        await this.#repository.stallProjectionGap(ctx, session.id, reason);
+                        await this.#repository.stallProjectionGap(ctx, conversationId, reason);
                         console.error(
-                            `Happy sync cannot recover session '${session.id}': ${reason}`,
+                            `Happy sync cannot recover session '${conversationId}': ${reason}`,
                         );
                     }
                 }
                 if (!this.#closed) client.start(ctx);
-                this.#attachRetryAfter.delete(session.id);
+                this.#attachRetryAfter.delete(conversationId);
             } catch (error) {
                 if (isDatabaseFailure(error)) throw error;
-                this.#clients.delete(session.id);
-                this.#messageMappers.delete(session.id);
-                this.#attachRetryAfter.set(session.id, Date.now() + ATTACH_RETRY_DELAY_MS);
+                this.#clients.delete(conversationId);
+                this.#messageMappers.delete(conversationId);
+                this.#attachRetryAfter.set(conversationId, Date.now() + ATTACH_RETRY_DELAY_MS);
                 await client?.close(ctx).catch(rethrowDatabaseFailure);
                 console.error(
-                    `Happy sync could not attach session '${session.id}': ${String(error)}`,
+                    `Happy sync could not attach session '${conversationId}': ${String(error)}`,
                 );
             }
         }
@@ -282,42 +321,39 @@ export class HappySyncService {
         if (failure !== undefined) throw failure.reason;
     }
 
-    async observe(
-        ctx: Context,
-        event: SessionEvent,
-        session: InMemorySession | undefined,
-    ): Promise<void> {
+    async observe(ctx: Context, event: SessionEvent): Promise<void> {
         if (this.#closed) return;
-        if (session === undefined) return;
-        if (session.agentMetadata().type !== "primary") return;
+        const conversationId = event.sessionId;
+        const snapshot = await this.#conversations.readSnapshot(ctx, conversationId);
+        if (snapshot === undefined || snapshot.agent.type !== "primary") return;
         if (isLiveOnlySessionEvent(event)) return;
-        if (session.isArchived()) {
+        if (snapshot.archived) {
             if (
-                !this.#detachedClientClosures.has(session.id) &&
-                (await this.#repository.getSession(ctx, session.id)) !== undefined
+                !this.#detachedClientClosures.has(conversationId) &&
+                (await this.#repository.getSession(ctx, conversationId)) !== undefined
             ) {
-                await this.#attachOnce(ctx, session, true);
+                await this.#attachOnce(ctx, conversationId, true, snapshot);
             }
-            this.#detach(session.id);
+            this.#detach(conversationId);
             return;
         }
-        const closure = this.#detachedClientClosures.get(session.id);
+        const closure = this.#detachedClientClosures.get(conversationId);
         if (closure !== undefined) {
-            this.#scheduleReattach(session, closure);
+            this.#scheduleReattach(conversationId, closure);
             return;
         }
         try {
-            await this.attach(ctx, session);
+            await this.attach(ctx, conversationId);
             if (event.type === "session_archived" && event.data.archived === false) {
-                this.#clients.get(session.id)?.resume(ctx);
+                this.#clients.get(conversationId)?.resume(ctx);
             }
-            const mapper = this.#messageMappers.get(session.id) ?? new HappyMessageMapper();
-            this.#messageMappers.set(session.id, mapper);
-            const client = this.#clients.get(session.id);
+            const mapper = this.#messageMappers.get(conversationId) ?? new HappyMessageMapper();
+            this.#messageMappers.set(conversationId, mapper);
+            const client = this.#clients.get(conversationId);
             if (client === undefined) return;
             const result = await this.#repository.enqueueProjection(
                 ctx,
-                session.id,
+                conversationId,
                 event.id,
                 mapper.map(event),
             );
@@ -330,16 +366,18 @@ export class HappySyncService {
             client.kick(ctx);
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
-            const client = this.#clients.get(session.id);
+            const client = this.#clients.get(conversationId);
             if (error instanceof HappySyncOutboxFullError) {
-                if (error.recoverable) this.#scheduleBackfill(session);
-            } else if (client !== undefined && this.#clients.get(session.id) === client) {
-                this.#clients.delete(session.id);
-                this.#messageMappers.delete(session.id);
-                this.#attachRetryAfter.set(session.id, Date.now() + ATTACH_RETRY_DELAY_MS);
+                if (error.recoverable) this.#scheduleBackfill(conversationId);
+            } else if (client !== undefined && this.#clients.get(conversationId) === client) {
+                this.#clients.delete(conversationId);
+                this.#messageMappers.delete(conversationId);
+                this.#attachRetryAfter.set(conversationId, Date.now() + ATTACH_RETRY_DELAY_MS);
                 await client.close(ctx).catch(rethrowDatabaseFailure);
             }
-            console.error(`Happy sync could not observe session '${session.id}': ${String(error)}`);
+            console.error(
+                `Happy sync could not observe session '${conversationId}': ${String(error)}`,
+            );
         }
     }
 
@@ -375,73 +413,77 @@ export class HappySyncService {
         );
     }
 
-    #scheduleReattach(session: InMemorySession, closure: Promise<void>): void {
-        if (this.#pendingReattachments.has(session.id)) return;
-        this.#pendingReattachments.add(session.id);
+    #scheduleReattach(conversationId: string, closure: Promise<void>): void {
+        if (this.#pendingReattachments.has(conversationId)) return;
+        this.#pendingReattachments.add(conversationId);
         void closure.then(
             () =>
                 withWorkerContext("happy-session-reattach", async (ctx) => {
-                    this.#pendingReattachments.delete(session.id);
-                    if (this.#closed || session.isArchived()) return;
+                    this.#pendingReattachments.delete(conversationId);
+                    const snapshot = await this.#conversations.readSnapshot(ctx, conversationId);
+                    if (this.#closed || snapshot === undefined || snapshot.archived) return;
                     try {
-                        await this.attach(ctx, session);
-                        this.#clients.get(session.id)?.resume(ctx);
+                        await this.attach(ctx, conversationId);
+                        this.#clients.get(conversationId)?.resume(ctx);
                     } catch (error) {
                         if (isDatabaseFailure(error)) throw error;
                         console.error(
-                            `Happy sync could not restore session '${session.id}': ${String(error)}`,
+                            `Happy sync could not restore session '${conversationId}': ${String(error)}`,
                         );
                     }
                 }),
             (error: unknown) => {
-                this.#pendingReattachments.delete(session.id);
+                this.#pendingReattachments.delete(conversationId);
                 rethrowDatabaseFailure(error);
             },
         );
     }
 
-    #scheduleBackfill(session: InMemorySession): void {
-        if (this.#backfillTimers.has(session.id)) return;
+    #scheduleBackfill(conversationId: string): void {
+        if (this.#backfillTimers.has(conversationId)) return;
         const timer = setTimeout(() => {
-            this.#backfillTimers.delete(session.id);
+            this.#backfillTimers.delete(conversationId);
             void withWorkerContext("happy-session-backfill", (ctx) =>
-                this.#runBackfill(ctx, session),
+                this.#runBackfill(ctx, conversationId),
             ).catch(rethrowDatabaseFailure);
         }, ATTACH_RETRY_DELAY_MS);
         timer.unref();
-        this.#backfillTimers.set(session.id, timer);
+        this.#backfillTimers.set(conversationId, timer);
     }
 
-    async #runBackfill(ctx: Context, session: InMemorySession): Promise<void> {
-        const client = this.#clients.get(session.id);
+    async #runBackfill(ctx: Context, conversationId: string): Promise<void> {
+        const client = this.#clients.get(conversationId);
         if (client === undefined) {
-            await this.attach(ctx, session);
+            await this.attach(ctx, conversationId);
             return;
         }
         try {
-            const state = await this.#repository.getSession(ctx, session.id);
+            const state = await this.#repository.getSession(ctx, conversationId);
             if (state === undefined) return;
-            const backfill = mapSessionEvents(session, state.projectedEventId);
-            if (!backfill.cursorFound && state.projectedEventId !== latestDurableEventId(session)) {
+            const events = await this.#conversations.events(ctx, conversationId);
+            const backfill = mapSessionEvents(events, state.projectedEventId);
+            if (!backfill.cursorFound && state.projectedEventId !== latestDurableEventId(events)) {
                 const reason = "Happy projection recovery fell outside the bounded event window.";
-                await this.#repository.stallProjectionGap(ctx, session.id, reason);
-                console.error(`Happy sync cannot recover session '${session.id}': ${reason}`);
+                await this.#repository.stallProjectionGap(ctx, conversationId, reason);
+                console.error(`Happy sync cannot recover session '${conversationId}': ${reason}`);
                 return;
             }
-            this.#messageMappers.set(session.id, backfill.mapper);
-            await this.#enqueueRecovered(ctx, session, client, backfill.projections);
+            this.#messageMappers.set(conversationId, backfill.mapper);
+            await this.#enqueueRecovered(ctx, conversationId, client, backfill.projections);
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
             if (!(error instanceof HappySyncOutboxFullError) || error.recoverable) {
-                this.#scheduleBackfill(session);
+                this.#scheduleBackfill(conversationId);
             }
-            console.error(`Happy sync could not recover session '${session.id}': ${String(error)}`);
+            console.error(
+                `Happy sync could not recover session '${conversationId}': ${String(error)}`,
+            );
         }
     }
 
     async #enqueueRecovered(
         ctx: Context,
-        session: InMemorySession,
+        conversationId: string,
         client: HappySessionClient,
         projections: readonly HappyEventProjection[],
     ): Promise<void> {
@@ -449,7 +491,7 @@ export class HappySyncService {
         for (const projection of bounded) {
             const result = await this.#repository.enqueueProjection(
                 ctx,
-                session.id,
+                conversationId,
                 projection.event.id,
                 projection.messages,
             );
@@ -461,7 +503,7 @@ export class HappySyncService {
             }
         }
         client.kick(ctx);
-        if (projections.length > bounded.length) this.#scheduleBackfill(session);
+        if (projections.length > bounded.length) this.#scheduleBackfill(conversationId);
     }
 }
 
@@ -470,12 +512,12 @@ interface HappyEventProjection {
     messages: ReturnType<HappyMessageMapper["map"]>;
 }
 
-function latestDurableEventId(session: InMemorySession): string | undefined {
-    return session.events.all().at(-1)?.id;
+function latestDurableEventId(events: readonly SessionEvent[]): string | undefined {
+    return events.at(-1)?.id;
 }
 
 function mapSessionEvents(
-    session: InMemorySession,
+    allEvents: readonly SessionEvent[],
     afterEventId?: string,
 ): {
     cursorFound: boolean;
@@ -484,7 +526,7 @@ function mapSessionEvents(
     projections: readonly HappyEventProjection[];
 } {
     const mapper = new HappyMessageMapper();
-    const events = (session.events.since(undefined) ?? []).slice(-MAX_MAPPED_EVENTS);
+    const events = allEvents.slice(-MAX_MAPPED_EVENTS);
     let cursorFound = afterEventId === undefined;
     const projections: HappyEventProjection[] = [];
     const mapped: HappySessionProtocolMessage[] = [];
