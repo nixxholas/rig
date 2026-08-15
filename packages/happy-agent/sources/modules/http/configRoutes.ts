@@ -70,7 +70,7 @@ export function createConfigRoutes(): AgentHttpRouteGroup {
         {
             method: "PUT",
             path: "/v0/config/instructions",
-            handle: async ({ dependencies, request, response }) => {
+            handle: async ({ ctx, dependencies, request, response }) => {
                 const body = await readValidatedBody(request, textDocumentSchema);
                 const path =
                     dependencies.configuration?.instructionsPath ??
@@ -79,7 +79,7 @@ export function createConfigRoutes(): AgentHttpRouteGroup {
                 sendJson(response, 200, {
                     instructions: await readDocument(path, 256 * 1024),
                 });
-                dependencies.agent.modules.events.append({
+                await dependencies.agent.modules.events.record(ctx, {
                     agentId: dependencies.agent.agent.id,
                     payload: { bytes: Buffer.byteLength(body.instructions, "utf8") },
                     type: "config.instructions_changed",
@@ -102,7 +102,7 @@ export function createConfigRoutes(): AgentHttpRouteGroup {
         {
             method: "PUT",
             path: "/v0/config/security",
-            handle: async ({ dependencies, request, response }) => {
+            handle: async ({ ctx, dependencies, request, response }) => {
                 const body = await readValidatedBody(request, securityDocumentSchema);
                 const path =
                     dependencies.configuration?.securityPath ??
@@ -111,7 +111,7 @@ export function createConfigRoutes(): AgentHttpRouteGroup {
                 sendJson(response, 200, {
                     policy: await readDocument(path, 32 * 1024),
                 });
-                dependencies.agent.modules.events.append({
+                await dependencies.agent.modules.events.record(ctx, {
                     agentId: dependencies.agent.agent.id,
                     payload: { bytes: Buffer.byteLength(body.policy, "utf8") },
                     type: "config.security_changed",

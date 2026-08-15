@@ -1009,6 +1009,7 @@ function isRunEvent(event: SessionEvent, runId: string): boolean {
     }
     if (
         event.type !== "agent_event" &&
+        event.type !== "provider_event" &&
         event.type !== "agent_message" &&
         event.type !== "run_error" &&
         event.type !== "run_finished" &&

@@ -169,7 +169,7 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
                 assertVersion(request.headers["if-match"], current.updatedAt, "project");
                 const body = await readValidatedBody(request, renameProjectSchema);
                 const project = await projects.rename(ctx, agentId, projectId, { name: body.name });
-                emitProjectEvent(options.agent, projectId, "project.updated", {
+                await emitProjectEvent(ctx, options.agent, projectId, "project.updated", {
                     mutationId: body.mutationId,
                     project: await toProject(project),
                 });
@@ -193,7 +193,7 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
                         : { defaultWorkspaceCompute: body.defaultWorkspaceCompute };
                 const result = await projects.updateSettings(ctx, agentId, projectId, settings);
                 const project = await requireProject(ctx, projectId);
-                emitProjectEvent(options.agent, projectId, "project.updated", {
+                await emitProjectEvent(ctx, options.agent, projectId, "project.updated", {
                     mutationId: body.mutationId,
                     project: await toProject(project),
                 });
@@ -238,7 +238,7 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
                 assertVersion(request.headers["if-match"], current.updatedAt, "project");
                 await readValidatedBody(request, emptySchema);
                 const project = await projects.archive(ctx, agentId, projectId);
-                emitProjectEvent(options.agent, projectId, "project.updated", {
+                await emitProjectEvent(ctx, options.agent, projectId, "project.updated", {
                     project: await toProject(project),
                 });
                 sendJson(response, 202, { project: await toProject(project) });
@@ -331,7 +331,7 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
                           name,
                           repositoryRef: canonical,
                       });
-            emitProjectEvent(options.agent, project.id, "project.created", {
+            await emitProjectEvent(ctx, options.agent, project.id, "project.created", {
                 project: await toProject(project),
             });
             return project;
@@ -422,13 +422,14 @@ function assertVersion(
     }
 }
 
-function emitProjectEvent(
+async function emitProjectEvent(
+    ctx: import("@steve.kite/stdlib").Context,
     agent: LoadedHappyAgent,
     projectId: string,
     type: "project.created" | "project.updated",
     payload: Record<string, unknown>,
-): void {
-    agent.modules.events.append({
+): Promise<void> {
+    await agent.modules.events.record(ctx, {
         agentId: agent.agent.id,
         payload: { projectId, ...payload },
         type,

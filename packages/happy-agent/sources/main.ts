@@ -38,28 +38,31 @@ export async function startHappyAgentDaemon(
     ctx: RootContext,
     options: StartHappyAgentDaemonOptions,
 ): Promise<HappyAgentDaemon> {
-    const agent = await loadHappyAgent(ctx.named("happy-agent"), options);
     let closeDaemon: ((closeCtx?: Context) => Promise<void>) | undefined;
-    let http: AgentHttpServer;
+    const http = await startAgentHttpServer({
+        agentHome: options.agentHome,
+        ctx: ctx.named("happy-agent-http"),
+        ...(options.socketPath === undefined ? {} : { socketPath: options.socketPath }),
+        ...(options.tokenPath === undefined ? {} : { tokenPath: options.tokenPath }),
+        ...(options.httpConfiguration === undefined
+            ? {}
+            : { configuration: options.httpConfiguration }),
+        ...(options.routeGroups === undefined ? {} : { routeGroups: options.routeGroups }),
+        ...(options.version === undefined ? {} : { version: options.version }),
+        onShutdown: () => {
+            void closeDaemon?.(ctx.named("happy-agent-http-shutdown")).catch(() => undefined);
+        },
+    });
+    let agent: LoadedHappyAgent | undefined;
     try {
-        http = await startAgentHttpServer({
-            agent,
-            ctx: ctx.named("happy-agent-http"),
-            ...(options.socketPath === undefined ? {} : { socketPath: options.socketPath }),
-            ...(options.tokenPath === undefined ? {} : { tokenPath: options.tokenPath }),
-            ...(options.httpConfiguration === undefined
-                ? {}
-                : { configuration: options.httpConfiguration }),
-            ...(options.routeGroups === undefined ? {} : { routeGroups: options.routeGroups }),
-            ...(options.version === undefined ? {} : { version: options.version }),
-            onShutdown: () => {
-                void closeDaemon?.(ctx.named("happy-agent-http-shutdown")).catch(() => undefined);
-            },
-        });
+        agent = await loadHappyAgent(ctx.named("happy-agent"), options);
+        await http.setAgent(agent);
     } catch (error) {
-        await agent.close(ctx.named("happy-agent-startup-cleanup")).catch(() => undefined);
+        await agent?.close(ctx.named("happy-agent-startup-cleanup")).catch(() => undefined);
+        await http.close().catch(() => undefined);
         throw error;
     }
+    if (agent === undefined) throw new Error("The Happy agent did not finish loading.");
 
     let closing: Promise<void> | undefined;
     closeDaemon = (closeCtx = ctx.named("happy-agent-shutdown")) => {
@@ -80,7 +83,7 @@ async function closeHappyAgentDaemon(
     agent: LoadedHappyAgent,
     http: AgentHttpServer,
 ): Promise<void> {
-    agent.modules.events.append({
+    await agent.modules.events.record(ctx, {
         agentId: agent.agent.id,
         payload: {},
         type: "daemon.stopping",

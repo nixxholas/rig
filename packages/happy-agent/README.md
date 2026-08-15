@@ -22,6 +22,8 @@ const machine = compute.createHostCompute({ ctx, cwd });
 `startHappyAgentDaemon` is the top-level composition root. It:
 
 - creates the private home and public home;
+- opens the authenticated Unix socket first, reporting `status: "starting"` until the Agent
+  System is ready;
 - opens `<agentHome>/agent.sqlite` through asynchronous libSQL and takes an exclusive process
   lock;
 - creates a host compute rooted at `publicHome`;
@@ -57,8 +59,8 @@ agent lifetime without the HTTP daemon.
 
 ## Unix-socket API
 
-Every endpoint is under `/v0`; it is intentionally a new API rather than a Rig compatibility
-surface.
+Every endpoint is under `/v0`. The implemented session and event surface is consumable through
+Rig's protocol client, while capabilities explicitly excluded from this daemon remain unsupported.
 
 - `GET /v0/health` — readiness, model catalog, and daemon identity.
 - `GET /v0/agent` — root agent metadata, active state, installed modules, and event cursor.
@@ -72,9 +74,9 @@ surface.
 - `POST /v0/abort` — cancel the active turn.
 - `POST /v0/compact` — compact the conversation.
 - `PATCH /v0/agent/metadata` — shallow-merge agent metadata.
-- `GET /v0/events` — bounded in-memory event replay.
+- `GET /v0/events` — bounded durable event replay.
 - `GET /v0/events/live` — live Server-Sent Events with replay and `Last-Event-ID`.
-- `GET /v0/events/stream` — durable-shaped SSE alias for the same process-local journal.
+- `GET /v0/events/stream` — durable global SSE replay.
 - `GET /v0/catalog` — a Rig-shaped catalog snapshot.
 - `POST /v0/timeline` — global timeline snapshot; project/workspace/session timelines are not
   claimed unless their host is configured.
@@ -88,12 +90,23 @@ Message bodies accept either a string or text/image input blocks. The same reque
 provider, model, reasoning effort, service tier, and permission mode. An optional caller-generated
 cuid2 makes delivery idempotent.
 
-The Events module observes Agent Base directly and assigns every update a process-monotonic
-UUIDv7. SSE frames use that UUID as `id`, the update type as `event`, and the complete event
-envelope as JSON `data`. Reconnect with `Last-Event-ID` or `?after=`. A client with an expired
-bounded cursor receives `409 Event cursor not found` and should reload `/v0/agent`; a new client
-starts at the current cursor instead of replaying history it did not request. Connections receive
-15-second comment heartbeats and are closed on backpressure so they can safely reconnect.
+The Events module observes Agent Base directly and assigns every update a durable UUIDv7 that stays
+strictly ordered across restarts and clock rollback. Current provider `SessionEvent` values,
+including reasoning, text, tool-call/result, retry, usage, reset, and completion updates, are
+retained verbatim. Rig sessions also receive an explicit indexed UI projection beside the native
+event; the projection never replaces or casts away provider data.
+
+SSE frames use the durable UUID as `id`, the update type as `event`, and the complete event envelope
+as JSON `data`. Reconnect with `Last-Event-ID` or `?after=`. A client with an expired bounded cursor
+receives `409 Event cursor not found` and should reload `/v0/agent`; a new client starts at the
+current cursor instead of replaying history it did not request. Both global and session streams
+queue whole frames, stop writing until Node emits `drain`, cap pending and writable bytes, skip
+heartbeats under pressure, and disconnect slow consumers so they can replay from their last
+successfully applied cursor.
+
+If the daemon dies mid-inference, Agent Base restores its durable owed stage. Happy Agent restores
+the matching run identity, emits `block_reset` for the abandoned partial block, and continues the
+same run without presenting the partial text as completed history.
 
 `@slopus/happy-agent` does not add a second agent runtime. `AgentStorage` and
 `AgentSystemLocal` from Agent Base remain the owners.

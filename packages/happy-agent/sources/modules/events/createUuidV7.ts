@@ -12,9 +12,10 @@ const MAX_TIMESTAMP = (1n << 48n) - 1n;
  * Within one millisecond we increment the random tail, preserving that ordering without replacing
  * its process-unique seed with a small counter.
  */
-export function createUuidV7Factory(now: () => number = Date.now): () => string {
-    let lastTimestamp = -1n;
-    let randomTail = 0n;
+export function createUuidV7Factory(now: () => number = Date.now, after?: string): () => string {
+    const initial = after === undefined ? undefined : parseUuidV7(after);
+    let lastTimestamp = initial?.timestamp ?? -1n;
+    let randomTail = initial?.randomTail ?? 0n;
 
     return () => {
         let timestamp = BigInt(Math.max(0, Math.trunc(now())));
@@ -35,6 +36,18 @@ export function createUuidV7Factory(now: () => number = Date.now): () => string 
         const value = (timestamp << 80n) | (7n << 76n) | (randA << 64n) | (2n << 62n) | randB;
         const hex = value.toString(16).padStart(32, "0");
         return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    };
+}
+
+function parseUuidV7(value: string): { readonly randomTail: bigint; readonly timestamp: bigint } {
+    const hex = value.replaceAll("-", "");
+    if (!/^[0-9a-f]{12}7[0-9a-f]{3}[89ab][0-9a-f]{15}$/.test(hex)) {
+        throw new Error("The UUIDv7 high-water mark is invalid.");
+    }
+    const parsed = BigInt(`0x${hex}`);
+    return {
+        randomTail: (((parsed >> 64n) & 0xfffn) << 62n) | (parsed & RAND_B_MASK),
+        timestamp: parsed >> 80n,
     };
 }
 

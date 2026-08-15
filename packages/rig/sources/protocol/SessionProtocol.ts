@@ -11,6 +11,7 @@ import type { Attachment } from "./Attachment.js";
 import type { Model, ProviderError, ServiceTier, StopReason, Usage } from "@slopus/rig-execution";
 import {
     MAX_INFERENCE_MAX_RETRIES,
+    type SessionEvent as ProviderSessionEvent,
     type ProviderModelCompatibilityType,
     type ProviderQuota,
     type ProviderUsage,
@@ -1143,6 +1144,7 @@ export type SessionEvent =
     | SteeringAppliedEvent
     | RunStartedEvent
     | AgentStreamEvent
+    | ProviderStreamEvent
     | AgentMessageEvent
     | SystemNoticeEvent
     | RunFinishedEvent
@@ -1245,6 +1247,16 @@ export type AgentStreamEvent = BaseSessionEvent<
     "agent_event",
     {
         event: AgentLoopEvent;
+        /** The current provider event retained losslessly beside Rig's indexed UI projection. */
+        providerEvent?: ProviderSessionEvent;
+        runId: string;
+    }
+>;
+
+export type ProviderStreamEvent = BaseSessionEvent<
+    "provider_event",
+    {
+        event: ProviderSessionEvent;
         runId: string;
     }
 >;

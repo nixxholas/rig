@@ -35,7 +35,9 @@ import {
 } from "./router.js";
 
 export interface StartAgentHttpServerOptions {
-    readonly agent: LoadedHappyAgent;
+    readonly agent?: LoadedHappyAgent;
+    /** Required when the socket is opened before the Agent System finishes loading. */
+    readonly agentHome?: string;
     readonly configuration?: AgentHttpConfiguration;
     readonly ctx: Context;
     readonly onShutdown?: () => void;
@@ -48,27 +50,28 @@ export interface StartAgentHttpServerOptions {
 export interface AgentHttpServer {
     readonly socketPath: string;
     readonly tokenPath: string;
+    setAgent(agent: LoadedHappyAgent): Promise<void>;
     close(): Promise<void>;
 }
 
 export async function startAgentHttpServer(
     options: StartAgentHttpServerOptions,
 ): Promise<AgentHttpServer> {
-    const paths = resolveAgentDaemonPaths(
-        options.agent.agentHome,
-        options.socketPath,
-        options.tokenPath,
-    );
+    const agentHome = options.agent?.agentHome ?? options.agentHome;
+    if (agentHome === undefined) {
+        throw new Error("The Happy agent home is required before opening its daemon socket.");
+    }
+    const paths = resolveAgentDaemonPaths(agentHome, options.socketPath, options.tokenPath);
     await mkdir(paths.agentHome, { mode: 0o700, recursive: true });
     await mkdir(dirname(paths.tokenPath), { mode: 0o700, recursive: true });
     const token = await readOrCreateAgentToken(paths.tokenPath);
     await prepareAgentSocket(paths);
 
     const connections = new Set<Socket>();
-    const groups = routeGroups(options);
+    const state: { agent?: LoadedHappyAgent; groups?: readonly AgentHttpRouteGroup[] } = {};
     const server = createServer((request, response) => {
         void span(options.ctx, "happy-agent-http-request", (requestCtx) =>
-            handleRequest(requestCtx, request, response, options, token, groups),
+            handleRequest(requestCtx, request, response, options, token, state),
         ).catch((error: unknown) => {
             options.configuration?.onUnexpectedError?.(error);
             sendError(response, error);
@@ -88,11 +91,6 @@ export async function startAgentHttpServer(
         await listen(server, paths.socketPath);
         listening = true;
         await secureAgentSocket(paths.socketPath);
-        options.agent.modules.events.append({
-            agentId: options.agent.agent.id,
-            payload: { protocolVersion: 0 },
-            type: "daemon.ready",
-        });
     } catch (error) {
         if (listening) {
             await closeServer(server, connections, paths.socketPath).catch(() => undefined);
@@ -103,17 +101,29 @@ export async function startAgentHttpServer(
     }
 
     let closePromise: Promise<void> | undefined;
-    return {
+    const result: AgentHttpServer = {
         socketPath: paths.socketPath,
         tokenPath: paths.tokenPath,
+        setAgent: async (agent) => {
+            if (state.agent !== undefined && state.agent !== agent) {
+                throw new Error("The Happy agent HTTP server is already ready.");
+            }
+            state.agent = agent;
+            state.groups ??= routeGroups(options, agent);
+        },
         close: () => {
             closePromise ??= closeServer(server, connections, paths.socketPath);
             return closePromise;
         },
     };
+    if (options.agent !== undefined) await result.setAgent(options.agent);
+    return result;
 }
 
-function routeGroups(options: StartAgentHttpServerOptions): readonly AgentHttpRouteGroup[] {
+function routeGroups(
+    options: StartAgentHttpServerOptions,
+    agent: LoadedHappyAgent,
+): readonly AgentHttpRouteGroup[] {
     const projectHost = options.configuration?.projectHost ?? createLocalProjectWorkspaceHost();
     const projectFiles =
         options.configuration?.projectFiles ??
@@ -122,8 +132,8 @@ function routeGroups(options: StartAgentHttpServerOptions): readonly AgentHttpRo
             ...(projectHost.protectedPaths === undefined
                 ? {}
                 : { protectedPaths: projectHost.protectedPaths }),
-            projects: options.agent.modules.projects,
-            workspaces: options.agent.modules.workspaces,
+            projects: agent.modules.projects,
+            workspaces: agent.modules.workspaces,
         });
     const git =
         options.configuration?.git ??
@@ -139,22 +149,22 @@ function routeGroups(options: StartAgentHttpServerOptions): readonly AgentHttpRo
         createAgentRoutes(),
         createSessionRoutes(),
         createProjectRoutes({
-            agent: options.agent,
+            agent,
             files: projectFiles,
             git,
             host: projectHost,
         }),
         createWorkspaceRoutes({
-            agent: options.agent,
+            agent,
             git,
             host: projectHost,
         }),
         createFileRoutes({
-            agent: options.agent,
+            agent,
             files: projectFiles,
         }),
         createGitRoutes({
-            agent: options.agent,
+            agent,
             files: projectFiles,
             git,
         }),
@@ -167,20 +177,45 @@ async function handleRequest(
     response: ServerResponse,
     options: StartAgentHttpServerOptions,
     token: string,
-    groups: readonly AgentHttpRouteGroup[],
+    state: {
+        readonly agent?: LoadedHappyAgent;
+        readonly groups?: readonly AgentHttpRouteGroup[];
+    },
 ): Promise<void> {
     if (!isAuthorizedAgentRequest(request.headers.authorization, token)) {
         sendJson(response, 401, { error: "Unauthorized" });
         return;
     }
+    const url = new URL(request.url ?? "/", "http://happy-agent.local");
+    if (state.agent === undefined || state.groups === undefined) {
+        if (request.method === "GET" && url.pathname === "/v0/health") {
+            sendJson(response, 200, {
+                catalog: {
+                    defaultModelId: "",
+                    defaultProviderId: "",
+                    models: [],
+                    providers: [],
+                },
+                durableGlobalEventQueue: true,
+                healthy: true,
+                identity: { version: options.version ?? "0.0.0" },
+                protocolVersion: 0,
+                ready: false,
+                status: "starting",
+            });
+            return;
+        }
+        sendJson(response, 503, { error: "The Happy agent is still starting." });
+        return;
+    }
     const context = routeContext(ctx, request, response, {
-        agent: options.agent,
+        agent: state.agent,
         ...(options.configuration === undefined ? {} : { configuration: options.configuration }),
         ...(options.onShutdown === undefined ? {} : { onShutdown: options.onShutdown }),
         ...(options.version === undefined ? {} : { version: options.version }),
     });
     try {
-        await dispatchAgentHttpRoute(context, groups);
+        await dispatchAgentHttpRoute(context, state.groups);
     } catch (error) {
         if (error instanceof AgentHttpError && Object.keys(error.headers).length > 0) {
             for (const [key, value] of Object.entries(error.headers)) {

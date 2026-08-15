@@ -6,6 +6,7 @@ import { Value } from "@sinclair/typebox/value";
 import { readValidatedBody, parsePositiveLimit } from "./body.js";
 import { AgentHttpError, sendJson, serializeJson } from "./errors.js";
 import { createRouteGroup, type AgentHttpRouteGroup } from "./router.js";
+import { createSseWriter } from "./sseWriter.js";
 import { happyAgentEventIdSchema, type HappyAgentEvent } from "../events/EventsModule.js";
 
 const timelineSchema = Type.Object(
@@ -145,9 +146,9 @@ export function createEventRoutes(): AgentHttpRouteGroup {
         {
             method: "POST",
             path: "/v0/events/trim",
-            handle: async ({ dependencies, request, response }) => {
+            handle: async ({ ctx, dependencies, request, response }) => {
                 const body = await readValidatedBody(request, trimSchema);
-                const result = dependencies.agent.modules.events.trim(body.through);
+                const result = await dependencies.agent.modules.events.trim(ctx, body.through);
                 if (result === undefined) {
                     throw new AgentHttpError(409, "Event cursor is unavailable.", {
                         cursor: dependencies.agent.modules.events.cursor(),
@@ -191,52 +192,40 @@ async function streamEvents(
     mode: "durable" | "live",
     agentId: string,
 ): Promise<void> {
-    let closed = false;
-    let streaming = false;
+    const writer = createSseWriter(request, response);
+    let replaying = true;
     let headersStarted = false;
     const pending: HappyAgentEvent[] = [];
     let pendingBytes = 0;
     let heartbeat: NodeJS.Timeout | undefined;
     let unsubscribe = (): void => undefined;
-    const cleanup = (): void => {
-        if (closed) return;
-        closed = true;
-        if (heartbeat !== undefined) clearInterval(heartbeat);
-        unsubscribe();
-        if (headersStarted && !response.destroyed && !response.writableEnded) {
-            response.end();
-        }
-    };
 
     unsubscribe = events.subscribe((event) => {
-        if (closed) return;
-        if (!streaming) {
+        if (writer.closed) return;
+        if (replaying) {
             const bytes = Buffer.byteLength(serializeJson(event), "utf8");
             if (pendingBytes + bytes > MAX_PENDING_BYTES) {
-                cleanup();
+                writer.close();
                 return;
             }
             pending.push(event);
             pendingBytes += bytes;
             return;
         }
-        try {
-            if (!writeSseEvent(response, event, mode)) cleanup();
-        } catch {
-            cleanup();
-        }
+        writer.write(sseEventFrame(event, mode));
     });
 
     const replay = events.replay(after, events.capacity());
     if (replay === undefined) {
-        cleanup();
+        unsubscribe();
+        writer.close();
         sendJson(response, 409, {
             cursor: events.cursor(),
             error: "Event cursor is unavailable.",
         });
         return;
     }
-    if (closed) {
+    if (writer.closed) {
         sendJson(response, 503, {
             error: "The event stream could not buffer its initial updates.",
         });
@@ -250,89 +239,48 @@ async function streamEvents(
         "x-accel-buffering": "no",
     });
     headersStarted = true;
-    if (!response.write(": connected\n\n")) {
-        cleanup();
-        return;
-    }
-    if (
-        !response.write(
-            `event: hello\ndata: ${serializeJson({
-                agentId,
-                connectedAt: Date.now(),
-                cursor: replay.latestCursor,
-                protocolVersion: 0,
-                resumed: after !== undefined,
-            })}\n\n`,
-        )
-    ) {
-        cleanup();
-        return;
-    }
+    writer.write(": connected\n\n");
+    writer.write(
+        `event: hello\ndata: ${serializeJson({
+            agentId,
+            connectedAt: Date.now(),
+            cursor: replay.latestCursor,
+            protocolVersion: 0,
+            resumed: after !== undefined,
+        })}\n\n`,
+    );
+    const replayed = new Set<string>();
     for (const event of replay.events) {
-        if (!writeSseEventSafely(response, event, mode)) {
-            cleanup();
-            return;
-        }
+        replayed.add(event.id);
+        if (!writer.write(sseEventFrame(event, mode))) break;
     }
-    streaming = true;
+    replaying = false;
     for (const event of pending) {
-        if (!writeSseEventSafely(response, event, mode)) {
-            cleanup();
-            return;
-        }
+        if (replayed.has(event.id)) continue;
+        if (!writer.write(sseEventFrame(event, mode))) break;
     }
     pending.length = 0;
     pendingBytes = 0;
     heartbeat = setInterval(() => {
-        try {
-            if (!response.write(": keepalive\n\n")) cleanup();
-        } catch {
-            cleanup();
-        }
+        writer.heartbeat(": keepalive\n\n");
     }, SSE_HEARTBEAT_MS);
     heartbeat.unref();
-    const finish = (): void => {
-        cleanup();
-    };
-    request.once("close", finish);
-    response.once("close", finish);
-    response.once("finish", finish);
-
-    await new Promise<void>((resolve) => {
-        const done = (): void => resolve();
-        response.once("close", done);
-        response.once("finish", done);
-    });
-
-    function writeSseEventSafely(
-        target: ServerResponse,
-        event: HappyAgentEvent,
-        eventMode: "durable" | "live",
-    ): boolean {
-        try {
-            return writeSseEvent(target, event, eventMode);
-        } catch {
-            return false;
-        }
+    await writer.done;
+    if (heartbeat !== undefined) clearInterval(heartbeat);
+    unsubscribe();
+    if (headersStarted) {
+        writer.close();
     }
 }
 
-function writeSseEvent(
-    response: ServerResponse,
-    event: HappyAgentEvent,
-    mode: "durable" | "live",
-): boolean {
+function sseEventFrame(event: HappyAgentEvent, mode: "durable" | "live"): string {
     if (mode === "live") {
-        return response.write(
-            `id: ${event.id}\nevent: update\ndata: ${serializeJson({
-                cursor: event.id,
-                event,
-            })}\n\n`,
-        );
+        return `id: ${event.id}\nevent: update\ndata: ${serializeJson({
+            cursor: event.id,
+            event,
+        })}\n\n`;
     }
-    return response.write(
-        `id: ${event.id}\nevent: ${event.type}\ndata: ${serializeJson(event)}\n\n`,
-    );
+    return `id: ${event.id}\nevent: ${event.type}\ndata: ${serializeJson(event)}\n\n`;
 }
 
 function groupModels(models: readonly { readonly providerId: string }[]): readonly unknown[] {

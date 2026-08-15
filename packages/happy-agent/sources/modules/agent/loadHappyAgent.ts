@@ -14,7 +14,6 @@ import {
     currentAgentEnvironment,
     type Agent,
     type AgentConfig,
-    type AgentDatabase,
     type AgentModel,
     type AgentModule,
     type AgentProviders,
@@ -198,24 +197,6 @@ export interface LoadedHappyAgent {
     close(ctx: Context): Promise<void>;
 }
 
-const loaderStateModule: AgentModule<AnyAgentTool, LibSQLDatabase> = {
-    name: "happy-agent-loader",
-    migrations: [
-        [
-            "001-root-agent",
-            async (_ctx, database) => {
-                await agentDatabaseRun(
-                    database,
-                    sql`CREATE TABLE IF NOT EXISTS happy_agent_loader_state (
-                        key TEXT PRIMARY KEY,
-                        value TEXT NOT NULL
-                    )`,
-                );
-            },
-        ],
-    ],
-};
-
 /**
  * Load one durable Happy agent and every standard module over a private home and public home.
  *
@@ -242,6 +223,13 @@ export async function loadHappyAgent(
     const opened = await openHappyAgentDatabase(databasePath);
     let modules: HappyAgentModuleCollection | undefined;
     let system: AgentSystemLocal<LibSQLDatabase> | undefined;
+    let loaderIdentity:
+        | {
+              readonly epoch: string;
+              readonly rootAgentId: string;
+              readonly schemaVersion: number;
+          }
+        | undefined;
     try {
         await chmod(databasePath, 0o600);
         const storage = new AgentStorage({
@@ -257,6 +245,9 @@ export async function loadHappyAgent(
             publicHome,
             options.events,
         );
+        const loaderStateModule = createLoaderStateModule((identity) => {
+            loaderIdentity = identity;
+        });
         const orderedModules: AgentModule<AnyAgentTool, LibSQLDatabase>[] = [
             modules.systemPrompt,
             modules.conversations,
@@ -292,15 +283,22 @@ export async function loadHappyAgent(
             modules: orderedModules,
             provider: options.provider,
             providers: options.providers,
+        }).catch((error: unknown) => {
+            throw new Error("Creating the Agent System failed.", { cause: error });
         });
-        const identity = await ensureLoaderIdentity(ctx, storage);
+        const identity = loaderIdentity;
+        if (identity === undefined) {
+            throw new Error("The Happy Agent identity was not initialized before restoration.");
+        }
         const agentId = identity.rootAgentId;
         const existing = await system.config(ctx, agentId);
         const config = rootAgentConfig(options.config, publicHome);
         if (existing !== undefined) assertExistingRootAgentConfig(existing, publicHome);
         const agent =
             existing === undefined
-                ? await system.create(ctx, config, { id: agentId })
+                ? await system.create(ctx, config, { id: agentId }).catch((error: unknown) => {
+                      throw new Error("Creating the root Happy Agent failed.", { cause: error });
+                  })
                 : await system.resolve(ctx, agentId);
 
         let closed = false;
@@ -383,7 +381,10 @@ function createModules(
         collaboration: new CollaborationModule({ broker: integrations.collaboration }),
         conversations: new ConversationModule({ defaultCwd: publicHome, transaction }),
         compute: compute.computeModule,
-        events: new EventsModule(events),
+        events: new EventsModule({
+            ...events,
+            transaction,
+        }),
         goal: new GoalModule({}),
         happy: new HappyModule({ host: integrations.happy }),
         history,
@@ -469,53 +470,77 @@ function assertExistingRootAgentConfig(config: AgentConfig, publicHome: string):
     }
 }
 
-async function ensureLoaderIdentity(
-    ctx: Context,
-    storage: AgentStorage<LibSQLDatabase>,
-): Promise<{
+function createLoaderStateModule(
+    setIdentity: (identity: {
+        readonly epoch: string;
+        readonly rootAgentId: string;
+        readonly schemaVersion: number;
+    }) => void,
+): AgentModule<AnyAgentTool, LibSQLDatabase> {
+    return {
+        name: "happy-agent-loader",
+        migrations: [
+            [
+                "001-root-agent",
+                async (_ctx, database) => {
+                    await agentDatabaseRun(
+                        database,
+                        sql`CREATE TABLE IF NOT EXISTS happy_agent_loader_state (
+                            key TEXT PRIMARY KEY,
+                            value TEXT NOT NULL
+                        )`,
+                    );
+                },
+            ],
+        ],
+        beforeStart: async (_ctx, _agents, database) => {
+            setIdentity(await ensureLoaderIdentity(database));
+        },
+    };
+}
+
+async function ensureLoaderIdentity(database: LibSQLDatabase): Promise<{
     readonly epoch: string;
     readonly rootAgentId: string;
     readonly schemaVersion: number;
 }> {
-    return await storage.transaction(ctx, async (_txCtx, database) => {
-        const rows = await agentDatabaseRows<{ key: string; value: string }>(
-            database as AgentDatabase,
-            sql`SELECT key, value FROM happy_agent_loader_state
-                WHERE key IN ('root_agent_id', 'installation_epoch', 'schema_version')`,
-        );
-        const values = new Map(rows.map((row) => [row.key, row.value]));
-        const rootAgentIdValue = values.get("root_agent_id");
-        const rootAgentId =
-            rootAgentIdValue === undefined
-                ? createId()
-                : Value.Check(rootAgentIdSchema, rootAgentIdValue)
-                  ? rootAgentIdValue
-                  : undefined;
-        if (rootAgentId === undefined || !Value.Check(rootAgentIdSchema, rootAgentId)) {
-            throw new Error("The stored root agent identity is invalid.");
+    const rows = await agentDatabaseRows<{ key: string; value: string }>(
+        database,
+        sql`SELECT key, value FROM happy_agent_loader_state
+            WHERE key IN ('root_agent_id', 'installation_epoch', 'schema_version')`,
+    );
+    const values = new Map(rows.map((row) => [row.key, row.value]));
+    const rootAgentIdValue = values.get("root_agent_id");
+    const rootAgentId =
+        rootAgentIdValue === undefined
+            ? createId()
+            : Value.Check(rootAgentIdSchema, rootAgentIdValue)
+              ? rootAgentIdValue
+              : undefined;
+    if (rootAgentId === undefined || !Value.Check(rootAgentIdSchema, rootAgentId)) {
+        throw new Error("The stored root agent identity is invalid.");
+    }
+    const epoch = values.get("installation_epoch") ?? randomUUID();
+    const schemaVersionValue = values.get("schema_version");
+    const schemaVersion =
+        schemaVersionValue === undefined ? 1 : Number.parseInt(schemaVersionValue, 10);
+    if (!Number.isSafeInteger(schemaVersion) || schemaVersion < 1) {
+        throw new Error("The stored Happy agent schema version is invalid.");
+    }
+    for (const [key, value] of [
+        ["root_agent_id", rootAgentId],
+        ["installation_epoch", epoch],
+        ["schema_version", String(schemaVersion)],
+    ] as const) {
+        if (!values.has(key)) {
+            await agentDatabaseRun(
+                database,
+                sql`INSERT INTO happy_agent_loader_state (key, value)
+                    VALUES (${key}, ${value})`,
+            );
         }
-        const epoch = values.get("installation_epoch") ?? randomUUID();
-        const schemaVersionValue = values.get("schema_version");
-        const schemaVersion =
-            schemaVersionValue === undefined ? 1 : Number.parseInt(schemaVersionValue, 10);
-        if (!Number.isSafeInteger(schemaVersion) || schemaVersion < 1) {
-            throw new Error("The stored Happy agent schema version is invalid.");
-        }
-        for (const [key, value] of [
-            ["root_agent_id", rootAgentId],
-            ["installation_epoch", epoch],
-            ["schema_version", String(schemaVersion)],
-        ] as const) {
-            if (!values.has(key)) {
-                await agentDatabaseRun(
-                    database as AgentDatabase,
-                    sql`INSERT INTO happy_agent_loader_state (key, value)
-                        VALUES (${key}, ${value})`,
-                );
-            }
-        }
-        return { epoch, rootAgentId, schemaVersion };
-    });
+    }
+    return { epoch, rootAgentId, schemaVersion };
 }
 
 async function prepareHomes(agentHome: string, publicHome: string): Promise<void> {

@@ -1,8 +1,11 @@
 import { rm } from "node:fs/promises";
+import { fork, type ChildProcess } from "node:child_process";
+import { once } from "node:events";
 import { join } from "node:path";
 
 import {
     AgentProviders,
+    startAgentHttpServer,
     startHappyAgentDaemon,
     type AgentModel,
     type HappyAgentDaemon,
@@ -12,6 +15,7 @@ import { createRootContext, type RootContext } from "@steve.kite/stdlib";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createTestSocketDirectory } from "../testing/createTestSocketDirectory.js";
+import type { EventId } from "../protocol/EventId.js";
 import { connectHappyAgentProtocolServer } from "./connectHappyAgentProtocolServer.js";
 
 const running = new Set<{
@@ -19,8 +23,18 @@ const running = new Set<{
     readonly daemon: HappyAgentDaemon;
     readonly directory: string;
 }>();
+const childDaemons = new Set<ChildProcess>();
 
 afterEach(async () => {
+    for (const child of childDaemons) {
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    }
+    await Promise.all(
+        [...childDaemons].map(async (child) => {
+            if (child.exitCode === null && child.signalCode === null) await once(child, "exit");
+        }),
+    );
+    childDaemons.clear();
     await Promise.all(
         [...running].map(async ({ ctx, daemon, directory }) => {
             await daemon.close(ctx.named("test-cleanup")).catch(() => undefined);
@@ -31,6 +45,31 @@ afterEach(async () => {
 });
 
 describe("Rig client to Happy Agent daemon integration", () => {
+    it("exposes authenticated starting health before the Agent System is ready", async () => {
+        const directory = await createTestSocketDirectory();
+        const agentHome = join(directory, "agent");
+        const ctx = createRootContext() as unknown as RootContext;
+        const http = await startAgentHttpServer({
+            agentHome,
+            ctx: ctx.named("starting-http"),
+            version: "integration-test",
+        });
+        try {
+            const connection = await connectHappyAgentProtocolServer({ agentHome });
+            await expect(connection.client.health()).resolves.toMatchObject({
+                healthy: true,
+                ready: false,
+                status: "starting",
+            });
+            await expect(connection.client.listSessions()).rejects.toMatchObject({
+                statusCode: 503,
+            });
+        } finally {
+            await http.close();
+            await rm(directory, { force: true, recursive: true });
+        }
+    });
+
     it("drives inference and SSE through the replacement Unix socket and survives restart", async () => {
         const first = await startTestDaemon();
         const connection = await connectHappyAgentProtocolServer({
@@ -59,13 +98,26 @@ describe("Rig client to Happy Agent daemon integration", () => {
         const abort = new AbortController();
         const message = deferred<unknown>();
         const finished = deferred<unknown>();
+        let finishedCursor: string | undefined;
+        const providerEventTypes: string[] = [];
+        const rigEventTypes: string[] = [];
         const watching = connection.client.watchSessionEvents({
             after: submitted.eventId,
             onEvent: (event) => {
+                if (event.type === "agent_event") {
+                    rigEventTypes.push(event.data.event.type);
+                    if (event.data.providerEvent !== undefined) {
+                        providerEventTypes.push(event.data.providerEvent.type);
+                    }
+                }
+                if (event.type === "provider_event") {
+                    providerEventTypes.push(event.data.event.type);
+                }
                 if (event.type === "agent_message" && event.data.runId === submitted.runId) {
                     message.resolve(event);
                 }
                 if (event.type === "run_finished" && event.data.runId === submitted.runId) {
+                    finishedCursor = event.id;
                     finished.resolve(event);
                     abort.abort();
                 }
@@ -76,7 +128,9 @@ describe("Rig client to Happy Agent daemon integration", () => {
         await expect(message.promise).resolves.toMatchObject({
             data: {
                 message: {
-                    blocks: [{ text: "Happy Agent replied through Rig.", type: "text" }],
+                    blocks: expect.arrayContaining([
+                        { text: "Happy Agent replied through Rig.", type: "text" },
+                    ]),
                 },
                 runId: submitted.runId,
             },
@@ -87,6 +141,39 @@ describe("Rig client to Happy Agent daemon integration", () => {
             type: "run_finished",
         });
         await watching;
+        expect(providerEventTypes).toEqual([
+            "block_start",
+            "reasoning_start",
+            "reasoning_delta",
+            "reasoning_end",
+            "text_start",
+            "text_delta",
+            "text_end",
+            "toolcall_start",
+            "toolcall_delta",
+            "toolcall_end",
+            "toolcall_result_start",
+            "toolcall_result_delta",
+            "toolcall_result_end",
+            "block_stop",
+            "done",
+        ]);
+        expect(rigEventTypes).toEqual([
+            "block_start",
+            "thinking_start",
+            "thinking_delta",
+            "thinking_end",
+            "text_start",
+            "text_delta",
+            "text_end",
+            "toolcall_start",
+            "toolcall_delta",
+            "toolcall_end",
+            "tool_execution_start",
+            "tool_execution_progress",
+            "tool_execution_end",
+            "block_stop",
+        ]);
 
         const events = await vi.waitFor(async () => {
             const page = await connection.client.getEvents(session.id);
@@ -115,15 +202,110 @@ describe("Rig client to Happy Agent daemon integration", () => {
         await expect(reconnected.client.listSessions()).resolves.toMatchObject({
             sessions: [expect.objectContaining({ id: session.id })],
         });
+        if (finishedCursor === undefined) throw new Error("The first run had no durable cursor.");
+        const replayedSubmission = await reconnected.client.submitMessage(session.id, {
+            text: "Replay from the cursor created before restart.",
+        });
+        const replayAbort = new AbortController();
+        const replayFinished = deferred<unknown>();
+        let replayFinishedCursor: string | undefined;
+        await reconnected.client.watchSessionEvents({
+            after: finishedCursor as EventId,
+            onEvent: (event) => {
+                if (
+                    event.type === "run_finished" &&
+                    event.data.runId === replayedSubmission.runId
+                ) {
+                    replayFinishedCursor = event.id;
+                    replayFinished.resolve(event);
+                    replayAbort.abort();
+                }
+            },
+            sessionId: session.id,
+            signal: replayAbort.signal,
+        });
+        await expect(replayFinished.promise).resolves.toMatchObject({
+            data: { runId: replayedSubmission.runId },
+            type: "run_finished",
+        });
+        if (replayFinishedCursor === undefined) {
+            throw new Error("The replayed run had no durable cursor.");
+        }
+        expect(replayFinishedCursor > finishedCursor).toBe(true);
     });
+
+    it("resets a partial block and resumes the same run across daemon restart", async () => {
+        const directory = await createTestSocketDirectory();
+        const agentHome = join(directory, "agent");
+        const publicHome = join(directory, "public");
+        const first = await startRestartFixture(agentHome, publicHome, 1);
+        const connection = await connectHappyAgentProtocolServer({
+            agentHome,
+        });
+        const sessions = await connection.client.listSessions();
+        const session = sessions.sessions[0];
+        if (session === undefined) throw new Error("Happy Agent exposed no root session.");
+        const submitted = await connection.client.submitMessage(session.id, {
+            text: "Resume this response after restart.",
+        });
+        const partial = deferred<void>();
+        const reset = deferred<void>();
+        const finished = deferred<unknown>();
+        const streamedTypes: string[] = [];
+        const abort = new AbortController();
+        const watching = connection.client.watchSessionEvents({
+            after: submitted.eventId,
+            onEvent: (event) => {
+                if (event.type === "agent_event" && event.data.runId === submitted.runId) {
+                    streamedTypes.push(event.data.event.type);
+                    if (
+                        event.data.providerEvent?.type === "text_delta" &&
+                        event.data.providerEvent.delta === "unfinished"
+                    ) {
+                        partial.resolve();
+                    }
+                    if (event.data.event.type === "block_reset") reset.resolve();
+                }
+                if (event.type === "run_finished" && event.data.runId === submitted.runId) {
+                    finished.resolve(event);
+                    abort.abort();
+                }
+            },
+            sessionId: session.id,
+            signal: abort.signal,
+        });
+
+        await partial.promise;
+        first.kill("SIGKILL");
+        await once(first, "exit");
+        childDaemons.delete(first);
+        const second = await startRestartFixture(agentHome, publicHome, 2);
+
+        await reset.promise;
+        await expect(finished.promise).resolves.toMatchObject({
+            data: { runId: submitted.runId, stopReason: "stop" },
+            type: "run_finished",
+        });
+        await watching;
+        const resetIndex = streamedTypes.indexOf("block_reset");
+        expect(resetIndex).toBeGreaterThanOrEqual(0);
+        expect(streamedTypes.indexOf("text_start", resetIndex + 1)).toBeGreaterThan(resetIndex);
+        second.send({ type: "shutdown" });
+        await once(second, "exit");
+        childDaemons.delete(second);
+        await rm(directory, { force: true, recursive: true });
+    }, 30_000);
 });
 
-async function startTestDaemon(existingDirectory?: string) {
+async function startTestDaemon(
+    existingDirectory?: string,
+    provider: Parameters<AgentProviders["add"]>[1] = scriptedProvider(),
+) {
     const directory = existingDirectory ?? (await createTestSocketDirectory());
     const agentHome = join(directory, "agent");
     const publicHome = join(directory, "public");
     const providers = new AgentProviders();
-    providers.add("scripted", scriptedProvider(), "gym");
+    providers.add("scripted", provider, "gym");
     const models: readonly AgentModel[] = [
         {
             defaultEffort: "medium",
@@ -148,7 +330,7 @@ async function startTestDaemon(existingDirectory?: string) {
     return entry;
 }
 
-function scriptedProvider() {
+function scriptedProvider(): Parameters<AgentProviders["add"]>[1] {
     return {
         inputTypes: ["text"],
         name: "scripted",
@@ -161,9 +343,46 @@ function scriptedProvider() {
             destroy: () => undefined,
             run: () => {
                 const events = [
+                    { type: "block_start" },
+                    { type: "reasoning_start" },
+                    { type: "reasoning_delta", delta: "I should answer through Rig." },
+                    { type: "reasoning_end", reasoning: "I should answer through Rig." },
                     { type: "text_start" },
                     { type: "text_delta", delta: "Happy Agent replied through Rig." },
                     { type: "text_end" },
+                    {
+                        type: "toolcall_start",
+                        callId: "server-tool-1",
+                        name: "lookup",
+                        server: true,
+                        vendor: { provider: "scripted" },
+                    },
+                    {
+                        type: "toolcall_delta",
+                        callId: "server-tool-1",
+                        delta: '{"query":"happy"}',
+                    },
+                    {
+                        type: "toolcall_end",
+                        arguments: '{"query":"happy"}',
+                        callId: "server-tool-1",
+                    },
+                    {
+                        type: "toolcall_result_start",
+                        callId: "server-tool-1",
+                        vendor: { provider: "scripted" },
+                    },
+                    {
+                        type: "toolcall_result_delta",
+                        callId: "server-tool-1",
+                        delta: "found",
+                    },
+                    {
+                        type: "toolcall_result_end",
+                        callId: "server-tool-1",
+                        content: [{ text: "found", type: "text" }],
+                    },
+                    { type: "block_stop" },
                     {
                         type: "done",
                         state: "normal",
@@ -176,6 +395,57 @@ function scriptedProvider() {
             },
         }),
     } as never;
+}
+
+async function startRestartFixture(
+    agentHome: string,
+    publicHome: string,
+    attempt: number,
+): Promise<ChildProcess> {
+    const child = fork(
+        new URL("./fixtures/happyAgentRestartDaemon.ts", import.meta.url),
+        [agentHome, publicHome, String(attempt)],
+        {
+            execArgv: ["--import", "tsx"],
+            stdio: ["ignore", "pipe", "pipe", "ipc"],
+        },
+    );
+    childDaemons.add(child);
+    let diagnostics = "";
+    child.stderr?.on("data", (chunk: Buffer | string) => {
+        diagnostics += chunk.toString();
+    });
+    await new Promise<void>((resolve, reject) => {
+        const failed = (error: unknown): void => {
+            cleanup();
+            reject(error);
+        };
+        const exited = (code: number | null, signal: NodeJS.Signals | null): void => {
+            failed(
+                new Error(
+                    `The restart fixture exited before readiness (${String(code ?? signal)}): ${diagnostics}`,
+                ),
+            );
+        };
+        const message = (value: unknown): void => {
+            if (value === null || typeof value !== "object") return;
+            if (Reflect.get(value, "type") === "ready") {
+                cleanup();
+                resolve();
+            } else if (Reflect.get(value, "type") === "failed") {
+                failed(new Error(String(Reflect.get(value, "error"))));
+            }
+        };
+        const cleanup = (): void => {
+            child.off("error", failed);
+            child.off("exit", exited);
+            child.off("message", message);
+        };
+        child.once("error", failed);
+        child.once("exit", exited);
+        child.on("message", message);
+    });
+    return child;
 }
 
 function unavailableIntegrations(): HappyAgentIntegrations {

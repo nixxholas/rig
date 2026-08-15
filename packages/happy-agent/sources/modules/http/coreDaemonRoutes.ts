@@ -25,7 +25,7 @@ export function createCoreDaemonRoutes(): AgentHttpRouteGroup {
                 const catalog = createModelCatalog(dependencies.agent.system.models);
                 sendJson(response, 200, {
                     catalog,
-                    durableGlobalEventQueue: false,
+                    durableGlobalEventQueue: true,
                     healthy: true,
                     identity: daemonIdentity(dependencies),
                     protocolVersion: 0,

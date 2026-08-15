@@ -17,6 +17,9 @@ import type { HappyAgentEvent } from "../events/EventsModule.js";
 import { readValidatedBody } from "./body.js";
 import { AgentHttpError, sendJson, serializeJson } from "./errors.js";
 import { createRouteGroup, type AgentHttpRouteGroup } from "./router.js";
+import { createSseWriter } from "./sseWriter.js";
+
+const MAX_SESSION_STREAM_PENDING_BYTES = 1_024 * 1_024;
 
 const textBlockSchema = Type.Object(
     { type: Type.Literal("text"), text: Type.String({ maxLength: 262_144 }) },
@@ -407,18 +410,30 @@ function createReadRoutes(): AgentHttpRouteGroup["routes"] {
             path: "/v0/sessions/:sessionId/events",
             handle: async ({ ctx, dependencies, url, response }) => {
                 const session = await requireSession(ctx, dependencies, sessionId(url));
-                const after = url.searchParams.get("after");
-                const events = await dependencies.agent.modules.conversations.events(
-                    ctx,
-                    session.id,
-                    after === null
-                        ? { limit: parseLimit(url.searchParams.get("message_limit"), 50, 100) }
-                        : {
-                              after,
-                              limit: parseLimit(url.searchParams.get("message_limit"), 50, 100),
-                          },
+                const journal = dependencies.agent.modules.events;
+                const requestedAfter = url.searchParams.get("after");
+                const replay = journal.replay(
+                    requestedAfter ?? journal.originCursor(),
+                    journal.capacity(),
                 );
-                sendJson(response, 200, { events });
+                if (replay === undefined) {
+                    throw new AgentHttpError(409, "Event cursor not found.", {
+                        cursor: journal.cursor(),
+                    });
+                }
+                const limit = parseLimit(url.searchParams.get("message_limit"), 50, 100);
+                const projected = replay.events
+                    .filter((event) => event.agentId === session.agentId)
+                    .flatMap((event) => {
+                        const result = projectSessionEvent(event, session.id);
+                        return result === undefined ? [] : [result];
+                    });
+                sendJson(response, 200, {
+                    events:
+                        requestedAfter === null
+                            ? projected.slice(Math.max(0, projected.length - limit))
+                            : projected.slice(0, limit),
+                });
             },
         },
         {
@@ -1073,21 +1088,39 @@ async function streamSessionEvents(
     const header = request.headers["last-event-id"];
     const headerValue = Array.isArray(header) ? header.at(-1) : header;
     const after = headerValue ?? url.searchParams.get("after") ?? undefined;
-    let closed = false;
-    let streaming = false;
+    if (
+        after !== undefined &&
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(after)
+    ) {
+        throw new AgentHttpError(400, "The event cursor must be a UUIDv7 value.");
+    }
+    const writer = createSseWriter(request, response);
+    let replaying = true;
     const pending: HappyAgentEvent[] = [];
+    let pendingBytes = 0;
     const unsubscribe = events.subscribe((event: HappyAgentEvent) => {
-        if (event.agentId !== session.agentId || closed) return;
-        if (!streaming) {
-            if (pending.length < events.capacity()) pending.push(event);
+        if (event.agentId !== session.agentId || writer.closed) return;
+        if (replaying) {
+            const bytes = Buffer.byteLength(serializeJson(event), "utf8");
+            if (pendingBytes + bytes > MAX_SESSION_STREAM_PENDING_BYTES) {
+                writer.close();
+                return;
+            }
+            pending.push(event);
+            pendingBytes += bytes;
             return;
         }
-        if (!writeEvent(event)) cleanup();
+        writeEvent(event);
     });
     const replay = events.replay(after, events.capacity());
     if (replay === undefined) {
         unsubscribe();
+        writer.close();
         throw new AgentHttpError(409, "Event cursor not found.");
+    }
+    if (writer.closed) {
+        unsubscribe();
+        throw new AgentHttpError(503, "The session stream could not buffer its initial updates.");
     }
     response.writeHead(200, {
         "cache-control": "no-cache, no-transform",
@@ -1095,50 +1128,44 @@ async function streamSessionEvents(
         "content-type": "text/event-stream; charset=utf-8",
         "x-accel-buffering": "no",
     });
-    response.write(
+    writer.write(
         `event: hello\ndata: ${serializeJson({
             cursor: replay.latestCursor,
             resumed: after !== undefined,
             sessionId: session.id,
         })}\n\n`,
     );
+    const replayed = new Set<string>();
     for (const event of replay.events) {
         if (event.agentId !== session.agentId) continue;
+        replayed.add(event.id);
         if (!writeEvent(event)) {
-            response.end();
             unsubscribe();
             return;
         }
     }
-    streaming = true;
+    replaying = false;
     for (const event of pending) {
+        if (replayed.has(event.id)) continue;
         if (!writeEvent(event)) {
-            cleanup();
+            unsubscribe();
             return;
         }
     }
     pending.length = 0;
+    pendingBytes = 0;
     const heartbeat = setInterval(() => {
-        if (!response.write(": keepalive\n\n")) cleanup();
+        writer.heartbeat(": keepalive\n\n");
     }, 15_000);
     heartbeat.unref();
-    request.once("close", cleanup);
-    response.once("close", cleanup);
-    await new Promise<void>((resolve) => response.once("finish", resolve));
-    cleanup();
-
-    function cleanup(): void {
-        if (closed) return;
-        closed = true;
-        clearInterval(heartbeat);
-        unsubscribe();
-        response.end();
-    }
+    await writer.done;
+    clearInterval(heartbeat);
+    unsubscribe();
 
     function writeEvent(event: HappyAgentEvent): boolean {
         const projected = projectSessionEvent(event, session.id);
         if (projected === undefined) return true;
-        return response.write(
+        return writer.write(
             `id: ${event.id}\nevent: ${projected.type}\ndata: ${serializeJson(projected)}\n\n`,
         );
     }
@@ -1172,18 +1199,41 @@ function projectSessionEvent(
             type: "message_submitted",
         };
     }
-    if (
-        event.type === "provider.event" &&
-        runId !== undefined &&
-        recordValue(payload.event)?.type === "text_end" &&
-        typeof payload.text === "string"
-    ) {
+    if (event.type === "provider.event" && runId !== undefined) {
+        const providerEvent = recordValue(payload.event);
+        const rigEvent = recordValue(payload.rigEvent);
+        if (providerEvent === undefined) return undefined;
+        if (rigEvent === undefined) {
+            return {
+                ...base,
+                data: { event: providerEvent, runId },
+                type: "provider_event",
+            };
+        }
+        return {
+            ...base,
+            data: { event: rigEvent, providerEvent, runId },
+            type: "agent_event",
+        };
+    }
+    if ((event.type === "tool.started" || event.type === "tool.completed") && runId !== undefined) {
+        const rigEvent = recordValue(payload.rigEvent);
+        if (rigEvent === undefined) return undefined;
+        return {
+            ...base,
+            data: { event: rigEvent, runId },
+            type: "agent_event",
+        };
+    }
+    if (event.type === "inference.completed" && runId !== undefined) {
+        const inferenceId =
+            typeof payload.inferenceId === "string" ? payload.inferenceId : `${runId}-inference`;
         return {
             ...base,
             data: {
                 message: {
-                    blocks: [{ text: payload.text, type: "text" }],
-                    id: `${runId}-assistant`,
+                    blocks: agentBlocks(payload.blocks),
+                    id: inferenceId,
                     role: "agent",
                 },
                 runId,
@@ -1208,6 +1258,59 @@ function projectSessionEvent(
         };
     }
     return undefined;
+}
+
+function agentBlocks(value: unknown): readonly Record<string, unknown>[] {
+    if (!Array.isArray(value)) return [];
+    const result: Record<string, unknown>[] = [];
+    for (const entry of value) {
+        const block = recordValue(entry);
+        if (block?.type === "text" && typeof block.text === "string") {
+            result.push({ text: block.text, type: "text" });
+            continue;
+        }
+        if (block?.type === "thinking" && typeof block.thinking === "string") {
+            result.push({
+                thinking: block.thinking,
+                type: "thinking",
+                ...(typeof block.encrypted === "string" ? { encrypted: block.encrypted } : {}),
+            });
+            continue;
+        }
+        if (
+            block?.type === "toolCall" &&
+            typeof block.id === "string" &&
+            typeof block.name === "string"
+        ) {
+            result.push({
+                arguments: block.arguments ?? {},
+                id: block.id,
+                name: block.name,
+                ...(typeof block.namespace === "string" ? { namespace: block.namespace } : {}),
+                ...(typeof block.providerToolCallId === "string"
+                    ? { providerToolCallId: block.providerToolCallId }
+                    : {}),
+                type: "tool_call",
+                ...(block.vendor === undefined ? {} : { vendor: block.vendor }),
+            });
+            continue;
+        }
+        if (
+            block?.type === "tool_result" &&
+            typeof block.toolCallId === "string" &&
+            typeof block.toolName === "string"
+        ) {
+            result.push({
+                display: typeof block.display === "string" ? block.display : "",
+                ...(block.isError === true ? { isError: true } : {}),
+                rendered: Array.isArray(block.rendered) ? block.rendered : [],
+                toolCallId: block.toolCallId,
+                toolName: block.toolName,
+                type: "tool_result",
+            });
+        }
+    }
+    return result;
 }
 
 function providerInputBlocks(value: unknown): readonly Record<string, unknown>[] {
