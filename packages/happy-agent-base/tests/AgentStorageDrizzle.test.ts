@@ -3,7 +3,6 @@ import {
     afterCommit,
     createContextNamespace,
     createRootContext,
-    withAfterCommit,
     type Context,
 } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
@@ -19,7 +18,6 @@ import {
     type AgentDatabaseFacade,
     type AgentModule,
     type AgentStorageLock,
-    type AgentStorageTransaction,
     type AnyAgentTool,
 } from "../sources/index.js";
 import { inMemoryStorageLock, providersOf } from "./gym/fixtures.js";
@@ -163,7 +161,7 @@ describe("AgentStorage Drizzle persistence", () => {
                 events.push("unrelated context");
             });
             events.push("inside");
-            await storage.transaction(nestedValue.set(txCtx, "preserved"), async (nestedCtx) => {
+            await nestedValue.set(txCtx, "preserved").inTx(async (nestedCtx) => {
                 expect(nestedValue.get(nestedCtx)).toBe("preserved");
             });
         });
@@ -195,96 +193,83 @@ describe("AgentStorage Drizzle persistence", () => {
         close();
     });
 
-    it("uses a host-supplied transaction with stdlib afterCommit and its active facade", async () => {
+    it("exposes the root database and active transaction through ctx.db and ctx.inTx", async () => {
         const { close, database } = inMemoryDrizzle();
-        const state = createContextNamespace<
-            | {
-                  readonly database: AgentDatabase;
-              }
-            | undefined
-        >("agent-storage-test-transaction", undefined);
-        const transaction: AgentStorageTransaction = async (transactionCtx, work) => {
-            const nested = state.get(transactionCtx);
-            if (nested !== undefined) return await work(transactionCtx, nested.database);
-            let runAfterCommit!: () => Promise<void>;
-            const result = await database.transaction(async (activeDatabase) => {
-                const [activeCtx, drain] = withAfterCommit(
-                    state.set(transactionCtx, {
-                        database: activeDatabase,
-                    }),
-                );
-                runAfterCommit = drain;
-                return await work(activeCtx, activeDatabase);
-            });
-            await runAfterCommit();
-            return result;
-        };
-        const storage = new AgentStorage({
-            acquireLock: lock(),
-            database,
-            transaction,
-        });
+        const storage = new AgentStorage({ acquireLock: lock(), database });
         await storage.migrate(ctx, []);
-        let activeDatabase: AgentDatabase | undefined;
-        let observed = "";
+        const rootCtx = withAgentDatabase(ctx, database);
+        expect(rootCtx.db).toBe(database);
+        let retainedCtx: Context | undefined;
+        const events: string[] = [];
 
-        await storage.kv.transaction(ctx, async (kv, txCtx) => {
-            activeDatabase = agentDatabase(txCtx);
-            await kv.write(txCtx, "host-value", "ready");
-            afterCommit(txCtx, async () => {
-                observed = String(await storage.kv.read(ctx, "host-value"));
+        await rootCtx.inTx(async (txCtx) => {
+            retainedCtx = txCtx;
+            expect(txCtx.db).not.toBe(database);
+            expect(agentDatabase(txCtx)).toBe(txCtx.db);
+            await storage.kv.write(txCtx, "host-value", "ready");
+            await txCtx.inTx(async (nestedCtx) => {
+                expect(nestedCtx.db).toBe(txCtx.db);
+                afterCommit(nestedCtx, () => {
+                    events.push("afterCommit");
+                });
+            });
+            events.push("execute:return");
+        });
+
+        expect(events).toEqual(["execute:return", "afterCommit"]);
+        expect(await storage.kv.read(rootCtx, "host-value")).toBe("ready");
+        const endedCtx = retainedCtx;
+        if (endedCtx === undefined) throw new Error("Transaction context was not captured.");
+        expect(() => endedCtx.db).toThrow("has ended");
+        await expect(endedCtx.inTx(async () => undefined)).rejects.toThrow("has ended");
+        close();
+    });
+
+    it("rolls back ctx.inTx work and drops queued post-commit callbacks", async () => {
+        const { close, database } = inMemoryDrizzle();
+        const storage = new AgentStorage({ acquireLock: lock(), database });
+        await storage.migrate(ctx, []);
+        const rootCtx = withAgentDatabase(ctx, database);
+        const events: string[] = [];
+
+        await expect(
+            rootCtx.inTx(async (txCtx) => {
+                await storage.kv.write(txCtx, "rolled-back", true);
+                afterCommit(txCtx, () => {
+                    events.push("must not run");
+                });
+                throw new Error("roll back");
+            }),
+        ).rejects.toThrow("roll back");
+
+        expect(await storage.kv.read(rootCtx, "rolled-back")).toBeUndefined();
+        expect(events).toEqual([]);
+        close();
+    });
+
+    it("rejects ctx.db and ctx.inTx when no agent database is installed", async () => {
+        expect(() => ctx.db).toThrow("no agent database");
+        await expect(ctx.inTx(async () => undefined)).rejects.toThrow("no agent database");
+    });
+
+    it("keeps storage key-value transactions on the same ctx.inTx facade", async () => {
+        const { close, database } = inMemoryDrizzle();
+        const storage = new AgentStorage({ acquireLock: lock(), database });
+        await storage.migrate(ctx, []);
+        const rootCtx = withAgentDatabase(ctx, database);
+        let activeDatabase: AgentDatabase | undefined;
+
+        await rootCtx.inTx(async (txCtx) => {
+            activeDatabase = txCtx.db;
+            await storage.kv.transaction(txCtx, async (kv, nestedCtx) => {
+                expect(nestedCtx.db).toBe(activeDatabase);
+                await kv.write(nestedCtx, "nested-value", "ready");
             });
         });
 
         expect(activeDatabase).toBeDefined();
         expect(activeDatabase).not.toBe(database);
-        expect(observed).toBe("ready");
-        close();
-    });
-
-    it("accepts transaction integration without a separate post-commit option", async () => {
-        const { close, database } = inMemoryDrizzle();
-        const transaction: AgentStorageTransaction = async (transactionCtx, work) => {
-            let runAfterCommit!: () => Promise<void>;
-            const result = await database.transaction(async (activeDatabase) => {
-                const [activeCtx, drain] = withAfterCommit(transactionCtx);
-                runAfterCommit = drain;
-                return await work(activeCtx, activeDatabase);
-            });
-            await runAfterCommit();
-            return result;
-        };
-        const storage = new AgentStorage({
-            acquireLock: lock(),
-            database,
-            transaction,
-        });
-        await storage.migrate(ctx, []);
-        const events: string[] = [];
-        await storage.transaction(ctx, async (txCtx) => {
-            afterCommit(txCtx, () => {
-                events.push("committed");
-            });
-        });
-        expect(events).toEqual(["committed"]);
-        close();
-    });
-
-    it("serializes concurrent default SQLite transactions", async () => {
-        const { close, database } = inMemoryDrizzle();
-        const storage = new AgentStorage({ acquireLock: lock(), database });
-        await storage.migrate(ctx, []);
-
-        await Promise.all(
-            Array.from({ length: 20 }, async (_, index) => {
-                await storage.kv.transaction(ctx, async (kv, txCtx) => {
-                    await kv.write(txCtx, `concurrent.${index}`, index);
-                    await Promise.resolve();
-                });
-            }),
-        );
-
-        expect(await storage.kv.list(ctx, "concurrent.")).toHaveLength(20);
+        expect(await storage.kv.read(rootCtx, "nested-value")).toBe("ready");
         close();
     });
 
@@ -294,7 +279,7 @@ describe("AgentStorage Drizzle persistence", () => {
         await storage.migrate(ctx, []);
 
         await expect(
-            storage.transaction(ctx, async (txCtx) => {
+            withAgentDatabase(ctx, database).inTx(async (txCtx) => {
                 await expect(storage.kv.write(ctx, "wrong-context", true)).rejects.toThrow(
                     "must use that transaction's context",
                 );
@@ -305,37 +290,6 @@ describe("AgentStorage Drizzle persistence", () => {
 
         expect(await storage.kv.read(ctx, "wrong-context")).toBeUndefined();
         expect(await storage.kv.read(ctx, "rolled-back")).toBeUndefined();
-        close();
-    });
-
-    it("coordinates root database contexts without mistaking them for active transactions", async () => {
-        const { close, database } = inMemoryDrizzle();
-        const storage = new AgentStorage({ acquireLock: lock(), database });
-        await storage.migrate(ctx, []);
-        const rootDatabaseCtx = withAgentDatabase(ctx, database);
-        let entered!: () => void;
-        let release!: () => void;
-        const transactionEntered = new Promise<void>((resolve) => {
-            entered = resolve;
-        });
-        const transactionRelease = new Promise<void>((resolve) => {
-            release = resolve;
-        });
-        const rollingBack = storage.transaction(rootDatabaseCtx, async (txCtx) => {
-            await storage.kv.write(txCtx, "rolled-back", true);
-            entered();
-            await transactionRelease;
-            throw new Error("roll back");
-        });
-        await transactionEntered;
-
-        const outsideWrite = storage.kv.write(rootDatabaseCtx, "outside", true);
-        release();
-        await expect(rollingBack).rejects.toThrow("roll back");
-        await outsideWrite;
-
-        expect(await storage.kv.read(ctx, "rolled-back")).toBeUndefined();
-        expect(await storage.kv.read(ctx, "outside")).toBe(true);
         close();
     });
 
@@ -358,7 +312,7 @@ describe("AgentStorage Drizzle persistence", () => {
         expect(await firstStorage.kv.read(ctx, "belongs-to-second")).toBeUndefined();
         expect(await secondStorage.kv.read(ctx, "belongs-to-second")).toBe(true);
 
-        await firstStorage.transaction(ctx, async (firstTxCtx) => {
+        await withAgentDatabase(ctx, first.database).inTx(async (firstTxCtx) => {
             await expect(
                 secondStorage.kv.write(firstTxCtx, "must-not-cross", true),
             ).rejects.toThrow("another agent storage");
@@ -378,8 +332,9 @@ describe("AgentStorage Drizzle persistence", () => {
             models: [],
         });
         const agent = await system.create(ctx, {});
+        await agent.waitForIdle();
 
-        await storage.transaction(ctx, async (txCtx) => {
+        await withAgentDatabase(ctx, database).inTx(async (txCtx) => {
             await expect(
                 system.create(txCtx, {}, { id: "h12345678901234567890123" }),
             ).rejects.toThrow("outer storage transaction");

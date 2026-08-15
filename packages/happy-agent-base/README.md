@@ -19,14 +19,14 @@ Drizzle SQLite or PostgreSQL/PGlite database plus a hard database-level lock. It
 record, key-value, and migration tables itself. `AgentSystem.close()` stops its agents and releases
 the lock; the runtime intentionally contains no CAS or multi-owner coordination.
 
-By default, storage uses Drizzle transactions and installs stdlib's universal `afterCommit` scope
-on their contexts, draining it only after the outer transaction succeeds. A host that composes
-agent writes into a wider transaction may provide `transaction`; its callback context must carry
-the host transaction's own stdlib `afterCommit` scope. Outside a transaction, stdlib starts
-post-commit callbacks on the next microtask.
+Storage uses Drizzle transactions and installs stdlib's universal `afterCommit` scope on their
+contexts, draining it only after the outer transaction succeeds. Agent contexts expose the root or
+active Drizzle facade as `ctx.db`; `ctx.inTx(work)` and the exported `inTx(ctx, work)` helper open
+an outer transaction or reuse the one already carried by the context. Outside a transaction,
+stdlib starts post-commit callbacks on the next microtask.
 
-Storage, KV, migrations, and transactional module hooks compose with a host-owned outer
-transaction. Live `Agent` and `AgentSystem` commands do not: creating, resolving, messaging,
+Storage, KV, migrations, and transactional module hooks compose with a context's outer transaction.
+Live `Agent` and `AgentSystem` commands do not: creating, resolving, messaging,
 mutating, archiving, or closing a live agent from inside an outer storage transaction is rejected
 because the corresponding in-memory lifetime cannot be published until that transaction commits.
 
@@ -54,6 +54,9 @@ Every executable call receives an internally generated cuid2 `id`, the provider'
 atomically saves that result with the tool's writes. The first successful commit wins; later
 commits and the tool's eventual return or throw are ignored. Committed results survive a crash,
 remain ordered with their batch, and the call-bound KV is erased in the result transaction.
+Setting a tool's optional `transactional` property to `true` wraps its `execute` call, result
+validation, rendering, and automatic result commit in one outer transaction. It defaults to
+`false`.
 
 Modules may provide an ordered array of `[key, migration]` tuples. Agent base tracks each
 successful key and runs every missing migration transactionally before any `beforeStart` hook; a

@@ -90,6 +90,7 @@ export {
     taskContextBeforeToolCall,
     withAgentTaskContext,
 } from "./AgentTaskContext.js";
+export { inTx, type AgentTransactionWork } from "./inTx.js";
 export { AgentKV } from "./AgentKV.js";
 export {
     type AgentBaseAcceptedMessage,

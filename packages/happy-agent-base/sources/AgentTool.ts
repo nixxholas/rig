@@ -89,8 +89,15 @@ export interface AgentTool<Args extends TSchema = TSchema, Result extends TSchem
      */
     readonly durable?: boolean;
     /**
+     * Whether Agent Base wraps `execute` and its returned-result commit in one Agent Storage
+     * transaction. A transactional tool commits only after `execute` returns successfully; a
+     * throw, invalid result, or rendering failure rolls the transaction back.
+     */
+    readonly transactional?: boolean;
+    /**
      * The context's lifetime aborts when the turn is aborted, so a long-running tool can
-     * observe cancellation and stop its own work.
+     * observe cancellation and stop its own work. For a transactional tool, `ctx.db` is the
+     * active transaction facade.
      */
     execute(ctx: Context, args: Static<Args>, call: AgentToolCall<Result>): Promise<Static<Result>>;
     /** Renders a validated result into the content blocks the model actually sees. */

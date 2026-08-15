@@ -1,29 +1,18 @@
-import { AsyncLocalStorage } from "node:async_hooks";
 import { sql } from "drizzle-orm";
-import { asyncLock, withAfterCommit, type Context } from "@steve.kite/stdlib";
+import type { Context } from "@steve.kite/stdlib";
 
 import {
     agentDatabaseRows,
     agentDatabaseRun,
-    isAgentSQLiteDatabase,
     type AgentDatabase,
     type AgentDatabaseFacade,
     type AgentModuleMigration,
-    type AgentStorageTransaction,
 } from "./AgentDatabase.js";
-import {
-    agentStorageTransaction,
-    withAgentStorageTransaction,
-    type AgentStorageTransactionContext,
-} from "./AgentContexts.js";
 import type { AgentModule } from "./AgentModule.js";
 import { AgentKV } from "./AgentKV.js";
 import type { AgentPersistence } from "./AgentPersistence.js";
 import type { AnyAgentTool } from "./AgentTool.js";
-import {
-    AgentPersistenceDrizzle,
-    type AgentPersistenceDrizzleOptions,
-} from "./AgentPersistenceDrizzle.js";
+import { AgentPersistenceDrizzle } from "./AgentPersistenceDrizzle.js";
 
 /**
  * The exclusive ownership of one durable agent store. A host sharing its database between
@@ -42,20 +31,12 @@ interface AgentStorageCommonOptions {
     readonly acquireLock: (ctx: Context) => Promise<AgentStorageLock>;
 }
 
-/** Drizzle-owned storage with optional host transaction integration. */
+/** Drizzle-owned storage. */
 export type AgentStorageOptions<Database extends AgentDatabase = AgentDatabase> =
     AgentStorageCommonOptions & {
         /** The engine-specific Drizzle facade; the same object is passed through to modules. */
         readonly database: Database;
-        /**
-         * Host transaction integration. It must pass the active Drizzle transaction facade and a
-         * context carrying the host transaction's stdlib `afterCommit` scope to `work`. Omission
-         * uses the Drizzle facade's own transaction method and installs that scope automatically.
-         */
-        readonly transaction?: AgentStorageTransaction<Database>;
     };
-
-const storageTransactions = new AsyncLocalStorage<AgentStorageTransactionContext>();
 
 /** Storage roots and Drizzle persistence shared by an `AgentSystemLocal` collection. */
 export class AgentStorage<Database extends AgentDatabase = AgentDatabase> {
@@ -67,24 +48,19 @@ export class AgentStorage<Database extends AgentDatabase = AgentDatabase> {
     readonly #acquireLock: (ctx: Context) => Promise<AgentStorageLock>;
     /** Produces the isolated persistence used by one agent. */
     readonly #persistence: (agentId: string) => AgentPersistence;
-    /** Drizzle transaction integration shared by every owned persistence scope. */
-    readonly #drizzle: AgentPersistenceDrizzleOptions<Database>;
+    /** Root persistence used for storage-wide transactions and key-value state. */
+    readonly #drizzle: AgentPersistenceDrizzle<Database>;
     /** Prevents two systems from sharing even one AgentStorage instance. */
     #owned = false;
 
     constructor(options: AgentStorageOptions<Database>) {
         this.#acquireLock = options.acquireLock;
         this.database = options.database;
-        const owner = {};
-        const rawTransaction =
-            options.transaction ?? defaultTransactionIntegration(options.database);
-        const integration: AgentPersistenceDrizzleOptions<Database> = {
+        const integration = {
             database: options.database,
-            owner,
-            transaction: storageTransactionIntegration(owner, rawTransaction),
         };
-        this.#drizzle = integration;
-        this.kv = new AgentKV(new AgentPersistenceDrizzle(integration, ""), "agentSystem.");
+        this.#drizzle = new AgentPersistenceDrizzle(integration, "");
+        this.kv = new AgentKV(this.#drizzle, "agentSystem.");
         this.#persistence = (agentId) => new AgentPersistenceDrizzle(integration, agentId);
     }
 
@@ -119,12 +95,15 @@ export class AgentStorage<Database extends AgentDatabase = AgentDatabase> {
         return this.#persistence(agentId);
     }
 
-    /** Run work in this storage's default or host-supplied transaction integration. */
+    /** Run work in this storage's internally managed transaction. */
     async transaction<Result>(
         ctx: Context,
         work: (ctx: Context, database: AgentDatabaseFacade<Database>) => Promise<Result>,
     ): Promise<Result> {
-        return await this.#drizzle.transaction(ctx, work);
+        return await this.#drizzle.transaction(
+            ctx,
+            async (txCtx) => await work(txCtx, txCtx.db as AgentDatabaseFacade<Database>),
+        );
     }
 
     /**
@@ -140,9 +119,9 @@ export class AgentStorage<Database extends AgentDatabase = AgentDatabase> {
         if (names.includes("@happy-agent-base") || new Set(names).size !== names.length) {
             throw new Error("Module names must be unique and cannot use the agent-base owner.");
         }
-        await this.#drizzle.transaction(ctx, async (txCtx, database) => {
+        await this.#drizzle.transaction(ctx, async (txCtx) => {
             await agentDatabaseRun(
-                database,
+                txCtx.db,
                 sql`CREATE TABLE IF NOT EXISTS happy_agent_migrations (
                     module_key TEXT NOT NULL,
                     migration_key TEXT NOT NULL,
@@ -215,10 +194,10 @@ export class AgentStorage<Database extends AgentDatabase = AgentDatabase> {
             const migration = migrations[index];
             if (migration === undefined) continue;
             const [key, run] = migration;
-            await this.#drizzle.transaction(ctx, async (txCtx, database) => {
-                await run(txCtx, database);
+            await this.#drizzle.transaction(ctx, async (txCtx) => {
+                await run(txCtx, txCtx.db as AgentDatabaseFacade<Database>);
                 await agentDatabaseRun(
-                    database,
+                    txCtx.db,
                     sql`INSERT INTO happy_agent_migrations
                         (module_key, migration_key, position)
                         VALUES (${module}, ${key}, ${index})`,
@@ -226,100 +205,4 @@ export class AgentStorage<Database extends AgentDatabase = AgentDatabase> {
             });
         }
     }
-}
-
-function defaultTransactionIntegration<Database extends AgentDatabase>(
-    database: Database,
-): AgentStorageTransaction<Database> {
-    const transactionLock = isAgentSQLiteDatabase(database) ? asyncLock() : undefined;
-    const commitTransaction = async <Result>(
-        ctx: Context,
-        work: (ctx: Context, database: AgentDatabaseFacade<Database>) => Promise<Result>,
-    ): Promise<readonly [Result, () => Promise<void>]> => {
-        let runAfterCommit!: () => Promise<void>;
-        const result = await runDrizzleTransaction(database, async (activeDatabase) => {
-            const [commitCtx, drainAfterCommit] = withAfterCommit(ctx);
-            runAfterCommit = drainAfterCommit;
-            return await work(commitCtx, activeDatabase as AgentDatabaseFacade<Database>);
-        });
-        return [result, runAfterCommit];
-    };
-    const transaction: AgentStorageTransaction<Database> = async (ctx, work) => {
-        const [result, runAfterCommit] =
-            transactionLock === undefined
-                ? await commitTransaction(ctx, work)
-                : await transactionLock.runInLock(ctx, async (lockCtx) => {
-                      return await commitTransaction(lockCtx, work);
-                  });
-        try {
-            await runAfterCommit();
-        } catch (error: unknown) {
-            process.emitWarning(
-                new AggregateError(
-                    [error],
-                    "Agent storage committed, but post-commit work failed.",
-                ),
-            );
-        }
-        return result;
-    };
-    return transaction;
-}
-
-/**
- * Own transaction identity and nesting independently of the supplied database integration.
- * A normal context from another storage remains a normal context, while an actual foreign
- * transaction can neither leak its facade into this store nor silently open a second commit.
- */
-function storageTransactionIntegration<Database extends AgentDatabase>(
-    owner: object,
-    transaction: AgentStorageTransaction<Database>,
-): AgentStorageTransaction<Database> {
-    return async (ctx, work) => {
-        const carried = agentStorageTransaction(ctx);
-        const ambient = storageTransactions.getStore();
-        if (ambient !== undefined && !ambient.lifetime.aborted) {
-            if (ambient.owner === owner && carried === ambient) {
-                return await work(ctx, ambient.database as AgentDatabaseFacade<Database>);
-            }
-            throw new Error(
-                "Work started inside an agent storage transaction must use that transaction's context.",
-            );
-        }
-        if (carried !== undefined) {
-            if (carried.lifetime.aborted) {
-                throw new Error("The agent storage transaction carried by this context has ended.");
-            }
-            if (carried.owner !== owner) {
-                throw new Error("A transaction context cannot be used with another agent storage.");
-            }
-            return await work(ctx, carried.database as AgentDatabaseFacade<Database>);
-        }
-        return await transaction(ctx, async (txCtx, database) => {
-            const lifetime = new AbortController();
-            const state: AgentStorageTransactionContext = {
-                database,
-                lifetime: lifetime.signal,
-                owner,
-            };
-            const activeCtx = withAgentStorageTransaction(txCtx, state);
-            try {
-                return await storageTransactions.run(state, async () => {
-                    return await work(activeCtx, database);
-                });
-            } finally {
-                lifetime.abort();
-            }
-        });
-    };
-}
-
-async function runDrizzleTransaction<Result>(
-    database: AgentDatabase,
-    work: (database: AgentDatabase) => Promise<Result>,
-): Promise<Result> {
-    if (isAgentSQLiteDatabase(database)) {
-        return await database.transaction(async (transaction) => await work(transaction));
-    }
-    return await database.transaction(async (transaction) => await work(transaction));
 }

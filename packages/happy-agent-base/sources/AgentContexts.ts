@@ -1,5 +1,5 @@
 import type { SessionReasoningEffort, SessionServiceTier } from "@slopus/happy-providers";
-import { createContextNamespace, type Context } from "@steve.kite/stdlib";
+import { createContextNamespace, registerContextExtension, type Context } from "@steve.kite/stdlib";
 
 import type { AgentDatabase } from "./AgentDatabase.js";
 import type { AgentKV } from "./AgentKV.js";
@@ -30,20 +30,38 @@ const permissionModeNamespace = createContextNamespace<AgentPermissionMode>(
 const kvNamespace = createContextNamespace<AgentKV | undefined>("agentKV", undefined);
 /** Backing storage for `agentRunKV`: the run's own store, erased when the agent settles. */
 const runKVNamespace = createContextNamespace<AgentKV | undefined>("agentRunKV", undefined);
-/** Backing storage for the active Drizzle database or transaction facade. */
+/** Storage-owned identity and lifetime of an active transaction facade. */
+export interface AgentStorageTransactionContext {
+    readonly database: AgentDatabase;
+    readonly root: AgentDatabase;
+    readonly lifetime: AbortSignal;
+}
+
+declare global {
+    namespace stdlib {
+        interface ContextExtensions {
+            readonly db: AgentDatabase;
+        }
+    }
+}
+
 const databaseNamespace = createContextNamespace<AgentDatabase | undefined>(
     "agentDatabase",
     undefined,
 );
-/** Storage-owned identity and lifetime of an active transaction facade. */
-export interface AgentStorageTransactionContext {
-    readonly database: AgentDatabase;
-    readonly lifetime: AbortSignal;
-    readonly owner: object;
-}
 const storageTransactionNamespace = createContextNamespace<
     AgentStorageTransactionContext | undefined
 >("agentStorageTransaction", undefined);
+
+registerContextExtension("db", (ctx) => {
+    const transaction = storageTransactionNamespace.get(ctx);
+    if (transaction?.lifetime.aborted === true) {
+        throw new Error("The agent storage transaction carried by this context has ended.");
+    }
+    const database = databaseNamespace.get(ctx);
+    if (database === undefined) throw new Error("Context has no agent database.");
+    return database;
+});
 
 /**
  * Derive the agent's context carrying its ID, provider ID, model, effort, service tier, and
@@ -140,7 +158,14 @@ export function agentRunKV(ctx: Context): AgentKV | undefined {
 
 /** Carry the active Drizzle database or transaction facade on a derived context. */
 export function withAgentDatabase(ctx: Context, database: AgentDatabase): Context {
-    return databaseNamespace.set(ctx, database);
+    const transaction = storageTransactionNamespace.get(ctx);
+    if (
+        transaction !== undefined &&
+        (database === transaction.database || database === transaction.root)
+    ) {
+        return ctx;
+    }
+    return databaseNamespace.set(storageTransactionNamespace.set(ctx, undefined), database);
 }
 
 /** The active Drizzle database or transaction facade, when this work has durable storage. */
@@ -148,25 +173,30 @@ export function agentDatabase(ctx: Context): AgentDatabase | undefined {
     return databaseNamespace.get(ctx);
 }
 
-/** Install the active facade and its owning storage for the duration of one transaction callback. */
+/** Install the active facade for the duration of one transaction callback. */
 export function withAgentStorageTransaction(
     ctx: Context,
     transaction: AgentStorageTransactionContext,
 ): Context {
+    if (databaseNamespace.get(ctx) !== transaction.root) {
+        throw new Error("A transaction context cannot be used with another agent storage.");
+    }
     return storageTransactionNamespace.set(
-        withAgentDatabase(ctx, transaction.database),
+        databaseNamespace.set(ctx, transaction.database),
         transaction,
     );
 }
 
 /** The storage transaction carried by this context, including its ended state when retained. */
-export function agentStorageTransaction(
-    ctx: Context,
-): AgentStorageTransactionContext | undefined {
+export function agentStorageTransaction(ctx: Context): AgentStorageTransactionContext | undefined {
     return storageTransactionNamespace.get(ctx);
 }
 
 /** Drop a caller's transaction lifetime when creating independently owned agent work. */
 export function withoutAgentStorageTransaction(ctx: Context): Context {
-    return storageTransactionNamespace.set(ctx, undefined);
+    const transaction = storageTransactionNamespace.get(ctx);
+    const withoutTransaction = storageTransactionNamespace.set(ctx, undefined);
+    return transaction === undefined
+        ? withoutTransaction
+        : databaseNamespace.set(withoutTransaction, transaction.root);
 }

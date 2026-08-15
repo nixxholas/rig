@@ -1,6 +1,6 @@
 import type { SessionEvent } from "@slopus/happy-providers";
 import { Type } from "@sinclair/typebox";
-import { createRootContext, type Context } from "@steve.kite/stdlib";
+import { afterCommit, createRootContext, type Context } from "@steve.kite/stdlib";
 import { Value } from "@sinclair/typebox/value";
 import { describe, expect, it } from "vitest";
 
@@ -341,6 +341,270 @@ describe("transactional tool commits", () => {
             content: [{ type: "text", text: "already durable" }],
         });
         await agent.close();
+    });
+
+    it("commits transactional execute only after the tool exits", async () => {
+        const persistence = new InMemoryPersistence();
+        const events: string[] = [];
+        let release!: () => void;
+        let staged!: () => void;
+        const mayExit = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        const reachedPause = new Promise<void>((resolve) => {
+            staged = resolve;
+        });
+        const tool = defineAgentTool({
+            name: "transactional_exit",
+            returnType: resultSchema,
+            durable: true,
+            transactional: true,
+            shouldReviewInAutoMode: () => false,
+            execute: async (toolCtx, _args, call) => {
+                events.push("execute");
+                await persistence.writeValue(toolCtx, "transactional.marker", "committed");
+                afterCommit(toolCtx, () => {
+                    events.push("committed");
+                });
+                await call.commit(toolCtx, { value: "committed winner" });
+                events.push("call.commit returned");
+                staged();
+                await mayExit;
+                events.push("execute returned");
+                return { value: "ignored return" };
+            },
+            toLLM: (result) => [{ type: "text", text: result.value }],
+        });
+        const provider = new ScriptedProvider([
+            toolCallTurn("provider-transactional-exit", tool.name),
+            textTurn("continued"),
+        ]);
+        const agent = await AgentBase.create(ctx, {
+            id: "transactional-exit",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+            initialState: { tools: [tool] },
+        });
+
+        await agent.send(ctx, user("run it"), { await: false });
+        await reachedPause;
+
+        expect(persistence.values.has("transactional.marker")).toBe(false);
+        expect(events).toEqual(["execute", "call.commit returned"]);
+        expect(provider.sessions[0]?.requests).toHaveLength(1);
+
+        release();
+        await agent.waitForIdle();
+
+        expect(persistence.values.get("transactional.marker")).toBe("committed");
+        expect(events).toEqual([
+            "execute",
+            "call.commit returned",
+            "execute returned",
+            "committed",
+        ]);
+        expect(provider.sessions[0]?.requests[1]?.context.messages.at(-1)).toEqual({
+            role: "tool",
+            callId: "provider-transactional-exit",
+            content: [{ type: "text", text: "committed winner" }],
+        });
+        await agent.close();
+    });
+
+    it("rolls back transactional execute and a nested call.commit when the tool throws", async () => {
+        const persistence = new InMemoryPersistence();
+        let committed = false;
+        const tool = defineAgentTool({
+            name: "transactional_throw",
+            returnType: resultSchema,
+            durable: true,
+            transactional: true,
+            shouldReviewInAutoMode: () => false,
+            execute: async (toolCtx, _args, call) => {
+                await persistence.writeValue(toolCtx, "transactional.rolled-back", true);
+                afterCommit(toolCtx, () => {
+                    committed = true;
+                });
+                await call.commit(toolCtx, { value: "must roll back" });
+                throw new Error("transactional failure");
+            },
+            toLLM: (result) => [{ type: "text", text: result.value }],
+        });
+        const provider = new ScriptedProvider([
+            toolCallTurn("provider-transactional-throw", tool.name),
+            textTurn("continued"),
+        ]);
+        const agent = await AgentBase.create(ctx, {
+            id: "transactional-throw",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+            initialState: { tools: [tool] },
+        });
+
+        await agent.send(ctx, user("run it"), { await: true });
+        await agent.waitForIdle();
+
+        expect(persistence.values.has("transactional.rolled-back")).toBe(false);
+        expect(committed).toBe(false);
+        expect([...persistence.values.keys()].some((key) => key.startsWith("toolResult."))).toBe(
+            false,
+        );
+        expect(provider.sessions[0]?.requests[1]?.context.messages.at(-1)).toEqual({
+            role: "tool",
+            callId: "provider-transactional-throw",
+            content: [{ type: "text", text: "transactional failure" }],
+            isError: true,
+        });
+        await agent.close();
+    });
+
+    it.each([
+        {
+            failure: "invalid result",
+            expected: 'Tool "transactional_invalid result" returned an invalid result.',
+        },
+        {
+            failure: "render failure",
+            expected: "transactional render failure",
+        },
+    ])("rolls back transactional execute on $failure", async ({ failure, expected }) => {
+        const persistence = new InMemoryPersistence();
+        const name = `transactional_${failure}`;
+        const tool = defineAgentTool({
+            name,
+            returnType: resultSchema,
+            transactional: true,
+            shouldReviewInAutoMode: () => false,
+            execute: async (toolCtx) => {
+                await persistence.writeValue(toolCtx, "transactional.invalid", true);
+                if (failure === "invalid result") return { invalid: true } as never;
+                return { value: "cannot render" };
+            },
+            toLLM: (result) => {
+                if (failure === "render failure") {
+                    throw new Error("transactional render failure");
+                }
+                return [{ type: "text", text: result.value }];
+            },
+        });
+        const provider = new ScriptedProvider([
+            toolCallTurn(`provider-${failure}`, tool.name),
+            textTurn("continued"),
+        ]);
+        const agent = await AgentBase.create(ctx, {
+            id: `transactional-${failure}`,
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+            initialState: { tools: [tool] },
+        });
+
+        await agent.send(ctx, user("run it"), { await: true });
+        await agent.waitForIdle();
+
+        expect(persistence.values.has("transactional.invalid")).toBe(false);
+        expect(provider.sessions[0]?.requests[1]?.context.messages.at(-1)).toEqual({
+            role: "tool",
+            callId: `provider-${failure}`,
+            content: [{ type: "text", text: expected }],
+            isError: true,
+        });
+        await agent.close();
+    });
+
+    it("leaves ordinary execute outside a transaction while wrapping transactional execute", async () => {
+        class TracingPersistence extends InMemoryPersistence {
+            readonly events: string[] = [];
+
+            override async transaction<Returned>(
+                transactionCtx: Context,
+                work: (workCtx: Context) => Promise<Returned>,
+            ): Promise<Returned> {
+                this.events.push("transaction:begin");
+                try {
+                    const result = await super.transaction(transactionCtx, work);
+                    this.events.push("transaction:commit");
+                    return result;
+                } catch (error: unknown) {
+                    this.events.push("transaction:rollback");
+                    throw error;
+                }
+            }
+        }
+
+        const run = async (transactional: boolean): Promise<readonly string[]> => {
+            const persistence = new TracingPersistence();
+            const implementation = async (): Promise<Result> => {
+                persistence.events.push("execute:start");
+                await Promise.resolve();
+                persistence.events.push("execute:end");
+                return { value: "done" };
+            };
+            const tool = transactional
+                ? defineAgentTool({
+                      name: "transaction_order",
+                      returnType: resultSchema,
+                      transactional: true,
+                      shouldReviewInAutoMode: () => false,
+                      execute: implementation,
+                      toLLM: (result) => [{ type: "text", text: result.value }],
+                  })
+                : defineAgentTool({
+                      name: "ordinary_order",
+                      returnType: resultSchema,
+                      shouldReviewInAutoMode: () => false,
+                      execute: implementation,
+                      toLLM: (result) => [{ type: "text", text: result.value }],
+                  });
+            const agent = await AgentBase.create(ctx, {
+                id: transactional ? "transaction-order" : "ordinary-order",
+                providers: providersOf(
+                    new ScriptedProvider([
+                        toolCallTurn(
+                            transactional
+                                ? "provider-transaction-order"
+                                : "provider-ordinary-order",
+                            tool.name,
+                        ),
+                        textTurn("continued"),
+                    ]),
+                ),
+                provider: "scripted",
+                persistence,
+                hooks: {
+                    beforeToolCall: () => {
+                        persistence.events.push("before");
+                        return undefined;
+                    },
+                },
+                initialState: { tools: [tool] },
+            });
+
+            await agent.send(ctx, user("run it"), { await: true });
+            await agent.waitForIdle();
+            const relevant = persistence.events.slice(persistence.events.indexOf("before"));
+            await agent.close();
+            return relevant;
+        };
+
+        const ordinary = await run(false);
+        expect(ordinary.indexOf("execute:start")).toBeGreaterThan(ordinary.indexOf("before"));
+        expect(ordinary.indexOf("transaction:begin")).toBeGreaterThan(
+            ordinary.indexOf("execute:end"),
+        );
+
+        const transactional = await run(true);
+        expect(transactional.indexOf("transaction:begin")).toBeGreaterThan(
+            transactional.indexOf("before"),
+        );
+        expect(transactional.indexOf("transaction:begin")).toBeLessThan(
+            transactional.indexOf("execute:start"),
+        );
+        expect(transactional.lastIndexOf("transaction:commit")).toBeGreaterThan(
+            transactional.indexOf("execute:end"),
+        );
     });
 
     it.each(["abort", "close"] as const)(

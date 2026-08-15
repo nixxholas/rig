@@ -547,7 +547,7 @@ export class AgentSystemLocal<
      * Building the agent is all this does. An agent picks its own work back up when it is
      * loaded, so the collection has only to bring the right ones into existence.
      */
-    async #start(ctx: Context): Promise<readonly Agent[]> {
+    async #start(ctx: Context): Promise<readonly Agent<AnyAgentTool, Database>[]> {
         const created = await this.#configs.list(ctx);
         const results = await Promise.allSettled(
             created.map(async ({ key: agentId }) => {

@@ -6,16 +6,14 @@ import {
     agentDatabaseRun,
     type AgentDatabase,
     type AgentDatabaseFacade,
-    type AgentStorageTransaction,
 } from "./AgentDatabase.js";
-import { agentStorageTransaction } from "./AgentContexts.js";
+import { agentStorageTransaction, withAgentDatabase } from "./AgentContexts.js";
 import type { AgentPersistence, AgentRecord } from "./AgentPersistence.js";
+import { inTx } from "./inTx.js";
 
-/** The database and transaction integration shared by every scope in one AgentStorage. */
+/** The database shared by every persistence scope in one AgentStorage. */
 export interface AgentPersistenceDrizzleOptions<Database extends AgentDatabase = AgentDatabase> {
     readonly database: Database;
-    readonly owner: object;
-    readonly transaction: AgentStorageTransaction<Database>;
 }
 
 /**
@@ -42,7 +40,7 @@ export class AgentPersistenceDrizzle<
         ctx: Context,
         work: (ctx: Context) => Promise<Result>,
     ): Promise<Result> {
-        return await this.#options.transaction(ctx, async (txCtx) => await work(txCtx));
+        return await inTx(this.#bound(ctx), work);
     }
 
     async load(ctx: Context): Promise<readonly AgentRecord[]> {
@@ -144,13 +142,25 @@ export class AgentPersistenceDrizzle<
             if (transaction.lifetime.aborted) {
                 throw new Error("The agent storage transaction carried by this context has ended.");
             }
-            if (transaction.owner !== this.#options.owner) {
+            if (transaction.root !== this.#options.database) {
                 throw new Error("A transaction context cannot be used with another agent storage.");
             }
             return await work(transaction.database as AgentDatabaseFacade<Database>);
         }
-        return await this.#options.transaction(ctx, async (_txCtx, database) => {
-            return await work(database);
+        return await inTx(withAgentDatabase(ctx, this.#options.database), async (txCtx) => {
+            return await work(txCtx.db as AgentDatabaseFacade<Database>);
         });
+    }
+
+    #bound(ctx: Context): Context {
+        const transaction = agentStorageTransaction(ctx);
+        if (transaction === undefined) return withAgentDatabase(ctx, this.#options.database);
+        if (transaction.lifetime.aborted) {
+            throw new Error("The agent storage transaction carried by this context has ended.");
+        }
+        if (transaction.root !== this.#options.database) {
+            throw new Error("A transaction context cannot be used with another agent storage.");
+        }
+        return ctx;
     }
 }

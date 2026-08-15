@@ -3090,14 +3090,23 @@ export class AgentBase {
                             : [runCtx.lifetime, callLifetime.signal],
                     ),
                 );
-                const execution = Promise.resolve(
-                    ran.execute(executionCtx, ranArguments, {
-                        id: entry.id,
-                        providerCallId: entry.providerCallId,
-                        kv: boundedCallKV,
-                        commit,
-                    }),
-                ).then(
+                const toolCall = {
+                    id: entry.id,
+                    providerCallId: entry.providerCallId,
+                    kv: boundedCallKV,
+                    commit,
+                };
+                const returned =
+                    ran.transactional === true
+                        ? this.#persistence.transaction(executionCtx, async (txCtx) => {
+                              const result = await ran.execute(txCtx, ranArguments, toolCall);
+                              if (!Value.Check(ran.returnType, result)) {
+                                  throw new Error(`Tool "${ran.name}" returned an invalid result.`);
+                              }
+                              return await commit(txCtx, result);
+                          })
+                        : Promise.resolve(ran.execute(executionCtx, ranArguments, toolCall));
+                const execution = returned.then(
                     (result) => ({ type: "returned", result }) as const,
                     (error: unknown) => ({ type: "threw", error }) as const,
                 );

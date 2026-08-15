@@ -57,6 +57,7 @@ describe("lifecycle concurrency", () => {
                 beforeTurn: async () => {
                     beforeTurnStarted.resolve();
                     await releaseBeforeTurn.promise;
+                    return undefined;
                 },
                 onEvent: (_eventCtx, event) => {
                     if (event.type === "done") doneStates.push(event.state);

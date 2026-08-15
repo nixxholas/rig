@@ -1,5 +1,6 @@
 import { createContextNamespace, type Context } from "@steve.kite/stdlib";
 
+import type { AgentDatabase } from "./AgentDatabase.js";
 import type { AgentSystemRef } from "./AgentSystemRef.js";
 
 /** The context slot that carries the collection owning the current agent or module operation. */
@@ -17,8 +18,11 @@ const agentSystemNamespace = createContextNamespace<AgentSystemRef | undefined>(
  * every context it derives, and agents come back from it as `AgentRef`, so nothing reached
  * through a context can wait for the loop that is waiting for it.
  */
-export function withAgentSystem(ctx: Context, value: AgentSystemRef): Context {
-    return agentSystemNamespace.set(ctx, value);
+export function withAgentSystem<Database extends AgentDatabase>(
+    ctx: Context,
+    value: AgentSystemRef<Database>,
+): Context {
+    return agentSystemNamespace.set(ctx, value as unknown as AgentSystemRef);
 }
 
 /** The collection owning the current module or agent operation. */

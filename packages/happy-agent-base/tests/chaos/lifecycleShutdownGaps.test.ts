@@ -412,6 +412,7 @@ describe("abort and shutdown lifecycle gaps", () => {
             hooks: {
                 modelChanged: () => {
                     switchObserved.resolve();
+                    return undefined;
                 },
             },
         });
