@@ -164,10 +164,7 @@ export class SlotsModule implements AgentModule {
                 const page = await this.#readPage(txCtx, agentId, { ...normalized, limit });
                 await this.#authorizeEntries(txCtx, agentId, page.entries, "list");
                 await this.#validateScopeReferences(txCtx, agentId, page.entries);
-                if (
-                    this.#formatPage(page, this.#maxOutputCharacters).length <=
-                    this.#maxOutputCharacters
-                ) {
+                if (this.#pageFits(page, this.#maxOutputCharacters)) {
                     return page;
                 }
             }
@@ -749,6 +746,19 @@ export class SlotsModule implements AgentModule {
         return detailed.length <= maxCharacters ? detailed : compact;
     }
 
+    /** Check a candidate without throwing so fitting loops can try a smaller page. */
+    #pageFits(page: SlotPage, maxCharacters: number): boolean {
+        const identities =
+            page.entries.length === 0
+                ? "No slot entries."
+                : page.entries.map((entry) => entry.id).join("\n");
+        const compact =
+            page.nextCursor === undefined
+                ? identities
+                : `${identities}\nNext cursor: ${page.nextCursor}`;
+        return compact.length <= maxCharacters;
+    }
+
     #fitDetailPage(page: Exclude<SlotDetailPage, { entry: null }>): SlotDetailPage {
         let detail = page.detail;
         for (;;) {
@@ -784,7 +794,12 @@ export class SlotsModule implements AgentModule {
                 limit: visible,
                 ...(visible < entries.length ? { nextCursor: visible } : {}),
             };
-            if (this.formatReorderPageForModel(page).length <= this.#maxOutputCharacters) {
+            if (
+                this.#pageFits(
+                    page,
+                    this.#maxOutputCharacters - REORDER_RESULT_PREFIX.length,
+                )
+            ) {
                 return page;
             }
         }

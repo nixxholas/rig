@@ -34,7 +34,6 @@ import {
 import {
     collaborationMessageIdSchema,
     collaborationMessageSchema,
-    collaborationObligationIdSchema,
     collaborationObligationPageQuerySchema,
     collaborationObligationSchema,
     collaborationReplyInputSchema,
@@ -83,10 +82,6 @@ const messageIdFactorySchema = Type.Function(
     [collaborationContextSchema, collaborationAgentIdSchema],
     Type.Union([collaborationMessageIdSchema, Type.Promise(collaborationMessageIdSchema)]),
 );
-const obligationIdFactorySchema = Type.Function(
-    [collaborationContextSchema, collaborationAgentIdSchema],
-    Type.Union([collaborationObligationIdSchema, Type.Promise(collaborationObligationIdSchema)]),
-);
 const eventFactorySchema = Type.Function(
     [collaborationContextSchema, collaborationAgentIdSchema],
     Type.Union([collaborationEventIdSchema, Type.Promise(collaborationEventIdSchema)]),
@@ -98,7 +93,6 @@ const collaborationModuleOptionsSchema = Type.Object(
         authorization: Type.Optional(collaborationAuthorizationSchema),
         idFactory: Type.Optional(idFactorySchema),
         messageIdFactory: Type.Optional(messageIdFactorySchema),
-        obligationIdFactory: Type.Optional(obligationIdFactorySchema),
         eventIdFactory: Type.Optional(eventFactorySchema),
         clock: Type.Optional(
             Type.Function([], Type.Integer({ minimum: 0, maximum: COLLABORATION_MAX_TIMESTAMP })),
@@ -137,7 +131,6 @@ export class CollaborationModule implements AgentModule {
     readonly #listener: CollaborationModuleListener | undefined;
     readonly #idFactory: NonNullable<CollaborationModuleOptions["idFactory"]>;
     readonly #messageIdFactory: NonNullable<CollaborationModuleOptions["messageIdFactory"]>;
-    readonly #obligationIdFactory: NonNullable<CollaborationModuleOptions["obligationIdFactory"]>;
     readonly #eventIdFactory: NonNullable<CollaborationModuleOptions["eventIdFactory"]>;
     readonly #clock: NonNullable<CollaborationModuleOptions["clock"]>;
     readonly #maxPageSize: number;
@@ -155,8 +148,6 @@ export class CollaborationModule implements AgentModule {
         this.#idFactory = validated.idFactory ?? ((_ctx, _acting) => generatedId("a"));
         this.#messageIdFactory =
             validated.messageIdFactory ?? ((_ctx, _acting) => generatedId("m"));
-        this.#obligationIdFactory =
-            validated.obligationIdFactory ?? ((_ctx, _acting) => generatedId("o"));
         this.#eventIdFactory = validated.eventIdFactory ?? ((_ctx, _acting) => generatedId("e"));
         this.#clock = validated.clock ?? (() => Date.now());
         this.#maxPageSize = validated.maxPageSize ?? DEFAULT_PAGE_SIZE;
@@ -197,7 +188,7 @@ export class CollaborationModule implements AgentModule {
                 "agent",
             ));
 
-        return await ctx.inTx(async (txCtx) => {
+        const planned = await ctx.inTx(async (txCtx) => {
             const actor = await this.#readAgent(txCtx, actingAgentId);
             const parentId =
                 input.parentId === undefined
@@ -231,21 +222,6 @@ export class CollaborationModule implements AgentModule {
                 throw new Error(`Collaborator "${id}" already exists.`);
             }
 
-            const createdRaw: unknown = this.#broker.create(
-                txCtx,
-                structuredClone(expectedConfig),
-                {
-                    id,
-                    parent: parentId,
-                },
-            );
-            const created = await requirePromise(createdRaw, "Collaboration broker create");
-            assertCollaborationBrokerAgentResult(created);
-            if (created.id !== id) {
-                throw new Error("Agent Base did not preserve the requested collaborator ID.");
-            }
-            await this.#assertBrokerConfig(txCtx, id, expectedConfig);
-
             const at = this.#now();
             const roster: CollaborationAgent = {
                 id,
@@ -260,6 +236,32 @@ export class CollaborationModule implements AgentModule {
                 updatedAt: at,
             };
             this.#assertAgent(roster);
+            return { config: expectedConfig, roster };
+        });
+
+        const brokerConfig = await this.#broker.config(ctx, id);
+        if (brokerConfig === undefined) {
+            const createdRaw: unknown = this.#broker.create(ctx, structuredClone(planned.config), {
+                id,
+                parent: planned.roster.parentId,
+            });
+            const created = await requirePromise(createdRaw, "Collaboration broker create");
+            assertCollaborationBrokerAgentResult(created);
+            if (created.id !== id) {
+                throw new Error("Agent Base did not preserve the requested collaborator ID.");
+            }
+        }
+        await this.#assertBrokerConfig(ctx, id, planned.config);
+
+        return await ctx.inTx(async (txCtx) => {
+            const existing = await this.#readAgent(txCtx, id);
+            if (existing !== undefined) {
+                if (!sameValue(existing, planned.roster)) {
+                    throw new Error("Collaborator retry disagrees with durable roster state.");
+                }
+                return existing;
+            }
+            const roster = planned.roster;
             await this.#writeAgent(txCtx, roster);
             const persisted = await this.#readRequiredAgent(txCtx, id);
             if (!sameValue(persisted, roster)) {
@@ -528,6 +530,7 @@ export class CollaborationModule implements AgentModule {
         ctx: Context,
         scope: AgentModuleScope,
     ): Promise<void> => {
+        await this.#ensureLoopAgent(ctx, scope.agent.id);
         await this.#setStatus(ctx, scope.agent.id, "active");
     };
 
@@ -554,7 +557,7 @@ export class CollaborationModule implements AgentModule {
                 collaborationMessageIdSchema,
                 "message",
             ));
-        return await ctx.inTx(async (txCtx) => {
+        const planned = await ctx.inTx(async (txCtx) => {
             await this.#readRequiredAgent(txCtx, actingAgentId);
             const recipient = await this.#readRequiredAgent(txCtx, recipientId);
             await this.#authorize(txCtx, actingAgentId, recipient, kind);
@@ -576,13 +579,7 @@ export class CollaborationModule implements AgentModule {
             const obligationId =
                 replyTo !== undefined || !("expectReply" in input) || input.expectReply !== true
                     ? undefined
-                    : await this.#generatedId(
-                          txCtx,
-                          actingAgentId,
-                          this.#obligationIdFactory,
-                          collaborationObligationIdSchema,
-                          "obligation",
-                      );
+                    : messageId;
             const at = this.#now();
             const messageMetadata = collaborationMessageMetadata(
                 input.metadata,
@@ -616,19 +613,50 @@ export class CollaborationModule implements AgentModule {
                 brokerOptions,
                 "broker send options",
             );
-            const sendRaw: unknown = this.#broker.send(
-                txCtx,
-                recipientId,
-                {
-                    role: "user",
-                    content: [{ type: "text", text: input.text }],
-                },
+            return {
                 brokerOptions,
-            );
-            assertCollaborationVoidResult(
-                await requirePromise(sendRaw, "Collaboration broker send"),
-                "broker send",
-            );
+                existingObligation,
+                message,
+                obligationId,
+                replyTo,
+            };
+        });
+
+        const sendRaw: unknown = this.#broker.send(
+            ctx,
+            recipientId,
+            {
+                role: "user",
+                content: [{ type: "text", text: input.text }],
+            },
+            planned.brokerOptions,
+        );
+        assertCollaborationVoidResult(
+            await requirePromise(sendRaw, "Collaboration broker send"),
+            "broker send",
+        );
+
+        return await ctx.inTx(async (txCtx) => {
+            const message = planned.message;
+            const at = message.createdAt;
+            const existingMessage = await this.#readMessage(txCtx, messageId);
+            if (existingMessage !== undefined) {
+                if (!sameValue(existingMessage, message)) {
+                    throw new Error("Message retry disagrees with durable state.");
+                }
+                const obligation =
+                    planned.obligationId === undefined
+                        ? planned.replyTo === undefined
+                            ? undefined
+                            : await this.#readRequiredObligation(txCtx, planned.replyTo)
+                        : await this.#readRequiredObligation(txCtx, planned.obligationId);
+                const existingResult = {
+                    message: existingMessage,
+                    ...(obligation === undefined ? {} : { obligation }),
+                };
+                this.#assertSendResult(existingResult);
+                return structuredClone(existingResult);
+            }
             await this.#writeMessage(txCtx, message);
             const persistedMessage = await this.#readRequiredMessage(txCtx, messageId);
             if (!sameValue(persistedMessage, message)) {
@@ -636,9 +664,9 @@ export class CollaborationModule implements AgentModule {
             }
 
             let obligation: CollaborationObligation | undefined;
-            if (obligationId !== undefined) {
+            if (planned.obligationId !== undefined) {
                 obligation = {
-                    id: obligationId,
+                    id: planned.obligationId,
                     requesterAgentId: actingAgentId,
                     responderAgentId: recipientId,
                     messageId,
@@ -648,10 +676,10 @@ export class CollaborationModule implements AgentModule {
                 };
                 this.#assertObligation(obligation);
                 await this.#writeObligation(txCtx, obligation);
-                obligation = await this.#readRequiredObligation(txCtx, obligationId);
+                obligation = await this.#readRequiredObligation(txCtx, planned.obligationId);
                 if (
                     !sameValue(obligation, {
-                        id: obligationId,
+                        id: planned.obligationId,
                         requesterAgentId: actingAgentId,
                         responderAgentId: recipientId,
                         messageId,
@@ -662,7 +690,14 @@ export class CollaborationModule implements AgentModule {
                 ) {
                     throw new Error("Collaboration store substituted the reply obligation.");
                 }
-            } else if (existingObligation !== undefined) {
+            } else if (planned.existingObligation !== undefined) {
+                const existingObligation = await this.#readRequiredObligation(
+                    txCtx,
+                    planned.existingObligation.id,
+                );
+                if (existingObligation.status !== "pending") {
+                    throw new Error("The reply obligation is no longer pending.");
+                }
                 const answered: CollaborationObligation = {
                     ...existingObligation,
                     status: "answered",
@@ -688,7 +723,7 @@ export class CollaborationModule implements AgentModule {
                 ...(obligation === undefined ? {} : { obligation }),
             });
             await this.#announce(txCtx, event);
-            if (existingObligation !== undefined && obligation !== undefined) {
+            if (planned.existingObligation !== undefined && obligation !== undefined) {
                 const answerEvent = await this.#event(txCtx, {
                     type: "reply_answered",
                     actingAgentId,
@@ -726,6 +761,19 @@ export class CollaborationModule implements AgentModule {
             status,
         });
         await this.#announce(ctx, event);
+    }
+
+    async #ensureLoopAgent(ctx: Context, agentId: string): Promise<void> {
+        if ((await this.#readAgent(ctx, agentId)) !== undefined) return;
+        const at = this.#now();
+        await this.#writeAgent(ctx, {
+            id: agentId,
+            ownerAgentId: agentId,
+            parentId: null,
+            status: "idle",
+            createdAt: at,
+            updatedAt: at,
+        });
     }
 
     async #event(
@@ -1184,26 +1232,6 @@ function methodView(value: unknown, keys: readonly string[]): unknown {
     const view: Record<string, unknown> = {};
     for (const key of keys) view[key] = source[key];
     return view;
-}
-
-function normalizeCreateInput(
-    input: CollaborationCreateInput,
-    assertMetadata: (value: unknown) => asserts value is CollaborationMetadata,
-): Record<string, unknown> {
-    const metadata = mergedMetadata(input.config.metadata, input.metadata);
-    if (metadata !== undefined) assertMetadata(metadata);
-    return {
-        ...(input.id === undefined ? {} : { id: input.id }),
-        ...(input.parentId === undefined ? {} : { parentId: input.parentId }),
-        ...(input.role === undefined ? {} : { role: input.role }),
-        ...(input.groupId === undefined ? {} : { groupId: input.groupId }),
-        ...(input.title === undefined ? {} : { title: input.title }),
-        config: {
-            ...input.config,
-            ...(metadata === undefined ? {} : { metadata }),
-        },
-        ...(metadata === undefined ? {} : { metadata }),
-    };
 }
 
 function mergedMetadata(

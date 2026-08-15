@@ -16,7 +16,6 @@ export function sendMessageTool(collaboration: CollaborationModule, actingAgentI
         parameters: collaborationSendToolInputSchema,
         returnType: collaborationSendResultSchema,
         durable: true,
-        transactional: true,
         shouldReviewInAutoMode: () => false,
         execute: async (ctx, input: CollaborationSendToolInput, call) =>
             await collaboration.sendMessage(ctx, actingAgentId, {

@@ -8,7 +8,12 @@ export { createAgentRoutes } from "./agentRoutes.js";
 export { createConfigRoutes } from "./configRoutes.js";
 export { createCoreDaemonRoutes, type HappyModelCatalog } from "./coreDaemonRoutes.js";
 export { createEventRoutes } from "./eventRoutes.js";
+export { createFileRoutes, type FileRouteOptions } from "./fileRoutes.js";
+export { createGitRoutes, type GitRouteOptions } from "./gitRoutes.js";
 export { createInspectorRoutes } from "./inspectorRoutes.js";
+export { createProjectRoutes, type ProjectRouteOptions } from "./projectRoutes.js";
+export { createSessionRoutes } from "./sessionRoutes.js";
+export { createWorkspaceRoutes, type WorkspaceRouteOptions } from "./workspaceRoutes.js";
 export {
     createRouteGroup,
     dispatchAgentHttpRoute,

@@ -185,6 +185,34 @@ describe("SlotsModule", () => {
         }
     });
 
+    it("shrinks an oversized list page until its identities and cursor fit", async () => {
+        const database = moduleDatabase(slotsMigrations, "slots-page-fitting-test");
+        await database.ready;
+        const module = new SlotsModule({
+            ...options(),
+            maxOutputCharacters: 256,
+        });
+        try {
+            for (const suffix of ["a", "b", "c"]) {
+                await module.create(database.context, "agent-a", {
+                    id: `${suffix}${"x".repeat(99)}`,
+                    slot: "sidebar",
+                    scope: "everywhere",
+                    content: { type: "text", markdown: suffix },
+                    description: `Entry ${suffix}`,
+                    purpose: "Exercise page fitting",
+                });
+            }
+
+            const page = await module.listPage(database.context, "agent-a", { limit: 3 });
+            expect(page.entries).toHaveLength(2);
+            expect(page.nextCursor).toBe(2);
+            expect(module.formatPageForModel(page).length).toBeLessThanOrEqual(256);
+        } finally {
+            database.close();
+        }
+    });
+
     it("rejects injected transaction and store options", () => {
         expect(
             () =>

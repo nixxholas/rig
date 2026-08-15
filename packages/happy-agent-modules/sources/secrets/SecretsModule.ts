@@ -178,25 +178,27 @@ export class SecretsModule implements AgentModule {
         this.#assertContext(ctx);
         this.#assertAgentId(actingAgentId);
         this.#assertInput(secretListInputSchema, query, "list query");
-        await this.#authorizeOperation(ctx, actingAgentId, "list", query.scopeRef);
         const normalized = this.#listQuery(query);
-        const page = await this.#readPage(ctx, actingAgentId, normalized);
-        for (let count = page.secrets.length; count >= 1; count -= 1) {
-            const candidate: SecretPage = {
-                secrets: page.secrets.slice(0, count),
-                limit: page.limit,
-                ...(count < page.secrets.length
-                    ? { nextCursor: (normalized.cursor ?? 0) + count }
-                    : page.nextCursor === undefined
-                      ? {}
-                      : { nextCursor: page.nextCursor }),
-            };
-            if (this.#formatPage(candidate, true).length <= this.#maxOutputCharacters) {
-                return candidate;
+        return await ctx.inTx(async (txCtx) => {
+            await this.#authorizeOperation(txCtx, actingAgentId, "list", query.scopeRef);
+            const page = await this.#readPage(txCtx, actingAgentId, normalized);
+            for (let count = page.secrets.length; count >= 1; count -= 1) {
+                const candidate: SecretPage = {
+                    secrets: page.secrets.slice(0, count),
+                    limit: page.limit,
+                    ...(count < page.secrets.length
+                        ? { nextCursor: (normalized.cursor ?? 0) + count }
+                        : page.nextCursor === undefined
+                          ? {}
+                          : { nextCursor: page.nextCursor }),
+                };
+                if (this.#formatPage(candidate, true).length <= this.#maxOutputCharacters) {
+                    return candidate;
+                }
             }
-        }
-        if (page.secrets.length === 0) return page;
-        throw new Error("Secret metadata cannot fit a complete model-facing page.");
+            if (page.secrets.length === 0) return page;
+            throw new Error("Secret metadata cannot fit a complete model-facing page.");
+        });
     }
 
     /** Read one safe reference. This method never returns registration values. */

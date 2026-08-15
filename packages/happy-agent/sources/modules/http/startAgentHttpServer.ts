@@ -6,6 +6,9 @@ import { dirname } from "node:path";
 import { span, type Context } from "@steve.kite/stdlib";
 
 import type { LoadedHappyAgent } from "../agent/loadHappyAgent.js";
+import { ProjectFilesModule } from "../files/ProjectFilesModule.js";
+import { GitModule } from "../git/GitModule.js";
+import { createLocalProjectWorkspaceHost } from "../projects/ProjectHost.js";
 import { readOrCreateAgentToken, isAuthorizedAgentRequest } from "./auth.js";
 import { AgentHttpError, sendError, sendJson } from "./errors.js";
 import { createAgentRoutes } from "./agentRoutes.js";
@@ -13,6 +16,11 @@ import { createConfigRoutes } from "./configRoutes.js";
 import { createCoreDaemonRoutes } from "./coreDaemonRoutes.js";
 import { createEventRoutes } from "./eventRoutes.js";
 import { createInspectorRoutes } from "./inspectorRoutes.js";
+import { createFileRoutes } from "./fileRoutes.js";
+import { createGitRoutes } from "./gitRoutes.js";
+import { createProjectRoutes } from "./projectRoutes.js";
+import { createSessionRoutes } from "./sessionRoutes.js";
+import { createWorkspaceRoutes } from "./workspaceRoutes.js";
 import {
     prepareAgentSocket,
     removeOwnedAgentSocket,
@@ -57,10 +65,12 @@ export async function startAgentHttpServer(
     await prepareAgentSocket(paths);
 
     const connections = new Set<Socket>();
+    const groups = routeGroups(options);
     const server = createServer((request, response) => {
         void span(options.ctx, "happy-agent-http-request", (requestCtx) =>
-            handleRequest(requestCtx, request, response, options, token, routeGroups(options)),
+            handleRequest(requestCtx, request, response, options, token, groups),
         ).catch((error: unknown) => {
+            options.configuration?.onUnexpectedError?.(error);
             sendError(response, error);
         });
     });
@@ -86,8 +96,6 @@ export async function startAgentHttpServer(
     } catch (error) {
         if (listening) {
             await closeServer(server, connections, paths.socketPath).catch(() => undefined);
-        } else {
-            await removeOwnedAgentSocket(paths.socketPath).catch(() => undefined);
         }
         throw error;
     } finally {
@@ -106,6 +114,22 @@ export async function startAgentHttpServer(
 }
 
 function routeGroups(options: StartAgentHttpServerOptions): readonly AgentHttpRouteGroup[] {
+    const projectHost = options.configuration?.projectHost ?? createLocalProjectWorkspaceHost();
+    const projectFiles =
+        options.configuration?.projectFiles ??
+        new ProjectFilesModule({
+            git: projectHost.git,
+            ...(projectHost.protectedPaths === undefined
+                ? {}
+                : { protectedPaths: projectHost.protectedPaths }),
+            projects: options.agent.modules.projects,
+            workspaces: options.agent.modules.workspaces,
+        });
+    const git =
+        options.configuration?.git ??
+        new GitModule({
+            runner: projectHost.git,
+        });
     return [
         ...(options.routeGroups ?? []),
         createCoreDaemonRoutes(),
@@ -113,6 +137,27 @@ function routeGroups(options: StartAgentHttpServerOptions): readonly AgentHttpRo
         createEventRoutes(),
         createInspectorRoutes(),
         createAgentRoutes(),
+        createSessionRoutes(),
+        createProjectRoutes({
+            agent: options.agent,
+            files: projectFiles,
+            git,
+            host: projectHost,
+        }),
+        createWorkspaceRoutes({
+            agent: options.agent,
+            git,
+            host: projectHost,
+        }),
+        createFileRoutes({
+            agent: options.agent,
+            files: projectFiles,
+        }),
+        createGitRoutes({
+            agent: options.agent,
+            files: projectFiles,
+            git,
+        }),
     ];
 }
 

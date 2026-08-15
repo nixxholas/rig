@@ -41,6 +41,8 @@ export const happyAgentEventSchema = Type.Object(
 );
 
 export type HappyAgentEvent = Static<typeof happyAgentEventSchema>;
+const unknownRecordSchema = Type.Record(Type.String(), Type.Unknown());
+type UnknownRecord = Static<typeof unknownRecordSchema>;
 
 export interface AppendHappyAgentEvent {
     readonly agentId?: string;
@@ -75,6 +77,14 @@ export class EventsModule implements AgentModule<AnyAgentTool, LibSQLDatabase> {
     readonly #entries: HappyAgentEvent[] = [];
     readonly #listeners = new Set<HappyAgentEventListener>();
     readonly #now: () => number;
+    readonly #runs = new Map<
+        string,
+        {
+            runId: string;
+            stopReason: "aborted" | "error" | "length" | "stop";
+            text: string;
+        }
+    >();
     #originCursor: string;
     #occurredAt = 0;
 
@@ -168,128 +178,204 @@ export class EventsModule implements AgentModule<AnyAgentTool, LibSQLDatabase> {
         return () => this.#listeners.delete(listener);
     }
 
-    agentCreatedTransact(
+    messageCursor(agentId: string, messageId: string): string | undefined {
+        return this.#entries.findLast(
+            (event) =>
+                event.agentId === agentId &&
+                event.type === "message.accepted" &&
+                recordValue(event.payload)?.id === messageId,
+        )?.id;
+    }
+
+    readonly agentCreatedTransact = (
         ctx: Context,
         _scope: AgentModuleSystemScope<LibSQLDatabase>,
         agent: AgentModuleAgentLifecycle,
-    ): void {
+    ): void => {
         this.afterCommitEvent(ctx, { agentId: agent.id, payload: agent, type: "agent.created" });
-    }
+    };
 
-    agentRestoredTransact(
+    readonly agentRestoredTransact = (
         ctx: Context,
         _scope: AgentModuleSystemScope<LibSQLDatabase>,
         agent: AgentModuleAgentLifecycle,
-    ): void {
+    ): void => {
         this.afterCommitEvent(ctx, { agentId: agent.id, payload: agent, type: "agent.restored" });
-    }
+    };
 
-    agentArchivedTransact(
+    readonly agentArchivedTransact = (
         ctx: Context,
         _scope: AgentModuleSystemScope<LibSQLDatabase>,
         agent: AgentModuleAgentLifecycle,
-    ): void {
+    ): void => {
         this.afterCommitEvent(ctx, { agentId: agent.id, payload: agent, type: "agent.archived" });
-    }
+    };
 
-    messageAccepted(
+    readonly messageAccepted = (
         _ctx: Context,
         scope: AgentModuleScope<LibSQLDatabase>,
         accepted: AgentBaseAcceptedMessage,
-    ): void {
+    ): void => {
+        const previous = this.#runs.get(scope.agent.id);
+        const run =
+            accepted.kind === "steering" && previous !== undefined
+                ? previous
+                : {
+                      runId: accepted.id,
+                      stopReason: "stop" as const,
+                      text: "",
+                  };
+        this.#runs.set(scope.agent.id, run);
         this.append({
             agentId: scope.agent.id,
-            payload: accepted,
+            payload: { ...accepted, runId: run.runId },
             type: "message.accepted",
         });
-    }
+    };
 
-    permissionModeChanged(
+    readonly permissionModeChanged = (
         _ctx: Context,
         scope: AgentModuleScope<LibSQLDatabase>,
         change: AgentBasePermissionModeChange,
-    ): void {
+    ): void => {
         this.append({
             agentId: scope.agent.id,
             payload: change,
             type: "agent.permission-changed",
         });
-    }
+    };
 
-    metadataChanged(
+    readonly metadataChanged = (
         _ctx: Context,
         scope: AgentModuleScope<LibSQLDatabase>,
         change: AgentMetadataChange,
-    ): void {
+    ): void => {
         this.append({
             agentId: scope.agent.id,
             payload: change,
             type: "agent.metadata-changed",
         });
-    }
+    };
 
-    beforeAgentLoop(
+    readonly beforeAgentLoop = (
         _ctx: Context,
         scope: AgentModuleScope<LibSQLDatabase>,
         loop: AgentBaseLoop,
-    ): void {
+    ): void => {
         this.append({ agentId: scope.agent.id, payload: loop, type: "loop.started" });
-    }
+    };
 
-    onEvent(_ctx: Context, scope: AgentModuleScope<LibSQLDatabase>, event: SessionEvent): void {
-        this.append({ agentId: scope.agent.id, payload: event, type: "provider.event" });
-    }
+    readonly onEvent = (
+        _ctx: Context,
+        scope: AgentModuleScope<LibSQLDatabase>,
+        event: SessionEvent,
+    ): void => {
+        const previous = this.#runs.get(scope.agent.id);
+        const run =
+            previous ??
+            ({
+                runId: this.#createId(),
+                stopReason: "stop",
+                text: "",
+            } as const);
+        let text = run.text;
+        let stopReason = run.stopReason;
+        if (event.type === "text_start") text = "";
+        if (event.type === "text_delta") text += event.delta;
+        if (event.type === "done") {
+            stopReason =
+                event.state === "cancelled"
+                    ? "aborted"
+                    : event.state === "error"
+                      ? "error"
+                      : event.state === "length"
+                        ? "length"
+                        : "stop";
+        }
+        const next = { runId: run.runId, stopReason, text };
+        this.#runs.set(scope.agent.id, next);
+        this.append({
+            agentId: scope.agent.id,
+            payload: {
+                event,
+                runId: next.runId,
+                ...(event.type === "text_end" ? { text: next.text } : {}),
+            },
+            type: "provider.event",
+        });
+    };
 
-    afterToolCall(
+    readonly afterToolCall = (
         _ctx: Context,
         scope: AgentModuleScope<LibSQLDatabase>,
         outcome: AgentBaseToolOutcome,
-    ): void {
+    ): void => {
         this.append({
             agentId: scope.agent.id,
             payload: outcome,
             type: "tool.completed",
         });
-    }
+    };
 
-    afterInference(
+    readonly afterInference = (
         _ctx: Context,
         scope: AgentModuleScope<LibSQLDatabase>,
         inference: AgentBaseInference,
-    ): void {
+    ): void => {
         this.append({
             agentId: scope.agent.id,
-            payload: inference,
+            payload: {
+                ...inference,
+                runId: this.#runs.get(scope.agent.id)?.runId ?? inference.loopId,
+            },
             type: "inference.completed",
         });
-    }
+    };
 
-    afterTurn(
+    readonly afterTurn = (
         _ctx: Context,
         scope: AgentModuleScope<LibSQLDatabase>,
         turn: AgentBaseTurn,
-    ): undefined {
-        this.append({ agentId: scope.agent.id, payload: turn, type: "turn.completed" });
+    ): undefined => {
+        const run = this.#runs.get(scope.agent.id);
+        if (run !== undefined && turn.aborted) {
+            this.#runs.set(scope.agent.id, { ...run, stopReason: "aborted" });
+        }
+        this.append({
+            agentId: scope.agent.id,
+            payload: { ...turn, runId: run?.runId ?? turn.loopId },
+            type: "turn.completed",
+        });
         return undefined;
-    }
+    };
 
-    afterAgentSettled(
+    readonly afterAgentSettled = (
         _ctx: Context,
         scope: AgentModuleScope<LibSQLDatabase>,
         settlement: AgentBaseSettlement,
-    ): void {
+    ): void => {
+        const run = this.#runs.get(scope.agent.id);
         this.append({
             agentId: scope.agent.id,
-            payload: settlement,
+            payload: {
+                ...settlement,
+                runId: run?.runId ?? settlement.loopId,
+                stopReason: run?.stopReason ?? "stop",
+            },
             type: "loop.settled",
         });
-    }
+        this.#runs.delete(scope.agent.id);
+    };
 
     private afterCommitEvent(ctx: Context, event: AppendHappyAgentEvent): void {
         afterCommit(ctx, () => {
             this.append(event);
         });
     }
+}
+
+function recordValue(value: unknown): UnknownRecord | undefined {
+    return Value.Check(unknownRecordSchema, value) ? value : undefined;
 }
 
 function snapshotPayload(payload: unknown): unknown {

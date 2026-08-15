@@ -128,8 +128,8 @@ importers:
         specifier: ^0.34.49
         version: 0.34.49
       '@slopus/happy-agent-base':
-        specifier: npm:@slopus/happy-agent-base@0.0.7
-        version: 0.0.7(@aws-sdk/credential-provider-node@3.972.71)(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)
+        specifier: npm:@slopus/happy-agent-base@0.0.8
+        version: 0.0.8(@aws-sdk/credential-provider-node@3.972.71)(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)
       '@slopus/happy-agent-compute':
         specifier: npm:@slopus/happy-agent-compute@0.1.6
         version: 0.1.6
@@ -501,6 +501,9 @@ importers:
       '@slopus/ghostty-web':
         specifier: workspace:*
         version: link:../ghostty-web
+      '@slopus/happy-agent':
+        specifier: workspace:*
+        version: link:../happy-agent
       '@slopus/happy-agent-compute':
         specifier: workspace:*
         version: link:../happy-agent-compute
@@ -2320,10 +2323,6 @@ packages:
 
   '@slopus/happy-agent-base@0.0.5':
     resolution: {integrity: sha512-dhBnT/iEykMu4xU440w6W078igRdWtI3xEHxDnoC/rnjhQEXQGglqBUUQtnHlzHZJyf+3v7ASwthKFOEW8KtRg==}
-    engines: {node: '>=22.19.0'}
-
-  '@slopus/happy-agent-base@0.0.7':
-    resolution: {integrity: sha512-5N5GoCWWwAJn/fv52wRS4y+QfkihU6U+BrdhdbrJHJ7L6Tt13wfD9pTPnz/qAPjl3Fj1VwV74BE6nFIWsWtERA==}
     engines: {node: '>=22.19.0'}
 
   '@slopus/happy-agent-base@0.0.8':
@@ -6019,51 +6018,6 @@ snapshots:
       - '@cfworker/json-schema'
       - '@smithy/hash-node'
       - '@smithy/signature-v4'
-      - supports-color
-      - ws
-      - zod
-
-  '@slopus/happy-agent-base@0.0.7(@aws-sdk/credential-provider-node@3.972.71)(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)':
-    dependencies:
-      '@paralleldrive/cuid2': 3.3.0
-      '@sinclair/typebox': 0.34.49
-      '@slopus/happy-providers': 0.0.8(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
-      '@steve.kite/stdlib': 0.0.10
-      drizzle-orm: 0.45.2(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@types/pg@8.15.6)(sql.js@1.14.1)
-    transitivePeerDependencies:
-      - '@aws-sdk/client-rds-data'
-      - '@aws-sdk/credential-provider-node'
-      - '@cfworker/json-schema'
-      - '@cloudflare/workers-types'
-      - '@electric-sql/pglite'
-      - '@libsql/client'
-      - '@libsql/client-wasm'
-      - '@neondatabase/serverless'
-      - '@op-engineering/op-sqlite'
-      - '@opentelemetry/api'
-      - '@planetscale/database'
-      - '@prisma/client'
-      - '@smithy/hash-node'
-      - '@smithy/signature-v4'
-      - '@tidbcloud/serverless'
-      - '@types/better-sqlite3'
-      - '@types/pg'
-      - '@types/sql.js'
-      - '@upstash/redis'
-      - '@vercel/postgres'
-      - '@xata.io/client'
-      - better-sqlite3
-      - bun-types
-      - expo-sqlite
-      - gel
-      - knex
-      - kysely
-      - mysql2
-      - pg
-      - postgres
-      - prisma
-      - sql.js
-      - sqlite3
       - supports-color
       - ws
       - zod

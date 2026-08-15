@@ -16,7 +16,6 @@ export function replyToMessageTool(collaboration: CollaborationModule, actingAge
         parameters: collaborationReplyToolInputSchema,
         returnType: collaborationSendResultSchema,
         durable: true,
-        transactional: true,
         shouldReviewInAutoMode: () => false,
         execute: async (ctx, input: CollaborationReplyToolInput, call) =>
             await collaboration.replyMessage(ctx, actingAgentId, {

@@ -10,16 +10,15 @@ const scheduling = new SchedulingModule({
 });
 ```
 
-The host transaction is optional when Scheduling is used only through Agent Base hooks and tools,
-because those contexts already carry the active Drizzle facade; direct host calls made without an
-active database must provide it. Every agent receives `wait` and `wait_until`. `schedule_message` is included only when the
+Every caller supplies a context carrying the Agent Base database. Every agent receives `wait` and
+`wait_until`. `schedule_message` is included only when the
 injected `scheduleMessagePolicy` allows the calling agent; the module never guesses whether an
 agent is a subagent. The model-facing schedule tool has no target field and always schedules to
 the calling agent itself. A host caller can pass `targetAgentId`, but cross-agent scheduling is
 denied unless the injected authorization policy grants it.
 
-Waits claim a durable record in a short transaction, suspend through the host scheduler outside
-that transaction, and settle the authoritative terminal record in a second short transaction.
+Waits plan and finalize a durable record in short transactions while both host claim and suspension
+run outside them, then settle the authoritative terminal record in another short transaction.
 New chat messages interrupt the host wait. Results are explicitly `elapsed` or
 `interrupted` and include the actual elapsed milliseconds, which the model rendering turns into
 human-readable English.
@@ -27,11 +26,12 @@ human-readable English.
 Scheduled messages have `pending`, `delivered`, `undelivered`, and `cancelled` states. Delivery
 attempts, failure details, retention, and process recovery belong to the host. The module exposes
 `schedule`, `cancelSchedule`, `listSchedulePage`/`listSchedule`, `getSchedule`/`getSchedulePage`,
-and `reportDeliveryOutcome`. Scheduling does not maintain a second receipt, proof, fingerprint,
-replay, or operation-state layer. Single-transaction model tools set `transactional: true`, so
-Agent Base commits their durable results when execution returns. Waits cannot do that because the
-host wait remains outside the narrow start and settle transactions; their terminal scheduling
-record commits before the tool's separately managed durable result.
+and `reportDeliveryOutcome`. Every host schedule, cancellation, and delivery callback runs outside
+database transactions. Catalog finalization follows in a short transaction. The scheduler must
+reconcile a repeated operation with the same schedule ID and identical input, allowing a retry to
+finish catalog persistence after a finalization rollback without duplicating the external effect.
+Scheduling does not maintain a second receipt, proof, fingerprint, replay, or operation-state
+layer. Only database-only tools use `transactional: true`; host-backed tools remain unwrapped.
 
 Transactional and post-commit listeners receive one detached, deeply frozen event object for each
 changed mutation: `wait_started`, `wait_finished`, `message_scheduled`,

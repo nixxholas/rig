@@ -35,12 +35,13 @@ export function sendError(response: ServerResponse, error: unknown): void {
         return;
     }
     if (error instanceof AgentHttpError) {
+        const details = asObject(error.details);
         sendJson(
             response,
             error.status,
             error.details === undefined
                 ? { error: error.message }
-                : { error: error.message, ...asObject(error.details) },
+                : { ...details, error: error.message },
         );
         return;
     }
@@ -48,7 +49,10 @@ export function sendError(response: ServerResponse, error: unknown): void {
 }
 
 export function errorMessage(error: unknown): string {
-    return error instanceof Error ? error.message : "The Happy agent request failed.";
+    if (!(error instanceof Error)) return "The Happy agent request failed.";
+    // Do not expose filesystem paths, tokens, or provider diagnostics through an unexpected
+    // HTTP failure. Route handlers should throw AgentHttpError when a detail is safe to expose.
+    return "The Happy agent request failed.";
 }
 
 export function serializeJson(value: unknown): string {

@@ -15,7 +15,6 @@ export function scheduleMessageTool(scheduling: SchedulingModule, agentId: strin
         parameters: schedulingScheduleToolInputSchema,
         returnType: schedulingScheduledMessageSchema,
         durable: true,
-        transactional: true,
         shouldReviewInAutoMode: () => false,
         execute: async (ctx, input: SchedulingScheduleToolInput, call) =>
             await scheduling.schedule(ctx, agentId, {

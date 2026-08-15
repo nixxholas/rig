@@ -71,6 +71,7 @@ import type { Context } from "@steve.kite/stdlib";
 import { openHappyAgentDatabase } from "./HappyAgentDatabase.js";
 import { acquireHappyAgentStorageLock } from "./HappyAgentStorageLock.js";
 import { EventsModule, type EventsModuleOptions } from "../events/EventsModule.js";
+import { ConversationModule } from "../conversations/ConversationModule.js";
 
 const pathSchema = Type.String({ minLength: 1, maxLength: 4_096 });
 const providerSchema = Type.String({ minLength: 1, maxLength: 256 });
@@ -154,6 +155,7 @@ export interface HappyAgentModuleCollection {
     readonly agentsMd: AgentsMdModule;
     readonly applets: AppletModule;
     readonly collaboration: CollaborationModule;
+    readonly conversations: ConversationModule;
     readonly compute: ComputeModule;
     readonly events: EventsModule;
     readonly goal: GoalModule;
@@ -257,6 +259,7 @@ export async function loadHappyAgent(
         );
         const orderedModules: AgentModule<AnyAgentTool, LibSQLDatabase>[] = [
             modules.systemPrompt,
+            modules.conversations,
             modules.history,
             modules.modelSwitch,
             modules.agentsMd,
@@ -360,7 +363,7 @@ function createModules(
     publicHome: string,
     events: EventsModuleOptions | undefined,
 ): HappyAgentModuleCollection {
-    const history = new HistoryModule({ transaction });
+    const history = new HistoryModule();
     const compute = createComputeModules({
         provider: {
             id: "host",
@@ -377,63 +380,50 @@ function createModules(
     return {
         agentsMd: compute.agentsMdModule,
         applets: new AppletModule({ rootDirectory: join(publicHome, "Applets") }),
-        collaboration: new CollaborationModule({
-            broker: integrations.collaboration,
-            transaction,
-        }),
+        collaboration: new CollaborationModule({ broker: integrations.collaboration }),
+        conversations: new ConversationModule({ defaultCwd: publicHome, transaction }),
         compute: compute.computeModule,
         events: new EventsModule(events),
-        goal: new GoalModule({ transaction }),
-        happy: new HappyModule({ host: integrations.happy, transaction }),
+        goal: new GoalModule({}),
+        happy: new HappyModule({ host: integrations.happy }),
         history,
         imageGeneration: new ImageGenerationModule({
             generator: integrations.imageGeneration,
             outputDirectory: join(publicHome, "Generated"),
         }),
-        mcp: new McpModule({ host: integrations.mcp, transaction }),
+        mcp: new McpModule({ host: integrations.mcp }),
         modelSwitch: new ModelSwitchModule({ history }),
         permissions: new PermissionsModule(
             integrations.permissionReviewer === undefined
                 ? {}
                 : { reviewer: integrations.permissionReviewer },
         ),
-        presence: new PresenceModule({ transaction }),
-        projects: new ProjectsModule({ transaction }),
-        scheduling: new SchedulingModule({
-            scheduler: integrations.scheduling,
-            transaction,
-        }),
+        presence: new PresenceModule(),
+        projects: new ProjectsModule({}),
+        scheduling: new SchedulingModule({ scheduler: integrations.scheduling }),
         search: new SearchModule({ backend: integrations.search }),
-        secrets: new SecretsModule({
-            transaction,
-            ...(integrations.secretResolver === undefined
+        secrets: new SecretsModule(
+            integrations.secretResolver === undefined
                 ? {}
-                : { resolveForHost: integrations.secretResolver }),
-        }),
+                : { resolveForHost: integrations.secretResolver },
+        ),
         skills: compute.skillsModule,
         slots: new SlotsModule({
             publisher: integrations.slots.publisher,
             scopeResolver: integrations.slots.scopeResolver,
-            transaction,
         }),
         systemPrompt: new SystemPromptModule(),
-        tasks: new TasksModule({ transaction }),
-        usage: new UsageModule({ transaction }),
-        userInput: new UserInputModule({
-            broker: integrations.userInput,
-            transaction,
-        }),
+        tasks: new TasksModule({}),
+        usage: new UsageModule({}),
+        userInput: new UserInputModule({ broker: integrations.userInput }),
         workflows: new WorkflowsModule({ runtime: integrations.workflows }),
         worklets: new WorkletsModule({
             installRoot: join(publicHome, "Worklets"),
             runtime: integrations.worklets,
         }),
-        workspaces: new WorkspacesModule({
-            transaction,
-            ...(integrations.workspaceHost === undefined
-                ? {}
-                : { host: integrations.workspaceHost }),
-        }),
+        workspaces: new WorkspacesModule(
+            integrations.workspaceHost === undefined ? {} : { host: integrations.workspaceHost },
+        ),
     };
 }
 
@@ -446,8 +436,9 @@ function rootAgentConfig(config: AgentConfig | undefined, publicHome: string): A
     if (configuredCompute !== undefined) {
         if (
             !Value.Check(agentComputeConfigSchema, configuredCompute) ||
-            resolve(configuredCompute.cwd) !== publicHome ||
-            (configuredCompute.providerId ?? "host") !== "host"
+            resolve((configuredCompute as { readonly cwd: string }).cwd) !== publicHome ||
+            ((configuredCompute as { readonly providerId?: string }).providerId ?? "host") !==
+                "host"
         ) {
             throw new Error("The root agent compute configuration must use its public Happy home.");
         }
@@ -469,8 +460,8 @@ function assertExistingRootAgentConfig(config: AgentConfig, publicHome: string):
     const compute = config.modules?.compute;
     if (
         !Value.Check(agentComputeConfigSchema, compute) ||
-        resolve(compute.cwd) !== publicHome ||
-        (compute.providerId ?? "host") !== "host"
+        resolve((compute as { readonly cwd: string }).cwd) !== publicHome ||
+        ((compute as { readonly providerId?: string }).providerId ?? "host") !== "host"
     ) {
         throw new Error(
             "The stored root agent does not have the expected host compute configuration.",

@@ -27,10 +27,13 @@ The module exposes:
 - `reply_to_agent_message`
 - `wait_for_reply`
 
-The database mutation tools are durable and transactional. `create_agent` uses the Agent Base `call.id` as
-the collaborator ID, and send/reply use it as the message ID. Agent Base wraps each ordinary tool
-execution and result completion in one transaction. The module does not maintain a replay ledger,
-fingerprint, or call-scoped KV state.
+The broker-backed mutation tools are durable but not transactional. `create_agent` uses the Agent
+Base `call.id` as the collaborator ID, and send/reply use it as the message ID. Broker calls run
+outside database transactions, followed by a short catalog-finalization transaction. The broker
+must reconcile repeated `create`/`send` calls carrying the same stable ID and identical input; this
+lets a retry finish catalog persistence after a prior finalization rollback without duplicating
+the external effect. A reply obligation uses its message ID as its own stable identity. The module
+does not maintain a replay ledger, fingerprint, or call-scoped KV state.
 
 `wait_for_reply` is non-durable because it performs a potentially long external broker wait.
 After the broker returns, one short transaction verifies the authoritative persisted obligation.

@@ -8,12 +8,21 @@ import { AgentHttpError } from "./errors.js";
 export const MAX_AGENT_HTTP_BODY_BYTES = 12 * 1_024 * 1_024;
 
 export async function readJsonBody(request: IncomingMessage): Promise<unknown> {
+    const declaredLength = request.headers["content-length"];
+    if (typeof declaredLength === "string") {
+        const parsedLength = Number(declaredLength);
+        if (Number.isSafeInteger(parsedLength) && parsedLength > MAX_AGENT_HTTP_BODY_BYTES) {
+            request.resume();
+            throw new AgentHttpError(413, "Request body is too large.");
+        }
+    }
     const chunks: Buffer[] = [];
     let bytes = 0;
     for await (const chunk of request) {
         const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
         bytes += buffer.byteLength;
         if (bytes > MAX_AGENT_HTTP_BODY_BYTES) {
+            request.resume();
             throw new AgentHttpError(413, "Request body is too large.");
         }
         chunks.push(buffer);

@@ -27,7 +27,7 @@ const machine = compute.createHostCompute({ ctx, cwd });
 - creates a host compute rooted at `publicHome`;
 - installs every standard module and runs its migrations;
 - restores or creates the home’s stable root agent;
-- listens on a mode-`0600` Unix socket, normally `<agentHome>/agent.sock`;
+- listens on a mode-`0600` Unix socket, normally `<agentHome>/server.sock`;
 - closes HTTP, the agent system, compute, lock, and database together.
 
 ```ts
@@ -60,15 +60,28 @@ agent lifetime without the HTTP daemon.
 Every endpoint is under `/v0`; it is intentionally a new API rather than a Rig compatibility
 surface.
 
-- `GET /v0/health` — readiness, root agent ID, and latest event cursor.
+- `GET /v0/health` — readiness, model catalog, and daemon identity.
 - `GET /v0/agent` — root agent metadata, active state, installed modules, and event cursor.
+- `GET /v0/installation` — persistent installation epoch and schema version.
+- `GET /v0/models` — the curated provider/model catalog.
+- `GET|PATCH /v0/config` — daemon settings (runtime changes are rejected unless a host supplies them).
+- `GET|PUT /v0/config/instructions` — the bounded global `AGENTS.md` document.
+- `GET|PUT /v0/config/security` — the bounded global `AGENTS_SECURITY.md` document.
 - `POST /v0/messages` — queue a normal user message.
 - `POST /v0/steering` — queue a message for the current turn boundary.
 - `POST /v0/abort` — cancel the active turn.
 - `POST /v0/compact` — compact the conversation.
 - `PATCH /v0/agent/metadata` — shallow-merge agent metadata.
-- `GET /v0/events/history` — bounded in-memory event replay.
-- `GET /v0/events` — replay plus live Server-Sent Events.
+- `GET /v0/events` — bounded in-memory event replay.
+- `GET /v0/events/live` — live Server-Sent Events with replay and `Last-Event-ID`.
+- `GET /v0/events/stream` — durable-shaped SSE alias for the same process-local journal.
+- `GET /v0/catalog` — a Rig-shaped catalog snapshot.
+- `POST /v0/timeline` — global timeline snapshot; project/workspace/session timelines are not
+  claimed unless their host is configured.
+- `GET|POST /v0/sessions...` — conversation creation, listing, messages, state, transcript, and
+  module actions.
+- `GET|POST|PATCH /v0/projects...` — local project/workspace/file/Git routes. Remote cloning,
+  Docker workspaces, and other excluded host capabilities return an explicit unsupported response.
 - `POST /v0/shutdown` — close the daemon started by `startHappyAgentDaemon`.
 
 Message bodies accept either a string or text/image input blocks. The same request may select the

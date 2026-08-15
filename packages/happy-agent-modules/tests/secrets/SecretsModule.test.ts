@@ -79,4 +79,35 @@ describe("SecretsModule", () => {
             database.close();
         }
     });
+
+    it("lists and validates scoped attachments in one context transaction", async () => {
+        const database = moduleDatabase(secretsMigrations, "secrets-list-snapshot-test");
+        await database.ready;
+        let listAuthorizationWasTransactional = false;
+        const module = new SecretsModule({
+            authorize: async (ctx, _agentId, operation) => {
+                if (operation === "list") {
+                    listAuthorizationWasTransactional = ctx.db !== database.database;
+                }
+                return true;
+            },
+        });
+        try {
+            await module.register(database.context, "agent-a", {
+                id: "secret-1",
+                description: "A token",
+                environment: { TOKEN: "host-only" },
+            });
+            await module.attach(database.context, "agent-a", "scope-1", "secret-1");
+
+            await expect(
+                module.list(database.context, "agent-a", { scopeRef: "scope-1" }),
+            ).resolves.toMatchObject({
+                secrets: [expect.objectContaining({ id: "secret-1" })],
+            });
+            expect(listAuthorizationWasTransactional).toBe(true);
+        } finally {
+            database.close();
+        }
+    });
 });

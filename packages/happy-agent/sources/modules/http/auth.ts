@@ -1,5 +1,5 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { chmod, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, readFile, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { Type, type Static } from "@sinclair/typebox";
@@ -29,7 +29,16 @@ export async function readOrCreateAgentToken(tokenPath: string): Promise<Token> 
     try {
         await writeFile(temporaryPath, `${token}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
         await chmod(temporaryPath, 0o600);
-        await rename(temporaryPath, tokenPath);
+        try {
+            await link(temporaryPath, tokenPath);
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+            const concurrent = await readToken(tokenPath);
+            if (concurrent === undefined) {
+                throw new Error("A concurrent daemon created an invalid token file.");
+            }
+            return concurrent;
+        }
         await chmod(tokenPath, 0o600);
     } catch (error) {
         await unlink(temporaryPath).catch(() => undefined);
@@ -48,8 +57,9 @@ export function isAuthorizedAgentRequest(
     authorization: string | readonly string[] | undefined,
     expectedToken: string,
 ): boolean {
-    const value = Array.isArray(authorization) ? authorization.at(-1) : authorization;
-    if (value === undefined || !value.startsWith("Bearer ")) return false;
+    if (typeof authorization !== "string") return false;
+    const value = authorization;
+    if (!value.startsWith("Bearer ")) return false;
     const supplied = value.slice("Bearer ".length);
     const expected = Buffer.from(expectedToken, "utf8");
     const actual = Buffer.from(supplied, "utf8");
@@ -58,6 +68,8 @@ export function isAuthorizedAgentRequest(
 
 async function readToken(path: string): Promise<Token | undefined> {
     try {
+        const information = await lstat(path);
+        if (!information.isFile()) return undefined;
         const value = (await readFile(path, "utf8")).trim();
         return Value.Check(tokenSchema, value) ? value : undefined;
     } catch {

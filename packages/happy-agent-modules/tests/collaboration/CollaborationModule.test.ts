@@ -19,6 +19,7 @@ import { moduleDatabase } from "../support/moduleDatabase.js";
 class Broker implements CollaborationBroker {
     readonly configs = new Map<string, AgentConfig>();
     readonly sent: Array<{ readonly target: string; readonly id: string }> = [];
+    sendAttempts = 0;
     waitResult: CollaborationObligation | undefined;
     database: AgentDatabase | undefined;
     createDepths: number[] = [];
@@ -50,7 +51,10 @@ class Broker implements CollaborationBroker {
         options: Parameters<CollaborationBroker["send"]>[3],
     ): Promise<void> {
         this.sendDepths.push(this.#transactionDepth(_ctx));
-        this.sent.push({ target, id: options.id });
+        this.sendAttempts += 1;
+        if (!this.sent.some((sent) => sent.target === target && sent.id === options.id)) {
+            this.sent.push({ target, id: options.id });
+        }
     }
 
     async wait(
@@ -68,15 +72,17 @@ class Broker implements CollaborationBroker {
     }
 }
 
-function setup(name: string) {
+function setup(
+    name: string,
+    listener?: ConstructorParameters<typeof CollaborationModule>[0]["listener"],
+) {
     const broker = new Broker();
-    let obligationSequence = 0;
     let eventSequence = 0;
     const collaboration = new CollaborationModule({
         broker,
-        obligationIdFactory: () => `obligation${++obligationSequence}`,
         eventIdFactory: () => `event${++eventSequence}`,
         clock: () => 1_000 + eventSequence,
+        ...(listener === undefined ? {} : { listener }),
     });
     const database = moduleDatabase([], name);
     broker.database = database.database;
@@ -205,8 +211,8 @@ describe("CollaborationModule", () => {
 
             expect(commitDepths).toEqual([]);
             expect(committed).toEqual([]);
-            expect(broker.createDepths).toEqual([1, 1]);
-            expect(broker.sendDepths).toEqual([1, 1]);
+            expect(broker.createDepths).toEqual([0, 0]);
+            expect(broker.sendDepths).toEqual([0, 0]);
             expect(broker.waitDepths).toEqual([0]);
         } finally {
             database.close();
@@ -269,11 +275,60 @@ describe("CollaborationModule", () => {
             expect(byName.get("send_agent_message")?.durable).toBe(true);
             expect(byName.get("reply_to_agent_message")?.durable).toBe(true);
             expect(byName.get("wait_for_reply")?.durable).toBe(false);
-            expect(byName.get("create_agent")?.transactional).toBe(true);
-            expect(byName.get("send_agent_message")?.transactional).toBe(true);
-            expect(byName.get("reply_to_agent_message")?.transactional).toBe(true);
+            expect(byName.get("create_agent")?.transactional).not.toBe(true);
+            expect(byName.get("send_agent_message")?.transactional).not.toBe(true);
+            expect(byName.get("reply_to_agent_message")?.transactional).not.toBe(true);
             expect(byName.get("wait_for_reply")?.transactional).not.toBe(true);
             expect(collaborationAgentSchema).toBeDefined();
+        } finally {
+            database.close();
+        }
+    });
+
+    it("reconciles stable broker effects after catalog finalization rolls back", async () => {
+        let rejectCreate = true;
+        let rejectSend = false;
+        const { broker, collaboration, database, ready } = setup("collaboration-retry-contract", {
+            onEventTransactional: async (_ctx, event) => {
+                if (rejectCreate && event.type === "agent_created") {
+                    throw new Error("reject agent finalization");
+                }
+                if (rejectSend && event.type === "message_sent") {
+                    throw new Error("reject message finalization");
+                }
+            },
+        });
+        await ready;
+        try {
+            await expect(
+                createRoot(collaboration, database.context),
+            ).rejects.toThrow("reject agent finalization");
+            rejectCreate = false;
+            await expect(createRoot(collaboration, database.context)).resolves.toMatchObject({
+                id: "owner",
+            });
+            expect(broker.createDepths).toEqual([0]);
+
+            await collaboration.createAgent(database.context, "owner", {
+                id: "child",
+                config: {},
+            });
+            rejectSend = true;
+            const input = {
+                toAgentId: "child",
+                text: "Retry this delivery",
+                messageId: "message-stable",
+            } as const;
+            await expect(
+                collaboration.sendMessage(database.context, "owner", input),
+            ).rejects.toThrow("reject message finalization");
+            rejectSend = false;
+            await expect(
+                collaboration.sendMessage(database.context, "owner", input),
+            ).resolves.toMatchObject({ message: { id: "message-stable" } });
+            expect(broker.sendAttempts).toBe(2);
+            expect(broker.sent).toEqual([{ target: "child", id: "message-stable" }]);
+            expect(broker.sendDepths).toEqual([0, 0]);
         } finally {
             database.close();
         }

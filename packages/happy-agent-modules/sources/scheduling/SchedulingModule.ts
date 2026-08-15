@@ -322,13 +322,24 @@ export class SchedulingModule implements AgentModule {
     ): Promise<SchedulingScheduledMessage> {
         this.#assertAgentId(agentId, "acting agent");
         this.#assertInput(schedulingDeliveryOutcomeInputSchema, input, "delivery outcome");
-        return await ctx.inTx(async (txCtx) => {
+        const before = await ctx.inTx(async (txCtx) => {
             const before = await this.#readRequiredSchedule(txCtx, agentId, input.scheduleId);
             await this.#authorize(txCtx, agentId, before.senderAgentId, "delivery");
-            if (before.status !== "pending") return structuredClone(before);
-            const raw = await this.#scheduler.reportDelivery(txCtx, agentId, input);
-            assertSchedulingScheduledMessage(raw);
-            this.#assertScheduleTransition(raw, before, input.status, input);
+            return structuredClone(before);
+        });
+        if (before.status !== "pending") return before;
+        const raw = await this.#scheduler.reportDelivery(ctx, agentId, input);
+        assertSchedulingScheduledMessage(raw);
+        this.#assertScheduleTransition(raw, before, input.status, input);
+        return await ctx.inTx(async (txCtx) => {
+            const current = await this.#readRequiredSchedule(txCtx, agentId, input.scheduleId);
+            if (current.status !== "pending") {
+                if (!sameSchedule(current, raw)) {
+                    throw new Error("Delivery outcome retry disagrees with durable state.");
+                }
+                return current;
+            }
+            this.#assertScheduleTransition(raw, current, input.status, input);
             await this.#writeSchedule(txCtx, raw);
             const event = await this.#event(txCtx, {
                 type: "scheduled_message_delivery_outcome",
@@ -428,31 +439,41 @@ export class SchedulingModule implements AgentModule {
         const targetAgentId = input.targetAgentId ?? agentId;
         this.#assertAgentId(targetAgentId, "target agent");
         await this.#authorize(ctx, agentId, targetAgentId, "schedule");
-        return await ctx.inTx(async (txCtx) => {
+        const request = await ctx.inTx(async (txCtx) => {
             const id = input.id ?? (await this.#newIdentity(txCtx, agentId));
             this.#assertId(id, "schedule");
             if ((await this.#readSchedule(txCtx, agentId, id)) !== undefined) {
                 throw new Error(`Scheduled message "${id}" already exists.`);
             }
             const dueAt = this.#dueAtFromSchedule(this.#now(txCtx, agentId), input);
-            const raw = await this.#scheduler.schedule(txCtx, agentId, {
+            return {
                 id,
                 senderAgentId: agentId,
                 targetAgentId,
                 message: input.message,
                 dueAt,
-            });
-            assertSchedulingScheduledMessage(raw);
-            this.#assertScheduleRequest(
-                raw,
-                id,
-                agentId,
-                targetAgentId,
-                input.message,
-                dueAt,
-            );
-            if (raw.status !== "pending") {
-                throw new Error("Scheduling scheduler returned a non-pending new message.");
+            };
+        });
+        const raw = await this.#scheduler.schedule(ctx, agentId, request);
+        assertSchedulingScheduledMessage(raw);
+        this.#assertScheduleRequest(
+            raw,
+            request.id,
+            agentId,
+            targetAgentId,
+            input.message,
+            request.dueAt,
+        );
+        if (raw.status !== "pending") {
+            throw new Error("Scheduling scheduler returned a non-pending new message.");
+        }
+        return await ctx.inTx(async (txCtx) => {
+            const existing = await this.#readSchedule(txCtx, agentId, request.id);
+            if (existing !== undefined) {
+                if (!sameSchedule(existing, raw)) {
+                    throw new Error("Scheduled message retry disagrees with durable state.");
+                }
+                return existing;
             }
             await this.#writeSchedule(txCtx, raw);
             const event = await this.#event(txCtx, {
@@ -472,15 +493,24 @@ export class SchedulingModule implements AgentModule {
     ): Promise<SchedulingScheduledMessage> {
         this.#assertAgentId(agentId, "acting agent");
         this.#assertInput(schedulingCancelInputSchema, input, "schedule cancellation");
-        return await ctx.inTx(async (txCtx) => {
+        const before = await ctx.inTx(async (txCtx) => {
             const before = await this.#readRequiredSchedule(txCtx, agentId, input.scheduleId);
             await this.#authorize(txCtx, agentId, before.senderAgentId, "cancel");
-            if (before.status !== "pending") {
-                return structuredClone(before);
+            return structuredClone(before);
+        });
+        if (before.status !== "pending") return before;
+        const raw = await this.#scheduler.cancel(ctx, agentId, input);
+        assertSchedulingScheduledMessage(raw);
+        this.#assertScheduleTransition(raw, before, "cancelled");
+        return await ctx.inTx(async (txCtx) => {
+            const current = await this.#readRequiredSchedule(txCtx, agentId, input.scheduleId);
+            if (current.status !== "pending") {
+                if (!sameSchedule(current, raw)) {
+                    throw new Error("Schedule cancellation retry disagrees with durable state.");
+                }
+                return current;
             }
-            const raw = await this.#scheduler.cancel(txCtx, agentId, input);
-            assertSchedulingScheduledMessage(raw);
-            this.#assertScheduleTransition(raw, before, "cancelled");
+            this.#assertScheduleTransition(raw, current, "cancelled");
             await this.#writeSchedule(txCtx, raw);
             const event = await this.#event(txCtx, {
                 type: "scheduled_message_cancelled",
@@ -539,44 +569,61 @@ export class SchedulingModule implements AgentModule {
         );
         const id = input.id ?? (await this.#newIdentity(ctx, agentId));
         this.#assertId(id, "wait");
-        const claimed = await ctx.inTx(async (txCtx) => {
+        const planned = await ctx.inTx(async (txCtx) => {
             const existing = await this.#readWait(txCtx, agentId, id);
             if (existing !== undefined) {
                 if (existing.kind !== kind) {
                     throw new Error("Scheduling wait identity belongs to another wait kind.");
                 }
-                return existing.status === "waiting"
-                    ? structuredClone(existing)
-                    : resultFromWait(existing);
+                return { existing: structuredClone(existing) } as const;
             }
             const startedAt = this.#now(txCtx, agentId);
             const dueAt =
                 "duration" in input
                     ? this.#dueAtFromDuration(startedAt, input.duration)
                     : this.#dueAtFromInstant(startedAt, input.at);
-            const raw = await this.#scheduler.startWait(txCtx, agentId, {
-                id,
-                agentId,
-                kind,
-                dueAt,
-                startedAt,
-            });
+            return {
+                request: {
+                    id,
+                    agentId,
+                    kind,
+                    dueAt,
+                    startedAt,
+                },
+            } as const;
+        });
+        let claimed: SchedulingWaitRecord;
+        if ("existing" in planned) {
+            if (planned.existing.status !== "waiting") {
+                return resultFromWait(planned.existing);
+            }
+            claimed = planned.existing;
+        } else {
+            const raw = await this.#scheduler.startWait(ctx, agentId, planned.request);
             assertSchedulingWaitRecord(raw);
-            this.#assertWaitRequest(raw, agentId, id, kind, dueAt, startedAt);
+            this.#assertWaitRequest(
+                raw,
+                agentId,
+                id,
+                kind,
+                planned.request.dueAt,
+                planned.request.startedAt,
+            );
             if (raw.status !== "waiting") {
                 throw new Error("Scheduling scheduler returned a terminal wait while claiming.");
             }
-            await this.#writeWait(txCtx, raw);
-            const event = await this.#event(txCtx, {
-                type: "wait_started",
-                agentId,
-                wait: raw,
+            claimed = await ctx.inTx(async (txCtx) => {
+                const existing = await this.#readWait(txCtx, agentId, id);
+                if (existing !== undefined) return existing;
+                await this.#writeWait(txCtx, raw);
+                const event = await this.#event(txCtx, {
+                    type: "wait_started",
+                    agentId,
+                    wait: raw,
+                });
+                await this.#announce(txCtx, event);
+                return structuredClone(raw);
             });
-            await this.#announce(txCtx, event);
-            return structuredClone(raw);
-        });
-        if (Value.Check(schedulingWaitResultSchema, claimed)) {
-            return structuredClone(claimed as SchedulingWaitResult);
         }
         assertSchedulingWaitRecord(claimed);
         const settlement = await this.#scheduler.wait(ctx, agentId, id);
@@ -1226,4 +1273,11 @@ function safeError(error: unknown): string {
     const message =
         error instanceof Error ? error.message : typeof error === "string" ? error : String(error);
     return message.slice(0, 512) || "Unknown scheduling observer error.";
+}
+
+function sameSchedule(
+    left: SchedulingScheduledMessage,
+    right: SchedulingScheduledMessage,
+): boolean {
+    return JSON.stringify(left) === JSON.stringify(right);
 }

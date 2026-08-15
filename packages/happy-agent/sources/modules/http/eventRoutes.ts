@@ -191,12 +191,25 @@ async function streamEvents(
     mode: "durable" | "live",
     agentId: string,
 ): Promise<void> {
+    let closed = false;
+    let streaming = false;
+    let headersStarted = false;
     const pending: HappyAgentEvent[] = [];
     let pendingBytes = 0;
-    let streaming = false;
-    let closed = false;
     let heartbeat: NodeJS.Timeout | undefined;
-    const unsubscribe = events.subscribe((event) => {
+    let unsubscribe = (): void => undefined;
+    const cleanup = (): void => {
+        if (closed) return;
+        closed = true;
+        if (heartbeat !== undefined) clearInterval(heartbeat);
+        unsubscribe();
+        if (headersStarted && !response.destroyed && !response.writableEnded) {
+            response.end();
+        }
+    };
+
+    unsubscribe = events.subscribe((event) => {
+        if (closed) return;
         if (!streaming) {
             const bytes = Buffer.byteLength(serializeJson(event), "utf8");
             if (pendingBytes + bytes > MAX_PENDING_BYTES) {
@@ -207,14 +220,25 @@ async function streamEvents(
             pendingBytes += bytes;
             return;
         }
-        if (!writeSseEvent(response, event, mode)) cleanup();
+        try {
+            if (!writeSseEvent(response, event, mode)) cleanup();
+        } catch {
+            cleanup();
+        }
     });
+
     const replay = events.replay(after, events.capacity());
     if (replay === undefined) {
-        unsubscribe();
+        cleanup();
         sendJson(response, 409, {
             cursor: events.cursor(),
             error: "Event cursor is unavailable.",
+        });
+        return;
+    }
+    if (closed) {
+        sendJson(response, 503, {
+            error: "The event stream could not buffer its initial updates.",
         });
         return;
     }
@@ -225,48 +249,71 @@ async function streamEvents(
         "content-type": "text/event-stream; charset=utf-8",
         "x-accel-buffering": "no",
     });
-    response.write(": connected\n\n");
-    response.write(
-        `event: hello\ndata: ${serializeJson({
-            agentId,
-            connectedAt: Date.now(),
-            cursor: replay.latestCursor,
-            protocolVersion: 0,
-            resumed: after !== undefined,
-        })}\n\n`,
-    );
+    headersStarted = true;
+    if (!response.write(": connected\n\n")) {
+        cleanup();
+        return;
+    }
+    if (
+        !response.write(
+            `event: hello\ndata: ${serializeJson({
+                agentId,
+                connectedAt: Date.now(),
+                cursor: replay.latestCursor,
+                protocolVersion: 0,
+                resumed: after !== undefined,
+            })}\n\n`,
+        )
+    ) {
+        cleanup();
+        return;
+    }
     for (const event of replay.events) {
-        if (!writeSseEvent(response, event, mode)) {
+        if (!writeSseEventSafely(response, event, mode)) {
             cleanup();
             return;
         }
     }
     streaming = true;
     for (const event of pending) {
-        if (!writeSseEvent(response, event, mode)) {
+        if (!writeSseEventSafely(response, event, mode)) {
             cleanup();
             return;
         }
     }
     pending.length = 0;
+    pendingBytes = 0;
     heartbeat = setInterval(() => {
-        if (!response.write(": keepalive\n\n")) cleanup();
+        try {
+            if (!response.write(": keepalive\n\n")) cleanup();
+        } catch {
+            cleanup();
+        }
     }, SSE_HEARTBEAT_MS);
     heartbeat.unref();
-    request.once("close", cleanup);
-    response.once("close", cleanup);
+    const finish = (): void => {
+        cleanup();
+    };
+    request.once("close", finish);
+    response.once("close", finish);
+    response.once("finish", finish);
 
     await new Promise<void>((resolve) => {
-        response.once("close", resolve);
-        response.once("finish", resolve);
+        const done = (): void => resolve();
+        response.once("close", done);
+        response.once("finish", done);
     });
 
-    function cleanup(): void {
-        if (closed) return;
-        closed = true;
-        if (heartbeat !== undefined) clearInterval(heartbeat);
-        unsubscribe();
-        response.end();
+    function writeSseEventSafely(
+        target: ServerResponse,
+        event: HappyAgentEvent,
+        eventMode: "durable" | "live",
+    ): boolean {
+        try {
+            return writeSseEvent(target, event, eventMode);
+        } catch {
+            return false;
+        }
     }
 }
 

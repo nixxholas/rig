@@ -5,13 +5,24 @@ import {
     type LoadedHappyAgent,
     type LoadHappyAgentOptions,
 } from "./modules/agent/loadHappyAgent.js";
-import { startAgentHttpServer, type AgentHttpServer } from "./modules/http/startAgentHttpServer.js";
+import {
+    startAgentHttpServer,
+    type AgentHttpConfiguration,
+    type AgentHttpRouteGroup,
+    type AgentHttpServer,
+} from "./modules/http/index.js";
 
 export interface StartHappyAgentDaemonOptions extends LoadHappyAgentOptions {
     /** Private Unix socket path. Defaults to `<agentHome>/server.sock`. */
     readonly socketPath?: string;
     /** Bearer token path. Defaults to `<agentHome>/token`. */
     readonly tokenPath?: string;
+    /** Optional host-backed daemon configuration and inspector capabilities. */
+    readonly httpConfiguration?: AgentHttpConfiguration;
+    /** Additional route families registered by the composition root. */
+    readonly routeGroups?: readonly AgentHttpRouteGroup[];
+    /** Human-readable daemon version exposed by health/installation. */
+    readonly version?: string;
 }
 
 export interface HappyAgentDaemon {
@@ -36,6 +47,11 @@ export async function startHappyAgentDaemon(
             ctx: ctx.named("happy-agent-http"),
             ...(options.socketPath === undefined ? {} : { socketPath: options.socketPath }),
             ...(options.tokenPath === undefined ? {} : { tokenPath: options.tokenPath }),
+            ...(options.httpConfiguration === undefined
+                ? {}
+                : { configuration: options.httpConfiguration }),
+            ...(options.routeGroups === undefined ? {} : { routeGroups: options.routeGroups }),
+            ...(options.version === undefined ? {} : { version: options.version }),
             onShutdown: () => {
                 void closeDaemon?.(ctx.named("happy-agent-http-shutdown")).catch(() => undefined);
             },

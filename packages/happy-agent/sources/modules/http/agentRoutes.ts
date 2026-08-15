@@ -29,7 +29,7 @@ export function createAgentRoutes(): AgentHttpRouteGroup {
         },
         {
             method: "POST",
-            path: "/v0/messages",
+            path: "/v0/agent/messages",
             handle: async ({ ctx, dependencies, request, response }) => {
                 const body = await readValidatedBody(request, messageRequestSchema);
                 const acceptance = await dependencies.agent.system.send(
