@@ -79,11 +79,14 @@ describe("createHostShell commands", () => {
             expect(read?.status).toBe("running");
         });
 
-        let completed;
         await vi.waitFor(async () => {
-            completed = await compute.shell.readSession(sessionId, { waitMs: 30 });
-            expect(completed?.status).toBe("completed");
+            const snapshot = await compute.shell.readSession(sessionId, {
+                peek: true,
+                waitMs: 30,
+            });
+            expect(snapshot?.status).toBe("completed");
         });
+        const completed = await compute.shell.readSession(sessionId);
         expect(completed).toMatchObject({ stdoutDelta: "b" });
     });
 
