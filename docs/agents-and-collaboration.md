@@ -22,7 +22,7 @@ Subagents are limited by depth and by concurrency:
 | --------------------------------------- | ------- |
 | Nesting depth                           | 3       |
 | Concurrently running subagents per tree | 8       |
-| Same, for Codex v2 collaboration models | 3       |
+| Same, for Codex v2 collaboration models | 10      |
 
 A subagent at maximum
 depth is told to finish the task itself, and a subagent may only delegate further

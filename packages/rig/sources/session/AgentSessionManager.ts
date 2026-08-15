@@ -46,7 +46,7 @@ import type { InMemorySession } from "./InMemorySession.js";
 
 export const DEFAULT_MAX_SUBAGENT_DEPTH = 3;
 export const DEFAULT_MAX_ACTIVE_SUBAGENTS = 8;
-export const DEFAULT_MAX_ACTIVE_CODEX_V2_SUBAGENTS = 3;
+export const DEFAULT_MAX_ACTIVE_CODEX_V2_SUBAGENTS = 10;
 
 export interface AgentSessionRepository {
     archiveOwnedWorkspace?(
@@ -141,10 +141,12 @@ export class AgentSessionManager {
     readonly #slotReservations = new Map<string, number>();
     readonly #stoppedExplicitly = new Set<string>();
     readonly #taskDrain: TaskDrain | undefined;
+    readonly #configuredMaxActive: number | undefined;
 
     constructor(options: AgentSessionManagerOptions) {
         this.#repository = options.repository;
         this.#taskDrain = options.taskDrain;
+        this.#configuredMaxActive = options.maxActive;
         this.maxActive = options.maxActive ?? DEFAULT_MAX_ACTIVE_SUBAGENTS;
         this.maxDepth = options.maxDepth ?? DEFAULT_MAX_SUBAGENT_DEPTH;
     }
@@ -158,7 +160,10 @@ export class AgentSessionManager {
     maxActiveFor(rootSessionId: string): number {
         const root = this.#repository.get(rootSessionId);
         return root?.isCodexV2Collaboration?.() === true
-            ? Math.min(this.maxActive, DEFAULT_MAX_ACTIVE_CODEX_V2_SUBAGENTS)
+            ? Math.min(
+                  this.#configuredMaxActive ?? DEFAULT_MAX_ACTIVE_CODEX_V2_SUBAGENTS,
+                  DEFAULT_MAX_ACTIVE_CODEX_V2_SUBAGENTS,
+              )
             : this.maxActive;
     }
 

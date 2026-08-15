@@ -464,7 +464,7 @@ describe("AgentSessionManager", () => {
                 taskName: "idle",
             }),
         } as unknown as InMemorySession;
-        const running = Array.from({ length: 3 }, (_, index) => ({
+        const running = Array.from({ length: 10 }, (_, index) => ({
             agentMetadata: () => ({
                 depth: 1,
                 parentSessionId: "root-1",
@@ -498,11 +498,11 @@ describe("AgentSessionManager", () => {
         });
 
         await expect(manager.followUp(ctx, root.id, "/root/idle", "Continue.")).rejects.toThrow(
-            "No more than 3 subagents can run at once.",
+            "No more than 10 subagents can run at once.",
         );
     });
 
-    it("keeps the existing generic limit and narrows Codex V2 trees", async () => {
+    it("keeps the generic limit and allows ten concurrent Codex V2 subagents", async () => {
         const codexRoot = {
             encryptedAgentTransportScope: () => '["codex",null]',
             id: "codex-root",
@@ -529,8 +529,20 @@ describe("AgentSessionManager", () => {
 
         expect(manager.maxActive).toBe(8);
         expect(manager.maxActiveFor("generic-root")).toBe(8);
-        expect(manager.maxActiveFor(codexRoot.id)).toBe(3);
+        expect(manager.maxActiveFor(codexRoot.id)).toBe(10);
         expect(manager.maxActiveFor(bedrockRoot.id)).toBe(8);
+
+        const configuredManager = new AgentSessionManager({
+            maxActive: 4,
+            repository: {
+                createSubagent: async () => {
+                    throw new Error("Not used by this test.");
+                },
+                get: () => codexRoot,
+                listByRoot: () => [],
+            },
+        });
+        expect(configuredManager.maxActiveFor(codexRoot.id)).toBe(4);
     });
 
     it("reads paginated history from the root and nested subagents by task path", async () => {
@@ -2233,7 +2245,7 @@ describe("AgentSessionManager", () => {
             id: "root-1",
             isCodexV2Collaboration: () => true,
         } as unknown as InMemorySession;
-        const active = Array.from({ length: 3 }, (_, index) => {
+        const active = Array.from({ length: 10 }, (_, index) => {
             const id = `child-${index + 1}`;
             return {
                 subagentSummary: () => ({
@@ -2263,7 +2275,7 @@ describe("AgentSessionManager", () => {
                 description: "One task too many",
                 prompt: "Do more work.",
             }),
-        ).rejects.toThrow("No more than 3 subagents can run at once");
+        ).rejects.toThrow("No more than 10 subagents can run at once");
         expect(createSubagent).not.toHaveBeenCalled();
     });
 
