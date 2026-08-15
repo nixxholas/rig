@@ -11,8 +11,11 @@ import { createSandboxedCommand } from "../agent/context/createSandboxedCommand.
 import { createToolEnvironment } from "../agent/context/createToolEnvironment.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
 import type { RigAgentService } from "../agent/RigAgentService.js";
+import type { ConversationRepository } from "../conversations/ConversationRepository.js";
 import type { GeneratedMediaStore } from "../generated-media/index.js";
-import type { SessionStore } from "../session/SessionStore.js";
+import type { LiveGlobalEventQueue } from "../global-event/LiveGlobalEventQueue.js";
+import type { ProjectRepository } from "../project/ProjectRepository.js";
+import type { SlotEntryStore } from "../slots/SlotEntryStore.js";
 import { createPluginNodeRuntime } from "./createPluginNodeRuntime.js";
 import {
     createPluginApiServer,
@@ -49,8 +52,9 @@ export interface RunningPlugin {
 }
 
 export interface StartPluginOptions {
-    agents?: RigAgentService;
+    agents: RigAgentService;
     appRegistry?: PluginAppRegistry;
+    conversations: ConversationRepository;
     dataDirectory?: string;
     defaultDocker?: DockerExecutionConfig;
     docker?: Dockerode;
@@ -58,6 +62,7 @@ export interface StartPluginOptions {
     environment?: NodeJS.ProcessEnv;
     generatedMedia?: GeneratedMediaStore;
     hookRegistry?: PluginHookRegistry;
+    liveEvents: LiveGlobalEventQueue;
     listPlugins: CreatePluginApiServerOptions["listPlugins"];
     listProviderUsage?: CreatePluginApiServerOptions["listProviderUsage"];
     computeRegistry?: PluginComputeRegistry;
@@ -65,7 +70,8 @@ export interface StartPluginOptions {
     networkRegistry?: PluginNetworkRegistry;
     onStatus?: (status: HappyPluginStatus) => void;
     preserveLog?: boolean;
-    store: SessionStore;
+    projects: ProjectRepository;
+    slots: SlotEntryStore;
 }
 
 interface PluginProcess {
@@ -172,11 +178,12 @@ export async function startPlugin(
         throw error;
     }
     const server = createPluginApiServer({
-        ...(options.agents === undefined ? {} : { agents: options.agents }),
+        agents: options.agents,
         ...(compute === undefined ? {} : { compute }),
         ...(options.computeRegistry === undefined
             ? {}
             : { computeRegistry: options.computeRegistry }),
+        conversations: options.conversations,
         ...(options.defaultDocker === undefined ? {} : { defaultDocker: options.defaultDocker }),
         ...(options.listProviderUsage === undefined
             ? {}
@@ -184,17 +191,19 @@ export async function startPlugin(
         listPlugins: options.listPlugins,
         ...(options.generatedMedia === undefined ? {} : { generatedMedia: options.generatedMedia }),
         ...(hooks === undefined ? {} : { hooks }),
+        liveEvents: options.liveEvents,
         ...(mcp === undefined ? {} : { mcp }),
         ...(network === undefined ? {} : { network }),
         pluginFolder: plugin.folderName,
         pluginDataDirectory: dataDirectory,
         pluginName: plugin.manifest.name,
+        projects: options.projects,
+        slots: options.slots,
         onStatus: (status) => {
             statusMessage = status;
             options.onStatus?.(status);
         },
         startup,
-        store: options.store,
         token,
     });
     let dockerSocketBridge: PluginDockerSocketBridge | undefined;

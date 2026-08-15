@@ -7,9 +7,14 @@ import {
     type HappySystemPromptHookInput,
     type HappyTracingEvent,
 } from "happy-plugins";
+import type { RigAgentService } from "../agent/RigAgentService.js";
+import type { ConversationRepository } from "../conversations/ConversationRepository.js";
 import { errorToMessage } from "../errorToMessage.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
 import type { GeneratedMediaStore } from "../generated-media/index.js";
+import type { GlobalEventQueue } from "../global-event/GlobalEventQueue.js";
+import type { LiveGlobalEventQueue } from "../global-event/LiveGlobalEventQueue.js";
+import type { ProjectRepository } from "../project/ProjectRepository.js";
 import { createEventIdFactory } from "../protocol/createEventIdFactory.js";
 import type {
     ComputePreparationEvent,
@@ -17,9 +22,8 @@ import type {
     PluginLogSnapshot,
     PluginSummary,
 } from "../protocol/index.js";
-import type { InMemorySession } from "../session/InMemorySession.js";
-import type { SessionStore } from "../session/SessionStore.js";
 import type { DaemonLog } from "../server/DaemonLog.js";
+import type { SlotEntryStore } from "../slots/SlotEntryStore.js";
 import type { FileSystemContext } from "../agent/context/FileSystemContext.js";
 import type {
     ManagedNetworkHttpRequest,
@@ -65,16 +69,16 @@ import { removePluginDockerContainers } from "./startPluginDockerContainer.js";
 import { DEFAULT_PLUGIN_STARTUP_TIMEOUT_MS } from "./PluginStartupState.js";
 import { formatComputePreparationNotice } from "./formatComputePreparationNotice.js";
 import { withWorkerContext } from "../observability/index.js";
-import type { RigAgentService } from "../agent/RigAgentService.js";
 
 const PLUGIN_STATUS_PUBLICATION_INTERVAL_MS = 100;
 const PLUGIN_PROCESS_EXIT_SETTLE_MS = 100;
 const MAX_COMPUTE_SESSION_PREPARATIONS = 1_000;
 
 export interface PluginManagerOptions {
-    agents?: RigAgentService;
+    agents: RigAgentService;
     appRegistry?: PluginAppRegistry;
     computeRegistry?: PluginComputeRegistry;
+    conversations: ConversationRepository;
     daemonLog: DaemonLog;
     defaultDocker?: DockerExecutionConfig;
     directory?: string;
@@ -83,15 +87,18 @@ export interface PluginManagerOptions {
     environment?: NodeJS.ProcessEnv;
     githubFetch?: GitHubFetch;
     generatedMedia?: GeneratedMediaStore;
+    globalEvents: GlobalEventQueue;
     hookRegistry?: PluginHookRegistry;
+    liveEvents: LiveGlobalEventQueue;
     now?: () => number;
     mcpRegistry?: PluginMcpRegistry;
     networkRegistry?: PluginNetworkRegistry;
+    projects: ProjectRepository;
     listProviderUsage?: StartPluginOptions["listProviderUsage"];
     /** How a registered plugin is started. Tests replace the real sandboxed process. */
     start?: (plugin: RegisteredPlugin, options: StartPluginOptions) => Promise<RunningPlugin>;
     startupTimeoutMs?: number;
-    store: SessionStore;
+    slots: SlotEntryStore;
 }
 
 export interface UninstalledPlugin {
@@ -132,17 +139,18 @@ export class PluginManager implements ManagedNetworkInterceptor {
     readonly directory: string;
 
     readonly #appRegistry: PluginAppRegistry;
-    readonly #agents: RigAgentService | undefined;
+    readonly #agents: RigAgentService;
     #catalog: { promise: Promise<PluginCatalog>; version: EventId } | undefined;
     readonly #createEventId = createEventIdFactory();
     #catalogVersion: EventId = this.#createEventId();
     readonly #computeRegistry: PluginComputeRegistry;
+    readonly #conversations: ConversationRepository;
     readonly #computeSessionPreparation = new Map<
         string,
         {
-            delivered: WeakSet<InMemorySession>;
+            delivered: Set<string>;
             phase: string;
-            sessions: WeakSet<InMemorySession>;
+            sessions: Set<string>;
             state: ComputePreparationEvent["data"]["state"];
         }
     >();
@@ -153,6 +161,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
     readonly #environment: NodeJS.ProcessEnv;
     readonly #githubFetch: GitHubFetch | undefined;
     readonly #generatedMedia: GeneratedMediaStore | undefined;
+    readonly #globalEvents: GlobalEventQueue;
     readonly #hookRegistry: PluginHookRegistry;
     readonly #iconCache = new PluginIconSummaryCache();
     #discovery: { promise: Promise<PluginDiscovery>; version: EventId } | undefined;
@@ -160,6 +169,8 @@ export class PluginManager implements ManagedNetworkInterceptor {
     readonly #mcpRegistry: PluginMcpRegistry | undefined;
     readonly #networkRegistry: PluginNetworkRegistry;
     readonly #listProviderUsage: StartPluginOptions["listProviderUsage"];
+    readonly #liveEvents: LiveGlobalEventQueue;
+    readonly #projects: ProjectRepository;
     readonly #installationRequests = new PluginInstallationRequests();
     readonly #running = new Map<string, RunningPlugin>();
     readonly #startupGenerations = new Map<string, symbol>();
@@ -168,7 +179,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
         plugin: RegisteredPlugin,
         options: StartPluginOptions,
     ) => Promise<RunningPlugin>;
-    readonly #store: SessionStore;
+    readonly #slots: SlotEntryStore;
     readonly #startupTimeoutMs: number;
     readonly #unsubscribeCompute: () => void;
     #statusPublication: StatusPublicationState = { status: "idle" };
@@ -183,6 +194,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
         }
         this.#appRegistry = options.appRegistry ?? new PluginAppRegistry(options.mcpRegistry!);
         this.#agents = options.agents;
+        this.#conversations = options.conversations;
         this.#daemonLog = options.daemonLog;
         this.#computeRegistry =
             options.computeRegistry ??
@@ -213,6 +225,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
         this.#environment = options.environment ?? process.env;
         this.#githubFetch = options.githubFetch;
         this.#generatedMedia = options.generatedMedia;
+        this.#globalEvents = options.globalEvents;
         this.#hookRegistry =
             options.hookRegistry ??
             new PluginHookRegistry({
@@ -234,9 +247,11 @@ export class PluginManager implements ManagedNetworkInterceptor {
                 },
             });
         this.#listProviderUsage = options.listProviderUsage;
+        this.#liveEvents = options.liveEvents;
+        this.#projects = options.projects;
         this.#start = options.start ?? startPlugin;
         this.#startupTimeoutMs = options.startupTimeoutMs ?? DEFAULT_PLUGIN_STARTUP_TIMEOUT_MS;
-        this.#store = options.store;
+        this.#slots = options.slots;
         this.directory = options.directory ?? getPluginsDirectory(this.#environment);
     }
 
@@ -481,7 +496,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
             force: true,
             recursive: true,
         });
-        await this.#store.slots.removeByPluginAuthor(ctx, installed.folderName);
+        await this.#slots.removeByPluginAuthor(ctx, installed.folderName);
         this.#states.delete(installed.folderName);
         this.#daemonLog.record(
             "info",
@@ -911,9 +926,10 @@ export class PluginManager implements ManagedNetworkInterceptor {
             }
             const startupStartedAt = Date.now();
             const starting = this.#start(plugin, {
-                ...(this.#agents === undefined ? {} : { agents: this.#agents }),
+                agents: this.#agents,
                 appRegistry: this.#appRegistry,
                 computeRegistry: this.#computeRegistry,
+                conversations: this.#conversations,
                 ...(this.#defaultDocker === undefined
                     ? {}
                     : { defaultDocker: this.#defaultDocker }),
@@ -926,6 +942,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
                     ? {}
                     : { generatedMedia: this.#generatedMedia }),
                 hookRegistry: this.#hookRegistry,
+                liveEvents: this.#liveEvents,
                 ...(this.#listProviderUsage === undefined
                     ? {}
                     : { listProviderUsage: this.#listProviderUsage }),
@@ -938,7 +955,8 @@ export class PluginManager implements ManagedNetworkInterceptor {
                 networkRegistry: this.#networkRegistry,
                 onStatus: (status) => this.#updatePluginStatus(folderName, status),
                 ...(options.preserveLog === true ? { preserveLog: true } : {}),
-                store: this.#store,
+                projects: this.#projects,
+                slots: this.#slots,
             });
             running = await startPluginWithin(starting, this.#startupTimeoutMs);
             if (this.#closed || !isCurrentStartup()) {
@@ -1270,8 +1288,8 @@ export class PluginManager implements ManagedNetworkInterceptor {
                 id: eventId,
                 type: "plugins_changed" as const,
             };
-            this.#store.globalEventQueue.publishLive(event);
-            this.#store.liveEvents.publish(event);
+            this.#globalEvents.publishLive(event);
+            this.#liveEvents.publish(event);
         };
         const next = this.#publication.then(publish, publish);
         this.#publication = next.catch(() => undefined);
@@ -1302,7 +1320,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
             type: "compute_preparation",
         };
         try {
-            const entry = await this.#store.globalEventQueue.append(ctx, event);
+            const entry = await this.#globalEvents.append(ctx, event);
             if (entry === undefined) {
                 this.#daemonLog.record(
                     "warning",
@@ -1317,7 +1335,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
                 );
                 return;
             }
-            this.#store.globalEventQueue.publish(entry);
+            this.#globalEvents.publish(entry);
         } catch (error) {
             this.#daemonLog.record(
                 "warning",
@@ -1332,7 +1350,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
             );
             return;
         }
-        this.#store.liveEvents.publish(event);
+        this.#liveEvents.publish(event);
         const previous = this.#computeSessionPreparation.get(event.computeInstanceId);
         try {
             await this.#publishComputePreparationToSessions(ctx, progress, event);
@@ -1368,25 +1386,34 @@ export class PluginManager implements ManagedNetworkInterceptor {
         const closesLifecycle = closesComputePreparationLifecycle(event);
         const settlesArchived = settlesArchivedComputePreparation(event, previous?.state);
         const payload = formatComputePreparationNotice(event);
-        const current =
-            samePhase && previous !== undefined
-                ? previous
-                : {
-                      delivered: new WeakSet<InMemorySession>(),
-                      phase: event.data.phase,
-                      sessions: previous?.sessions ?? new WeakSet<InMemorySession>(),
-                      state: event.data.state,
-                  };
+        const current = {
+            delivered:
+                samePhase && previous !== undefined
+                    ? new Set(previous.delivered)
+                    : new Set<string>(),
+            phase: event.data.phase,
+            sessions: new Set(previous?.sessions),
+            state: event.data.state,
+        };
         const sourcePath = resolve(progress.workspaceSource.path);
-        const recipients: { session: InMemorySession; settleArchived: boolean }[] = [];
-        for (const session of this.#store.loadedSessions()) {
-            const summary = session.summary();
+        const recipients = new Map<string, boolean>();
+        for (const summary of await this.#conversations.listActive(ctx, {
+            limit: MAX_COMPUTE_SESSION_PREPARATIONS,
+        })) {
             if (resolve(summary.cwd) !== sourcePath) continue;
-            const settleArchived =
-                summary.archived && settlesArchived && previous?.sessions.has(session) === true;
-            if (summary.archived && !settleArchived) continue;
-            if (!summary.archived && current.delivered.has(session)) continue;
-            recipients.push({ session, settleArchived });
+            if (current.delivered.has(summary.id)) continue;
+            recipients.set(summary.id, false);
+        }
+        if (settlesArchived && previous !== undefined) {
+            for (const conversationId of previous.sessions) {
+                if (recipients.has(conversationId) || current.delivered.has(conversationId)) {
+                    continue;
+                }
+                const snapshot = await this.#conversations.readSnapshot(ctx, conversationId);
+                if (snapshot?.archived === true && resolve(snapshot.cwd) === sourcePath) {
+                    recipients.set(conversationId, true);
+                }
+            }
         }
         if (!closesLifecycle) {
             if (
@@ -1400,28 +1427,22 @@ export class PluginManager implements ManagedNetworkInterceptor {
         }
 
         /*
-         * Attribution follows the matching loaded session, including subagents. An archived
-         * session cannot begin or resume a lifecycle, but a weakly retained recipient gets the
-         * terminal row that settles work it observed before archival. Cold sessions are never
-         * hydrated merely to receive progress. `resolve` normalizes path syntax but does not
-         * resolve symlinks, so aliases such as `/tmp` and `/private/tmp` intentionally do not
-         * match. Phase coalescing is process-local and bounded; a daemon restart or extreme
-         * concurrent-preparation eviction may append the current phase once more.
+         * Attribution follows a bounded persisted query rather than loaded session objects. An
+         * archived conversation cannot begin or resume a lifecycle, but a retained recipient id
+         * gets the terminal row that settles work it observed before archival. `resolve`
+         * normalizes path syntax but does not resolve symlinks, so aliases such as `/tmp` and
+         * `/private/tmp` intentionally do not match. Phase coalescing and retained conversation
+         * identities are both process-local and bounded.
          *
          * Formatting, session enumeration, and summary reads finish before the lifecycle map is
          * changed or a notice is written. From that point onward each durable write is caught
-         * independently, and weak recipient state changes only after that write succeeds. The
-         * outer rollback therefore never has to clone or undo a WeakSet after partial delivery.
+         * independently, and recipient state changes only after that write succeeds.
          */
-        for (const { session, settleArchived } of recipients) {
+        for (const [conversationId, settleArchived] of recipients) {
             try {
-                await session.recordSystemNotice(
-                    ctx,
-                    payload,
-                    settleArchived ? { settleArchived: true } : {},
-                );
-                current.delivered.add(session);
-                if (!settleArchived) current.sessions.add(session);
+                await this.#conversations.appendSystemNotice(ctx, conversationId, payload);
+                addBounded(current.delivered, conversationId);
+                if (!settleArchived) addBounded(current.sessions, conversationId);
             } catch (error) {
                 this.#daemonLog.record(
                     "warning",
@@ -1432,12 +1453,22 @@ export class PluginManager implements ManagedNetworkInterceptor {
                         instanceId: event.computeInstanceId,
                         phase: event.data.phase,
                         provider: event.data.provider,
-                        sessionId: session.id,
+                        sessionId: conversationId,
                     },
                 );
             }
         }
         if (closesLifecycle) this.#computeSessionPreparation.delete(event.computeInstanceId);
+    }
+}
+
+function addBounded(values: Set<string>, value: string): void {
+    values.delete(value);
+    values.add(value);
+    while (values.size > MAX_COMPUTE_SESSION_PREPARATIONS) {
+        const oldest = values.values().next().value;
+        if (oldest === undefined) return;
+        values.delete(oldest);
     }
 }
 
