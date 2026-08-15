@@ -91,6 +91,7 @@ describeLive("live Docker compute boundary", () => {
             command: [
                 "set -eu",
                 "mkdir -p /workspace/race",
+                "chmod 0777 /workspace/race",
                 "printf secret-live-value > /home/rig/secret.txt",
                 "printf safe > /workspace/race/candidate",
                 "touch /workspace/race/ready",
