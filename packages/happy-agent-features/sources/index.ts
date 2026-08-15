@@ -964,3 +964,6 @@ export * from "./projects/index.js";
 
 // Scheduling: durable waits, and messages an agent asks to be delivered later.
 export * from "./scheduling/index.js";
+
+// User input: questions an agent asks a person, and the answers it waits for.
+export * from "./userInput/index.js";

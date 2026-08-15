@@ -58,6 +58,8 @@ an agent.
 - [Tasks](sources/tasks/README.md) — durable task creation, dependency tracking, updates, and
   completion.
 - [Usage](sources/usage/README.md) — bounded provider and agent-tree usage observation.
+- [User input](sources/userInput/README.md) — questions an agent asks a person, and the durable
+  wait for an answer that survives a restart.
 - [Workflows](sources/workflows/README.md) — launch, inspect, cancel, resume, wait for, and read
   logs from host-owned workflows.
 - [Workspaces](sources/workspaces/README.md) — create, inspect, transfer, and archive isolated
