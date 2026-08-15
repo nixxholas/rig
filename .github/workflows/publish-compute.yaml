@@ -139,13 +139,16 @@ jobs:
               with:
                   node-version: "24"
                   package-manager-cache: false
+                  registry-url: https://registry.npmjs.org
 
             - name: Install an npm that speaks trusted publishing
               # OIDC publishing requires npm 11.5.1 or newer. Install the exact reviewed CLI with
-              # pnpm, then invoke npm directly so it can acquire GitHub's workload identity.
+              # pnpm, then invoke its entry point directly so Node's bundled npm cannot shadow it.
               run: |
                   pnpm add --global npm@11.18.0
-                  npm --version
+                  npm_cli="$(pnpm root --global)/npm/bin/npm-cli.js"
+                  test "$(node "${npm_cli}" --version)" = "11.18.0"
+                  echo "NPM_CLI=${npm_cli}" >> "${GITHUB_ENV}"
 
             - name: Install dependencies
               run: pnpm install --frozen-lockfile
@@ -161,11 +164,11 @@ jobs:
                   package="@slopus/happy-agent-compute"
                   version="$(node -p "require('./packages/happy-agent-compute/package.json').version")"
                   distribution_tag="${RELEASE_DIST_TAG:-latest}"
-                  if npm view "${package}@${version}" version --registry https://registry.npmjs.org/ >/dev/null 2>&1; then
+                  if node "${NPM_CLI}" view "${package}@${version}" version --registry https://registry.npmjs.org/ >/dev/null 2>&1; then
                       echo "${package}@${version} is already published."
                   else
                       cd packages/happy-agent-compute
-                      npm publish \
+                      node "${NPM_CLI}" publish \
                           --access public \
                           --tag "${distribution_tag}" \
                           --provenance \
