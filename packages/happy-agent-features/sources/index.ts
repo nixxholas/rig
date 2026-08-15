@@ -967,3 +967,6 @@ export * from "./scheduling/index.js";
 
 // User input: questions an agent asks a person, and the answers it waits for.
 export * from "./userInput/index.js";
+
+// Worklets: background compute installed on disk, versioned beside data that outlives it.
+export * from "./worklets/index.js";

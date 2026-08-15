@@ -62,6 +62,8 @@ an agent.
   wait for an answer that survives a restart.
 - [Workflows](sources/workflows/README.md) — launch, inspect, cancel, resume, wait for, and read
   logs from host-owned workflows.
+- [Worklets](sources/worklets/README.md) — background compute installed from a folder, versioned
+  and revertible, with a data folder that outlives every update.
 - [Workspaces](sources/workspaces/README.md) — create, inspect, transfer, and archive isolated
   workspaces through a host manager.
 
