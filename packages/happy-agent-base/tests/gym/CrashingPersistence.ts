@@ -34,6 +34,10 @@ export class FlakyPersistence implements AgentPersistence {
         this.#fails = fails;
     }
 
+    get database() {
+        return this.disk.database;
+    }
+
     #step(): void {
         this.operations += 1;
         if (!this.#fails(this.operations)) return;
@@ -105,6 +109,10 @@ export class CrashingPersistence implements AgentPersistence {
     constructor(disk: InMemoryPersistence, crashAt?: number) {
         this.disk = disk;
         this.#crashAt = crashAt;
+    }
+
+    get database() {
+        return this.disk.database;
     }
 
     /** Count this operation, dying instead if the process has reached its crash point. */

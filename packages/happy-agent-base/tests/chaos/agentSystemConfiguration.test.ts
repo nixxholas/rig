@@ -2,16 +2,21 @@ import { createRootContext, type Context } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
 import {
-    agentFeatureConfig,
+    agentModuleConfig,
     AgentKV,
-    AgentStorage,
     AgentSystemLocal,
     type AgentConfig,
-    type AgentFeature,
+    type AgentModule,
 } from "../../sources/index.js";
 import { InMemoryPersistence } from "../gym/InMemoryPersistence.js";
 import { ScriptedProvider } from "../gym/ScriptedProvider.js";
-import { inMemoryStorageLock, providersOf, textTurn, user } from "../gym/fixtures.js";
+import {
+    InMemoryAgentStorage,
+    inMemoryStorageLock,
+    providersOf,
+    textTurn,
+    user,
+} from "../gym/fixtures.js";
 
 const ctx = createRootContext().named("happy-agent-base-agent-system-configuration");
 
@@ -23,16 +28,16 @@ async function collection(
     managerPersistence: InMemoryPersistence,
     agentPersistence: InMemoryPersistence,
     provider: ScriptedProvider,
-    features: readonly AgentFeature[] = [],
+    modules: readonly AgentModule[] = [],
 ): Promise<AgentSystemLocal> {
     return await AgentSystemLocal.create(
         ctx,
-        new AgentStorage({
+        new InMemoryAgentStorage({
             acquireLock: inMemoryStorageLock(),
             kv: managerKV(managerPersistence),
             persistence: () => agentPersistence,
         }),
-        { features, providers: providersOf(provider), provider: "scripted", models: [] },
+        { modules, providers: providersOf(provider), provider: "scripted", models: [] },
     );
 }
 
@@ -41,11 +46,11 @@ describe("agent system configuration", () => {
         const managerDisk = new InMemoryPersistence();
         const agentDisk = new InMemoryPersistence();
         let observedSetting: unknown;
-        const recorder: AgentFeature = new (class implements AgentFeature {
+        const recorder: AgentModule = new (class implements AgentModule {
             readonly name = "recorder";
 
             instructions(hookCtx: Context): string {
-                observedSetting = agentFeatureConfig(hookCtx, "recorder")?.label;
+                observedSetting = agentModuleConfig(hookCtx, "recorder")?.label;
                 return "";
             }
         })();
@@ -56,12 +61,12 @@ describe("agent system configuration", () => {
             [recorder],
         );
         const config: AgentConfig = {
-            features: { recorder: { label: "original" } },
+            modules: { recorder: { label: "original" } },
         };
 
         const creation = owner.create(ctx, config);
         // The caller goes on editing the object it passed while the creation is still running.
-        const callerSettings = config.features?.recorder;
+        const callerSettings = config.modules?.recorder;
         if (callerSettings !== undefined) callerSettings.label = "mutated by caller";
         const agent = await creation;
         await agent.send(ctx, user("go"), { await: true });
@@ -70,7 +75,7 @@ describe("agent system configuration", () => {
         await agent.close();
 
         expect({
-            durableLabel: durableConfig?.features?.recorder?.label,
+            durableLabel: durableConfig?.modules?.recorder?.label,
             observedSetting,
         }).toEqual({
             durableLabel: "original",

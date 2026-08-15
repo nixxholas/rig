@@ -6,29 +6,34 @@ import {
     agentId,
     AgentKV,
     AgentRef,
-    AgentStorage,
     AgentSystemLocal,
     AgentSystemRef,
     defineAgentTool,
     withAgentContext,
-    type AgentFeature,
-    type AgentFeatureScope,
+    type AgentModule,
+    type AgentModuleScope,
 } from "../sources/index.js";
 import { InMemoryPersistence } from "./gym/InMemoryPersistence.js";
 import { ScriptedProvider } from "./gym/ScriptedProvider.js";
-import { inMemoryStorageLock, providersOf, textTurn, user } from "./gym/fixtures.js";
+import {
+    InMemoryAgentStorage,
+    inMemoryStorageLock,
+    providersOf,
+    textTurn,
+    user,
+} from "./gym/fixtures.js";
 
 const ctx = createRootContext().named("happy-agent-base-agent-system-ref");
 
 async function localSystem(
     provider: ScriptedProvider,
     stores: Map<string, InMemoryPersistence>,
-    features: readonly AgentFeature[] = [],
+    modules: readonly AgentModule[] = [],
 ): Promise<AgentSystemLocal> {
     const managerDisk = new InMemoryPersistence();
     return await AgentSystemLocal.create(
         ctx,
-        new AgentStorage({
+        new InMemoryAgentStorage({
             acquireLock: inMemoryStorageLock(),
             kv: new AgentKV(managerDisk, "agents."),
             persistence: (id) => {
@@ -39,7 +44,7 @@ async function localSystem(
                 return created;
             },
         }),
-        { features, providers: providersOf(provider), provider: "scripted", models: [] },
+        { modules, providers: providersOf(provider), provider: "scripted", models: [] },
     );
 }
 
@@ -192,7 +197,7 @@ describe("AgentSystemRef", () => {
             textTurn("done"),
         ]);
         let failure: string | undefined;
-        const feature: AgentFeature = new (class implements AgentFeature {
+        const module: AgentModule = new (class implements AgentModule {
             readonly name = "self-compacting";
 
             readonly tools = () => [
@@ -213,7 +218,7 @@ describe("AgentSystemRef", () => {
                 }),
             ];
         })();
-        const system = await localSystem(provider, stores, [feature]);
+        const system = await localSystem(provider, stores, [module]);
         const reference = new AgentSystemRef(system);
 
         const agent = await system.create(ctx, {});
@@ -231,12 +236,12 @@ describe("AgentSystemRef", () => {
         const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
         const events: string[] = [];
         let asked = false;
-        const feature: AgentFeature = new (class implements AgentFeature {
+        const module: AgentModule = new (class implements AgentModule {
             readonly name = "self-aborting";
 
             readonly onEvent = (
                 _hookCtx: Context,
-                _scope: AgentFeatureScope,
+                _scope: AgentModuleScope,
                 event: { readonly type: string; readonly state?: string },
             ) => {
                 if (event.type === "done") events.push(event.state ?? "unknown");
@@ -249,7 +254,7 @@ describe("AgentSystemRef", () => {
                 await reference.abort(hookCtx, agentId(hookCtx) ?? "");
             };
         })();
-        const system = await localSystem(provider, stores, [feature]);
+        const system = await localSystem(provider, stores, [module]);
         const reference = new AgentSystemRef(system);
 
         const agent = await system.create(ctx, {});

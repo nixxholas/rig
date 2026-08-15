@@ -3,14 +3,16 @@ import type { Context } from "@steve.kite/stdlib";
 
 import type { AgentBaseMessageOptions } from "./AgentBase.js";
 import type { AgentConfig } from "./AgentConfig.js";
+import type { AgentDatabase } from "./AgentDatabase.js";
 import type { AgentMetadata } from "./AgentMetadata.js";
+import type { AgentMessageAcceptance } from "./AgentMessageAcceptance.js";
 import type { AgentModel } from "./AgentModel.js";
 import { acceptanceIsWaitable, AgentRef } from "./AgentRef.js";
 import type { AgentCreateOptions, AgentSystem } from "./AgentSystem.js";
 
 /**
  * A reference to a collection of agents that cannot deadlock, for code that runs inside an agent
- * — a feature hook, or a tool the run loop is waiting on. Every operation returns without
+ * — a module hook, or a tool the run loop is waiting on. Every operation returns without
  * waiting for any agent's loop to reach a particular point.
  *
  * What is missing is missing on purpose. `delete` closes an agent and `start` resumes whole
@@ -27,16 +29,23 @@ import type { AgentCreateOptions, AgentSystem } from "./AgentSystem.js";
  * for. That is decided from the context, which names the agent the caller is running inside; a
  * context that names none proves nothing, so nothing is waited for there either.
  */
-export class AgentSystemRef {
+export class AgentSystemRef<Database extends AgentDatabase = AgentDatabase> {
     /** The collection this reference forwards every operation to without waiting on its loops. */
-    readonly #system: AgentSystem;
+    readonly #system: AgentSystem<Database>;
+    /** Identity whose lifecycle lock is held while this scoped reference is in use. */
+    readonly #blockedAgentId: string | undefined;
     /** The agent this reference belongs to, or `null` for collection lifecycle code. */
     readonly agentId: string | null;
 
     /** Wrap a collection as the deadlock-free reference given to code running inside it. */
-    constructor(system: AgentSystem, agentId: string | null = null) {
+    constructor(
+        system: AgentSystem<Database>,
+        agentId: string | null = null,
+        blockedAgentId?: string,
+    ) {
         this.#system = system;
         this.agentId = agentId;
+        this.#blockedAgentId = blockedAgentId;
     }
 
     /** The models this collection offers its agents. */
@@ -49,14 +58,15 @@ export class AgentSystemRef {
         ctx: Context,
         config: AgentConfig,
         options?: AgentCreateOptions,
-    ): Promise<AgentRef> {
+    ): Promise<AgentRef<Database>> {
         const parent = options?.parent === undefined ? this.agentId : options.parent;
         const agent = await this.#system.create(ctx, config, { ...options, parent });
         return new AgentRef(agent, parent);
     }
 
     /** A reference to an existing agent; resolving one that was never created is an error. */
-    async resolve(ctx: Context, agentId: string): Promise<AgentRef> {
+    async resolve(ctx: Context, agentId: string): Promise<AgentRef<Database>> {
+        this.#assertNotLifecycleTarget(agentId);
         const agent = await this.#system.resolve(ctx, agentId);
         const parent = await this.#system.parentOf(ctx, agentId);
         return new AgentRef(agent, parent);
@@ -69,6 +79,7 @@ export class AgentSystemRef {
 
     /** Shallow-merge fields into an agent's immutable metadata. */
     async updateMetadata(ctx: Context, agentId: string, update: AgentMetadata): Promise<void> {
+        this.#assertNotLifecycleTarget(agentId);
         await this.#system.updateMetadata(ctx, agentId, update);
     }
 
@@ -92,8 +103,9 @@ export class AgentSystemRef {
         agentId: string,
         message: SessionUserMessage,
         options?: AgentBaseMessageOptions,
-    ): Promise<void> {
-        await this.#system.steer(ctx, agentId, message, {
+    ): Promise<AgentMessageAcceptance> {
+        this.#assertNotLifecycleTarget(agentId);
+        return await this.#system.steer(ctx, agentId, message, {
             ...options,
             await: acceptanceIsWaitable(ctx, agentId),
         });
@@ -109,8 +121,9 @@ export class AgentSystemRef {
         agentId: string,
         message: SessionUserMessage,
         options?: AgentBaseMessageOptions,
-    ): Promise<void> {
-        await this.#system.send(ctx, agentId, message, {
+    ): Promise<AgentMessageAcceptance> {
+        this.#assertNotLifecycleTarget(agentId);
+        return await this.#system.send(ctx, agentId, message, {
             ...options,
             await: acceptanceIsWaitable(ctx, agentId),
         });
@@ -124,5 +137,14 @@ export class AgentSystemRef {
     /** Cancel an agent's active turn, and resolve once the cancellation has been signalled. */
     async abort(ctx: Context, agentId: string): Promise<void> {
         await (await this.resolve(ctx, agentId)).abort(ctx);
+    }
+
+    /** Fail quickly instead of re-entering an identity lock held by its transactional lifecycle. */
+    #assertNotLifecycleTarget(agentId: string): void {
+        if (agentId === this.#blockedAgentId) {
+            throw new Error(
+                `Agent "${agentId}" cannot be resolved from inside its transactional lifecycle hook.`,
+            );
+        }
     }
 }

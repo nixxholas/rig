@@ -9,6 +9,7 @@ import {
     type AgentBaseOptions,
 } from "./AgentBase.js";
 import {
+    agentDatabase,
     agentEffort,
     agentKV,
     agentModel,
@@ -21,93 +22,101 @@ import {
 } from "./AgentContexts.js";
 import type { AgentBaseHooks, MaybePromise } from "./AgentBaseHooks.js";
 import type { AgentBaseState } from "./AgentBaseState.js";
-import type { AgentFeature, AgentFeatureScope } from "./AgentFeature.js";
+import type { AgentDatabase, AgentDatabaseFacade } from "./AgentDatabase.js";
+import type { AgentModule, AgentModuleScope } from "./AgentModule.js";
 import type { AgentPermissionMode } from "./AgentPermissionMode.js";
-import type { AgentFeatureAction } from "./AgentFeatureAction.js";
+import type { AgentModuleAction } from "./AgentModuleAction.js";
 import type { AgentKV } from "./AgentKV.js";
 import type { AgentMetadata } from "./AgentMetadata.js";
+import type { AgentMessageAcceptance } from "./AgentMessageAcceptance.js";
 import type { AnyAgentTool } from "./AgentTool.js";
 
 /**
  * Everything `AgentBase` is constructed with, except its hooks: an agent's behavior comes from
- * its features, and the singular hooks the base runs with are merged from them.
+ * its modules, and the singular hooks the base runs with are merged from them.
  */
-export interface AgentOptions<Tool extends AnyAgentTool = AnyAgentTool> extends Omit<
-    AgentBaseOptions,
-    "hooks"
-> {
+export interface AgentOptions<
+    Tool extends AnyAgentTool = AnyAgentTool,
+    Database extends AgentDatabase = AgentDatabase,
+> extends Omit<AgentBaseOptions, "hooks"> {
     /** Independent capabilities whose hook implementations are merged, in array order. */
-    readonly features?: readonly AgentFeature<Tool>[];
+    readonly modules?: readonly AgentModule<Tool, Database>[];
     /**
-     * The store features share with every other agent built over the same storage. Each feature
+     * The store modules share with every other agent built over the same storage. Each module
      * is handed its own scope of it, which is where anything outliving one conversation belongs.
      */
     readonly sharedKV: AgentKV;
 }
 
 /**
- * A thin wrapper around `AgentBase` that assembles its behavior from features. Each feature
+ * A thin wrapper around `AgentBase` that assembles its behavior from modules. Each module
  * implements any subset of the agent hooks on its own; the agent merges them into the singular
  * private hooks its internal base runs with.
  *
- * Features are independent. Observing hooks — events and lifecycle brackets — fan out to every
- * feature in array order with per-feature isolation, so one throwing feature never silences the
- * others, and lifecycle actions concatenate across features with a failing feature losing only
+ * Modules are independent. Observing hooks — events and lifecycle brackets — fan out to every
+ * module in array order with per-module isolation, so one throwing module never silences the
+ * others, and lifecycle actions concatenate across modules with a failing module losing only
  * its own actions. Correctness hooks are loud instead: instructions and tools concatenate in
- * feature order — extending the base state, which `AgentBase` puts first — and a failure there
+ * module order — extending the base state, which `AgentBase` puts first — and a failure there
  * fails the turn rather than running with a wrong configuration. For a model change, every
- * feature observes the change, the first returned handoff wins, and a feature failure during an
+ * module observes the change, the first returned handoff wins, and a module failure during an
  * incompatible change rejects the switch so the history survives.
  */
-export class Agent<Tool extends AnyAgentTool = AnyAgentTool> {
+export class Agent<
+    Tool extends AnyAgentTool = AnyAgentTool,
+    Database extends AgentDatabase = AgentDatabase,
+> {
     /** The session this agent is a facade over; every operation delegates straight to it. */
     readonly #base: AgentBase;
-    /** The features whose hooks were merged into the base, kept in the order they were given. */
-    readonly #features: readonly AgentFeature<Tool>[];
+    /** The modules whose hooks were merged into the base, kept in the order they were given. */
+    readonly #modules: readonly AgentModule<Tool, Database>[];
 
     /**
-     * A new agent over a fresh identity, with its features' hooks merged into one set. Touches
+     * A new agent over a fresh identity, with its modules' hooks merged into one set. Touches
      * no storage.
      */
-    static async create<Tool extends AnyAgentTool = AnyAgentTool>(
-        ctx: Context,
-        options: AgentOptions<Tool>,
-    ): Promise<Agent<Tool>> {
-        const { features, base } = split(options);
-        return new Agent(await AgentBase.create(ctx, base), features);
+    static async create<
+        Tool extends AnyAgentTool = AnyAgentTool,
+        Database extends AgentDatabase = AgentDatabase,
+    >(ctx: Context, options: AgentOptions<Tool, Database>): Promise<Agent<Tool, Database>> {
+        const { modules, base } = split(options);
+        return new Agent(await AgentBase.create(ctx, base), modules);
     }
 
     /**
      * An agent over an identity that may already have durable state, with that state's one
      * externally meaningful fact — whether it has work left — read before it is handed back.
      */
-    static async load<Tool extends AnyAgentTool = AnyAgentTool>(
-        ctx: Context,
-        options: AgentOptions<Tool>,
-    ): Promise<Agent<Tool>> {
-        const { features, base } = split(options);
-        return new Agent(await AgentBase.load(ctx, base), features);
+    static async load<
+        Tool extends AnyAgentTool = AnyAgentTool,
+        Database extends AgentDatabase = AgentDatabase,
+    >(ctx: Context, options: AgentOptions<Tool, Database>): Promise<Agent<Tool, Database>> {
+        const { modules, base } = split(options);
+        return new Agent(await AgentBase.load(ctx, base), modules);
     }
 
     /**
      * Load the agent and set it going again if it has work left, or answer with nothing when it
      * has none — how an owner coming up carries on what an earlier process was in the middle of.
      */
-    static async loadActive<Tool extends AnyAgentTool = AnyAgentTool>(
+    static async loadActive<
+        Tool extends AnyAgentTool = AnyAgentTool,
+        Database extends AgentDatabase = AgentDatabase,
+    >(
         ctx: Context,
-        options: AgentOptions<Tool>,
-    ): Promise<Agent<Tool> | undefined> {
-        const { features, base } = split(options);
+        options: AgentOptions<Tool, Database>,
+    ): Promise<Agent<Tool, Database> | undefined> {
+        const { modules, base } = split(options);
         const loaded = await AgentBase.loadActive(ctx, base);
-        return loaded === undefined ? undefined : new Agent(loaded, features);
+        return loaded === undefined ? undefined : new Agent(loaded, modules);
     }
 
     /**
      * Wrap an already-built base. Private, because an agent is made by `create` or by `load`,
      * and which of the two the caller means is worth saying.
      */
-    private constructor(base: AgentBase, features: readonly AgentFeature<Tool>[]) {
-        this.#features = features;
+    private constructor(base: AgentBase, modules: readonly AgentModule<Tool, Database>[]) {
+        this.#modules = modules;
         this.#base = base;
     }
 
@@ -122,17 +131,17 @@ export class Agent<Tool extends AnyAgentTool = AnyAgentTool> {
     }
 
     /**
-     * The feature this agent runs under `name`, when it has one. An individual feature holds the
+     * The module this agent runs under `name`, when it has one. An individual module holds the
      * state of the single agent it was built for, so this is how that agent's owner reaches what
-     * belongs to it — a goal to pause, for instance. A shared feature is answered here too, but
+     * belongs to it — a goal to pause, for instance. A shared module is answered here too, but
      * it is the collection's instance, serving every agent at once.
      */
-    feature(name: string): AgentFeature<Tool> | undefined {
-        return this.#features.find((feature) => feature.name === name);
+    module(name: string): AgentModule<Tool, Database> | undefined {
+        return this.#modules.find((module) => module.name === name);
     }
 
     /**
-     * The base's mutable instructions and tools, which every inference reads and every feature's
+     * The base's mutable instructions and tools, which every inference reads and every module's
      * own contribution extends.
      */
     get state(): AgentBaseState {
@@ -144,8 +153,8 @@ export class Agent<Tool extends AnyAgentTool = AnyAgentTool> {
         ctx: Context,
         message: SessionUserMessage,
         options?: AgentBaseMessageOptions & AgentBaseAwaitOptions,
-    ): Promise<void> {
-        await this.#base.steer(ctx, message, options);
+    ): Promise<AgentMessageAcceptance> {
+        return await this.#base.steer(ctx, message, options);
     }
 
     /** Queue a user message that injects only when the agent would otherwise stop. */
@@ -153,8 +162,8 @@ export class Agent<Tool extends AnyAgentTool = AnyAgentTool> {
         ctx: Context,
         message: SessionUserMessage,
         options?: AgentBaseMessageOptions & AgentBaseAwaitOptions,
-    ): Promise<void> {
-        await this.#base.send(ctx, message, options);
+    ): Promise<AgentMessageAcceptance> {
+        return await this.#base.send(ctx, message, options);
     }
 
     /** Shallow-merge fields into this agent's immutable metadata. */
@@ -197,108 +206,118 @@ export class Agent<Tool extends AnyAgentTool = AnyAgentTool> {
 }
 
 /**
- * Merge every feature's hook implementations into one `AgentBaseHooks`. A hook is provided only
- * when at least one feature implements it, so the base's own behavior — the mutable state alone
+ * Merge every module's hook implementations into one `AgentBaseHooks`. A hook is provided only
+ * when at least one module implements it, so the base's own behavior — the mutable state alone
  * for instructions and tools — stays in effect otherwise.
  */
 /**
- * Separate the features from the options the base is built with, and merge their hooks into the
+ * Separate the modules from the options the base is built with, and merge their hooks into the
  * one set the base observes the run through. Both factories need exactly this, and the merge has
  * to happen before the base exists.
  */
-function split<Tool extends AnyAgentTool>(
-    options: AgentOptions<Tool>,
-): { features: readonly AgentFeature<Tool>[]; base: AgentBaseOptions } {
-    const { features, sharedKV, ...rest } = options;
-    const resolved = features ?? [];
+function split<Tool extends AnyAgentTool, Database extends AgentDatabase>(
+    options: AgentOptions<Tool, Database>,
+): { modules: readonly AgentModule<Tool, Database>[]; base: AgentBaseOptions } {
+    const { modules, sharedKV, ...rest } = options;
+    const resolved = modules ?? [];
     return {
-        features: resolved,
-        base: { ...rest, hooks: mergeFeatures(resolved, options, sharedKV) },
+        modules: resolved,
+        base: { ...rest, hooks: mergeModules(resolved, options, sharedKV) },
     };
 }
 
-function mergeFeatures<Tool extends AnyAgentTool>(
-    features: readonly AgentFeature<Tool>[],
-    options: AgentOptions<Tool>,
+function mergeModules<Tool extends AnyAgentTool, Database extends AgentDatabase>(
+    modules: readonly AgentModule<Tool, Database>[],
+    options: AgentOptions<Tool, Database>,
     sharedKV: AgentKV,
 ): AgentBaseHooks {
-    /** What one feature's hook is handed alongside the context, for this call. */
-    const scopeOf = (ctx: Context, feature: AgentFeature<Tool>): AgentFeatureScope =>
-        featureScope(ctx, feature, options, sharedKV);
-    const withInstructions = features.filter((feature) => feature.instructions !== undefined);
-    const withTools = features.filter((feature) => feature.tools !== undefined);
-    const withBeforeToolCall = features.filter((feature) => feature.beforeToolCall !== undefined);
-    const withModelChanged = features.filter((feature) => feature.modelChanged !== undefined);
-    const withEvents = features.filter((feature) => feature.onEvent !== undefined);
-    // Observing hooks fan out with per-feature isolation: one throwing feature must never
-    // prevent the features after it from observing.
+    /** What one module's hook is handed alongside the context, for this call. */
+    const scopeOf = (
+        ctx: Context,
+        module: AgentModule<Tool, Database>,
+    ): AgentModuleScope<Database> => moduleScope(ctx, module, options, sharedKV);
+    const withInstructions = modules.filter((module) => module.instructions !== undefined);
+    const withTools = modules.filter((module) => module.tools !== undefined);
+    const withBeforeToolCall = modules.filter((module) => module.beforeToolCall !== undefined);
+    const withModelChanged = modules.filter((module) => module.modelChanged !== undefined);
+    const withEvents = modules.filter((module) => module.onEvent !== undefined);
+    // Observing hooks fan out with per-module isolation: one throwing module must never
+    // prevent the modules after it from observing.
     const fanOut = <Arguments extends readonly unknown[]>(
         pick: (
-            feature: AgentFeature<Tool>,
+            module: AgentModule<Tool, Database>,
         ) =>
-            | ((ctx: Context, scope: AgentFeatureScope, ...args: Arguments) => MaybePromise<void>)
+            | ((
+                  ctx: Context,
+                  scope: AgentModuleScope<Database>,
+                  ...args: Arguments
+              ) => MaybePromise<void>)
             | undefined,
     ): ((ctx: Context, ...args: Arguments) => Promise<void>) | undefined => {
-        const implemented = features.filter((feature) => pick(feature) !== undefined);
+        const implemented = modules.filter((module) => pick(module) !== undefined);
         if (implemented.length === 0) return undefined;
         return async (ctx, ...args) => {
-            for (const feature of implemented) {
+            for (const module of implemented) {
                 try {
-                    await pick(feature)?.(featureCtx(ctx, feature), scopeOf(ctx, feature), ...args);
+                    await pick(module)?.(moduleCtx(ctx, module), scopeOf(ctx, module), ...args);
                 } catch {
-                    // Features observe independently; one failing never silences the rest.
+                    // Modules observe independently; one failing never silences the rest.
                 }
             }
         };
     };
     // Transactional hooks run in order inside one transaction, and a failure propagates: the
-    // features here are writing alongside the fact being committed, so containing one feature's
+    // modules here are writing alongside the fact being committed, so containing one module's
     // failure would commit a conclusion the rest of the transaction contradicts.
     const chain = <Arguments extends readonly unknown[]>(
         pick: (
-            feature: AgentFeature<Tool>,
-        ) =>
-            | ((ctx: Context, scope: AgentFeatureScope, ...args: Arguments) => MaybePromise<void>)
-            | undefined,
-    ): ((ctx: Context, ...args: Arguments) => Promise<void>) | undefined => {
-        const implemented = features.filter((feature) => pick(feature) !== undefined);
-        if (implemented.length === 0) return undefined;
-        return async (ctx, ...args) => {
-            for (const feature of implemented) {
-                await pick(feature)?.(featureCtx(ctx, feature), scopeOf(ctx, feature), ...args);
-            }
-        };
-    };
-    // Action hooks concatenate what every feature asks for; a failing feature loses only its
-    // own actions.
-    const collect = <Arguments extends readonly unknown[]>(
-        pick: (
-            feature: AgentFeature<Tool>,
+            module: AgentModule<Tool, Database>,
         ) =>
             | ((
                   ctx: Context,
-                  scope: AgentFeatureScope,
+                  scope: AgentModuleScope<Database>,
                   ...args: Arguments
-              ) => MaybePromise<readonly AgentFeatureAction[] | undefined>)
+              ) => MaybePromise<void>)
             | undefined,
-    ):
-        | ((ctx: Context, ...args: Arguments) => Promise<readonly AgentFeatureAction[]>)
-        | undefined => {
-        const implemented = features.filter((feature) => pick(feature) !== undefined);
+    ): ((ctx: Context, ...args: Arguments) => Promise<void>) | undefined => {
+        const implemented = modules.filter((module) => pick(module) !== undefined);
         if (implemented.length === 0) return undefined;
         return async (ctx, ...args) => {
-            const actions: AgentFeatureAction[] = [];
-            for (const feature of implemented) {
+            for (const module of implemented) {
+                await pick(module)?.(moduleCtx(ctx, module), scopeOf(ctx, module), ...args);
+            }
+        };
+    };
+    // Action hooks concatenate what every module asks for; a failing module loses only its
+    // own actions.
+    const collect = <Arguments extends readonly unknown[]>(
+        pick: (
+            module: AgentModule<Tool, Database>,
+        ) =>
+            | ((
+                  ctx: Context,
+                  scope: AgentModuleScope<Database>,
+                  ...args: Arguments
+              ) => MaybePromise<readonly AgentModuleAction[] | undefined>)
+            | undefined,
+    ):
+        | ((ctx: Context, ...args: Arguments) => Promise<readonly AgentModuleAction[]>)
+        | undefined => {
+        const implemented = modules.filter((module) => pick(module) !== undefined);
+        if (implemented.length === 0) return undefined;
+        return async (ctx, ...args) => {
+            const actions: AgentModuleAction[] = [];
+            for (const module of implemented) {
                 try {
                     actions.push(
-                        ...((await pick(feature)?.(
-                            featureCtx(ctx, feature),
-                            scopeOf(ctx, feature),
+                        ...((await pick(module)?.(
+                            moduleCtx(ctx, module),
+                            scopeOf(ctx, module),
                             ...args,
                         )) ?? []),
                     );
                 } catch {
-                    // Features act independently; one failing never discards the rest.
+                    // Modules act independently; one failing never discards the rest.
                 }
             }
             return actions;
@@ -309,15 +328,15 @@ function mergeFeatures<Tool extends AnyAgentTool>(
             ? {}
             : {
                   onEvent: (async (ctx, event) => {
-                      for (const feature of withEvents) {
+                      for (const module of withEvents) {
                           try {
-                              await feature.onEvent?.(
-                                  featureCtx(ctx, feature),
-                                  scopeOf(ctx, feature),
+                              await module.onEvent?.(
+                                  moduleCtx(ctx, module),
+                                  scopeOf(ctx, module),
                                   event,
                               );
                           } catch {
-                              // Features observe independently; one failing never silences
+                              // Modules observe independently; one failing never silences
                               // the rest.
                           }
                       }
@@ -325,19 +344,19 @@ function mergeFeatures<Tool extends AnyAgentTool>(
               }),
         ...spread(
             "onEventTransact",
-            chain((feature) => feature.onEventTransact),
+            chain((module) => module.onEventTransact),
         ),
         ...(withInstructions.length === 0
             ? {}
             : {
-                  // Correctness hook: a failing feature propagates and fails the turn.
+                  // Correctness hook: a failing module propagates and fails the turn.
                   instructions: async (ctx: Context) => {
                       const texts: string[] = [];
-                      for (const feature of withInstructions) {
+                      for (const module of withInstructions) {
                           texts.push(
-                              (await feature.instructions?.(
-                                  featureCtx(ctx, feature),
-                                  scopeOf(ctx, feature),
+                              (await module.instructions?.(
+                                  moduleCtx(ctx, module),
+                                  scopeOf(ctx, module),
                               )) ?? "",
                           );
                       }
@@ -347,15 +366,15 @@ function mergeFeatures<Tool extends AnyAgentTool>(
         ...(withTools.length === 0
             ? {}
             : {
-                  // Correctness hook: a failing feature propagates and fails the turn; the
+                  // Correctness hook: a failing module propagates and fails the turn; the
                   // base validates the merged list against duplicate names.
                   tools: async (ctx: Context) => {
                       const tools: AnyAgentTool[] = [];
-                      for (const feature of withTools) {
+                      for (const module of withTools) {
                           tools.push(
-                              ...((await feature.tools?.(
-                                  featureCtx(ctx, feature),
-                                  scopeOf(ctx, feature),
+                              ...((await module.tools?.(
+                                  moduleCtx(ctx, module),
+                                  scopeOf(ctx, module),
                               )) ?? []),
                           );
                       }
@@ -364,28 +383,28 @@ function mergeFeatures<Tool extends AnyAgentTool>(
               }),
         ...spread(
             "beforeToolCallTransact",
-            chain((feature) => feature.beforeToolCallTransact),
+            chain((module) => module.beforeToolCallTransact),
         ),
         ...(withBeforeToolCall.length === 0
             ? {}
             : {
-                  // Correctness hook: features decide in array order, each seeing the call as the
+                  // Correctness hook: modules decide in array order, each seeing the call as the
                   // one before it left it, and a failure propagates to the base so it becomes
                   // this call's error result.
                   beforeToolCall: async (ctx, call) => {
                       let current = call;
-                      // Nothing carries a mode into the next feature's view of the call, so the
-                      // last feature to name one is the one that meant it about the run itself.
+                      // Nothing carries a mode into the next module's view of the call, so the
+                      // last module to name one is the one that meant it about the run itself.
                       let permissionMode: AgentPermissionMode | undefined;
-                      for (const feature of withBeforeToolCall) {
-                          const decision = await feature.beforeToolCall?.(
-                              featureCtx(ctx, feature),
-                              scopeOf(ctx, feature),
+                      for (const module of withBeforeToolCall) {
+                          const decision = await module.beforeToolCall?.(
+                              moduleCtx(ctx, module),
+                              scopeOf(ctx, module),
                               current,
                           );
                           if (decision === undefined) continue;
                           // An answer settles the call: there is no longer a run for the
-                          // features after it to have an opinion about.
+                          // modules after it to have an opinion about.
                           if (decision.type === "answer") return decision;
                           current = {
                               callId: current.callId,
@@ -413,11 +432,11 @@ function mergeFeatures<Tool extends AnyAgentTool>(
               }),
         ...spread(
             "afterToolCall",
-            fanOut((feature) => feature.afterToolCall),
+            fanOut((module) => module.afterToolCall),
         ),
         ...spread(
             "afterToolCallTransact",
-            chain((feature) => feature.afterToolCallTransact),
+            chain((module) => module.afterToolCallTransact),
         ),
         ...(withModelChanged.length === 0
             ? {}
@@ -426,13 +445,13 @@ function mergeFeatures<Tool extends AnyAgentTool>(
                       let injected: SessionSystemMessage | undefined;
                       let failed = false;
                       let failure: unknown;
-                      // Every feature observes the change even when an earlier one fails;
+                      // Every module observes the change even when an earlier one fails;
                       // the first returned handoff wins.
-                      for (const feature of withModelChanged) {
+                      for (const module of withModelChanged) {
                           try {
-                              const message = await feature.modelChanged?.(
-                                  featureCtx(ctx, feature),
-                                  scopeOf(ctx, feature),
+                              const message = await module.modelChanged?.(
+                                  moduleCtx(ctx, module),
+                                  scopeOf(ctx, module),
                                   change,
                               );
                               injected ??= message;
@@ -443,7 +462,7 @@ function mergeFeatures<Tool extends AnyAgentTool>(
                               }
                           }
                       }
-                      // A failing feature during an incompatible change rejects the switch,
+                      // A failing module during an incompatible change rejects the switch,
                       // preserving the history; on a compatible change it merely observed.
                       if (failed && change.wasReset) throw failure;
                       return injected;
@@ -451,122 +470,124 @@ function mergeFeatures<Tool extends AnyAgentTool>(
               }),
         ...spread(
             "messageAcceptedTransact",
-            chain((feature) => feature.messageAcceptedTransact),
+            chain((module) => module.messageAcceptedTransact),
         ),
         ...spread(
             "messageAccepted",
-            fanOut((feature) => feature.messageAccepted),
+            fanOut((module) => module.messageAccepted),
         ),
         ...spread(
             "permissionModeChangedTransact",
-            chain((feature) => feature.permissionModeChangedTransact),
+            chain((module) => module.permissionModeChangedTransact),
         ),
         ...spread(
             "permissionModeChanged",
-            fanOut((feature) => feature.permissionModeChanged),
+            fanOut((module) => module.permissionModeChanged),
         ),
         ...spread(
             "metadataChangedTransact",
-            chain((feature) => feature.metadataChangedTransact),
+            chain((module) => module.metadataChangedTransact),
         ),
         ...spread(
             "metadataChanged",
-            fanOut((feature) => feature.metadataChanged),
+            fanOut((module) => module.metadataChanged),
         ),
         ...spread(
             "beforeAgentLoopTransact",
-            chain((feature) => feature.beforeAgentLoopTransact),
+            chain((module) => module.beforeAgentLoopTransact),
         ),
         ...spread(
             "beforeAgentLoop",
-            fanOut((feature) => feature.beforeAgentLoop),
+            fanOut((module) => module.beforeAgentLoop),
         ),
         ...spread(
             "beforeTurnTransact",
-            chain((feature) => feature.beforeTurnTransact),
+            chain((module) => module.beforeTurnTransact),
         ),
         ...spread(
             "beforeTurn",
-            collect((feature) => feature.beforeTurn),
+            collect((module) => module.beforeTurn),
         ),
         ...spread(
             "beforeInferenceTransact",
-            chain((feature) => feature.beforeInferenceTransact),
+            chain((module) => module.beforeInferenceTransact),
         ),
         ...spread(
             "beforeInference",
-            fanOut((feature) => feature.beforeInference),
+            fanOut((module) => module.beforeInference),
         ),
         ...spread(
             "afterInferenceTransact",
-            chain((feature) => feature.afterInferenceTransact),
+            chain((module) => module.afterInferenceTransact),
         ),
         ...spread(
             "afterInference",
-            fanOut((feature) => feature.afterInference),
+            fanOut((module) => module.afterInference),
         ),
         ...spread(
             "afterTurnTransact",
-            chain((feature) => feature.afterTurnTransact),
+            chain((module) => module.afterTurnTransact),
         ),
         ...spread(
             "afterTurn",
-            collect((feature) => feature.afterTurn),
+            collect((module) => module.afterTurn),
         ),
         ...spread(
             "afterAgentLoopTransact",
-            chain((feature) => feature.afterAgentLoopTransact),
+            chain((module) => module.afterAgentLoopTransact),
         ),
         ...spread(
             "afterAgentLoop",
-            collect((feature) => feature.afterAgentLoop),
+            collect((module) => module.afterAgentLoop),
         ),
         ...spread(
             "afterAgentSettledTransact",
-            chain((feature) => feature.afterAgentSettledTransact),
+            chain((module) => module.afterAgentSettledTransact),
         ),
         ...spread(
             "afterAgentSettled",
-            fanOut((feature) => feature.afterAgentSettled),
+            fanOut((module) => module.afterAgentSettled),
         ),
     };
 }
 
 /**
- * The context a feature's hooks run on: the agent's context with both key-value stores narrowed
- * to the feature's own name, so features never see each other's persisted entries — and neither
+ * The context a module's hooks run on: the agent's context with both key-value stores narrowed
+ * to the module's own name, so modules never see each other's persisted entries — and neither
  * does a tool one of them runs.
  */
-function featureCtx(ctx: Context, feature: { readonly name: string }): Context {
+function moduleCtx(ctx: Context, module: { readonly name: string }): Context {
     const kv = agentKV(ctx);
     const runKV = agentRunKV(ctx);
-    const scoped = kv === undefined ? ctx : withAgentKV(ctx, kv.scoped("feature", feature.name));
+    const scoped = kv === undefined ? ctx : withAgentKV(ctx, kv.scoped("module", module.name));
     return runKV === undefined
         ? scoped
-        : withAgentRunKV(scoped, runKV.scoped("feature", feature.name));
+        : withAgentRunKV(scoped, runKV.scoped("module", module.name));
 }
 
 /**
- * What a feature's hook is handed alongside the context: the agent it is serving, and its own
+ * What a module's hook is handed alongside the context: the agent it is serving, and its own
  * scope of each of the three stores. The selection comes from the context the agent derived for
  * this call, so a hook always sees the model, effort, and tier the work is actually running on
  * rather than the ones the agent was built with.
  */
-function featureScope<Tool extends AnyAgentTool>(
+function moduleScope<Tool extends AnyAgentTool, Database extends AgentDatabase>(
     ctx: Context,
-    feature: AgentFeature<Tool>,
-    options: AgentOptions<Tool>,
+    module: AgentModule<Tool, Database>,
+    options: AgentOptions<Tool, Database>,
     sharedKV: AgentKV,
-): AgentFeatureScope {
+): AgentModuleScope<Database> {
     const kv = agentKV(ctx);
     const runKV = agentRunKV(ctx);
-    if (kv === undefined || runKV === undefined) {
+    const database = agentDatabase(ctx);
+    if (kv === undefined || runKV === undefined || database === undefined) {
         throw new Error(
-            `The feature "${feature.name}" was called on a context carrying no agent stores.`,
+            `The module "${module.name}" was called without its agent storage context.`,
         );
     }
     const provider = agentProvider(ctx) ?? options.provider;
     return {
+        database: database as AgentDatabaseFacade<Database>,
         agent: {
             id: options.id,
             metadata: agentConfig(ctx)?.metadata,
@@ -577,15 +598,15 @@ function featureScope<Tool extends AnyAgentTool>(
             tier: agentServiceTier(ctx) ?? options.serviceTier,
             permissionMode: agentPermissionMode(ctx),
         },
-        kv: kv.scoped("feature", feature.name),
-        sharedKV: sharedKV.scoped(feature.name),
-        runKV: runKV.scoped("feature", feature.name),
+        kv: kv.scoped("module", module.name),
+        sharedKV: sharedKV.scoped(module.name),
+        runKV: runKV.scoped("module", module.name),
     };
 }
 
 /**
  * One optional entry to spread into the merged hooks: the key when a merged implementation
- * exists, and nothing at all when no feature implemented it, so the base keeps its own behavior.
+ * exists, and nothing at all when no module implemented it, so the base keeps its own behavior.
  */
 function spread<Key extends string, Value>(
     key: Key,

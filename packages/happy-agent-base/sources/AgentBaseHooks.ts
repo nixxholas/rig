@@ -12,7 +12,7 @@ import type {
 } from "@slopus/happy-providers";
 import type { Context } from "@steve.kite/stdlib";
 
-import type { AgentFeatureAction } from "./AgentFeatureAction.js";
+import type { AgentModuleAction } from "./AgentModuleAction.js";
 import type { AgentMessageMetadata, AgentMetadataChange } from "./AgentMetadata.js";
 import type { AgentPermissionMode } from "./AgentPermissionMode.js";
 import type { AgentProviders } from "./AgentProviders.js";
@@ -70,7 +70,7 @@ export interface AgentBaseAcceptedMessage {
     readonly kind: "steering" | "send";
     /** The message exactly as it entered the conversation. */
     readonly message: SessionUserMessage;
-    /** Immutable feature-owned metadata supplied with the message. */
+    /** Immutable module-owned metadata supplied with the message. */
     readonly metadata?: AgentMessageMetadata;
 }
 
@@ -82,8 +82,31 @@ export interface AgentBasePermissionModeChange {
     readonly mode: AgentPermissionMode;
 }
 
+/** Stable Base-owned identity of one settled-to-settled loop. */
+export interface AgentBaseLoop {
+    readonly loopId: string;
+}
+
+/** Stable identity of one turn within a loop. */
+export interface AgentBaseTurnStart extends AgentBaseLoop {
+    readonly turnId: string;
+    /**
+     * The true size of the conversation context in tokens, as the provider last measured it:
+     * the complete input it received plus the output it generated. It is durable, so it
+     * survives a restart, and it is cleared whenever the conversation is replaced — by a
+     * compaction or by a reset — until the next response measures the new one. Absent only
+     * before any response has been measured.
+     */
+    readonly contextTokens: number | undefined;
+}
+
+/** Stable identity of one provider inference within a turn. */
+export interface AgentBaseInferenceStart extends AgentBaseTurnStart {
+    readonly inferenceId: string;
+}
+
 /** What the `afterInference` hook sees about the response that just completed. */
-export interface AgentBaseInference {
+export interface AgentBaseInference extends AgentBaseInferenceStart {
     /** How the response ended, or undefined when the stream ended without a done event. */
     readonly state: SessionDoneState | undefined;
     /**
@@ -96,25 +119,18 @@ export interface AgentBaseInference {
     readonly errorMessage?: string;
 }
 
-/** What `beforeTurn` sees about the conversation the turn is about to run on. */
-export interface AgentBaseTurnStart {
-    /**
-     * The true size of the conversation context in tokens, as the provider last measured it:
-     * the complete input it received plus the output it generated. It is durable, so it
-     * survives a restart, and it is cleared whenever the conversation is replaced — by a
-     * compaction or by a reset — until the next response measures the new one. Absent only
-     * before any response has been measured.
-     */
-    readonly contextTokens: number | undefined;
-}
-
 /** What `afterTurn` sees about the turn that just ended. */
 export interface AgentBaseTurn extends AgentBaseTurnStart {
     /**
      * True when the turn was cancelled by `abort`. The work it had already done stays in the
-     * history, but it stopped early, so a feature should generally not act on it.
+     * history, but it stopped early, so a module should generally not act on it.
      */
     readonly aborted: boolean;
+}
+
+/** Stable identity of the transaction that settles one loop. */
+export interface AgentBaseSettlement extends AgentBaseLoop {
+    readonly settlementId: string;
 }
 
 /** One validated tool invocation, as it stands before anything decides what to do with it. */
@@ -249,7 +265,7 @@ export interface AgentBaseHooks {
     readonly afterToolCall?: (ctx: Context, outcome: AgentBaseToolOutcome) => MaybePromise<void>;
     /**
      * Runs inside the transaction that appends one result to the durable conversation and releases
-     * the call it answers, so what a feature concludes about the result and the result itself
+     * the call it answers, so what a module concludes about the result and the result itself
      * become durable together.
      *
      * Every result the conversation records reaches this, including the ones no execution
@@ -303,7 +319,7 @@ export interface AgentBaseHooks {
     /**
      * Runs inside the transaction that commits a consumed message which changed the permission
      * mode, before the message-accepted hooks for that same consumption. A failure rolls the
-     * consumption back, so the mode never changes without whatever a feature concluded from it.
+     * consumption back, so the mode never changes without whatever a module concluded from it.
      */
     readonly permissionModeChangedTransact?: (
         ctx: Context,
@@ -331,9 +347,9 @@ export interface AgentBaseHooks {
     /**
      * Runs after the agent is staged as working, inside the transaction committing that state.
      */
-    readonly beforeAgentLoopTransact?: (ctx: Context) => MaybePromise<void>;
+    readonly beforeAgentLoopTransact?: (ctx: Context, loop: AgentBaseLoop) => MaybePromise<void>;
     /** Called when the loop leaves the settled state and begins working. */
-    readonly beforeAgentLoop?: (ctx: Context) => MaybePromise<void>;
+    readonly beforeAgentLoop?: (ctx: Context, loop: AgentBaseLoop) => MaybePromise<void>;
     /** Runs inside the transaction committing the inference stage for the turn being opened. */
     readonly beforeTurnTransact?: (ctx: Context, turn: AgentBaseTurnStart) => MaybePromise<void>;
     /**
@@ -345,11 +361,17 @@ export interface AgentBaseHooks {
     readonly beforeTurn?: (
         ctx: Context,
         turn: AgentBaseTurnStart,
-    ) => MaybePromise<readonly AgentFeatureAction[] | undefined>;
+    ) => MaybePromise<readonly AgentModuleAction[] | undefined>;
     /** Runs inside the transaction committing the inference stage for the request being made. */
-    readonly beforeInferenceTransact?: (ctx: Context) => MaybePromise<void>;
+    readonly beforeInferenceTransact?: (
+        ctx: Context,
+        inference: AgentBaseInferenceStart,
+    ) => MaybePromise<void>;
     /** Called immediately before each inference request. */
-    readonly beforeInference?: (ctx: Context) => MaybePromise<void>;
+    readonly beforeInference?: (
+        ctx: Context,
+        inference: AgentBaseInferenceStart,
+    ) => MaybePromise<void>;
     /**
      * Runs inside the transaction committing the response's measured context size. A response
      * without a measurement instead recommits its inference stage with this hook.
@@ -373,16 +395,17 @@ export interface AgentBaseHooks {
     readonly afterTurn?: (
         ctx: Context,
         turn: AgentBaseTurn,
-    ) => MaybePromise<readonly AgentFeatureAction[] | undefined>;
+    ) => MaybePromise<readonly AgentModuleAction[] | undefined>;
     /** Runs inside the transaction committing the stage left by the completed loop. */
-    readonly afterAgentLoopTransact?: (ctx: Context) => MaybePromise<void>;
+    readonly afterAgentLoopTransact?: (ctx: Context, loop: AgentBaseLoop) => MaybePromise<void>;
     /**
      * Called when the loop would settle back to idle. Returned actions are all applied together
      * and start the work over instead of settling.
      */
     readonly afterAgentLoop?: (
         ctx: Context,
-    ) => MaybePromise<readonly AgentFeatureAction[] | undefined>;
+        loop: AgentBaseLoop,
+    ) => MaybePromise<readonly AgentModuleAction[] | undefined>;
     /**
      * Called inside the transaction that settles the agent, before the settlement commits. The
      * key-value store on the context writes into that same transaction, so a conclusion about
@@ -394,7 +417,13 @@ export interface AgentBaseHooks {
      * leaving the agent recorded as still working, because a conclusion that failed to be
      * written must not be reported as one that was. The store handle is lent for the call only.
      */
-    readonly afterAgentSettledTransact?: (ctx: Context) => MaybePromise<void>;
-    /** Called once after the loop has fully settled and no feature reopened it. */
-    readonly afterAgentSettled?: (ctx: Context) => MaybePromise<void>;
+    readonly afterAgentSettledTransact?: (
+        ctx: Context,
+        settlement: AgentBaseSettlement,
+    ) => MaybePromise<void>;
+    /** Called once after the loop has fully settled and no module reopened it. */
+    readonly afterAgentSettled?: (
+        ctx: Context,
+        settlement: AgentBaseSettlement,
+    ) => MaybePromise<void>;
 }

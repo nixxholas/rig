@@ -5,17 +5,17 @@ import type { Context } from "@steve.kite/stdlib";
 import {
     defineAgentTool,
     knownModels,
-    type AgentFeature,
+    type AgentModule,
     type AgentModel,
 } from "../../sources/index.js";
 import type { RealGymVendor } from "./loadRealProvider.js";
 
 /**
- * The gym's own feature: it tells the model it is being exercised by an automated check, and
+ * The gym's own module: it tells the model it is being exercised by an automated check, and
  * gives it one real tool, so a scenario can prove a tool call travels the whole way — model to
  * agent to execution and back into the conversation.
  */
-export class FeatureGymHarness implements AgentFeature {
+export class ModuleGymHarness implements AgentModule {
     readonly name = "gym";
 
     /** Every answer the model recorded through the tool, in call order. */
@@ -59,13 +59,13 @@ export class FeatureGymHarness implements AgentFeature {
 }
 
 /**
- * The feature classes every gym agent runs with, named as the report lists them. One instance of
+ * The module classes every gym agent runs with, named as the report lists them. One instance of
  * each serves every agent the gym's collection builds.
  */
-export const REAL_GYM_FEATURES: readonly {
+export const REAL_GYM_MODULES: readonly {
     name: string;
-    Feature: new () => AgentFeature;
-}[] = [{ name: "gym", Feature: FeatureGymHarness }];
+    Module: new () => AgentModule;
+}[] = [{ name: "gym", Module: ModuleGymHarness }];
 
 const EFFORTS: readonly SessionReasoningEffort[] = [
     "off",

@@ -130,7 +130,7 @@ describe("core loop consistency gaps", () => {
         const actionB = user("action B");
         const external = user("external");
         let returnedActions = false;
-        let externalSend: Promise<void> | undefined;
+        let externalSend: Promise<unknown> | undefined;
         let agent!: AgentBase;
 
         const originalWriteValue = persistence.writeValue.bind(persistence);
@@ -190,7 +190,7 @@ describe("core loop consistency gaps", () => {
             const session = (await originalSession(id, options)) as ScriptedSession;
             const originalRun = session.run.bind(session);
             let runs = 0;
-            session.run = (runCtx: Context, request: SessionRunRequest): SessionStream => {
+            session.run = (runCtx, request: SessionRunRequest): SessionStream => {
                 const stream = originalRun(runCtx, request);
                 runs += 1;
                 if (runs !== 1) return stream;

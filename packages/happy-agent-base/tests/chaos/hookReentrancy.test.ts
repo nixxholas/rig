@@ -11,14 +11,19 @@ import {
     AgentBase,
     agentId,
     AgentKV,
-    AgentStorage,
     AgentSystemLocal,
     agentSystem as agentsFromContext,
-    type AgentFeature,
+    type AgentModule,
 } from "../../sources/index.js";
 import { InMemoryPersistence } from "../gym/InMemoryPersistence.js";
 import { ScriptedProvider, ScriptedSession } from "../gym/ScriptedProvider.js";
-import { inMemoryStorageLock, providersOf, textTurn, user } from "../gym/fixtures.js";
+import {
+    InMemoryAgentStorage,
+    inMemoryStorageLock,
+    providersOf,
+    textTurn,
+    user,
+} from "../gym/fixtures.js";
 
 const ctx = createRootContext().named("happy-agent-base-hook-reentrancy");
 
@@ -82,11 +87,11 @@ async function collection(
     managerPersistence: InMemoryPersistence,
     persistences: Map<string, InMemoryPersistence>,
     provider: ScriptedProvider,
-    features: readonly AgentFeature[],
+    modules: readonly AgentModule[],
 ): Promise<AgentSystemLocal> {
     return await AgentSystemLocal.create(
         ctx,
-        new AgentStorage({
+        new InMemoryAgentStorage({
             acquireLock: inMemoryStorageLock(),
             kv: managerKV(managerPersistence),
             persistence: (id) => {
@@ -97,7 +102,7 @@ async function collection(
                 return created;
             },
         }),
-        { features, providers: providersOf(provider), provider: "scripted", models: [] },
+        { modules, providers: providersOf(provider), provider: "scripted", models: [] },
     );
 }
 
@@ -111,7 +116,7 @@ describe("hook and event re-entrancy", () => {
     it("accepts an asynchronous self-send from onEvent exactly once without a ghost turn", async () => {
         const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
         const events: SessionEvent[] = [];
-        let selfSend: Promise<void> | undefined;
+        let selfSend: Promise<unknown> | undefined;
         let turnsStarted = 0;
         let turnsFinished = 0;
         let agent!: AgentBase;
@@ -167,8 +172,8 @@ describe("hook and event re-entrancy", () => {
             textTurn("steered"),
             textTurn("sent"),
         ]);
-        let steering: Promise<void> | undefined;
-        let laterSend: Promise<void> | undefined;
+        let steering: Promise<unknown> | undefined;
+        let laterSend: Promise<unknown> | undefined;
         let agent!: AgentBase;
         agent = await AgentBase.create(ctx, {
             id: "event-self-steer",
@@ -448,7 +453,8 @@ describe("hook and event re-entrancy", () => {
     it("runs a self-send from afterAgentSettled as one fresh exact-once turn", async () => {
         const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
         let settlements = 0;
-        let selfSend: Promise<void> | undefined;
+        const loopIds: string[] = [];
+        let selfSend: Promise<unknown> | undefined;
         let agent!: AgentBase;
         agent = await AgentBase.create(ctx, {
             id: "settled-self-send",
@@ -456,8 +462,9 @@ describe("hook and event re-entrancy", () => {
             provider: "scripted",
             persistence: new InMemoryPersistence(),
             hooks: {
-                afterAgentSettled: async (hookCtx) => {
+                afterAgentSettled: async (hookCtx, settlement) => {
                     settlements += 1;
+                    loopIds.push(settlement.loopId);
                     if (selfSend !== undefined) return;
                     selfSend = agent.send(hookCtx, user("wake yourself"));
                     await selfSend;
@@ -475,10 +482,12 @@ describe("hook and event re-entrancy", () => {
             requests: requests.length,
             secondTail: requests[1]?.context.messages.at(-1),
             settlements,
+            uniqueLoops: new Set(loopIds).size,
         }).toEqual({
             requests: 2,
             secondTail: user("wake yourself"),
             settlements: 2,
+            uniqueLoops: 2,
         });
     });
 
@@ -521,7 +530,7 @@ describe("hook and event re-entrancy", () => {
         const managerDisk = new InMemoryPersistence();
         const disks = new Map<string, InMemoryPersistence>();
         const hookEntered = deferred();
-        const reentrantFeature: AgentFeature = new (class implements AgentFeature {
+        const reentrantModule: AgentModule = new (class implements AgentModule {
             readonly name = "model-change-self-send";
 
             async modelChanged(hookCtx: Context): Promise<undefined> {
@@ -540,7 +549,7 @@ describe("hook and event re-entrancy", () => {
             managerDisk,
             disks,
             new ScriptedProvider([textTurn("after switch"), textTurn("after self-send")]),
-            [reentrantFeature],
+            [reentrantModule],
         );
         const agent = await owner.create(ctx, {});
         await agent.waitForIdle();
@@ -555,11 +564,11 @@ describe("hook and event re-entrancy", () => {
     it("allows modelChanged to send to another agent without coupling their locks", async () => {
         const managerDisk = new InMemoryPersistence();
         const disks = new Map<string, InMemoryPersistence>();
-        // The identities are allocated by the collection, so the feature learns them from the
+        // The identities are allocated by the collection, so the module learns them from the
         // agents it is about to serve rather than from a name the test chose.
         let sourceId: string | undefined;
         let targetId: string | undefined;
-        const reentrantFeature: AgentFeature = new (class implements AgentFeature {
+        const reentrantModule: AgentModule = new (class implements AgentModule {
             readonly name = "model-change-cross-send";
 
             async modelChanged(hookCtx: Context): Promise<undefined> {
@@ -571,7 +580,7 @@ describe("hook and event re-entrancy", () => {
             }
         })();
         const provider = new ScriptedProvider([textTurn("target"), textTurn("source")]);
-        const owner = await collection(managerDisk, disks, provider, [reentrantFeature]);
+        const owner = await collection(managerDisk, disks, provider, [reentrantModule]);
         const source = await owner.create(ctx, {});
         const target = await owner.create(ctx, {});
         sourceId = source.id;

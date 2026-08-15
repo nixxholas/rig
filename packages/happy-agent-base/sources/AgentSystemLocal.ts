@@ -2,11 +2,24 @@ import { createId } from "@paralleldrive/cuid2";
 import type { SessionMessage, SessionUserMessage } from "@slopus/happy-providers";
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import { asyncLock, type AsyncLock, type Context } from "@steve.kite/stdlib";
+import {
+    afterCommit,
+    asyncLock,
+    withLifetime,
+    type AsyncLock,
+    type Context,
+} from "@steve.kite/stdlib";
 
 import { Agent } from "./Agent.js";
 import { type AgentBaseAwaitOptions, type AgentBaseMessageOptions } from "./AgentBase.js";
-import { agentId as agentIdOf } from "./AgentContexts.js";
+import {
+    agentDatabase,
+    agentId as agentIdOf,
+    agentStorageTransaction,
+    withAgentDatabase,
+    withAgentKV,
+} from "./AgentContexts.js";
+import type { AgentDatabase, AgentDatabaseFacade } from "./AgentDatabase.js";
 import type { AgentKV } from "./AgentKV.js";
 import type { AgentPersistence } from "./AgentPersistence.js";
 import {
@@ -15,26 +28,38 @@ import {
     withAgentConfig,
     type AgentConfig,
 } from "./AgentConfig.js";
-import type { AgentFeature } from "./AgentFeature.js";
-import { cuid2Schema, type AgentMetadata } from "./AgentMetadata.js";
+import type {
+    AgentModule,
+    AgentModuleAgentLifecycle,
+    AgentModuleSystemScope,
+} from "./AgentModule.js";
+import { cuid2Schema, ownAgentMetadata, type AgentMetadata } from "./AgentMetadata.js";
+import type { AgentMessageAcceptance } from "./AgentMessageAcceptance.js";
 import type { AgentModel } from "./AgentModel.js";
 import type { AgentProviders } from "./AgentProviders.js";
 import type { AgentStorage, AgentStorageLock } from "./AgentStorage.js";
 import type { AgentCreateOptions, AgentSystem } from "./AgentSystem.js";
 import { withAgentSystem } from "./AgentSystemContext.js";
 import { AgentSystemRef } from "./AgentSystemRef.js";
+import type { AnyAgentTool } from "./AgentTool.js";
 
 const storedParentSchema = Type.String();
 
+type AgentLifecycleHook<Database extends AgentDatabase> = (
+    ctx: Context,
+    scope: AgentModuleSystemScope<Database>,
+    agent: AgentModuleAgentLifecycle,
+) => void | Promise<void>;
+
 /** Everything `AgentSystemLocal` needs to build and run the agents in its collection. */
-export interface AgentSystemLocalOptions {
+export interface AgentSystemLocalOptions<Database extends AgentDatabase = AgentDatabase> {
     /**
-     * The features every agent in this collection runs with, given as instances the caller has
+     * The modules every agent in this collection runs with, given as instances the caller has
      * already built and ready to serve. One instance serves the whole collection: a hook is told
-     * which agent it is running for by the scope it is handed, so any per-agent state a feature
+     * which agent it is running for by the scope it is handed, so any per-agent state a module
      * keeps in memory has to be keyed by that ID rather than held as a single value.
      */
-    readonly features?: readonly AgentFeature[];
+    readonly modules?: readonly AgentModule<AnyAgentTool, Database>[];
     /** The registry providers are resolved from when an agent is built. */
     readonly providers: AgentProviders;
     /** The registry ID of the provider new agents are created with. */
@@ -49,13 +74,15 @@ export interface AgentSystemLocalOptions {
  * failed load is forgotten so a later resolution can retry.
  *
  * Work serializes per agent rather than per collection: a collection-wide lock would make one
- * agent's feature load block every other agent, including one that load itself resolves.
+ * agent's module load block every other agent, including one that load itself resolves.
  *
  * This is the owner's handle, and some of what it offers waits for an agent to reach a point only
  * that agent's run loop can bring it to. Hand an `AgentSystemRef` to anything running inside an
  * agent instead.
  */
-export class AgentSystemLocal implements AgentSystem {
+export class AgentSystemLocal<
+    Database extends AgentDatabase = AgentDatabase,
+> implements AgentSystem<Database> {
     /** The models this collection offers its agents. */
     readonly models: readonly AgentModel[];
     /** The lifetime context retained by this system and its storage lock. */
@@ -65,11 +92,11 @@ export class AgentSystemLocal implements AgentSystem {
      * What this collection looks like from inside one of its agents, and the only form of it a
      * derived context ever carries.
      */
-    readonly #ref: AgentSystemRef = new AgentSystemRef(this, null);
-    /** The collection's feature instances, every one of them serving every agent it builds. */
-    readonly #features: readonly AgentFeature[];
+    readonly #ref: AgentSystemRef<Database> = new AgentSystemRef(this, null);
+    /** The collection's module instances, every one of them serving every agent it builds. */
+    readonly #modules: readonly AgentModule<AnyAgentTool, Database>[];
     /** Where the collection's identities, configuration, and per-agent state are durable. */
-    readonly #storage: AgentStorage;
+    readonly #storage: AgentStorage<Database>;
     /** The registry providers are resolved from when an agent is built. */
     readonly #providers: AgentProviders;
     /** The registry ID of the provider new agents are created with. */
@@ -81,12 +108,12 @@ export class AgentSystemLocal implements AgentSystem {
     /** The durable parent of each non-root identity, keyed by child identity. */
     readonly #parents: AgentKV;
     /**
-     * The root of the store features share across the collection. Each feature works under its
+     * The root of the store modules share across the collection. Each module works under its
      * own scope of it, which is where anything outliving one agent's conversation belongs.
      */
-    readonly #sharedFeatureKV: AgentKV;
+    readonly #sharedModuleKV: AgentKV;
     /** The live `Agent` instances this process has built, keyed by identity. */
-    readonly #agents = new Map<string, Agent>();
+    readonly #agents = new Map<string, Agent<AnyAgentTool, Database>>();
     // One agent has one store for the life of the collection, so inspecting an agent's durable
     // work and running that agent never end up looking at two different stores.
     readonly #persistences = new Map<string, AgentPersistence>();
@@ -94,7 +121,9 @@ export class AgentSystemLocal implements AgentSystem {
     readonly #locks = new Map<string, AsyncLock>();
     /** Public operations admitted before shutdown and therefore allowed to finish. */
     readonly #admitted = new Set<Promise<void>>();
-    /** No agent operation is admitted until every feature has finished its beforeStart hook. */
+    /** Post-commit lifecycle observations still running outside per-agent locks. */
+    readonly #lifecycleObservations = new Set<Promise<void>>();
+    /** No agent operation is admitted until every module has finished its beforeStart hook. */
     #lifecycle: "initializing" | "open" | "closing" | "closed" = "initializing";
     /** The shared shutdown, including release of the hard storage lock. */
     #closePromise: Promise<void> | undefined;
@@ -108,18 +137,22 @@ export class AgentSystemLocal implements AgentSystem {
      * is resolved and resumed, so by the time this returns the collection is not merely built
      * but running.
      */
-    static async create(
+    static async create<Database extends AgentDatabase>(
         ctx: Context,
-        storage: AgentStorage,
-        config: AgentSystemLocalOptions,
-    ): Promise<AgentSystemLocal> {
-        const systemCtx = ctx;
+        storage: AgentStorage<Database>,
+        config: AgentSystemLocalOptions<Database>,
+    ): Promise<AgentSystemLocal<Database>> {
+        const systemCtx = withAgentDatabase(ctx, storage.database);
         const storageLock = await storage.acquireLock(systemCtx);
         const system = new AgentSystemLocal(systemCtx, storage, storageLock, config);
         try {
+            await storage.migrate(systemCtx, system.#modules);
             await system.#beforeStart(systemCtx);
-            const active = await system.#start(systemCtx);
+            // beforeStart is the initialization barrier. Restoration observers receive the
+            // system ref next and must be able to reconcile other durable agents through it,
+            // even though restored run loops do not start until every observation finishes.
             system.#lifecycle = "open";
+            const active = await system.#start(systemCtx);
             for (const agent of active) agent.start();
             await system.#afterStart(systemCtx);
             return system;
@@ -130,18 +163,18 @@ export class AgentSystemLocal implements AgentSystem {
     }
 
     /**
-     * Wire this collection to its storage, providers, and feature configuration, without reading
+     * Wire this collection to its storage, providers, and module configuration, without reading
      * any of it. Private: a collection is brought up by `create`, which also resumes the work
      * the storage was left holding — building one without that is building half of it.
      */
     private constructor(
         ctx: Context,
-        storage: AgentStorage,
+        storage: AgentStorage<Database>,
         storageLock: AgentStorageLock,
-        options: AgentSystemLocalOptions,
+        options: AgentSystemLocalOptions<Database>,
     ) {
         this.#ctx = ctx;
-        this.#features = options.features ?? [];
+        this.#modules = options.modules ?? [];
         this.#storage = storage;
         this.#storageLock = storageLock;
         this.#providers = options.providers;
@@ -149,7 +182,7 @@ export class AgentSystemLocal implements AgentSystem {
         this.models = [...options.models];
         this.#configs = storage.kv.scoped("config");
         this.#parents = storage.kv.scoped("parent");
-        this.#sharedFeatureKV = storage.kv.scoped("features");
+        this.#sharedModuleKV = storage.kv.scoped("modules");
     }
 
     /**
@@ -157,6 +190,7 @@ export class AgentSystemLocal implements AgentSystem {
      * release the database lock. Repeated callers join the same shutdown.
      */
     async close(ctx: Context): Promise<void> {
+        this.#assertOutsideStorageTransaction(ctx, "closed");
         if (this.#closePromise === undefined) {
             this.#lifecycle = "closing";
             this.#closePromise = this.#shutdown();
@@ -234,12 +268,17 @@ export class AgentSystemLocal implements AgentSystem {
      * it. Configuration and parentage are persisted before the agent runs, so every later process
      * resolves the same agent; only its metadata may subsequently change.
      *
-     * Nothing here is undone: an agent whose features refuse to load leaves an identity that
+     * Nothing here is undone: an agent whose modules refuse to load leaves an identity that
      * exists, is resolvable, and will be built the next time something wants it. Taking a
      * provisional identity back after a failed build would add a compensation that can itself
      * fail.
      */
-    async create(ctx: Context, config: AgentConfig, options?: AgentCreateOptions): Promise<Agent> {
+    async create(
+        ctx: Context,
+        config: AgentConfig,
+        options?: AgentCreateOptions,
+    ): Promise<Agent<AnyAgentTool, Database>> {
+        this.#assertOutsideStorageTransaction(ctx, "created");
         return await this.#admit(async () => {
             const agentId = options?.id ?? createId();
             if (!Value.Check(cuid2Schema, agentId)) {
@@ -253,6 +292,7 @@ export class AgentSystemLocal implements AgentSystem {
             // The caller keeps its own object, and may go on editing it. What was created is what
             // was passed at this moment, so storage and this agent's context both get a copy.
             const owned = ownAgentConfig(config);
+            const lifecycle = lifecycleAgent(agentId, owned);
             return await this.#lockFor(agentId).runInLock(ctx, async (lockCtx) => {
                 if ((await this.#configs.read(lockCtx, agentId)) !== undefined) {
                     throw new Error(`Agent "${agentId}" already exists.`);
@@ -278,6 +318,12 @@ export class AgentSystemLocal implements AgentSystem {
                     }
                     await this.#configs.write(txCtx, agentId, owned);
                     if (parent !== null) await this.#parents.write(txCtx, agentId, parent);
+                    await this.#recordLifecycle(
+                        txCtx,
+                        lifecycle,
+                        (module) => module.agentCreatedTransact,
+                        (module) => module.agentCreated,
+                    );
                 });
                 const agent = await this.#instantiate(lockCtx, agentId, owned);
                 if (agent === undefined) throw new Error(`Agent "${agentId}" could not be built.`);
@@ -297,8 +343,10 @@ export class AgentSystemLocal implements AgentSystem {
      * what clears it.
      */
     async delete(ctx: Context, agentId: string): Promise<void> {
+        this.#assertOutsideStorageTransaction(ctx, "archived");
         await this.#admit(async () => {
             await this.#lockFor(agentId).runInLock(ctx, async (lockCtx) => {
+                const config = await this.#config(lockCtx, agentId);
                 const agent = this.#agents.get(agentId);
                 this.#agents.delete(agentId);
                 await agent?.close();
@@ -308,6 +356,14 @@ export class AgentSystemLocal implements AgentSystem {
                     const children = await this.#parents.list(txCtx);
                     for (const child of children) {
                         if (child.value === agentId) await this.#parents.delete(txCtx, child.key);
+                    }
+                    if (config !== undefined) {
+                        await this.#recordLifecycle(
+                            txCtx,
+                            lifecycleAgent(agentId, config),
+                            (module) => module.agentArchivedTransact,
+                            (module) => module.agentArchived,
+                        );
                     }
                 });
                 this.#persistences.delete(agentId);
@@ -360,6 +416,7 @@ export class AgentSystemLocal implements AgentSystem {
 
     /** Shallow-merge fields into one agent's immutable metadata. */
     async updateMetadata(ctx: Context, agentId: string, update: AgentMetadata): Promise<void> {
+        this.#assertOutsideStorageTransaction(ctx, "updated");
         await this.#admit(async () => {
             const agent = await this.#resolve(ctx, agentId);
             await agent.updateMetadata(ctx, update);
@@ -400,12 +457,28 @@ export class AgentSystemLocal implements AgentSystem {
      * The live agent for an ID, loading and starting it if this process has not seen it yet.
      * Concurrent resolutions of the same ID share one load.
      */
-    async resolve(ctx: Context, agentId: string): Promise<Agent> {
+    async resolve(ctx: Context, agentId: string): Promise<Agent<AnyAgentTool, Database>> {
+        this.#assertOutsideStorageTransaction(ctx, "resolved");
         return await this.#admit(async () => await this.#resolve(ctx, agentId));
     }
 
+    /**
+     * Live Agent objects cannot be published or removed until an enclosing transaction commits,
+     * while waiting for stdlib afterCommit from inside that transaction would deadlock its
+     * callback. Keep those lifetime operations outside host-owned transactions; durable storage
+     * and module transactional hooks remain fully composable.
+     */
+    #assertOutsideStorageTransaction(ctx: Context, operation: string): void {
+        if (agentStorageTransaction(ctx) !== undefined) {
+            throw new Error(
+                `An agent cannot be ${operation} from inside an outer storage transaction.`,
+            );
+        }
+    }
+
     /** Resolve one agent while its owning public operation is already admitted. */
-    async #resolve(ctx: Context, agentId: string): Promise<Agent> {
+    async #resolve(ctx: Context, agentId: string): Promise<Agent<AnyAgentTool, Database>> {
+        this.#assertOutsideStorageTransaction(ctx, "resolved");
         const existing = this.#agents.get(agentId);
         if (existing !== undefined) return existing;
 
@@ -433,20 +506,20 @@ export class AgentSystemLocal implements AgentSystem {
         config: AgentConfig,
         onlyIfActive = false,
         start = true,
-    ): Promise<Agent | undefined> {
-        const agentCtx = withAgentConfig(
-            withAgentSystem(ctx, new AgentSystemRef(this, agentId)),
-            config,
+    ): Promise<Agent<AnyAgentTool, Database> | undefined> {
+        const agentCtx = withAgentDatabase(
+            withAgentConfig(withAgentSystem(ctx, new AgentSystemRef(this, agentId)), config),
+            this.#storage.database,
         );
         const options = {
             id: agentId,
             providers: this.#providers,
             provider: this.#provider,
             persistence: this.#persistenceFor(agentId),
-            sharedKV: this.#sharedFeatureKV,
-            // The collection's features come first, so the instructions they contribute — the
+            sharedKV: this.#sharedModuleKV,
+            // The collection's modules come first, so the instructions they contribute — the
             // system prompt above all — open every agent's prompt.
-            features: this.#features,
+            modules: this.#modules,
         };
         // An identity built here may already have durable state — this is the path a restart
         // resolves through — so the agent is loaded rather than created, and knows whether it
@@ -482,30 +555,111 @@ export class AgentSystemLocal implements AgentSystem {
                     if (this.#agents.has(agentId)) return undefined;
                     const config = await this.#config(lockCtx, agentId);
                     if (config === undefined) return undefined;
+                    await this.#storage.transaction(lockCtx, async (txCtx) => {
+                        await this.#recordLifecycle(
+                            txCtx,
+                            lifecycleAgent(agentId, config),
+                            (module) => module.agentRestoredTransact,
+                            (module) => module.agentRestored,
+                        );
+                    });
                     return await this.#instantiate(lockCtx, agentId, config, true, false);
                 });
             }),
         );
         throwFirstStartFailure(results);
+        await Promise.allSettled([...this.#lifecycleObservations]);
         return results.flatMap((result) =>
             result.status === "fulfilled" && result.value !== undefined ? [result.value] : [],
         );
     }
 
-    /** Initialize every feature before any active agent is restored or started. */
+    /** Run one lifecycle projection in its durable transaction and observe it after commit. */
+    async #recordLifecycle(
+        txCtx: Context,
+        agent: AgentModuleAgentLifecycle,
+        transact: (
+            module: AgentModule<AnyAgentTool, Database>,
+        ) => AgentLifecycleHook<Database> | undefined,
+        observe: (
+            module: AgentModule<AnyAgentTool, Database>,
+        ) => AgentLifecycleHook<Database> | undefined,
+    ): Promise<void> {
+        for (const module of this.#modules) {
+            const hook = transact(module);
+            if (hook === undefined) continue;
+            await this.#invokeLifecycleHook(txCtx, module, hook, agent, true);
+        }
+        afterCommit(txCtx, () => {
+            const observed = (async () => {
+                for (const module of this.#modules) {
+                    const hook = observe(module);
+                    if (hook === undefined) continue;
+                    try {
+                        await this.#invokeLifecycleHook(this.#ctx, module, hook, agent);
+                    } catch {
+                        // The durable change already committed; observers cannot undo it.
+                    }
+                }
+            })();
+            this.#admitted.add(observed);
+            this.#lifecycleObservations.add(observed);
+            void observed.finally(() => {
+                this.#admitted.delete(observed);
+                this.#lifecycleObservations.delete(observed);
+            });
+        });
+    }
+
+    /** Give one lifecycle hook its module-scoped shared KV and active Drizzle facade. */
+    async #invokeLifecycleHook(
+        ctx: Context,
+        module: AgentModule<AnyAgentTool, Database>,
+        hook: AgentLifecycleHook<Database>,
+        agent: AgentModuleAgentLifecycle,
+        blockAgent: boolean = false,
+    ): Promise<void> {
+        const lifetime = new AbortController();
+        const database = (agentDatabase(ctx) ??
+            this.#storage.database) as AgentDatabaseFacade<Database>;
+        const sharedKV = this.#sharedModuleKV.scoped(module.name);
+        const agents = new AgentSystemRef(this, null, blockAgent ? agent.id : undefined);
+        const hookCtx = withLifetime(
+            withAgentKV(withAgentSystem(withAgentDatabase(ctx, database), agents), sharedKV),
+            lifetime.signal,
+        );
+        const scope: AgentModuleSystemScope<Database> = {
+            database,
+            agents,
+            sharedKV,
+        };
+        try {
+            await hook(hookCtx, scope, agent);
+        } finally {
+            lifetime.abort();
+        }
+    }
+
+    /** Initialize every module before any active agent is restored or started. */
     async #beforeStart(ctx: Context): Promise<void> {
         const startCtx = withAgentSystem(ctx, this.#ref);
         const results = await Promise.allSettled(
-            this.#features.map(async (feature) => await feature.beforeStart?.(startCtx, this.#ref)),
+            this.#modules.map(
+                async (module) =>
+                    await module.beforeStart?.(startCtx, this.#ref, this.#storage.database),
+            ),
         );
         throwFirstStartFailure(results);
     }
 
-    /** Notify every feature after all active agents have been restored and started. */
+    /** Notify every module after all active agents have been restored and started. */
     async #afterStart(ctx: Context): Promise<void> {
         const startCtx = withAgentSystem(ctx, this.#ref);
         const results = await Promise.allSettled(
-            this.#features.map(async (feature) => await feature.afterStart?.(startCtx, this.#ref)),
+            this.#modules.map(
+                async (module) =>
+                    await module.afterStart?.(startCtx, this.#ref, this.#storage.database),
+            ),
         );
         throwFirstStartFailure(results);
     }
@@ -521,7 +675,7 @@ export class AgentSystemLocal implements AgentSystem {
 
     /**
      * The lock serializing this collection's work on one identity. It is per agent because the
-     * work it guards — building an agent, which loads every feature — may itself resolve another
+     * work it guards — building an agent, which loads every module — may itself resolve another
      * agent from this same collection, and a collection-wide lock would deadlock on it.
      */
     #lockFor(agentId: string): AsyncLock {
@@ -538,10 +692,10 @@ export class AgentSystemLocal implements AgentSystem {
         agentId: string,
         message: SessionUserMessage,
         options?: AgentBaseMessageOptions & AgentBaseAwaitOptions,
-    ): Promise<void> {
-        await this.#admit(async () => {
+    ): Promise<AgentMessageAcceptance> {
+        return await this.#admit(async () => {
             const agent = await this.#resolve(ctx, agentId);
-            await agent.steer(ctx, message, options);
+            return await agent.steer(ctx, message, options);
         });
     }
 
@@ -551,10 +705,10 @@ export class AgentSystemLocal implements AgentSystem {
         agentId: string,
         message: SessionUserMessage,
         options?: AgentBaseMessageOptions & AgentBaseAwaitOptions,
-    ): Promise<void> {
-        await this.#admit(async () => {
+    ): Promise<AgentMessageAcceptance> {
+        return await this.#admit(async () => {
             const agent = await this.#resolve(ctx, agentId);
-            await agent.send(ctx, message, options);
+            return await agent.send(ctx, message, options);
         });
     }
 
@@ -573,7 +727,16 @@ export class AgentSystemLocal implements AgentSystem {
     }
 }
 
-/** Start every feature even when one fails, then surface the first failure in feature order. */
+/** Own and freeze the lifecycle snapshot before any module observes it. */
+function lifecycleAgent(agentId: string, config: AgentConfig): AgentModuleAgentLifecycle {
+    const metadata = config.metadata === undefined ? undefined : ownAgentMetadata(config.metadata);
+    if (config.metadata !== undefined && metadata === undefined) {
+        throw new Error(`The metadata for agent "${agentId}" is not valid.`);
+    }
+    return Object.freeze({ id: agentId, metadata });
+}
+
+/** Start every module even when one fails, then surface the first failure in module order. */
 function throwFirstStartFailure(results: readonly PromiseSettledResult<unknown>[]): void {
     const failure = results.find(
         (result): result is PromiseRejectedResult => result.status === "rejected",

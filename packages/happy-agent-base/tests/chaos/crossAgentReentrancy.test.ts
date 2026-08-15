@@ -17,16 +17,22 @@ import {
     type Agent,
     agentId,
     AgentKV,
-    AgentStorage,
     AgentSystemLocal,
     type AgentSystem,
     agentSystem,
     defineAgentTool,
-    type AgentFeature,
+    type AgentModule,
     type AnyAgentTool,
 } from "../../sources/index.js";
 import { InMemoryPersistence } from "../gym/InMemoryPersistence.js";
-import { inMemoryStorageLock, providersOf, system, textTurn, user } from "../gym/fixtures.js";
+import {
+    InMemoryAgentStorage,
+    inMemoryStorageLock,
+    providersOf,
+    system,
+    textTurn,
+    user,
+} from "../gym/fixtures.js";
 
 const ctx = createRootContext().named("happy-agent-base-cross-agent-reentrancy");
 
@@ -47,7 +53,7 @@ type ToolAction = (
     id: (alias: string) => string,
 ) => Promise<void>;
 
-/** The collection under test, which exists only once the features it is built with do. */
+/** The collection under test, which exists only once the modules it is built with do. */
 interface OwnerHolder {
     owner?: AgentSystem;
 }
@@ -131,16 +137,19 @@ class RoutedSession extends BaseSession {
         this.#compactionResults = compactionResults;
     }
 
-    run(runCtx: Context, request: SessionRunRequest): SessionStream {
+    run(runCtx: Parameters<BaseSession["run"]>[0], request: SessionRunRequest): SessionStream {
         this.requests.push(request);
         const script = this.#scripts.shift() ?? [];
-        if (typeof script === "function") return script(runCtx);
+        if (typeof script === "function") return script(runCtx as unknown as Context);
         return (async function* () {
             yield* script;
         })();
     }
 
-    compact(_compactCtx: Context, options: SessionCompactionOptions): Promise<SessionCompaction> {
+    compact(
+        _compactCtx: Parameters<BaseSession["compact"]>[0],
+        options: SessionCompactionOptions,
+    ): Promise<SessionCompaction> {
         this.compactions.push(options);
         const result = this.#compactionResults.shift();
         return result === undefined
@@ -189,12 +198,12 @@ class RoutedProvider extends BaseProvider {
     }
 }
 
-function crossAgentFeature(
+function crossAgentModule(
     actions: ReadonlyMap<string, ToolAction>,
     holder: OwnerHolder,
     names: AgentNames,
-): AgentFeature {
-    return new (class implements AgentFeature {
+): AgentModule {
+    return new (class implements AgentModule {
         readonly name = "cross-agent-reentrancy";
         readonly #tool: AnyAgentTool = defineAgentTool({
             name: "cross_agent",
@@ -220,9 +229,9 @@ function crossAgentFeature(
         });
 
         readonly tools = (hookCtx: Context): readonly AnyAgentTool[] => {
-            // A feature is given the collection as a reference, and nothing more.
+            // A module is given the collection as a reference, and nothing more.
             if (agentSystem(hookCtx) === undefined) {
-                throw new Error("Cross-agent feature requires its owning collection.");
+                throw new Error("Cross-agent module requires its owning collection.");
             }
             return [this.#tool];
         };
@@ -277,7 +286,7 @@ async function harness(
     const holder: OwnerHolder = {};
     const owner = await AgentSystemLocal.create(
         ctx,
-        new AgentStorage({
+        new InMemoryAgentStorage({
             acquireLock: inMemoryStorageLock(),
             kv: managerKV(manager),
             persistence: (id) => {
@@ -289,7 +298,7 @@ async function harness(
             },
         }),
         {
-            features: [crossAgentFeature(actions, holder, names)],
+            modules: [crossAgentModule(actions, holder, names)],
             providers: providersOf(provider),
             provider: "scripted",
             models: [],

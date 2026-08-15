@@ -4,8 +4,11 @@ import type { Context } from "@steve.kite/stdlib";
 import type { Agent } from "./Agent.js";
 import type { AgentBaseAwaitOptions, AgentBaseMessageOptions } from "./AgentBase.js";
 import type { AgentConfig } from "./AgentConfig.js";
+import type { AgentDatabase } from "./AgentDatabase.js";
 import type { AgentMetadata } from "./AgentMetadata.js";
+import type { AgentMessageAcceptance } from "./AgentMessageAcceptance.js";
 import type { AgentModel } from "./AgentModel.js";
+import type { AnyAgentTool } from "./AgentTool.js";
 
 /** Conversation state installed atomically before a newly created agent starts. */
 export interface AgentInitialContext {
@@ -29,16 +32,16 @@ export interface AgentCreateOptions {
 /**
  * A collection of agents addressed by ID: what an owner can ask of the agents it runs. An agent
  * exists only once it has been created with its persisted configuration; resolving one that was
- * never created is an error. Environment and feature settings stay fixed, while metadata changes
+ * never created is an error. Environment and module settings stay fixed, while metadata changes
  * through a transactional shallow merge.
  *
  * This is the full surface, including the operations that wait for an agent's run loop to reach a
  * particular point — `delete`, and anything reached through the returned `Agent`. Those are for
- * the caller that owns the agents' lifetime. Code running *inside* an agent, such as a feature
+ * the caller that owns the agents' lifetime. Code running *inside* an agent, such as a module
  * hook or a tool, is waited for by that loop and must not wait for it in turn: it should hold an
  * `AgentSystemRef`, whose every operation returns without waiting for a loop.
  */
-export interface AgentSystem {
+export interface AgentSystem<Database extends AgentDatabase = AgentDatabase> {
     /** The models this collection offers its agents. */
     readonly models: readonly AgentModel[];
 
@@ -49,7 +52,11 @@ export interface AgentSystem {
      * Create an agent with a generated or caller-supplied cuid2 identity. Configuration,
      * parentage, and optional initial context are persisted before it runs.
      */
-    create(ctx: Context, config: AgentConfig, options?: AgentCreateOptions): Promise<Agent>;
+    create(
+        ctx: Context,
+        config: AgentConfig,
+        options?: AgentCreateOptions,
+    ): Promise<Agent<AnyAgentTool, Database>>;
 
     /** Close an agent and release its identity, so the same ID can be created again. */
     delete(ctx: Context, agentId: string): Promise<void>;
@@ -67,7 +74,7 @@ export interface AgentSystem {
     parentOf(ctx: Context, agentId: string): Promise<string | null>;
 
     /** The live agent for an ID, loading it if this process has not seen it yet. */
-    resolve(ctx: Context, agentId: string): Promise<Agent>;
+    resolve(ctx: Context, agentId: string): Promise<Agent<AnyAgentTool, Database>>;
 
     /**
      * Queue a user message for an agent, injected as soon as its current response and tool batch
@@ -78,7 +85,7 @@ export interface AgentSystem {
         agentId: string,
         message: SessionUserMessage,
         options?: AgentBaseMessageOptions & AgentBaseAwaitOptions,
-    ): Promise<void>;
+    ): Promise<AgentMessageAcceptance>;
 
     /** Queue a user message for an agent that injects only when the agent would otherwise stop. */
     send(
@@ -86,7 +93,7 @@ export interface AgentSystem {
         agentId: string,
         message: SessionUserMessage,
         options?: AgentBaseMessageOptions & AgentBaseAwaitOptions,
-    ): Promise<void>;
+    ): Promise<AgentMessageAcceptance>;
 
     /** Cancel an agent's active turn, leaving its queued messages durable for the next one. */
     abort(ctx: Context, agentId: string, options?: AgentBaseAwaitOptions): Promise<void>;

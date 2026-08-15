@@ -11,6 +11,11 @@ import {
 } from "@slopus/happy-providers";
 import type { Context } from "@steve.kite/stdlib";
 
+/** Adapt the provider package's older nominal Context type to Base's stdlib 0.0.10 Context. */
+export function fromProviderContext(ctx: Parameters<BaseSession["run"]>[0]): Context {
+    return ctx as unknown as Context;
+}
+
 /**
  * A fake session that answers each run with the next scripted event batch and records every
  * request for assertions.
@@ -34,8 +39,8 @@ export class ScriptedSession extends BaseSession {
         this.options = options;
     }
 
-    run(ctx: Context, request: SessionRunRequest): SessionStream {
-        this.requestContexts.push(ctx);
+    run(ctx: Parameters<BaseSession["run"]>[0], request: SessionRunRequest): SessionStream {
+        this.requestContexts.push(fromProviderContext(ctx));
         this.requests.push(request);
         const events = this.#script.shift() ?? [];
         return (async function* () {
@@ -43,7 +48,10 @@ export class ScriptedSession extends BaseSession {
         })();
     }
 
-    compact(ctx: Context, options: SessionCompactionOptions): Promise<SessionCompaction> {
+    compact(
+        _ctx: Parameters<BaseSession["compact"]>[0],
+        options: SessionCompactionOptions,
+    ): Promise<SessionCompaction> {
         this.compactions.push(options);
         const result = this.compactionResults.shift();
         if (result === undefined) {

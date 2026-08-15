@@ -9,7 +9,6 @@ import {
     type SessionRunRequest,
     type SessionStream,
 } from "@slopus/happy-providers";
-import type { Context } from "@steve.kite/stdlib";
 
 /**
  * A model that answers from the conversation it is given rather than from a script, so it says
@@ -33,7 +32,7 @@ export class RespondingSession extends BaseSession {
         this.compaction = compaction;
     }
 
-    run(_ctx: Context, request: SessionRunRequest): SessionStream {
+    run(_ctx: Parameters<BaseSession["run"]>[0], request: SessionRunRequest): SessionStream {
         this.requests.push(request);
         const events = respond(request.context.messages);
         return (async function* () {

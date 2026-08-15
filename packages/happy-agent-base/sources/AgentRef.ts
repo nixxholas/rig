@@ -4,21 +4,24 @@ import type { Context } from "@steve.kite/stdlib";
 import type { Agent } from "./Agent.js";
 import type { AgentBaseMessageOptions } from "./AgentBase.js";
 import { agentId } from "./AgentContexts.js";
+import type { AgentDatabase } from "./AgentDatabase.js";
 import type { AgentMetadata } from "./AgentMetadata.js";
+import type { AgentMessageAcceptance } from "./AgentMessageAcceptance.js";
+import type { AnyAgentTool } from "./AgentTool.js";
 
 /**
  * Whether this caller may be told that `agentId` durably accepted a message. Acceptance is a
  * queue write under that agent's own persistence lock, so waiting for it is safe from anywhere
- * except inside that agent's loop, which is holding the lock the write needs. The proof is the
- * caller's context naming a different agent; a context naming none proves nothing.
+ * except inside that agent's loop, which is holding the lock the write needs. A caller naming no
+ * agent is an external host and may wait; only the target agent itself cannot.
  */
 export function acceptanceIsWaitable(ctx: Context, target: string): boolean {
     const caller = agentId(ctx);
-    return caller !== undefined && caller !== target;
+    return caller !== target;
 }
 
 /**
- * A reference to an agent for code that runs inside one — a feature hook, or a tool the run loop
+ * A reference to an agent for code that runs inside one — a module hook, or a tool the run loop
  * is waiting on. No operation here waits for a run loop: `compact` and `abort` are requests that
  * resolve once they have been made, and there is no `close`, `waitForIdle` or `start`, each of
  * which is whole-agent lifetime owned by whoever created the agent and nothing *but* the wait
@@ -29,16 +32,16 @@ export function acceptanceIsWaitable(ctx: Context, target: string): boolean {
  * agent's conversation and reject when the write fails, so a caller routing work elsewhere knows
  * whether it arrived. Addressed to the agent the caller is running inside — whose loop would have
  * to perform that write — the message is queued and not waited for. The context decides, since it
- * names the agent the caller is in; a context that names none proves nothing and waits for
- * nothing.
+ * names the agent the caller is in; a context that names none is an external host and receives
+ * the durable acceptance result.
  */
-export class AgentRef {
+export class AgentRef<Database extends AgentDatabase = AgentDatabase> {
     /** The agent this reference wraps. */
-    readonly #agent: Agent;
+    readonly #agent: Agent<AnyAgentTool, Database>;
     /** The durable parent captured when this reference was resolved, or `null` for a root. */
     readonly parent: string | null;
 
-    constructor(agent: Agent, parent: string | null = null) {
+    constructor(agent: Agent<AnyAgentTool, Database>, parent: string | null = null) {
         this.#agent = agent;
         this.parent = parent;
     }
@@ -53,8 +56,8 @@ export class AgentRef {
         ctx: Context,
         message: SessionUserMessage,
         options?: AgentBaseMessageOptions,
-    ): Promise<void> {
-        await this.#agent.steer(ctx, message, {
+    ): Promise<AgentMessageAcceptance> {
+        return await this.#agent.steer(ctx, message, {
             ...options,
             await: acceptanceIsWaitable(ctx, this.#agent.id),
         });
@@ -65,8 +68,8 @@ export class AgentRef {
         ctx: Context,
         message: SessionUserMessage,
         options?: AgentBaseMessageOptions,
-    ): Promise<void> {
-        await this.#agent.send(ctx, message, {
+    ): Promise<AgentMessageAcceptance> {
+        return await this.#agent.send(ctx, message, {
             ...options,
             await: acceptanceIsWaitable(ctx, this.#agent.id),
         });

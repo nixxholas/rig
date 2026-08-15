@@ -36,7 +36,7 @@ export function renderRealGymReport(traces: readonly RealGymTrace[]): string {
         "</head>",
         "<body>",
         "<h1>Real gym report</h1>",
-        `<p class="meta">Live inference through the real agent collection, its features, and each vendor's own sign-in — generated ${escape(generated)}.</p>`,
+        `<p class="meta">Live inference through the real agent collection, its modules, and each vendor's own sign-in — generated ${escape(generated)}.</p>`,
         renderSummary(traces),
         ...traces.map((trace, index) => renderTrace(trace, index)),
         "</body>",
@@ -96,7 +96,7 @@ function renderConfiguration(trace: RealGymTrace): string {
     return [
         "<h3>Agent</h3>",
         "<table class='facts'>",
-        row("Features", trace.features.map((name) => `<code>${escape(name)}</code>`).join(" ")),
+        row("Modules", trace.modules.map((name) => `<code>${escape(name)}</code>`).join(" ")),
         row(
             "Models offered",
             trace.models.map((id) => `<code>${escape(id)}</code>`).join(" ") || "none",

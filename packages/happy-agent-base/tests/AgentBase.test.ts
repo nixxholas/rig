@@ -4,6 +4,7 @@ import type {
     SessionEvent,
     SessionMessage,
     SessionStream,
+    SessionToolCallBlock,
 } from "@slopus/happy-providers";
 import { Type } from "@sinclair/typebox";
 import { createRootContext, type Context } from "@steve.kite/stdlib";
@@ -32,6 +33,11 @@ const ctx = createRootContext().named("happy-agent-base-test");
 
 function recordedUser(text: string) {
     return expect.objectContaining({ type: "user", message: user(text) });
+}
+
+function storedTool(id: string, call: SessionToolCallBlock) {
+    const { callId, server: _server, ...stored } = call;
+    return { id, providerCallId: callId, call: stored };
 }
 
 function tool(name: string) {
@@ -910,7 +916,9 @@ describe("AgentBase persistence", () => {
         await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
 
-        expect(keysDuringFast).toEqual(["tool.000000.call-a", "tool.000001.call-b"]);
+        expect(keysDuringFast).toHaveLength(2);
+        expect(keysDuringFast[0]).toMatch(/^tool\.000000\.[a-z0-9]+$/);
+        expect(keysDuringFast[1]).toMatch(/^tool\.000001\.[a-z0-9]+$/);
         // The fast tool finished first, but its result waited for the earlier call to commit.
         expect(
             persistence.records
@@ -940,8 +948,8 @@ describe("AgentBase persistence", () => {
             { type: "block", block: durableCall },
             { type: "block", block: fragileCall },
         ]);
-        persistence.values.set("tool.000000.call-a", durableCall);
-        persistence.values.set("tool.000001.call-b", fragileCall);
+        persistence.values.set("tool.000000.durablecall", storedTool("durablecall", durableCall));
+        persistence.values.set("tool.000001.fragilecall", storedTool("fragilecall", fragileCall));
         const provider = new ScriptedProvider([textTurn("recovered")]);
         let durableRuns = 0;
         let fragileRuns = 0;
@@ -2356,7 +2364,7 @@ describe("AgentBase instructions and tools hooks", () => {
         const toolA = tool("tool_a");
         const toolB = tool("tool_b");
         const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
-        // The first inference flips the feature state, exactly like a tool execution would.
+        // The first inference flips the module state, exactly like a tool execution would.
         let current = [toolA];
         const agent = await AgentBase.create(ctx, {
             id: "test-agent",
@@ -2701,7 +2709,7 @@ describe("AgentBase lifecycle hooks", () => {
         expect(persistence.values.has("context")).toBe(false);
         expect(persistence.values.has("kv.test-agent.rolled-back-inference")).toBe(false);
         expect(ordinary).toEqual([]);
-        expect(turns).toEqual([{ contextTokens: undefined, aborted: false }]);
+        expect(turns).toMatchObject([{ contextTokens: undefined, aborted: false }]);
         await agent.close();
     });
 
@@ -2790,6 +2798,7 @@ describe("AgentBase lifecycle hooks", () => {
             textTurn("done"),
         ]);
         const order: string[] = [];
+        let callScope = "";
         const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
@@ -2800,6 +2809,7 @@ describe("AgentBase lifecycle hooks", () => {
                     order.push(`dispatched:${call.callId}`);
                     const kv = agentKV(hookCtx);
                     if (kv === undefined) throw new Error("Missing transactional agent store.");
+                    callScope = kv.prefix;
                     await kv.write(hookCtx, "dispatched", call.name);
                 },
                 afterToolCallTransact: async (hookCtx, result) => {
@@ -2829,11 +2839,10 @@ describe("AgentBase lifecycle hooks", () => {
         await agent.waitForIdle();
 
         expect(order).toEqual(["dispatched:call-1", "tool", "answered:call-1"]);
-        // Both notes live in the call's own scope, which is where the execution itself writes.
-        expect(persistence.values.get("kv.test-agent.call.call-1.dispatched")).toBe("look");
-        expect(persistence.values.get("kv.test-agent.call.call-1.answered")).toEqual([
-            { type: "text", text: "looked" },
-        ]);
+        expect(callScope).toMatch(/^kv\.test-agent\.call\.[a-z0-9]+\.$/);
+        expect([...persistence.values.keys()].filter((key) => key.startsWith(callScope))).toEqual(
+            [],
+        );
         await agent.close();
     });
 
@@ -2967,7 +2976,7 @@ describe("AgentBase lifecycle hooks", () => {
 
         // The response never reached a done event, so it measured no tokens — and the turn
         // reports plainly that it was cancelled rather than finished.
-        expect(turns).toEqual([{ tokens: undefined, aborted: true }]);
+        expect(turns).toMatchObject([{ contextTokens: undefined, aborted: true }]);
         await agent.close();
     });
 
@@ -3006,11 +3015,14 @@ describe("AgentBase lifecycle hooks", () => {
         await agent.waitForIdle();
 
         // Each response reports what it measured; the turn carries the last measurement.
-        expect(inferences).toEqual([
+        expect(inferences).toMatchObject([
             { state: "tool_call", tokens: { input: 100, output: 20 } },
             { state: "normal", tokens: { input: 400, output: 30 } },
         ]);
-        expect(turns).toEqual([{ contextTokens: 430, aborted: false }]);
+        expect(new Set(inferences.map((inference) => inference?.inferenceId)).size).toBe(2);
+        expect(inferences[0]?.loopId).toBe(inferences[1]?.loopId);
+        expect(inferences[0]?.turnId).toBe(inferences[1]?.turnId);
+        expect(turns).toMatchObject([{ contextTokens: 430, aborted: false }]);
         await agent.close();
     });
 
@@ -3045,11 +3057,14 @@ describe("AgentBase lifecycle hooks", () => {
         await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
 
-        expect(inferences).toEqual([
+        expect(inferences).toMatchObject([
             { state: "tool_call", tokens: { input: 200, output: 10 } },
             { state: "error", tokens: undefined, errorMessage: "provider exploded" },
         ]);
-        expect(turns).toEqual([{ contextTokens: 210, aborted: false }]);
+        expect(new Set(inferences.map(({ inferenceId }) => inferenceId)).size).toBe(2);
+        expect(inferences[0]?.loopId).toBe(inferences[1]?.loopId);
+        expect(inferences[0]?.turnId).toBe(inferences[1]?.turnId);
+        expect(turns).toMatchObject([{ contextTokens: 210, aborted: false }]);
         await agent.close();
     });
 
@@ -3315,6 +3330,7 @@ describe("AgentBase scoped persistence", () => {
         ]);
         const persistence = new InMemoryPersistence();
         const seen: unknown[] = [];
+        let callId = "";
         const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
@@ -3326,7 +3342,8 @@ describe("AgentBase scoped persistence", () => {
                         name: "remember",
                         returnType: Type.Object({}),
                         shouldReviewInAutoMode: () => false,
-                        execute: async (toolCtx) => {
+                        execute: async (toolCtx, _args, call) => {
+                            callId = call.id;
                             const kv = agentKV(toolCtx);
                             if (kv === undefined) throw new Error("No store on the context.");
                             await kv.write(toolCtx, "note", "stashed");
@@ -3343,9 +3360,8 @@ describe("AgentBase scoped persistence", () => {
         await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
 
-        // The write landed under the call ID's scope, and the tool read it back with a
-        // scope-relative key.
-        expect(persistence.values.get("kv.test-agent.call.call-1.note")).toBe("stashed");
+        expect(callId).toMatch(/^[a-z0-9]+$/);
+        expect(persistence.values.get(`kv.test-agent.call.${callId}.note`)).toBeUndefined();
         expect(seen).toEqual(["stashed", [{ key: "note", value: "stashed" }]]);
         await agent.close();
     });

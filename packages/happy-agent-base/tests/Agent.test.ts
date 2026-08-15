@@ -7,14 +7,22 @@ import {
     Agent,
     agentKV,
     defineAgentTool,
-    type AgentFeature,
-    type AgentFeatureAgent,
+    withAgentDatabase,
+    type AgentModule,
+    type AgentModuleAgent,
 } from "../sources/index.js";
-import { providersOf, sharedKV, system, textTurn, user } from "./gym/fixtures.js";
+import {
+    providersOf,
+    sharedKV,
+    system,
+    testAgentDatabase,
+    textTurn,
+    user,
+} from "./gym/fixtures.js";
 import { InMemoryPersistence } from "./gym/InMemoryPersistence.js";
 import { ScriptedProvider } from "./gym/ScriptedProvider.js";
 
-const ctx = createRootContext().named("happy-agent-test");
+const ctx = withAgentDatabase(createRootContext().named("happy-agent-test"), testAgentDatabase());
 
 function tool(name: string) {
     return defineAgentTool({
@@ -26,7 +34,7 @@ function tool(name: string) {
     });
 }
 
-function feature(hooks: AgentFeature): AgentFeature {
+function module(hooks: AgentModule): AgentModule {
     return { ...hooks };
 }
 
@@ -39,7 +47,7 @@ function toolCallTurn(callId: string, name: string, argumentsJson: string): Sess
 }
 
 describe("Agent", () => {
-    it("preserves each tool's Auto review and Full-access policy through feature assembly", async () => {
+    it("preserves each tool's Auto review and Full-access policy through module assembly", async () => {
         const provider = new ScriptedProvider([textTurn("answer")]);
         const reviewedTool = defineAgentTool({
             name: "publish",
@@ -60,7 +68,7 @@ describe("Agent", () => {
             provider: "scripted",
             persistence: new InMemoryPersistence(),
             sharedKV: sharedKV(),
-            features: [feature({ name: "publishing", tools: () => [reviewedTool] })],
+            modules: [module({ name: "publishing", tools: () => [reviewedTool] })],
         });
 
         await agent.send(ctx, user("go"), { await: true });
@@ -82,16 +90,16 @@ describe("Agent", () => {
         await agent.close();
     });
 
-    it("merges instructions and tools from every feature in order", async () => {
+    it("merges instructions and tools from every module in order", async () => {
         const searchTool = tool("search");
         const editTool = tool("edit");
         const provider = new ScriptedProvider([textTurn("answer")]);
-        const searchFeature = feature({
+        const searchModule = module({
             name: "search",
             instructions: () => "You can search.",
             tools: () => [searchTool],
         });
-        const editFeature = feature({
+        const editModule = module({
             name: "edit",
             instructions: () => "You can edit.",
             tools: () => [editTool],
@@ -102,7 +110,7 @@ describe("Agent", () => {
             provider: "scripted",
             persistence: new InMemoryPersistence(),
             sharedKV: sharedKV(),
-            features: [searchFeature, editFeature],
+            modules: [searchModule, editModule],
         });
 
         await agent.send(ctx, user("go"), { await: true });
@@ -115,7 +123,7 @@ describe("Agent", () => {
         await agent.close();
     });
 
-    it("lets each feature amend the call the next one decides about", async () => {
+    it("lets each module amend the call the next one decides about", async () => {
         const provider = new ScriptedProvider([
             toolCallTurn("call-1", "mutate", '{"text":"a"}'),
             textTurn("done"),
@@ -134,8 +142,8 @@ describe("Agent", () => {
             },
             toLLM: ({ value }) => [{ type: "text", text: value }],
         });
-        const amend = (name: string, suffix: string): AgentFeature =>
-            feature({
+        const amend = (name: string, suffix: string): AgentModule =>
+            module({
                 name,
                 beforeToolCall: (_hookCtx, _scope, call) => {
                     const { text } = call.arguments as { text: string };
@@ -152,10 +160,10 @@ describe("Agent", () => {
             provider: "scripted",
             persistence: new InMemoryPersistence(),
             sharedKV: sharedKV(),
-            features: [
+            modules: [
                 amend("outer", "b"),
                 amend("inner", "c"),
-                feature({ name: "tools", tools: () => [mutate] }),
+                module({ name: "tools", tools: () => [mutate] }),
             ],
         });
 
@@ -178,7 +186,7 @@ describe("Agent", () => {
         await agent.close();
     });
 
-    it("lets a feature answer a call itself, so the tool never runs", async () => {
+    it("lets a module answer a call itself, so the tool never runs", async () => {
         const provider = new ScriptedProvider([
             toolCallTurn("call-1", "mutate", "{}"),
             textTurn("done"),
@@ -202,8 +210,8 @@ describe("Agent", () => {
             provider: "scripted",
             persistence: new InMemoryPersistence(),
             sharedKV: sharedKV(),
-            features: [
-                feature({
+            modules: [
+                module({
                     name: "refuse",
                     beforeToolCall: () => ({
                         type: "answer",
@@ -211,17 +219,17 @@ describe("Agent", () => {
                         isError: true,
                     }),
                 }),
-                feature({
+                module({
                     name: "later",
                     beforeToolCall: () => {
-                        throw new Error("a settled call must not reach the next feature");
+                        throw new Error("a settled call must not reach the next module");
                     },
                     afterToolCall: (_hookCtx, _scope, outcome) => {
                         // A hook answered the call, so there is no structured result to see.
                         outcomes.push(`${String(outcome.isError)}:${String("result" in outcome)}`);
                     },
                 }),
-                feature({ name: "tools", tools: () => [mutate] }),
+                module({ name: "tools", tools: () => [mutate] }),
             ],
         });
 
@@ -239,10 +247,10 @@ describe("Agent", () => {
         await agent.close();
     });
 
-    it("fans events out to every feature in order", async () => {
+    it("fans events out to every module in order", async () => {
         const seen: string[] = [];
-        const observe = (name: string): AgentFeature =>
-            feature({
+        const observe = (name: string): AgentModule =>
+            module({
                 name,
                 onEvent: (_hookCtx, _scope, event) => {
                     if (event.type === "done") seen.push(name);
@@ -255,7 +263,7 @@ describe("Agent", () => {
             provider: "scripted",
             persistence: new InMemoryPersistence(),
             sharedKV: sharedKV(),
-            features: [observe("first"), observe("second")],
+            modules: [observe("first"), observe("second")],
         });
 
         await agent.send(ctx, user("go"), { await: true });
@@ -265,7 +273,7 @@ describe("Agent", () => {
         await agent.close();
     });
 
-    it("chains transactional event features in order and rolls them back together", async () => {
+    it("chains transactional event modules in order and rolls them back together", async () => {
         const order: string[] = [];
         const persistence = new InMemoryPersistence();
         const provider = new ScriptedProvider([textTurn("answer")]);
@@ -275,15 +283,15 @@ describe("Agent", () => {
             provider: "scripted",
             persistence,
             sharedKV: sharedKV(),
-            features: [
-                feature({
+            modules: [
+                module({
                     name: "first",
                     onEventTransact: async (hookCtx, scope, event) => {
                         order.push(`first:${event.type}`);
                         await scope.kv.write(hookCtx, "seen", true);
                     },
                 }),
-                feature({
+                module({
                     name: "second",
                     onEventTransact: async (hookCtx, scope, event) => {
                         order.push(`second:${event.type}`);
@@ -291,7 +299,7 @@ describe("Agent", () => {
                         throw new Error("transactional observer failed");
                     },
                 }),
-                feature({
+                module({
                     name: "third",
                     onEventTransact: () => {
                         order.push("third");
@@ -304,24 +312,24 @@ describe("Agent", () => {
         await agent.waitForIdle();
 
         expect(order).toEqual(["first:text_end", "second:text_end"]);
-        expect(persistence.values.has("kv.test-agent.feature.first.seen")).toBe(false);
-        expect(persistence.values.has("kv.test-agent.feature.second.seen")).toBe(false);
+        expect(persistence.values.has("kv.test-agent.module.first.seen")).toBe(false);
+        expect(persistence.values.has("kv.test-agent.module.second.seen")).toBe(false);
         expect(persistence.records.some((record) => record.type === "block")).toBe(false);
         await agent.close();
     });
 
-    it("concatenates lifecycle actions from every feature", async () => {
+    it("concatenates lifecycle actions from every module", async () => {
         const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
         let done = false;
-        const followUp = (text: string): AgentFeature =>
-            feature({
+        const followUp = (text: string): AgentModule =>
+            module({
                 name: `follow-up-${text.replaceAll(" ", "-")}`,
                 afterTurn: () => {
                     if (done) return undefined;
                     return [{ type: "send", message: user(text) }];
                 },
             });
-        const stop = feature({
+        const stop = module({
             name: "stop",
             afterTurn: () => {
                 done = true;
@@ -335,13 +343,13 @@ describe("Agent", () => {
             persistence: new InMemoryPersistence(),
             sharedKV: sharedKV(),
             sendMode: "all",
-            features: [followUp("from first"), followUp("from second"), stop],
+            modules: [followUp("from first"), followUp("from second"), stop],
         });
 
         await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
 
-        // Both features' actions were applied together and drained into one follow-up turn.
+        // Both modules' actions were applied together and drained into one follow-up turn.
         const requests = provider.sessions[0]?.requests ?? [];
         expect(requests).toHaveLength(2);
         expect(requests[1]?.context.messages.slice(-2)).toEqual([
@@ -351,21 +359,21 @@ describe("Agent", () => {
         await agent.close();
     });
 
-    it("lets the first answering feature win the reset injection while all observe the change", async () => {
+    it("lets the first answering module win the reset injection while all observe the change", async () => {
         const provider = new ScriptedProvider([textTurn("claude"), textTurn("gpt")]);
         const observed: boolean[] = [];
-        const silent = feature({
+        const silent = module({
             name: "silent",
             modelChanged: (_hookCtx, _scope, change) => {
                 observed.push(change.wasReset);
                 return undefined;
             },
         });
-        const summarizer = feature({
+        const summarizer = module({
             name: "summarizer",
             modelChanged: () => system("summary"),
         });
-        const late = feature({
+        const late = module({
             name: "late",
             modelChanged: (_hookCtx, _scope, change) => {
                 observed.push(change.wasReset);
@@ -379,7 +387,7 @@ describe("Agent", () => {
             persistence: new InMemoryPersistence(),
             sharedKV: sharedKV(),
             model: "anthropic/claude",
-            features: [silent, summarizer, late],
+            modules: [silent, summarizer, late],
         });
 
         await agent.send(ctx, user("hello"), { await: true });
@@ -395,11 +403,11 @@ describe("Agent", () => {
         await agent.close();
     });
 
-    it("isolates a throwing observer so later features still see everything", async () => {
+    it("isolates a throwing observer so later modules still see everything", async () => {
         const seen: string[] = [];
         const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
         let done = false;
-        const broken = feature({
+        const broken = module({
             name: "broken",
             onEvent: () => {
                 throw new Error("observer broke");
@@ -411,7 +419,7 @@ describe("Agent", () => {
                 throw new Error("actions broke");
             },
         });
-        const working = feature({
+        const working = module({
             name: "working",
             onEvent: (_hookCtx, _scope, event) => {
                 if (event.type === "done") seen.push("event");
@@ -429,14 +437,14 @@ describe("Agent", () => {
             provider: "scripted",
             persistence: new InMemoryPersistence(),
             sharedKV: sharedKV(),
-            features: [broken, working],
+            modules: [broken, working],
         });
 
         await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
 
-        // The broken feature silenced nothing: the working feature observed both turns and
-        // its follow-up action survived the broken feature's afterTurn failure.
+        // The broken module silenced nothing: the working module observed both turns and
+        // its follow-up action survived the broken module's afterTurn failure.
         const requests = provider.sessions[0]?.requests ?? [];
         expect(requests).toHaveLength(2);
         expect(requests[1]?.context.messages.at(-1)).toEqual(user("follow up"));
@@ -444,7 +452,7 @@ describe("Agent", () => {
         await agent.close();
     });
 
-    it("supports asynchronous feature hooks", async () => {
+    it("supports asynchronous module hooks", async () => {
         const asyncTool = tool("async_tool");
         const provider = new ScriptedProvider([textTurn("answer")]);
         const agent = await Agent.create(ctx, {
@@ -453,8 +461,8 @@ describe("Agent", () => {
             provider: "scripted",
             persistence: new InMemoryPersistence(),
             sharedKV: sharedKV(),
-            features: [
-                feature({
+            modules: [
+                module({
                     name: "async",
                     instructions: () => Promise.resolve("async instructions"),
                     tools: () => Promise.resolve([asyncTool]),
@@ -470,10 +478,10 @@ describe("Agent", () => {
         await agent.close();
     });
 
-    it("rejects an incompatible switch when a model-change feature fails", async () => {
+    it("rejects an incompatible switch when a model-change module fails", async () => {
         const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
         const persistence = new InMemoryPersistence();
-        const broken = feature({
+        const broken = module({
             name: "broken",
             modelChanged: () => {
                 throw new Error("handoff broke");
@@ -486,7 +494,7 @@ describe("Agent", () => {
             persistence,
             sharedKV: sharedKV(),
             model: "anthropic/claude",
-            features: [broken],
+            modules: [broken],
         });
 
         await agent.send(ctx, user("hello"), { await: true });
@@ -509,7 +517,7 @@ describe("Agent", () => {
         await agent.close();
     });
 
-    it("fails the turn when two features register the same tool", async () => {
+    it("fails the turn when two modules register the same tool", async () => {
         const provider = new ScriptedProvider([textTurn("answer")]);
         const events: string[] = [];
         const agent = await Agent.create(ctx, {
@@ -518,10 +526,10 @@ describe("Agent", () => {
             provider: "scripted",
             persistence: new InMemoryPersistence(),
             sharedKV: sharedKV(),
-            features: [
-                feature({ name: "first-bash", tools: () => [tool("bash")] }),
-                feature({ name: "second-bash", tools: () => [tool("bash")] }),
-                feature({
+            modules: [
+                module({ name: "first-bash", tools: () => [tool("bash")] }),
+                module({ name: "second-bash", tools: () => [tool("bash")] }),
+                module({
                     name: "observer",
                     onEvent: (_hookCtx, _scope, event) => {
                         if (event.type === "done" && event.state === "error") {
@@ -540,7 +548,7 @@ describe("Agent", () => {
         await agent.close();
     });
 
-    it("keeps the base fallbacks when no feature implements a hook", async () => {
+    it("keeps the base fallbacks when no module implements a hook", async () => {
         const provider = new ScriptedProvider([textTurn("answer")]);
         const events: SessionEvent[] = [];
         const agent = await Agent.create(ctx, {
@@ -550,8 +558,8 @@ describe("Agent", () => {
             persistence: new InMemoryPersistence(),
             sharedKV: sharedKV(),
             initialState: { instructions: "state instructions" },
-            features: [
-                feature({
+            modules: [
+                module({
                     name: "observer",
                     onEvent: (_hookCtx, _scope, event) => events.push(event),
                 }),
@@ -561,17 +569,17 @@ describe("Agent", () => {
         await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
 
-        // No feature implements instructions, so the mutable state answers as usual.
+        // No module implements instructions, so the mutable state answers as usual.
         expect(provider.sessions[0]?.requests[0]?.context.instructions).toBe("state instructions");
         expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
         await agent.close();
     });
 
-    it("scopes each feature's store to the feature's name", async () => {
+    it("scopes each module's store to the module's name", async () => {
         const provider = new ScriptedProvider([textTurn("answer")]);
         const persistence = new InMemoryPersistence();
         const listed: unknown[] = [];
-        const memory = feature({
+        const memory = module({
             name: "memory",
             afterTurn: async (hookCtx) => {
                 const kv = agentKV(hookCtx);
@@ -581,12 +589,12 @@ describe("Agent", () => {
                 return undefined;
             },
         });
-        const other = feature({
+        const other = module({
             name: "other",
             afterTurn: async (hookCtx) => {
                 const kv = agentKV(hookCtx);
                 if (kv === undefined) throw new Error("No store on the context.");
-                // A feature sees only its own scope, never a sibling's entries.
+                // A module sees only its own scope, never a sibling's entries.
                 listed.push(await kv.list(hookCtx));
                 return undefined;
             },
@@ -597,19 +605,19 @@ describe("Agent", () => {
             provider: "scripted",
             persistence,
             sharedKV: sharedKV(),
-            features: [memory, other],
+            modules: [memory, other],
         });
 
         await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
 
-        expect(persistence.values.get("kv.test-agent.feature.memory.note")).toBe("remembered");
+        expect(persistence.values.get("kv.test-agent.module.memory.note")).toBe("remembered");
         expect(listed).toEqual([[{ key: "note", value: "remembered" }], []]);
         await agent.close();
     });
     it("tells every hook which agent it is serving, and what it is running on", async () => {
         const provider = new ScriptedProvider([textTurn("answer")]);
-        const seen: AgentFeatureAgent[] = [];
+        const seen: AgentModuleAgent[] = [];
         const agent = await Agent.create(ctx, {
             id: "identified-agent",
             providers: providersOf(provider),
@@ -619,8 +627,8 @@ describe("Agent", () => {
             model: "gym/small",
             effort: "high",
             serviceTier: "priority",
-            features: [
-                feature({
+            modules: [
+                module({
                     name: "identity",
                     instructions: (_hookCtx, scope) => {
                         seen.push(scope.agent);
@@ -645,14 +653,14 @@ describe("Agent", () => {
         await agent.close();
     });
 
-    it("lends each feature a run store that the settling transaction erases", async () => {
+    it("lends each module a run store that the settling transaction erases", async () => {
         const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
         const persistence = new InMemoryPersistence();
         const withinRun: unknown[] = [];
         const whileSettling: unknown[] = [];
         const acrossRuns: unknown[] = [];
         let runs = 0;
-        const notes = feature({
+        const notes = module({
             name: "notes",
             beforeTurn: async (hookCtx, scope) => {
                 runs += 1;
@@ -676,7 +684,7 @@ describe("Agent", () => {
             provider: "scripted",
             persistence,
             sharedKV: sharedKV(),
-            features: [notes],
+            modules: [notes],
         });
 
         await agent.send(ctx, user("first"), { await: true });

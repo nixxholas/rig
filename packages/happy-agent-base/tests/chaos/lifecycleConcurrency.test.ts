@@ -10,7 +10,7 @@ import { describe, expect, it } from "vitest";
 
 import { AgentBase, defineAgentTool } from "../../sources/index.js";
 import { InMemoryPersistence } from "../gym/InMemoryPersistence.js";
-import { ScriptedProvider, ScriptedSession } from "../gym/ScriptedProvider.js";
+import { fromProviderContext, ScriptedProvider, ScriptedSession } from "../gym/ScriptedProvider.js";
 import { providersOf, textTurn, user } from "../gym/fixtures.js";
 
 const ctx = createRootContext().named("happy-agent-base-lifecycle-concurrency");
@@ -89,7 +89,8 @@ describe("lifecycle concurrency", () => {
 
         provider.session = async (id: string, options: SessionOptions): Promise<BaseSession> => {
             const session = (await originalSession(id, options)) as ScriptedSession;
-            session.run = (runCtx: Context, request: SessionRunRequest): SessionStream => {
+            session.run = (providerCtx, request: SessionRunRequest): SessionStream => {
+                const runCtx = fromProviderContext(providerCtx);
                 session.requestContexts.push(runCtx);
                 session.requests.push(request);
                 return (async function* () {
@@ -155,7 +156,8 @@ describe("lifecycle concurrency", () => {
         provider.session = async (id: string, options: SessionOptions): Promise<BaseSession> => {
             const session = (await originalSession(id, options)) as ScriptedSession;
             let runs = 0;
-            session.run = (runCtx: Context, request: SessionRunRequest): SessionStream => {
+            session.run = (providerCtx, request: SessionRunRequest): SessionStream => {
+                const runCtx = fromProviderContext(providerCtx);
                 session.requestContexts.push(runCtx);
                 session.requests.push(request);
                 runs += 1;

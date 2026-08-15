@@ -7,6 +7,7 @@ import type {
 } from "@slopus/happy-providers";
 import type { Context } from "@steve.kite/stdlib";
 
+import type { AgentDatabase } from "./AgentDatabase.js";
 import type { AgentMessageMetadata } from "./AgentMetadata.js";
 
 /**
@@ -41,15 +42,17 @@ export type AgentRecord =
  * ignored database conflict; history replacement removes keys for the records it deletes.
  * Exactly one owner connects to a store, and the agent serializes its own record and bookkeeping
  * writes through one lock, so history order always matches storage order. Key-value operations —
- * a feature's or a tool's — run as they come, so each one has to be atomic on its own, but no
+ * a module's or a tool's — run as they come, so each one has to be atomic on its own, but no
  * implementation ever has to defend against a second owner.
  */
 export interface AgentPersistence {
+    /** The root Drizzle facade for this store. */
+    readonly database: AgentDatabase;
     /**
      * Run work atomically. The implementation opens a transaction and passes work a derived
-     * context that its own operations recognize; how the transaction rides on that context is
-     * entirely the implementation's business. Work resolving commits every operation; a thrown
-     * error rolls them all back.
+     * context that its own operations recognize and that carries stdlib's universal
+     * `afterCommit` scope. Work resolving commits every operation and then drains that scope; a
+     * thrown error rolls everything back without draining it.
      */
     transaction<Result>(ctx: Context, work: (ctx: Context) => Promise<Result>): Promise<Result>;
     /** Every record in the main context store, in append order. */

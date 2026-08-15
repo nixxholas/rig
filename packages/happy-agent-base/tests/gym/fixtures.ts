@@ -9,10 +9,52 @@ import type { Context } from "@steve.kite/stdlib";
 import {
     AgentKV,
     AgentProviders,
+    AgentStorage,
+    type AgentPersistence,
     type AgentRecord,
     type AgentStorageLock,
 } from "../../sources/index.js";
-import { InMemoryPersistence } from "./InMemoryPersistence.js";
+import { InMemoryPersistence, inMemoryPersistenceDatabase } from "./InMemoryPersistence.js";
+
+const sharedTestDatabase = inMemoryPersistenceDatabase;
+
+/** A real in-memory Drizzle database for direct Agent tests that do not exercise SQL storage. */
+export function testAgentDatabase() {
+    return sharedTestDatabase;
+}
+
+/**
+ * Test-only storage that keeps the old fault-injectable in-memory persistence underneath the
+ * production AgentStorage lifecycle. Product code has only the mandatory Drizzle-owned path.
+ */
+export class InMemoryAgentStorage extends AgentStorage {
+    readonly #testPersistence: (agentId: string) => AgentPersistence;
+    readonly #testKV: AgentKV;
+
+    constructor(options: {
+        readonly acquireLock: (ctx: Context) => Promise<AgentStorageLock>;
+        readonly kv: AgentKV;
+        readonly persistence: (agentId: string) => AgentPersistence;
+    }) {
+        super({ acquireLock: options.acquireLock, database: sharedTestDatabase });
+        Object.defineProperty(this, "kv", { value: options.kv });
+        this.#testKV = options.kv;
+        this.#testPersistence = options.persistence;
+    }
+
+    override persistence(agentId: string): AgentPersistence {
+        return this.#testPersistence(agentId);
+    }
+
+    override async transaction<Result>(
+        ctx: Context,
+        work: (ctx: Context, database: typeof this.database) => Promise<Result>,
+    ): Promise<Result> {
+        return await this.#testKV.transaction(ctx, async (_kv, txCtx) => {
+            return await work(txCtx, this.database);
+        });
+    }
+}
 
 /** A registry holding the one provider under the ID `"scripted"` that tests configure. */
 export function providersOf(provider: BaseProvider): AgentProviders {

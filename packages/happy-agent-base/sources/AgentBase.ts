@@ -15,8 +15,10 @@ import type {
 import { areProviderModelsCompatible } from "@slopus/happy-providers";
 import { createId } from "@paralleldrive/cuid2";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import {
+    afterCommit,
     asyncLock,
     createContextNamespace,
     deterministicStringify,
@@ -26,10 +28,15 @@ import {
 } from "@steve.kite/stdlib";
 
 import {
+    agentDatabase,
+    agentKV,
+    agentStorageTransaction,
     withAgentContext,
+    withAgentDatabase,
     withAgentKV,
     withAgentPermissionMode,
     withAgentRunKV,
+    withoutAgentStorageTransaction,
 } from "./AgentContexts.js";
 import { agentConfig, ownAgentConfig, withAgentConfig, type AgentConfig } from "./AgentConfig.js";
 import { taskContextBeforeToolCall, withAgentTaskContext } from "./AgentTaskContext.js";
@@ -43,8 +50,11 @@ import {
 import type {
     AgentBaseAcceptedMessage,
     AgentBaseHooks,
+    AgentBaseInferenceStart,
+    AgentBaseLoop,
     AgentBasePermissionModeChange,
     AgentBasePersistedEvent,
+    AgentBaseSettlement,
     AgentBaseToolOutcome,
     MaybePromise,
 } from "./AgentBaseHooks.js";
@@ -57,6 +67,7 @@ import {
     type AgentMetadata,
     type AgentMetadataChange,
 } from "./AgentMetadata.js";
+import type { AgentMessageAcceptance } from "./AgentMessageAcceptance.js";
 import {
     DEFAULT_AGENT_PERMISSION_MODE,
     isAgentPermissionMode,
@@ -64,7 +75,7 @@ import {
 } from "./AgentPermissionMode.js";
 import type { AgentBaseState } from "./AgentBaseState.js";
 import { AgentProviders } from "./AgentProviders.js";
-import type { AgentFeatureAction } from "./AgentFeatureAction.js";
+import type { AgentModuleAction } from "./AgentModuleAction.js";
 import type { AnyAgentTool } from "./AgentTool.js";
 
 /** Race winner when an abort interrupts a wait on the stream or a running tool. */
@@ -107,7 +118,7 @@ export type AgentBaseQueueMode = "one-at-a-time" | "all";
 export interface AgentBaseMessageOptions {
     /** Stable cuid2 identity for idempotent delivery; generated when omitted. */
     readonly id?: string;
-    /** Immutable feature-owned metadata that travels with this one message. */
+    /** Immutable module-owned metadata that travels with this one message. */
     readonly metadata?: AgentMessageMetadata;
     /** The registry ID of the provider to switch to. */
     readonly provider?: string;
@@ -128,7 +139,9 @@ export interface AgentBaseMessageOptions {
 /**
  * Whether an operation resolves once the agent has taken the request on, or once the agent has
  * carried it out. Every operation that asks something of an agent accepts this, and every one of
- * them defaults to the first: asking is the operation, and waiting is opt-in.
+ * most of them default to the first: asking is the operation, and waiting is opt-in. Message
+ * acceptance defaults to the durable result except inside the target's own loop, where waiting
+ * would deadlock.
  *
  * The reason is re-entrancy. An agent does its work in one run loop, and while a hook or a tool
  * runs, that loop is waiting for it — so code in that position that waits for its own agent waits
@@ -139,8 +152,9 @@ export interface AgentBaseMessageOptions {
  */
 export interface AgentBaseAwaitOptions {
     /**
-     * Wait for the operation to finish rather than for it to be accepted. Refused from inside the
-     * agent's own run loop.
+     * Wait for the operation to finish rather than for it to be accepted. Message delivery uses
+     * this to request the durable created/existing result. Refused from inside the agent's own
+     * run loop.
      */
     readonly await?: boolean;
 }
@@ -160,8 +174,38 @@ interface QueueEntry {
 interface ToolBatchEntry {
     /** The pending-tool key the call is durable under until its result commits. */
     readonly key: string;
+    /** Internally generated stable identity used for persistence and the call's KV scope. */
+    readonly id: string;
+    /** The provider's opaque identity, kept separate from the internal identity. */
+    readonly providerCallId: string;
     readonly call: SessionToolCallBlock;
+    /** A tool-side result that already committed and must not execute again. */
+    readonly committed?: SessionToolResultMessage;
 }
+
+const storedToolCallSchema = Type.Object({
+    id: cuid2Schema,
+    providerCallId: Type.String(),
+    call: Type.Object({
+        type: Type.Literal("tool_call"),
+        name: Type.String(),
+        arguments: Type.String(),
+        namespace: Type.Optional(Type.String()),
+        incomplete: Type.Optional(Type.Boolean()),
+        vendor: Type.Optional(Type.Unknown()),
+    }),
+    committed: Type.Optional(Type.Unknown()),
+});
+type StoredToolCall = Static<typeof storedToolCallSchema>;
+
+/** A durable first-writer-wins claim on the result one call will append. */
+const storedToolResultSchema = Type.Object({
+    role: Type.Literal("tool"),
+    callId: Type.String(),
+    content: Type.Array(Type.Unknown()),
+    isError: Type.Optional(Type.Boolean()),
+    vendor: Type.Optional(Type.Unknown()),
+});
 
 /** One message offered to a durable queue, before it has a key. */
 interface QueueRequest {
@@ -183,7 +227,7 @@ export interface AgentBaseOptions {
     readonly provider: string;
     /** The append-only store the conversation, the queues, and the settings live in. */
     readonly persistence: AgentPersistence;
-    /** Observers and correctness hooks the run is assembled from; `Agent` merges features here. */
+    /** Observers and correctness hooks the run is assembled from; `Agent` merges modules here. */
     readonly hooks?: AgentBaseHooks;
     /** Copied into the agent's own mutable `state`. */
     readonly initialState?: Partial<AgentBaseState>;
@@ -287,7 +331,7 @@ export interface AgentBaseOptions {
  * running under rather than being told.
  *
  * The loop enforces nothing. It has no idea what any particular tool touches, and a runtime that
- * guessed would be wrong about tools it has never seen. Enforcement belongs to the features and
+ * guessed would be wrong about tools it has never seen. Enforcement belongs to the modules and
  * tools that do know; the loop's whole part is to carry the mode, make its changes durable, and
  * report them.
  *
@@ -430,7 +474,7 @@ export class AgentBase {
     /** The durable send queue, in the order its keys sort. */
     #sends: QueueEntry[] = [];
     /** A dispatched tool batch whose results have not all landed yet, and so has to be resumed. */
-    #pendingTools: { readonly key: string; readonly call: SessionToolCallBlock }[] = [];
+    #pendingTools: ToolBatchEntry[] = [];
     /**
      * True when the pending tools were reconstructed from an unanswered trailing tool call
      * rather than read from the durable batch, so the batch still has to be committed before
@@ -460,6 +504,13 @@ export class AgentBase {
      * about the agent is answered from here without touching the disk.
      */
     #pending: AgentBasePendingState | undefined;
+    /** Stable Base-owned lifecycle identities persisted as part of the pending run. */
+    #loopId: string | undefined;
+    #turnId: string | undefined;
+    #inferenceId: string | undefined;
+    #settlementId: string | undefined;
+    /** The durable settlement awaiting its post-commit observing hook. */
+    #settlement: AgentBaseSettlement | undefined;
     /**
      * The pending state this instance last wrote, so a write that would change nothing is
      * skipped. The loop passes through the same stage many times in a turn, and a store is not
@@ -503,6 +554,8 @@ export class AgentBase {
     #contextTokens: number | undefined;
     /** Whether the current turn was cancelled before it could finish. */
     #turnAborted = false;
+    /** A staged tool result could not settle, so this run must leave its pending state intact. */
+    #durableWorkBlocked = false;
     /** Whether something has asked for a turn that has not been answered yet. */
     #turnRequested = false;
     /** The run loop while it is running; the field is cleared once it has actually stopped. */
@@ -512,7 +565,7 @@ export class AgentBase {
     /** The one shutdown every closing caller shares, so a session is never destroyed twice. */
     #closing: Promise<void> | undefined;
     /** Operations accepted from a caller and not finished yet; a close waits for every one. */
-    readonly #admitted = new Set<Promise<void>>();
+    readonly #admitted = new Set<Promise<unknown>>();
     /**
      * Work from an earlier response that is still unwinding: a provider stream that has not
      * finished closing, or a tool that was settled in the conversation by an abort and is still
@@ -527,6 +580,8 @@ export class AgentBase {
      * owners of one session at once.
      */
     readonly #streamCleanup = new Set<Promise<unknown>>();
+    /** IDs offered by this process, for immediate self-reentrant acceptance answers. */
+    readonly #offeredMessageIds = new Set<string>();
 
     /**
      * A new agent, wired to its options and touching no storage at all. Use this for an identity
@@ -584,6 +639,10 @@ export class AgentBase {
             this.#inherited = stored;
             this.#inheritedRead = true;
             this.#pending = stored;
+            this.#loopId = stored?.loopId;
+            this.#turnId = stored?.turnId;
+            this.#inferenceId = stored?.inferenceId;
+            this.#settlementId = stored?.settlementId;
             this.#pendingWritten =
                 stored === undefined ? undefined : deterministicStringify(stored);
         });
@@ -601,7 +660,12 @@ export class AgentBase {
         // An agent is its own lifetime. Whatever call happened to construct it — a tool of
         // another agent, most often — is not a loop this one runs inside, so an inherited
         // marker is dropped rather than carried into work that outlives that call.
-        this.#baseCtx = withAgentConfig(insideTurn.set(ctx, [options.id]), this.#config);
+        this.#baseCtx = withoutAgentStorageTransaction(
+            withAgentDatabase(
+                withAgentConfig(insideTurn.set(ctx, [options.id]), this.#config),
+                options.persistence.database,
+            ),
+        );
         this.#providers = options.providers;
         this.#providerId = options.provider;
         this.#persistence = options.persistence;
@@ -636,7 +700,11 @@ export class AgentBase {
     /** Add this agent's selection and stores to a caller context without losing its transaction. */
     #hookContext(ctx: Context): Context {
         const selected = withAgentContext(ctx, this.#selection());
-        return withAgentRunKV(withAgentKV(selected, this.#kv), this.#runKV);
+        const database = agentDatabase(ctx) ?? this.#persistence.database;
+        return withAgentRunKV(
+            withAgentKV(withAgentDatabase(selected, database), this.#kv),
+            this.#runKV,
+        );
     }
 
     /** Load a directly owned configuration written by `updateMetadata`, when one exists. */
@@ -685,16 +753,25 @@ export class AgentBase {
      * whatever else that transaction is writing, which is how a consumed message and the
      * inference it owes become durable as one fact rather than two.
      */
-    async #recordPending(
-        ctx: Context,
-        pending: AgentBasePendingState,
-        force = false,
-    ): Promise<void> {
+    async #recordPending(ctx: Context, stage: AgentBasePendingStage, force = false): Promise<void> {
+        const pending = this.#pendingState(stage);
         const serialized = deterministicStringify(pending);
         if (!force && this.#pendingWritten === serialized) return;
         await this.#persistence.writeValue(ctx, AGENT_BASE_PENDING_KEY, pending);
         this.#pending = pending;
         this.#pendingWritten = serialized;
+    }
+
+    /** The complete durable lifecycle identity state for one outstanding stage. */
+    #pendingState(stage: AgentBasePendingStage): AgentBasePendingState {
+        this.#loopId ??= createId();
+        return {
+            stage,
+            loopId: this.#loopId,
+            ...(this.#turnId === undefined ? {} : { turnId: this.#turnId }),
+            ...(this.#inferenceId === undefined ? {} : { inferenceId: this.#inferenceId }),
+            ...(this.#settlementId === undefined ? {} : { settlementId: this.#settlementId }),
+        };
     }
 
     /**
@@ -709,7 +786,7 @@ export class AgentBase {
         stage: AgentBasePendingStage,
         transact?: (ctx: Context) => MaybePromise<Result>,
     ): Promise<Result | undefined> {
-        const pending: AgentBasePendingState = { stage };
+        const pending = this.#pendingState(stage);
         if (
             transact === undefined &&
             deterministicStringify(pending) === this.#pendingWritten &&
@@ -724,14 +801,14 @@ export class AgentBase {
                     this.#inherited = await agentBasePendingStateOf(lockCtx, this.#persistence);
                 }
                 if (transact === undefined) {
-                    await this.#recordPending(lockCtx, pending);
+                    await this.#recordPending(lockCtx, stage);
                     return undefined;
                 }
                 return await this.#recordTransaction(lockCtx, async (txCtx) => {
                     // The state is staged first. The callback then writes against this exact
                     // transaction, so neither its conclusion nor the state it observed can land
                     // without the other.
-                    await this.#recordPending(txCtx, pending, true);
+                    await this.#recordPending(txCtx, stage, true);
                     return await this.#withTransactionalContext(txCtx, transact);
                 });
             });
@@ -757,31 +834,31 @@ export class AgentBase {
     /**
      * Queue a user message that injects as soon as the current assistant response and its tool
      * batch finish; steering always takes precedence over sent messages. Returns once the message
-     * has been handed to the agent, which never waits for the turn that answers it; with
-     * `await: true` it returns once the durable write has landed instead, and a failed write both
-     * rejects and keeps the message out of the conversation entirely.
+     * has been handed to the agent and returns its acceptance identity. Outside the target's own
+     * loop it waits for the durable created/existing result by default; a failed write rejects and
+     * keeps the message out of the conversation entirely.
      */
     async steer(
         ctx: Context,
         message: SessionUserMessage,
         options?: AgentBaseMessageOptions & AgentBaseAwaitOptions,
-    ): Promise<void> {
-        await this.#offer(ctx, "steering", message, options);
+    ): Promise<AgentMessageAcceptance> {
+        return await this.#offer(ctx, "steering", message, options);
     }
 
     /**
      * Queue a user message that waits until the agent would otherwise stop — no tool calls or
      * steering remain — before injecting. Returns once the message has been handed to the agent,
-     * which never waits for the turn that answers it; with `await: true` it returns once the
-     * durable write has landed instead, and a failed write both rejects and keeps the message out
-     * of the conversation entirely.
+     * without waiting for the turn that answers it and returns its acceptance identity. Outside
+     * the target's own loop it waits for the durable created/existing result by default; a failed
+     * write rejects and keeps the message out of the conversation entirely.
      */
     async send(
         ctx: Context,
         message: SessionUserMessage,
         options?: AgentBaseMessageOptions & AgentBaseAwaitOptions,
-    ): Promise<void> {
-        await this.#offer(ctx, "send", message, options);
+    ): Promise<AgentMessageAcceptance> {
+        return await this.#offer(ctx, "send", message, options);
     }
 
     /**
@@ -789,6 +866,7 @@ export class AgentBase {
      * transactional hook writes commit together; observing hooks run only after that commit.
      */
     async updateMetadata(ctx: Context, update: AgentMetadata): Promise<void> {
+        this.#assertOutsideStorageTransaction(ctx, "metadata update");
         const ownedUpdate = ownAgentMetadata(update);
         if (ownedUpdate === undefined) throw new Error("The agent metadata is not valid.");
         if (this.#closed) throw new Error("The agent has been closed.");
@@ -849,9 +927,10 @@ export class AgentBase {
         kind: QueueRequest["kind"],
         message: SessionUserMessage,
         options: (AgentBaseMessageOptions & AgentBaseAwaitOptions) | undefined,
-    ): Promise<void> {
+    ): Promise<AgentMessageAcceptance> {
+        this.#assertOutsideStorageTransaction(ctx, "message delivery");
         const {
-            await: wait = false,
+            await: requestedWait,
             id = createId(),
             metadata: suppliedMetadata,
             ...settings
@@ -859,6 +938,7 @@ export class AgentBase {
         if (!Value.Check(cuid2Schema, id)) {
             throw new Error("The message ID must be a cuid2 identity.");
         }
+        const wait = requestedWait ?? !insideTurn.get(ctx).includes(this.id);
         const metadata = ownAgentMessageMetadata(suppliedMetadata);
         // Refusing the flag rather than the operation: a closed agent and a re-entrant wait are
         // both caller mistakes, and both are reported before any work is started.
@@ -868,6 +948,8 @@ export class AgentBase {
             kind === "steering" ? "a steered message" : "a sent message",
         );
         if (this.#closed) throw new Error("The agent has been closed.");
+        const knownInProcess = this.#offeredMessageIds.has(id);
+        this.#offeredMessageIds.add(id);
         const accepted = this.#enqueue(ctx, [
             {
                 kind,
@@ -877,8 +959,26 @@ export class AgentBase {
                 options: settings,
             },
         ]);
-        if (wait) return accepted;
-        accepted.catch(() => undefined);
+        if (wait) {
+            try {
+                const [result] = await accepted;
+                if (result === undefined) {
+                    throw new Error("The message acceptance result was lost.");
+                }
+                return result;
+            } catch (error: unknown) {
+                if (!knownInProcess) this.#offeredMessageIds.delete(id);
+                throw error;
+            }
+        }
+        accepted.catch(() => {
+            if (!knownInProcess) this.#offeredMessageIds.delete(id);
+        });
+        return {
+            id,
+            delivery: kind === "steering" ? "steer" : "send",
+            accepted: knownInProcess ? "existing" : "created",
+        };
     }
 
     /**
@@ -911,6 +1011,15 @@ export class AgentBase {
         return insidePersistenceLocks.getStore()?.includes(this.id) === true;
     }
 
+    /** Live agent commands cannot be staged or undone by an enclosing database transaction. */
+    #assertOutsideStorageTransaction(ctx: Context, operation: string): void {
+        if (agentStorageTransaction(ctx) !== undefined) {
+            throw new Error(
+                `Agent ${operation} cannot run from inside an outer storage transaction.`,
+            );
+        }
+    }
+
     /** Hold the persistence lock while marking it independently of the caller's Context. */
     async #runInPersistenceLock<Result>(
         ctx: Context,
@@ -930,17 +1039,26 @@ export class AgentBase {
      * batch is being written lands after the whole batch rather than in the middle of it, and a
      * failure admits none of them.
      */
-    async #enqueue(ctx: Context, batch: readonly QueueRequest[]): Promise<void> {
-        if (batch.length === 0) return;
+    async #enqueue(
+        ctx: Context,
+        batch: readonly QueueRequest[],
+    ): Promise<readonly AgentMessageAcceptance[]> {
+        if (batch.length === 0) return [];
         if (this.#closed) throw new Error("The agent has been closed.");
         // Admitted: from here on the messages are the agent's responsibility, and a close that
         // begins now waits for them rather than resolving over the top of them.
         const admitted = this.#runInPersistenceLock(ctx, async (lockCtx) => {
             const accepted: { readonly key: string; readonly request: QueueRequest }[] = [];
-            await this.#persistence.transaction(lockCtx, async (txCtx) => {
+            const results: AgentMessageAcceptance[] = [];
+            await this.#recordTransaction(lockCtx, async (txCtx) => {
                 for (const request of batch) {
                     const identityKey = `message.${request.id}`;
                     if (!(await this.#persistence.writeValueIfAbsent(txCtx, identityKey, true))) {
+                        results.push({
+                            id: request.id,
+                            delivery: request.kind === "steering" ? "steer" : "send",
+                            accepted: "existing",
+                        });
                         continue;
                     }
                     const key = await this.#queueKey(txCtx, `${request.kind}.`);
@@ -951,12 +1069,17 @@ export class AgentBase {
                         options: request.options,
                     });
                     accepted.push({ key, request });
+                    results.push({
+                        id: request.id,
+                        delivery: request.kind === "steering" ? "steer" : "send",
+                        accepted: "created",
+                    });
                 }
                 if (accepted.length === 0) return;
                 // Accepting a message is what makes the work owed: the same transaction that
                 // admits it records that the agent owes an answer, so a process that dies right
                 // here is discovered still owing it rather than looking idle over a full queue.
-                await this.#recordPending(txCtx, { stage: "inference" });
+                await this.#recordPending(txCtx, "inference");
             });
             for (const { key, request } of accepted) {
                 // The queue is resolved inside the lock: a history load running just before this
@@ -971,13 +1094,15 @@ export class AgentBase {
                     options: request.options,
                 });
             }
-            if (accepted.length === 0) return;
-            this.#turnRequested = true;
-            this.#startRun();
+            if (accepted.length > 0) {
+                this.#turnRequested = true;
+                this.#startRun();
+            }
+            return results;
         });
         this.#admitted.add(admitted);
         try {
-            await admitted;
+            return await admitted;
         } finally {
             this.#admitted.delete(admitted);
         }
@@ -1017,6 +1142,7 @@ export class AgentBase {
      * compaction rather than queueing another.
      */
     async compact(ctx: Context, options?: AgentBaseAwaitOptions): Promise<void> {
+        this.#assertOutsideStorageTransaction(ctx, "compaction");
         const wait = options?.await ?? false;
         this.#assertCanWait(ctx, wait, "a compaction");
         if (this.#closed) throw new Error("The agent has been closed.");
@@ -1150,6 +1276,7 @@ export class AgentBase {
      * when it finished.
      */
     async abort(ctx: Context, options?: AgentBaseAwaitOptions): Promise<void> {
+        this.#assertOutsideStorageTransaction(ctx, "abort");
         const wait = options?.await ?? false;
         this.#assertCanWait(ctx, wait, "an abort");
         const run = this.#signalAbort();
@@ -1297,9 +1424,20 @@ export class AgentBase {
      * more work, so the loop hooks always bracket a settled-to-settled span.
      */
     async #runLoop(): Promise<void> {
+        if (this.#pending?.stage === "settlement") {
+            this.#loopId ??= createId();
+            this.#settlementId ??= createId();
+            await this.#settleDurably({
+                loopId: this.#loopId,
+                settlementId: this.#settlementId,
+            });
+            return;
+        }
         // The outer loop reopens when an `afterAgentLoop` action requests more work, so the
         // loop hooks always bracket a settled-to-settled span.
         do {
+            this.#loopId ??= createId();
+            const loop: AgentBaseLoop = { loopId: this.#loopId };
             // The abort scope opens before the loop hook, not just before the turn. An abort
             // owns everything the run does — its opening hook as much as its inference — so a
             // run cancelled while it is still starting up never reaches the model at all.
@@ -1308,10 +1446,17 @@ export class AgentBase {
             // crash could interrupt. What it records is refined as the run reaches each stage;
             // what matters at this point is that the record exists at all, since its absence is
             // what a later process reads as an agent that finished.
-            await this.#enterStage("inference", this.#hooks.beforeAgentLoopTransact);
-            await this.#invokeHook(this.#hooks.beforeAgentLoop);
+            await this.#enterStage(
+                "inference",
+                this.#hooks.beforeAgentLoopTransact === undefined
+                    ? undefined
+                    : (hookCtx) => this.#hooks.beforeAgentLoopTransact?.(hookCtx, loop),
+            );
+            await this.#invokeHook(this.#hooks.beforeAgentLoop, loop);
             do {
                 this.#turnAborted = false;
+                this.#durableWorkBlocked = false;
+                this.#turnId ??= createId();
                 // Claimed before any awaiting, so a request raised while the turn is still
                 // starting up survives into another turn instead of being cleared by it. The
                 // redundant turn this can cost is cheap: an empty queue drains without any
@@ -1339,9 +1484,12 @@ export class AgentBase {
                                 ? loadFailure.message
                                 : String(loadFailure),
                     });
+                    this.#turnId = undefined;
                     break;
                 }
                 const turnStart = {
+                    loopId: loop.loopId,
+                    turnId: this.#turnId,
                     contextTokens: this.#contextTokens,
                 };
                 await this.#enterStage(
@@ -1352,30 +1500,50 @@ export class AgentBase {
                 );
                 await this.#applyActions(this.#hooks.beforeTurn, abort.signal, turnStart);
                 await this.#runInference(abort);
+                if (this.#durableWorkBlocked) return;
                 const turn = {
+                    loopId: loop.loopId,
+                    turnId: turnStart.turnId,
                     contextTokens: this.#contextTokens,
                     aborted: this.#turnAborted,
                 };
-                await this.#enterStage(
-                    "inference",
-                    this.#hooks.afterTurnTransact === undefined
-                        ? undefined
-                        : (hookCtx) => this.#hooks.afterTurnTransact?.(hookCtx, turn),
-                );
+                const completedTurnId = this.#turnId;
+                this.#turnId = undefined;
+                try {
+                    await this.#enterStage(
+                        "inference",
+                        this.#hooks.afterTurnTransact === undefined
+                            ? undefined
+                            : (hookCtx) => this.#hooks.afterTurnTransact?.(hookCtx, turn),
+                    );
+                } catch (error: unknown) {
+                    this.#turnId = completedTurnId;
+                    throw error;
+                }
                 await this.#applyActions(this.#hooks.afterTurn, abort.signal, turn);
                 if (!this.#turnRequested || this.#closed) break;
                 // Each turn cancels on its own scope. Reopening it here rather than at the top
                 // keeps the run's first turn under the scope its opening hook already ran in.
                 abort = this.#openAbortScope();
             } while (true);
-            await this.#enterStage("inference", this.#hooks.afterAgentLoopTransact);
-            await this.#applyActions(this.#hooks.afterAgentLoop, abort.signal);
+            await this.#enterStage(
+                "inference",
+                this.#hooks.afterAgentLoopTransact === undefined
+                    ? undefined
+                    : (hookCtx) => this.#hooks.afterAgentLoopTransact?.(hookCtx, loop),
+            );
+            await this.#applyActions(this.#hooks.afterAgentLoop, abort.signal, loop);
         } while (this.#turnRequested && !this.#closed);
         // Nothing is asked for any more, so the outstanding work is erased. That erasure is what
         // makes the agent idle, and it commits together with whatever the settling hooks write,
         // so no owner can ever see the agent finished without their conclusions or their
         // conclusions without the agent being finished.
-        await this.#settleDurably();
+        this.#settlementId ??= createId();
+        await this.#enterStage("settlement");
+        await this.#settleDurably({
+            loopId: this.#loopId ?? createId(),
+            settlementId: this.#settlementId,
+        });
     }
 
     /**
@@ -1384,12 +1552,12 @@ export class AgentBase {
      * is resumed and finds nothing to do, while one wrongly believed to be finished is never
      * resumed at all.
      */
-    async #settleDurably(): Promise<void> {
+    async #settleDurably(settlement: AgentBaseSettlement): Promise<void> {
         try {
             await this.#runInPersistenceLock(this.#ctx, (lockCtx) =>
                 this.#recordTransaction(lockCtx, async (txCtx) => {
                     await this.#clearPending(txCtx);
-                    await this.#invokeTransactionalSettle(txCtx);
+                    await this.#invokeTransactionalSettle(txCtx, settlement);
                     // The run store is erased last, so a settling hook can still read what the
                     // run concluded and keep whatever part of it belongs to the conversation.
                     // It commits with the settlement: the run is over and its notes are gone as
@@ -1397,6 +1565,11 @@ export class AgentBase {
                     await this.#clearRunStore(txCtx);
                 }),
             );
+            this.#loopId = undefined;
+            this.#turnId = undefined;
+            this.#inferenceId = undefined;
+            this.#settlementId = undefined;
+            this.#settlement = settlement;
         } catch {
             // The run itself is over and succeeded; only the record of its ending failed.
         }
@@ -1409,10 +1582,15 @@ export class AgentBase {
      * with it, because a hook here is writing a conclusion about the very fact being committed,
      * and half of that pair is worse than neither.
      */
-    async #invokeTransactionalSettle(txCtx: Context): Promise<void> {
+    async #invokeTransactionalSettle(
+        txCtx: Context,
+        settlement: AgentBaseSettlement,
+    ): Promise<void> {
         const hook = this.#hooks.afterAgentSettledTransact;
         if (hook === undefined) return;
-        await this.#withTransactionalContext(insideTurn.set(txCtx, []), hook);
+        await this.#withTransactionalContext(insideTurn.set(txCtx, []), (liveCtx) =>
+            hook(liveCtx, settlement),
+        );
     }
 
     /**
@@ -1448,7 +1626,15 @@ export class AgentBase {
             // The settle runs once the loop has stopped, so its hook is not inside a turn and
             // its context does not claim to be: a compaction it waits for reaches a loop that
             // can still be started.
-            await this.#invokeHookOn(insideTurn.set(this.#ctx, []), this.#hooks.afterAgentSettled);
+            const settlement = this.#settlement;
+            if (settlement !== undefined) {
+                await this.#invokeHookOn(
+                    insideTurn.set(this.#ctx, []),
+                    this.#hooks.afterAgentSettled,
+                    settlement,
+                );
+                this.#settlement = undefined;
+            }
         })();
         this.#admitted.add(announced);
         void announced.finally(() => this.#admitted.delete(announced));
@@ -1476,7 +1662,7 @@ export class AgentBase {
     }
 
     /**
-     * Lend a hook the transaction's context and feature stores for exactly one callback. Keeping
+     * Lend a hook the transaction's context and module stores for exactly one callback. Keeping
      * the context after the callback cannot leak a transaction past its commit.
      */
     async #withTransactionalContext<Result>(
@@ -1505,13 +1691,13 @@ export class AgentBase {
             | ((
                   ctx: Context,
                   ...args: Arguments
-              ) => MaybePromise<readonly AgentFeatureAction[] | undefined>)
+              ) => MaybePromise<readonly AgentModuleAction[] | undefined>)
             | undefined,
         signal: AbortSignal,
         ...args: Arguments
     ): Promise<void> {
         if (hook === undefined) return;
-        let actions: readonly AgentFeatureAction[] | undefined;
+        let actions: readonly AgentModuleAction[] | undefined;
         try {
             actions = await hook(this.#ctx, ...args);
         } catch {
@@ -1533,12 +1719,12 @@ export class AgentBase {
             | ((
                   ctx: Context,
                   ...args: Arguments
-              ) => MaybePromise<readonly AgentFeatureAction[] | undefined>)
+              ) => MaybePromise<readonly AgentModuleAction[] | undefined>)
             | undefined,
         ...args: Arguments
     ): Promise<void> {
         if (hook === undefined) return;
-        let actions: readonly AgentFeatureAction[] | undefined;
+        let actions: readonly AgentModuleAction[] | undefined;
         try {
             actions = await hook(this.#ctx, ...args);
         } catch {
@@ -1552,7 +1738,7 @@ export class AgentBase {
      * as one batch: a caller arriving while they are being written lands after all of them
      * rather than between two halves of the same thought.
      */
-    async #carryOutActions(actions: readonly AgentFeatureAction[] | undefined): Promise<void> {
+    async #carryOutActions(actions: readonly AgentModuleAction[] | undefined): Promise<void> {
         const batch: QueueRequest[] = [];
         const flush = async (): Promise<void> => {
             const pending = batch.splice(0, batch.length);
@@ -1668,9 +1854,24 @@ export class AgentBase {
                 // hold a cancellation open, so a new cancellation must not start waiting for it
                 // either.
                 if ((await Promise.race([this.#settled(), abortPromise])) === ABORTED) continue;
-                await this.#enterStage("inference", this.#hooks.beforeInferenceTransact);
-                await this.#invokeHook(this.#hooks.beforeInference);
-                const stream = session.run(this.#ctx, {
+                this.#inferenceId ??= createId();
+                const inferenceStart: AgentBaseInferenceStart = {
+                    loopId: this.#loopId ?? createId(),
+                    turnId: this.#turnId ?? createId(),
+                    inferenceId: this.#inferenceId,
+                    contextTokens: this.#contextTokens,
+                };
+                this.#loopId = inferenceStart.loopId;
+                this.#turnId = inferenceStart.turnId;
+                await this.#enterStage(
+                    "inference",
+                    this.#hooks.beforeInferenceTransact === undefined
+                        ? undefined
+                        : (hookCtx) =>
+                              this.#hooks.beforeInferenceTransact?.(hookCtx, inferenceStart),
+                );
+                await this.#invokeHook(this.#hooks.beforeInference, inferenceStart);
+                const stream = session.run(providerContext(this.#ctx), {
                     context: {
                         instructions,
                         messages: [...this.#messages],
@@ -1686,6 +1887,7 @@ export class AgentBase {
                 // A cancelled or failed response measures nothing, so the conversation keeps
                 // the last real measurement instead of forgetting how large it had become.
                 const inference = {
+                    ...inferenceStart,
                     state,
                     tokens,
                     ...(errorMessage === undefined ? {} : { errorMessage }),
@@ -1695,13 +1897,20 @@ export class AgentBase {
                         ? undefined
                         : (hookCtx: Context) =>
                               this.#hooks.afterInferenceTransact?.(hookCtx, inference);
-                if (tokens === undefined) {
-                    await this.#enterStage("inference", afterInferenceTransact);
-                } else {
-                    await this.#recordContextTokens(
-                        tokens.input + tokens.output,
-                        afterInferenceTransact,
-                    );
+                const completedInferenceId = this.#inferenceId;
+                this.#inferenceId = undefined;
+                try {
+                    if (tokens === undefined) {
+                        await this.#enterStage("inference", afterInferenceTransact);
+                    } else {
+                        await this.#recordContextTokens(
+                            tokens.input + tokens.output,
+                            afterInferenceTransact,
+                        );
+                    }
+                } catch (error: unknown) {
+                    this.#inferenceId = completedInferenceId;
+                    throw error;
                 }
                 await this.#invokeHook(this.#hooks.afterInference, inference);
                 if (content.length > 0) {
@@ -1730,10 +1939,7 @@ export class AgentBase {
                     );
                     if (calls.length === 0) continue;
                     const closedDuringTools = await this.#runToolBatch(
-                        calls.map((call, index) => ({
-                            key: this.#toolKey(index, call.callId),
-                            call,
-                        })),
+                        calls.map((call, index) => this.#newToolEntry(index, call)),
                         false,
                         abort.signal,
                         abortPromise,
@@ -1830,6 +2036,7 @@ export class AgentBase {
                 }
                 await this.#recordTransaction(lockCtx, async (txCtx) => {
                     await write(txCtx);
+                    await this.#recordPending(txCtx, "inference", true);
                     await this.#withTransactionalContext(txCtx, transact);
                 });
             });
@@ -1861,7 +2068,7 @@ export class AgentBase {
             // Provider compaction is this turn's work, so it runs on this turn's lifetime: an
             // abort reaches the provider operation itself rather than waiting for it to finish
             // work nobody wants any more.
-            const result = await session.compact(withLifetime(this.#ctx, signal), {
+            const result = await session.compact(providerContext(withLifetime(this.#ctx, signal)), {
                 context: { instructions, messages: snapshot },
                 ...(this.#model === undefined ? {} : { model: this.#model }),
             });
@@ -1913,6 +2120,7 @@ export class AgentBase {
         const owed = this.#unansweredCalls(this.#messages);
         if (owed.length === 0) return true;
         let settled = false;
+        let staged = false;
         try {
             await this.#runInPersistenceLock(this.#ctx, async (lockCtx) => {
                 // A call the durable batch still holds belongs to the resume, which answers it
@@ -1920,30 +2128,59 @@ export class AgentBase {
                 // well would give the conversation two results for one call.
                 const pending = await this.#persistence.readValues(lockCtx, "tool.");
                 const dispatched = new Set(
-                    pending.map(({ value }) => (value as SessionToolCallBlock).callId),
+                    pending.map(
+                        ({ key, value }) => this.#restoreToolEntry(key, value).providerCallId,
+                    ),
                 );
-                const results = owed
-                    .filter((call) => !dispatched.has(call.callId))
-                    .map((call) => toolFailure(call.callId, reason));
-                if (results.length === 0) return;
+                if (owed.some((call) => dispatched.has(call.callId))) {
+                    settled = true;
+                    return;
+                }
+                const entries = owed.map((call, index) => {
+                    const entry = this.#newToolEntry(index, call);
+                    return {
+                        ...entry,
+                        committed: toolFailure(entry.providerCallId, reason),
+                    };
+                });
+                // Give every otherwise-undispatched call a durable internal identity and staged
+                // result first. If the settlement transaction below fails, restart resumes these
+                // exact entries and commits their staged errors without executing the tools.
                 await this.#recordTransaction(lockCtx, async (txCtx) => {
-                    for (const result of results) {
+                    for (const entry of entries) {
+                        await this.#persistence.writeValue(
+                            txCtx,
+                            entry.key,
+                            this.#storedToolEntry(entry),
+                        );
+                    }
+                    await this.#recordPending(txCtx, "tools");
+                });
+                staged = true;
+                await this.#recordTransaction(lockCtx, async (txCtx) => {
+                    for (const entry of entries) {
+                        const result = entry.committed;
                         await this.#appendRecord(txCtx, { type: "tool", message: result });
+                        await this.#persistence.deleteValue(txCtx, entry.key);
                         // A result the conversation records is a result the hook sees, however
                         // little of a run produced it. A hook that fails here leaves the calls
                         // unsettled, which is what lets a later attempt answer them properly.
                         await this.#invokeToolTransactHook(
                             txCtx,
-                            result.callId,
+                            entry.id,
+                            entry.providerCallId,
                             this.#hooks.afterToolCallTransact,
                             result,
                         );
+                        await this.#kv.scoped("call", entry.id).clear(txCtx);
                     }
+                    await this.#recordPending(txCtx, "inference");
                 });
-                this.#messages.push(...results);
+                this.#messages.push(...entries.map(({ committed }) => committed));
+                settled = true;
             });
-            settled = true;
         } catch {
+            if (staged) this.#durableWorkBlocked = true;
             // The turn is already failing; a restart settles what this could not, as long as
             // nothing is written over the top of the call in the meantime.
         }
@@ -1962,6 +2199,7 @@ export class AgentBase {
         for (const record of records) {
             if (record.type === "user") {
                 await this.#persistence.deleteValue(ctx, `message.${record.id}`);
+                this.#offeredMessageIds.delete(record.id);
             }
         }
     }
@@ -1978,11 +2216,19 @@ export class AgentBase {
         // agent skip the write that actually records what it is doing.
         const pending = this.#pending;
         const written = this.#pendingWritten;
+        const loopId = this.#loopId;
+        const turnId = this.#turnId;
+        const inferenceId = this.#inferenceId;
+        const settlementId = this.#settlementId;
         try {
             return await this.#persistence.transaction(ctx, work);
         } catch (error: unknown) {
             this.#pending = pending;
             this.#pendingWritten = written;
+            this.#loopId = loopId;
+            this.#turnId = turnId;
+            this.#inferenceId = inferenceId;
+            this.#settlementId = settlementId;
             throw error;
         }
     }
@@ -2071,7 +2317,7 @@ export class AgentBase {
                 }
             }
             // The mode the messages make effective, kept apart from the rest because it is the one
-            // setting with hooks of its own: a change is announced, and what a feature concludes
+            // setting with hooks of its own: a change is announced, and what a module concludes
             // from it commits with the message that carried it.
             const modeChange: AgentBasePermissionModeChange | undefined =
                 permissionMode === this.#permissionMode
@@ -2201,7 +2447,7 @@ export class AgentBase {
                 // Consuming a message is precisely the act that makes an inference owed, so
                 // the two commit as one. A crash cannot land between them and leave a
                 // message in the conversation that nothing remembers having to answer.
-                await this.#recordPending(txCtx, { stage: "inference" });
+                await this.#recordPending(txCtx, "inference");
                 // Last, so a hook writing its own account of the consumption sees a transaction
                 // holding all of it. The mode comes before the messages: it is what they were
                 // said under, and a listener recording them wants to know that first.
@@ -2358,10 +2604,9 @@ export class AgentBase {
                 }
                 this.#ctx = this.#deriveCtx();
             }
-            this.#pendingTools = pendingTools.map(({ key, value }) => ({
-                key,
-                call: value as SessionToolCallBlock,
-            }));
+            this.#pendingTools = pendingTools.map(({ key, value }) =>
+                this.#restoreToolEntry(key, value),
+            );
             this.#pendingToolsUndispatched = false;
             if (this.#pendingTools.length === 0) {
                 // A crash between the response's last block and the batch commit leaves calls
@@ -2371,10 +2616,7 @@ export class AgentBase {
                 // dispatched.
                 const owed = this.#unansweredCalls(restored);
                 if (owed.length > 0) {
-                    this.#pendingTools = owed.map((call, index) => ({
-                        key: this.#toolKey(index, call.callId),
-                        call,
-                    }));
+                    this.#pendingTools = owed.map((call, index) => this.#newToolEntry(index, call));
                     this.#pendingToolsUndispatched = true;
                 }
             }
@@ -2401,18 +2643,23 @@ export class AgentBase {
             await this.#runInPersistenceLock(this.#ctx, (lockCtx) =>
                 this.#recordTransaction(lockCtx, async (txCtx) => {
                     for (const entry of entries) {
-                        await this.#persistence.writeValue(txCtx, entry.key, entry.call);
+                        await this.#persistence.writeValue(
+                            txCtx,
+                            entry.key,
+                            this.#storedToolEntry(entry),
+                        );
                     }
                     // The batch and the stage that describes it commit together. A crash can
                     // then never find calls owed with no record of a run owing them, nor a run
                     // recorded as running tools that were never written.
-                    await this.#recordPending(txCtx, { stage: "tools" });
+                    await this.#recordPending(txCtx, "tools");
                     // Last, so a hook noting a call about to happen sees a transaction holding
                     // the whole batch it belongs to.
                     for (const entry of entries) {
                         await this.#invokeToolTransactHook(
                             txCtx,
-                            entry.call.callId,
+                            entry.id,
+                            entry.providerCallId,
                             this.#hooks.beforeToolCallTransact,
                             entry.call,
                         );
@@ -2438,33 +2685,52 @@ export class AgentBase {
                 await this.#runInPersistenceLock(this.#ctx, async (lockCtx) => {
                     while (committed < entries.length) {
                         const entry = entries[committed];
-                        const result = results[committed];
-                        if (entry === undefined || result === undefined) return;
+                        const proposed = results[committed];
+                        if (entry === undefined || proposed === undefined) return;
+                        let winner = proposed;
                         await this.#recordTransaction(lockCtx, async (txCtx) => {
+                            const resultKey = this.#toolResultKey(entry.id);
+                            await this.#persistence.writeValueIfAbsent(txCtx, resultKey, proposed);
+                            const claims = await this.#persistence.readValues(txCtx, resultKey);
+                            const stored = claims.find(({ key }) => key === resultKey)?.value;
+                            if (!Value.Check(storedToolResultSchema, stored)) {
+                                throw new Error(
+                                    `The committed result claim for tool "${entry.id}" is not valid.`,
+                                );
+                            }
+                            const result = stored as SessionToolResultMessage;
+                            if (result.callId !== entry.providerCallId) {
+                                throw new Error(
+                                    `The committed result claim for tool "${entry.id}" has the wrong provider call ID.`,
+                                );
+                            }
+                            winner = result;
+                            results[committed] = result;
                             await this.#appendRecord(txCtx, {
                                 type: "tool",
                                 message: result,
                             });
-                            // The call is answered, so what was kept only to let it be retried
-                            // goes with it. What the tool itself wrote under its own call scope
-                            // stays: that is the tool's state, not the batch's bookkeeping, and
-                            // an owner may still want to read what a finished call recorded.
+                            // The call is answered, so both its retry record and its temporary
+                            // invocation store disappear in this same result transaction.
                             await this.#persistence.deleteValue(txCtx, entry.key);
+                            await this.#persistence.deleteValue(txCtx, resultKey);
                             await this.#invokeToolTransactHook(
                                 txCtx,
-                                entry.call.callId,
+                                entry.id,
+                                entry.providerCallId,
                                 this.#hooks.afterToolCallTransact,
                                 result,
                             );
+                            await this.#kv.scoped("call", entry.id).clear(txCtx);
                         });
-                        this.#messages.push(result);
+                        this.#messages.push(winner);
                         committed += 1;
                     }
                     // The batch is fully answered, so its results are what the model is owed a
                     // response to. Recording that here means a crash between the last result and
                     // the next request resumes as an inference rather than as a finished batch.
                     if (committed === entries.length) {
-                        await this.#recordPending(lockCtx, { stage: "inference" });
+                        await this.#recordPending(lockCtx, "inference");
                     }
                 });
             } catch (error: unknown) {
@@ -2476,7 +2742,9 @@ export class AgentBase {
         const batch = Promise.all(
             entries.map(async (entry, index) => {
                 let outcome: SessionToolResultMessage | typeof ABORTED;
-                if (resume && !(await this.#isDurable(entry.call))) {
+                if (entry.committed !== undefined) {
+                    outcome = entry.committed;
+                } else if (resume && !(await this.#isDurable(entry.call))) {
                     outcome = toolFailure(
                         entry.call.callId,
                         "The tool call was interrupted by a restart and was not retried.",
@@ -2485,7 +2753,7 @@ export class AgentBase {
                     const toolLifetime = AbortSignal.any([signal, this.#closeController.signal]);
                     const execution = this.#executeToolCall(
                         withLifetime(this.#ctx, toolLifetime),
-                        entry.call,
+                        entry,
                     );
                     running.push(execution);
                     outcome = await Promise.race([execution, abortPromise, this.#closingTools()]);
@@ -2559,23 +2827,77 @@ export class AgentBase {
         );
     }
 
+    /** Allocate one internal identity before the call becomes durable or executable. */
+    #newToolEntry(index: number, call: SessionToolCallBlock): ToolBatchEntry {
+        const id = createId();
+        return {
+            key: this.#toolKey(index, id),
+            id,
+            providerCallId: call.callId,
+            call,
+        };
+    }
+
+    /** Restore the exact internal/provider identity pair that was dispatched before a restart. */
+    #restoreToolEntry(key: string, value: unknown): ToolBatchEntry {
+        if (!Value.Check(storedToolCallSchema, value)) {
+            throw new Error(`The pending tool call under "${key}" is not valid.`);
+        }
+        const stored = value as StoredToolCall;
+        if (
+            stored.committed !== undefined &&
+            !Value.Check(storedToolResultSchema, stored.committed)
+        ) {
+            throw new Error(`The committed result under "${key}" is not valid.`);
+        }
+        const call: SessionToolCallBlock = {
+            ...stored.call,
+            callId: stored.providerCallId,
+        };
+        return {
+            key,
+            id: stored.id,
+            providerCallId: stored.providerCallId,
+            call,
+            ...(stored.committed === undefined
+                ? {}
+                : { committed: stored.committed as SessionToolResultMessage }),
+        };
+    }
+
+    /** The explicit durable representation keeps provider and internal identities separate. */
+    #storedToolEntry(entry: ToolBatchEntry): StoredToolCall {
+        const { callId: _providerCallId, server: _server, ...call } = entry.call;
+        return {
+            id: entry.id,
+            providerCallId: entry.providerCallId,
+            call,
+            ...(entry.committed === undefined ? {} : { committed: entry.committed }),
+        };
+    }
+
     /** Sorted by position in the batch; only one batch is ever pending at a time. */
-    #toolKey(index: number, callId: string): string {
-        return `tool.${String(index).padStart(6, "0")}.${callId}`;
+    #toolKey(index: number, id: string): string {
+        return `tool.${String(index).padStart(6, "0")}.${id}`;
+    }
+
+    /** The first-writer-wins durable claim shared by tool commit and ordinary settlement. */
+    #toolResultKey(id: string): string {
+        return `toolResult.${id}`;
     }
 
     /**
-     * The scope one call owns: state persists under its own call ID, never in another call's
-     * scope, and the task context ends where the call was made. The execution and all four tool
-     * hooks share it, so what one of them writes about a call is where the others look for it.
+     * The scope one call owns: state lives under its internal ID, never under the provider's
+     * opaque ID or another call's scope, and is erased when the call commits. The task context
+     * still locates the provider call in conversation history.
      */
-    #callScoped(ctx: Context, callId: string): Context {
+    #callScoped(ctx: Context, id: string, providerCallId: string): Context {
         return withAgentTaskContext(
             withAgentRunKV(
-                withAgentKV(ctx, this.#kv.scoped("call", callId)),
-                this.#runKV.scoped("call", callId),
+                withAgentKV(ctx, this.#kv.scoped("call", id)),
+                this.#runKV.scoped("call", id),
             ),
-            taskContextBeforeToolCall(this.#messages, callId),
+            taskContextBeforeToolCall(this.#messages, providerCallId),
         );
     }
 
@@ -2586,14 +2908,18 @@ export class AgentBase {
      */
     async #invokeToolTransactHook<Argument>(
         txCtx: Context,
-        callId: string,
+        id: string,
+        providerCallId: string,
         hook: ((ctx: Context, argument: Argument) => MaybePromise<void>) | undefined,
         argument: Argument,
     ): Promise<void> {
         if (hook === undefined) return;
         const lifetime = new AbortController();
         try {
-            await hook(this.#callScoped(withLifetime(txCtx, lifetime.signal), callId), argument);
+            await hook(
+                this.#callScoped(withLifetime(txCtx, lifetime.signal), id, providerCallId),
+                argument,
+            );
         } finally {
             lifetime.abort();
         }
@@ -2604,10 +2930,8 @@ export class AgentBase {
      * The context carries the turn's abort signal as its lifetime, so a running tool can
      * observe cancellation and stop its own work.
      */
-    async #executeToolCall(
-        ctx: Context,
-        call: SessionToolCallBlock,
-    ): Promise<SessionToolResultMessage> {
+    async #executeToolCall(ctx: Context, entry: ToolBatchEntry): Promise<SessionToolResultMessage> {
+        const { call } = entry;
         const failure = (text: string): SessionToolResultMessage => ({
             role: "tool",
             callId: call.callId,
@@ -2632,13 +2956,101 @@ export class AgentBase {
         if (tool.parameters !== undefined && !Value.Check(tool.parameters, args)) {
             return failure(`The arguments for "${call.name}" did not match its schema.`);
         }
-        const callCtx = this.#callScoped(ctx, call.callId);
+        const callKV = this.#kv.scoped("call", entry.id).serialized();
+        const callLifetime = new AbortController();
+        let committing = false;
+        const boundedCallKV = callKV.until(callLifetime.signal, () => !committing);
+        const callCtx = withAgentKV(
+            this.#callScoped(ctx, entry.id, entry.providerCallId),
+            boundedCallKV,
+        );
         // From here the call is one the two tool hooks bracket: a tool that exists, a call that
         // finished, and arguments its schema accepts. A call refused before that reaches neither
         // hook, because there is nothing yet to decide about or to report.
         let ran = tool;
         let ranArguments = args;
         let outcome: AgentBaseToolOutcome;
+        let committedOutcome: AgentBaseToolOutcome | undefined;
+        let commitAttempt: Promise<unknown> | undefined;
+        let resolveCommitted!: (outcome: AgentBaseToolOutcome) => void;
+        const committed = new Promise<AgentBaseToolOutcome>((resolve) => {
+            resolveCommitted = resolve;
+        });
+        const outcomeFor = (result: unknown): AgentBaseToolOutcome => ({
+            callId: call.callId,
+            tool: ran,
+            arguments: ranArguments,
+            content: [...ran.toLLM(result)],
+            isError: ran.isError?.(result) === true,
+            result,
+        });
+        const commit = async (commitCtx: Context, result: unknown): Promise<unknown> => {
+            if (commitAttempt !== undefined) return await commitAttempt;
+            if (callLifetime.signal.aborted || commitCtx.lifetime?.aborted === true) {
+                throw new Error("The tool call can no longer commit a result.");
+            }
+            if (!Value.Check(ran.returnType, result)) {
+                throw new Error(`Tool "${ran.name}" committed an invalid result.`);
+            }
+            const candidate = outcomeFor(result);
+            const message: SessionToolResultMessage = {
+                role: "tool",
+                callId: entry.providerCallId,
+                content: candidate.content,
+                ...(candidate.isError ? { isError: true } : {}),
+            };
+            committing = true;
+            const attempt = (async () => {
+                if (agentKV(commitCtx)?.prefix !== callKV.prefix) {
+                    throw new Error(
+                        "A tool result can only be committed with its own live call context.",
+                    );
+                }
+                await this.#persistence.transaction(commitCtx, async (txCtx) => {
+                    const claimed = await this.#persistence.writeValueIfAbsent(
+                        txCtx,
+                        this.#toolResultKey(entry.id),
+                        message,
+                    );
+                    if (!claimed) {
+                        throw new Error("The tool call already has a committed result.");
+                    }
+                    const pending = await this.#persistence.readValues(txCtx, entry.key);
+                    const stored = pending.find(({ key }) => key === entry.key);
+                    if (stored === undefined) {
+                        throw new Error("The tool call has already been settled.");
+                    }
+                    const current = this.#restoreToolEntry(entry.key, stored.value);
+                    if (current.id !== entry.id) {
+                        throw new Error("The pending tool identity changed before commit.");
+                    }
+                    if (current.committed === undefined) {
+                        await this.#persistence.writeValue(
+                            txCtx,
+                            entry.key,
+                            this.#storedToolEntry({ ...entry, committed: message }),
+                        );
+                        await callKV.clear(txCtx);
+                    }
+                    afterCommit(txCtx, () => {
+                        committedOutcome = candidate;
+                        callLifetime.abort();
+                        resolveCommitted(candidate);
+                    });
+                });
+                return result;
+            })();
+            commitAttempt = attempt;
+            try {
+                return await attempt;
+            } catch (error: unknown) {
+                if (commitAttempt === attempt) {
+                    commitAttempt = undefined;
+                    committing = false;
+                }
+                throw error;
+            }
+        };
         try {
             const decision = await this.#hooks.beforeToolCall?.(callCtx, {
                 callId: call.callId,
@@ -2671,37 +3083,69 @@ export class AgentBase {
                     decision?.permissionMode === undefined
                         ? callCtx
                         : withAgentPermissionMode(callCtx, decision.permissionMode);
-                const result: unknown = await ran.execute(runCtx, ranArguments);
-                if (!Value.Check(ran.returnType, result)) {
-                    throw new Error(`Tool "${ran.name}" returned an invalid result.`);
+                const executionCtx = withLifetime(
+                    runCtx,
+                    AbortSignal.any(
+                        runCtx.lifetime === undefined
+                            ? [callLifetime.signal]
+                            : [runCtx.lifetime, callLifetime.signal],
+                    ),
+                );
+                const execution = Promise.resolve(
+                    ran.execute(executionCtx, ranArguments, {
+                        id: entry.id,
+                        providerCallId: entry.providerCallId,
+                        kv: boundedCallKV,
+                        commit,
+                    }),
+                ).then(
+                    (result) => ({ type: "returned", result }) as const,
+                    (error: unknown) => ({ type: "threw", error }) as const,
+                );
+                const settled = await Promise.race([
+                    execution,
+                    committed.then((committed) => ({ type: "committed", committed }) as const),
+                ]);
+                if (settled.type === "committed") {
+                    outcome = settled.committed;
+                } else if (settled.type === "threw") {
+                    throw settled.error;
+                } else if (committedOutcome !== undefined) {
+                    outcome = committedOutcome;
+                } else {
+                    if (!Value.Check(ran.returnType, settled.result)) {
+                        throw new Error(`Tool "${ran.name}" returned an invalid result.`);
+                    }
+                    outcome = outcomeFor(settled.result);
                 }
-                outcome = {
+            }
+        } catch (error: unknown) {
+            outcome =
+                committedOutcome ??
+                ({
                     callId: call.callId,
                     tool: ran,
                     arguments: ranArguments,
-                    content: [...ran.toLLM(result)],
-                    isError: ran.isError?.(result) === true,
-                    result,
-                };
-            }
-        } catch (error: unknown) {
-            outcome = {
-                callId: call.callId,
-                tool: ran,
-                arguments: ranArguments,
-                content: [
-                    { type: "text", text: error instanceof Error ? error.message : String(error) },
-                ],
-                isError: true,
-            };
+                    content: [
+                        {
+                            type: "text",
+                            text: error instanceof Error ? error.message : String(error),
+                        },
+                    ],
+                    isError: true,
+                } satisfies AgentBaseToolOutcome);
         }
-        await this.#invokeHookOn(callCtx, this.#hooks.afterToolCall, outcome);
-        return {
-            role: "tool",
-            callId: call.callId,
-            content: outcome.content,
-            ...(outcome.isError ? { isError: true } : {}),
-        };
+        try {
+            await this.#invokeHookOn(callCtx, this.#hooks.afterToolCall, outcome);
+            return {
+                role: "tool",
+                callId: call.callId,
+                content: outcome.content,
+                ...(outcome.isError ? { isError: true } : {}),
+            };
+        } finally {
+            callLifetime.abort();
+        }
     }
 
     /**
@@ -3011,4 +3455,12 @@ function sessionConfigKey(
             tool.grammar ?? null,
         ]),
     ]);
+}
+
+/**
+ * Provider 0.0.7 types its context through stdlib 0.0.8. Context is used there as a type-only
+ * boundary, so adapt that nominal version skew in this one place while Base owns stdlib 0.0.10.
+ */
+function providerContext(ctx: Context): Parameters<BaseSession["run"]>[0] {
+    return ctx as unknown as Parameters<BaseSession["run"]>[0];
 }

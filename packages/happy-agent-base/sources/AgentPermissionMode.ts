@@ -7,7 +7,7 @@ import { Value } from "@sinclair/typebox/value";
  * The mode is part of what an agent is running on, exactly like its model: it is carried on every
  * context the agent derives, it is durable, and a message may change it. What the runtime does not
  * do is enforce it — the loop has no idea what any particular tool touches. Enforcement belongs to
- * the features and tools that know, and they read the mode in force from the context they are
+ * the modules and tools that know, and they read the mode in force from the context they are
  * given.
  */
 export const agentPermissionModeSchema = Type.Union(

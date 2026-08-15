@@ -2,6 +2,23 @@ import type { SessionOutputBlock, SessionToolLarkGrammar } from "@slopus/happy-p
 import type { Static, TSchema } from "@sinclair/typebox";
 import type { Context } from "@steve.kite/stdlib";
 
+import type { AgentKV } from "./AgentKV.js";
+
+/** One durable invocation as handed directly to the tool that executes it. */
+export interface AgentToolCall<Result extends TSchema = TSchema> {
+    /** Stable internally generated cuid2 identity, reused when an interrupted call resumes. */
+    readonly id: string;
+    /** Opaque identity supplied by the provider and used only to pair its call and result. */
+    readonly providerCallId: string;
+    /** State owned by this invocation and erased atomically when its winning result commits. */
+    readonly kv: AgentKV;
+    /**
+     * Atomically stage this structured result using the transaction carried by `ctx`. The first
+     * successful commit wins; later commits and the eventual execute return value are ignored.
+     */
+    commit(ctx: Context, result: Static<Result>): Promise<Static<Result>>;
+}
+
 /** A tool-owned decision about one invocation while the agent is in Auto mode. */
 export type AgentToolAutoPermissionPredicate<Args> = {
     bivarianceHack(args: Args, ctx: Context): boolean | Promise<boolean>;
@@ -75,7 +92,7 @@ export interface AgentTool<Args extends TSchema = TSchema, Result extends TSchem
      * The context's lifetime aborts when the turn is aborted, so a long-running tool can
      * observe cancellation and stop its own work.
      */
-    execute(ctx: Context, args: Static<Args>): Promise<Static<Result>>;
+    execute(ctx: Context, args: Static<Args>, call: AgentToolCall<Result>): Promise<Static<Result>>;
     /** Renders a validated result into the content blocks the model actually sees. */
     toLLM(result: Static<Result>): readonly SessionOutputBlock[];
     /** Whether a structured result should be reported to the model as an error. */

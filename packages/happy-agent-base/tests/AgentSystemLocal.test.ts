@@ -4,21 +4,28 @@ import { describe, expect, it } from "vitest";
 import {
     AgentKV,
     agentConfig,
-    agentFeatureConfig,
-    AgentStorage,
+    agentModuleConfig,
     AgentSystemLocal,
     AgentSystemRef,
     agentSystem as agentsFromContext,
     type AgentConfig,
     type AgentEnvironment,
-    type AgentFeature,
-    type AgentFeatureScope,
+    type AgentModule,
+    type AgentModuleScope,
 } from "../sources/index.js";
-import { inMemoryStorageLock, providersOf, queued, textTurn, user } from "./gym/fixtures.js";
+import {
+    InMemoryAgentStorage,
+    inMemoryStorageLock,
+    providersOf,
+    queued,
+    textTurn,
+    user,
+} from "./gym/fixtures.js";
 import { InMemoryPersistence } from "./gym/InMemoryPersistence.js";
 import { ScriptedProvider } from "./gym/ScriptedProvider.js";
 
 const ctx = createRootContext().named("agentSystem-test");
+const LOOP_ID = "l12345678901234567890123";
 
 /** A complete environment, since an agent either knows one fully or not at all. */
 function environmentOf(workingDirectory: string): AgentEnvironment {
@@ -49,12 +56,12 @@ describe("AgentSystemLocal", () => {
         const activePersistence = new InMemoryPersistence();
         managerPersistence.values.set("agentSystem.config.active", {});
         activePersistence.values.set("send.0001", queued(user("continue")));
-        activePersistence.values.set("owed", { stage: "inference" });
+        activePersistence.values.set("owed", { stage: "inference", loopId: LOOP_ID });
         const events: string[] = [];
         const releases = new Map<string, () => void>();
         const references: AgentSystemRef[] = [];
-        const startFeature = (name: string): AgentFeature =>
-            new (class implements AgentFeature {
+        const startModule = (name: string): AgentModule =>
+            new (class implements AgentModule {
                 readonly name = name;
 
                 beforeStart(startCtx: Context, agents: AgentSystemRef): Promise<void> {
@@ -75,7 +82,7 @@ describe("AgentSystemLocal", () => {
                     events.push(`afterStart:${name}`);
                 }
 
-                async beforeAgentLoop(hookCtx: Context, scope: AgentFeatureScope): Promise<void> {
+                async beforeAgentLoop(hookCtx: Context, scope: AgentModuleScope): Promise<void> {
                     const agents = agentsFromContext(hookCtx);
                     expect((await agents?.resolve(hookCtx, scope.agent.id))?.id).toBe(
                         scope.agent.id,
@@ -88,7 +95,7 @@ describe("AgentSystemLocal", () => {
                     return "";
                 }
             })();
-        const storage = new AgentStorage({
+        const storage = new InMemoryAgentStorage({
             acquireLock: inMemoryStorageLock(),
             kv: managerKV(managerPersistence),
             persistence: (agentId) => {
@@ -98,14 +105,14 @@ describe("AgentSystemLocal", () => {
         });
 
         const creating = AgentSystemLocal.create(ctx, storage, {
-            features: [startFeature("first"), startFeature("second")],
+            modules: [startModule("first"), startModule("second")],
             providers: providersOf(provider),
             provider: "scripted",
             models: [],
         });
         await until(() => releases.size === 2);
 
-        // Both hooks started together, and no restored agent can reach another feature hook yet.
+        // Both hooks started together, and no restored agent can reach another module hook yet.
         expect(events).toEqual(["beforeStart:first:start", "beforeStart:second:start"]);
         expect(provider.sessions).toHaveLength(0);
         await expect(references[0]?.resolve(ctx, "active")).rejects.toThrow("not ready");
@@ -175,16 +182,16 @@ describe("AgentSystemLocal", () => {
                 return await super.readValues(readCtx, prefix);
             }
         })();
-        slowPersistence.values.set("owed", { stage: "inference" });
-        const storage = (): AgentStorage =>
-            new AgentStorage({
+        slowPersistence.values.set("owed", { stage: "inference", loopId: LOOP_ID });
+        const storage = (): InMemoryAgentStorage =>
+            new InMemoryAgentStorage({
                 acquireLock,
                 kv: managerKV(managerPersistence),
                 persistence: (agentId) =>
                     agentId === "failed" ? failedPersistence : slowPersistence,
             });
         const options = {
-            features: [],
+            modules: [],
             providers: providersOf(new ScriptedProvider([])),
             provider: "scripted",
             models: [],
@@ -204,11 +211,11 @@ describe("AgentSystemLocal", () => {
         });
     });
 
-    it("releases the storage lock when a feature start hook fails", async () => {
+    it("releases the storage lock when a module start hook fails", async () => {
         const acquireLock = inMemoryStorageLock();
         const managerPersistence = new InMemoryPersistence();
-        const storage = (): AgentStorage =>
-            new AgentStorage({
+        const storage = (): InMemoryAgentStorage =>
+            new InMemoryAgentStorage({
                 acquireLock,
                 kv: managerKV(managerPersistence),
                 persistence: () => new InMemoryPersistence(),
@@ -216,11 +223,11 @@ describe("AgentSystemLocal", () => {
         const providers = providersOf(new ScriptedProvider([]));
         let releaseSlow = (): void => undefined;
         let slowStarted = false;
-        const failing: AgentFeature = {
+        const failing: AgentModule = {
             name: "failing",
-            beforeStart: () => Promise.reject(new Error("Feature initialization failed.")),
+            beforeStart: () => Promise.reject(new Error("Module initialization failed.")),
         };
-        const slow: AgentFeature = {
+        const slow: AgentModule = {
             name: "slow",
             beforeStart: () =>
                 new Promise((resolve) => {
@@ -230,7 +237,7 @@ describe("AgentSystemLocal", () => {
         };
 
         const creation = AgentSystemLocal.create(ctx, storage(), {
-            features: [failing, slow],
+            modules: [failing, slow],
             providers,
             provider: "scripted",
             models: [],
@@ -249,7 +256,7 @@ describe("AgentSystemLocal", () => {
         expect(settled).toBe(false);
         await expect(
             AgentSystemLocal.create(ctx, storage(), {
-                features: [],
+                modules: [],
                 providers,
                 provider: "scripted",
                 models: [],
@@ -257,9 +264,9 @@ describe("AgentSystemLocal", () => {
         ).rejects.toThrow("already locked");
 
         releaseSlow();
-        await expect(creation).rejects.toThrow("Feature initialization failed.");
+        await expect(creation).rejects.toThrow("Module initialization failed.");
         const recovered = await AgentSystemLocal.create(ctx, storage(), {
-            features: [],
+            modules: [],
             providers,
             provider: "scripted",
             models: [],
@@ -268,19 +275,19 @@ describe("AgentSystemLocal", () => {
 
         await expect(
             AgentSystemLocal.create(ctx, storage(), {
-                features: [
+                modules: [
                     {
                         name: "failing-after",
-                        afterStart: () => Promise.reject(new Error("Feature post-start failed.")),
+                        afterStart: () => Promise.reject(new Error("Module post-start failed.")),
                     },
                 ],
                 providers,
                 provider: "scripted",
                 models: [],
             }),
-        ).rejects.toThrow("Feature post-start failed.");
+        ).rejects.toThrow("Module post-start failed.");
         const recoveredAgain = await AgentSystemLocal.create(ctx, storage(), {
-            features: [],
+            modules: [],
             providers,
             provider: "scripted",
             models: [],
@@ -292,8 +299,8 @@ describe("AgentSystemLocal", () => {
         const acquireLock = inMemoryStorageLock();
         const managerPersistence = new InMemoryPersistence();
         const agentStores = new Map<string, InMemoryPersistence>();
-        const storage = (): AgentStorage =>
-            new AgentStorage({
+        const storage = (): InMemoryAgentStorage =>
+            new InMemoryAgentStorage({
                 acquireLock,
                 kv: managerKV(managerPersistence),
                 persistence: (agentId) => {
@@ -305,7 +312,7 @@ describe("AgentSystemLocal", () => {
                 },
             });
         const options = {
-            features: [],
+            modules: [],
             providers: providersOf(new ScriptedProvider([])),
             provider: "scripted",
             models: [],
@@ -331,17 +338,17 @@ describe("AgentSystemLocal", () => {
         await second.close(ctx);
     });
 
-    it("caches the resolved agent and its store, and tells features which agent they serve", async () => {
+    it("caches the resolved agent and its store, and tells modules which agent they serve", async () => {
         const provider = new ScriptedProvider([]);
         const managerPersistence = new InMemoryPersistence();
         const served: string[] = [];
         const owners: (AgentSystemRef | undefined)[] = [];
 
-        const feature = (featureName: string): AgentFeature =>
-            new (class implements AgentFeature {
-                readonly name = featureName;
+        const module = (moduleName: string): AgentModule =>
+            new (class implements AgentModule {
+                readonly name = moduleName;
 
-                readonly instructions = (hookCtx: Context, scope: AgentFeatureScope): string => {
+                readonly instructions = (hookCtx: Context, scope: AgentModuleScope): string => {
                     owners.push(agentsFromContext(hookCtx));
                     served.push(`${this.name}:${scope.agent.id}`);
                     return "";
@@ -351,7 +358,7 @@ describe("AgentSystemLocal", () => {
         let stores = 0;
         const agentSystem = await AgentSystemLocal.create(
             ctx,
-            new AgentStorage({
+            new InMemoryAgentStorage({
                 acquireLock: inMemoryStorageLock(),
                 kv: managerKV(managerPersistence),
                 persistence: () => {
@@ -360,7 +367,7 @@ describe("AgentSystemLocal", () => {
                 },
             }),
             {
-                features: [feature("first"), feature("second")],
+                modules: [module("first"), module("second")],
                 providers: providersOf(provider),
                 provider: "scripted",
                 models: [],
@@ -377,7 +384,7 @@ describe("AgentSystemLocal", () => {
         await firstAgent.send(ctx, user("go"), { await: true });
         await firstAgent.waitForIdle();
 
-        // Both features were told the same agent, in the order the collection was given them.
+        // Both modules were told the same agent, in the order the collection was given them.
         expect(served).toEqual([`first:${firstAgent.id}`, `second:${firstAgent.id}`]);
         // And each was handed the collection as a reference, never the collection itself.
         expect(owners[0]).toBeInstanceOf(AgentSystemRef);
@@ -393,7 +400,7 @@ describe("AgentSystemLocal", () => {
         const managerPersistence = new InMemoryPersistence();
         activePersistence.values.set("send.0001", queued(user("continue")));
         // The message was accepted and never answered, so the agent is durably owing an answer.
-        activePersistence.values.set("owed", { stage: "inference" });
+        activePersistence.values.set("owed", { stage: "inference", loopId: LOOP_ID });
         // Both agentSystem were created by the previous process, so this one only resolves them.
         managerPersistence.values.set("agentSystem.config.active", {
             environment: environmentOf("/work/active"),
@@ -403,7 +410,7 @@ describe("AgentSystemLocal", () => {
 
         const agentSystem = await AgentSystemLocal.create(
             ctx,
-            new AgentStorage({
+            new InMemoryAgentStorage({
                 acquireLock: inMemoryStorageLock(),
                 kv: managerKV(managerPersistence),
                 persistence: (id) => {
@@ -412,7 +419,7 @@ describe("AgentSystemLocal", () => {
                 },
             }),
             {
-                features: [],
+                modules: [],
                 providers: providersOf(activeProvider),
                 provider: "scripted",
                 models: [],
@@ -438,12 +445,12 @@ describe("AgentSystemLocal", () => {
         const persistence = new InMemoryPersistence();
         const agentSystem = await AgentSystemLocal.create(
             ctx,
-            new AgentStorage({
+            new InMemoryAgentStorage({
                 acquireLock: inMemoryStorageLock(),
                 kv: managerKV(new InMemoryPersistence()),
                 persistence: () => persistence,
             }),
-            { features: [], providers: providersOf(provider), provider: "scripted", models: [] },
+            { modules: [], providers: providersOf(provider), provider: "scripted", models: [] },
         );
 
         const created = await agentSystem.create(ctx, {});
@@ -480,8 +487,8 @@ describe("AgentSystemLocal", () => {
 
 describe("AgentSystemLocal configuration", () => {
     /**
-     * A collection over the given manager storage, with one feature that records what each
-     * agent's configuration looks like from inside that agent's own hooks. The feature instance
+     * A collection over the given manager storage, with one module that records what each
+     * agent's configuration looks like from inside that agent's own hooks. The module instance
      * is shared, so the configuration reaches it through the context of the agent it is running
      * for rather than through its construction.
      */
@@ -491,25 +498,25 @@ describe("AgentSystemLocal configuration", () => {
         settings: (Record<string, unknown> | undefined)[],
         provider: ScriptedProvider = new ScriptedProvider([]),
     ): Promise<AgentSystemLocal> {
-        const recorder: AgentFeature = new (class implements AgentFeature {
+        const recorder: AgentModule = new (class implements AgentModule {
             readonly name = "recorder";
 
             instructions(hookCtx: Context): string {
                 const config = agentConfig(hookCtx);
                 if (config !== undefined) seen.push(config);
-                settings.push(agentFeatureConfig(hookCtx, "recorder"));
+                settings.push(agentModuleConfig(hookCtx, "recorder"));
                 return "";
             }
         })();
         return await AgentSystemLocal.create(
             ctx,
-            new AgentStorage({
+            new InMemoryAgentStorage({
                 acquireLock: inMemoryStorageLock(),
                 kv: managerKV(managerPersistence),
                 persistence: () => new InMemoryPersistence(),
             }),
             {
-                features: [recorder],
+                modules: [recorder],
                 providers: providersOf(provider),
                 provider: "scripted",
                 models: [],
@@ -519,10 +526,10 @@ describe("AgentSystemLocal configuration", () => {
 
     const config: AgentConfig = {
         environment: environmentOf("/work"),
-        features: { recorder: { verbosity: "high" } },
+        modules: { recorder: { verbosity: "high" } },
     };
 
-    it("carries the created configuration to every feature and keeps it across a restart", async () => {
+    it("carries the created configuration to every module and keeps it across a restart", async () => {
         const managerPersistence = new InMemoryPersistence();
         const seen: AgentConfig[] = [];
         const settings: (Record<string, unknown> | undefined)[] = [];
@@ -537,7 +544,7 @@ describe("AgentSystemLocal configuration", () => {
         await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
         expect(seen).toEqual([config]);
-        // A feature sees only its own opaque entry, which the collection never interprets.
+        // A module sees only its own opaque entry, which the collection never interprets.
         expect(settings).toEqual([{ verbosity: "high" }]);
         expect(await agentSystem.config(ctx, agent.id)).toEqual(config);
         await agent.close();
@@ -575,9 +582,9 @@ describe("AgentSystemLocal configuration", () => {
     });
 });
 
-describe("AgentSystemLocal shared features", () => {
-    /** A feature instance that records, per agent, everything it was told from the context. */
-    class SharedRecorder implements AgentFeature {
+describe("AgentSystemLocal shared modules", () => {
+    /** A module instance that records, per agent, everything it was told from the context. */
+    class SharedRecorder implements AgentModule {
         static readonly instances: SharedRecorder[] = [];
 
         readonly name = "shared-recorder";
@@ -590,7 +597,7 @@ describe("AgentSystemLocal shared features", () => {
             SharedRecorder.instances.push(this);
         }
 
-        readonly instructions = (hookCtx: Context, scope: AgentFeatureScope): string => {
+        readonly instructions = (hookCtx: Context, scope: AgentModuleScope): string => {
             const id = scope.agent.id;
             if (!this.served.includes(id)) {
                 this.served.push(id);
@@ -602,16 +609,16 @@ describe("AgentSystemLocal shared features", () => {
 
     async function collectionOf(
         provider: ScriptedProvider,
-        features: readonly AgentFeature[],
+        modules: readonly AgentModule[],
     ): Promise<AgentSystemLocal> {
         return await AgentSystemLocal.create(
             ctx,
-            new AgentStorage({
+            new InMemoryAgentStorage({
                 acquireLock: inMemoryStorageLock(),
                 kv: managerKV(new InMemoryPersistence()),
                 persistence: () => new InMemoryPersistence(),
             }),
-            { features, providers: providersOf(provider), provider: "scripted", models: [] },
+            { modules, providers: providersOf(provider), provider: "scripted", models: [] },
         );
     }
 
@@ -625,7 +632,7 @@ describe("AgentSystemLocal shared features", () => {
 
         // One instance for the whole collection, serving both agents.
         expect(SharedRecorder.instances).toHaveLength(1);
-        expect(first.feature("shared-recorder")).toBe(second.feature("shared-recorder"));
+        expect(first.module("shared-recorder")).toBe(second.module("shared-recorder"));
 
         // That instance serves both agents, and its instructions open every prompt.
         await first.send(ctx, user("first"), { await: true });
@@ -642,16 +649,16 @@ describe("AgentSystemLocal shared features", () => {
         await second.close();
     });
 
-    it("gives a feature one store shared by every agent, beside a store of its own", async () => {
-        /** A feature that leaves a note for whichever agent runs next. */
-        class Postbox implements AgentFeature {
+    it("gives a module one store shared by every agent, beside a store of its own", async () => {
+        /** A module that leaves a note for whichever agent runs next. */
+        class Postbox implements AgentModule {
             readonly name = "postbox";
             /** What each agent found in the shared store, and in its own, before writing. */
             readonly found: { shared: unknown; own: unknown }[] = [];
 
             readonly instructions = async (
                 hookCtx: Context,
-                scope: AgentFeatureScope,
+                scope: AgentModuleScope,
             ): Promise<string> => {
                 this.found.push({
                     shared: await scope.sharedKV.read(hookCtx, "note"),
@@ -682,9 +689,9 @@ describe("AgentSystemLocal shared features", () => {
         await second.close();
     });
 
-    it("hands features the collection as a reference rather than itself", async () => {
+    it("hands modules the collection as a reference rather than itself", async () => {
         let seen: unknown;
-        class Peek implements AgentFeature {
+        class Peek implements AgentModule {
             readonly name = "peek";
             readonly instructions = (hookCtx: Context): string => {
                 seen = agentsFromContext(hookCtx);
@@ -693,13 +700,13 @@ describe("AgentSystemLocal shared features", () => {
         }
         const agentSystem = await AgentSystemLocal.create(
             ctx,
-            new AgentStorage({
+            new InMemoryAgentStorage({
                 acquireLock: inMemoryStorageLock(),
                 kv: managerKV(new InMemoryPersistence()),
                 persistence: () => new InMemoryPersistence(),
             }),
             {
-                features: [new Peek()],
+                modules: [new Peek()],
                 providers: providersOf(new ScriptedProvider([textTurn("answer")])),
                 provider: "scripted",
                 models: [],
@@ -727,5 +734,180 @@ describe("AgentSystemLocal shared features", () => {
             "updateMetadata",
         ]);
         await agent.close();
+    });
+
+    it("observes created, restored, and archived agents around durable module projections", async () => {
+        const manager = new InMemoryPersistence();
+        const stores = new Map<string, InMemoryPersistence>();
+        const acquireLock = inMemoryStorageLock();
+        const events: string[] = [];
+        const snapshots: unknown[] = [];
+        let restoredRefId: string | undefined;
+        const lifecycleModule: AgentModule = {
+            name: "lifecycle",
+            agentCreatedTransact: async (hookCtx, scope, agent) => {
+                await scope.sharedKV.write(hookCtx, agent.id, "created");
+                events.push("created:transact");
+            },
+            agentCreated: async (hookCtx, scope, agent) => {
+                events.push(`created:${String(await scope.sharedKV.read(hookCtx, agent.id))}`);
+                snapshots.push(agent);
+            },
+            agentRestoredTransact: async (hookCtx, scope, agent) => {
+                await scope.sharedKV.write(hookCtx, agent.id, "restored");
+                events.push("restored:transact");
+            },
+            agentRestored: async (hookCtx, scope, agent) => {
+                restoredRefId = (await scope.agents.resolve(hookCtx, agent.id)).id;
+                events.push(`restored:${String(await scope.sharedKV.read(hookCtx, agent.id))}`);
+                snapshots.push(agent);
+            },
+            agentArchivedTransact: async (hookCtx, scope, agent) => {
+                await scope.sharedKV.write(hookCtx, agent.id, "archived");
+                events.push("archived:transact");
+            },
+            agentArchived: async (hookCtx, scope, agent) => {
+                events.push(`archived:${String(await scope.sharedKV.read(hookCtx, agent.id))}`);
+                snapshots.push(agent);
+            },
+        };
+        const storage = () =>
+            new InMemoryAgentStorage({
+                acquireLock,
+                kv: managerKV(manager),
+                persistence: (agentId) => {
+                    const existing = stores.get(agentId);
+                    if (existing !== undefined) return existing;
+                    const created = new InMemoryPersistence();
+                    stores.set(agentId, created);
+                    return created;
+                },
+            });
+        const options = {
+            modules: [lifecycleModule],
+            providers: providersOf(new ScriptedProvider([])),
+            provider: "scripted",
+            models: [],
+        };
+        const first = await AgentSystemLocal.create(ctx, storage(), options);
+        const agent = await first.create(
+            ctx,
+            { metadata: { title: "Owned", nested: { value: "stable" } } },
+            { id: "a12345678901234567890123" },
+        );
+        await first.close(ctx);
+
+        const second = await AgentSystemLocal.create(ctx, storage(), options);
+        await second.delete(ctx, agent.id);
+        await second.close(ctx);
+
+        expect(events).toEqual([
+            "created:transact",
+            "created:created",
+            "restored:transact",
+            "restored:restored",
+            "archived:transact",
+            "archived:archived",
+        ]);
+        expect(snapshots).toHaveLength(3);
+        expect(Object.isFrozen(snapshots[0])).toBe(true);
+        expect(Object.isFrozen((snapshots[0] as { metadata: unknown }).metadata)).toBe(true);
+        expect(restoredRefId).toBe(agent.id);
+        expect(snapshots).toEqual([
+            {
+                id: agent.id,
+                metadata: { title: "Owned", nested: { value: "stable" } },
+            },
+            {
+                id: agent.id,
+                metadata: { title: "Owned", nested: { value: "stable" } },
+            },
+            {
+                id: agent.id,
+                metadata: { title: "Owned", nested: { value: "stable" } },
+            },
+        ]);
+    });
+
+    it("rolls lifecycle projections back and suppresses observation when creation fails", async () => {
+        const manager = new InMemoryPersistence();
+        let observed = 0;
+        const system = await AgentSystemLocal.create(
+            ctx,
+            new InMemoryAgentStorage({
+                acquireLock: inMemoryStorageLock(),
+                kv: managerKV(manager),
+                persistence: () => new InMemoryPersistence(),
+            }),
+            {
+                modules: [
+                    {
+                        name: "reject-created",
+                        agentCreatedTransact: async (hookCtx, scope, agent) => {
+                            await scope.sharedKV.write(hookCtx, agent.id, "must roll back");
+                            throw new Error("creation projection failed");
+                        },
+                        agentCreated: () => {
+                            observed += 1;
+                        },
+                    },
+                ],
+                providers: providersOf(new ScriptedProvider([])),
+                provider: "scripted",
+                models: [],
+            },
+        );
+
+        await expect(system.create(ctx, {}, { id: "f12345678901234567890123" })).rejects.toThrow(
+            "creation projection failed",
+        );
+
+        expect(await system.config(ctx, "f12345678901234567890123")).toBeUndefined();
+        expect(
+            manager.values.has("agentSystem.modules.reject-created.f12345678901234567890123"),
+        ).toBe(false);
+        expect(observed).toBe(0);
+        await system.close(ctx);
+    });
+
+    it("rejects reentry through a transactional lifecycle ref without restricting observers", async () => {
+        let transactionalError = "";
+        let observerResolved = false;
+        const system = await AgentSystemLocal.create(
+            ctx,
+            new InMemoryAgentStorage({
+                acquireLock: inMemoryStorageLock(),
+                kv: managerKV(new InMemoryPersistence()),
+                persistence: () => new InMemoryPersistence(),
+            }),
+            {
+                modules: [
+                    {
+                        name: "lifecycle-reentry",
+                        agentCreatedTransact: async (hookCtx, scope, agent) => {
+                            try {
+                                await scope.agents.resolve(hookCtx, agent.id);
+                            } catch (error: unknown) {
+                                transactionalError =
+                                    error instanceof Error ? error.message : String(error);
+                            }
+                        },
+                        agentCreated: async (hookCtx, scope, agent) => {
+                            observerResolved =
+                                (await scope.agents.resolve(hookCtx, agent.id)).id === agent.id;
+                        },
+                    },
+                ],
+                providers: providersOf(new ScriptedProvider([])),
+                provider: "scripted",
+                models: [],
+            },
+        );
+
+        await system.create(ctx, {}, { id: "g12345678901234567890123" });
+        await until(() => observerResolved);
+
+        expect(transactionalError).toContain("transactional lifecycle hook");
+        await system.close(ctx);
     });
 });

@@ -15,7 +15,7 @@ const trace: RealGymTrace = {
         workingDirectory: "/work",
         shell: "/bin/zsh",
     },
-    features: ["gym"],
+    modules: ["gym"],
     models: ["openai/gpt-5.6-sol"],
     sessions: [
         {
@@ -68,7 +68,7 @@ const trace: RealGymTrace = {
 };
 
 describe("renderRealGymReport", () => {
-    it("reports the agent, its features, and everything one scenario did", () => {
+    it("reports the agent, its modules, and everything one scenario did", () => {
         const html = renderRealGymReport([trace]);
 
         expect(html).toContain("Tool call through codex");
@@ -76,11 +76,11 @@ describe("renderRealGymReport", () => {
         expect(html).toContain("codex-session");
         expect(html).toContain("1.00 s");
         expect(html).toContain("120 in / 3 out");
-        // The agent's own shape: features, offered models, and the environment it works in.
+        // The agent's own shape: modules, offered models, and the environment it works in.
         expect(html).toContain("gym");
         expect(html).toContain("/work");
         expect(html).toContain("darwin 25.5.0");
-        // What the features assembled, and what the model did with it.
+        // What the modules assembled, and what the model did with it.
         expect(html).toContain("record_answer");
         expect(html).toContain("Record your final answer.");
         expect(html).toContain("{&quot;answer&quot;:&quot;Paris&quot;}");

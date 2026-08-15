@@ -7,7 +7,7 @@ import type { AgentMessageMetadata } from "./AgentMetadata.js";
  * the ordinary durable queues, or trigger a compaction. An action drives the loop exactly like
  * an external call to `steer`, `send`, or `compact` would.
  */
-export type AgentFeatureAction =
+export type AgentModuleAction =
     | {
           readonly type: "steer";
           readonly id?: string;

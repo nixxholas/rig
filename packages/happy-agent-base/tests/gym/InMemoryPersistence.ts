@@ -1,6 +1,9 @@
-import { createContextNamespace, type Context } from "@steve.kite/stdlib";
+import { createContextNamespace, withAfterCommit, type Context } from "@steve.kite/stdlib";
 
 import type { AgentPersistence, AgentRecord } from "../../sources/index.js";
+import { inMemoryDrizzle } from "./InMemoryDrizzle.js";
+
+export const inMemoryPersistenceDatabase = inMemoryDrizzle().database;
 
 interface StagedTransaction {
     readonly owner: InMemoryPersistence;
@@ -33,6 +36,7 @@ function stored<Value>(value: Value): Value {
  * transaction and apply them only at commit.
  */
 export class InMemoryPersistence implements AgentPersistence {
+    readonly database = inMemoryPersistenceDatabase;
     readonly records: AgentRecord[];
     readonly values = new Map<string, unknown>();
     loads = 0;
@@ -61,6 +65,8 @@ export class InMemoryPersistence implements AgentPersistence {
         ctx: Context,
         work: (ctx: Context) => Promise<Result>,
     ): Promise<Result> {
+        const existing = this.#staged(ctx);
+        if (existing !== undefined) return await work(ctx);
         const staged: StagedTransaction = {
             owner: this,
             cleared: false,
@@ -68,11 +74,13 @@ export class InMemoryPersistence implements AgentPersistence {
             writes: new Map(),
             deletes: new Set(),
         };
-        const result = await work(stagedNamespace.set(ctx, staged));
+        const [transactionCtx, runAfterCommit] = withAfterCommit(stagedNamespace.set(ctx, staged));
+        const result = await work(transactionCtx);
         if (staged.cleared) this.records.length = 0;
         this.records.push(...staged.records);
         for (const [key, value] of staged.writes) this.values.set(key, value);
         for (const key of staged.deletes) this.values.delete(key);
+        await runAfterCommit();
         return result;
     }
 

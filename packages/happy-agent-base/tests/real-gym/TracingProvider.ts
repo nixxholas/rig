@@ -32,7 +32,7 @@ export class TracingProvider extends BaseProvider {
     }
 
     override async session(id: string, options: SessionOptions): Promise<BaseSession> {
-        // Session creation is where the features' work becomes visible: the assembled system
+        // Session creation is where the modules' work becomes visible: the assembled system
         // prompt and the exact tool descriptors the model will be shown.
         this.#trace.sessions.push({
             instructions: options.instructions,
@@ -56,7 +56,10 @@ class TracingSession extends BaseSession {
         this.#trace = trace;
     }
 
-    override run(ctx: Context, request: SessionRunRequest): SessionStream {
+    override run(
+        ctx: Parameters<BaseSession["run"]>[0],
+        request: SessionRunRequest,
+    ): SessionStream {
         const inference: RealGymInference = {
             model: request.model,
             effort: request.effort,
@@ -74,7 +77,7 @@ class TracingSession extends BaseSession {
     }
 
     override async compact(
-        ctx: Context,
+        ctx: Parameters<BaseSession["compact"]>[0],
         options: SessionCompactionOptions,
     ): Promise<SessionCompaction> {
         return await this.#session.compact(ctx, options);

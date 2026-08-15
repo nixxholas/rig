@@ -7,9 +7,9 @@ import { InMemoryPersistence } from "../gym/InMemoryPersistence.js";
 import { ScriptedProvider } from "../gym/ScriptedProvider.js";
 import { providersOf, user } from "../gym/fixtures.js";
 
-const ctx = createRootContext().named("happy-agent-base-feature-state-durability-gaps");
+const ctx = createRootContext().named("happy-agent-base-module-state-durability-gaps");
 
-describe("feature and metadata durability gaps", () => {
+describe("module and metadata durability gaps", () => {
     it("does not let failed context-token persistence change only the live agent's decisions", async () => {
         const persistence = new InMemoryPersistence();
         const originalWriteValue = persistence.writeValue.bind(persistence);

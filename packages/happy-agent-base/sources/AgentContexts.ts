@@ -1,6 +1,7 @@
 import type { SessionReasoningEffort, SessionServiceTier } from "@slopus/happy-providers";
 import { createContextNamespace, type Context } from "@steve.kite/stdlib";
 
+import type { AgentDatabase } from "./AgentDatabase.js";
 import type { AgentKV } from "./AgentKV.js";
 import { DEFAULT_AGENT_PERMISSION_MODE, type AgentPermissionMode } from "./AgentPermissionMode.js";
 
@@ -29,12 +30,26 @@ const permissionModeNamespace = createContextNamespace<AgentPermissionMode>(
 const kvNamespace = createContextNamespace<AgentKV | undefined>("agentKV", undefined);
 /** Backing storage for `agentRunKV`: the run's own store, erased when the agent settles. */
 const runKVNamespace = createContextNamespace<AgentKV | undefined>("agentRunKV", undefined);
+/** Backing storage for the active Drizzle database or transaction facade. */
+const databaseNamespace = createContextNamespace<AgentDatabase | undefined>(
+    "agentDatabase",
+    undefined,
+);
+/** Storage-owned identity and lifetime of an active transaction facade. */
+export interface AgentStorageTransactionContext {
+    readonly database: AgentDatabase;
+    readonly lifetime: AbortSignal;
+    readonly owner: object;
+}
+const storageTransactionNamespace = createContextNamespace<
+    AgentStorageTransactionContext | undefined
+>("agentStorageTransaction", undefined);
 
 /**
  * Derive the agent's context carrying its ID, provider ID, model, effort, service tier, and
  * permission mode — all serializable values. The agent applies this once at construction, so hooks
  * and tool executions can read the values back through the accessors below. The ID is what lets one
- * feature instance serve every agent in a collection: a shared feature learns which agent a hook is
+ * module instance serve every agent in a collection: a shared module learns which agent a hook is
  * running for from the context rather than from something it was constructed with.
  */
 export function withAgentContext(
@@ -121,4 +136,37 @@ export function withAgentRunKV(ctx: Context, kv: AgentKV): Context {
 /** The run's own store carried on this context, when the agent attached one. */
 export function agentRunKV(ctx: Context): AgentKV | undefined {
     return runKVNamespace.get(ctx);
+}
+
+/** Carry the active Drizzle database or transaction facade on a derived context. */
+export function withAgentDatabase(ctx: Context, database: AgentDatabase): Context {
+    return databaseNamespace.set(ctx, database);
+}
+
+/** The active Drizzle database or transaction facade, when this work has durable storage. */
+export function agentDatabase(ctx: Context): AgentDatabase | undefined {
+    return databaseNamespace.get(ctx);
+}
+
+/** Install the active facade and its owning storage for the duration of one transaction callback. */
+export function withAgentStorageTransaction(
+    ctx: Context,
+    transaction: AgentStorageTransactionContext,
+): Context {
+    return storageTransactionNamespace.set(
+        withAgentDatabase(ctx, transaction.database),
+        transaction,
+    );
+}
+
+/** The storage transaction carried by this context, including its ended state when retained. */
+export function agentStorageTransaction(
+    ctx: Context,
+): AgentStorageTransactionContext | undefined {
+    return storageTransactionNamespace.get(ctx);
+}
+
+/** Drop a caller's transaction lifetime when creating independently owned agent work. */
+export function withoutAgentStorageTransaction(ctx: Context): Context {
+    return storageTransactionNamespace.set(ctx, undefined);
 }

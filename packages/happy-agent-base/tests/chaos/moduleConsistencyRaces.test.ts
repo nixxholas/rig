@@ -8,15 +8,19 @@ import {
     agentKV,
     AgentKV,
     defineAgentTool,
-    type AgentFeature,
+    withAgentDatabase,
+    type AgentModule,
 } from "../../sources/index.js";
-import { providersOf, sharedKV, textTurn, user } from "../gym/fixtures.js";
+import { providersOf, sharedKV, testAgentDatabase, textTurn, user } from "../gym/fixtures.js";
 import { InMemoryPersistence } from "../gym/InMemoryPersistence.js";
 import { ScriptedProvider } from "../gym/ScriptedProvider.js";
 
-const ctx = createRootContext().named("feature-consistency-races-test");
+const ctx = withAgentDatabase(
+    createRootContext().named("module-consistency-races-test"),
+    testAgentDatabase(),
+);
 
-describe("feature consistency races", () => {
+describe("module consistency races", () => {
     it("isolates a dotted KV scope segment from an equivalent dotted relative key", async () => {
         const persistence = new InMemoryPersistence();
         const root = directKV(persistence, "kv.");
@@ -31,38 +35,38 @@ describe("feature consistency races", () => {
         expect.soft(persistence.values).toHaveLength(2);
     });
 
-    it("isolates dotted feature names from dots in another feature's relative keys", async () => {
+    it("isolates dotted module names from dots in another module's relative keys", async () => {
         const persistence = new InMemoryPersistence();
         const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
-        let dottedFeatureObserved: unknown;
-        let dottedFeatureCalls = 0;
-        const dottedFeature: AgentFeature = {
+        let dottedModuleObserved: unknown;
+        let dottedModuleCalls = 0;
+        const dottedModule: AgentModule = {
             name: "alpha.beta",
-            instructions: async (featureCtx) => {
-                const kv = requiredKV(featureCtx);
-                dottedFeatureCalls += 1;
-                if (dottedFeatureCalls === 1) {
-                    await kv.write(featureCtx, "state", "dotted feature");
+            instructions: async (moduleCtx) => {
+                const kv = requiredKV(moduleCtx);
+                dottedModuleCalls += 1;
+                if (dottedModuleCalls === 1) {
+                    await kv.write(moduleCtx, "state", "dotted module");
                 } else {
-                    dottedFeatureObserved = await kv.read(featureCtx, "state");
+                    dottedModuleObserved = await kv.read(moduleCtx, "state");
                 }
                 return "";
             },
         };
-        const dottedKeyFeature: AgentFeature = {
+        const dottedKeyModule: AgentModule = {
             name: "alpha",
-            instructions: async (featureCtx) => {
-                await requiredKV(featureCtx).write(featureCtx, "beta.state", "dotted key");
+            instructions: async (moduleCtx) => {
+                await requiredKV(moduleCtx).write(moduleCtx, "beta.state", "dotted key");
                 return "";
             },
         };
         const agent = await Agent.create(ctx, {
-            id: "feature-scope-collision",
+            id: "module-scope-collision",
             providers: providersOf(provider),
             provider: "scripted",
             persistence,
             sharedKV: sharedKV(),
-            features: [dottedFeature, dottedKeyFeature],
+            modules: [dottedModule, dottedKeyModule],
         });
 
         try {
@@ -71,7 +75,7 @@ describe("feature consistency races", () => {
             await agent.send(ctx, user("second"), { await: true });
             await agent.waitForIdle();
 
-            expect(dottedFeatureObserved).toBe("dotted feature");
+            expect(dottedModuleObserved).toBe("dotted module");
         } finally {
             await agent.close();
         }
@@ -117,7 +121,7 @@ describe("feature consistency races", () => {
             },
             toLLM: () => [{ type: "text", text: "dotted key done" }],
         });
-        const toolsFeature: AgentFeature = {
+        const toolsModule: AgentModule = {
             name: "collision-tools",
             tools: () => [dottedCallTool, dottedKeyTool],
         };
@@ -134,7 +138,7 @@ describe("feature consistency races", () => {
             provider: "scripted",
             persistence,
             sharedKV: sharedKV(),
-            features: [toolsFeature],
+            modules: [toolsModule],
         });
 
         try {

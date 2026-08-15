@@ -73,7 +73,7 @@ describe.skipIf(!live)("real inference", () => {
                 expect(inference?.tokens?.input).toBeGreaterThan(0);
                 expect(inference?.tokens?.output).toBeGreaterThan(0);
 
-                // The gym feature really assembled this session and exposed its real tool.
+                // The gym module really assembled this session and exposed its real tool.
                 const [session] = live.trace.sessions;
                 expect(session?.instructions).toContain("# Automated check");
                 expect(session?.tools.map((tool) => tool.name)).toEqual(["record_answer"]);

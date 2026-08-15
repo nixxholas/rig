@@ -11,16 +11,21 @@ import {
     AgentBase,
     AgentKV,
     agentKV,
-    AgentStorage,
     AgentSystemLocal,
     defineAgentTool,
     type Agent,
-    type AgentFeature,
+    type AgentModule,
     type AgentStorageLock,
 } from "../../sources/index.js";
 import { InMemoryPersistence } from "../gym/InMemoryPersistence.js";
 import { ScriptedProvider } from "../gym/ScriptedProvider.js";
-import { inMemoryStorageLock, providersOf, textTurn, user } from "../gym/fixtures.js";
+import {
+    InMemoryAgentStorage,
+    inMemoryStorageLock,
+    providersOf,
+    textTurn,
+    user,
+} from "../gym/fixtures.js";
 
 const ctx = createRootContext().named("happy-agent-base-self-reentrant-tool-calls");
 
@@ -105,7 +110,7 @@ async function managerHarness(
     readonly managerPersistence: InMemoryPersistence;
 }> {
     const tool = selfTool(execute);
-    class SelfToolFeature implements AgentFeature {
+    class SelfToolModule implements AgentModule {
         readonly name = "self-tool";
 
         tools(): readonly [typeof tool] {
@@ -117,13 +122,13 @@ async function managerHarness(
     return {
         manager: await AgentSystemLocal.create(
             ctx,
-            new AgentStorage({
+            new InMemoryAgentStorage({
                 acquireLock,
                 kv: managerKV(managerPersistence),
                 persistence: () => persistence,
             }),
             {
-                features: [new SelfToolFeature()],
+                modules: [new SelfToolModule()],
                 providers: providersOf(provider),
                 provider: "scripted",
                 models: [],
@@ -214,7 +219,7 @@ describe("self-reentrant tool calls", () => {
             textTurn("deferred answer"),
         ]);
         let agent!: AgentBase;
-        let sending!: Promise<void>;
+        let sending!: Promise<unknown>;
         const tool = selfTool((callCtx) => {
             sending = agent.send(callCtx, user("fire-and-forget send"));
             return Promise.resolve();

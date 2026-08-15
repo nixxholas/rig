@@ -3,6 +3,7 @@ import { Value } from "@sinclair/typebox/value";
 import type { Context } from "@steve.kite/stdlib";
 
 import type { AgentPersistence } from "./AgentPersistence.js";
+import { cuid2Schema } from "./AgentMetadata.js";
 
 /**
  * The one key an agent's outstanding work lives under, in the agent's own store. It is a single
@@ -24,6 +25,8 @@ export const AgentBasePendingStage = Type.Union([
     Type.Literal("tools"),
     /** The conversation is being replaced by the provider's summary of it. */
     Type.Literal("compaction"),
+    /** The loop has ended and its durable settlement transaction remains to commit. */
+    Type.Literal("settlement"),
 ]);
 export type AgentBasePendingStage = Static<typeof AgentBasePendingStage>;
 
@@ -35,6 +38,10 @@ export type AgentBasePendingStage = Static<typeof AgentBasePendingStage>;
  */
 export const AgentBasePendingState = Type.Object({
     stage: AgentBasePendingStage,
+    loopId: cuid2Schema,
+    turnId: Type.Optional(cuid2Schema),
+    inferenceId: Type.Optional(cuid2Schema),
+    settlementId: Type.Optional(cuid2Schema),
 });
 export type AgentBasePendingState = Static<typeof AgentBasePendingState>;
 

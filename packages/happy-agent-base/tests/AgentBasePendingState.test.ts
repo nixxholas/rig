@@ -12,6 +12,10 @@ import { ScriptedProvider } from "./gym/ScriptedProvider.js";
 import { providersOf, textTurn, user, userRecord } from "./gym/fixtures.js";
 
 const ctx = createRootContext().named("happy-agent-base-pending-state");
+const LOOP_ID = "l12345678901234567890123";
+const TURN_ID = "t12345678901234567890123";
+const INFERENCE_ID = "i12345678901234567890123";
+const SETTLEMENT_ID = "s12345678901234567890123";
 
 interface Deferred {
     readonly promise: Promise<void>;
@@ -130,7 +134,10 @@ describe("durable pending state", () => {
 
     it("tells a listener to drop a block that a cut-off run will never finish", async () => {
         const persistence = new InMemoryPersistence([userRecord("interrupted question")]);
-        persistence.values.set(AGENT_BASE_PENDING_KEY, { stage: "inference" });
+        persistence.values.set(AGENT_BASE_PENDING_KEY, {
+            stage: "inference",
+            loopId: LOOP_ID,
+        });
         const events: string[] = [];
         const provider = new ScriptedProvider([textTurn("recovered")]);
         const restarted = await AgentBase.create(ctx, {
@@ -203,9 +210,78 @@ describe("durable pending state", () => {
         // work, which costs one wasted resumption and never a lost answer.
         expect(persistence.values.has("conclusion")).toBe(false);
         expect(await agentBasePendingStateOf(ctx, persistence)).toMatchObject({
-            stage: "inference",
+            stage: "settlement",
         });
         expect(agent.active).toBe(true);
         await agent.close();
+    });
+
+    it("reuses persisted loop, turn, and inference identities after restart", async () => {
+        const persistence = new InMemoryPersistence([userRecord("resume")]);
+        persistence.values.set(AGENT_BASE_PENDING_KEY, {
+            stage: "inference",
+            loopId: LOOP_ID,
+            turnId: TURN_ID,
+            inferenceId: INFERENCE_ID,
+        });
+        const observed: unknown[] = [];
+        const restarted = await AgentBase.load(ctx, {
+            id: "identity-restart",
+            providers: providersOf(new ScriptedProvider([textTurn("done")])),
+            provider: "scripted",
+            persistence,
+            hooks: {
+                beforeInferenceTransact: (_hookCtx, inference) => void observed.push(inference),
+                beforeInference: (_hookCtx, inference) => void observed.push(inference),
+                afterInferenceTransact: (_hookCtx, inference) => void observed.push(inference),
+                afterInference: (_hookCtx, inference) => void observed.push(inference),
+            },
+        });
+
+        restarted.start();
+        await restarted.waitForIdle();
+
+        expect(observed).toHaveLength(4);
+        expect(observed).toMatchObject(
+            Array.from({ length: 4 }, () => ({
+                loopId: LOOP_ID,
+                turnId: TURN_ID,
+                inferenceId: INFERENCE_ID,
+            })),
+        );
+        await restarted.close();
+    });
+
+    it("resumes a durable settlement directly with its original identity", async () => {
+        const persistence = new InMemoryPersistence();
+        persistence.values.set(AGENT_BASE_PENDING_KEY, {
+            stage: "settlement",
+            loopId: LOOP_ID,
+            settlementId: SETTLEMENT_ID,
+        });
+        const settlements: unknown[] = [];
+        const provider = new ScriptedProvider([]);
+        const restarted = await AgentBase.load(ctx, {
+            id: "settlement-restart",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+            hooks: {
+                afterAgentSettledTransact: (_hookCtx, settlement) =>
+                    void settlements.push(settlement),
+                afterAgentSettled: (_hookCtx, settlement) => void settlements.push(settlement),
+            },
+        });
+
+        restarted.start();
+        await restarted.waitForIdle();
+
+        expect(settlements).toEqual([
+            { loopId: LOOP_ID, settlementId: SETTLEMENT_ID },
+            { loopId: LOOP_ID, settlementId: SETTLEMENT_ID },
+        ]);
+        expect(provider.sessions).toHaveLength(0);
+        expect(await agentBasePendingStateOf(ctx, persistence)).toBeUndefined();
+        await restarted.close();
     });
 });

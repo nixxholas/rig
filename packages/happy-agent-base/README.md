@@ -10,13 +10,25 @@ restarts.
 The package also provides the primitives needed to host that runtime:
 
 - `Agent`, `AgentSystem`, and `AgentSystemLocal` for composing and addressing agents;
-- `AgentPersistence`, `AgentStorage`, and `AgentKV` for durable state;
+- Drizzle-backed `AgentStorage` and scoped `AgentKV` for durable state;
 - `AgentProviders` for resolving provider/model routes;
 - `AgentTool` and lifecycle hooks for extending the loop.
 
-One `AgentSystem` exclusively owns one durable store. Every `AgentStorage` adapter must acquire a
-hard database-level lock before the system starts; `AgentSystem.close()` stops its agents and
-releases that lock. The runtime intentionally contains no CAS or multi-owner coordination.
+One `AgentSystem` exclusively owns one durable store. `AgentStorage` requires an asynchronous
+Drizzle SQLite or PostgreSQL/PGlite database plus a hard database-level lock. It owns the agent
+record, key-value, and migration tables itself. `AgentSystem.close()` stops its agents and releases
+the lock; the runtime intentionally contains no CAS or multi-owner coordination.
+
+By default, storage uses Drizzle transactions and installs stdlib's universal `afterCommit` scope
+on their contexts, draining it only after the outer transaction succeeds. A host that composes
+agent writes into a wider transaction may provide `transaction`; its callback context must carry
+the host transaction's own stdlib `afterCommit` scope. Outside a transaction, stdlib starts
+post-commit callbacks on the next microtask.
+
+Storage, KV, migrations, and transactional module hooks compose with a host-owned outer
+transaction. Live `Agent` and `AgentSystem` commands do not: creating, resolving, messaging,
+mutating, archiving, or closing a live agent from inside an outer storage transaction is rejected
+because the corresponding in-memory lifetime cannot be published until that transaction commits.
 
 An agent runs in one of four permission modes — `read_only`, `workspace_write`, `auto`, and
 `full_access` — carried on every context it derives and read back with `agentPermissionMode`. A
@@ -25,8 +37,8 @@ consumed, so a response and the tools it dispatched finish under the mode they s
 is durable, and a change is reported through `permissionModeChangedTransact` and
 `permissionModeChanged`; every message entering the conversation is reported the same way through
 `messageAcceptedTransact` and `messageAccepted`. The runtime enforces nothing — it cannot know what
-a tool touches — so enforcement belongs to features and tools; see `PermissionsFeature` in
-[`@slopus/happy-agent-features`](../happy-agent-features).
+a tool touches — so enforcement belongs to modules and tools; see the companion
+[`@slopus/happy-agent-features`](../happy-agent-features) package.
 
 A tool call is bracketed by four hooks and executed by the loop itself. `beforeToolCallTransact`
 runs inside the transaction that makes a dispatched batch durable; `beforeToolCall` decides what
@@ -37,17 +49,39 @@ transaction that appends the result. Nothing outside the loop ever executes a to
 drove execution would be deciding inside machinery that also commits results, resumes interrupted
 batches, and settles cancelled ones.
 
-Features may implement `beforeStart(ctx, agents)` and `afterStart(ctx, agents)` hooks.
+Every executable call receives an internally generated cuid2 `id`, the provider's separate opaque
+`providerCallId`, and a call-bound `kv`. Calling `call.commit(ctx, result)` inside a transaction
+atomically saves that result with the tool's writes. The first successful commit wins; later
+commits and the tool's eventual return or throw are ignored. Committed results survive a crash,
+remain ordered with their batch, and the call-bound KV is erased in the result transaction.
+
+Modules may provide an ordered array of `[key, migration]` tuples. Agent base tracks each
+successful key and runs every missing migration transactionally before any `beforeStart` hook; a
+failure aborts system startup. Every module migration and hook scope carries a schema-aware common
+Drizzle facade: a root database outside a transaction and its active transaction facade inside
+one. Driver-only root members such as `$client` and `batch` are deliberately not part of that
+surface. Modules may implement `beforeStart(ctx, agents, database)` and
+`afterStart(ctx, agents, database)` hooks.
 Every `beforeStart` settles successfully before active agents are restored; every `afterStart`
-runs after those agents are restored and started. Both receive the system's `AgentSystemRef`.
+runs after those agents are restored and started. Both receive the system's `AgentSystemRef` and
+root database.
 All hooks may return synchronously or with a promise, including `onEvent`; the runtime awaits each
 answer and contains failures from observing hooks.
 
 Messages receive a generated cuid2 identity, or accept one through `{ id }` for idempotent
 delivery. A repeated ID is an ignored persistence conflict while its message remains in the
 durable conversation; deliberate conversation replacement releases identities for the records it
-removes. Optional immutable metadata travels beside the provider message and reaches both
-message-accepted hooks; feature-generated send and steer actions accept the same fields.
+removes. `send` and `steer` return the effective ID, delivery mode, and whether durable acceptance
+created the identity or found it already present. Optional immutable metadata travels beside the
+provider message and reaches both message-accepted hooks; module-generated send and steer actions
+accept the same fields.
+
+Base allocates cuid2 identities for every settled-to-settled loop, turn, inference, and settlement.
+The IDs are persisted with outstanding work before their first lifecycle hook, survive restart,
+and are passed to transactional and observing hook counterparts without imposing a host protocol.
+Modules may also observe agent creation, restoration, metadata changes, and archival. Creation,
+restoration, and archival provide transactional and post-commit hook pairs with an immutable agent
+ID/metadata snapshot and module-scoped shared KV.
 
 Agent configuration may contain immutable metadata such as `title`. `updateMetadata` is available
 from `AgentBase`, `Agent`, `AgentRef`, `AgentSystem`, and `AgentSystemRef`; updates shallow-merge,
@@ -56,7 +90,11 @@ record a durable parent. An `AgentSystemRef` carries its owning agent ID (or `nu
 the default parent, while creation options may override the parent or explicitly choose `null`.
 `parentOf` and `childOf` query the resulting direct relationship, and `AgentRef.parent` exposes it.
 
-This package contains no ready-made product features. Reusable tools, hooks, permissions,
+`AgentKV.getOrCreate(ctx, key, factory)` standardizes durable allocate-once values. Used on a
+tool's call-bound KV, it supplies retry-stable operation identities without heap state or provider
+call IDs.
+
+This package contains no ready-made product modules. Reusable tools, hooks, permissions,
 workspaces, search, workflows, and other capabilities belong in
 [`@slopus/happy-agent-features`](../happy-agent-features). Provider protocols and vendor
 implementations belong in [`@slopus/happy-providers`](../happy-providers).

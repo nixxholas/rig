@@ -13,17 +13,17 @@ export { agentSystem, withAgentSystem } from "./AgentSystemContext.js";
 export {
     agentConfig,
     agentConfigSchema,
-    agentFeatureConfig,
+    agentModuleConfig,
     agentMetadata,
     agentEnvironment,
     agentEnvironmentSchema,
-    agentFeatureConfigSchema,
+    agentModuleConfigSchema,
     agentPlatformSchema,
     currentAgentEnvironment,
     withAgentConfig,
     type AgentConfig,
     type AgentEnvironment,
-    type AgentFeatureConfig,
+    type AgentModuleConfig,
     type AgentPlatform,
 } from "./AgentConfig.js";
 export {
@@ -36,7 +36,19 @@ export {
     type AgentMetadataChange,
     type AgentMetadataValue,
 } from "./AgentMetadata.js";
+export { type AgentMessageAcceptance } from "./AgentMessageAcceptance.js";
 export { AgentStorage, type AgentStorageLock, type AgentStorageOptions } from "./AgentStorage.js";
+export {
+    agentDatabaseRows,
+    agentDatabaseRun,
+    isAgentSQLiteDatabase,
+    type AgentDatabase,
+    type AgentDatabaseFacade,
+    type AgentModuleMigration,
+    type AgentPostgresDatabase,
+    type AgentSQLiteDatabase,
+    type AgentStorageTransaction,
+} from "./AgentDatabase.js";
 
 // Provider/model routing and the curated model catalog.
 export { type AgentModel } from "./AgentModel.js";
@@ -51,6 +63,7 @@ export {
     type AgentBaseQueueMode,
 } from "./AgentBase.js";
 export {
+    agentDatabase,
     agentEffort,
     agentId,
     agentKV,
@@ -60,6 +73,7 @@ export {
     agentRunKV,
     agentServiceTier,
     withAgentContext,
+    withAgentDatabase,
     withAgentKV,
     withAgentPermissionMode,
     withAgentRunKV,
@@ -81,9 +95,12 @@ export {
     type AgentBaseAcceptedMessage,
     type AgentBaseHooks,
     type AgentBaseInference,
+    type AgentBaseInferenceStart,
+    type AgentBaseLoop,
     type AgentBaseModelChange,
     type AgentBasePermissionModeChange,
     type AgentBasePersistedEvent,
+    type AgentBaseSettlement,
     type AgentBaseToolCall,
     type AgentBaseToolCallDecision,
     type AgentBaseToolOutcome,
@@ -101,13 +118,15 @@ export {
 } from "./AgentBasePending.js";
 export { type AgentBaseState } from "./AgentBaseState.js";
 
-// Features: pluggable capabilities that compose into an agent's hooks, tools, and instructions.
+// Modules: pluggable capabilities that compose into an agent's hooks, tools, and instructions.
 export {
-    type AgentFeature,
-    type AgentFeatureAgent,
-    type AgentFeatureScope,
-} from "./AgentFeature.js";
-export { type AgentFeatureAction } from "./AgentFeatureAction.js";
+    type AgentModule,
+    type AgentModuleAgent,
+    type AgentModuleAgentLifecycle,
+    type AgentModuleScope,
+    type AgentModuleSystemScope,
+} from "./AgentModule.js";
+export { type AgentModuleAction } from "./AgentModuleAction.js";
 
 // Registry of provider sources agents resolve their selected models through.
 export {
@@ -120,6 +139,7 @@ export {
 export {
     defineAgentTool,
     type AgentTool,
+    type AgentToolCall,
     type AgentToolAutoPermissionActionDescriber,
     type AgentToolAutoPermissionPredicate,
     type AnyAgentTool,

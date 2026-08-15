@@ -24,8 +24,8 @@ export const agentMetadataValueSchema = Type.Recursive((value) =>
 export type AgentMetadataValue = Static<typeof agentMetadataValueSchema>;
 
 /**
- * Metadata attached to one queued message. Features own additional fields; `hideFromUser` is the
- * common hint that a presentation feature should keep this message out of the user-visible view.
+ * Metadata attached to one queued message. Modules own additional fields; `hideFromUser` is the
+ * common hint that a presentation module should keep this message out of the user-visible view.
  */
 export const agentMessageMetadataSchema = Type.Intersect([
     Type.Object({
@@ -38,7 +38,7 @@ export const agentMessageMetadataSchema = Type.Intersect([
 export type AgentMessageMetadata = Static<typeof agentMessageMetadataSchema>;
 
 /**
- * Mutable-by-replacement metadata describing one agent. Features own additional fields; `title`
+ * Mutable-by-replacement metadata describing one agent. Modules own additional fields; `title`
  * is the common human-readable label.
  */
 export const agentMetadataSchema = Type.Intersect([

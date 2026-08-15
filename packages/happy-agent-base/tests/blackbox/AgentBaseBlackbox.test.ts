@@ -27,6 +27,11 @@ function recordedUser(text: string) {
     return expect.objectContaining({ type: "user", message: user(text) });
 }
 
+function storedTool(id: string, call: SessionToolCallBlock) {
+    const { callId, server: _server, ...stored } = call;
+    return { id, providerCallId: callId, call: stored };
+}
+
 type ToolCallSpec = {
     readonly callId: string;
     readonly name: string;
@@ -580,8 +585,8 @@ describe("AgentBase black-box persistence and restart behavior", () => {
             { type: "block", block: callC },
             { type: "tool", message: resultA },
         ]);
-        persistence.values.set("tool.000001.call-b", callB);
-        persistence.values.set("tool.000002.call-c", callC);
+        persistence.values.set("tool.000001.durablecall", storedTool("durablecall", callB));
+        persistence.values.set("tool.000002.fragilecall", storedTool("fragilecall", callC));
         const provider = new ScriptedProvider([textTurn("resumed")]);
         const executions: string[] = [];
         const makeTool = (name: string, durable: boolean) =>
@@ -882,7 +887,19 @@ describe("AgentBase black-box persistence and restart behavior", () => {
             kind: "internal_error",
             message: "result transaction crashed",
         });
-        expect([...persistence.pending.entries()]).toEqual([["tool.000000.crashed-result", call]]);
+        const pending = [...persistence.pending.entries()];
+        expect(pending).toHaveLength(1);
+        const [pendingKey, pendingCall] = pending[0]!;
+        expect(pendingKey).toMatch(/^tool\.000000\.[a-z0-9]+$/);
+        expect(pendingCall).toMatchObject({
+            id: pendingKey.split(".").at(-1),
+            providerCallId: call.callId,
+            call: {
+                type: "tool_call",
+                name: call.name,
+                arguments: call.arguments,
+            },
+        });
         await firstAgent.close();
 
         const secondProvider = new ScriptedProvider([textTurn("recovered")]);
@@ -1314,15 +1331,18 @@ describe("AgentBase black-box tool validation and ordering", () => {
         await agent.send(ctx, user("parallel"), { await: true });
         await agent.waitForIdle();
 
-        expect(keysAtFirstStart).toEqual(
-            calls.map((_, index) => `tool.${String(index).padStart(6, "0")}.call-${index}`),
-        );
-        expect(keysBeforeSecondResult).toEqual([
-            "tool.000001.call-1",
-            "tool.000002.call-2",
-            "tool.000003.call-3",
-            "tool.000004.call-4",
-        ]);
+        expect(keysAtFirstStart).toHaveLength(calls.length);
+        keysAtFirstStart.forEach((key, index) => {
+            expect(key).toMatch(
+                new RegExp(`^tool\\.${String(index).padStart(6, "0")}\\.[a-z0-9]+$`),
+            );
+        });
+        expect(keysBeforeSecondResult).toHaveLength(4);
+        keysBeforeSecondResult.forEach((key, offset) => {
+            expect(key).toMatch(
+                new RegExp(`^tool\\.${String(offset + 1).padStart(6, "0")}\\.[a-z0-9]+$`),
+            );
+        });
         expect(finished).not.toEqual(calls.map((call) => call.name));
         expect(
             persistence.records

@@ -5,14 +5,13 @@ import {
     AgentKV,
     AgentProviders,
     AgentSystemLocal,
-    AgentStorage,
     currentAgentEnvironment,
     type Agent,
 } from "../../sources/index.js";
-import { inMemoryStorageLock } from "../gym/fixtures.js";
+import { InMemoryAgentStorage, inMemoryStorageLock } from "../gym/fixtures.js";
 import { InMemoryPersistence } from "../gym/InMemoryPersistence.js";
 import { loadRealProvider, type RealGymVendor } from "./loadRealProvider.js";
-import { REAL_GYM_FEATURES, realGymModels } from "./realGymFeatures.js";
+import { REAL_GYM_MODULES, realGymModels } from "./realGymModules.js";
 import { textOf, type RealGymTrace, type RealGymTraces } from "./RealGymTrace.js";
 import { TracingProvider } from "./TracingProvider.js";
 
@@ -29,10 +28,10 @@ export interface RealGymOptions {
 
 /**
  * One live agent talking to one real vendor, assembled the way the product assembles agents:
- * an `AgentSystemLocal` collection over real storage, the real feature classes, and a provider built from
+ * an `AgentSystemLocal` collection over real storage, the real module classes, and a provider built from
  * the credentials the installed assistant already manages. The agent is created explicitly with
  * its configuration and resolved from the collection, so the whole path — configuration,
- * feature loading, prompt assembly, tools, the loop, and durable persistence — is the product's
+ * module loading, prompt assembly, tools, the loop, and durable persistence — is the product's
  * own. Only the answers come from outside.
  *
  * Returns null when the machine is not signed in to that assistant, so a caller can report the
@@ -53,7 +52,7 @@ export async function createRealGym(
         model: options.model,
         credential: real.credential,
         environment,
-        features: REAL_GYM_FEATURES.map((feature) => feature.name),
+        modules: REAL_GYM_MODULES.map((module) => module.name),
         models: models.map((model) => model.id),
     });
 
@@ -64,13 +63,13 @@ export async function createRealGym(
     const persistence = new InMemoryPersistence();
     const agents = await AgentSystemLocal.create(
         ctx,
-        new AgentStorage({
+        new InMemoryAgentStorage({
             acquireLock: inMemoryStorageLock(),
             kv: new AgentKV(new InMemoryPersistence(), "agents."),
             persistence: () => persistence,
         }),
         {
-            features: REAL_GYM_FEATURES.map((feature) => new feature.Feature()),
+            modules: REAL_GYM_MODULES.map((module) => new module.Module()),
             providers,
             provider: options.vendor,
             models,
@@ -78,7 +77,7 @@ export async function createRealGym(
     );
     const agent = await agents.create(ctx, {
         environment,
-        features: { gym: { scenario: options.scenario } },
+        modules: { gym: { scenario: options.scenario } },
     });
     // The collection allocates the identity, so the trace learns it from the agent it built.
     trace.agentId = agent.id;

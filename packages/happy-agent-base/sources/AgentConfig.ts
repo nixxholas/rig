@@ -25,13 +25,13 @@ export const agentPlatformSchema = Type.Union([
 export type AgentPlatform = Static<typeof agentPlatformSchema>;
 
 /**
- * The settings one feature was configured with. The agent never looks inside: a feature owns
+ * The settings one module was configured with. The agent never looks inside: a module owns
  * the shape of its own entry and validates it against its own schema.
  */
-export const agentFeatureConfigSchema = Type.Record(Type.String(), Type.Unknown());
+export const agentModuleConfigSchema = Type.Record(Type.String(), Type.Unknown());
 
-/** The TypeScript type inferred from {@link agentFeatureConfigSchema}. */
-export type AgentFeatureConfig = Static<typeof agentFeatureConfigSchema>;
+/** The TypeScript type inferred from {@link agentModuleConfigSchema}. */
+export type AgentModuleConfig = Static<typeof agentModuleConfigSchema>;
 
 /**
  * The machine an agent works on. It is all or nothing: an agent either knows its environment
@@ -53,15 +53,15 @@ export type AgentEnvironment = Static<typeof agentEnvironmentSchema>;
 
 /**
  * What an agent was created with: the environment it works on, when it has one, one opaque
- * settings map per feature, and descriptive metadata. Environment and feature settings stay
+ * settings map per module, and descriptive metadata. Environment and module settings stay
  * fixed; metadata changes only through the agent metadata API, which shallow-merges updates and
  * persists the resulting complete configuration.
  */
 export const agentConfigSchema = Type.Object({
     /** The machine this agent was told it works on, when it was told anything at all. */
     environment: Type.Optional(agentEnvironmentSchema),
-    /** Per-feature settings, keyed by feature name; each entry is opaque to the agent. */
-    features: Type.Optional(Type.Record(Type.String(), agentFeatureConfigSchema)),
+    /** Per-module settings, keyed by module name; each entry is opaque to the agent. */
+    modules: Type.Optional(Type.Record(Type.String(), agentModuleConfigSchema)),
     /** Immutable descriptive metadata, replaced only through a merged metadata update. */
     metadata: Type.Optional(agentMetadataSchema),
 });
@@ -123,7 +123,7 @@ export function agentMetadata(ctx: Context): AgentMetadata | undefined {
     return configNamespace.get(ctx)?.metadata;
 }
 
-/** The opaque settings the named feature was configured with, if it was configured at all. */
-export function agentFeatureConfig(ctx: Context, name: string): AgentFeatureConfig | undefined {
-    return configNamespace.get(ctx)?.features?.[name];
+/** The opaque settings the named module was configured with, if it was configured at all. */
+export function agentModuleConfig(ctx: Context, name: string): AgentModuleConfig | undefined {
+    return configNamespace.get(ctx)?.modules?.[name];
 }

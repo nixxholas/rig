@@ -6,16 +6,21 @@ import {
     AgentKV,
     agentConfig,
     agentSystem,
-    AgentStorage,
     AgentSystemLocal,
     AgentSystemRef,
     withAgentConfig,
     type AgentBaseAcceptedMessage,
-    type AgentFeature,
-    type AgentFeatureScope,
+    type AgentModule,
+    type AgentModuleScope,
     type AgentMetadataChange,
 } from "../sources/index.js";
-import { inMemoryStorageLock, providersOf, textTurn, user } from "./gym/fixtures.js";
+import {
+    InMemoryAgentStorage,
+    inMemoryStorageLock,
+    providersOf,
+    textTurn,
+    user,
+} from "./gym/fixtures.js";
 import { InMemoryPersistence } from "./gym/InMemoryPersistence.js";
 import { ScriptedProvider } from "./gym/ScriptedProvider.js";
 
@@ -37,8 +42,8 @@ async function until(predicate: () => boolean): Promise<void> {
 function systemStorage(
     manager: InMemoryPersistence,
     stores = new Map<string, InMemoryPersistence>(),
-): AgentStorage {
-    return new AgentStorage({
+): InMemoryAgentStorage {
+    return new InMemoryAgentStorage({
         acquireLock: inMemoryStorageLock(),
         kv: new AgentKV(manager, "agentSystem."),
         persistence: (agentId) => {
@@ -82,7 +87,7 @@ describe("message metadata and identity", () => {
         });
         metadata.hideFromUser = false;
         metadata.nested.source = "mutated";
-        await first;
+        const firstAcceptance = await first;
         await agent.waitForIdle();
         await agent.close();
 
@@ -93,13 +98,23 @@ describe("message metadata and identity", () => {
             provider: "scripted",
             persistence,
         });
-        await restarted.send(ctx, user("ignored retry"), {
+        const retryAcceptance = await restarted.send(ctx, user("ignored retry"), {
             await: true,
             id: MESSAGE_ID,
             metadata: { hideFromUser: false },
         });
         await restarted.waitForIdle();
 
+        expect(firstAcceptance).toEqual({
+            id: MESSAGE_ID,
+            delivery: "send",
+            accepted: "created",
+        });
+        expect(retryAcceptance).toEqual({
+            id: MESSAGE_ID,
+            delivery: "send",
+            accepted: "existing",
+        });
         expect(provider.sessions[0]?.requests).toHaveLength(1);
         expect(restartedProvider.sessions).toHaveLength(0);
         expect(accepted).toHaveLength(2);
@@ -130,6 +145,60 @@ describe("message metadata and identity", () => {
             },
         });
         await restarted.close();
+    });
+
+    it("restores pending-state and process reservations after a failed acceptance", async () => {
+        class FailsFirstPendingWrite extends InMemoryPersistence {
+            fail = true;
+
+            override async writeValue(
+                writeCtx: Context,
+                key: string,
+                value: unknown,
+            ): Promise<void> {
+                await super.writeValue(writeCtx, key, value);
+                if (key === "owed" && this.fail) {
+                    this.fail = false;
+                    throw new Error("pending write failed");
+                }
+            }
+        }
+        const persistence = new FailsFirstPendingWrite();
+        let releaseLoop!: () => void;
+        let loopStarted!: () => void;
+        const started = new Promise<void>((resolve) => {
+            loopStarted = resolve;
+        });
+        const released = new Promise<void>((resolve) => {
+            releaseLoop = resolve;
+        });
+        const agent = await AgentBase.create(ctx, {
+            id: "message-acceptance-rollback",
+            providers: providersOf(new ScriptedProvider([textTurn("accepted")])),
+            provider: "scripted",
+            persistence,
+            hooks: {
+                beforeAgentLoop: async () => {
+                    loopStarted();
+                    await released;
+                },
+            },
+        });
+
+        await expect(
+            agent.send(ctx, user("retry me"), { await: true, id: MESSAGE_ID }),
+        ).rejects.toThrow("pending write failed");
+        const retry = await agent.send(ctx, user("retry me"), {
+            await: true,
+            id: MESSAGE_ID,
+        });
+        await started;
+
+        expect(retry.accepted).toBe("created");
+        expect(persistence.values.get("owed")).toBeDefined();
+        releaseLoop();
+        await agent.waitForIdle();
+        await agent.close();
     });
 
     it("lets hook actions supply message IDs and metadata", async () => {
@@ -295,16 +364,16 @@ describe("agent metadata, custom identity, and parentage", () => {
         await agent.close();
     });
 
-    it("merges immutable metadata transactionally and passes it through every feature scope", async () => {
+    it("merges immutable metadata transactionally and passes it through every module scope", async () => {
         const manager = new InMemoryPersistence();
         const stores = new Map<string, InMemoryPersistence>();
         const changes: { phase: string; change: AgentMetadataChange }[] = [];
         const scopedMetadata: unknown[] = [];
         let retainedTransaction:
-            | { readonly ctx: Context; readonly kv: AgentFeatureScope["kv"] }
+            | { readonly ctx: Context; readonly kv: AgentModuleScope["kv"] }
             | undefined;
         let rejectNext = false;
-        const feature: AgentFeature = {
+        const module: AgentModule = {
             name: "metadata-recorder",
             instructions: (hookCtx, scope) => {
                 scopedMetadata.push({
@@ -328,7 +397,7 @@ describe("agent metadata, custom identity, and parentage", () => {
             },
         };
         const system = await AgentSystemLocal.create(ctx, systemStorage(manager, stores), {
-            features: [feature],
+            modules: [module],
             providers: providersOf(new ScriptedProvider([textTurn("one"), textTurn("two")])),
             provider: "scripted",
             models: [],
@@ -390,7 +459,7 @@ describe("agent metadata, custom identity, and parentage", () => {
         expect(
             stores
                 .get(ROOT_ID)
-                ?.values.get(`kv.${ROOT_ID}.feature.metadata-recorder.metadata-attempt`),
+                ?.values.get(`kv.${ROOT_ID}.module.metadata-recorder.metadata-attempt`),
         ).toBe("Renamed");
         expect(changes.map(({ phase }) => phase)).toEqual([
             "transaction",
@@ -400,7 +469,7 @@ describe("agent metadata, custom identity, and parentage", () => {
         await system.close(ctx);
 
         const restarted = await AgentSystemLocal.create(ctx, systemStorage(manager, stores), {
-            features: [],
+            modules: [],
             providers: providersOf(new ScriptedProvider([])),
             provider: "scripted",
             models: [],
@@ -453,15 +522,15 @@ describe("agent metadata, custom identity, and parentage", () => {
         const manager = new InMemoryPersistence();
         const stores = new Map<string, InMemoryPersistence>();
         let rootRef: AgentSystemRef | undefined;
-        const feature: AgentFeature = {
+        const module: AgentModule = {
             name: "capture-reference",
-            instructions: (hookCtx: Context, _scope: AgentFeatureScope) => {
+            instructions: (hookCtx: Context, _scope: AgentModuleScope) => {
                 rootRef = agentSystem(hookCtx);
                 return "";
             },
         };
         const system = await AgentSystemLocal.create(ctx, systemStorage(manager, stores), {
-            features: [feature],
+            modules: [module],
             providers: providersOf(new ScriptedProvider([textTurn("root")])),
             provider: "scripted",
             models: [],
@@ -516,7 +585,7 @@ describe("agent metadata, custom identity, and parentage", () => {
         await system.close(ctx);
 
         const restarted = await AgentSystemLocal.create(ctx, systemStorage(manager, stores), {
-            features: [],
+            modules: [],
             providers: providersOf(new ScriptedProvider([])),
             provider: "scripted",
             models: [],

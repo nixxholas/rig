@@ -11,7 +11,7 @@ import { describe, expect, it } from "vitest";
 
 import { AgentBase, agentKV } from "../../sources/index.js";
 import { InMemoryPersistence } from "../gym/InMemoryPersistence.js";
-import { ScriptedProvider, ScriptedSession } from "../gym/ScriptedProvider.js";
+import { fromProviderContext, ScriptedProvider, ScriptedSession } from "../gym/ScriptedProvider.js";
 import { providersOf, system, textTurn, user, userRecord } from "../gym/fixtures.js";
 
 const ctx = createRootContext().named("happy-agent-base-lifecycle-shutdown-gaps");
@@ -168,10 +168,8 @@ describe("abort and shutdown lifecycle gaps", () => {
 
         provider.session = async (id: string, options: SessionOptions): Promise<BaseSession> => {
             const session = (await originalSession(id, options)) as ScriptedSession;
-            session.compact = async (
-                compactCtx: Context,
-                compactOptions: SessionCompactionOptions,
-            ) => {
+            session.compact = async (providerCtx, compactOptions: SessionCompactionOptions) => {
+                const compactCtx = fromProviderContext(providerCtx);
                 session.compactions.push(compactOptions);
                 compactionSignal = compactCtx.lifetime;
                 compactionStarted.resolve();
@@ -258,7 +256,8 @@ describe("abort and shutdown lifecycle gaps", () => {
 
         provider.session = async (id: string, options: SessionOptions): Promise<BaseSession> => {
             const session = (await originalSession(id, options)) as ScriptedSession;
-            session.run = (runCtx: Context, request: SessionRunRequest): SessionStream => {
+            session.run = (providerCtx, request: SessionRunRequest): SessionStream => {
+                const runCtx = fromProviderContext(providerCtx);
                 session.requestContexts.push(runCtx);
                 session.requests.push(request);
                 return oneDoneThenBlockedCleanup(
@@ -316,7 +315,8 @@ describe("abort and shutdown lifecycle gaps", () => {
         provider.session = async (id: string, options: SessionOptions): Promise<BaseSession> => {
             const session = (await originalSession(id, options)) as ScriptedSession;
             if (provider.sessions.length === 1) {
-                session.run = (runCtx: Context, request: SessionRunRequest): SessionStream => {
+                session.run = (providerCtx, request: SessionRunRequest): SessionStream => {
+                    const runCtx = fromProviderContext(providerCtx);
                     session.requestContexts.push(runCtx);
                     session.requests.push(request);
                     return oneDoneThenBlockedCleanup(
@@ -384,7 +384,8 @@ describe("abort and shutdown lifecycle gaps", () => {
         provider.session = async (id: string, options: SessionOptions): Promise<BaseSession> => {
             const session = (await originalSession(id, options)) as ScriptedSession;
             if (provider.sessions.length === 1) {
-                session.run = (runCtx: Context, request: SessionRunRequest): SessionStream => {
+                session.run = (providerCtx, request: SessionRunRequest): SessionStream => {
+                    const runCtx = fromProviderContext(providerCtx);
                     session.requestContexts.push(runCtx);
                     session.requests.push(request);
                     return oneDoneThenBlockedCleanup(
@@ -471,7 +472,8 @@ describe("abort and shutdown lifecycle gaps", () => {
         provider.session = async (id: string, options: SessionOptions): Promise<BaseSession> => {
             const session = (await originalSession(id, options)) as ScriptedSession;
             let runs = 0;
-            session.run = (runCtx: Context, request: SessionRunRequest): SessionStream => {
+            session.run = (providerCtx, request: SessionRunRequest): SessionStream => {
+                const runCtx = fromProviderContext(providerCtx);
                 session.requestContexts.push(runCtx);
                 session.requests.push(request);
                 runs += 1;
@@ -562,7 +564,7 @@ describe("abort and shutdown lifecycle gaps", () => {
         expect(idleSettledBeforeWriteRelease).toBe(false);
     });
 
-    it("rolls back modelChanged feature KV when the switch transaction later fails", async () => {
+    it("rolls back modelChanged module KV when the switch transaction later fails", async () => {
         const persistence = new InMemoryPersistence();
         const provider = new ScriptedProvider([]);
         const originalAppend = persistence.append.bind(persistence);
@@ -601,7 +603,7 @@ describe("abort and shutdown lifecycle gaps", () => {
 
         // The hook write describes the same switch as the queue claim, reset, injected handoff,
         // consumed message, and settings write. A failure in that transaction must retain none
-        // of those effects, including feature state written by the hook.
+        // of those effects, including module state written by the hook.
         expect(escapedValue).toBeUndefined();
     });
 });
