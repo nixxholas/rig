@@ -5,7 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  '@steve.kite/stdlib': 0.0.8
+  '@steve.kite/stdlib': 0.0.10
 
 importers:
 
@@ -159,8 +159,8 @@ importers:
         specifier: 0.0.1
         version: 0.0.1
       '@steve.kite/stdlib':
-        specifier: 0.0.8
-        version: 0.0.8
+        specifier: 0.0.10
+        version: 0.0.10
       dockerode:
         specifier: ^5.0.1
         version: 5.0.1
@@ -203,8 +203,8 @@ importers:
         specifier: 0.0.7
         version: 0.0.7(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
       '@steve.kite/stdlib':
-        specifier: 0.0.8
-        version: 0.0.8
+        specifier: 0.0.10
+        version: 0.0.10
     devDependencies:
       '@slopus/happy-agent-base':
         specifier: 0.0.5
@@ -425,8 +425,8 @@ importers:
         specifier: 0.4.4
         version: 0.4.4
       '@steve.kite/stdlib':
-        specifier: 0.0.8
-        version: 0.0.8
+        specifier: 0.0.10
+        version: 0.0.10
       '@types/node':
         specifier: ^24.0.10
         version: 24.13.2
@@ -642,8 +642,8 @@ importers:
         specifier: 0.0.7
         version: 0.0.7(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
       '@steve.kite/stdlib':
-        specifier: 0.0.8
-        version: 0.0.8
+        specifier: 0.0.10
+        version: 0.0.10
     devDependencies:
       '@types/node':
         specifier: ^24.0.10
@@ -2491,9 +2491,6 @@ packages:
 
   '@steve.kite/stdlib@0.0.10':
     resolution: {integrity: sha512-asMXmFTF+GHhmwgGZeV7vNJ+RgE8CUYqebZSLEUHPPhoQeAW2eD4caFbLa/LWTqetUengpyTYYxLsrH6xwE6uw==}
-
-  '@steve.kite/stdlib@0.0.8':
-    resolution: {integrity: sha512-+OzCwzV2oblIptw/pt87f4dyBD33GL/iQG9OARsmjf9gCOSZgOD/imPFMYRoa/nuboKjYdYFoSi+lFsTwijXKg==}
 
   '@tokenizer/inflate@0.4.1':
     resolution: {integrity: sha512-2mAv+8pkG6GIZiF1kNg1jAjh27IDxEPKwdGul3snfztFerfPGI1LjDezZp3i7BElXompqEtPmoPx6c2wgtWsOA==}
@@ -5956,7 +5953,7 @@ snapshots:
       '@paralleldrive/cuid2': 3.3.0
       '@sinclair/typebox': 0.34.49
       '@slopus/happy-providers': 0.0.7(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
-      '@steve.kite/stdlib': 0.0.8
+      '@steve.kite/stdlib': 0.0.10
     transitivePeerDependencies:
       - '@aws-sdk/credential-provider-node'
       - '@cfworker/json-schema'
@@ -5989,7 +5986,7 @@ snapshots:
       '@anthropic-ai/sdk': 0.110.0(zod@4.4.3)
       '@modelcontextprotocol/sdk': 1.29.0(zod@4.4.3)
       '@sinclair/typebox': 0.34.49
-      '@steve.kite/stdlib': 0.0.8
+      '@steve.kite/stdlib': 0.0.10
       deunicode: 1.0.7
       openai: 6.46.0(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
       undici: 8.8.0
@@ -6264,8 +6261,6 @@ snapshots:
   '@stablelib/base64@1.0.1': {}
 
   '@steve.kite/stdlib@0.0.10': {}
-
-  '@steve.kite/stdlib@0.0.8': {}
 
   '@tokenizer/inflate@0.4.1':
     dependencies:
