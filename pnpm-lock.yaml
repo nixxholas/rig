@@ -449,6 +449,9 @@ importers:
       '@opentelemetry/semantic-conventions':
         specifier: ^1.43.0
         version: 1.43.0
+      '@pydantic/monty':
+        specifier: 0.0.18
+        version: 0.0.18(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.2)
       '@sinclair/typebox':
         specifier: ^0.34.49
         version: 0.34.49
@@ -456,14 +459,11 @@ importers:
         specifier: 1.3.6
         version: 1.3.6
       '@slopus/happy-agent-base':
-        specifier: npm:@slopus/happy-agent-base@0.0.7
-        version: 0.0.7(@aws-sdk/credential-provider-node@3.972.71)(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)
-      '@slopus/happy-agent-modules':
-        specifier: workspace:*
-        version: link:../happy-agent-modules
+        specifier: 0.0.5
+        version: 0.0.5(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
       '@slopus/happy-providers':
-        specifier: 0.0.8
-        version: 0.0.8(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
+        specifier: 0.0.7
+        version: 0.0.7(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
       '@slopus/murmur':
         specifier: 0.4.4
         version: 0.4.4
@@ -501,6 +501,12 @@ importers:
       '@slopus/ghostty-web':
         specifier: workspace:*
         version: link:../ghostty-web
+      '@slopus/happy-agent-compute':
+        specifier: workspace:*
+        version: link:../happy-agent-compute
+      '@slopus/rig-execution':
+        specifier: workspace:*
+        version: link:../rig-execution
       '@types/dockerode':
         specifier: ^4.0.1
         version: 4.0.1
@@ -669,6 +675,31 @@ importers:
       typescript:
         specifier: ^5.8.3
         version: 5.9.3
+
+  packages/rig-execution:
+    dependencies:
+      '@sinclair/typebox':
+        specifier: ^0.34.49
+        version: 0.34.49
+      '@slopus/happy-providers':
+        specifier: 0.0.7
+        version: 0.0.7(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
+      '@steve.kite/stdlib':
+        specifier: 0.0.10
+        version: 0.0.10
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.10
+        version: 24.13.3
+      tsc-alias:
+        specifier: ^1.8.16
+        version: 1.9.1
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.6(@types/node@24.13.3)(jiti@2.7.0)(tsx@4.23.0)(yaml@2.9.0)
 
 packages:
 
@@ -858,8 +889,14 @@ packages:
     resolution: {integrity: sha512-2BJI6qwRQfnM0Q7seL1+SbacU/jRRjBnN7Hu3n9BjAn7/s5FaBNnvdD1qBQYRsFTHfjqMaDsjYqanPyqwXj99w==}
     engines: {node: '>=22.19.0'}
 
+  '@emnapi/core@1.11.3':
+    resolution: {integrity: sha512-zLpS5asjEb7lq8jYLq37N6XKaE41DIexlY1rF/z4/tIl3wo13Sqm28fRyfIsKZD+NZ8mM5RoKkpW/rBcuoSZSg==}
+
   '@emnapi/runtime@1.11.2':
     resolution: {integrity: sha512-kyOl3X0DuTiT1h2ft8r2fYO8JYtU9a9Xis/zBSiGArNaagCOWx90N1k2wxp18czFDH+OgcWGb5ZP/XMt3dcyPA==}
+
+  '@emnapi/wasi-threads@1.2.3':
+    resolution: {integrity: sha512-ELEBe8PsLvvJ6QMr0zLt8ffvOHW/dc1m3CEzNMg7aJUv3bMaoDtw2TXyDAwkYBuroxxuHEwhRTLJSe5sya547g==}
 
   '@esbuild/aix-ppc64@0.28.1':
     resolution: {integrity: sha512-Svl7tq8k/08+p6CXPpRjQ1fKX+1odH/BQbb48fV6fj3CWHhsoIOoY87w1oHXm0qEpkIK3ZfVgp0hed3XBXzXMQ==}
@@ -1511,6 +1548,13 @@ packages:
       '@cfworker/json-schema':
         optional: true
 
+  '@napi-rs/wasm-runtime@1.2.3':
+    resolution: {integrity: sha512-UMduMbqO5s5zF2NkNacMT/yK5Y5QiKvWr2+50bzIIxFDwVJ2h49b+oyjaCGPhJxd2/gC2x39EHv/gHVuu36x2Q==}
+    engines: {node: ^20.19.0 || ^22.13.0 || >=23.5.0}
+    peerDependencies:
+      '@emnapi/core': ^1.7.1 || ^2.0.0-alpha.4
+      '@emnapi/runtime': ^1.7.1 || ^2.0.0-alpha.4
+
   '@neon-rs/load@0.0.4':
     resolution: {integrity: sha512-kTPhdZyTQxB+2wpiRcFWrDcejc4JI6tkPuS7UZCG4l6Zvc5kU/gGQ/ozvHTh1XR5tS+UlfAfGuPajjzQjCiHCw==}
 
@@ -2104,6 +2148,45 @@ packages:
   '@protobufjs/utf8@1.1.2':
     resolution: {integrity: sha512-b1UQwcEZ4yCnMCD8DAL1VlbvBJE9/IX4FTIp7BG1xYpf29SLazLSrqUkj4w7Y5y7cCVP6E5tcqqcI0xemPkHug==}
 
+  '@pydantic/monty-darwin-arm64@0.0.18':
+    resolution: {integrity: sha512-63R8YhyXHc8O9lei+oEW4ns58Ss+34AlRN0lmzKJdzEKRh6YQ/N0cZI0n9CCqSi7ERmiQXJ0NhwWIKxgStx3Tg==}
+    engines: {node: '>= 6.14.2 < 7 || >= 8.11.2 < 9 || >= 9.11.0 < 10 || >= 10.0.0'}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@pydantic/monty-darwin-x64@0.0.18':
+    resolution: {integrity: sha512-7ecWyb2sJxKnPPSiTqX8bdrMsKZZaP2/szZxbMa0wZVvoc5jLvkm3azg3n5L+vcVbP/vhlXTSno/huBt/Vvn+g==}
+    engines: {node: '>= 6.14.2 < 7 || >= 8.11.2 < 9 || >= 9.11.0 < 10 || >= 10.0.0'}
+    cpu: [x64]
+    os: [darwin]
+
+  '@pydantic/monty-linux-arm64-gnu@0.0.18':
+    resolution: {integrity: sha512-IonXv0Er8QoHJKEoewurQRgnOoe2mwbrw8A0rj0FnsOkZaQ98KHMLxDsa1UUvTVmKx/XUYst3j9o/8nrfbW68g==}
+    engines: {node: '>= 6.14.2 < 7 || >= 8.11.2 < 9 || >= 9.11.0 < 10 || >= 10.0.0'}
+    cpu: [arm64]
+    os: [linux]
+
+  '@pydantic/monty-linux-x64-gnu@0.0.18':
+    resolution: {integrity: sha512-7QWTiVO7T8YxpIuTtoTafTMOm3tXgje/hSddVSS4pqQbrf2UDQcRW89azqYWTf1JKFGmO27YKyniz70+gOWMMw==}
+    engines: {node: '>= 6.14.2 < 7 || >= 8.11.2 < 9 || >= 9.11.0 < 10 || >= 10.0.0'}
+    cpu: [x64]
+    os: [linux]
+
+  '@pydantic/monty-wasm32-wasi@0.0.18':
+    resolution: {integrity: sha512-64AWbkeoFxvjX4w8VHoRlJCa5P4pxNtbly3hHD9jpDD9qrHcxYu0/g5b0peceQ5wRxIpCC/sWsC46SyFYnma4A==}
+    engines: {node: '>=14.0.0'}
+    cpu: [wasm32]
+
+  '@pydantic/monty-win32-x64-msvc@0.0.18':
+    resolution: {integrity: sha512-3Pvqu5LZHJhZilV3/uEK+d0BiUUo+con55O2/iBxal/9cXBk0CSENpleruPOLp0is96AsYwrKmK/MRsjisd10g==}
+    engines: {node: '>= 6.14.2 < 7 || >= 8.11.2 < 9 || >= 9.11.0 < 10 || >= 10.0.0'}
+    cpu: [x64]
+    os: [win32]
+
+  '@pydantic/monty@0.0.18':
+    resolution: {integrity: sha512-4tCURCLkmpYm5nfZ0TFkBTIV1KWx62ns7Io7JihFAXPtFCYyMd4Q94t5PulEIbJeJ7EKwNsLZOX9ilb0By2LKw==}
+    engines: {node: '>= 6.14.2 < 7 || >= 8.11.2 < 9 || >= 9.11.0 < 10 || >= 10.0.0'}
+
   '@rollup/rollup-android-arm-eabi@4.62.2':
     resolution: {integrity: sha512-6o7ZLZK+BeenkZCFNDXqpbjw9bD6nuWonvS/lwQJp7NoVVxm6p3qE7qQ5jGuBjiFsgvqjD8mZAU5oWxTmbOeOg==}
     cpu: [arm]
@@ -2235,6 +2318,10 @@ packages:
   '@slopus/ghostty-wasm@1.3.6':
     resolution: {integrity: sha512-S8KS9VyGgv451D8ZrRoS5vAg1Eqk8dZJWzM28HrjXVmD1B8g3Ec1QsjUWAIVqReuZyZqLFxZfjH6rU0N/f7n2Q==}
 
+  '@slopus/happy-agent-base@0.0.5':
+    resolution: {integrity: sha512-dhBnT/iEykMu4xU440w6W078igRdWtI3xEHxDnoC/rnjhQEXQGglqBUUQtnHlzHZJyf+3v7ASwthKFOEW8KtRg==}
+    engines: {node: '>=22.19.0'}
+
   '@slopus/happy-agent-base@0.0.7':
     resolution: {integrity: sha512-5N5GoCWWwAJn/fv52wRS4y+QfkihU6U+BrdhdbrJHJ7L6Tt13wfD9pTPnz/qAPjl3Fj1VwV74BE6nFIWsWtERA==}
     engines: {node: '>=22.19.0'}
@@ -2274,6 +2361,10 @@ packages:
     cpu: [x64]
     os: [linux]
     hasBin: true
+
+  '@slopus/happy-providers@0.0.7':
+    resolution: {integrity: sha512-5IR/BM3IRoz91oEbJ9XMRauTvXQyqZ1hSKaPlpxHJbMGjDaYDrxkcsSLQySbRr2q2FsOWAZUPTjrmpl6b1b8EA==}
+    engines: {node: '>=22.19.0'}
 
   '@slopus/happy-providers@0.0.8':
     resolution: {integrity: sha512-c8r41solmLODAku2HBOhdkihEKrbaoToDt7g1eqR6FesOccl9nQs8EXPSUX92XuNRM9bflsGE4BxwmJQFJ4ouw==}
@@ -2463,6 +2554,9 @@ packages:
 
   '@tokenizer/token@0.3.0':
     resolution: {integrity: sha512-OvjF+z51L3ov0OyAU0duzsYuvO01PH7x4t6DJx+guahgTnBHkhJdG7soQeTSFLWN3efnHyibZ4Z8l2EuWwJN3A==}
+
+  '@tybys/wasm-util@0.10.3':
+    resolution: {integrity: sha512-F3fo1MYrRJYL3zER0OUOmkutjr1Vp23m7OsSgp7nq4SP6OqX6C/56XFIPAl5bt3zaBRjmW7SGz3u/6LwFpYcOg==}
 
   '@types/chai@5.2.3':
     resolution: {integrity: sha512-Mw558oeA9fFbv65/y4mHtXDs9bPnFMZAL/jxdPFUpOHHIXX91mcgEHbS5Lahr+pwZFR8A7GQleRWeI6cGFC2UA==}
@@ -4789,7 +4883,18 @@ snapshots:
       get-east-asian-width: 1.6.0
       marked: 18.0.5
 
+  '@emnapi/core@1.11.3':
+    dependencies:
+      '@emnapi/wasi-threads': 1.2.3
+      tslib: 2.8.1
+    optional: true
+
   '@emnapi/runtime@1.11.2':
+    dependencies:
+      tslib: 2.8.1
+    optional: true
+
+  '@emnapi/wasi-threads@1.2.3':
     dependencies:
       tslib: 2.8.1
     optional: true
@@ -5295,6 +5400,13 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
+  '@napi-rs/wasm-runtime@1.2.3(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.2)':
+    dependencies:
+      '@emnapi/core': 1.11.3
+      '@emnapi/runtime': 1.11.2
+      '@tybys/wasm-util': 0.10.3
+    optional: true
+
   '@neon-rs/load@0.0.4': {}
 
   '@noble/ciphers@1.3.0': {}
@@ -5778,6 +5890,41 @@ snapshots:
 
   '@protobufjs/utf8@1.1.2': {}
 
+  '@pydantic/monty-darwin-arm64@0.0.18':
+    optional: true
+
+  '@pydantic/monty-darwin-x64@0.0.18':
+    optional: true
+
+  '@pydantic/monty-linux-arm64-gnu@0.0.18':
+    optional: true
+
+  '@pydantic/monty-linux-x64-gnu@0.0.18':
+    optional: true
+
+  '@pydantic/monty-wasm32-wasi@0.0.18(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.2)':
+    dependencies:
+      '@napi-rs/wasm-runtime': 1.2.3(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.2)
+    transitivePeerDependencies:
+      - '@emnapi/core'
+      - '@emnapi/runtime'
+    optional: true
+
+  '@pydantic/monty-win32-x64-msvc@0.0.18':
+    optional: true
+
+  '@pydantic/monty@0.0.18(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.2)':
+    optionalDependencies:
+      '@pydantic/monty-darwin-arm64': 0.0.18
+      '@pydantic/monty-darwin-x64': 0.0.18
+      '@pydantic/monty-linux-arm64-gnu': 0.0.18
+      '@pydantic/monty-linux-x64-gnu': 0.0.18
+      '@pydantic/monty-wasm32-wasi': 0.0.18(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.2)
+      '@pydantic/monty-win32-x64-msvc': 0.0.18
+    transitivePeerDependencies:
+      - '@emnapi/core'
+      - '@emnapi/runtime'
+
   '@rollup/rollup-android-arm-eabi@4.62.2':
     optional: true
 
@@ -5856,6 +6003,21 @@ snapshots:
   '@sinclair/typebox@0.34.49': {}
 
   '@slopus/ghostty-wasm@1.3.6': {}
+
+  '@slopus/happy-agent-base@0.0.5(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)':
+    dependencies:
+      '@paralleldrive/cuid2': 3.3.0
+      '@sinclair/typebox': 0.34.49
+      '@slopus/happy-providers': 0.0.7(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
+      '@steve.kite/stdlib': 0.0.10
+    transitivePeerDependencies:
+      - '@aws-sdk/credential-provider-node'
+      - '@cfworker/json-schema'
+      - '@smithy/hash-node'
+      - '@smithy/signature-v4'
+      - supports-color
+      - ws
+      - zod
 
   '@slopus/happy-agent-base@0.0.7(@aws-sdk/credential-provider-node@3.972.71)(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)':
     dependencies:
@@ -5938,6 +6100,36 @@ snapshots:
 
   '@slopus/happy-agent-supervisor@0.0.1-linux-x64':
     optional: true
+
+  '@slopus/happy-providers@0.0.7(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)':
+    dependencies:
+      '@anthropic-ai/bedrock-sdk': 0.32.0(zod@4.4.3)
+      '@anthropic-ai/claude-agent-sdk': 0.3.226(@anthropic-ai/sdk@0.110.0(zod@4.4.3))(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(zod@4.4.3)
+      '@anthropic-ai/sdk': 0.110.0(zod@4.4.3)
+      '@modelcontextprotocol/sdk': 1.29.0(zod@4.4.3)
+      '@sinclair/typebox': 0.34.49
+      '@steve.kite/stdlib': 0.0.10
+      deunicode: 1.0.7
+      openai: 6.46.0(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
+      undici: 8.8.0
+      wink-porter2-stemmer: 2.0.1
+    optionalDependencies:
+      '@anthropic-ai/claude-agent-sdk-darwin-arm64': 0.3.226
+      '@anthropic-ai/claude-agent-sdk-darwin-x64': 0.3.226
+      '@anthropic-ai/claude-agent-sdk-linux-arm64': 0.3.226
+      '@anthropic-ai/claude-agent-sdk-linux-arm64-musl': 0.3.226
+      '@anthropic-ai/claude-agent-sdk-linux-x64': 0.3.226
+      '@anthropic-ai/claude-agent-sdk-linux-x64-musl': 0.3.226
+      '@anthropic-ai/claude-agent-sdk-win32-arm64': 0.3.226
+      '@anthropic-ai/claude-agent-sdk-win32-x64': 0.3.226
+    transitivePeerDependencies:
+      - '@aws-sdk/credential-provider-node'
+      - '@cfworker/json-schema'
+      - '@smithy/hash-node'
+      - '@smithy/signature-v4'
+      - supports-color
+      - ws
+      - zod
 
   '@slopus/happy-providers@0.0.8(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)':
     dependencies:
@@ -6230,6 +6422,11 @@ snapshots:
       - supports-color
 
   '@tokenizer/token@0.3.0': {}
+
+  '@tybys/wasm-util@0.10.3':
+    dependencies:
+      tslib: 2.8.1
+    optional: true
 
   '@types/chai@5.2.3':
     dependencies:
