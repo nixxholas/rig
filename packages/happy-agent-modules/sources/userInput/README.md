@@ -1,22 +1,20 @@
 # User input
 
 `UserInputModule` gives an agent one common `request_user_input` tool for asking a human a
-question and durably waiting for the answer. The module owns request, receipt, and proof tables
-through Agent Base migrations. A host supplies the AgentStorage transaction function and a narrow
-external wait broker; the transaction passes the active Drizzle facade to module work.
+question and durably waiting for the answer. The module owns only its request table. A host
+supplies the storage adapter and a narrow external wait broker.
 
 ```ts
 import { UserInputModule } from "@slopus/happy-agent-modules";
 
 const userInput = new UserInputModule({
-    transaction, // optional host AgentStorageTransaction for direct calls
+    store, // request rows and transactions
     broker, // external durable wait broker
     presence, // optional { isAvailable(ctx, agentId) }
 });
 ```
 
-The optional transaction function serializes each ask, answer, cancel, complete, and wait
-settlement when a direct host call is not already running under an Agent Base database context.
+The store transaction serializes each ask, answer, cancel, complete, and wait settlement.
 stdlib `afterCommit(ctx, callback)` registers post-commit event delivery against the outermost
 AgentStorage transaction. The broker's `wait` method may suspend across daemon restarts;
 UserInputModule never holds a database transaction open while it waits.
@@ -27,12 +25,11 @@ can be free-form text or structured selected labels plus text. Answer, cancellat
 away transitions are single-settlement operations.
 
 The tool is durable and never enters Auto-mode review. Its ask input contains only the question,
-Markdown context, choices, and optional deadline; module-owned mutation identities stay in the
-call-scoped AgentKV. After a terminal result, the same tool can read bounded detail pages by
-request ID and cursor so long answers remain available to the model. Retrying the same durable
-call re-attaches to its stored request. Direct host-facing mutations must supply their
-caller-owned operation ID; host ask retries recover the request identity from the durable receipt
-boundary.
+Markdown context, choices, and optional deadline. Agent Base's stable call ID is the request ID.
+The tool creates or resumes that request in one transaction, waits through the broker outside a
+transaction, then settles the call with `call.commit` in one transaction. After a terminal result,
+the same tool can read bounded detail pages by request ID and cursor so long answers remain
+available to the model.
 
 Host callers can use `ask`, `wait`, `listPage`/`list`, `get`/`getPage`, `answer`, `cancel`, and
 `complete`. `formatForModel`, `formatPageForModel`, `formatDetailPageForModel`, and

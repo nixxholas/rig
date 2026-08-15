@@ -391,6 +391,30 @@ export class WorkflowsModule implements AgentModule {
     }
 
     async wait(ctx: Context, agentId: string, id: string): Promise<WorkflowRun> {
+        return await this.#wait(ctx, agentId, id, async (_txCtx, run) => run);
+    }
+
+    async waitForTool(
+        ctx: Context,
+        agentId: string,
+        id: string,
+        call: RunToolCall,
+    ): Promise<WorkflowRun> {
+        this.#assertId(call.id);
+        return await this.#wait(
+            ctx,
+            agentId,
+            id,
+            async (txCtx, run) => await call.commit(txCtx, run),
+        );
+    }
+
+    async #wait(
+        ctx: Context,
+        agentId: string,
+        id: string,
+        complete: Complete<WorkflowRun>,
+    ): Promise<WorkflowRun> {
         this.#assertAgentId(agentId);
         this.#assertId(id);
         const run = await this.#waitStoreRun(ctx, agentId, id);
@@ -399,7 +423,25 @@ export class WorkflowsModule implements AgentModule {
         if (!isWorkflowTerminalStatus(run.status)) {
             throw new Error("Workflow wait returned before a terminal or unavailable status.");
         }
-        return structuredClone(run);
+        let completed: WorkflowRun | undefined;
+        const change = await this.#transaction(ctx, agentId, async (txCtx) => {
+            await this.#saveStoreRun(txCtx, run);
+            const persisted = await this.#getStoreRun(txCtx, agentId, id);
+            if (persisted === undefined || !sameWorkflowRunObject(persisted, run)) {
+                throw new Error("Workflow wait result was not persisted.");
+            }
+            completed = await complete(txCtx, structuredClone(persisted));
+            return {
+                agentId,
+                operationId: id,
+                run: persisted,
+                changed: false,
+            };
+        });
+        if (completed === undefined || !sameWorkflowRunObject(completed, change.run)) {
+            throw new Error("Workflow wait completion returned a substituted run.");
+        }
+        return structuredClone(completed);
     }
 
     async logs(ctx: Context, agentId: string, query: WorkflowLogQuery): Promise<WorkflowLogPage> {
@@ -718,6 +760,14 @@ export class WorkflowsModule implements AgentModule {
         const resolved = await workflowStorePromise(raw, "wait");
         assertWorkflowRun(resolved);
         return resolved;
+    }
+
+    async #saveStoreRun(ctx: Context, run: WorkflowRun): Promise<void> {
+        const raw: unknown = Reflect.apply(this.#store.save, this.#store, [ctx, run]);
+        const resolved = await workflowStorePromise(raw, "save");
+        if (resolved !== undefined) {
+            throw new Error("Workflow save must resolve to undefined.");
+        }
     }
 
     async #logsStorePage(

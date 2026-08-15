@@ -649,4 +649,3 @@ async function persistWorkspace(database: AgentDatabase, workspace: Workspace): 
             WHERE id = ${workspace.id}`,
     );
 }
-

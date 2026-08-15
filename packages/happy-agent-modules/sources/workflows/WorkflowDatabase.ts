@@ -257,10 +257,11 @@ export function createWorkflowDatabase(
             if (run.agentId !== agentId || run.id !== id) {
                 throw new Error("Workflow runtime returned an unrelated wait result.");
             }
-            await transaction(ctx, agentId, async (txCtx) => {
-                await writeRun(txCtx, run, "update");
-            });
             return structuredClone(run);
+        },
+        save: async (ctx, run) => {
+            assertWorkflowRun(run);
+            await writeRun(ctx, run, "update");
         },
         logs: async (ctx, agentId, query) => {
             if (

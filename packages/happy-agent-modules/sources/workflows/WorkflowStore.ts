@@ -55,6 +55,13 @@ export const workflowRuntimeSchema = Type.Object(
             ],
             Type.Promise(workflowRunSchema),
         ),
+        save: Type.Function(
+            [
+                Type.Unsafe<Context>(Type.Object({}, { additionalProperties: false })),
+                workflowRunSchema,
+            ],
+            Type.Promise(Type.Void()),
+        ),
     },
     { additionalProperties: false },
 );

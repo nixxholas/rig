@@ -32,6 +32,10 @@ export class UserInputTestStore implements UserInputStore, UserInputBroker {
     #pendingWaiterReleases = new Set<string>();
     #waiters = new Map<string, Array<(request: UserInputTerminalRequest) => void>>();
 
+    get insideTransaction(): boolean {
+        return this.#transactionDepth > 0;
+    }
+
     async transaction(
         ctx: Context,
         _actingAgentId: string,

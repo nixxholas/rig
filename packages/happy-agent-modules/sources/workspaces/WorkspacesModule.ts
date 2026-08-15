@@ -833,10 +833,7 @@ export class WorkspacesModule implements AgentModule {
         return value;
     }
 
-    #operation(
-        kind: WorkspaceMutationOperation,
-        operationId: string,
-    ): WorkspaceOperation {
+    #operation(kind: WorkspaceMutationOperation, operationId: string): WorkspaceOperation {
         const operation = { kind, operationId };
         if (!Value.Check(workspaceMutationRequestSchema, toMutationRequest(operation))) {
             throw new Error("Workspace module created an invalid operation.");
@@ -1047,10 +1044,7 @@ export class WorkspacesModule implements AgentModule {
         operation: WorkspaceOperation,
         agentId: string,
     ): void {
-        if (
-            result.agentId !== agentId ||
-            result.operationId !== operation.operationId
-        ) {
+        if (result.agentId !== agentId || result.operationId !== operation.operationId) {
             throw new Error("Workspace transfer result identity does not match the request.");
         }
     }
@@ -1067,7 +1061,6 @@ export class WorkspacesModule implements AgentModule {
             throw new Error("Workspace create result does not match the requested identity.");
         }
     }
-
 }
 
 export function assertWorkspaceModuleOptions(

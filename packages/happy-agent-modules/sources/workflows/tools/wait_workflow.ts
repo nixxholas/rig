@@ -16,13 +16,8 @@ export function waitWorkflowTool(module: WorkflowsModule, agentId: string) {
         returnType: workflowRunSchema,
         durable: true,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, input: Input, call) => {
-            const run = await module.wait(ctx, agentId, input.id);
-            return await call.kv.transaction(
-                ctx,
-                async (_scope, txCtx) => await call.commit(txCtx, run),
-            );
-        },
+        execute: async (ctx, input: Input, call) =>
+            await module.waitForTool(ctx, agentId, input.id, call),
         toLLM: (run) => [{ type: "text", text: module.formatRunForModel(run) }],
     });
 }
