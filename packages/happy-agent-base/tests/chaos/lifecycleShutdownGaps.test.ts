@@ -11,7 +11,7 @@ import { describe, expect, it } from "vitest";
 
 import { AgentBase, agentKV } from "../../sources/index.js";
 import { InMemoryPersistence } from "../gym/InMemoryPersistence.js";
-import { fromProviderContext, ScriptedProvider, ScriptedSession } from "../gym/ScriptedProvider.js";
+import { ScriptedProvider, ScriptedSession } from "../gym/ScriptedProvider.js";
 import { providersOf, system, textTurn, user, userRecord } from "../gym/fixtures.js";
 
 const ctx = createRootContext().named("happy-agent-base-lifecycle-shutdown-gaps");
@@ -168,8 +168,7 @@ describe("abort and shutdown lifecycle gaps", () => {
 
         provider.session = async (id: string, options: SessionOptions): Promise<BaseSession> => {
             const session = (await originalSession(id, options)) as ScriptedSession;
-            session.compact = async (providerCtx, compactOptions: SessionCompactionOptions) => {
-                const compactCtx = fromProviderContext(providerCtx);
+            session.compact = async (compactCtx, compactOptions: SessionCompactionOptions) => {
                 session.compactions.push(compactOptions);
                 compactionSignal = compactCtx.lifetime;
                 compactionStarted.resolve();
@@ -256,8 +255,7 @@ describe("abort and shutdown lifecycle gaps", () => {
 
         provider.session = async (id: string, options: SessionOptions): Promise<BaseSession> => {
             const session = (await originalSession(id, options)) as ScriptedSession;
-            session.run = (providerCtx, request: SessionRunRequest): SessionStream => {
-                const runCtx = fromProviderContext(providerCtx);
+            session.run = (runCtx, request: SessionRunRequest): SessionStream => {
                 session.requestContexts.push(runCtx);
                 session.requests.push(request);
                 return oneDoneThenBlockedCleanup(
@@ -315,8 +313,7 @@ describe("abort and shutdown lifecycle gaps", () => {
         provider.session = async (id: string, options: SessionOptions): Promise<BaseSession> => {
             const session = (await originalSession(id, options)) as ScriptedSession;
             if (provider.sessions.length === 1) {
-                session.run = (providerCtx, request: SessionRunRequest): SessionStream => {
-                    const runCtx = fromProviderContext(providerCtx);
+                session.run = (runCtx, request: SessionRunRequest): SessionStream => {
                     session.requestContexts.push(runCtx);
                     session.requests.push(request);
                     return oneDoneThenBlockedCleanup(
@@ -384,8 +381,7 @@ describe("abort and shutdown lifecycle gaps", () => {
         provider.session = async (id: string, options: SessionOptions): Promise<BaseSession> => {
             const session = (await originalSession(id, options)) as ScriptedSession;
             if (provider.sessions.length === 1) {
-                session.run = (providerCtx, request: SessionRunRequest): SessionStream => {
-                    const runCtx = fromProviderContext(providerCtx);
+                session.run = (runCtx, request: SessionRunRequest): SessionStream => {
                     session.requestContexts.push(runCtx);
                     session.requests.push(request);
                     return oneDoneThenBlockedCleanup(
@@ -472,8 +468,7 @@ describe("abort and shutdown lifecycle gaps", () => {
         provider.session = async (id: string, options: SessionOptions): Promise<BaseSession> => {
             const session = (await originalSession(id, options)) as ScriptedSession;
             let runs = 0;
-            session.run = (providerCtx, request: SessionRunRequest): SessionStream => {
-                const runCtx = fromProviderContext(providerCtx);
+            session.run = (runCtx, request: SessionRunRequest): SessionStream => {
                 session.requestContexts.push(runCtx);
                 session.requests.push(request);
                 runs += 1;

@@ -137,17 +137,17 @@ class RoutedSession extends BaseSession {
         this.#compactionResults = compactionResults;
     }
 
-    run(runCtx: Parameters<BaseSession["run"]>[0], request: SessionRunRequest): SessionStream {
+    run(runCtx: Context, request: SessionRunRequest): SessionStream {
         this.requests.push(request);
         const script = this.#scripts.shift() ?? [];
-        if (typeof script === "function") return script(runCtx as unknown as Context);
+        if (typeof script === "function") return script(runCtx);
         return (async function* () {
             yield* script;
         })();
     }
 
     compact(
-        _compactCtx: Parameters<BaseSession["compact"]>[0],
+        _compactCtx: Context,
         options: SessionCompactionOptions,
     ): Promise<SessionCompaction> {
         this.compactions.push(options);

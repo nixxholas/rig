@@ -56,10 +56,7 @@ class TracingSession extends BaseSession {
         this.#trace = trace;
     }
 
-    override run(
-        ctx: Parameters<BaseSession["run"]>[0],
-        request: SessionRunRequest,
-    ): SessionStream {
+    override run(ctx: Context, request: SessionRunRequest): SessionStream {
         const inference: RealGymInference = {
             model: request.model,
             effort: request.effort,
@@ -77,7 +74,7 @@ class TracingSession extends BaseSession {
     }
 
     override async compact(
-        ctx: Parameters<BaseSession["compact"]>[0],
+        ctx: Context,
         options: SessionCompactionOptions,
     ): Promise<SessionCompaction> {
         return await this.#session.compact(ctx, options);

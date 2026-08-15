@@ -135,7 +135,6 @@ export interface AgentBaseMessageOptions {
      */
     readonly permissionMode?: AgentPermissionMode;
 }
-
 /**
  * Whether an operation resolves once the agent has taken the request on, or once the agent has
  * carried it out. Every operation that asks something of an agent accepts this, and every one of
@@ -1871,7 +1870,7 @@ export class AgentBase {
                               this.#hooks.beforeInferenceTransact?.(hookCtx, inferenceStart),
                 );
                 await this.#invokeHook(this.#hooks.beforeInference, inferenceStart);
-                const stream = session.run(providerContext(this.#ctx), {
+                const stream = session.run(this.#ctx, {
                     context: {
                         instructions,
                         messages: [...this.#messages],
@@ -2068,7 +2067,7 @@ export class AgentBase {
             // Provider compaction is this turn's work, so it runs on this turn's lifetime: an
             // abort reaches the provider operation itself rather than waiting for it to finish
             // work nobody wants any more.
-            const result = await session.compact(providerContext(withLifetime(this.#ctx, signal)), {
+            const result = await session.compact(withLifetime(this.#ctx, signal), {
                 context: { instructions, messages: snapshot },
                 ...(this.#model === undefined ? {} : { model: this.#model }),
             });
@@ -3455,12 +3454,4 @@ function sessionConfigKey(
             tool.grammar ?? null,
         ]),
     ]);
-}
-
-/**
- * Provider 0.0.7 types its context through stdlib 0.0.8. Context is used there as a type-only
- * boundary, so adapt that nominal version skew in this one place while Base owns stdlib 0.0.10.
- */
-function providerContext(ctx: Context): Parameters<BaseSession["run"]>[0] {
-    return ctx as unknown as Parameters<BaseSession["run"]>[0];
 }
