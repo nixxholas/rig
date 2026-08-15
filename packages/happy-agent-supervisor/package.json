@@ -37,6 +37,7 @@
         "package:platform": "node scripts/package.mjs platform",
         "package:root": "node scripts/package.mjs root",
         "prepack": "pnpm build",
+        "release:placeholder": "node scripts/publish-placeholder.mjs",
         "test": "vitest run",
         "test:native": "cargo +1.96.0 test --manifest-path native/Cargo.toml --locked"
     },

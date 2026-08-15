@@ -3,6 +3,26 @@ use std::ffi::{CStr, CString, OsStr, OsString};
 use std::os::raw::c_char;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+/// The environment as the caller wrote it, taken before the supervisor edits its own copy.
+static CALLER_ENVIRONMENT: OnceLock<Vec<(OsString, OsString)>> = OnceLock::new();
+
+/// Records the caller's environment so later changes to this process do not reach the workload.
+///
+/// Process hardening removes the loader variables from the supervisor, which is about what the
+/// supervisor loads rather than about what the workload is allowed to see. Taking the environment
+/// first is what keeps those two questions apart.
+pub(crate) fn capture_caller_environment() {
+    let _ = CALLER_ENVIRONMENT.set(std::env::vars_os().collect());
+}
+
+fn caller_environment() -> Vec<(OsString, OsString)> {
+    match CALLER_ENVIRONMENT.get() {
+        Some(captured) => captured.clone(),
+        None => std::env::vars_os().collect(),
+    }
+}
 
 pub(crate) fn exec_target(
     command: &[OsString],
@@ -44,7 +64,8 @@ pub(crate) type EnvironmentOverride = (OsString, Option<OsString>);
 /// An override with no value removes the variable outright. That is what keeps an inherited
 /// proxy address or exemption list from surviving into a workload whose policy never named it.
 fn merge_environment(overrides: &[EnvironmentOverride]) -> Vec<(OsString, OsString)> {
-    let mut environment: Vec<(OsString, OsString)> = std::env::vars_os()
+    let mut environment: Vec<(OsString, OsString)> = caller_environment()
+        .into_iter()
         .filter(|(key, _)| !overrides.iter().any(|(name, _)| name == key))
         .collect();
     for (name, value) in overrides {

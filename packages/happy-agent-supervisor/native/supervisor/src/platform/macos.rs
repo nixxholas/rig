@@ -23,6 +23,9 @@ unsafe extern "C" {
 
 pub(crate) fn run(policy: SupervisorPolicy, command: Vec<OsString>) -> SupervisorResult<()> {
     refuse_nested_sandbox()?;
+    // After the nested-sandbox check, so an enclosing sandbox is reported as itself rather than as
+    // whichever hardening step it happened to interfere with first.
+    crate::hardening::apply()?;
     // There is no network namespace here, so the split between the two processes is the profile
     // itself. The egress process is forked first and never has the profile applied to it; this
     // process binds the front-ends, is sandboxed with the workload, and can reach nothing but its

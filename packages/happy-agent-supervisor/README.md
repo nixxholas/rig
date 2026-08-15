@@ -1,7 +1,9 @@
 # Happy Agent Supervisor
 
 `@slopus/happy-agent-supervisor` is the small trusted native boundary used to
-launch agent workloads without an intermediary shell.
+launch agent workloads without an intermediary shell. You hand it a policy and
+an argument vector; it applies the operating system's own isolation and then
+`execve`s your command inside it.
 
 ```text
 caller
@@ -16,18 +18,134 @@ supervisor
 execve(target, argv, inherited environment)
 ```
 
-## Invocation
+The package is two things in one npm name: a native executable per platform,
+and a small TypeScript API that validates a policy and tells you where the
+matching executable lives.
 
-Pass policy out of argv and pass the command as an argument vector:
+## Where it runs
+
+| Platform | Architecture | Rust target                  | Enforcement                                             |
+| -------- | ------------ | ---------------------------- | ------------------------------------------------------- |
+| macOS    | arm64        | `aarch64-apple-darwin`       | Seatbelt profile installed in-process                   |
+| macOS    | x64          | `x86_64-apple-darwin`        | Seatbelt profile installed in-process                   |
+| Linux    | arm64        | `aarch64-unknown-linux-musl` | namespaces, mount policy, seccomp, capability removal   |
+| Linux    | x64          | `x86_64-unknown-linux-musl`  | namespaces, mount policy, seccomp, capability removal   |
+
+The Linux binaries are static musl builds, so they run on any distribution and
+can be mounted read-only into a container that has no toolchain of its own.
+Windows is not supported; `resolveSupervisorBinary()` throws there rather than
+returning something that cannot enforce anything.
+
+## Install
+
+```sh
+npm install @slopus/happy-agent-supervisor
+pnpm add @slopus/happy-agent-supervisor
+```
+
+Nothing is downloaded by a post-install script. The native binaries ship as
+ordinary npm packages, and the root package names them as optional dependencies
+guarded by `os` and `cpu`, so your package manager installs exactly the one that
+matches the machine and silently skips the other three.
+
+The binaries are published as versions of the same npm name, one per target:
+
+| Optional dependency                             | Resolves to                                   |
+| ----------------------------------------------- | --------------------------------------------- |
+| `@slopus/happy-agent-supervisor-darwin-arm64`    | `@slopus/happy-agent-supervisor@<version>-darwin-arm64` |
+| `@slopus/happy-agent-supervisor-darwin-x64`      | `@slopus/happy-agent-supervisor@<version>-darwin-x64`   |
+| `@slopus/happy-agent-supervisor-linux-arm64`     | `@slopus/happy-agent-supervisor@<version>-linux-arm64`  |
+| `@slopus/happy-agent-supervisor-linux-x64`       | `@slopus/happy-agent-supervisor@<version>-linux-x64`    |
+
+Each of those packages contains one executable at
+`vendor/<rust-target>/bin/happy-agent-supervisor` plus a `SHA256SUMS` file for it.
+
+### Getting a binary for another platform
+
+Two cases need a binary that does not match the host: building a Linux image on
+a Mac, and shipping a container that carries the supervisor. Install the target
+package explicitly and read its path from your build script:
+
+```sh
+# The binary you want to copy into a linux/amd64 image.
+npm install --no-save @slopus/happy-agent-supervisor@0.0.1-linux-x64
+```
+
+Or ask your package manager for every variant at once, which is what a release
+pipeline usually wants:
+
+```sh
+npm install --force \
+  @slopus/happy-agent-supervisor@0.0.1-linux-x64 \
+  @slopus/happy-agent-supervisor@0.0.1-linux-arm64
+```
+
+Then point the container at it:
+
+```ts
+import { resolveLinuxSupervisorBinary } from "@slopus/happy-agent-supervisor";
+
+// Accepts OCI, Node.js, and Rust spellings: amd64 | x64 | x86_64 | arm64 | aarch64.
+const hostPath = resolveLinuxSupervisorBinary("amd64");
+// docker run -v ${hostPath}:/usr/local/bin/happy-agent-supervisor:ro ...
+```
+
+## Using the TypeScript API
+
+```ts
+import { spawn } from "node:child_process";
+import {
+    parseSupervisorPolicy,
+    resolveSupervisorBinary,
+} from "@slopus/happy-agent-supervisor";
+
+const policy = parseSupervisorPolicy({
+    mode: "workspace_write",
+    allowedWritePaths: ["/work/project"],
+    network: { egress: false, localBinding: false },
+});
+
+const child = spawn(
+    resolveSupervisorBinary(),
+    ["--policy-fd", "3", "--", "/usr/bin/env", "node", "build.mjs"],
+    {
+        cwd: "/work/project",
+        stdio: ["inherit", "inherit", "inherit", "pipe"],
+    },
+);
+child.stdio[3].end(JSON.stringify(policy));
+```
+
+`parseSupervisorPolicy(value)` validates against the TypeBox schema and throws a
+readable error listing every offending field; the schemas and their `Static`
+types are exported if you want to compose them yourself.
+
+`resolveSupervisorBinary(binaryPath?)` returns the executable for the current
+host, and `resolveLinuxSupervisorBinary(architecture, binaryPath?)` returns a
+Linux one regardless of host. Both accept an explicit path that wins over
+lookup — useful in tests and for a locally built binary — and both fall back to
+this repository's `native/target` build directories when the optional package is
+not installed. If neither is present they throw, naming the package to reinstall.
+
+## Command line
+
+Policy stays out of argv, and the command is always an argument vector:
 
 ```sh
 happy-agent-supervisor --policy-fd 3 -- /bin/sh -c 'printf "%s\n" "$VALUE"'
 happy-agent-supervisor --policy-file /trusted/policy.json -- /usr/bin/env
 ```
 
-The supervisor consumes the policy descriptor. Descriptors `0`, `1`, and `2`
-are rejected. Policy files are read and closed before sandbox setup. Policy
-JSON is limited to 1 MiB and rejects unknown fields.
+Exactly one of `--policy-fd` and `--policy-file` is required, and everything
+after `--` is the target command. The supervisor consumes the policy descriptor;
+descriptors `0`, `1`, and `2` are rejected. Policy files are read and closed
+before sandbox setup. Policy JSON is limited to 1 MiB and rejects unknown fields.
+A supervisor-level failure — a bad argument, an invalid policy, an enforcement
+step that would not apply — exits `125` with a message on stderr, which keeps it
+distinguishable from the workload's own status. Otherwise the workload's exit
+status is reproduced as its own.
+
+## Policy
 
 The policy names match `ComputePermissions`:
 
@@ -46,10 +164,12 @@ The policy names match `ComputePermissions`:
 }
 ```
 
-For `workspace_write` and `auto`, the process working directory is the
-workspace write root. Denials win over grants. Linux write-denied paths and
-writable roots must already exist so the supervisor never creates a
-user-visible mount point while privileged.
+`mode` is one of `read_only`, `workspace_write`, `auto`, or `full_access`. For
+`workspace_write` and `auto`, the process working directory is the workspace
+write root — the cwd is the single source of truth, so it is not repeated in the
+document. Denials win over grants. Linux write-denied paths and writable roots
+must already exist so the supervisor never creates a user-visible mount point
+while privileged.
 
 ## Outgoing proxy
 
@@ -87,15 +207,32 @@ would be enforcing the list. A host list with egress disabled is already enforce
 by the isolated network namespace. No TLS is terminated anywhere, so the boundary
 is which host may be reached rather than what is sent to it.
 
-## Binary resolution
+## Process hardening
 
-`resolveSupervisorBinary()` selects the current host binary.
-`resolveLinuxSupervisorBinary(architecture)` selects Linux `x64` or `arm64`
-independently of the host, for read-only mounting into a container.
+The supervisor runs as the same user as the workload and holds the workload's
+only route out of the jail, so before it forks anything it makes itself harder
+to read: non-dumpable on Linux, debugger attachment denied on macOS, and core
+dumps disabled. The egress process asks for the same again after the fork,
+because macOS gives a child fresh process flags. Any of these failing stops the
+run rather than continuing unprotected.
 
-The package script emits four npm variants:
+It also drops `LD_*` and `DYLD_*` from its own environment, so nothing chosen by
+the caller is loaded into the process that is about to become the boundary. The
+workload's environment is taken before that happens and passed on unchanged: a
+sandboxed build may legitimately need `LD_LIBRARY_PATH`, and the workload can set
+these variables for its own children in any case.
 
-- `aarch64-apple-darwin`
-- `x86_64-apple-darwin`
-- `aarch64-unknown-linux-musl`
-- `x86_64-unknown-linux-musl`
+## Building from source
+
+The native workspace lives in `native/` and pins its own Rust toolchain.
+
+```sh
+pnpm build              # TypeScript API into dist/
+pnpm build:native       # host supervisor binary into native/target/release/
+pnpm test               # TypeScript tests
+pnpm test:native        # Rust behavior tests, which need the host's real kernel
+```
+
+A binary built this way is picked up automatically by the resolvers, so a
+checkout works without any published package installed. Release packaging and
+publishing are described in [`release/README.md`](release/README.md).

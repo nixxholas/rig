@@ -1,0 +1,228 @@
+name: Publish happy-agent-supervisor
+
+# The supervisor ships as a native binary per platform, and every claim it makes is an
+# operating-system claim that only that platform's kernel can settle. Nothing is published until all
+# four shipped targets have built and passed their own tests on their own real hardware.
+#
+# Publication uses npm's trusted publishing: the registry trusts this workflow in this repository
+# rather than a token, so there is no npm credential in the repository or in any environment. The
+# publisher is configured once on the package page, which is why the name has to exist first —
+# `pnpm --filter @slopus/happy-agent-supervisor release:placeholder` does that, by hand, once.
+
+on:
+    push:
+        tags:
+            - "happy-agent-supervisor-v*"
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+concurrency:
+    group: publish-sandbox-${{ github.ref }}
+    cancel-in-progress: false
+
+jobs:
+    verify:
+        name: ${{ matrix.name }}
+        runs-on: ${{ matrix.runner }}
+        timeout-minutes: 30
+        strategy:
+            # Every target reports, so a regression on one architecture is visible as exactly that
+            # rather than hidden behind whichever leg happened to fail first.
+            fail-fast: false
+            matrix:
+                include:
+                    - name: macOS arm64
+                      runner: macos-15
+                      target: aarch64-apple-darwin
+                    - name: macOS x64
+                      runner: macos-15-intel
+                      target: x86_64-apple-darwin
+                    - name: Linux arm64
+                      runner: ubuntu-24.04-arm
+                      target: aarch64-unknown-linux-musl
+                    - name: Linux x64
+                      runner: ubuntu-24.04
+                      target: x86_64-unknown-linux-musl
+
+        defaults:
+            run:
+                working-directory: packages/happy-agent-supervisor/native
+
+        steps:
+            - name: Check out the repository
+              uses: actions/checkout@v6
+
+            - name: Install the pinned Rust toolchain
+              run: |
+                  rustup show active-toolchain || rustup toolchain install
+                  rustup target add "${{ matrix.target }}"
+
+            - name: Allow unprivileged user namespaces
+              if: runner.os == 'Linux'
+              # Ubuntu confines unprivileged user namespaces through AppArmor by default. The
+              # supervisor creates one as its very first act, so without this every Linux case
+              # fails identically at setup and proves nothing about the code.
+              run: |
+                  if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+                      sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+                  fi
+
+            - name: Report what the kernel actually offers
+              # The fallback paths are chosen at runtime, so the kernel version is the difference
+              # between a run that exercised `mount_setattr` and one that exercised the pre-5.12
+              # remount walk. Record it rather than inferring it later from a green tick.
+              run: uname -a
+
+            - name: Build the release binary
+              run: cargo build --locked --release --target "${{ matrix.target }}" --bin happy-agent-supervisor
+
+            - name: Run the native test suite
+              # The tests run against the binary that is about to be published, not against the host
+              # default target. `--test-threads=1` keeps the behaviour tests from racing each other
+              # over namespaces and listeners.
+              run: cargo test --locked --target "${{ matrix.target }}" -- --test-threads=1
+
+            - name: Lint
+              run: cargo clippy --locked --all-targets --target "${{ matrix.target }}" -- -D warnings
+
+            - name: Upload the binary
+              uses: actions/upload-artifact@v4
+              with:
+                  name: happy-agent-supervisor-${{ matrix.target }}
+                  path: packages/happy-agent-supervisor/native/target/${{ matrix.target }}/release/happy-agent-supervisor
+                  if-no-files-found: error
+
+    package:
+        name: TypeScript package
+        runs-on: ubuntu-24.04
+        timeout-minutes: 20
+
+        steps:
+            - name: Check out the repository
+              uses: actions/checkout@v6
+
+            - name: Set up pnpm
+              uses: pnpm/action-setup@v6
+
+            - name: Set up Node.js
+              uses: actions/setup-node@v6
+              with:
+                  node-version: "24"
+                  package-manager-cache: false
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Run type checks
+              run: pnpm --filter @slopus/happy-agent-supervisor check
+
+            - name: Run unit tests
+              run: pnpm --filter @slopus/happy-agent-supervisor test
+
+    publish:
+        name: Publish @slopus/happy-agent-supervisor
+        if: startsWith(github.ref, 'refs/tags/happy-agent-supervisor-v')
+        needs: [verify, package]
+        runs-on: ubuntu-24.04
+        environment: npm
+        timeout-minutes: 20
+        permissions:
+            contents: read
+            # The identity npm trusts in place of a token.
+            id-token: write
+
+        steps:
+            - name: Check out the release tag
+              uses: actions/checkout@v6
+              with:
+                  fetch-depth: 0
+
+            - name: Verify the tagged commit is on main
+              run: |
+                  if ! git merge-base --is-ancestor HEAD origin/main; then
+                      echo "Release tags must point to a commit on the main branch." >&2
+                      exit 1
+                  fi
+
+            - name: Set up pnpm
+              uses: pnpm/action-setup@v6
+
+            - name: Set up Node.js
+              uses: actions/setup-node@v6
+              with:
+                  node-version: "24"
+                  package-manager-cache: false
+
+            - name: Install an npm that speaks trusted publishing
+              # OIDC publishing landed in npm 11.5.1. The Node release line ships an older npm, and
+              # pnpm cannot publish over OIDC at all, which is why this one step is npm's.
+              run: npm install --global npm@latest
+
+            - name: Verify the tag matches the package version
+              env:
+                  RELEASE_TAG: ${{ github.ref_name }}
+              working-directory: packages/happy-agent-supervisor
+              run: |
+                  node --input-type=module --eval '
+                    import { readFileSync } from "node:fs";
+                    const tag = process.env.RELEASE_TAG;
+                    const prefix = "happy-agent-supervisor-v";
+                    const { version } = JSON.parse(readFileSync("package.json", "utf8"));
+                    if (tag !== `${prefix}${version}`) {
+                        throw new Error(`Tag ${tag} does not match version ${version}.`);
+                    }
+                    console.log(`${tag} matches ${version}.`);
+                  '
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Download the verified binaries
+              uses: actions/download-artifact@v4
+              with:
+                  pattern: happy-agent-supervisor-*
+                  path: binaries
+
+            - name: Build the publishable tarballs
+              working-directory: packages/happy-agent-supervisor
+              run: |
+                  set -euo pipefail
+                  binaries="${{ github.workspace }}/binaries"
+                  for target in aarch64-apple-darwin x86_64-apple-darwin \
+                                aarch64-unknown-linux-musl x86_64-unknown-linux-musl; do
+                      binary="${binaries}/happy-agent-supervisor-${target}/happy-agent-supervisor"
+                      # Artifacts come back without the executable bit, and the tarball is what the
+                      # installed package runs.
+                      chmod +x "${binary}"
+                      node scripts/package.mjs platform --target "${target}" --binary "${binary}"
+                  done
+                  node scripts/package.mjs root
+
+            - name: Publish the platform packages
+              working-directory: packages/happy-agent-supervisor/artifacts
+              # The platform versions go first: the root package names them as optional
+              # dependencies, so publishing the root first would briefly describe releases that do
+              # not exist yet. They stay off `latest`, because nothing installs them by name.
+              run: |
+                  set -euo pipefail
+                  for tarball in *-darwin-*.tgz *-linux-*.tgz; do
+                      echo "Publishing ${tarball}..."
+                      npm publish "${tarball}" --access public --tag platform
+                  done
+
+            - name: Publish the package
+              working-directory: packages/happy-agent-supervisor/artifacts
+              env:
+                  RELEASE_TAG: ${{ github.ref_name }}
+              run: |
+                  set -euo pipefail
+                  version="${RELEASE_TAG#happy-agent-supervisor-v}"
+                  tarball="slopus-happy-agent-supervisor-${version}.tgz"
+                  distribution_tag=latest
+                  case "${version}" in
+                      *-beta.*) distribution_tag=beta ;;
+                  esac
+                  echo "Publishing ${tarball} as ${distribution_tag}..."
+                  npm publish "${tarball}" --access public --tag "${distribution_tag}"

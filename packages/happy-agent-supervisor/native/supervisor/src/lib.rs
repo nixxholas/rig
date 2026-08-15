@@ -1,5 +1,6 @@
 mod cli;
 mod exec;
+mod hardening;
 mod platform;
 mod policy;
 mod proxy;

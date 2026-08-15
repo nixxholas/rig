@@ -57,6 +57,11 @@ type OutgoingProxySetup = Option<OutgoingProxy>;
 
 pub(crate) fn run(policy: SupervisorPolicy, command: Vec<OsString>) -> SupervisorResult<()> {
     enter_user_namespace()?;
+    // Hardening follows the user namespace rather than preceding it. Marking the process
+    // non-dumpable changes who may inspect it, and the identity mapping written immediately before
+    // this is exactly the kind of write that governs. Nothing has forked yet, so everything below
+    // inherits the hardening anyway.
+    crate::hardening::apply()?;
     // A configured proxy isolates the network exactly as hard as no egress at all. The egress
     // process is forked here, before any namespace is unshared, so it keeps the original network
     // namespace while everything below shares an empty one. Its socketpair is created with it, and

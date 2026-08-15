@@ -52,6 +52,13 @@ pub(crate) fn start(allowed_hosts: &[String]) -> SupervisorResult<Egress> {
     }
     if child == 0 {
         drop(front_end);
+        // This process holds the only route out of the jail, so it is the one worth reading. Linux
+        // inherited the supervisor's non-dumpable flag through the fork; macOS gives a child fresh
+        // process flags, so the deny has to be asked for again here. A failure leaves no proxy at
+        // all rather than an unprotected one.
+        if crate::hardening::deny_debugger_attach().is_err() {
+            unsafe { libc::_exit(125) };
+        }
         // A supervisor that dies without reaping must not leave a process holding an open route out
         // of the jail. macOS has no equivalent, where the link closing is what ends the loop.
         #[cfg(target_os = "linux")]
@@ -116,15 +123,22 @@ pub(crate) fn close(link: std::os::fd::RawFd, pid: libc::pid_t) {
 }
 
 fn link_pair() -> SupervisorResult<(File, File)> {
+    // The link is inherited across `exec` unless it is closed on exec, and the workload must not be
+    // able to speak the frame protocol itself or desynchronise it. Linux can say so in the call that
+    // creates the pair; macOS has no such flag and needs the second step below. The two-step form is
+    // only a window if another thread execs between them, which nothing here does today — but the
+    // one-step form is the one that stays correct if that ever changes.
+    #[cfg(target_os = "linux")]
+    let socket_type = libc::SOCK_STREAM | libc::SOCK_CLOEXEC;
+    #[cfg(not(target_os = "linux"))]
+    let socket_type = libc::SOCK_STREAM;
+
     let mut descriptors = [-1, -1];
-    if unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, descriptors.as_mut_ptr()) }
-        != 0
-    {
+    if unsafe { libc::socketpair(libc::AF_UNIX, socket_type, 0, descriptors.as_mut_ptr()) } != 0 {
         return Err(std::io::Error::last_os_error().into());
     }
+    #[cfg(not(target_os = "linux"))]
     for descriptor in descriptors {
-        // The link is inherited across `exec` unless this is set, and the workload must not be able
-        // to speak the frame protocol itself or desynchronise it.
         if unsafe { libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
             let error = std::io::Error::last_os_error();
             for descriptor in descriptors {

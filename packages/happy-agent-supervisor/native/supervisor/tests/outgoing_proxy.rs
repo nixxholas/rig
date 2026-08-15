@@ -11,6 +11,7 @@
 use serde_json::json;
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::os::fd::RawFd;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Output, Stdio};
 use std::sync::Arc;
@@ -266,11 +267,31 @@ fn a_front_end_credential_that_is_missing_or_wrong_is_refused() {
 
 #[test]
 fn the_workload_cannot_reach_the_destination_without_the_proxy() {
+    // Both sides are described, because a descriptor in the workload is either one the supervisor
+    // leaked or one this process was already holding when it spawned the supervisor, and only the
+    // two lists together say which. `--nocapture` shows this side on a passing run too.
+    let held_here = describe_inherited_descriptors();
+    eprintln!(
+        "descriptors held by the test process: {}",
+        as_list(&held_here)
+    );
     let run = run_workload("direct", &["127.0.0.1"], &["http", "socks5"]);
     let stdout = assert_succeeded(&run);
 
     assert!(stdout.contains("direct-connect=refused"), "stdout:\n{stdout}");
-    assert!(stdout.contains("inherited-sockets=0"), "stdout:\n{stdout}");
+    let inherited = inherited_descriptors(&stdout);
+    assert!(
+        inherited.is_empty(),
+        "the workload was given descriptors it has no use for: {}\n\nthe test process was already holding: {}\n\n\
+         Nothing the supervisor creates can be among them: the link to the egress process is a\n\
+         close-on-exec socketpair, the front-ends are std `TcpListener`s, and the status pipe is\n\
+         `pipe2(O_CLOEXEC)`. A descriptor here that the test process also holds came from the\n\
+         environment, through cargo and libtest, and this assertion is the thing that is wrong\n\
+         rather than the supervisor. One the test process does not hold is the supervisor's, and it\n\
+         should be fixed where it is created.",
+        as_list(&inherited),
+        as_list(&held_here)
+    );
     assert_eq!(run.origin_connections, 0);
 }
 
@@ -410,6 +431,11 @@ fn proxy_workload_process() {
             println!("socks-wrong-credential={}", result[1]);
         }
         "direct" => {
+            // Reported before anything here opens a descriptor of its own, so the list is exactly
+            // what survived `execve`.
+            for description in describe_inherited_descriptors() {
+                println!("inherited-descriptor={description}");
+            }
             println!(
                 "direct-connect={}",
                 match TcpStream::connect(&origin) {
@@ -417,7 +443,6 @@ fn proxy_workload_process() {
                     Err(_) => "refused",
                 }
             );
-            println!("inherited-sockets={}", inherited_sockets());
         }
         "large_transfer" => {
             let mut socks = socks_connect("127.0.0.1", origin_port);
@@ -608,19 +633,205 @@ fn echo_through(stream: &mut TcpStream) -> String {
     String::from_utf8_lossy(&echoed).into_owned()
 }
 
-/// Counts the sockets the workload inherited, which must not include the proxy link.
-fn inherited_sockets() -> usize {
-    let mut sockets = 0;
-    for descriptor in 3..64 {
+// ---------------------------------------------------------------------------------------------
+// Describing descriptors, which both sides of the supervisor do.
+// ---------------------------------------------------------------------------------------------
+
+/// Describes every descriptor above standard error: its number, its kind, whether it would survive
+/// `execve`, and for a socket its domain, its type and both of its addresses.
+///
+/// This counted rather than described once, and the count was useless the first time it mattered.
+/// CI reported one inherited socket where both development machines reported none, and a `1` cannot
+/// tell the supervisor's own link to its egress process — an unnamed `AF_UNIX` stream socketpair,
+/// and a way around the front-end credential if it ever escaped — from a socket the environment
+/// left open in whatever ran the test. Those two call for opposite fixes: the first is a descriptor
+/// to correct where it is created, the second means this assertion is over-broad. The report names
+/// which, so the next person does not have to find this out twice.
+fn describe_inherited_descriptors() -> Vec<String> {
+    let mut described = Vec::new();
+    for descriptor in 3..=highest_possible_descriptor() {
         let mut status = unsafe { std::mem::zeroed::<libc::stat>() };
-        if unsafe { libc::fstat(descriptor, &mut status) } == 0
-            && (status.st_mode & libc::S_IFMT) == libc::S_IFSOCK
-        {
-            sockets += 1;
+        if unsafe { libc::fstat(descriptor, &mut status) } != 0 {
+            continue;
         }
+        let kind = match status.st_mode & libc::S_IFMT {
+            libc::S_IFSOCK => "socket",
+            libc::S_IFIFO => "pipe",
+            libc::S_IFREG => "file",
+            libc::S_IFDIR => "directory",
+            libc::S_IFCHR => "character device",
+            libc::S_IFBLK => "block device",
+            libc::S_IFLNK => "symbolic link",
+            _ => "descriptor of an unrecognised kind",
+        };
+        let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
+        let across_exec = if flags >= 0 && (flags & libc::FD_CLOEXEC) != 0 {
+            "closed on exec"
+        } else {
+            "kept across exec"
+        };
+        let mut description = format!("fd {descriptor}: {kind}, {across_exec}");
+        if (status.st_mode & libc::S_IFMT) == libc::S_IFSOCK {
+            description.push_str(&format!(
+                ", {} {}, local {}, peer {}",
+                socket_domain(descriptor),
+                socket_type(descriptor),
+                socket_address(descriptor, End::Local),
+                socket_address(descriptor, End::Peer)
+            ));
+        }
+        described.push(description);
     }
-    sockets
+    described
 }
+
+enum End {
+    Local,
+    Peer,
+}
+
+/// Names the socket's address family.
+///
+/// This is what separates the two explanations for an unexpected socket. The supervisor's own link
+/// to its egress process is `AF_UNIX`; anything the environment hands down through cargo and
+/// libtest is almost certainly `AF_INET` or `AF_INET6`. The family is read from the socket's own
+/// address rather than `SO_DOMAIN`, which Linux has and macOS does not.
+fn socket_domain(descriptor: RawFd) -> String {
+    let mut storage = unsafe { std::mem::zeroed::<libc::sockaddr_storage>() };
+    let mut length = address_length();
+    let named = unsafe {
+        libc::getsockname(
+            descriptor,
+            (&raw mut storage).cast::<libc::sockaddr>(),
+            &mut length,
+        )
+    };
+    if named != 0 {
+        return "a socket of an unreadable family".to_string();
+    }
+    match libc::c_int::from(storage.ss_family) {
+        libc::AF_UNIX => "AF_UNIX".to_string(),
+        libc::AF_INET => "AF_INET".to_string(),
+        libc::AF_INET6 => "AF_INET6".to_string(),
+        family => format!("address family {family}"),
+    }
+}
+
+fn socket_type(descriptor: RawFd) -> String {
+    let mut kind: libc::c_int = 0;
+    let mut length = match libc::socklen_t::try_from(std::mem::size_of::<libc::c_int>()) {
+        Ok(length) => length,
+        Err(_) => return "a socket of an unreadable type".to_string(),
+    };
+    let asked = unsafe {
+        libc::getsockopt(
+            descriptor,
+            libc::SOL_SOCKET,
+            libc::SO_TYPE,
+            (&raw mut kind).cast::<libc::c_void>(),
+            &mut length,
+        )
+    };
+    if asked != 0 {
+        return "a socket of an unreadable type".to_string();
+    }
+    match kind {
+        libc::SOCK_STREAM => "stream".to_string(),
+        libc::SOCK_DGRAM => "datagram".to_string(),
+        libc::SOCK_SEQPACKET => "sequenced packet".to_string(),
+        other => format!("socket type {other}"),
+    }
+}
+
+fn address_length() -> libc::socklen_t {
+    libc::socklen_t::try_from(std::mem::size_of::<libc::sockaddr_storage>())
+        .unwrap_or(libc::socklen_t::MAX)
+}
+
+fn socket_address(descriptor: RawFd, end: End) -> String {
+    let mut storage = unsafe { std::mem::zeroed::<libc::sockaddr_storage>() };
+    let mut length = address_length();
+    let address = (&raw mut storage).cast::<libc::sockaddr>();
+    let named = unsafe {
+        match end {
+            End::Local => libc::getsockname(descriptor, address, &mut length),
+            End::Peer => libc::getpeername(descriptor, address, &mut length),
+        }
+    };
+    if named != 0 {
+        return format!("none ({})", std::io::Error::last_os_error());
+    }
+    match libc::c_int::from(storage.ss_family) {
+        libc::AF_INET => {
+            let inet = unsafe { *(&raw const storage).cast::<libc::sockaddr_in>() };
+            format!(
+                "{}:{}",
+                std::net::Ipv4Addr::from(u32::from_be(inet.sin_addr.s_addr)),
+                u16::from_be(inet.sin_port)
+            )
+        }
+        libc::AF_INET6 => {
+            let inet = unsafe { *(&raw const storage).cast::<libc::sockaddr_in6>() };
+            format!(
+                "[{}]:{}",
+                std::net::Ipv6Addr::from(inet.sin6_addr.s6_addr),
+                u16::from_be(inet.sin6_port)
+            )
+        }
+        libc::AF_UNIX => {
+            let unix = unsafe { *(&raw const storage).cast::<libc::sockaddr_un>() };
+            // `c_char` is signed on one of the tested architectures and unsigned on another, so the
+            // path is read as bytes rather than compared element by element.
+            let path = unsafe {
+                std::slice::from_raw_parts(unix.sun_path.as_ptr().cast::<u8>(), unix.sun_path.len())
+            };
+            let path = path.split(|byte| *byte == 0).next().unwrap_or_default();
+            if path.is_empty() {
+                // Which is what a socketpair looks like, the supervisor's own link included.
+                "unnamed".to_string()
+            } else {
+                String::from_utf8_lossy(path).into_owned()
+            }
+        }
+        family => format!("an address in family {family}"),
+    }
+}
+
+/// The highest descriptor this process could be holding.
+///
+/// A descriptor cannot be opened at or above `RLIMIT_NOFILE`, so the soft limit is the real bound.
+/// The ceiling only keeps an enormous or unlimited one from turning the scan into millions of
+/// futile calls.
+fn highest_possible_descriptor() -> RawFd {
+    let mut limit = unsafe { std::mem::zeroed::<libc::rlimit>() };
+    let soft = if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0 {
+        limit.rlim_cur
+    } else {
+        0
+    };
+    RawFd::try_from(soft.saturating_sub(1))
+        .unwrap_or(RawFd::MAX)
+        .clamp(3, 65_535)
+}
+
+fn inherited_descriptors(stdout: &str) -> Vec<&str> {
+    stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix("inherited-descriptor="))
+        .collect()
+}
+
+fn as_list(descriptions: &[impl AsRef<str>]) -> String {
+    if descriptions.is_empty() {
+        return "nothing".to_string();
+    }
+    descriptions
+        .iter()
+        .map(|description| format!("\n  {}", description.as_ref()))
+        .collect()
+}
+
+
 
 fn read_head_line(stream: &mut TcpStream) -> String {
     let mut line = Vec::new();

@@ -296,6 +296,61 @@ fn workload_process() {
     }
 }
 
+/// Process hardening removes the loader variables from the supervisor, and the easiest way to get
+/// that wrong is to remove them from the workload too. `LD_LIBRARY_PATH` is ordinary configuration
+/// for a build, and a sandbox that silently drops it breaks work it was never asked to police.
+#[test]
+fn the_workload_is_given_the_environment_the_caller_wrote() {
+    let boundary = TestBoundary::new(false, false);
+    let output = boundary.run_with_env(
+        &[
+            "/bin/sh",
+            "-c",
+            "printf 'library-path=%s' \"$LD_LIBRARY_PATH\"",
+        ],
+        &[("LD_LIBRARY_PATH", "/opt/vendor/lib")],
+    );
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "library-path=/opt/vendor/lib"
+    );
+    println!("library-path=/opt/vendor/lib");
+}
+
+/// The supervisor holds the workload's only route out of the jail and runs as the same user, so a
+/// workload that could read its memory would not need the route to be opened for it. The PID
+/// namespace already hides the egress process; this is about the one process the workload can see.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_workload_cannot_read_the_supervisor_it_runs_under() {
+    let boundary = TestBoundary::new(false, false);
+    // PID 1 in the workload's namespace is the supervisor's namespace init, and the workload runs
+    // as the same mapped user, so nothing but the non-dumpable flag stands between them.
+    let output = boundary.run(&[
+        "/bin/sh",
+        "-c",
+        "if : < /proc/1/mem 2>/dev/null; then exit 91; fi; printf supervisor-memory=refused",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "the workload could read the supervisor's memory (exit {:?})\nstderr:\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "supervisor-memory=refused"
+    );
+    println!("supervisor-memory=refused");
+}
+
 /// The pre-5.12 remount fallback would otherwise never execute on any kernel this is tested on, so
 /// it is forced here and held to exactly the boundary the modern path enforces.
 #[cfg(target_os = "linux")]
