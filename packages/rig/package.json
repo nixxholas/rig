@@ -43,6 +43,9 @@
         },
         "./dist/terminal/index.js": {
             "types": "./dist/types.d.ts"
+        },
+        "./dist/external-tools/index.js": {
+            "types": "./dist/types.d.ts"
         }
     },
     "publishConfig": {
@@ -79,10 +82,10 @@
         "@opentelemetry/sdk-trace-base": "^2.10.0",
         "@opentelemetry/sdk-trace-node": "^2.10.0",
         "@opentelemetry/semantic-conventions": "^1.43.0",
+        "@pydantic/monty": "0.0.18",
         "@sinclair/typebox": "^0.34.49",
         "@slopus/ghostty-wasm": "1.3.6",
-        "@slopus/happy-agent-base": "0.0.6",
-        "@slopus/happy-agent-features": "workspace:*",
+        "@slopus/happy-agent-base": "0.0.5",
         "@slopus/happy-providers": "0.0.7",
         "@slopus/murmur": "0.4.4",
         "@steve.kite/stdlib": "0.0.8",
@@ -98,6 +101,8 @@
         "@earendil-works/pi-tui": "^0.80.3",
         "@paralleldrive/cuid2": "^3.3.0",
         "@slopus/ghostty-web": "workspace:*",
+        "@slopus/happy-agent-compute": "workspace:*",
+        "@slopus/rig-execution": "workspace:*",
         "@types/dockerode": "^4.0.1",
         "@types/proper-lockfile": "^4.1.4",
         "@types/qrcode": "^1.5.6",

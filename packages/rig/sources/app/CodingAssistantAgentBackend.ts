@@ -7,9 +7,10 @@ import type {
     ContentBlock,
     UserMessage,
 } from "../agent/index.js";
+import type { Model, Provider, ServiceTier } from "@slopus/rig-execution";
 import type { Context } from "@steve.kite/stdlib";
 import type { PermissionMode } from "../permissions/index.js";
-import type { GoalStatus, SessionGoal } from "@slopus/happy-agent-features";
+import type { GoalStatus, SessionGoal } from "../goals/index.js";
 import type {
     AbortRunOptions,
     AbortRunResponse,
@@ -19,21 +20,12 @@ import type {
     SteerMessageResponse,
     SubmitContextMessageResponse,
     StopBackgroundProcessResponse,
-    Model,
-    ServiceTier,
 } from "../protocol/index.js";
 import type { SecretAttachmentScope } from "../secrets/index.js";
 
 export interface CodingAssistantModelChoice {
     model: Model;
     providerId: string;
-}
-
-/** Provider metadata the terminal needs; actual inference is owned by Agent Base. */
-export interface CodingAssistantProviderInfo {
-    id: string;
-    models: readonly Model[];
-    serviceTiers?: readonly ServiceTier[];
 }
 
 export interface SteeringRunOptions extends AgentRunOptions {
@@ -46,7 +38,7 @@ export interface CodingAssistantAgentBackend {
     readonly confirmedServiceTier: ServiceTier | undefined;
     readonly context: AgentContext;
     readonly id: string;
-    readonly provider: CodingAssistantProviderInfo;
+    readonly provider: Provider;
     readonly model: Model;
     readonly modelChoices?: readonly CodingAssistantModelChoice[];
     readonly permissionMode: PermissionMode;

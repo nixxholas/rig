@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vitest";
 
-import { knownModels, type Model } from "@slopus/happy-agent-base";
+import {
+    modelAnthropicFable5,
+    modelAnthropicOpus5,
+    modelOpenaiCodexAutoReview,
+    modelOpenaiGpt54,
+    modelOpenaiGpt56Luna,
+    modelOpenaiGpt56Sol,
+    modelOpenaiGpt56Terra,
+    modelXaiGrok45,
+    modelXaiGrokBuild,
+    modelXaiGrokComposer25Fast,
+} from "@slopus/rig-execution";
 import { createTestRootContext } from "../../testing/createTestRootContext.js";
 import {
     createModelCatalog as createModelCatalogWithContext,
@@ -9,21 +20,6 @@ import {
 
 const createModelCatalog = (options?: CreateModelCatalogOptions) =>
     createModelCatalogWithContext(createTestRootContext().named("model-catalog"), options);
-const knownModel = (id: string): Model => {
-    const model = knownModels.find((candidate) => candidate.id === id);
-    if (model === undefined) throw new Error(`Missing test model '${id}'.`);
-    return model;
-};
-const modelAnthropicFable5 = knownModel("anthropic/fable-5");
-const modelAnthropicOpus5 = knownModel("anthropic/opus-5");
-const modelOpenaiCodexAutoReview = knownModel("openai/codex-auto-review");
-const modelOpenaiGpt54 = knownModel("openai/gpt-5.4");
-const modelOpenaiGpt56Luna = knownModel("openai/gpt-5.6-luna");
-const modelOpenaiGpt56Sol = knownModel("openai/gpt-5.6-sol");
-const modelOpenaiGpt56Terra = knownModel("openai/gpt-5.6-terra");
-const modelXaiGrok45 = knownModel("xai/grok-4.5");
-const modelXaiGrokBuild = knownModel("xai/grok-build");
-const modelXaiGrokComposer25Fast = knownModel("xai/grok-composer-2.5-fast");
 
 describe("createModelCatalog", () => {
     it("keeps Amazon Bedrock disabled without exposing models when its token is absent", () => {

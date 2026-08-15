@@ -8,7 +8,7 @@ import type {
 } from "../agent/index.js";
 import type { AgentMessage, Message, SystemMessage, UserMessage } from "../agent/types.js";
 import type { Attachment } from "./Attachment.js";
-import type { Model, ProviderError, ServiceTier, StopReason, Usage } from "./InferenceProtocol.js";
+import type { Model, ProviderError, ServiceTier, StopReason, Usage } from "@slopus/rig-execution";
 import {
     MAX_INFERENCE_MAX_RETRIES,
     type ProviderModelCompatibilityType,
@@ -18,12 +18,9 @@ import {
 import type { PermissionMode } from "../permissions/index.js";
 import type { UserInputRequest, UserInputResponse } from "../user-input/index.js";
 import type { McpServerSummary } from "../mcp/index.js";
-import type {
-    GoalStatus,
-    SessionGoal,
-    Task as SessionTask,
-    WorkflowRun,
-} from "@slopus/happy-agent-features";
+import type { SessionTask } from "../tasks/index.js";
+import type { WorkflowRun, WorkflowRunUpdate } from "../workflows/index.js";
+import type { ChangeGoalStatusRequest, CreateGoalRequest, SessionGoal } from "../goals/index.js";
 import type { EventId } from "./EventId.js";
 import type { GitChangeSnapshot, PresenceSnapshot } from "./ProjectProtocol.js";
 import type { DockerExecutionConfig } from "../execution/DockerExecutionConfig.js";
@@ -35,6 +32,13 @@ import type {
     SecretAttachmentScope,
     SecretReference,
 } from "../secrets/index.js";
+import type {
+    ExternalToolCall,
+    ExternalToolCallResolution,
+    ExternalToolDefinition,
+    ResolveExternalToolCallResponse,
+} from "../external-tools/index.js";
+import type { DurableSkillDefinition } from "../external-skills/index.js";
 import type { ScheduledMessage } from "../scheduling/index.js";
 import { p2pInstanceIdSchema } from "./P2pIdentityProtocol.js";
 import { p2pCredentialVisibilitySchema } from "./P2pCredentialProtocol.js";
@@ -442,6 +446,9 @@ export interface ProtocolSession {
     backgroundProcesses?: readonly BashSessionActivity[];
     cumulativeUsage?: Usage;
     sessionTokenCount?: SessionTokenCount;
+    externalTools?: readonly ExternalToolDefinition[];
+    skills?: readonly DurableSkillDefinition[];
+    pendingExternalToolCalls?: readonly ExternalToolCall[];
     scheduledMessages?: readonly ScheduledMessage[];
     systemPrompt?: string;
 }
@@ -589,13 +596,16 @@ export interface SessionStateResponse extends SessionStreamHello {
 export interface SessionStreamCurrentState {
     draft?: string;
     draftUpdatedAt?: number;
+    externalTools?: readonly ExternalToolDefinition[];
     git?: GitChangeSnapshot;
     interruption?: SessionInterruption;
     mcpServers: readonly McpServerSummary[];
+    pendingExternalToolCalls?: readonly ExternalToolCall[];
     projectSecretIds?: readonly string[];
     secretIds?: readonly string[];
     sessionTokenCount?: SessionTokenCount;
     sessionSecretIds?: readonly string[];
+    skills?: readonly DurableSkillDefinition[];
     scheduledMessages?: readonly ScheduledMessage[];
     titleError?: string;
     titleStatus?: SessionTitleStatus;
@@ -816,15 +826,9 @@ export interface UnregisterSecretResponse {
     removed: boolean;
 }
 
-export interface SetGoalRequest {
-    objective: string;
-    mutationId?: string;
-}
+export type SetGoalRequest = CreateGoalRequest & { mutationId?: string };
 
-export interface ChangeSessionGoalStatusRequest {
-    status: GoalStatus;
-    mutationId?: string;
-}
+export type ChangeSessionGoalStatusRequest = ChangeGoalStatusRequest & { mutationId?: string };
 
 export interface GoalSessionResponse {
     session: ProtocolSession;
@@ -948,33 +952,9 @@ export interface StopInspectorResponse {
     stopped: boolean;
 }
 
-/** Structured user content accepted by the Agent Base protocol bridge. */
-export const submitMessageTextSchema = Type.String({ maxLength: 262_144 });
-export const submitMessageDisplayTextSchema = Type.String({ maxLength: 262_144 });
-export const submitMessageIdentitySchema = Type.String({
-    maxLength: 256,
-    minLength: 1,
-    pattern: "^[^\\u0000\\r\\n]+$",
-});
-export const submitContentBlockSchema = Type.Union([
-    Type.Object(
-        {
-            text: Type.String({ maxLength: 262_144 }),
-            type: Type.Literal("text"),
-        },
-        { additionalProperties: false },
-    ),
-    Type.Object(
-        {
-            data: Type.String({ maxLength: 16 * 1024 * 1024 }),
-            detail: Type.Optional(Type.Union([Type.Literal("high"), Type.Literal("original")])),
-            mediaType: Type.String({ minLength: 1, maxLength: 256 }),
-            type: Type.Literal("image"),
-        },
-        { additionalProperties: false },
-    ),
-]);
-export const submitContentSchema = Type.Array(submitContentBlockSchema, { maxItems: 256 });
+export interface ListExternalToolCallsResponse {
+    calls: readonly ExternalToolCall[];
+}
 
 export interface SubmitMessageRequest {
     clientSubmissionId?: string;
@@ -986,6 +966,10 @@ export interface SubmitMessageRequest {
     identity?: string | null;
     /** Refreshes the peer daemon's memory-only GitHub authentication for this managed project. */
     gitSecret?: { kind: "github" };
+    /** Replaces the external function set for this and subsequent runs when present. */
+    externalTools?: readonly ExternalToolDefinition[];
+    /** Replaces the integration-owned durable skill set when present. */
+    skills?: readonly DurableSkillDefinition[];
     /** Replaces Rig's assembled system prompt. Null restores Rig's normal prompt. */
     systemPrompt?: string | null;
     /**
@@ -1027,6 +1011,9 @@ export interface BroadcastMessageRequest extends SubmitMessageRequest {
 export interface BroadcastMessageResponse {
     submissions: readonly SubmitMessageResponse[];
 }
+
+export type ResolveExternalToolCallRequest = ExternalToolCallResolution;
+export type { ResolveExternalToolCallResponse };
 
 export interface SubmitMessageResponse {
     debugDirectory?: string;
@@ -1183,6 +1170,8 @@ export type SessionEvent =
     | SubagentChangedEvent
     | SubagentsSuspendedEvent
     | WorkflowChangedEvent
+    | ExternalToolCallRequestedEvent
+    | ExternalToolCallResolvedEvent
     | ShellCommandStartedEvent
     | ShellCommandFinishedEvent
     | ScheduledMessageChangedEvent
@@ -1235,11 +1224,6 @@ export type MessageSubmittedEvent = BaseSessionEvent<
         message: UserMessage;
         mutationId?: string;
         runId: string;
-        /**
-         * Immutable Agent Base submission identity. Legacy session submissions omit this because
-         * they predate the Agent Base protocol bridge.
-         */
-        submissionFingerprint?: string;
         source?: "notification";
     }
 >;
@@ -1549,6 +1533,16 @@ export type SubagentChangedEvent = BaseSessionEvent<
 export type WorkflowChangedEvent = BaseSessionEvent<
     "workflow_changed",
     {
-        workflow: WorkflowRun;
+        update: WorkflowRunUpdate;
     }
+>;
+
+export type ExternalToolCallRequestedEvent = BaseSessionEvent<
+    "external_tool_call_requested",
+    { call: ExternalToolCall }
+>;
+
+export type ExternalToolCallResolvedEvent = BaseSessionEvent<
+    "external_tool_call_resolved",
+    { call: ExternalToolCall }
 >;

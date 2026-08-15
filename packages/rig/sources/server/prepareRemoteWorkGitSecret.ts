@@ -5,7 +5,7 @@ import { projectGitSecretSchema } from "../protocol/index.js";
 export function prepareRemoteWorkGitSecret(
     path: string,
     body: Uint8Array,
-    secrets: { resolveSpecial(kind: "github"): NodeJS.ProcessEnv },
+    secrets: { resolveSpecialSecret(kind: "github"): NodeJS.ProcessEnv },
 ): Uint8Array | undefined {
     const pathname = new URL(path, "http://rig.local").pathname;
     let decoded: unknown;
@@ -24,7 +24,7 @@ export function prepareRemoteWorkGitSecret(
 
     let token: string | undefined;
     try {
-        token = secrets.resolveSpecial("github").GH_TOKEN;
+        token = secrets.resolveSpecialSecret("github").GH_TOKEN;
     } catch {
         return hadTemporaryGitSecret ? encode(record) : undefined;
     }

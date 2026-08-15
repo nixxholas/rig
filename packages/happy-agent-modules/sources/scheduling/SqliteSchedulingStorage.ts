@@ -1,0 +1,285 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+
+import {
+    agentDatabase,
+    agentDatabaseRows,
+    agentDatabaseRun,
+    type AgentDatabase,
+    type AgentDatabaseFacade,
+    type AgentModuleMigration,
+    type AgentStorageTransaction,
+    withAgentDatabase,
+} from "@slopus/happy-agent-base";
+import { sql } from "drizzle-orm";
+import { Value } from "@sinclair/typebox/value";
+import type { Context } from "@steve.kite/stdlib";
+
+import {
+    schedulingSchedulePageQuerySchema,
+    schedulingScheduledMessageSchema,
+    schedulingWaitRecordSchema,
+    type SchedulingSchedulePage,
+    type SchedulingSchedulePageQuery,
+    type SchedulingScheduledMessage,
+    type SchedulingWaitRecord,
+} from "./Scheduling.js";
+import type { SchedulingStore } from "./SchedulingStore.js";
+
+/** Tables owned by SchedulingModule. Keys are intentionally append-only module migrations. */
+export const schedulingMigrations: readonly AgentModuleMigration[] = [
+    [
+        "001-scheduling",
+        async (_ctx, database) => {
+            await agentDatabaseRun(
+                database,
+                sql`CREATE TABLE IF NOT EXISTS happy_scheduling_waits (
+                    id TEXT PRIMARY KEY,
+                    agent_id TEXT NOT NULL,
+                    record_json TEXT NOT NULL
+                )`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`CREATE INDEX IF NOT EXISTS happy_scheduling_waits_agent
+                    ON happy_scheduling_waits(agent_id, id)`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`CREATE TABLE IF NOT EXISTS happy_scheduling_schedules (
+                    id TEXT PRIMARY KEY,
+                    sender_agent_id TEXT NOT NULL,
+                    target_agent_id TEXT NOT NULL,
+                    due_at BIGINT NOT NULL,
+                    status TEXT NOT NULL,
+                    schedule_json TEXT NOT NULL
+                )`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`CREATE INDEX IF NOT EXISTS happy_scheduling_schedules_sender
+                    ON happy_scheduling_schedules(sender_agent_id, due_at, id)`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`CREATE INDEX IF NOT EXISTS happy_scheduling_schedules_target
+                    ON happy_scheduling_schedules(target_agent_id, due_at, id)`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`CREATE TABLE IF NOT EXISTS happy_scheduling_receipts (
+                    acting_agent_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    operation_id TEXT NOT NULL,
+                    receipt_json TEXT NOT NULL,
+                    PRIMARY KEY (acting_agent_id, kind, operation_id)
+                )`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`CREATE TABLE IF NOT EXISTS happy_scheduling_proofs (
+                    acting_agent_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    operation_id TEXT NOT NULL,
+                    proof_json TEXT NOT NULL,
+                    PRIMARY KEY (acting_agent_id, kind, operation_id)
+                )`,
+            );
+        },
+    ],
+    [
+        "002-remove-scheduling-idempotency",
+        async (_ctx, database) => {
+            await agentDatabaseRun(database, sql`DROP TABLE IF EXISTS happy_scheduling_receipts`);
+            await agentDatabaseRun(database, sql`DROP TABLE IF EXISTS happy_scheduling_proofs`);
+        },
+    ],
+];
+
+export interface SqliteSchedulingStorageOptions<Database extends AgentDatabase = AgentDatabase> {
+    /**
+     * Optional for Agent Base hooks, which already carry the active database in their context.
+     * Public calls made without an active database must provide this host transaction.
+     */
+    readonly transaction?: AgentStorageTransaction<Database>;
+}
+
+export function createSqliteSchedulingStorage<Database extends AgentDatabase = AgentDatabase>(
+    options: SqliteSchedulingStorageOptions<Database>,
+): SchedulingStore {
+    const activeTransactions = new AsyncLocalStorage<true>();
+    const dbFor = (ctx: Context): AgentDatabaseFacade<Database> =>
+        (agentDatabase(ctx) ??
+            (() => {
+                throw new Error(
+                    "Scheduling database access requires an AgentStorage transaction context.",
+                );
+            })()) as AgentDatabaseFacade<Database>;
+    const parse = (value: unknown, label: string): unknown => {
+        if (typeof value !== "string") throw new Error(`Scheduling ${label} is not JSON text.`);
+        try {
+            return JSON.parse(value) as unknown;
+        } catch {
+            throw new Error(`Scheduling ${label} contains invalid JSON.`);
+        }
+    };
+    const text = (value: unknown): string => JSON.stringify(value);
+    const readWait = async (
+        ctx: Context,
+        agentId: string,
+        id: string,
+    ): Promise<SchedulingWaitRecord | undefined> => {
+        const rows = await agentDatabaseRows<WaitRow>(
+            dbFor(ctx),
+            sql`SELECT record_json FROM happy_scheduling_waits
+                WHERE id = ${id} AND agent_id = ${agentId} LIMIT 1`,
+        );
+        if (rows[0] === undefined) return undefined;
+        const wait = parse(rows[0].record_json, "wait");
+        if (!Value.Check(schedulingWaitRecordSchema, wait)) {
+            throw new Error("Scheduling database returned an invalid durable wait.");
+        }
+        return wait as SchedulingWaitRecord;
+    };
+    const writeWait = async (ctx: Context, wait: SchedulingWaitRecord): Promise<void> => {
+        await agentDatabaseRun(
+            dbFor(ctx),
+            sql`INSERT INTO happy_scheduling_waits (id, agent_id, record_json)
+                VALUES (${wait.id}, ${wait.agentId}, ${text(wait)})
+                ON CONFLICT(id) DO UPDATE SET
+                    agent_id = excluded.agent_id,
+                    record_json = excluded.record_json`,
+        );
+    };
+    const readSchedule = async (
+        ctx: Context,
+        agentId: string,
+        id: string,
+    ): Promise<SchedulingScheduledMessage | undefined> => {
+        const rows = await agentDatabaseRows<ScheduleRow>(
+            dbFor(ctx),
+            sql`SELECT schedule_json FROM happy_scheduling_schedules
+                WHERE id = ${id}
+                  AND (sender_agent_id = ${agentId} OR target_agent_id = ${agentId})
+                LIMIT 1`,
+        );
+        if (rows[0] === undefined) return undefined;
+        const schedule = parse(rows[0].schedule_json, "scheduled message");
+        if (!Value.Check(schedulingScheduledMessageSchema, schedule)) {
+            throw new Error("Scheduling database returned an invalid scheduled message.");
+        }
+        return schedule as SchedulingScheduledMessage;
+    };
+    const writeSchedule = async (
+        ctx: Context,
+        schedule: SchedulingScheduledMessage,
+    ): Promise<void> => {
+        await agentDatabaseRun(
+            dbFor(ctx),
+            sql`INSERT INTO happy_scheduling_schedules
+                (id, sender_agent_id, target_agent_id, due_at, status, schedule_json)
+                VALUES (
+                    ${schedule.id}, ${schedule.senderAgentId}, ${schedule.targetAgentId},
+                    ${schedule.dueAt}, ${schedule.status}, ${text(schedule)}
+                )
+                ON CONFLICT(id) DO UPDATE SET
+                    sender_agent_id = excluded.sender_agent_id,
+                    target_agent_id = excluded.target_agent_id,
+                    due_at = excluded.due_at,
+                    status = excluded.status,
+                    schedule_json = excluded.schedule_json`,
+        );
+    };
+    const listSchedules = async (
+        ctx: Context,
+        _agentId: string,
+        query: SchedulingSchedulePageQuery,
+    ): Promise<SchedulingSchedulePage> => {
+        if (!Value.Check(schedulingSchedulePageQuerySchema, query)) {
+            throw new Error("Scheduling schedule page query is invalid.");
+        }
+        const limit = query.limit ?? 50;
+        const offset = cursorOffset(query.cursor);
+        const status = query.status === undefined ? sql`` : sql` AND status = ${query.status}`;
+        const sender =
+            query.senderAgentId === undefined
+                ? sql``
+                : sql` AND sender_agent_id = ${query.senderAgentId}`;
+        const target =
+            query.targetAgentId === undefined
+                ? sql``
+                : sql` AND target_agent_id = ${query.targetAgentId}`;
+        const rows = await agentDatabaseRows<ScheduleRow>(
+            dbFor(ctx),
+            sql`SELECT schedule_json FROM happy_scheduling_schedules
+                WHERE 1 = 1${status}${sender}${target}
+                ORDER BY due_at, id
+                LIMIT ${limit + 1} OFFSET ${offset}`,
+        );
+        const schedules = rows.slice(0, limit).map((row) => {
+            const schedule = parse(row.schedule_json, "scheduled message");
+            if (!Value.Check(schedulingScheduledMessageSchema, schedule)) {
+                throw new Error("Scheduling database returned an invalid scheduled message.");
+            }
+            return schedule as SchedulingScheduledMessage;
+        });
+        return {
+            schedules,
+            limit,
+            ...(offset > 0 ? { previousCursor: String(Math.max(0, offset - limit)) } : {}),
+            ...(rows.length > limit ? { nextCursor: String(offset + schedules.length) } : {}),
+        };
+    };
+    const inTransaction = async <Result>(
+        ctx: Context,
+        work: (txCtx: Context) => Promise<Result>,
+    ): Promise<Result> => {
+        if (activeTransactions.getStore() === true) return await work(ctx);
+        const transaction = options.transaction;
+        if (transaction === undefined) {
+            throw new Error(
+                "Scheduling database access requires an active Agent Base database or host transaction.",
+            );
+        }
+        return await transaction(ctx, async (txCtx, database) => {
+            const activeCtx = withAgentDatabase(txCtx, database);
+            return await activeTransactions.run(true, async () => await work(activeCtx));
+        });
+    };
+    const readWaitInTransaction = (ctx: Context, agentId: string, id: string) =>
+        inTransaction(ctx, (txCtx) => readWait(txCtx, agentId, id));
+    const writeWaitInTransaction = (ctx: Context, wait: SchedulingWaitRecord) =>
+        inTransaction(ctx, (txCtx) => writeWait(txCtx, wait));
+    const readScheduleInTransaction = (ctx: Context, agentId: string, id: string) =>
+        inTransaction(ctx, (txCtx) => readSchedule(txCtx, agentId, id));
+    const writeScheduleInTransaction = (ctx: Context, schedule: SchedulingScheduledMessage) =>
+        inTransaction(ctx, (txCtx) => writeSchedule(txCtx, schedule));
+    const listSchedulesInTransaction = (
+        ctx: Context,
+        agentId: string,
+        query: SchedulingSchedulePageQuery,
+    ) => inTransaction(ctx, (txCtx) => listSchedules(txCtx, agentId, query));
+    return {
+        transaction: inTransaction,
+        readWait: readWaitInTransaction,
+        writeWait: writeWaitInTransaction,
+        readSchedule: readScheduleInTransaction,
+        writeSchedule: writeScheduleInTransaction,
+        listSchedules: listSchedulesInTransaction,
+    } as SchedulingStore;
+}
+
+interface WaitRow {
+    readonly record_json: string;
+}
+
+interface ScheduleRow {
+    readonly schedule_json: string;
+}
+
+function cursorOffset(cursor: string | undefined): number {
+    if (cursor === undefined) return 0;
+    if (!/^(0|[1-9][0-9]*)$/.test(cursor)) throw new Error("Scheduling cursor is invalid.");
+    const offset = Number(cursor);
+    if (!Number.isSafeInteger(offset)) throw new Error("Scheduling cursor is too large.");
+    return offset;
+}

@@ -1,11 +1,7 @@
 import type { GlobalLiveEvent } from "../protocol/index.js";
-import type { GlobalEventQueue } from "../global-event/GlobalEventQueue.js";
-import type { LiveGlobalEventQueue } from "../global-event/LiveGlobalEventQueue.js";
+import type { SessionStore } from "../session/SessionStore.js";
 
-export function publishGitLiveEvent(
-    events: { global: GlobalEventQueue; live: LiveGlobalEventQueue },
-    event: GlobalLiveEvent,
-): boolean {
-    events.live.publish(event);
-    return events.global.publishLive(event);
+export function publishGitLiveEvent(store: SessionStore, event: GlobalLiveEvent): boolean {
+    store.liveEvents.publish(event);
+    return store.globalEventQueue.publishLive(event);
 }

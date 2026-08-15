@@ -36,7 +36,7 @@
         "@lydell/node-pty": "1.2.0-beta.12",
         "@sinclair/typebox": "^0.34.49",
         "@slopus/happy-agent-supervisor": "0.0.1",
-        "@steve.kite/stdlib": "0.0.8",
+        "@steve.kite/stdlib": "0.0.10",
         "dockerode": "^5.0.1",
         "just-bash": "^3.0.2"
     },

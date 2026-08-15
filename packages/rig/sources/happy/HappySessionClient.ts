@@ -1,30 +1,29 @@
 import { io, type Socket } from "socket.io-client";
 import type { Context } from "@steve.kite/stdlib";
 
-import type { AgentContext } from "../agent/index.js";
 import type { ImageBlock } from "../agent/types.js";
-import type { RigAgentService } from "../agent/RigAgentService.js";
-import type { ConversationRepository } from "../conversations/ConversationRepository.js";
 import type {
     AbortRunResponse,
     ModelCatalog,
-    ProtocolSession,
     Project,
     ProjectWorkspace,
     SubagentSummary,
 } from "../protocol/index.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
+import type { InMemorySession } from "../session/InMemorySession.js";
+import type { UserInputRequest } from "../user-input/index.js";
 import { readPackageVersion } from "../readPackageVersion.js";
 import { isPermissionMode } from "../permissions/index.js";
 import { withWorkerContext } from "../observability/index.js";
 import { rethrowDatabaseFailure } from "../persistence/rethrowDatabaseFailure.js";
 import {
     createHappyAgentState,
-    type HappyResolvedCommunication,
     rememberHappyResolvedCommunication,
     toHappyCommunication,
+    type HappyResolvedCommunication,
 } from "./createHappyAgentState.js";
 import { createHappySessionMetadata } from "./createHappySessionMetadata.js";
+import { resolveHappyUserInputAnswers } from "./resolveHappyUserInputAnswers.js";
 import { decryptHappyBlob } from "./decryptHappyBlob.js";
 import { HAPPY_SESSION_RPC_METHODS, handleHappySessionRpc } from "./handleHappySessionRpc.js";
 import { decryptHappyPayload, encryptHappyPayload, wrapHappyDataKey } from "./happyEncryption.js";
@@ -55,9 +54,7 @@ interface HappySocket {
 }
 
 export interface HappySessionClientOptions {
-    agents?: RigAgentService;
     configuration: HappyConnectionConfiguration;
-    conversations: ConversationRepository;
     fetch?: Fetch;
     getSubagents?: (
         ctx: Context,
@@ -66,27 +63,18 @@ export interface HappySessionClientOptions {
     modelCatalog?: ModelCatalog;
     projectContext?: (ctx: Context) => HappyProjectContext | Promise<HappyProjectContext>;
     repository: HappySyncRepository;
-    resolveExternalControlContext?: (
-        ctx: Context,
-        conversationId: string,
-    ) => AgentContext | Promise<AgentContext>;
-    sessionId: string;
+    session: InMemorySession;
     socketFactory?: (url: string, options: Parameters<typeof io>[1]) => HappySocket;
 }
 
 export class HappySessionClient {
-    readonly #agents: RigAgentService | undefined;
     readonly #configuration: HappyConnectionConfiguration;
-    readonly #conversations: ConversationRepository;
     readonly #fetch: Fetch;
     readonly #getSubagents: NonNullable<HappySessionClientOptions["getSubagents"]>;
     readonly #modelCatalog: ModelCatalog | undefined;
     readonly #projectContext: HappySessionClientOptions["projectContext"];
     readonly #repository: HappySyncRepository;
-    readonly #resolveExternalControlContext:
-        | HappySessionClientOptions["resolveExternalControlContext"]
-        | undefined;
-    readonly #sessionId: string;
+    readonly #session: InMemorySession;
     readonly #socketFactory: NonNullable<HappySessionClientOptions["socketFactory"]>;
     #archivePromise: Promise<void> | undefined;
     #archiving = false;
@@ -114,16 +102,13 @@ export class HappySessionClient {
     #retryTimer: NodeJS.Timeout | undefined;
 
     constructor(options: HappySessionClientOptions) {
-        this.#agents = options.agents;
         this.#configuration = options.configuration;
-        this.#conversations = options.conversations;
         this.#fetch = options.fetch ?? fetch;
         this.#getSubagents = options.getSubagents ?? (() => []);
         this.#modelCatalog = options.modelCatalog;
         this.#projectContext = options.projectContext;
         this.#repository = options.repository;
-        this.#resolveExternalControlContext = options.resolveExternalControlContext;
-        this.#sessionId = options.sessionId;
+        this.#session = options.session;
         this.#socketFactory =
             options.socketFactory ?? ((url, socketOptions) => io(url, socketOptions) as Socket);
     }
@@ -171,7 +156,7 @@ export class HappySessionClient {
     }
 
     async enqueue(ctx: Context, messages: readonly HappySessionProtocolMessage[]): Promise<void> {
-        await this.#repository.enqueue(ctx, this.#sessionId, messages);
+        await this.#repository.enqueue(ctx, this.#session.id, messages);
         this.kick(ctx);
     }
 
@@ -210,7 +195,7 @@ export class HappySessionClient {
         ctx: Context,
         timeoutMs = HTTP_TIMEOUT_MS,
     ): Promise<string | undefined> {
-        const current = (await this.#repository.getSession(ctx, this.#sessionId))?.remoteSessionId;
+        const current = (await this.#repository.getSession(ctx, this.#session.id))?.remoteSessionId;
         if (current !== undefined) return Promise.resolve(current);
         if (this.#closed) return Promise.resolve(undefined);
         this.kick(ctx);
@@ -239,7 +224,7 @@ export class HappySessionClient {
                         await this.#flushOutbox(ctx, state);
                         if (!this.#archiving) await this.#fetchIncoming(ctx, state);
                         await this.#syncMetadata(ctx, state);
-                        await this.#sendKeepAlive(ctx, state.remoteSessionId!);
+                        this.#sendKeepAlive(state.remoteSessionId!);
                         await this.#syncAgentState(ctx, state);
                         return true;
                     } catch (error) {
@@ -248,14 +233,14 @@ export class HappySessionClient {
                         return false;
                     }
                 },
-                { sessionId: this.#sessionId },
+                { sessionId: this.#session.id },
             );
             if (!completed) return;
         } while (this.#needsAnotherSync && !this.#closed);
     }
 
     async #ensureRemoteSession(ctx: Context): Promise<HappySessionState | undefined> {
-        const current = await this.#repository.getSession(ctx, this.#sessionId);
+        const current = await this.#repository.getSession(ctx, this.#session.id);
         if (current === undefined) return undefined;
         if (this.#metadataVersion !== undefined && current.remoteSessionId !== undefined) {
             return current;
@@ -299,10 +284,10 @@ export class HappySessionClient {
             this.#lastMetadata = JSON.stringify(metadata);
             this.#metadataBase = { ...metadata };
         }
-        await this.#repository.setRemoteSession(ctx, this.#sessionId, remoteSessionId);
+        await this.#repository.setRemoteSession(ctx, this.#session.id, remoteSessionId);
         for (const resolve of this.#remoteSessionWaiters) resolve(remoteSessionId);
         this.#remoteSessionWaiters.clear();
-        return this.#repository.getSession(ctx, this.#sessionId);
+        return this.#repository.getSession(ctx, this.#session.id);
     }
 
     #ensureSocket(remoteSessionId: string): void {
@@ -327,7 +312,7 @@ export class HappySessionClient {
             void withWorkerContext(
                 "happy-session-socket-connect",
                 (ctx) => this.#kickAndWait(ctx),
-                { sessionId: this.#sessionId },
+                { sessionId: this.#session.id },
             ).catch(rethrowDatabaseFailure);
         });
         socket.on(
@@ -336,12 +321,12 @@ export class HappySessionClient {
                 void withWorkerContext(
                     "happy-session-rpc",
                     (ctx) => this.#handleRpcRequest(ctx, remoteSessionId, request, callback),
-                    { sessionId: this.#sessionId },
+                    { sessionId: this.#session.id },
                 ).catch(rethrowDatabaseFailure),
         );
         socket.on("update", () => {
             void withWorkerContext("happy-session-update", (ctx) => this.#kickAndWait(ctx), {
-                sessionId: this.#sessionId,
+                sessionId: this.#session.id,
             }).catch(rethrowDatabaseFailure);
         });
         this.#socket = socket;
@@ -350,7 +335,7 @@ export class HappySessionClient {
 
     async #flushOutbox(ctx: Context, state: HappySessionState): Promise<void> {
         while (!this.#closed) {
-            const pending = await this.#repository.pending(ctx, this.#sessionId, 50);
+            const pending = await this.#repository.pending(ctx, this.#session.id, 50);
             if (pending.length === 0) return;
             await this.#request(
                 ctx,
@@ -367,7 +352,7 @@ export class HappySessionClient {
             );
             await this.#repository.acknowledge(
                 ctx,
-                this.#sessionId,
+                this.#session.id,
                 pending.map((message) => message.localId),
             );
         }
@@ -375,7 +360,7 @@ export class HappySessionClient {
 
     async #fetchIncoming(ctx: Context, state: HappySessionState): Promise<void> {
         let afterSequence =
-            (await this.#repository.getSession(ctx, this.#sessionId))?.lastRemoteSeq ?? 0;
+            (await this.#repository.getSession(ctx, this.#session.id))?.lastRemoteSeq ?? 0;
         while (!this.#closed) {
             const url = new URL(
                 `${this.#configuration.serverUrl}/v3/sessions/${encodeURIComponent(state.remoteSessionId!)}/messages`,
@@ -392,7 +377,7 @@ export class HappySessionClient {
                 if (canCommit) {
                     await this.#repository.updateLastRemoteSeq(
                         ctx,
-                        this.#sessionId,
+                        this.#session.id,
                         maximumSequence,
                     );
                 }
@@ -424,7 +409,7 @@ export class HappySessionClient {
                     withWorkerContext(
                         "happy-attachment-download",
                         (downloadCtx) => this.#downloadAttachment(downloadCtx, state, incoming),
-                        { messageId: message.id, sessionId: this.#sessionId },
+                        { messageId: message.id, sessionId: this.#session.id },
                     ).catch(() => undefined),
                 );
             }
@@ -433,12 +418,7 @@ export class HappySessionClient {
         const messageId = `happy:${message.id}`;
         const attachments = await Promise.all(this.#pendingAttachments.values());
         this.#pendingAttachments.clear();
-        if (
-            (await this.#conversations.messageSubmission(ctx, this.#sessionId, messageId)) !==
-            undefined
-        ) {
-            return true;
-        }
+        if (hasSubmittedMessage(this.#session, messageId)) return true;
         await this.#applySelection(ctx, incoming.meta);
         const imageBlocks = attachments.filter(
             (attachment): attachment is ImageBlock => attachment !== undefined,
@@ -455,7 +435,16 @@ export class HappySessionClient {
             displayText: incoming.text,
             text: incoming.text,
         };
-        await this.#requireAgents().deliverMessage(ctx, this.#sessionId, request);
+        if (this.#session.clientSnapshot().status === "running") {
+            try {
+                await this.#session.steer(ctx, request);
+                return true;
+            } catch (error) {
+                if (isDatabaseFailure(error)) throw error;
+                // The run may have completed between the snapshot and delivery.
+            }
+        }
+        await this.#session.submit(ctx, request);
         return true;
     }
 
@@ -470,7 +459,7 @@ export class HappySessionClient {
     ): Promise<void> {
         if (isPermissionMode(selection.permissionMode)) {
             try {
-                await this.#requireAgents().changePermissionMode(ctx, this.#sessionId, {
+                await this.#session.changePermissionMode(ctx, {
                     permissionMode: selection.permissionMode,
                 });
             } catch (error) {
@@ -478,9 +467,10 @@ export class HappySessionClient {
                 // A stale or unknown mobile mode must not prevent message delivery.
             }
         }
+        if (this.#session.clientSnapshot().status === "running") return;
         try {
             if (selection.modelId !== undefined && selection.modelId !== "default") {
-                await this.#requireAgents().changeModel(ctx, this.#sessionId, {
+                await this.#session.changeModel(ctx, {
                     ...(selection.effort === undefined ? {} : { effort: selection.effort }),
                     modelId: selection.modelId,
                     ...(selection.providerId === undefined
@@ -488,9 +478,7 @@ export class HappySessionClient {
                         : { providerId: selection.providerId }),
                 });
             } else if (selection.effort !== undefined) {
-                await this.#requireAgents().changeEffort(ctx, this.#sessionId, {
-                    effort: selection.effort,
-                });
+                await this.#session.changeEffort(ctx, { effort: selection.effort });
             }
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
@@ -545,7 +533,7 @@ export class HappySessionClient {
         request: unknown,
         callback: (response: string) => void,
     ): Promise<void> {
-        const state = await this.#repository.getSession(ctx, this.#sessionId);
+        const state = await this.#repository.getSession(ctx, this.#session.id);
         if (state === undefined) {
             callback("");
             return;
@@ -573,13 +561,13 @@ export class HappySessionClient {
                     response = await handleHappySessionRpc({
                         abort: () => this.#abortFromHappy(ctx),
                         archive: async () => {
-                            await this.#conversations.archive(ctx, this.#sessionId, true);
+                            await this.#session.setArchived(ctx, true);
                             return { success: true };
                         },
                         answerQuestion: (requestId, answers) =>
                             this.#answerQuestion(ctx, requestId, answers),
                         cancelQuestion: (requestId) => this.#cancelQuestion(ctx, requestId),
-                        context: () => this.#externalControlContext(ctx),
+                        context: () => this.#session.externalControlContext(ctx),
                         method: request.method.slice(prefix.length),
                         params,
                     });
@@ -593,7 +581,23 @@ export class HappySessionClient {
     }
 
     #abortFromHappy(ctx: Context): Promise<AbortRunResponse> {
-        return this.#requireAgents().abort(ctx, this.#sessionId);
+        const snapshot = this.#session.clientSnapshot();
+        const runId = snapshot.activeTurn?.runId;
+        const steeringMessageIds =
+            runId === undefined
+                ? []
+                : (snapshot.pendingSteeringMessages ?? []).flatMap((pending) =>
+                      pending.runId === runId && pending.message.provenance !== "agent"
+                          ? [pending.message.id]
+                          : [],
+                  );
+        return runId !== undefined && steeringMessageIds.length > 0
+            ? this.#session.abort(ctx, {
+                  continuePendingSteering: true,
+                  expectedRunId: runId,
+                  steeringMessageIds,
+              })
+            : this.#session.abort(ctx);
     }
 
     async #syncMetadata(ctx: Context, state: HappySessionState): Promise<void> {
@@ -653,7 +657,7 @@ export class HappySessionClient {
         ) {
             return;
         }
-        const pending = (await this.#snapshot(_ctx)).pendingUserInputs ?? [];
+        const pending = this.#session.clientSnapshot().pendingUserInputs ?? [];
         const pendingRequestIds = new Set(pending.map((request) => request.requestId));
         for (const requestId of this.#questionFirstSeen.keys()) {
             if (!pendingRequestIds.has(requestId)) this.#questionFirstSeen.delete(requestId);
@@ -700,20 +704,70 @@ export class HappySessionClient {
         return now;
     }
 
-    async #answerQuestion(
-        _ctx: Context,
-        _requestId: string,
-        _answers: Record<string, unknown>,
-    ): Promise<void> {
-        throw new Error(
-            "Answering agent questions from Happy is unavailable until the user-input feature is connected.",
+    #pendingQuestion(requestId: string): UserInputRequest | undefined {
+        return (this.#session.clientSnapshot().pendingUserInputs ?? []).find(
+            (pending) => pending.requestId === requestId,
         );
     }
 
-    async #cancelQuestion(_ctx: Context, _requestId: string): Promise<void> {
-        throw new Error(
-            "Cancelling agent questions from Happy is unavailable until the user-input feature is connected.",
-        );
+    /**
+     * Applies an answer that arrived from Happy. `answerUserInput` validates the
+     * selection and throws on a malformed one, so the question is only recorded
+     * as completed once it has actually been accepted; otherwise the error goes
+     * back to Happy and the prompt stays on screen.
+     */
+    async #answerQuestion(
+        ctx: Context,
+        requestId: string,
+        answers: Record<string, unknown>,
+    ): Promise<void> {
+        const request = this.#pendingQuestion(requestId);
+        if (request === undefined) return;
+        const createdAt = this.#firstSeen(requestId);
+        const response = resolveHappyUserInputAnswers(request, answers);
+        await this.#session.answerUserInput(ctx, requestId, response);
+        rememberHappyResolvedCommunication(this.#resolvedQuestions, requestId, {
+            // Echoed back so every client shows the same answer, including the
+            // one that is only now catching up with it.
+            answers: Object.fromEntries(
+                Object.entries(response.answers).map(([id, labels]) => [id, { options: labels }]),
+            ),
+            communication: toHappyCommunication(request, createdAt),
+            completedAt: Date.now(),
+            status: "answered",
+        });
+        this.#questionFirstSeen.delete(requestId);
+        this.kick(ctx);
+    }
+
+    /**
+     * Rig cannot decline a single question: a question is cancelled by aborting
+     * the run that asked it, which is what makes the waiting tool throw. So a
+     * dismissal from Happy aborts rather than inventing an empty answer, which
+     * `answerUserInput` would reject anyway.
+     */
+    async #cancelQuestion(ctx: Context, requestId: string): Promise<void> {
+        const request = this.#pendingQuestion(requestId);
+        if (request === undefined) return;
+        const createdAt = this.#firstSeen(requestId);
+        const cancellation = this.#session.abort(ctx);
+        rememberHappyResolvedCommunication(this.#resolvedQuestions, requestId, {
+            communication: toHappyCommunication(request, createdAt),
+            completedAt: Date.now(),
+            status: "cancelled",
+        });
+        try {
+            await cancellation;
+            if (this.#pendingQuestion(requestId) !== undefined) {
+                throw new Error("The pending question could not be cancelled.");
+            }
+        } catch (error) {
+            this.#resolvedQuestions.delete(requestId);
+            this.kick(ctx);
+            throw error;
+        }
+        this.#questionFirstSeen.delete(requestId);
+        this.kick(ctx);
     }
 
     #emitWithAck(event: string, value: unknown): Promise<unknown> {
@@ -737,7 +791,7 @@ export class HappySessionClient {
     }
 
     async #metadata(ctx: Context): Promise<HappySessionMetadata> {
-        const snapshot = await this.#snapshot(ctx);
+        const snapshot = this.#session.clientSnapshot({ includeTools: true });
         const context = await this.#projectContext?.(ctx);
         const title = snapshot.title ?? "Rig session";
         if (title !== this.#summaryTitle) {
@@ -745,7 +799,7 @@ export class HappySessionClient {
             this.#summaryUpdatedAt = Date.now();
         }
         return createHappySessionMetadata({
-            activity: snapshot.activity,
+            activity: this.#session.activity(),
             configuration: this.#configuration,
             ...(this.#modelCatalog === undefined ? {} : { modelCatalog: this.#modelCatalog }),
             session: snapshot,
@@ -767,14 +821,14 @@ export class HappySessionClient {
                                 },
                             }),
                   }),
-            subagents: await this.#getSubagents(ctx, this.#sessionId),
+            subagents: await this.#getSubagents(ctx, this.#session.id),
             summaryUpdatedAt: this.#summaryUpdatedAt,
         });
     }
 
-    async #sendKeepAlive(ctx: Context, remoteSessionId: string): Promise<void> {
+    #sendKeepAlive(remoteSessionId: string): void {
         if (this.#archiving) return;
-        const activity = (await this.#snapshot(ctx)).activity;
+        const activity = this.#session.activity();
         this.#socket?.emit("session-alive", {
             activity,
             sid: remoteSessionId,
@@ -788,7 +842,7 @@ export class HappySessionClient {
         try {
             await this.#kickAndWait();
             await this.#sendSessionEnd(ctx);
-            const remoteSessionId = (await this.#repository.getSession(ctx, this.#sessionId))
+            const remoteSessionId = (await this.#repository.getSession(ctx, this.#session.id))
                 ?.remoteSessionId;
             if (remoteSessionId !== undefined) {
                 await this.#request(
@@ -807,7 +861,7 @@ export class HappySessionClient {
 
     async #sendSessionEnd(ctx: Context): Promise<void> {
         if (this.#sentSessionEnd) return;
-        const remoteSessionId = (await this.#repository.getSession(ctx, this.#sessionId))
+        const remoteSessionId = (await this.#repository.getSession(ctx, this.#session.id))
             ?.remoteSessionId;
         if (remoteSessionId === undefined || this.#socket === undefined) return;
         this.#sentSessionEnd = true;
@@ -843,7 +897,7 @@ export class HappySessionClient {
         this.#retryTimer = setTimeout(() => {
             this.#retryTimer = undefined;
             void withWorkerContext("happy-session-retry", (ctx) => this.#kickAndWait(ctx), {
-                sessionId: this.#sessionId,
+                sessionId: this.#session.id,
             }).catch(rethrowDatabaseFailure);
         }, SYNC_RETRY_DELAY_MS);
         this.#retryTimer.unref();
@@ -853,29 +907,9 @@ export class HappySessionClient {
         if (this.#retryTimer !== undefined) clearTimeout(this.#retryTimer);
         this.#retryTimer = undefined;
     }
-
-    #requireAgents(): RigAgentService {
-        if (this.#agents !== undefined) return this.#agents;
-        throw new Error("Agent control is unavailable for this Happy session.");
-    }
-
-    async #externalControlContext(ctx: Context): Promise<AgentContext> {
-        if (this.#resolveExternalControlContext !== undefined) {
-            return await this.#resolveExternalControlContext(ctx, this.#sessionId);
-        }
-        throw new Error("Happy file and shell access is unavailable for this conversation.");
-    }
-
-    async #snapshot(ctx: Context): Promise<ProtocolSession> {
-        const snapshot = await this.#conversations.readSnapshot(ctx, this.#sessionId);
-        if (snapshot === undefined) {
-            throw new Error(`The conversation '${this.#sessionId}' no longer exists.`);
-        }
-        return snapshot;
-    }
 }
 
-function isWorkingActivity(kind: ProtocolSession["activity"]["kind"]): boolean {
+function isWorkingActivity(kind: ReturnType<InMemorySession["activity"]>["kind"]): boolean {
     return (
         kind === "queued" ||
         kind === "thinking" ||
@@ -954,6 +988,10 @@ function isHappyRemoteMessage(value: unknown): value is HappyRemoteMessage {
         value.content.t === "encrypted" &&
         typeof value.content.c === "string"
     );
+}
+
+function hasSubmittedMessage(session: InMemorySession, messageId: string): boolean {
+    return session.events.messageSubmission(messageId) !== undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, any> {

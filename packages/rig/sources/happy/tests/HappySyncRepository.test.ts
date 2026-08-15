@@ -507,7 +507,9 @@ async function insertSessions(
                 createdAtMs: 1,
                 cwd: "/workspace",
                 depth: 0,
+                durableSkillsJson: "[]",
                 elapsedMs: 0,
+                externalToolsJson: "[]",
                 id: row.id,
                 interrupted: false,
                 ...(row.lastMessageAtMs === undefined

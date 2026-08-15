@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { defineTestModel as defineModel } from "../testing/defineTestModel.js";
+import { defineModel } from "@slopus/rig-execution";
 import { formatSubagentToolCall } from "./formatSubagentToolCall.js";
 
 const currentModel = defineModel({

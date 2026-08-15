@@ -3,7 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { Value } from "@sinclair/typebox/value";
 import type { Context } from "@steve.kite/stdlib";
 
-import { FolderError, type FolderRepository } from "../folders/FolderRepository.js";
+import { FolderError } from "../folders/FolderRepository.js";
 import {
     createFolderRequestSchema,
     moveFolderRequestSchema,
@@ -14,6 +14,7 @@ import {
     type ListFoldersResponse,
 } from "../protocol/index.js";
 import { sendJson } from "./sendJson.js";
+import type { SessionStore } from "../session/SessionStore.js";
 
 /** One route in the folder surface, already parsed out of the URL. */
 export interface FolderRoute {
@@ -30,15 +31,7 @@ export interface FolderRoute {
  */
 export async function serveFolderRequest(
     ctx: Context,
-    store: Pick<
-        FolderRepository,
-        | "archiveFolder"
-        | "createFolder"
-        | "folderCatalog"
-        | "getFolder"
-        | "moveFolder"
-        | "updateFolder"
-    >,
+    store: SessionStore,
     route: FolderRoute,
     request: Pick<IncomingMessage, "headers" | "method">,
     response: ServerResponse,
@@ -250,7 +243,7 @@ function statusForCode(code: FolderErrorCode): number {
 
 async function folderResponse(
     ctx: Context,
-    store: Pick<FolderRepository, "folderCatalog">,
+    store: SessionStore,
     folderId: string,
     fallback: FolderResponse["folder"],
 ): Promise<FolderResponse> {

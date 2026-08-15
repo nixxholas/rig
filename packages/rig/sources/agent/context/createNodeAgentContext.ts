@@ -1,10 +1,13 @@
 import type { NativeProcessManager } from "../../processes/index.js";
 import type { AgentContext } from "./AgentContext.js";
 import type { FolderContext } from "./FolderContext.js";
+import type { GoalContext } from "./GoalContext.js";
 import { createFileReadState } from "./FileReadState.js";
 import { createNodeBashContext } from "./createNodeBashContext.js";
 import { createNodeFileSystemContext } from "./createNodeFileSystemContext.js";
 import type { UserInputContext } from "./UserInputContext.js";
+import type { TaskContext } from "./TaskContext.js";
+import type { WorkflowContext } from "../../workflows/index.js";
 import {
     createPermissionContext,
     DEFAULT_PERMISSION_MODE,
@@ -20,12 +23,15 @@ export interface CreateNodeAgentContextOptions {
     cwd: string;
     environment?: NodeJS.ProcessEnv;
     folders?: FolderContext;
+    goals?: GoalContext;
     processManager: NativeProcessManager;
     permissionMode?: PermissionMode;
     plugins?: PluginContext;
     protectedPaths?: readonly string[];
     secrets?: SessionSecretContext;
+    tasks?: TaskContext;
     userInput?: UserInputContext;
+    workflows?: WorkflowContext;
 }
 
 export function createNodeAgentContext(
@@ -59,5 +65,8 @@ export function createNodeAgentContext(
     if (options.secrets !== undefined) context.secrets = options.secrets;
     if (options.userInput !== undefined) context.userInput = options.userInput;
     if (options.folders !== undefined) context.folders = options.folders;
+    if (options.goals !== undefined) context.goals = options.goals;
+    if (options.tasks !== undefined) context.tasks = options.tasks;
+    if (options.workflows !== undefined) context.workflows = options.workflows;
     return context;
 }

@@ -17,6 +17,8 @@ export type {
     ProtocolSession,
     RegisterSecretRequest,
     RegisterSecretResponse,
+    ResolveExternalToolCallRequest,
+    ResolveExternalToolCallResponse,
     SecretSummary,
     SessionArchiveResponse,
     SubmitMessageRequest,
@@ -46,6 +48,12 @@ export type {
     WriteProjectFileRequest,
     WriteProjectFileResponse,
 } from "./protocol/ProjectFileProtocol.js";
+export type { DurableSkillDefinition } from "./external-skills/types.js";
+export type {
+    ExternalToolCall,
+    ExternalToolCallResolution,
+    ExternalToolDefinition,
+} from "./external-tools/types.js";
 export type {
     CreateRemoteTerminalRequest,
     RemoteTerminalResponse,

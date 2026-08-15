@@ -59,14 +59,6 @@ import { folderChildOrderSpace } from "./migrations/51-folder-child-order-space.
 import { folderSharing } from "./migrations/52-folder-sharing.js";
 import { happyHistoryBackfill } from "./migrations/53-happy-history-backfill.js";
 import { happyProjectionProgress } from "./migrations/54-happy-projection-progress.js";
-import { agentBaseStorage } from "./migrations/55-agent-base-storage.js";
-import { agentHistory } from "./migrations/56-agent-history.js";
-import { agentMessageSubmissions } from "./migrations/57-agent-message-submissions.js";
-import { removeExternalToolCalls } from "./migrations/58-remove-external-tool-calls.js";
-import { removeLegacyAgentRuntime } from "./migrations/59-remove-legacy-agent-runtime.js";
-import { appletFeatureCatalog } from "./migrations/60-applet-feature-catalog.js";
-import { workflowFeatureStore } from "./migrations/61-workflow-feature-store.js";
-import { workletFeatureCatalog } from "./migrations/62-worklet-feature-catalog.js";
 
 interface MigrationContext {
     createDataEpoch: () => string;
@@ -133,16 +125,8 @@ const migrations: readonly SessionDatabaseMigration[] = [
     folderSharing,
     happyHistoryBackfill,
     happyProjectionProgress,
-    agentBaseStorage,
-    agentHistory,
-    agentMessageSubmissions,
-    removeExternalToolCalls,
-    removeLegacyAgentRuntime,
-    appletFeatureCatalog,
-    workflowFeatureStore,
-    workletFeatureCatalog,
 ];
-export const SESSION_DATABASE_APPLICATION_ID = 0x52494733;
+export const SESSION_DATABASE_APPLICATION_ID = 0x52494732;
 export const RIG_DATA_IDENTITY_MIGRATION_INDEX = 19;
 /** First schema version whose committed transaction contains a stable data epoch. */
 export const RIG_DATA_IDENTITY_SCHEMA_VERSION = RIG_DATA_IDENTITY_MIGRATION_INDEX + 1;

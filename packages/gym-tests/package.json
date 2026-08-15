@@ -18,7 +18,7 @@
     },
     "devDependencies": {
         "@earendil-works/pi-tui": "^0.80.3",
-        "@slopus/happy-providers": "0.0.7",
+        "@slopus/happy-providers": "0.0.8",
         "@slopus/rig-gym": "workspace:*",
         "@types/node": "^24.0.10",
         "@types/ws": "8.18.1",

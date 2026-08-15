@@ -14,6 +14,7 @@ loading Rig at runtime:
 ```ts
 import type {
     CreateSessionRequest,
+    ExternalToolDefinition,
     ProtocolSession,
     RemoteTerminalSummary,
 } from "@slopus/rig/types";

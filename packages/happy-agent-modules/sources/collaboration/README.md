@@ -1,0 +1,139 @@
+# Collaboration
+
+Lets one agent create, message, and wait on other agents as durable collaborators, so a model can
+delegate work to a team of agents instead of doing everything in one conversation. Collaboration is
+a module-owned capability, not an agent manager: the roster, messages, obligations, and receipts
+live in its own Agent Base migrations and tables. The host supplies only its AgentStorage
+transaction function and the external Agent Base broker; the transaction passes the active Drizzle
+facade to module work.
+
+```ts
+import { Agent } from "@slopus/happy-agent-base";
+import { CollaborationModule } from "@slopus/happy-agent-modules";
+
+const collaboration = new CollaborationModule({
+    transaction, // optional host AgentStorageTransaction for direct calls
+    broker, // CollaborationBroker: create, config, send, wait
+    authorization, // optional CollaborationAuthorization: authorize(ctx, acting, target, action)
+});
+const agent = await Agent.create(ctx, { ...options, modules: [collaboration] });
+```
+
+`broker` is required. `transaction` is optional when the module is used only from Agent Base
+hooks and tools, because those contexts already carry the active Drizzle facade; direct host calls
+made without one must supply it. Every other option (`authorization`, the ID and
+operation-ID factories, `clock`, `listener`, `onPostCommitError`, `maxPageSize`,
+`maxOutputCharacters`) is optional and defaulted. One `CollaborationModule` instance serves every
+agent in a collection; each agent's own roster row, and the collaborators it creates, are what
+distinguish it.
+
+## Tools
+
+The module exposes `create_agent`, `list_agents`, `send_agent_message`, `reply_to_agent_message`,
+and `wait_for_reply` to every agent. Every tool is `durable: true` and answers
+`shouldReviewInAutoMode: () => false`, so none of them go through Auto-mode review; each simply
+calls the matching method on `CollaborationModule` with the calling agent's own ID as the acting
+agent.
+
+- **`create_agent`** — creates a collaborator with a durable role and roster entry. Parameters mirror
+  `CollaborationCreateInput` minus `operationId` and `id`: `config` (an `agentConfig`), and optional
+  `parentId`, `role`, `groupId`, `title`, and `metadata`. The module always assigns the new agent's
+  identity; the model cannot choose one. Returns the created `CollaborationAgent`.
+- **`list_agents`** — lists a bounded page of the roster. Parameters: optional `limit` (1–100,
+  default `maxPageSize`), `cursor`, `groupId`, `ownerAgentId`. The result is rendered to the model as
+  one line per agent (`id (role): status`) plus a cursor hint, capped at `maxOutputCharacters`; if a
+  full page would not fit, the module shrinks the page rather than truncating a row.
+- **`send_agent_message`** — sends a text message to another collaborator. Parameters: `toAgentId`,
+  `text` (1–50,000 characters), optional `metadata`, and `expectReply` (`true` opens a reply
+  obligation, the default `false`/omitted does not). Returns `{ message, obligation? }`.
+- **`reply_to_agent_message`** — answers a pending reply obligation. Parameters: `toAgentId`, `text`,
+  optional `metadata`, and `replyTo` (the obligation ID). Only the obligation's designated responder
+  may answer it. Returns `{ message, obligation }`.
+- **`wait_for_reply`** — blocks until a collaborator answers one of the caller's own reply
+  obligations. Parameter: `obligationId`. The host owns the durable wait and may suspend the tool
+  call across a restart; returns the settled `CollaborationObligation`.
+
+Every mutating tool (`create_agent`, `send_agent_message`, `reply_to_agent_message`,
+and the write side of `wait_for_reply`) is idempotent by construction: the module generates a
+durable `operationId` (persisted in the calling agent's own `AgentKV` when one is attached to the
+context) and a canonical input fingerprint before ever running the host transaction, so a retried
+tool call with the same input replays the original result instead of repeating the effect, while a
+retry with different input for the same operation is rejected.
+Authorization for anything not already settled by durable ownership — a self-owned root, or the
+owner of a target's ancestor chain — is delegated to the host's `authorize` callback; a missing
+policy is never treated as a grant.
+
+## External functions
+
+These are `CollaborationModule`'s public methods, called as `collaboration.<method>(ctx,
+actingAgentId, ...)` by a host or by the tools above. All take a `Context` first and the acting
+agent's ID second, and all return plain, already-validated, cloned values (never a live reference
+into host storage).
+
+- `createAgent(ctx, actingAgentId, input: CollaborationCreateInput): Promise<CollaborationAgent>` —
+  same operation as `create_agent`, but accepts a host-supplied `operationId` and `id`.
+- `getAgent(ctx, actingAgentId, targetAgentId): Promise<CollaborationAgent | undefined>` — reads one
+  roster row, subject to `authorize(..., "read")`.
+- `listAgents(ctx, actingAgentId, query?): Promise<CollaborationAgentPage>` — same as `list_agents`,
+  returning structured data rather than model text.
+- `sendMessage(ctx, actingAgentId, input: CollaborationSendInput): Promise<CollaborationSendResult>`
+  — same as `send_agent_message`; throws if `input` carries `replyTo` (use `replyMessage` instead).
+- `replyMessage` / `reply(ctx, actingAgentId, input: CollaborationReplyInput):
+Promise<CollaborationSendResult>` — `reply` is a descriptively named alias for `replyMessage`.
+- `listObligations(ctx, actingAgentId, query?): Promise<CollaborationObligationPage>` — a bounded,
+  cursor-paged read over obligations, filterable by `status`, `requesterAgentId`, and
+  `responderAgentId`.
+- `waitForReply` / `wait(ctx, actingAgentId, input: CollaborationWaitInput | obligationId):
+Promise<CollaborationObligation>` — `wait` is an alias; both accept either the full input object or
+  a bare obligation ID string.
+- `formatAgentPageForModel(page: CollaborationAgentPage): string` — the same rendering `list_agents`
+  uses, exposed so a host can reuse it outside the tool.
+
+`CollaborationModule` also implements the `AgentModule` contract Agent Base calls directly: `tools`
+(assembles the tool list above per agent), `metadataChangedTransact` (keeps the roster row's `title`
+and `metadata` in step with the agent's own metadata changes), `beforeAgentLoopTransact` (marks the
+agent `"active"`), and `afterAgentSettledTransact` (marks it `"idle"`).
+
+Every mutation that changes durable state emits a `CollaborationEvent` — `agent_created`,
+`agent_status_changed`, `message_sent` (optionally carrying the opened `obligation`), or
+`reply_answered` — carrying `eventId`, `at`, and `actingAgentId`. Events reach an optional
+`listener` passed in `CollaborationModuleOptions`: `onEventTransactional` runs inside the host's
+mutating transaction, and `onEvent` runs after it commits, via the host's `afterCommit`
+registration. A throw from `onEvent` is reported to `onPostCommitError` rather than surfacing back
+into the tool call, since the mutation has already committed. Post-commit work is registered with
+stdlib `afterCommit(ctx, callback)`, so it follows the outermost AgentStorage transaction.
+
+## Storage
+
+The module owns its durable tables and installs them through `collaborationMigrations`. Reads and
+writes use the active Agent Base Drizzle facade, while public mutations use the supplied
+`AgentStorageTransaction`:
+
+- **Roster** (`happy_collaboration_agents`) — rows are
+  `CollaborationAgent` values: `id`, `ownerAgentId`, `parentId` (`null` for a root), and optional
+  `role`, `groupId`, `title`, `metadata`, plus `status` (`"active" | "idle" | "waiting"`),
+  `createdAt`, `updatedAt`. The module never deletes a roster row.
+- **Messages and obligations** (`happy_collaboration_messages` and
+  `happy_collaboration_obligations`) — rows persist
+  `CollaborationMessage` (`id`, `fromAgentId`, `toAgentId`, `text`, optional `replyTo`/
+  `obligationId`/`metadata`, `createdAt`); `readObligation`/`writeObligation`/`listObligations`
+  persist `CollaborationObligation` (`id`, `requesterAgentId`, `responderAgentId`, `messageId`,
+  `status` of `"pending" | "answered" | "cancelled"`, and `answerMessageId` once answered).
+- **Replay receipts** (`happy_collaboration_receipts`) — one `CollaborationMutationReceipt` per
+  `(actingAgentId, operationId)`, holding `kind`, `fingerprint`, and the mutation's `result`. Read
+  before every mutating operation runs and written once it commits, so a retried call with a matching
+  fingerprint returns the stored result instead of re-executing.
+- **Per-agent call-scoping** — when the context carries an `AgentKV` (`agentKV(ctx)` from
+  `@slopus/happy-agent-base`), the module stores, under keys such as `operation.create`,
+  `operation.send`, `create.agentId`, and `send.messageId`, an `{ operationId, fingerprint }`
+  record or a generated ID, scoped to the calling agent. This lets a durable operation or tool ID
+  survive a retry even when the caller supplies none; when no `AgentKV` is attached, IDs are simply
+  regenerated by the configured factories on every call.
+
+Every timestamp is bounded to `COLLABORATION_MAX_TIMESTAMP` (`8_640_000_000_000_000`, the ECMAScript
+date maximum). Metadata objects (agent, message, and protocol) are bounded in depth (8), item and
+property counts (64), string length (4,096 characters per string), and total encoded size (16,384
+bytes), enforced both by the TypeBox schema and, for create/send/reply paths, by an explicit
+pre-schema check so oversized input fails before an ID or operation is ever allocated. Roster and
+obligation pages are capped at `maxPageSize` (default 50, hard ceiling 100) and, for `list_agents`,
+further shrunk so the rendered text stays within `maxOutputCharacters` (default 8,000).

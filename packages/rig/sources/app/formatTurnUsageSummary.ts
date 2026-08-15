@@ -1,4 +1,4 @@
-import type { Usage } from "../protocol/index.js";
+import type { Usage } from "@slopus/rig-execution";
 
 import { calculateCacheHitPercent } from "./calculateCacheHitPercent.js";
 import { formatCompactTokens } from "./formatCompactTokens.js";

@@ -1,5 +1,4 @@
 export type { EventId } from "./EventId.js";
-export type { Model, ProviderError, ServiceTier, StopReason, Usage } from "./InferenceProtocol.js";
 export {
     CURRENT_ONBOARDING_VERSION,
     onboardMurmurRequestSchema,
@@ -280,7 +279,7 @@ export {
     type WriteDocumentRequest,
 } from "./DocumentProtocol.js";
 export type { McpServerSummary } from "../mcp/index.js";
-export type { Task as SessionTask, TaskStatus } from "@slopus/happy-agent-features";
+export type { SessionTask, TaskStatus } from "../tasks/index.js";
 export type {
     CreateRemoteTerminalRequest,
     CreateRemoteTerminalResponse,
@@ -291,14 +290,15 @@ export type {
     RemoteTerminalSummary,
     ResizeRemoteTerminalRequest,
 } from "../terminal/index.js";
-export type { GoalStatus, SessionGoal } from "@slopus/happy-agent-features";
+export type { GoalStatus, SessionGoal } from "../goals/index.js";
+export type { DurableSkillDefinition } from "../external-skills/index.js";
 export type { ScheduledMessage } from "../scheduling/index.js";
 export type {
     ProviderUsage,
     ProviderUsageCredits,
     ProviderUsageWindow,
 } from "@slopus/happy-providers";
-export type { WorkflowRun, WorkflowStatus } from "@slopus/happy-agent-features";
+export type { WorkflowRun, WorkflowRunStatus, WorkflowRunUpdate } from "../workflows/index.js";
 export { isLiveGlobalEvent } from "./ProjectProtocol.js";
 export {
     discoverPluginCatalogRequestSchema,
@@ -362,6 +362,8 @@ export type {
     DaemonConfig,
     DaemonIdentity,
     DisconnectSessionTerminalResponse,
+    ExternalToolCallRequestedEvent,
+    ExternalToolCallResolvedEvent,
     ForkSessionResponse,
     GetCurrentProviderQuotaResponse,
     GetDaemonConfigResponse,
@@ -374,6 +376,7 @@ export type {
     ListSessionsArchivedFilter,
     ListSessionsOptions,
     ListSecretsResponse,
+    ListExternalToolCallsResponse,
     ListSubagentsResponse,
     ListModelsResponse,
     HealthResponse,
@@ -390,6 +393,8 @@ export type {
     ProviderQuotaObservedEvent,
     RecordSessionActivityResponse,
     ReadBackgroundProcessResponse,
+    ResolveExternalToolCallRequest,
+    ResolveExternalToolCallResponse,
     RewindSessionRequest,
     RewindSessionResponse,
     RegisterSecretRequest,
@@ -492,11 +497,7 @@ export type {
     UserInputResolvedEvent,
     WorkflowChangedEvent,
 } from "./SessionProtocol.js";
-export {
-    providerCredentialProvenanceSchema,
-    submitContentBlockSchema,
-    submitContentSchema,
-} from "./SessionProtocol.js";
+export { providerCredentialProvenanceSchema } from "./SessionProtocol.js";
 export {
     createSlotEntryRequestSchema,
     slotActionSchema,
@@ -608,47 +609,11 @@ export {
     SESSION_TRANSCRIPT_NOTICE_LIMIT,
     SESSION_STREAM_TURN_LIMIT,
     moveSessionRequestSchema,
-    submitMessageDisplayTextSchema,
-    submitMessageIdentitySchema,
-    submitMessageTextSchema,
     submitContextMessageRequestSchema,
     sessionScopeSchema,
     transferSessionRequestSchema,
     updateDaemonConfigRequestSchema,
 } from "./SessionProtocol.js";
-export {
-    agentAcceptedContentBlockSchema,
-    agentAcceptedContentSchema,
-    agentSubmissionInputSchema,
-    agentSubmissionMessageSchema,
-    MAX_AGENT_MESSAGE_BLOCKS,
-    MAX_AGENT_MESSAGE_ID_LENGTH,
-    MAX_AGENT_MESSAGE_IMAGE_BYTES,
-    MAX_AGENT_MESSAGE_METADATA_STRING_LENGTH,
-    MAX_AGENT_MESSAGE_TEXT_LENGTH,
-    MAX_PROTOCOL_JSON_ARRAY_ITEMS,
-    MAX_PROTOCOL_JSON_DEPTH,
-    MAX_PROTOCOL_JSON_OBJECT_PROPERTIES,
-    MAX_PROTOCOL_PENDING_BLOCKS_JSON_BYTES,
-    MAX_PROTOCOL_JSON_STRING_LENGTH,
-    protocolAgentBlockSchema,
-    protocolAgentBlockWithinBounds,
-    protocolErrorMessageSchema,
-    protocolJsonSchema,
-    protocolJsonWithinByteLimit,
-    protocolTextBlockSchema,
-    protocolThinkingBlockSchema,
-    protocolToolCallBlockSchema,
-    rigMessageMetadataEnvelopeSchema,
-    rigMessageMetadataSchema,
-    submissionFingerprintSchema,
-    type AgentAcceptedContent,
-    type AgentAcceptedContentBlock,
-    type AgentSubmissionInput,
-    type AgentSubmissionMessage,
-    type RigMessageMetadata,
-    type RigMessageMetadataEnvelope,
-} from "./AgentMessageSubmission.js";
 export {
     AttachmentImagePreviewSchema,
     AttachmentSchema,

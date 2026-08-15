@@ -15,23 +15,26 @@ import type {
 } from "../app/CodingAssistantAgentBackend.js";
 import type {
     AbortRunOptions,
-    Model,
     ModelCatalog,
-    ProviderError,
     ProtocolSession,
     SessionEvent,
     RunShellCommandResponse,
     ReadBackgroundProcessResponse,
     StopBackgroundProcessResponse,
     SteerMessageResponse,
-    ServiceTier,
-    StopReason,
     SubmitContextMessageResponse,
 } from "../protocol/index.js";
-import type { CodingAssistantProviderInfo } from "../app/CodingAssistantAgentBackend.js";
+import {
+    defineProvider,
+    type Model,
+    type Provider,
+    type ProviderError,
+    type ServiceTier,
+    type StopReason,
+} from "@slopus/rig-execution";
 import type { PermissionMode } from "../permissions/index.js";
 import type { SecretAttachmentScope } from "../secrets/index.js";
-import type { GoalStatus, SessionGoal } from "@slopus/happy-agent-features";
+import type { GoalStatus, SessionGoal } from "../goals/index.js";
 import { ProtocolHttpClient } from "./ProtocolHttpClient.js";
 import { RemoteAgentRunError } from "./RemoteAgentRunError.js";
 
@@ -137,15 +140,18 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         return this.#confirmedServiceTier;
     }
 
-    get provider(): CodingAssistantProviderInfo {
+    get provider(): Provider {
         const serviceTiers = this.#modelCatalog?.providers.find(
             (provider) => provider.providerId === this.#providerId,
         )?.serviceTiers;
-        return {
+        return defineProvider({
             id: this.#providerId,
             models: this.#models,
             ...(serviceTiers === undefined ? {} : { serviceTiers }),
-        };
+            stream() {
+                throw new Error("RemoteAgent does not expose provider streaming locally.");
+            },
+        });
     }
 
     get model(): Model {
@@ -861,6 +867,29 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
 
         if (event.type === "tasks_changed") {
             this.#session = { ...this.#session, tasks: event.data.tasks };
+            return;
+        }
+
+        if (event.type === "external_tool_call_requested") {
+            this.#session = {
+                ...this.#session,
+                pendingExternalToolCalls: [
+                    ...(this.#session.pendingExternalToolCalls ?? []).filter(
+                        (call) => call.id !== event.data.call.id,
+                    ),
+                    event.data.call,
+                ],
+            };
+            return;
+        }
+
+        if (event.type === "external_tool_call_resolved") {
+            this.#session = {
+                ...this.#session,
+                pendingExternalToolCalls: (this.#session.pendingExternalToolCalls ?? []).filter(
+                    (call) => call.id !== event.data.call.id,
+                ),
+            };
             return;
         }
     }

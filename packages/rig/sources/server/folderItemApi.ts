@@ -3,7 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { Value } from "@sinclair/typebox/value";
 import type { Context } from "@steve.kite/stdlib";
 
-import { FolderError, type FolderRepository } from "../folders/FolderRepository.js";
+import { FolderError } from "../folders/FolderRepository.js";
 import {
     createFolderItemRequestSchema,
     moveFolderItemRequestSchema,
@@ -11,6 +11,7 @@ import {
     type FolderErrorResponse,
     type FolderItemResponse,
 } from "../protocol/index.js";
+import type { SessionStore } from "../session/SessionStore.js";
 import { sendJson } from "./sendJson.js";
 
 export interface FolderItemRoute {
@@ -21,14 +22,7 @@ export interface FolderItemRoute {
 
 export async function serveFolderItemRequest(
     ctx: Context,
-    store: Pick<
-        FolderRepository,
-        | "archiveFolderItem"
-        | "createFolderItem"
-        | "folderCatalog"
-        | "getFolderItem"
-        | "moveFolderItem"
-    >,
+    store: SessionStore,
     route: FolderItemRoute,
     request: Pick<IncomingMessage, "headers" | "method">,
     response: ServerResponse,
@@ -182,7 +176,7 @@ export async function serveFolderItemRequest(
 
 async function itemResponse(
     ctx: Context,
-    store: Pick<FolderRepository, "folderCatalog">,
+    store: SessionStore,
     itemId: string,
     fallback: FolderItemResponse["item"],
 ): Promise<FolderItemResponse> {

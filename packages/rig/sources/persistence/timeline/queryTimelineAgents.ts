@@ -5,8 +5,8 @@ import type { SessionAgentType, TimelineScope } from "../../protocol/index.js";
 import type { TimelineAgentSource } from "../../timeline/index.js";
 import type { DatabaseScope, TX } from "../Transaction.js";
 import { inDatabase } from "../database/inDatabase.js";
-import { readNumber, readOptionalString, readString } from "../conversations/impl/sqliteRow.js";
-import { sessionScopeFromRow } from "../conversations/impl/sessionScope.js";
+import { readNumber, readOptionalString, readString } from "../session/impl/sqliteRow.js";
+import { sessionScopeFromRow } from "../session/impl/sessionScope.js";
 
 const COLUMNS = sql`
     id, agent_id, scope_kind, project_id, workspace_id, folder_id, session_kind, parent_session_id,

@@ -166,6 +166,7 @@ export function createHappySessionMetadata(options: {
             ...(session.serviceTier === undefined ? {} : { serviceTier: session.serviceTier }),
             status: session.status,
         },
+        skills: session.skills?.map((skill) => skill.name) ?? [],
         startedBy: "daemon",
         startedFromDaemon: true,
         summary: { text: title, updatedAt: summaryUpdatedAt },

@@ -152,7 +152,7 @@ parent.
 ```text
 happy-agent-base          the durable turn: inference, tools, compaction
         |
-happy-agent-features      reusable tools, hooks, and product capabilities
+happy-agent-modules       reusable tools, hooks, and product capabilities
         |
 happy-providers            the network: transports, framing, retries, errors, credentials
         |
@@ -411,7 +411,7 @@ transaction, advancing `PRAGMA user_version` after each one and stamping
 | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `packages/rig`                | The published `@slopus/rig` CLI: terminal UI, headless `exec`, host services, protocols, persistence adapters, and the local daemon. Entry point `sources/main.ts`.                              |
 | `packages/happy-agent-base`   | `@slopus/happy-agent-base` — the minimal durable agent loop, provider routing, persistence, and feature hooks.                                                                                 |
-| `packages/happy-agent-features` | `@slopus/happy-agent-features` — reusable agent tools, hooks, and product capabilities composed by Rig.                                                                                      |
+| `packages/happy-agent-modules` | `@slopus/happy-agent-modules` — reusable agent tools, hooks, and product capabilities composed by Rig.                                                                                      |
 | `packages/happy-providers`    | `@slopus/happy-providers` — the separately published, Node-only vendor library: stateful sessions, transports, retries, error parsing, credentials, and native compaction.                     |
 | `packages/rig-connect`        | `@slopus/rig-connect` — the client library any UI embeds to get live session, group, and plugin state from one subscription, with optimistic mutations. Web APIs only; no dependency on `rig`. |
 | `packages/ghostty-wasm`       | `@slopus/ghostty-wasm` — the Ghostty terminal emulator compiled to WebAssembly, usable from Node and the browser.                                                                              |

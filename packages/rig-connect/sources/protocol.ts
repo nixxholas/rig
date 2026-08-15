@@ -8,9 +8,9 @@
  */
 
 import { Type, type Static } from "@sinclair/typebox";
-import type { WorkflowRun } from "@slopus/happy-agent-features";
+import type { WorkflowRun } from "@slopus/happy-agent-modules";
 
-export type { WorkflowRun } from "@slopus/happy-agent-features";
+export type { WorkflowRun } from "@slopus/happy-agent-modules";
 
 export type EventId = string;
 export type MutationId = string;

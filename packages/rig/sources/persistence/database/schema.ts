@@ -10,138 +10,6 @@ import {
     unique,
 } from "drizzle-orm/sqlite-core";
 
-export const agentRecords = sqliteTable(
-    "agent_records",
-    {
-        sequence: integer("sequence").primaryKey({ autoIncrement: true }),
-        agentId: text("agent_id").notNull(),
-        recordJson: text("record_json").notNull(),
-    },
-    (table) => [index("agent_records_agent_sequence").on(table.agentId, table.sequence)],
-);
-
-export const agentValues = sqliteTable(
-    "agent_values",
-    {
-        agentId: text("agent_id").notNull(),
-        key: text("key").notNull(),
-        valueJson: text("value_json").notNull(),
-    },
-    (table) => [
-        primaryKey({ columns: [table.agentId, table.key] }),
-        index("agent_values_key_agent").on(table.key, table.agentId),
-    ],
-);
-
-/**
- * Rig's indexed caller-owned message receipt and immutable retry envelope.
- *
- * Settled rows are retained as the durable idempotency archive after the session event log's
- * in-memory retention expires. A future pruning policy must remove them only with an explicit
- * session/marker retention decision; queued and consumed rows are live recovery state.
- */
-export const agentMessageSubmissions = sqliteTable(
-    "agent_message_submissions",
-    {
-        agentId: text("agent_id").notNull(),
-        messageId: text("message_id").notNull(),
-        sessionId: text("session_id").notNull(),
-        runId: text("run_id").notNull(),
-        delivery: text("delivery").notNull(),
-        status: text("status").notNull(),
-        fingerprint: text("fingerprint").notNull(),
-        metadataJson: text("metadata_json").notNull(),
-        messageJson: text("message_json").notNull(),
-        inputJson: text("input_json").notNull(),
-        createdAtMs: integer("created_at_ms").notNull(),
-    },
-    (table) => [
-        primaryKey({ columns: [table.agentId, table.messageId] }),
-        index("agent_message_submissions_agent_status").on(
-            table.agentId,
-            table.status,
-            table.createdAtMs,
-            table.messageId,
-        ),
-        index("agent_message_submissions_agent_run_status").on(
-            table.agentId,
-            table.runId,
-            table.status,
-            table.messageId,
-        ),
-    ],
-);
-
-/** Durable Rig-owned history records supplied to the Agent Base History feature. */
-export const agentHistory = sqliteTable(
-    "agent_history",
-    {
-        agentId: text("agent_id").notNull(),
-        position: integer("position").notNull(),
-        recordId: text("record_id").notNull(),
-        messageJson: text("message_json").notNull(),
-    },
-    (table) => [
-        primaryKey({ columns: [table.agentId, table.position] }),
-        unique().on(table.agentId, table.recordId),
-    ],
-);
-
-/** Host-owned workflow state exposed through Happy Agent Features. */
-export const workflowRuns = sqliteTable(
-    "workflow_runs",
-    {
-        agentId: text("agent_id").notNull(),
-        id: text("id").notNull(),
-        workflow: text("workflow").notNull(),
-        status: text("status").notNull(),
-        createdAtMs: integer("created_at_ms").notNull(),
-        updatedAtMs: integer("updated_at_ms").notNull(),
-        runJson: text("run_json").notNull(),
-    },
-    (table) => [
-        primaryKey({ columns: [table.agentId, table.id] }),
-        index("workflow_runs_agent_status_id").on(table.agentId, table.status, table.id),
-    ],
-);
-
-export const workflowLogs = sqliteTable(
-    "workflow_logs",
-    {
-        agentId: text("agent_id").notNull(),
-        runId: text("run_id").notNull(),
-        position: integer("position").notNull(),
-        text: text("text").notNull(),
-    },
-    (table) => [
-        primaryKey({ columns: [table.agentId, table.runId, table.position] }),
-        foreignKey({
-            columns: [table.agentId, table.runId],
-            foreignColumns: [workflowRuns.agentId, workflowRuns.id],
-        }).onDelete("cascade"),
-    ],
-);
-
-export const workflowOperationReceipts = sqliteTable(
-    "workflow_operation_receipts",
-    {
-        agentId: text("agent_id").notNull(),
-        operationId: text("operation_id").notNull(),
-        receiptJson: text("receipt_json").notNull(),
-    },
-    (table) => [primaryKey({ columns: [table.agentId, table.operationId] })],
-);
-
-export const workflowMutationProofs = sqliteTable(
-    "workflow_mutation_proofs",
-    {
-        agentId: text("agent_id").notNull(),
-        operationId: text("operation_id").notNull(),
-        proofJson: text("proof_json").notNull(),
-    },
-    (table) => [primaryKey({ columns: [table.agentId, table.operationId] })],
-);
-
 export const rigDataIdentityTable = sqliteTable(
     "rig_data_identity",
     {
@@ -468,6 +336,8 @@ export const sessions = sqliteTable(
         instructions: text("instructions"),
         appendSystemPrompt: text("append_system_prompt"),
         systemPrompt: text("system_prompt"),
+        externalToolsJson: text("external_tools_json").notNull(),
+        durableSkillsJson: text("durable_skills_json").notNull(),
         status: text("status").notNull(),
         activeRunId: text("active_run_id"),
         activeSinceMs: integer("active_since_ms"),
@@ -501,6 +371,9 @@ export const sessions = sqliteTable(
         workspaceTransferJson: text("workspace_transfer_json")
             .notNull()
             .default('{"status":"idle"}'),
+        workspaceQueueWaiting: integer("workspace_queue_waiting", { mode: "boolean" })
+            .notNull()
+            .default(false),
         /** When a chat started out belonging nowhere. Null once it has been filed, or never was. */
         unsortedSinceMs: integer("unsorted_since_ms"),
         ownerInstanceId: text("owner_instance_id").notNull(),
@@ -737,6 +610,130 @@ export const sessionTurns = sqliteTable(
     ],
 );
 
+export const queuedRuns = sqliteTable(
+    "queued_runs",
+    {
+        sessionId: text("session_id")
+            .notNull()
+            .references(() => sessions.id, { onDelete: "cascade" }),
+        runId: text("run_id").notNull(),
+        debug: integer("debug", { mode: "boolean" }).notNull(),
+        debugDirectory: text("debug_directory"),
+        displayText: text("display_text").notNull(),
+        kind: text("kind").notNull(),
+        text: text("text").notNull(),
+        userMessageJson: text("user_message_json").notNull(),
+        integrationConfigJson: text("integration_config_json"),
+        createdAtMs: integer("created_at_ms").notNull(),
+    },
+    (table) => [primaryKey({ columns: [table.sessionId, table.runId] })],
+);
+
+export const pendingContextMessages = sqliteTable(
+    "pending_context_messages",
+    {
+        sessionId: text("session_id")
+            .notNull()
+            .references(() => sessions.id, { onDelete: "cascade" }),
+        messageId: text("message_id").notNull(),
+        position: integer("position").notNull(),
+        anchorRunId: text("anchor_run_id").notNull(),
+        createdAtMs: integer("created_at_ms").notNull(),
+    },
+    (table) => [
+        primaryKey({ columns: [table.sessionId, table.messageId] }),
+        unique().on(table.sessionId, table.position),
+        index("pending_context_messages_session_fifo").on(table.sessionId, table.position),
+    ],
+);
+
+export const externalToolCalls = sqliteTable(
+    "external_tool_calls",
+    {
+        id: text("id").primaryKey(),
+        sessionId: text("session_id")
+            .notNull()
+            .references(() => sessions.id, { onDelete: "cascade" }),
+        runId: text("run_id").notNull(),
+        batchId: text("batch_id").notNull(),
+        toolCallId: text("tool_call_id").notNull(),
+        providerToolCallId: text("provider_tool_call_id"),
+        toolCallIndex: integer("tool_call_index").notNull(),
+        definitionJson: text("definition_json").notNull(),
+        skillJson: text("skill_json"),
+        argumentsJson: text("arguments_json").notNull(),
+        status: text("status").notNull(),
+        resolutionJson: text("resolution_json"),
+        consumed: integer("consumed", { mode: "boolean" }).notNull(),
+        createdAtMs: integer("created_at_ms").notNull(),
+        resolvedAtMs: integer("resolved_at_ms"),
+    },
+    (table) => [
+        index("external_tool_calls_session_created").on(table.sessionId, table.createdAtMs),
+    ],
+);
+
+export const durableUserInputs = sqliteTable(
+    "durable_user_inputs",
+    {
+        sessionId: text("session_id")
+            .notNull()
+            .references(() => sessions.id, { onDelete: "cascade" }),
+        requestId: text("request_id").notNull(),
+        runId: text("run_id").notNull(),
+        batchId: text("batch_id").notNull(),
+        toolCallId: text("tool_call_id").notNull(),
+        providerToolCallId: text("provider_tool_call_id"),
+        toolCallIndex: integer("tool_call_index").notNull(),
+        toolName: text("tool_name").notNull(),
+        toolArgumentsJson: text("tool_arguments_json").notNull(),
+        kind: text("kind").notNull(),
+        permissionJson: text("permission_json"),
+        requestJson: text("request_json").notNull(),
+        responseJson: text("response_json"),
+        resultJson: text("result_json"),
+        status: text("status").notNull(),
+        consumed: integer("consumed", { mode: "boolean" }).notNull(),
+        createdAtMs: integer("created_at_ms").notNull(),
+        resolvedAtMs: integer("resolved_at_ms"),
+        detachedAtMs: integer("detached_at_ms"),
+        answerDueAtMs: integer("answer_due_at_ms"),
+        answerWaitStartedAtMs: integer("answer_wait_started_at_ms"),
+    },
+    (table) => [
+        primaryKey({ columns: [table.sessionId, table.requestId] }),
+        index("durable_user_inputs_session_created").on(table.sessionId, table.createdAtMs),
+    ],
+);
+
+export const durableWaits = sqliteTable(
+    "durable_waits",
+    {
+        id: text("id").primaryKey(),
+        sessionId: text("session_id")
+            .notNull()
+            .references(() => sessions.id, { onDelete: "cascade" }),
+        runId: text("run_id").notNull(),
+        batchId: text("batch_id").notNull(),
+        toolCallId: text("tool_call_id").notNull(),
+        providerToolCallId: text("provider_tool_call_id"),
+        toolCallIndex: integer("tool_call_index").notNull(),
+        toolName: text("tool_name").notNull(),
+        kind: text("kind").notNull(),
+        argumentsJson: text("arguments_json").notNull(),
+        status: text("status").notNull(),
+        consumed: integer("consumed", { mode: "boolean" }).notNull(),
+        createdAtMs: integer("created_at_ms").notNull(),
+        dueAtMs: integer("due_at_ms").notNull(),
+        resultJson: text("result_json"),
+        resultBlockJson: text("result_block_json"),
+    },
+    (table) => [
+        unique().on(table.sessionId, table.toolCallId),
+        index("durable_waits_session_created").on(table.sessionId, table.createdAtMs),
+    ],
+);
+
 export const scheduledMessages = sqliteTable(
     "scheduled_messages",
     {
@@ -907,27 +904,18 @@ export const appletVersions = sqliteTable(
         version: integer("version").notNull(),
         changeDescription: text("change_description").notNull(),
         createdAtMs: integer("created_at_ms").notNull(),
-        operationId: text("operation_id").notNull(),
     },
     (table) => [primaryKey({ columns: [table.appletName, table.version] })],
 );
 
-export const appletMutationReceipts = sqliteTable("applet_mutation_receipts", {
-    operationId: text("operation_id").primaryKey(),
-    receiptJson: text("receipt_json").notNull(),
-});
-
-export const appletMutationProofs = sqliteTable("applet_mutation_proofs", {
-    operationId: text("operation_id").primaryKey(),
-    proofJson: text("proof_json").notNull(),
-});
-
 export const worklets = sqliteTable("worklets", {
     name: text("name").primaryKey(),
-    ownerAgentId: text("owner_agent_id").notNull(),
+    authorSessionId: text("author_session_id").notNull(),
+    sourceDescription: text("source_description"),
     currentVersion: integer("current_version").notNull(),
     createdAtMs: integer("created_at_ms").notNull(),
     updatedAtMs: integer("updated_at_ms").notNull(),
+    iconThumbhash: text("icon_thumbhash").notNull(),
 });
 
 export const workletVersions = sqliteTable(
@@ -937,24 +925,13 @@ export const workletVersions = sqliteTable(
             .notNull()
             .references(() => worklets.name, { onDelete: "cascade" }),
         version: integer("version").notNull(),
-        sourceRef: text("source_ref").notNull(),
         changeDescription: text("change_description").notNull(),
-        operationsJson: text("operations_json").notNull(),
         createdAtMs: integer("created_at_ms").notNull(),
-        operationId: text("operation_id").notNull().unique(),
+        description: text("description").notNull(),
+        permissionsJson: text("permissions_json").notNull(),
     },
     (table) => [primaryKey({ columns: [table.workletName, table.version] })],
 );
-
-export const workletMutationReceipts = sqliteTable("worklet_mutation_receipts", {
-    operationId: text("operation_id").primaryKey(),
-    receiptJson: text("receipt_json").notNull(),
-});
-
-export const workletMutationProofs = sqliteTable("worklet_mutation_proofs", {
-    operationId: text("operation_id").primaryKey(),
-    proofJson: text("proof_json").notNull(),
-});
 
 export const durableGlobalEvents = sqliteTable("durable_global_events", {
     cursor: text("cursor").primaryKey(),

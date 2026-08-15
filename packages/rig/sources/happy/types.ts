@@ -172,6 +172,7 @@ export interface HappySessionMetadata {
         serviceTier?: string;
         status: string;
     };
+    skills: readonly string[];
     startedBy: "daemon";
     startedFromDaemon: true;
     summary: { text: string; updatedAt: number };

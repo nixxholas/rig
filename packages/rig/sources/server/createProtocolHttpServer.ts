@@ -23,11 +23,14 @@ import type {
     AbortRunResponse,
     BroadcastMessageRequest,
     BroadcastMessageResponse,
+    AnswerUserInputRequest,
+    AttachSecretRequest,
     ChangeEffortRequest,
     ChangeModelRequest,
     ChangePermissionModeRequest,
     ChangeServiceTierRequest,
     ChangeSessionGoalStatusRequest,
+    CancelScheduledMessageResponse,
     CreateRemoteProjectRequest,
     CompactSessionResponse,
     CreateSessionRequest,
@@ -35,6 +38,7 @@ import type {
     DaemonConfig,
     DaemonIdentity,
     DisconnectSessionTerminalResponse,
+    ForkSessionResponse,
     GetCurrentProviderQuotaResponse,
     GetDaemonConfigResponse,
     GetGlobalInstructionsResponse,
@@ -50,6 +54,7 @@ import type {
     ProviderUsageEntry,
     SessionStateResponse,
     ListGlobalEventsResponse,
+    ListExternalToolCallsResponse,
     ListSecretsResponse,
     HealthResponse,
     RigDaemonInstallationDiscovery,
@@ -81,15 +86,27 @@ import type {
     ProjectScope,
     ProjectWorkspaceResponse,
     ReorderRequest,
+    RewindSessionRequest,
+    RewindSessionResponse,
+    RecordSessionActivityResponse,
+    ReadBackgroundProcessResponse,
     ReadProjectFileResponse,
     ReadProjectFileRevisionResponse,
+    RunShellCommandRequest,
+    RunShellCommandResponse,
+    ResolveExternalToolCallRequest,
+    ResolveExternalToolCallResponse,
     RegisterSecretResponse,
     SearchFilesResponse,
+    SecretSessionResponse,
     ProtocolSession,
     SessionEvent,
+    SessionActivity,
     SessionArchiveResponse,
+    SessionPartialMessage,
     SessionReadResponse,
     SessionStreamHello,
+    SessionTranscriptWindow,
     SessionTerminalHeartbeatRequest,
     SessionTerminalHeartbeatResponse,
     SetGoalRequest,
@@ -97,12 +114,16 @@ import type {
     StartInspectorResponse,
     StopInspectorResponse,
     SteerMessageResponse,
+    StopBackgroundProcessResponse,
     StopWorkflowResponse,
     SubagentSummary,
     SubmitMessageResponse,
     SubmitMessageRequest,
+    SubmitContextMessageResponse,
     TrimGlobalEventsRequest,
     TrimGlobalEventsResponse,
+    TransferSessionRequest,
+    TransferSessionResponse,
     UninstallPluginResponse,
     UnregisterSecretResponse,
     UpdateSecretResponse,
@@ -112,6 +133,7 @@ import type {
     UpdateGlobalInstructionsResponse,
     UpdateGlobalSecurityPolicyResponse,
     SetSessionDraftRequest,
+    UpdateSessionRequest,
     CreateSharingInvitationResponse,
     CreateFolderShareRequest,
     FolderShareStatus,
@@ -137,11 +159,13 @@ import {
     createRemoteProjectRequestSchema,
     projectGitSecretSchema,
     SESSION_DRAFT_MAX_LENGTH,
+    submitContextMessageRequestSchema,
     updateProjectSettingsRequestSchema,
     createRigProfileRequestSchema,
     replicateRigProfileRequestSchema,
     rigProfileIdSchema,
     updateRigProfileRequestSchema,
+    transferSessionRequestSchema,
     writeProjectFileRequestSchema,
     onboardMurmurRequestSchema,
     createFolderShareRequestSchema,
@@ -157,32 +181,35 @@ import {
     validateRigProfilePhoto,
 } from "../profiles/index.js";
 import { getDaemonIdentity } from "../daemon/index.js";
+import { WorkspaceTransferTargetRestoreError } from "../git/prepareWorkspaceTransfer.js";
 import { ProjectRegistrationError } from "../project/ProjectRepository.js";
 import { errorToMessage } from "../errorToMessage.js";
+import { isOpenQuestion } from "../user-input/index.js";
 import type {
     GetPresenceResponse,
     SetPresenceRequestBody,
     SetPresenceResponse,
 } from "../protocol/index.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
-import { aggregateSessionUsage } from "../protocol/usage/index.js";
-import { projectClientTranscript } from "../protocol/projection/projectClientTranscript.js";
+import { InMemorySessionStore } from "../session/InMemorySessionStore.js";
+import type { SessionUsageSummary } from "../session/usage/index.js";
+import { projectClientTranscript } from "../session/projectClientTranscript.js";
 import { createModelCatalog } from "../model-catalog/createModelCatalog.js";
 import {
     FileSearchService,
     type FileSearchServiceContract,
 } from "../file-search/FileSearchService.js";
-import { SessionEventLog } from "../protocol/projection/SessionEventLog.js";
-import { isLiveOnlySessionEvent } from "../protocol/projection/isLiveOnlySessionEvent.js";
+import type { SessionEventLog } from "../session/SessionEventLog.js";
+import { isLiveOnlySessionEvent } from "../session/isLiveOnlySessionEvent.js";
 import { isSubmitMessageRequest } from "./isSubmitMessageRequest.js";
 import { limitProtocolSessionMessages } from "./limitProtocolSessionMessages.js";
 import type { GlobalStreamHello } from "../protocol/index.js";
 import type { GlobalEventQueue } from "../global-event/GlobalEventQueue.js";
+import type { SessionStore } from "../session/SessionStore.js";
 import { isGlobalEventRoute } from "./isGlobalEventRoute.js";
 import { parseGlobalEventCursor } from "../global-event/parseGlobalEventCursor.js";
 import { parseGlobalEventLimit } from "./parseGlobalEventLimit.js";
-import { selectRecentSessionEvents } from "../protocol/projection/selectRecentSessionEvents.js";
-import { createEventIdFactory } from "../protocol/createEventIdFactory.js";
+import { selectRecentSessionEvents } from "../session/selectRecentSessionEvents.js";
 import { SESSION_STREAM_TURN_LIMIT } from "../protocol/index.js";
 import { parseTimelineRequest } from "./parseTimelineRequest.js";
 import { sendJson } from "./sendJson.js";
@@ -191,10 +218,10 @@ import { streamLiveEvents } from "./streamLiveEvents.js";
 import type { GitStateTracker } from "../git/GitStateTracker.js";
 import { resolveGitTrackedEntity } from "../git/resolveGitTrackedEntity.js";
 import { INVALID_PERMISSION_MODE_MESSAGE, isPermissionMode } from "../permissions/index.js";
-import { goalStatusSchema } from "@slopus/happy-agent-features";
+import { isGoalStatus } from "../goals/index.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
 import { getGeneratedDirectory, resolveGeneratedMediaLocation } from "../generated-media/index.js";
-import { configureConversationRequest } from "../conversations/configureConversationRequest.js";
+import { configureSessionRequest } from "../session/configureSessionRequest.js";
 import { DEFAULT_INFERENCE_MAX_RETRIES } from "../config/inferenceRetrySettings.js";
 import { getGlobalAgentsMdPath } from "../config/getGlobalAgentsMdPath.js";
 import { GLOBAL_AGENTS_MD_MAX_BYTES } from "../config/globalAgentsMdMaxBytes.js";
@@ -204,12 +231,13 @@ import { getGlobalSecurityMdPath } from "../config/getGlobalSecurityMdPath.js";
 import { GLOBAL_SECURITY_MD_MAX_BYTES } from "../config/globalSecurityMdMaxBytes.js";
 import { readGlobalSecurityMd } from "../config/readGlobalSecurityMd.js";
 import { writeGlobalSecurityMd } from "../config/writeGlobalSecurityMd.js";
-import { ConversationConfigurationError } from "../conversations/ConversationConfigurationError.js";
+import { SessionConfigurationError } from "../session/SessionConfigurationError.js";
 import type { TaskDrain } from "../utils/TrackedTaskDrain.js";
 import type { ProviderQuota } from "@slopus/happy-providers";
 import {
     environmentSecretRegistrationSchema,
     environmentSecretUpdateSchema,
+    type EnvironmentSecretRegistration,
 } from "../secrets/index.js";
 import type {
     CreateRemoteTerminalRequest,
@@ -220,19 +248,25 @@ import type {
 } from "../terminal/index.js";
 import type { PluginContext } from "../agent/context/PluginContext.js";
 import {
-    assertAgentSubmissionOptionsSupported,
-    type RigAgentService,
-} from "../agent/RigAgentService.js";
-import {
     PluginAppError,
     PluginCatalogError,
     PluginIconError,
     PluginNotFoundError,
 } from "../plugins/index.js";
 import { SlotEntryInvalidError, SlotEntryNotFoundError } from "../slots/index.js";
-import { AppletContextTokenStore, resolveAppletOpenUrl } from "./AppletContextCapability.js";
-import { readHostedAppletIcon } from "./readHostedAppletIcon.js";
-import { describeAppletScopeNotAllowed } from "../slots/describeAppletScopeNotAllowed.js";
+import {
+    describeAppletScopeNotAllowed,
+    readAppletFile,
+    resolveAppletOpenUrl,
+    AppletContextTokenStore,
+    AppletInvalidError,
+    AppletNotFoundError,
+} from "../applets/index.js";
+import {
+    WorkletInvalidError,
+    WorkletNotFoundError,
+    type WorkletManager,
+} from "../worklets/index.js";
 import {
     installWorkletRequestSchema,
     revertWorkletRequestSchema,
@@ -242,13 +276,11 @@ import {
     type WorkletManagementErrorCode,
     type WorkletResponse,
 } from "../protocol/WorkletProtocol.js";
+import { MAX_ATTACHMENT_FILE_BYTES } from "../tools/attachments/prepareAttachment.js";
 import {
     createAppletRequestSchema,
-    defaultAppletAllowedScopes,
-    revertAppletRequestSchema,
     resolveAppletOpenRequestSchema,
     slotNameSchema,
-    updateAppletRequestSchema,
 } from "../protocol/index.js";
 import type {
     CreateSlotEntryRequest,
@@ -270,8 +302,8 @@ import type {
 import { isAuthorizedProtocolRequest } from "./isAuthorizedProtocolRequest.js";
 import { attachRemoteTerminalWebSocketServer } from "./attachRemoteTerminalWebSocketServer.js";
 import { attachP2pPeerTunnels } from "./attachP2pPeerTunnels.js";
-import { SessionTerminalTracker } from "../terminal/SessionTerminalTracker.js";
-import { sessionSummaryWithTerminalPresence } from "../protocol/projection/sessionSummaryWithTerminalPresence.js";
+import { SessionTerminalTracker } from "../session/SessionTerminalTracker.js";
+import { sessionSummaryWithTerminalPresence } from "../session/sessionSummaryWithTerminalPresence.js";
 import { attachHttpConnectProxy } from "./attachHttpConnectProxy.js";
 import { attachP2pSshBridge } from "./attachP2pSshBridge.js";
 import {
@@ -316,20 +348,8 @@ import { proxyP2pHttpRequest } from "./proxyP2pHttpRequest.js";
 import type { PrepareP2pHttpRequest } from "./proxyP2pHttpRequest.js";
 import { matchP2pPeerRoute } from "./matchP2pPeerRoute.js";
 import type { SharingLifecycleServiceContract } from "../sharing/index.js";
-import type { DaemonResources } from "../daemon/DaemonResources.js";
-import type { ConversationRepository } from "../conversations/ConversationRepository.js";
-import { withDatabase } from "../persistence/databaseContext.js";
-import { querySubagentSummaries } from "../persistence/conversations/querySubagentSummaries.js";
-import { queryTimelineAgents } from "../persistence/timeline/queryTimelineAgents.js";
-import { queryTimelineEvents } from "../persistence/timeline/queryTimelineEvents.js";
-import { buildTimeline } from "../timeline/index.js";
-import { secretRegister } from "../persistence/conversations/secretRegister.js";
-import { secretUnregister } from "../persistence/conversations/secretUnregister.js";
 
 export interface ProtocolHttpServerOptions {
-    agents: RigAgentService;
-    conversations: ConversationRepository;
-    resources: DaemonResources;
     inferenceMaxRetries?: number;
     /** Where the user's global AGENTS.md lives. Defaults to the file beside the daemon config. */
     globalInstructionsPath?: string;
@@ -337,6 +357,7 @@ export interface ProtocolHttpServerOptions {
     globalSecurityPolicyPath?: string;
     defaultDocker?: DockerExecutionConfig;
     gitStateTracker?: GitStateTracker;
+    happyCloud?: HappyCloudServiceContract;
     identity?: DaemonIdentity;
     modelCatalog?: ModelCatalog;
     onboarding?: OnboardingServiceContract;
@@ -360,6 +381,7 @@ export interface ProtocolHttpServerOptions {
     ) => Promise<P2pCredentialReplaceResult>;
     prepareP2pRequest?: PrepareP2pHttpRequest;
     fileSearchService?: FileSearchServiceContract;
+    globalEventQueue?: GlobalEventQueue;
     getProviderQuota?: (
         providerId: string,
         ownerInstanceId: string,
@@ -393,7 +415,11 @@ export interface ProtocolHttpServerOptions {
         | "storageSet"
         | "uninstall"
     >;
+    store?: SessionStore;
     taskDrain?: TaskDrain;
+    /** The daemon's running worklets. Absent when this daemon runs without them. */
+    worklets?: WorkletManager;
+    secrets?: readonly EnvironmentSecretRegistration[];
     token: string;
 }
 
@@ -405,15 +431,22 @@ export async function createProtocolHttpServer(
     const p2pProxyShutdown = new AbortController();
     protocolP2pProxyShutdowns.set(server, p2pProxyShutdown);
     const modelCatalog = options.modelCatalog ?? createModelCatalog(ctx);
-    const { agents, conversations, resources } = options;
+    const store =
+        options.store ??
+        (await InMemorySessionStore.open(ctx, {
+            ...(options.defaultDocker === undefined
+                ? {}
+                : { defaultDocker: options.defaultDocker }),
+            modelCatalog,
+            ...(options.secrets === undefined ? {} : { secrets: options.secrets }),
+        }));
     const identity = options.identity ?? getDaemonIdentity();
     const fileSearchService = options.fileSearchService ?? new FileSearchService();
     const appletContextTokens = new AppletContextTokenStore();
     const runtimeConfig: ProtocolServerRuntimeConfig = {
-        agents,
         inferenceMaxRetries: options.inferenceMaxRetries ?? DEFAULT_INFERENCE_MAX_RETRIES,
         gitStateTracker: options.gitStateTracker,
-        globalEventQueue: resources.globalEvents,
+        globalEventQueue: options.globalEventQueue ?? store.globalEventQueue,
         globalInstructionsPath: options.globalInstructionsPath ?? getGlobalAgentsMdPath(),
         globalSecurityPolicyPath: options.globalSecurityPolicyPath ?? getGlobalSecurityMdPath(),
         listProviderUsage: options.listProviderUsage,
@@ -430,22 +463,21 @@ export async function createProtocolHttpServer(
         resolveModelCatalog: options.resolveModelCatalog,
         prepareP2pRequest: options.prepareP2pRequest,
         p2pProxyShutdown: p2pProxyShutdown.signal,
-        happyCloud: resources.happyCloud,
+        happyCloud: options.happyCloud,
         onDaemonConfigChange: options.onDaemonConfigChange,
         onboarding: options.onboarding,
         onReloadHappy: options.onReloadHappy,
         onStartInspector: options.onStartInspector,
         onStopInspector: options.onStopInspector,
         plugins: options.plugins,
+        ...(options.worklets === undefined ? {} : { worklets: options.worklets }),
     };
+    // The persistent store caches sessions weakly; each open SSE stream needs its own strong lease.
+    const sessionEventStreamLeases = new Set<SessionEventStreamLease>();
     const sessionTerminals = new SessionTerminalTracker();
     const resolveP2pNetwork = options.resolveP2pNetwork ?? (() => options.p2pNetwork);
 
-    attachRemoteTerminalWebSocketServer({
-        remoteTerminals: resources.remoteTerminals,
-        server,
-        token: options.token,
-    });
+    attachRemoteTerminalWebSocketServer({ server, store, token: options.token });
     attachP2pPeerTunnels({
         resolveNetwork: resolveP2pNetwork,
         server,
@@ -457,7 +489,7 @@ export async function createProtocolHttpServer(
             ? network.acceptSshBridge.bind(network)
             : undefined;
     });
-    attachHttpConnectProxy(server, options.token, resources.projects);
+    attachHttpConnectProxy(server, options.token, store);
 
     server.on("request", (request, response) => {
         const mutating = isMutatingProtocolRequest(request);
@@ -480,8 +512,7 @@ export async function createProtocolHttpServer(
                         requestCtx,
                         request,
                         response,
-                        resources,
-                        conversations,
+                        store,
                         modelCatalog,
                         identity,
                         fileSearchService,
@@ -491,6 +522,7 @@ export async function createProtocolHttpServer(
                         options.defaultDocker,
                         options.taskDrain,
                         options.getProviderQuota,
+                        sessionEventStreamLeases,
                         sessionTerminals,
                         appletContextTokens,
                     );
@@ -552,8 +584,6 @@ export async function createProtocolHttpServer(
 }
 
 const protocolP2pProxyShutdowns = new WeakMap<Server, AbortController>();
-const createWorkletCatalogVersion = createEventIdFactory();
-const WORKLET_HTTP_AGENT_ID = "$system";
 
 export function beginProtocolHttpServerShutdown(server: Server): void {
     protocolP2pProxyShutdowns.get(server)?.abort();
@@ -575,7 +605,6 @@ function protocolTraceRoute(url: URL): string {
 }
 
 interface ProtocolServerRuntimeConfig {
-    agents: RigAgentService;
     canP2pPeerConfigure: ProtocolHttpServerOptions["canP2pPeerConfigure"];
     canP2pPeerProvision: ProtocolHttpServerOptions["canP2pPeerProvision"];
     canP2pPeerUseRemoteWork: ProtocolHttpServerOptions["canP2pPeerUseRemoteWork"];
@@ -595,7 +624,7 @@ interface ProtocolServerRuntimeConfig {
     resolveModelCatalog: ProtocolHttpServerOptions["resolveModelCatalog"];
     prepareP2pRequest: PrepareP2pHttpRequest | undefined;
     p2pProxyShutdown: AbortSignal;
-    happyCloud: HappyCloudServiceContract;
+    happyCloud: HappyCloudServiceContract | undefined;
     onDaemonConfigChange: ProtocolHttpServerOptions["onDaemonConfigChange"];
     onboarding: OnboardingServiceContract | undefined;
     onStartInspector: ProtocolHttpServerOptions["onStartInspector"];
@@ -619,33 +648,12 @@ interface ProtocolServerRuntimeConfig {
               | "uninstall"
           >
         | undefined;
+    worklets?: WorkletManager;
 }
 
 interface AppliedDaemonSettings {
     inferenceMaxRetries: number;
     globalEventQueue: GlobalEventQueue;
-}
-
-function rejectUnsupportedAgentSubmissionOptions(
-    response: ServerResponse,
-    runtimeConfig: ProtocolServerRuntimeConfig,
-    request: SubmitMessageRequest,
-): boolean {
-    try {
-        assertAgentSubmissionOptionsSupported(request);
-        return false;
-    } catch (error) {
-        sendJson(response, 400, { error: errorToMessage(error) });
-        return true;
-    }
-}
-
-function sendAgentsModeUnavailable(response: ServerResponse, capability: string): void {
-    sendUnavailable(response, `${capability} is not exposed by Agent Base yet.`);
-}
-
-function sendUnavailable(response: ServerResponse, error: string): void {
-    sendJson(response, 503, { error });
 }
 
 const GLOBAL_SECURITY_POLICY_REQUEST_MAX_BYTES = GLOBAL_SECURITY_MD_MAX_BYTES * 6 + 1024;
@@ -685,8 +693,7 @@ async function handleRequest(
     ctx: Context,
     request: IncomingMessage,
     response: ServerResponse,
-    resources: DaemonResources,
-    conversations: ConversationRepository,
+    store: SessionStore,
     modelCatalog: ModelCatalog,
     identity: DaemonIdentity,
     fileSearchService: FileSearchServiceContract,
@@ -702,6 +709,7 @@ async function handleRequest(
               credential?: ProviderCredentialProvenance,
           ) => Promise<ProviderQuota | undefined>)
         | undefined,
+    sessionEventStreamLeases: Set<SessionEventStreamLease>,
     sessionTerminals: SessionTerminalTracker,
     appletContextTokens: AppletContextTokenStore,
 ): Promise<void> {
@@ -1177,9 +1185,9 @@ async function handleRequest(
             daemonProtocolVersion: RIG_PROTOCOL_VERSION,
             daemonVersion: identity.version,
             data: {
-                epoch: resources.dataEpoch,
+                epoch: store.dataEpoch,
                 schemaCompatibility: "current",
-                schemaVersion: resources.dataSchemaVersion,
+                schemaVersion: store.dataSchemaVersion,
                 status: "initialized",
             },
             formatVersion: 1,
@@ -1295,7 +1303,7 @@ async function handleRequest(
             sendJson(response, 503, { error: "Plugins are unavailable while Rig is starting." });
             return;
         }
-        const cursor = resources.liveEvents.cursor();
+        const cursor = store.liveEvents.cursor();
         sendJson(response, 200, { cursor, ...(await runtimeConfig.plugins.list(ctx)) });
         return;
     }
@@ -1681,7 +1689,7 @@ async function handleRequest(
             const workspaceId = url.searchParams.get("workspaceId") ?? undefined;
             const sessionId = url.searchParams.get("sessionId") ?? undefined;
             sendJson<ListSlotEntriesResponse>(response, 200, {
-                entries: await resources.slots.list(ctx, {
+                entries: await store.slots.list(ctx, {
                     ...(slot === undefined ? {} : { slot }),
                     ...(projectId === undefined ? {} : { projectId }),
                     ...(workspaceId === undefined ? {} : { workspaceId }),
@@ -1700,7 +1708,7 @@ async function handleRequest(
             }
             try {
                 sendJson<SlotEntryResponse>(response, 201, {
-                    entry: await resources.slots.create(ctx, body as CreateSlotEntryRequest),
+                    entry: await store.slots.create(ctx, body as CreateSlotEntryRequest),
                 });
             } catch (error) {
                 if (error instanceof SlotEntryInvalidError) {
@@ -1725,7 +1733,7 @@ async function handleRequest(
             }
             try {
                 sendJson<SlotEntryResponse>(response, 200, {
-                    entry: await resources.slots.update(
+                    entry: await store.slots.update(
                         ctx,
                         route.slotEntryId,
                         body as UpdateSlotEntryRequest,
@@ -1747,7 +1755,7 @@ async function handleRequest(
         if (request.method === "DELETE") {
             try {
                 sendJson<SlotEntryResponse>(response, 200, {
-                    entry: await resources.slots.remove(ctx, route.slotEntryId),
+                    entry: await store.slots.remove(ctx, route.slotEntryId),
                 });
             } catch (error) {
                 if (error instanceof SlotEntryNotFoundError) {
@@ -1762,10 +1770,9 @@ async function handleRequest(
         return;
     }
     if (route.name === "applets") {
-        const applets = runtimeConfig.agents.applets;
         if (request.method === "GET") {
             sendJson<ListAppletsResponse>(response, 200, {
-                applets: await applets.list(ctx),
+                applets: await store.applets.list(ctx),
             });
             return;
         }
@@ -1788,13 +1795,10 @@ async function handleRequest(
             }
             try {
                 sendJson<AppletResponse>(response, 201, {
-                    applet: await applets.create(ctx, {
-                        ...body,
-                        allowedScopes: body.allowedScopes ?? [...defaultAppletAllowedScopes],
-                    }),
+                    applet: await store.applets.create(ctx, body),
                 });
             } catch (error) {
-                if (error instanceof Error) {
+                if (error instanceof AppletInvalidError) {
                     sendAppletManagementError(response, 400, "invalid_applet", error.message);
                     return;
                 }
@@ -1806,7 +1810,6 @@ async function handleRequest(
         return;
     }
     if (route.name === "applet-versions" || route.name === "applet-revert") {
-        const applets = runtimeConfig.agents.applets;
         if (request.method !== "POST") {
             sendJson(response, 405, { error: "Method not allowed" });
             return;
@@ -1818,39 +1821,23 @@ async function handleRequest(
             sendInvalidAppletBody(response, error);
             return;
         }
-        const expectedSchema =
-            route.name === "applet-versions"
-                ? updateAppletRequestSchema
-                : revertAppletRequestSchema;
-        if (!Value.Check(expectedSchema, body)) {
-            sendAppletManagementError(
-                response,
-                400,
-                "invalid_request",
-                route.name === "applet-versions"
-                    ? "An applet update needs a source folder path and a description of the change."
-                    : "An applet revert needs an existing version number.",
-            );
-            return;
-        }
-        if ((await applets.get(ctx, route.appletName)) === undefined) {
-            sendAppletManagementError(
-                response,
-                404,
-                "applet_not_found",
-                `No applet named ${JSON.stringify(route.appletName)} exists.`,
-            );
-            return;
-        }
         try {
             const applet =
                 route.name === "applet-versions"
-                    ? await applets.update(ctx, route.appletName, body as UpdateAppletRequest)
-                    : await applets.revert(ctx, route.appletName, body as RevertAppletRequest);
+                    ? await store.applets.update(ctx, route.appletName, body as UpdateAppletRequest)
+                    : await store.applets.revert(
+                          ctx,
+                          route.appletName,
+                          body as RevertAppletRequest,
+                      );
             sendJson<AppletResponse>(response, 200, { applet });
         } catch (error) {
-            if (error instanceof Error) {
+            if (error instanceof AppletInvalidError) {
                 sendAppletManagementError(response, 400, "invalid_applet", error.message);
+                return;
+            }
+            if (error instanceof AppletNotFoundError) {
+                sendAppletManagementError(response, 404, "applet_not_found", error.message);
                 return;
             }
             throw error;
@@ -1858,7 +1845,6 @@ async function handleRequest(
         return;
     }
     if (route.name === "applet-open") {
-        const applets = runtimeConfig.agents.applets;
         if (request.method !== "POST") {
             sendJson(response, 405, { error: "Method not allowed" });
             return;
@@ -1879,7 +1865,7 @@ async function handleRequest(
             );
             return;
         }
-        const applet = await applets.get(ctx, route.appletName);
+        const applet = await store.applets.get(ctx, route.appletName);
         if (applet === undefined) {
             sendAppletManagementError(
                 response,
@@ -1889,13 +1875,7 @@ async function handleRequest(
             );
             return;
         }
-        const resolution = await resolveAppletContext(
-            ctx,
-            conversations,
-            resources.projects,
-            applet,
-            body,
-        );
+        const resolution = await resolveAppletContext(ctx, store, applet, body);
         if (resolution.type === "error") {
             sendAppletManagementError(response, 400, resolution.code, resolution.message);
             return;
@@ -1906,12 +1886,11 @@ async function handleRequest(
         return;
     }
     if (route.name === "applet-icon") {
-        const applets = runtimeConfig.agents.applets;
         if (request.method !== "GET") {
             sendJson(response, 405, { error: "Method not allowed" });
             return;
         }
-        if ((await applets.get(ctx, route.appletName)) === undefined) {
+        if ((await store.applets.get(ctx, route.appletName)) === undefined) {
             sendAppletManagementError(
                 response,
                 404,
@@ -1920,7 +1899,7 @@ async function handleRequest(
             );
             return;
         }
-        const icon = await readHostedAppletIcon(route.appletName, route.format);
+        const icon = await store.applets.readIcon(ctx, route.appletName, route.format);
         if (icon.type !== "file") {
             sendAppletManagementError(response, 404, "applet_not_found", "Applet icon not found.");
             return;
@@ -1935,12 +1914,11 @@ async function handleRequest(
         return;
     }
     if (route.name === "applet-file") {
-        const applets = runtimeConfig.agents.applets;
         if (request.method !== "GET") {
             sendJson(response, 405, { error: "Method not allowed" });
             return;
         }
-        const applet = await applets.get(ctx, route.appletName);
+        const applet = await store.applets.get(ctx, route.appletName);
         if (applet === undefined) {
             sendAppletManagementError(
                 response,
@@ -1950,14 +1928,12 @@ async function handleRequest(
             );
             return;
         }
-        let file;
-        try {
-            file = await applets.readAsset(ctx, {
-                name: route.appletName,
-                path: route.appletFilePath === "" ? "index.html" : route.appletFilePath,
-                version: applet.currentVersion,
-            });
-        } catch {
+        const file = await readAppletFile(
+            route.appletName,
+            applet.currentVersion,
+            route.appletFilePath,
+        );
+        if (file.type === "invalid_path") {
             sendAppletManagementError(
                 response,
                 400,
@@ -1966,17 +1942,16 @@ async function handleRequest(
             );
             return;
         }
-        if (file === undefined) {
+        if (file.type === "not_found") {
             sendAppletManagementError(response, 404, "applet_not_found", "Applet file not found.");
             return;
         }
-        const data = Buffer.from(file.content, file.encoding);
         response.writeHead(200, {
-            "content-length": data.byteLength,
+            "content-length": file.data.byteLength,
             "content-type": file.contentType,
             "x-content-type-options": "nosniff",
         });
-        response.end(data);
+        response.end(file.data);
         return;
     }
     if (route.name === "worklets") {
@@ -2032,7 +2007,7 @@ async function handleRequest(
     }
 
     if (request.method === "GET" && route.name === "presence") {
-        sendJson<GetPresenceResponse>(response, 200, { presence: resources.presence.state() });
+        sendJson<GetPresenceResponse>(response, 200, { presence: store.presence.state() });
         return;
     }
 
@@ -2050,7 +2025,7 @@ async function handleRequest(
             return;
         }
         try {
-            const presence = await resources.presence.setPresence({
+            const presence = await store.presence.setPresence({
                 ...(body.fallbackPresenceId === undefined
                     ? {}
                     : { fallbackPresenceId: body.fallbackPresenceId }),
@@ -2073,7 +2048,7 @@ async function handleRequest(
     ) {
         await serveFolderRequest(
             ctx,
-            resources.folders,
+            store,
             {
                 name: routeName,
                 ...("folderId" in route && route.folderId !== undefined
@@ -2094,7 +2069,7 @@ async function handleRequest(
     ) {
         await serveFolderItemRequest(
             ctx,
-            resources.folders,
+            store,
             {
                 name: routeName,
                 ...("folderId" in route && route.folderId !== undefined
@@ -2118,7 +2093,7 @@ async function handleRequest(
     ) {
         await serveDocumentRequest(
             ctx,
-            resources.documents,
+            store,
             {
                 name: routeName,
                 ...("documentId" in route && route.documentId !== undefined
@@ -2138,7 +2113,7 @@ async function handleRequest(
                     return undefined;
                 }
                 return {
-                    instanceId: p2pPeerId(request) ?? resources.localInstanceId,
+                    instanceId: p2pPeerId(request) ?? store.localInstanceId,
                     ...(profileId === undefined || profileId === null ? {} : { profileId }),
                 };
             },
@@ -2149,7 +2124,7 @@ async function handleRequest(
     if (route.name === "projects") {
         if (request.method === "GET") {
             sendJson<ListProjectsResponse>(response, 200, {
-                projects: await resources.projects.listProjects(ctx),
+                projects: await store.listProjects(ctx),
             });
             return;
         }
@@ -2168,7 +2143,7 @@ async function handleRequest(
             return;
         }
         try {
-            const project = await resources.projects.registerProject(ctx, body);
+            const project = await store.registerProject(ctx, body);
             sendJson<ProjectResponse>(response, 200, { project });
         } catch (error) {
             if (!(error instanceof ProjectRegistrationError)) throw error;
@@ -2223,7 +2198,7 @@ async function handleRequest(
             const existing =
                 decoded.request.projectId === undefined
                     ? undefined
-                    : await resources.projects.getProject(ctx, decoded.request.projectId);
+                    : await store.getProject(ctx, decoded.request.projectId);
             if (peerId !== undefined && existing === undefined) {
                 sendProjectRegistrationError(
                     response,
@@ -2235,7 +2210,7 @@ async function handleRequest(
             }
             if (peerId === undefined)
                 try {
-                    githubToken = resources.secrets.resolveSpecial("github").GH_TOKEN;
+                    githubToken = store.resolveSpecialSecret("github").GH_TOKEN;
                 } catch {
                     sendProjectRegistrationError(
                         response,
@@ -2248,7 +2223,7 @@ async function handleRequest(
         }
         try {
             const mutationId = requestMutationId(request);
-            const project = await resources.projects.createRemoteProject(ctx, decoded.request, {
+            const project = await store.createRemoteProject(ctx, decoded.request, {
                 ...(decoded.request.identity === undefined
                     ? {}
                     : {
@@ -2292,7 +2267,7 @@ async function handleRequest(
         route.name === "project-file-tree" ||
         route.name === "project-files"
     ) {
-        const directory = await resolveProjectScopeDirectory(ctx, resources.projects, route);
+        const directory = await resolveProjectScopeDirectory(ctx, store, route);
         if (!directory.ok) {
             sendJson(response, directory.status, { error: directory.error });
             return;
@@ -2448,15 +2423,14 @@ async function handleRequest(
             projectId: route.projectId,
             ...(route.workspaceId === undefined ? {} : { workspaceId: route.workspaceId }),
         };
-        const project = await resources.projects.getProject(ctx, route.projectId);
+        const project = await store.getProject(ctx, route.projectId);
         if (project === undefined) {
             sendJson(response, 404, { error: "Project not found" });
             return;
         }
         if (
             route.workspaceId !== undefined &&
-            (await resources.projects.getWorkspace(ctx, route.projectId, route.workspaceId)) ===
-                undefined
+            (await store.getWorkspace(ctx, route.projectId, route.workspaceId)) === undefined
         ) {
             sendJson(response, 404, { error: "Workspace not found" });
             return;
@@ -2464,7 +2438,7 @@ async function handleRequest(
         if (route.name === "project-terminals") {
             if (request.method === "GET") {
                 sendJson<ListRemoteTerminalsResponse>(response, 200, {
-                    terminals: resources.remoteTerminals
+                    terminals: store.remoteTerminals
                         .list(scope)
                         .map((terminal) => terminal.summary()),
                 });
@@ -2479,7 +2453,7 @@ async function handleRequest(
                     return;
                 }
                 try {
-                    const terminal = await resources.remoteTerminals.create(ctx, scope, body);
+                    const terminal = await store.remoteTerminals.create(ctx, scope, body);
                     sendJson<CreateRemoteTerminalResponse>(response, 201, {
                         terminal: terminal.summary(),
                     });
@@ -2492,7 +2466,7 @@ async function handleRequest(
             sendJson(response, 405, { error: "Method not allowed" });
             return;
         }
-        const terminal = resources.remoteTerminals.get(scope, route.terminalId);
+        const terminal = store.remoteTerminals.get(scope, route.terminalId);
         if (terminal === undefined) {
             sendJson(response, 404, { error: "Terminal not found" });
             return;
@@ -2518,7 +2492,7 @@ async function handleRequest(
     }
 
     if (request.method === "GET" && route.name === "project-asset") {
-        const asset = await resources.projects.avatarAsset(ctx, route.assetHash);
+        const asset = await store.getProjectAvatar(ctx, route.assetHash);
         if (asset === undefined) {
             sendJson(response, 404, { error: "Project avatar not found" });
             return;
@@ -2534,7 +2508,7 @@ async function handleRequest(
     }
 
     if (route.name === "project") {
-        const project = await resources.projects.getProject(ctx, route.projectId);
+        const project = await store.getProject(ctx, route.projectId);
         if (project === undefined) {
             sendJson(response, 404, { error: "Project not found" });
             return;
@@ -2557,7 +2531,7 @@ async function handleRequest(
             const completed =
                 body.mutationId === undefined
                     ? undefined
-                    : (await resources.globalEvents.list(ctx))?.find(
+                    : (await store.globalEventQueue.list(ctx))?.find(
                           (entry) =>
                               entry.event.type === "project_updated" &&
                               entry.event.projectId === project.id &&
@@ -2565,7 +2539,7 @@ async function handleRequest(
                       );
             if (completed !== undefined) {
                 sendJson<ProjectResponse>(response, 200, {
-                    project: (await resources.projects.getProject(ctx, project.id))!,
+                    project: (await store.getProject(ctx, project.id))!,
                 });
                 return;
             }
@@ -2576,7 +2550,7 @@ async function handleRequest(
             }
             try {
                 sendJson<ProjectResponse>(response, 200, {
-                    project: (await resources.projects.renameProject(
+                    project: (await store.renameProject(
                         ctx,
                         project.id,
                         body.name,
@@ -2588,7 +2562,7 @@ async function handleRequest(
                 if (isDatabaseFailure(error)) throw error;
                 sendJson(response, 409, {
                     error: errorToMessage(error),
-                    project: await resources.projects.getProject(ctx, project.id),
+                    project: await store.getProject(ctx, project.id),
                 });
             }
             return;
@@ -2596,7 +2570,7 @@ async function handleRequest(
     }
 
     if (route.name === "project-settings" && request.method === "PUT") {
-        const project = await resources.projects.getProject(ctx, route.projectId);
+        const project = await store.getProject(ctx, route.projectId);
         if (project === undefined) {
             sendJson(response, 404, { error: "Project not found" });
             return;
@@ -2611,7 +2585,7 @@ async function handleRequest(
         const completed =
             body.mutationId === undefined
                 ? undefined
-                : (await resources.globalEvents.list(ctx))?.find(
+                : (await store.globalEventQueue.list(ctx))?.find(
                       (entry) =>
                           entry.event.type === "project_updated" &&
                           entry.event.projectId === project.id &&
@@ -2619,7 +2593,7 @@ async function handleRequest(
                   );
         if (completed !== undefined) {
             sendJson<ProjectResponse>(response, 200, {
-                project: (await resources.projects.getProject(ctx, project.id))!,
+                project: (await store.getProject(ctx, project.id))!,
             });
             return;
         }
@@ -2630,7 +2604,7 @@ async function handleRequest(
         }
         try {
             const { mutationId, ...settings } = body;
-            const updated = await resources.projects.setProjectSettings(
+            const updated = await store.setProjectSettings(
                 ctx,
                 project.id,
                 settings,
@@ -2646,7 +2620,7 @@ async function handleRequest(
             if (isDatabaseFailure(error)) throw error;
             sendJson(response, 409, {
                 error: errorToMessage(error),
-                project: await resources.projects.getProject(ctx, project.id),
+                project: await store.getProject(ctx, project.id),
             });
         }
         return;
@@ -2665,15 +2639,11 @@ async function handleRequest(
         }
         for (const requested of body.entities as { projectId?: unknown; workspaceId?: unknown }[]) {
             if (typeof requested?.projectId !== "string") continue;
-            const project = await resources.projects.getProject(ctx, requested.projectId);
+            const project = await store.getProject(ctx, requested.projectId);
             if (project === undefined) continue;
             const workspace =
                 typeof requested.workspaceId === "string"
-                    ? await resources.projects.getWorkspace(
-                          ctx,
-                          requested.projectId,
-                          requested.workspaceId,
-                      )
+                    ? await store.getWorkspace(ctx, requested.projectId, requested.workspaceId)
                     : undefined;
             if (typeof requested.workspaceId === "string" && workspace === undefined) continue;
             const entity = resolveGitTrackedEntity(project, workspace);
@@ -2691,14 +2661,14 @@ async function handleRequest(
             sendJson(response, 503, { error: "Git tracking is unavailable." });
             return;
         }
-        const project = await resources.projects.getProject(ctx, route.projectId);
+        const project = await store.getProject(ctx, route.projectId);
         if (project === undefined) {
             sendJson(response, 404, { error: "Project not found" });
             return;
         }
         const workspace =
             route.name === "project-workspace-git"
-                ? await resources.projects.getWorkspace(ctx, route.projectId, route.workspaceId)
+                ? await store.getWorkspace(ctx, route.projectId, route.workspaceId)
                 : undefined;
         if (route.name === "project-workspace-git" && workspace === undefined) {
             sendJson(response, 404, { error: "Workspace not found" });
@@ -2734,7 +2704,7 @@ async function handleRequest(
 
     if (route.name === "project-refresh" && request.method === "POST") {
         try {
-            const project = await resources.projects.refreshProject(ctx, route.projectId);
+            const project = await store.refreshProject(ctx, route.projectId);
             if (project === undefined) {
                 sendJson(response, 404, { error: "Project not found" });
                 return;
@@ -2761,12 +2731,7 @@ async function handleRequest(
             return;
         }
         try {
-            const project = await resources.projects.reorderProject(
-                ctx,
-                route.projectId,
-                body,
-                expectedVersion,
-            );
+            const project = await store.reorderProject(ctx, route.projectId, body, expectedVersion);
             if (project === undefined) {
                 sendJson(response, 404, { error: "Project not found" });
                 return;
@@ -2786,11 +2751,7 @@ async function handleRequest(
             return;
         }
         try {
-            const project = await resources.projects.archiveProject(
-                ctx,
-                route.projectId,
-                expectedVersion,
-            );
+            const project = await store.archiveProject(ctx, route.projectId, expectedVersion);
             if (project === undefined) {
                 sendJson(response, 404, { error: "Project not found" });
                 return;
@@ -2824,10 +2785,9 @@ async function handleRequest(
             }
             try {
                 const bytes = await readBuffer(request, 8 * 1024 * 1024);
-                const project = await resources.projects.setAvatar(
+                const project = await store.setProjectAvatar(
                     ctx,
                     route.projectId,
-                    "user",
                     bytes,
                     expectedVersion,
                 );
@@ -2852,7 +2812,7 @@ async function handleRequest(
             return;
         }
         if (request.method === "DELETE") {
-            const project = await resources.projects.clearAvatar(ctx, route.projectId);
+            const project = await store.clearProjectAvatar(ctx, route.projectId);
             if (project === undefined) {
                 sendJson(response, 404, { error: "Project not found" });
                 return;
@@ -2863,13 +2823,13 @@ async function handleRequest(
     }
 
     if (route.name === "project-workspaces") {
-        if ((await resources.projects.getProject(ctx, route.projectId)) === undefined) {
+        if ((await store.getProject(ctx, route.projectId)) === undefined) {
             sendJson(response, 404, { error: "Project not found" });
             return;
         }
         if (request.method === "GET") {
             sendJson<ListProjectWorkspacesResponse>(response, 200, {
-                workspaces: await resources.projects.listWorkspaces(ctx, route.projectId),
+                workspaces: await store.listWorkspaces(ctx, route.projectId),
             });
             return;
         }
@@ -2926,7 +2886,7 @@ async function handleRequest(
                     body.secret?.kind === "github"
                 ) {
                     try {
-                        githubToken = resources.secrets.resolveSpecial("github").GH_TOKEN;
+                        githubToken = store.resolveSpecialSecret("github").GH_TOKEN;
                     } catch {
                         sendJson(response, 409, {
                             code: "secret_unavailable",
@@ -2935,7 +2895,7 @@ async function handleRequest(
                         return;
                     }
                 }
-                const workspace = await resources.projects.createWorkspace(
+                const workspace = await store.createWorkspace(
                     ctx,
                     route.projectId,
                     {
@@ -2950,7 +2910,6 @@ async function handleRequest(
                             : { nameConfigured: body.nameConfigured }),
                         ...(body.secret === undefined ? {} : { secret: body.secret }),
                     },
-                    undefined,
                     {
                         ...(createdBy === undefined ? {} : { createdBy }),
                         ...(githubToken === undefined ? {} : { githubToken }),
@@ -2973,11 +2932,7 @@ async function handleRequest(
     }
 
     if (route.name === "project-workspace") {
-        const workspace = await resources.projects.getWorkspace(
-            ctx,
-            route.projectId,
-            route.workspaceId,
-        );
+        const workspace = await store.getWorkspace(ctx, route.projectId, route.workspaceId);
         if (workspace === undefined) {
             sendJson(response, 404, { error: "Workspace not found" });
             return;
@@ -2996,7 +2951,7 @@ async function handleRequest(
             const completed =
                 body.mutationId === undefined
                     ? undefined
-                    : (await resources.globalEvents.list(ctx))?.find(
+                    : (await store.globalEventQueue.list(ctx))?.find(
                           (entry) =>
                               entry.event.type === "workspace_updated" &&
                               entry.event.workspaceId === route.workspaceId &&
@@ -3004,11 +2959,7 @@ async function handleRequest(
                       );
             if (completed !== undefined) {
                 sendJson<ProjectWorkspaceResponse>(response, 200, {
-                    workspace: (await resources.projects.getWorkspace(
-                        ctx,
-                        route.projectId,
-                        route.workspaceId,
-                    ))!,
+                    workspace: (await store.getWorkspace(ctx, route.projectId, route.workspaceId))!,
                 });
                 return;
             }
@@ -3018,7 +2969,7 @@ async function handleRequest(
                     sendJson(response, 400, { error: "The workspace version is invalid." });
                     return;
                 }
-                const renamed = await resources.projects.renameWorkspace(
+                const renamed = await store.renameWorkspace(
                     ctx,
                     route.projectId,
                     route.workspaceId,
@@ -3037,11 +2988,7 @@ async function handleRequest(
                 if (isDatabaseFailure(error)) throw error;
                 sendJson(response, 409, {
                     error: errorToMessage(error),
-                    workspace: await resources.projects.getWorkspace(
-                        ctx,
-                        route.projectId,
-                        route.workspaceId,
-                    ),
+                    workspace: await store.getWorkspace(ctx, route.projectId, route.workspaceId),
                 });
             }
             return;
@@ -3055,7 +3002,7 @@ async function handleRequest(
                 sendJson(response, 400, { error: "The workspace version is invalid." });
                 return;
             }
-            const workspace = await resources.projects.beginWorkspaceArchive(
+            const workspace = await store.archiveWorkspace(
                 ctx,
                 route.projectId,
                 route.workspaceId,
@@ -3087,7 +3034,7 @@ async function handleRequest(
             return;
         }
         try {
-            const workspace = await resources.projects.reorderWorkspace(
+            const workspace = await store.reorderWorkspace(
                 ctx,
                 route.projectId,
                 route.workspaceId,
@@ -3123,12 +3070,11 @@ async function handleRequest(
             sendJson(response, 400, { error: "Message settings are invalid." });
             return;
         }
-        if (rejectUnsupportedAgentSubmissionOptions(response, runtimeConfig, body)) return;
         if (!(await authorizeMessageProfile(ctx, request, response, runtimeConfig, body))) return;
         const broadcast = body as BroadcastMessageRequest;
         const authenticatedOwnerId = p2pPeerId(request);
         const allTargets =
-            broadcast.all === true ? await conversations.list(ctx, { limit: 501 }) : undefined;
+            broadcast.all === true ? await store.list(ctx, { limit: 501 }) : undefined;
         if (allTargets !== undefined && allTargets.length > 500) {
             sendJson(response, 409, {
                 error: "A single broadcast can target at most 500 sessions.",
@@ -3158,14 +3104,12 @@ async function handleRequest(
             sendJson(response, 400, { error: "Session IDs must be unique." });
             return;
         }
-        const sessions = await Promise.all(
-            targets.map((id) => conversations.readSnapshot(ctx, id)),
-        );
+        const sessions = await Promise.all(targets.map((id) => store.get(ctx, id)));
         if (sessions.some((candidate) => candidate === undefined)) {
             sendJson(response, 404, { error: "One or more sessions were not found." });
             return;
         }
-        if (sessions.some((candidate) => candidate!.agent.type === "subagent")) {
+        if (sessions.some((candidate) => candidate!.isSubagent())) {
             sendJson(response, 409, { error: "Subagent sessions cannot receive broadcasts." });
             return;
         }
@@ -3192,10 +3136,9 @@ async function handleRequest(
         ) {
             await Promise.all(
                 sessions.map((candidate) =>
-                    refreshConversationGitCredential(
+                    store.refreshSessionGitCredential(
                         ctx,
-                        resources,
-                        candidate!,
+                        candidate!.id,
                         { instanceId: authenticatedOwnerId, profileId: body.identity! },
                         githubToken,
                     ),
@@ -3204,9 +3147,7 @@ async function handleRequest(
         }
         sendJson<BroadcastMessageResponse>(response, 202, {
             submissions: await Promise.all(
-                sessions.map((candidate) =>
-                    runtimeConfig.agents.submit(ctx, candidate!.id, message),
-                ),
+                sessions.map((candidate) => candidate!.submit(ctx, message)),
             ),
         });
         return;
@@ -3352,15 +3293,8 @@ async function handleRequest(
                 ? modelCatalog
                 : (runtimeConfig.resolveModelCatalog?.(ownerInstanceId) ?? modelCatalog);
         sendJson<GlobalStreamHello>(response, 200, {
-            cursor: resources.liveEvents.cursor(),
-            ...(await buildGroupCatalog(
-                ctx,
-                resources,
-                conversations,
-                scopedCatalog,
-                identity,
-                sessionTerminals,
-            )),
+            cursor: store.liveEvents.cursor(),
+            ...(await buildGroupCatalog(ctx, store, scopedCatalog, identity, sessionTerminals)),
         });
         return;
     }
@@ -3373,23 +3307,9 @@ async function handleRequest(
         }
         // Same ordering as the catalog: the stream position is read before the
         // agents, so a client can tell whether a later event is already included.
-        const cursor = resources.liveEvents.cursor();
-        const databaseCtx = withDatabase(ctx, resources.database);
-        const timelineAgents = await queryTimelineAgents(
-            databaseCtx,
-            parsed.request.scope,
-            parsed.request.includeArchived ?? false,
-        );
-        const timelineEvents = await queryTimelineEvents(
-            databaseCtx,
-            timelineAgents.map((agent) => agent.sessionId),
-        );
+        const cursor = store.liveEvents.cursor();
         sendJson<GetTimelineResponse>(response, 200, {
-            agents: buildTimeline(
-                timelineAgents,
-                timelineEvents,
-                parsed.request.since === undefined ? {} : { since: parsed.request.since },
-            ),
+            agents: await store.timeline(ctx, parsed.request),
             cursor,
             scope: parsed.request.scope,
         });
@@ -3399,7 +3319,7 @@ async function handleRequest(
     // Outside the durable-log gate on purpose: the live stream is the one
     // subscription a local client always has, whether or not events are stored.
     if (request.method === "GET" && route.name === "live-events-stream") {
-        streamLiveEvents(request, response, resources.liveEvents, url.searchParams.get("after"));
+        streamLiveEvents(request, response, store.liveEvents, url.searchParams.get("after"));
         return;
     }
 
@@ -3465,10 +3385,32 @@ async function handleRequest(
         return;
     }
 
-    if (request.method === "GET" && route.name === "secret-registrations") {
-        sendJson<ListSecretsResponse>(response, 200, {
-            secrets: resources.secrets.references(),
+    if (
+        request.method === "GET" &&
+        route.name === "external-tool-calls" &&
+        route.sessionId === undefined
+    ) {
+        const status = url.searchParams.get("status") ?? "pending";
+        if (!["pending", "completed", "failed", "cancelled"].includes(status)) {
+            sendJson(response, 400, { error: "External function status is invalid." });
+            return;
+        }
+        const limit = parseLimit(url.searchParams.get("limit"));
+        if (url.searchParams.has("limit") && limit === undefined) {
+            sendJson(response, 400, { error: "External function call limit is invalid." });
+            return;
+        }
+        sendJson<ListExternalToolCallsResponse>(response, 200, {
+            calls: await store.listExternalToolCalls(ctx, {
+                limit: limit ?? 100,
+                status: status as import("../external-tools/index.js").ExternalToolCall["status"],
+            }),
         });
+        return;
+    }
+
+    if (request.method === "GET" && route.name === "secret-registrations") {
+        sendJson<ListSecretsResponse>(response, 200, { secrets: await store.listSecrets(ctx) });
         return;
     }
 
@@ -3481,10 +3423,8 @@ async function handleRequest(
             return;
         }
         try {
-            await secretRegister(withDatabase(ctx, resources.database), body);
-            resources.secrets.register(body);
             sendJson<RegisterSecretResponse>(response, 200, {
-                secret: resources.secrets.reference(body.id),
+                secret: await store.registerSecret(ctx, body),
             });
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
@@ -3496,15 +3436,9 @@ async function handleRequest(
     }
 
     if (request.method === "DELETE" && route.name === "secret-registration") {
-        const registered = resources.secrets
-            .references()
-            .find((candidate) => candidate.id === route.secretId);
-        const removed = registered !== undefined && registered.kind === undefined;
-        if (removed) {
-            await secretUnregister(withDatabase(ctx, resources.database), route.secretId);
-            resources.secrets.unregister(route.secretId);
-        }
-        sendJson<UnregisterSecretResponse>(response, 200, { removed });
+        sendJson<UnregisterSecretResponse>(response, 200, {
+            removed: await store.unregisterSecret(ctx, route.secretId),
+        });
         return;
     }
 
@@ -3517,14 +3451,11 @@ async function handleRequest(
             return;
         }
         try {
-            const updated = resources.secrets.updatedRegistration(route.secretId, body);
-            if (updated === undefined) {
+            const secret = await store.updateSecret(ctx, route.secretId, body);
+            if (secret === undefined) {
                 sendJson(response, 404, { error: "Secret not found." });
                 return;
             }
-            await secretRegister(withDatabase(ctx, resources.database), updated);
-            resources.secrets.register(updated);
-            const secret = resources.secrets.reference(route.secretId);
             sendJson<UpdateSecretResponse>(response, 200, { secret });
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
@@ -3606,8 +3537,7 @@ async function handleRequest(
             return;
         }
         if (!(await authorizeMessageProfile(ctx, request, response, runtimeConfig, body))) return;
-        if (!(await authorizeRemoteSessionTarget(ctx, request, response, resources.projects, body)))
-            return;
+        if (!(await authorizeRemoteSessionTarget(ctx, request, response, store, body))) return;
         try {
             const effectiveBody =
                 authenticatedPeerId !== undefined &&
@@ -3618,8 +3548,8 @@ async function handleRequest(
                     : body;
             const sessionRequest =
                 effectiveBody.scope === undefined
-                    ? await configureConversationRequest(effectiveBody, defaultDocker, () =>
-                          resources.projects.queryProjectSettings(ctx, effectiveBody.cwd),
+                    ? await configureSessionRequest(effectiveBody, defaultDocker, () =>
+                          store.queryProjectSettings(ctx, effectiveBody.cwd),
                       )
                     : (() => {
                           const {
@@ -3638,7 +3568,7 @@ async function handleRequest(
             };
             const githubToken = transport.githubToken;
             const existingSession =
-                body.id === undefined ? undefined : await conversations.readSnapshot(ctx, body.id);
+                body.id === undefined ? undefined : await store.get(ctx, body.id);
             if (
                 authenticatedOwnerId !== undefined &&
                 transport.gitSecretRequested &&
@@ -3652,30 +3582,24 @@ async function handleRequest(
             }
             const session =
                 body.id === undefined
-                    ? await conversations.create(ctx, sessionRequest, creationOptions)
-                    : await conversations.createWithId(
-                          ctx,
-                          body.id,
-                          sessionRequest,
-                          creationOptions,
-                      );
+                    ? await store.create(ctx, sessionRequest, creationOptions)
+                    : await store.createWithId(ctx, body.id, sessionRequest, creationOptions);
             if (
                 githubToken !== undefined &&
                 authenticatedOwnerId !== undefined &&
                 body.identity !== undefined
             ) {
-                await refreshConversationGitCredential(
+                await store.refreshSessionGitCredential(
                     ctx,
-                    resources,
-                    session,
+                    session.id,
                     { instanceId: authenticatedOwnerId, profileId: body.identity },
                     githubToken,
                 );
             }
-            sendJson<CreateSessionResponse>(response, 201, { session });
+            sendJson<CreateSessionResponse>(response, 201, { session: session.snapshot() });
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
-            sendJson(response, error instanceof ConversationConfigurationError ? 400 : 409, {
+            sendJson(response, error instanceof SessionConfigurationError ? 400 : 409, {
                 error: error instanceof Error ? error.message : "The session could not be created.",
             });
         }
@@ -3691,7 +3615,7 @@ async function handleRequest(
             });
             return;
         }
-        const summaries = await conversations.list(ctx);
+        const summaries = await store.list(ctx);
         const filtered =
             archived === "all"
                 ? summaries
@@ -3711,16 +3635,13 @@ async function handleRequest(
         return;
     }
 
-    const session = await conversations.readSnapshot(ctx, sessionId);
+    const session = await store.get(ctx, sessionId, {
+        loadAgentTree: route.name !== "session-state",
+    });
     if (session === undefined) {
         sendJson(response, 404, { error: "Session not found" });
         return;
     }
-    const sessionEvents = await conversations.events(ctx, sessionId);
-    const sessionEventLog = new SessionEventLog({
-        events: sessionEvents,
-        retentionLimit: Number.MAX_SAFE_INTEGER,
-    });
     if (
         route.name === "session-attachment-download" ||
         route.name === "session-attachment-preview"
@@ -3730,7 +3651,7 @@ async function handleRequest(
             return;
         }
         try {
-            const attachment = await conversations.attachment(ctx, sessionId, route.attachmentId);
+            const attachment = await store.attachment(ctx, sessionId, route.attachmentId);
             const file =
                 attachment === undefined
                     ? undefined
@@ -3759,7 +3680,7 @@ async function handleRequest(
     }
 
     if (route.name === "terminal-connection") {
-        if (session.agent.type === "subagent") {
+        if (session.isSubagent()) {
             sendJson(response, 409, {
                 error: "Subagent histories are read-only and cannot accept terminal connections.",
             });
@@ -3780,7 +3701,7 @@ async function handleRequest(
                 const hadFocusedTerminal = sessionTerminals.hasFocusedTerminal(sessionId);
                 sessionTerminals.heartbeat(sessionId, body);
                 if (hadFocusedTerminal || sessionTerminals.hasFocusedTerminal(sessionId)) {
-                    await conversations.markRead(ctx, sessionId);
+                    await session.markRead(ctx);
                 }
                 sendJson<SessionTerminalHeartbeatResponse>(response, 200, { connected: true });
             } catch (error) {
@@ -3790,9 +3711,7 @@ async function handleRequest(
             return;
         }
         if (request.method === "DELETE") {
-            if (sessionTerminals.hasFocusedTerminal(sessionId)) {
-                await conversations.markRead(ctx, sessionId);
-            }
+            if (sessionTerminals.hasFocusedTerminal(sessionId)) await session.markRead(ctx);
             sendJson<DisconnectSessionTerminalResponse>(response, 200, {
                 disconnected: sessionTerminals.disconnect(sessionId, route.connectionId),
             });
@@ -3808,8 +3727,9 @@ async function handleRequest(
             sendJson(response, 400, { error: "Session message limit is invalid." });
             return;
         }
+        const snapshot = session.snapshot();
         sendJson(response, 200, {
-            session: limitProtocolSessionMessages(session, messageLimit),
+            session: limitProtocolSessionMessages(snapshot, messageLimit),
         });
         return;
     }
@@ -3835,8 +3755,12 @@ async function handleRequest(
         }
         const mutationId = body.mutationId ?? headerMutationId;
         try {
-            if (sessionMutationCompleted(sessionEventLog, mutationId)) {
-                sendJson(response, 200, { session });
+            if (
+                sessionMutationCompleted(session, mutationId) ||
+                (mutationId !== undefined &&
+                    (await store.sessionScopeMutationApplied(ctx, sessionId, mutationId)))
+            ) {
+                sendJson(response, 200, { session: session.snapshot() });
                 return;
             }
         } catch (error) {
@@ -3844,23 +3768,21 @@ async function handleRequest(
             sendJson(response, 400, { error: errorToMessage(error) });
             return;
         }
-        if (!sessionMutationCanApply(request, response, session, sessionEventLog)) return;
+        if (!sessionMutationCanApply(request, response, session)) return;
         try {
-            const cwd =
-                body.scope.kind === "folder"
-                    ? await resources.folders.activeFolderStoragePath(ctx, body.scope.folderId)
-                    : session.cwd;
-            const filed = await conversations.move(ctx, sessionId, {
-                afterId: body.afterId,
-                cwd,
-                ...(mutationId === undefined ? {} : { mutationId }),
-                scope: body.scope,
-            });
+            const filed = await store.setSessionFolder(
+                ctx,
+                sessionId,
+                body.scope.kind === "folder" ? body.scope.folderId : null,
+                body.afterId,
+                mutationId,
+            );
             if (filed === undefined) {
                 sendJson(response, 404, { error: "That chat is gone." });
                 return;
             }
-            sendJson(response, 200, { session: filed });
+            await filed.recordMutationApplied(ctx, mutationId);
+            sendJson(response, 200, { session: filed.snapshot() });
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
             if (error instanceof FolderError) {
@@ -3875,7 +3797,7 @@ async function handleRequest(
     }
 
     if (request.method === "POST" && route.name === "reorder") {
-        if (session.agent.type === "subagent") {
+        if (session.isSubagent()) {
             sendJson(response, 409, {
                 error: "Subagent histories are read-only and cannot be reordered.",
             });
@@ -3890,12 +3812,7 @@ async function handleRequest(
         }
         try {
             sendJson(response, 200, {
-                session: await conversations.reorder(
-                    ctx,
-                    sessionId,
-                    body,
-                    requestMutationId(request),
-                ),
+                session: (await store.reorderSession(ctx, sessionId, body))!.snapshot(),
             });
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
@@ -3905,7 +3822,7 @@ async function handleRequest(
     }
 
     if (request.method === "POST" && route.name === "read") {
-        if (session.agent.type === "subagent") {
+        if (session.isSubagent()) {
             sendJson(response, 409, {
                 error: "Subagent histories are read-only and are never unread.",
             });
@@ -3917,37 +3834,56 @@ async function handleRequest(
          * answers with its current state rather than failing, so a repeated
          * request after a retry is harmless.
          */
-        await conversations.markRead(ctx, sessionId, requestMutationId(request));
-        sendJson<SessionReadResponse>(response, 200, {
-            session: (await conversations.readSnapshot(ctx, sessionId)) ?? session,
-        });
+        await session.markRead(ctx);
+        sendJson<SessionReadResponse>(response, 200, { session: session.snapshot() });
         return;
     }
 
     if (request.method === "POST" && route.name === "transfer") {
-        sendUnavailable(
-            response,
-            "Workspace transfer is unavailable until the workspace feature owns this operation.",
-        );
+        const body = await readJson<unknown>(request);
+        if (!Value.Check(transferSessionRequestSchema, body)) {
+            sendJson(response, 400, {
+                error: "Choose an existing target workspace.",
+            });
+            return;
+        }
+        try {
+            const result = await store.transferSession(
+                ctx,
+                sessionId,
+                body as TransferSessionRequest,
+            );
+            if (result === undefined) {
+                sendJson(response, 404, { error: "Session not found" });
+                return;
+            }
+            sendJson<TransferSessionResponse>(response, 200, result);
+        } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
+            sendJson(response, error instanceof WorkspaceTransferTargetRestoreError ? 500 : 409, {
+                error: errorToMessage(error),
+            });
+        }
         return;
     }
 
     if (request.method === "POST" && (route.name === "archive" || route.name === "unarchive")) {
-        if (session.agent.type === "subagent") {
+        if (session.isSubagent()) {
             sendJson(response, 409, {
                 error: "Subagent histories are read-only and cannot be archived.",
             });
             return;
         }
         if (route.name === "unarchive") {
-            if (session.status === "archived") {
+            const snapshot = session.snapshot();
+            if (snapshot.status === "archived") {
                 sendJson(response, 409, {
                     error: "A session retired with its execution context cannot be restored.",
                 });
                 return;
             }
-            if (session.scope.kind === "folder") {
-                const folder = await resources.folders.getFolder(ctx, session.scope.folderId);
+            if (snapshot.scope.kind === "folder") {
+                const folder = await store.getFolder(ctx, snapshot.scope.folderId);
                 if (folder === undefined || folder.archivedAt !== undefined) {
                     sendJson(response, 409, {
                         error: "A chat cannot be restored while its folder is archived.",
@@ -3965,7 +3901,7 @@ async function handleRequest(
         const completed =
             mutationId === undefined
                 ? undefined
-                : sessionEventLog
+                : session.events
                       .since(undefined)
                       ?.find(
                           (event) =>
@@ -3973,24 +3909,15 @@ async function handleRequest(
                               event.data.mutationId === mutationId,
                       );
         if (completed !== undefined) {
-            sendJson<SessionArchiveResponse>(response, 200, { session });
+            sendJson<SessionArchiveResponse>(response, 200, { session: session.snapshot() });
             return;
         }
-        if (!sessionMutationCanApply(request, response, session, sessionEventLog)) return;
-        const archived = await conversations.archive(
-            ctx,
-            sessionId,
-            route.name === "archive",
-            mutationId,
-        );
-        if (archived === undefined) {
-            sendJson(response, 404, { error: "Session not found" });
-            return;
-        }
+        if (!sessionMutationCanApply(request, response, session)) return;
+        const archived = await session.setArchived(ctx, route.name === "archive", mutationId);
         if (route.name === "unarchive") {
             // A visible chat must never sit under a project the user archived.
             if (archived.scope.kind === "project" || archived.scope.kind === "workspace") {
-                await resources.projects.unarchiveProject(ctx, archived.scope.projectId);
+                await store.unarchiveProject(ctx, archived.scope.projectId);
             }
         }
         sendJson<SessionArchiveResponse>(response, 200, { session: archived });
@@ -3998,20 +3925,41 @@ async function handleRequest(
     }
 
     if (request.method === "PATCH" && route.name === "session") {
-        sendUnavailable(
-            response,
-            "Session prompt updates are unavailable until Agent Base exposes this configuration.",
-        );
+        const body = await readJson<UpdateSessionRequest | null>(request);
+        if (
+            body === null ||
+            typeof body !== "object" ||
+            Array.isArray(body) ||
+            (typeof body.appendSystemPrompt !== "string" && body.appendSystemPrompt !== null)
+        ) {
+            sendJson(response, 400, {
+                error: "The appended system prompt must be text or null.",
+            });
+            return;
+        }
+        const mutationId = body.mutationId ?? requestMutationId(request);
+        if (sessionMutationCompleted(session, mutationId)) {
+            sendJson(response, 200, { session: session.snapshot() });
+            return;
+        }
+        if (!sessionMutationCanApply(request, response, session)) return;
+        sendJson(response, 200, {
+            session: await session.update(ctx, {
+                ...body,
+                ...(mutationId === undefined ? {} : { mutationId }),
+            }),
+        });
         return;
     }
 
     if (request.method === "GET" && route.name === "current-provider-quota") {
-        const currentProviderId = session.providerId;
-        const credential = providerCredential(session.modelCatalog, currentProviderId);
+        const snapshot = session.snapshot();
+        const currentProviderId = snapshot.providerId;
+        const credential = providerCredential(snapshot.modelCatalog, currentProviderId);
         const quota =
             credential === undefined
-                ? await getProviderQuota?.(currentProviderId, session.ownerInstanceId)
-                : await getProviderQuota?.(currentProviderId, session.ownerInstanceId, credential);
+                ? await getProviderQuota?.(currentProviderId, snapshot.ownerInstanceId)
+                : await getProviderQuota?.(currentProviderId, snapshot.ownerInstanceId, credential);
         sendJson<GetCurrentProviderQuotaResponse>(response, 200, {
             currentProviderId,
             ...(quota === undefined ? {} : { quota }),
@@ -4023,15 +3971,13 @@ async function handleRequest(
         // The position is read before the session is described, so the payload
         // states the point in the live stream it reflects. Everything after that
         // position arrives on the global stream and is replayed on top of this.
-        const cursor = resources.liveEvents.cursor();
+        const cursor = store.liveEvents.cursor();
         const turnLimit = parseTurnLimit(url.searchParams.get("turns"));
-        const baseHello = await conversationStateHello(
+        const baseHello = await sessionStateHello(
             ctx,
-            conversations,
             session,
-            sessionEventLog,
             turnLimit,
-            await querySubagentSummaries(withDatabase(ctx, resources.database), sessionId),
+            await store.listSubagents(ctx, sessionId),
         );
         const hello = baseHello;
         // A client catching up says which message it already holds, and receives
@@ -4041,9 +3987,7 @@ async function handleRequest(
         // incrementally rather than from the beginning.
         const after = url.searchParams.get("after") ?? undefined;
         const forward =
-            after === undefined
-                ? undefined
-                : await conversations.transcriptSince(ctx, sessionId, turnLimit, after);
+            after === undefined ? undefined : await session.transcriptSince(ctx, after, turnLimit);
         if (after !== undefined && forward !== undefined) {
             sendJson<SessionStateResponse>(response, 200, {
                 ...hello,
@@ -4064,12 +4008,7 @@ async function handleRequest(
         // backward is how it reads further into the past.
         const after = url.searchParams.get("after") ?? undefined;
         if (after !== undefined) {
-            const forward = await conversations.transcriptSince(
-                ctx,
-                sessionId,
-                SESSION_STREAM_TURN_LIMIT,
-                after,
-            );
+            const forward = await session.transcriptSince(ctx, after, SESSION_STREAM_TURN_LIMIT);
             if (forward === undefined) {
                 sendJson(response, 409, {
                     error: "That part of the conversation is no longer available.",
@@ -4080,12 +4019,7 @@ async function handleRequest(
             return;
         }
         const before = url.searchParams.get("before") ?? undefined;
-        const page = await conversations.transcriptPage(
-            ctx,
-            sessionId,
-            SESSION_STREAM_TURN_LIMIT,
-            before,
-        );
+        const page = await session.transcriptPage(ctx, SESSION_STREAM_TURN_LIMIT, before);
         if (page === undefined) {
             // The anchor turn is gone, so the reader's view of the conversation
             // is stale and paging from it would duplicate or misplace content.
@@ -4099,9 +4033,10 @@ async function handleRequest(
     }
 
     if (request.method === "GET" && route.name === "usage") {
-        const ownerInstanceId = session.ownerInstanceId;
-        const usage = aggregateSessionUsage(sessionEvents, { type: session.agent.type });
-        const currentProviderId = session.providerId;
+        const ownerInstanceId = session.snapshot().ownerInstanceId;
+        const sessionEvents = session.events.all();
+        const usage = session.usage(sessionEvents);
+        const currentProviderId = session.snapshot().providerId;
         const providerIds = [
             ...new Set([
                 ...usage.groups.flatMap((group) =>
@@ -4110,8 +4045,8 @@ async function handleRequest(
                 currentProviderId,
             ]),
         ];
-        const observedQuotas = sessionEventLog.latestProviderQuotas();
-        const modelCatalog = session.modelCatalog;
+        const observedQuotas = session.events.latestProviderQuotas();
+        const modelCatalog = session.snapshot().modelCatalog;
         const quotas = (
             await Promise.all(
                 providerIds.map(async (providerId) => {
@@ -4144,43 +4079,60 @@ async function handleRequest(
 
     if (request.method === "GET" && route.name === "subagents") {
         sendJson<ListSubagentsResponse>(response, 200, {
-            subagents: await querySubagentSummaries(
-                withDatabase(ctx, resources.database),
-                sessionId,
-            ),
+            subagents: await store.listSubagents(ctx, sessionId),
         });
         return;
     }
 
     if (request.method === "POST" && route.name === "workflow-stop") {
         const mutationId = requestMutationId(request);
-        if (!sessionMutationCanApply(request, response, session, sessionEventLog)) return;
+        if (sessionMutationCompleted(session, mutationId)) {
+            const workflow = session
+                .listWorkflows()
+                .find((candidate) => candidate.runId === route.workflowRunId);
+            sendJson(
+                response,
+                workflow === undefined ? 404 : 200,
+                workflow === undefined ? { error: "Workflow not found" } : { workflow },
+            );
+            return;
+        }
+        if (!sessionMutationCanApply(request, response, session)) return;
+        const workflow = session.stopWorkflow(ctx, route.workflowRunId);
+        if (workflow === undefined) {
+            sendJson(response, 404, { error: "Workflow not found" });
+            return;
+        }
+        await session.recordMutationApplied(ctx, mutationId);
+        sendJson<StopWorkflowResponse>(response, 200, { workflow });
+        return;
+    }
+
+    if (request.method === "POST" && route.name === "fork") {
+        if (session.isSubagent()) {
+            sendJson(response, 409, { error: "Subagent histories cannot be forked." });
+            return;
+        }
+        const targetSessionId = requestMutationId(request);
+        if (!sessionMutationCanApply(request, response, session)) return;
         try {
-            const result = await runtimeConfig.agents.workflows.cancel(ctx, session.agentId, {
-                id: route.workflowRunId,
-                ...(mutationId === undefined ? {} : { operationId: mutationId }),
-            });
-            sendJson<StopWorkflowResponse>(response, 200, { workflow: result.run });
+            const forked = await store.fork(ctx, sessionId, targetSessionId);
+            if (forked === undefined) {
+                sendJson(response, 404, { error: "Session not found" });
+                return;
+            }
+            sendJson<ForkSessionResponse>(response, 201, { session: forked.snapshot() });
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
             sendJson(response, 409, {
-                error:
-                    error instanceof Error ? error.message : "The workflow could not be stopped.",
+                error: error instanceof Error ? error.message : "The session could not be forked.",
             });
         }
         return;
     }
 
-    if (request.method === "POST" && route.name === "fork") {
-        sendUnavailable(
-            response,
-            "Session forking is unavailable until Agent Base owns transcript branching.",
-        );
-        return;
-    }
-
     if (
-        session.agent.type === "subagent" &&
+        session.isSubagent() &&
         route.name !== "context" &&
         isSessionMutation(route.name, request.method)
     ) {
@@ -4201,28 +4153,38 @@ async function handleRequest(
             sendJson(response, 400, { error: "Message text must be text." });
             return;
         }
-        if (rejectUnsupportedAgentSubmissionOptions(response, runtimeConfig, body)) return;
         if (!(await authorizeMessageProfile(ctx, request, response, runtimeConfig, body))) return;
+        if (body.clientSubmissionId !== undefined) {
+            const submitted = session.events.messageSubmission(body.clientSubmissionId);
+            if (submitted !== undefined) {
+                sendJson<SubmitMessageResponse>(response, 202, {
+                    eventId: submitted.id,
+                    runId: submitted.data.runId,
+                    sessionId: session.id,
+                });
+                return;
+            }
+        }
         if (
-            !(await prepareConversationGitCredential(
+            !(await prepareSessionGitCredential(
                 ctx,
                 request,
                 response,
-                resources,
-                session,
+                store,
+                session.id,
                 body.identity,
                 transport.githubToken,
             ))
         ) {
             return;
         }
-        if (!sessionMutationCanApply(request, response, session, sessionEventLog)) return;
+        if (!sessionMutationCanApply(request, response, session)) return;
         // A user working in an explicitly archived session makes it visible again.
         const mutationId = body.mutationId ?? requestMutationId(request);
         sendJson<SubmitMessageResponse>(
             response,
             202,
-            await runtimeConfig.agents.submit(ctx, session.id, {
+            await session.submit(ctx, {
                 ...body,
                 ...(mutationId === undefined ? {} : { mutationId }),
             }),
@@ -4231,20 +4193,104 @@ async function handleRequest(
     }
 
     if (request.method === "POST" && route.name === "context") {
-        sendAgentsModeUnavailable(response, "Context messaging");
-        return;
-    }
-
-    if (request.method === "POST" && route.name === "scheduled-message-cancel") {
-        sendUnavailable(
+        const transport = decodeTemporaryGitCredential(await readJson<unknown>(request));
+        if (transport === undefined) {
+            sendJson(response, 400, { error: "Temporary Git credentials are invalid." });
+            return;
+        }
+        const body = transport.body;
+        if (!Value.Check(submitContextMessageRequestSchema, body)) {
+            sendJson(response, 400, {
+                error: "A context note accepts only message text and optional submission identities; run settings are not allowed.",
+            });
+            return;
+        }
+        if (!(await authorizeMessageProfile(ctx, request, response, runtimeConfig, body))) return;
+        if (body.clientSubmissionId !== undefined) {
+            const submitted = session.events.messageSubmission(body.clientSubmissionId);
+            if (submitted?.data.delivery === "context") {
+                sendJson<SubmitContextMessageResponse>(response, 202, {
+                    delivery: "context",
+                    eventId: submitted.id,
+                    messageId: submitted.data.message.id,
+                    sessionId: session.id,
+                });
+                return;
+            }
+        }
+        if (
+            !(await prepareSessionGitCredential(
+                ctx,
+                request,
+                response,
+                store,
+                session.id,
+                body.identity,
+                transport.githubToken,
+            ))
+        ) {
+            return;
+        }
+        if (!sessionMutationCanApply(request, response, session)) return;
+        const mutationId = body.mutationId ?? requestMutationId(request);
+        sendJson<SubmitContextMessageResponse>(
             response,
-            "Scheduled messages are unavailable until the scheduling feature is wired.",
+            202,
+            await session.submitContext(ctx, {
+                ...body,
+                ...(mutationId === undefined ? {} : { mutationId }),
+            }),
         );
         return;
     }
 
+    if (request.method === "GET" && route.name === "external-tool-calls") {
+        sendJson(response, 200, { calls: session.externalToolCalls() });
+        return;
+    }
+
+    if (request.method === "POST" && route.name === "external-tool-call") {
+        const body = await readJson<unknown>(request, 1_048_576);
+        if (!isExternalToolCallResolution(body)) {
+            sendJson(response, 400, { error: "External function result is invalid." });
+            return;
+        }
+        try {
+            const result = await session.resolveExternalToolCall(
+                ctx,
+                route.externalToolCallId,
+                body as ResolveExternalToolCallRequest,
+            );
+            if (result === undefined) {
+                sendJson(response, 404, { error: "External function call not found." });
+                return;
+            }
+            sendJson<ResolveExternalToolCallResponse>(response, 200, result);
+        } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
+            sendJson(response, 409, { error: errorToMessage(error) });
+        }
+        return;
+    }
+
+    if (request.method === "POST" && route.name === "scheduled-message-cancel") {
+        const mutationId = requestMutationId(request);
+        const result = await session.cancelScheduledMessage(
+            ctx,
+            route.scheduledMessageId,
+            mutationId,
+        );
+        if (result.message === undefined) {
+            sendJson(response, 404, { error: "Scheduled message not found." });
+            return;
+        }
+        sendJson<CancelScheduledMessageResponse>(response, 200, result);
+        return;
+    }
+
     if (request.method === "POST" && route.name === "activity") {
-        sendAgentsModeUnavailable(response, "Session activity recording");
+        session.recordUserActivity();
+        sendJson<RecordSessionActivityResponse>(response, 200, { recorded: true });
         return;
     }
 
@@ -4259,15 +4305,26 @@ async function handleRequest(
             sendJson(response, 400, { error: "Message text must be text." });
             return;
         }
-        if (rejectUnsupportedAgentSubmissionOptions(response, runtimeConfig, body)) return;
         if (!(await authorizeMessageProfile(ctx, request, response, runtimeConfig, body))) return;
+        if (body.clientSubmissionId !== undefined) {
+            const submitted = session.events.messageSubmission(body.clientSubmissionId);
+            if (submitted !== undefined) {
+                sendJson<SteerMessageResponse>(response, 202, {
+                    delivery: submitted.data.delivery === "steer" ? "steer" : "run",
+                    eventId: submitted.id,
+                    runId: submitted.data.runId,
+                    sessionId: session.id,
+                });
+                return;
+            }
+        }
         if (
-            !(await prepareConversationGitCredential(
+            !(await prepareSessionGitCredential(
                 ctx,
                 request,
                 response,
-                resources,
-                session,
+                store,
+                session.id,
                 body.identity,
                 transport.githubToken,
             ))
@@ -4275,11 +4332,7 @@ async function handleRequest(
             return;
         }
         try {
-            sendJson<SteerMessageResponse>(
-                response,
-                202,
-                await runtimeConfig.agents.steer(ctx, session.id, body),
-            );
+            sendJson<SteerMessageResponse>(response, 202, await session.steer(ctx, body));
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
             sendJson(response, 409, {
@@ -4294,7 +4347,7 @@ async function handleRequest(
         const completed =
             mutationId === undefined
                 ? undefined
-                : sessionEventLog
+                : session.events
                       .since(undefined)
                       ?.find(
                           (event): event is Extract<SessionEvent, { type: "abort_requested" }> =>
@@ -4309,14 +4362,14 @@ async function handleRequest(
             });
             return;
         }
-        if (!sessionMutationCanApply(request, response, session, sessionEventLog)) return;
+        if (!sessionMutationCanApply(request, response, session)) return;
         try {
             const expectedRunId = url.searchParams.get("expectedRunId") ?? undefined;
             const steeringMessageIds = url.searchParams.getAll("steeringMessageId");
             sendJson<AbortRunResponse>(
                 response,
                 200,
-                await runtimeConfig.agents.abort(ctx, session.id, {
+                await session.abort(ctx, {
                     continuePendingSteering:
                         url.searchParams.get("continuePendingSteering") === "1",
                     ...(expectedRunId === undefined ? {} : { expectedRunId }),
@@ -4334,100 +4387,151 @@ async function handleRequest(
     }
 
     if (request.method === "POST" && route.name === "background-processes-stop") {
-        sendUnavailable(
-            response,
-            "Background process control is unavailable until per-agent compute is wired.",
-        );
+        const stoppedProcesses = await session.stopBackgroundProcesses(ctx);
+        sendJson(response, 200, { stoppedProcesses });
         return;
     }
 
     if (route.name === "background-process") {
-        sendUnavailable(
-            response,
-            "Background process control is unavailable until per-agent compute is wired.",
-        );
-        return;
+        if (request.method === "GET") {
+            const rawWaitMs = url.searchParams.get("waitMs");
+            const waitMs =
+                rawWaitMs === null
+                    ? 0
+                    : Math.max(0, Math.min(30_000, Number.parseInt(rawWaitMs, 10) || 0));
+            const process = await session.readBackgroundProcess(ctx, route.processSessionId, {
+                waitMs,
+            });
+            if (process === undefined) {
+                sendJson(response, 404, { error: "The background terminal was not found." });
+                return;
+            }
+            sendJson<ReadBackgroundProcessResponse>(response, 200, process);
+            return;
+        }
+        if (request.method === "DELETE") {
+            const result = await session.stopBackgroundProcess(ctx, route.processSessionId);
+            sendJson<StopBackgroundProcessResponse>(response, 200, result);
+            return;
+        }
     }
 
     if (request.method === "POST" && route.name === "shell") {
-        sendUnavailable(
-            response,
-            "Shell commands are unavailable until per-agent compute is wired.",
-        );
+        const body = await readJson<unknown>(request);
+        if (body === null || typeof body !== "object" || Array.isArray(body)) {
+            sendJson(response, 400, { error: "Enter a shell command after !." });
+            return;
+        }
+        const candidate = body as Partial<RunShellCommandRequest>;
+        if (
+            typeof candidate.command !== "string" ||
+            candidate.command.trim().length === 0 ||
+            typeof candidate.commandId !== "string" ||
+            candidate.commandId.length === 0
+        ) {
+            sendJson(response, 400, { error: "Enter a shell command after !." });
+            return;
+        }
+        const mutationId = requestMutationId(request);
+        if (sessionMutationCompleted(session, mutationId)) {
+            sendJson(response, 200, {});
+            return;
+        }
+        if (!sessionMutationCanApply(request, response, session)) return;
+        const result = await session.runShellCommand(ctx, candidate as RunShellCommandRequest);
+        await session.recordMutationApplied(ctx, mutationId);
+        sendJson<RunShellCommandResponse>(response, 200, result);
         return;
     }
 
     if (request.method === "POST" && route.name === "reset") {
-        sendUnavailable(response, "Session reset is not exposed by Agent Base.");
+        const mutationId = requestMutationId(request);
+        if (sessionMutationCompleted(session, mutationId)) {
+            sendJson(response, 200, { session: session.snapshot() });
+            return;
+        }
+        if (!sessionMutationCanApply(request, response, session)) return;
+        await session.reset(ctx);
+        await session.recordMutationApplied(ctx, mutationId);
+        sendJson(response, 200, { session: session.snapshot() });
         return;
     }
 
     if (request.method === "POST" && route.name === "rewind") {
-        sendUnavailable(response, "Session rewind is not exposed by Agent Base.");
+        const body = await readJson<RewindSessionRequest>(request);
+        if (typeof body.messageId !== "string" || body.messageId.length === 0) {
+            sendJson(response, 400, { error: "Choose a user message to rewind to." });
+            return;
+        }
+        const mutationId = requestMutationId(request);
+        if (sessionMutationCompleted(session, mutationId)) {
+            sendJson(response, 200, { session: session.snapshot() });
+            return;
+        }
+        if (!sessionMutationCanApply(request, response, session)) return;
+        try {
+            const result = await session.rewind(ctx, body.messageId);
+            await session.recordMutationApplied(ctx, mutationId);
+            sendJson<RewindSessionResponse>(response, 200, {
+                ...result,
+                session: session.snapshot(),
+            });
+        } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
+            sendJson(response, 409, {
+                error: error instanceof Error ? error.message : "The session could not be rewound.",
+            });
+        }
         return;
     }
 
     if (request.method === "POST" && route.name === "compact") {
         const mutationId = requestMutationId(request);
-        if (sessionMutationCompleted(sessionEventLog, mutationId)) {
-            sendJson(response, 200, { session });
+        if (sessionMutationCompleted(session, mutationId)) {
+            sendJson(response, 200, { session: session.snapshot() });
             return;
         }
-        if (!sessionMutationCanApply(request, response, session, sessionEventLog)) return;
-        try {
-            const result = await runtimeConfig.agents.compact(ctx, session.id);
-            sendJson<CompactSessionResponse>(response, 200, {
-                result,
-                session: (await conversations.readSnapshot(ctx, sessionId)) ?? session,
-            });
-        } catch (error) {
-            if (isDatabaseFailure(error)) throw error;
-            sendJson(response, 409, { error: errorToMessage(error) });
-        }
+        if (!sessionMutationCanApply(request, response, session)) return;
+        const result = await session.compact(ctx);
+        await session.recordMutationApplied(ctx, mutationId);
+        sendJson<CompactSessionResponse>(response, 200, {
+            result,
+            session: session.snapshot(),
+        });
         return;
     }
 
     if (request.method === "PATCH" && route.name === "effort") {
         const body = await readJson<ChangeEffortRequest>(request);
         const mutationId = body.mutationId ?? requestMutationId(request);
-        if (sessionMutationCompleted(sessionEventLog, mutationId)) {
-            sendJson(response, 200, { session });
+        if (sessionMutationCompleted(session, mutationId)) {
+            sendJson(response, 200, { session: session.snapshot() });
             return;
         }
-        if (!sessionMutationCanApply(request, response, session, sessionEventLog)) return;
-        try {
-            sendJson(response, 200, {
-                session: await runtimeConfig.agents.changeEffort(ctx, session.id, {
-                    ...body,
-                    ...(mutationId === undefined ? {} : { mutationId }),
-                }),
-            });
-        } catch (error) {
-            if (isDatabaseFailure(error)) throw error;
-            sendJson(response, 409, { error: errorToMessage(error) });
-        }
+        if (!sessionMutationCanApply(request, response, session)) return;
+        sendJson(response, 200, {
+            session: await session.changeEffort(ctx, {
+                ...body,
+                ...(mutationId === undefined ? {} : { mutationId }),
+            }),
+        });
         return;
     }
 
     if (request.method === "PATCH" && route.name === "service-tier") {
         const body = await readJson<ChangeServiceTierRequest>(request);
         const mutationId = body.mutationId ?? requestMutationId(request);
-        if (sessionMutationCompleted(sessionEventLog, mutationId)) {
-            sendJson(response, 200, { session });
+        if (sessionMutationCompleted(session, mutationId)) {
+            sendJson(response, 200, { session: session.snapshot() });
             return;
         }
-        if (!sessionMutationCanApply(request, response, session, sessionEventLog)) return;
-        try {
-            sendJson(response, 200, {
-                session: await runtimeConfig.agents.changeServiceTier(ctx, session.id, {
-                    ...body,
-                    ...(mutationId === undefined ? {} : { mutationId }),
-                }),
-            });
-        } catch (error) {
-            if (isDatabaseFailure(error)) throw error;
-            sendJson(response, 409, { error: errorToMessage(error) });
-        }
+        if (!sessionMutationCanApply(request, response, session)) return;
+        sendJson(response, 200, {
+            session: await session.changeServiceTier(ctx, {
+                ...body,
+                ...(mutationId === undefined ? {} : { mutationId }),
+            }),
+        });
         return;
     }
 
@@ -4437,7 +4541,7 @@ async function handleRequest(
         const completed =
             mutationId === undefined
                 ? undefined
-                : sessionEventLog
+                : session.events
                       .since(undefined)
                       ?.find(
                           (event) =>
@@ -4445,13 +4549,13 @@ async function handleRequest(
                               event.data.mutationId === mutationId,
                       );
         if (completed !== undefined) {
-            sendJson(response, 200, { session });
+            sendJson(response, 200, { session: session.snapshot() });
             return;
         }
-        if (!sessionMutationCanApply(request, response, session, sessionEventLog)) return;
+        if (!sessionMutationCanApply(request, response, session)) return;
         try {
             sendJson(response, 200, {
-                session: await runtimeConfig.agents.changeModel(ctx, session.id, {
+                session: await session.changeModel(ctx, {
                     ...body,
                     ...(mutationId === undefined ? {} : { mutationId }),
                 }),
@@ -4460,7 +4564,7 @@ async function handleRequest(
             if (isDatabaseFailure(error)) throw error;
             sendJson(response, 409, {
                 error: errorToMessage(error),
-                session,
+                session: session.snapshot(),
             });
         }
         return;
@@ -4475,22 +4579,17 @@ async function handleRequest(
             return;
         }
         const mutationId = body.mutationId ?? requestMutationId(request);
-        if (sessionMutationCompleted(sessionEventLog, mutationId)) {
-            sendJson(response, 200, { session });
+        if (sessionMutationCompleted(session, mutationId)) {
+            sendJson(response, 200, { session: session.snapshot() });
             return;
         }
-        if (!sessionMutationCanApply(request, response, session, sessionEventLog)) return;
-        try {
-            sendJson(response, 200, {
-                session: await runtimeConfig.agents.changePermissionMode(ctx, session.id, {
-                    ...body,
-                    ...(mutationId === undefined ? {} : { mutationId }),
-                }),
-            });
-        } catch (error) {
-            if (isDatabaseFailure(error)) throw error;
-            sendJson(response, 409, { error: errorToMessage(error) });
-        }
+        if (!sessionMutationCanApply(request, response, session)) return;
+        sendJson(response, 200, {
+            session: await session.changePermissionMode(ctx, {
+                ...body,
+                ...(mutationId === undefined ? {} : { mutationId }),
+            }),
+        });
         return;
     }
 
@@ -4512,13 +4611,13 @@ async function handleRequest(
             return;
         }
         const mutationId = body.mutationId ?? requestMutationId(request);
-        if (sessionMutationCompleted(sessionEventLog, mutationId)) {
-            sendJson(response, 200, { session });
+        if (sessionMutationCompleted(session, mutationId)) {
+            sendJson(response, 200, { session: session.snapshot() });
             return;
         }
-        if (!sessionMutationCanApply(request, response, session, sessionEventLog)) return;
+        if (!sessionMutationCanApply(request, response, session)) return;
         sendJson(response, 200, {
-            session: await conversations.setDraft(ctx, sessionId, {
+            session: await session.setDraft(ctx, {
                 ...body,
                 ...(mutationId === undefined ? {} : { mutationId }),
             }),
@@ -4527,18 +4626,61 @@ async function handleRequest(
     }
 
     if (request.method === "POST" && route.name === "secrets") {
-        sendUnavailable(
-            response,
-            "Session secret attachments are unavailable until the secrets feature is wired.",
-        );
+        const body = await readJson<AttachSecretRequest | null>(request);
+        if (
+            body === null ||
+            typeof body !== "object" ||
+            typeof body.secretId !== "string" ||
+            body.secretId.length === 0
+        ) {
+            sendJson(response, 400, { error: "Choose a secret to attach." });
+            return;
+        }
+        const scope = body.scope ?? "session";
+        if (scope !== "session" && scope !== "project") {
+            sendJson(response, 400, { error: "Secret scope must be Session or Project." });
+            return;
+        }
+        const mutationId = requestMutationId(request);
+        if (sessionMutationCompleted(session, mutationId)) {
+            sendJson(response, 200, { session: session.snapshot() });
+            return;
+        }
+        if (!sessionMutationCanApply(request, response, session)) return;
+        try {
+            sendJson<SecretSessionResponse>(response, 200, {
+                session:
+                    (
+                        await store.attachSecret(ctx, session.id, body.secretId, scope, mutationId)
+                    )?.snapshot() ?? session.snapshot(),
+            });
+        } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
+            sendJson(response, 409, {
+                error: error instanceof Error ? error.message : "The secret could not be attached.",
+            });
+        }
         return;
     }
 
     if (request.method === "DELETE" && route.name === "secret") {
-        sendUnavailable(
-            response,
-            "Session secret attachments are unavailable until the secrets feature is wired.",
-        );
+        const scope = url.searchParams.get("scope") ?? "session";
+        if (scope !== "session" && scope !== "project") {
+            sendJson(response, 400, { error: "Secret scope must be Session or Project." });
+            return;
+        }
+        const mutationId = requestMutationId(request);
+        if (sessionMutationCompleted(session, mutationId)) {
+            sendJson(response, 200, { session: session.snapshot() });
+            return;
+        }
+        if (!sessionMutationCanApply(request, response, session)) return;
+        sendJson<SecretSessionResponse>(response, 200, {
+            session:
+                (
+                    await store.detachSecret(ctx, session.id, route.secretId, scope, mutationId)
+                )?.snapshot() ?? session.snapshot(),
+        });
         return;
     }
 
@@ -4549,21 +4691,14 @@ async function handleRequest(
             return;
         }
         const mutationId = body.mutationId ?? requestMutationId(request);
-        if (sessionMutationCompleted(sessionEventLog, mutationId)) {
-            sendJson(response, 200, { session });
+        if (sessionMutationCompleted(session, mutationId)) {
+            sendJson(response, 200, { session: session.snapshot() });
             return;
         }
-        if (!sessionMutationCanApply(request, response, session, sessionEventLog)) return;
+        if (!sessionMutationCanApply(request, response, session)) return;
         try {
-            const goal = await runtimeConfig.agents.goal.setGoal(
-                ctx,
-                session.agentId,
-                body.objective,
-                mutationId === undefined ? undefined : { operationId: mutationId },
-            );
-            sendJson<GoalSessionResponse>(response, 200, {
-                session: { ...session, goal },
-            });
+            await session.setGoal(ctx, body, mutationId);
+            sendJson<GoalSessionResponse>(response, 200, { session: session.snapshot() });
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
             sendJson(response, 409, {
@@ -4575,28 +4710,25 @@ async function handleRequest(
 
     if (request.method === "PATCH" && route.name === "goal") {
         const body = await readJson<ChangeSessionGoalStatusRequest>(request);
-        if (!Value.Check(goalStatusSchema, body.status)) {
+        if (!isGoalStatus(body.status)) {
             sendJson(response, 400, {
                 error: "Goal status must be Active, Paused, Blocked, or Complete.",
             });
             return;
         }
         const mutationId = body.mutationId ?? requestMutationId(request);
-        if (sessionMutationCompleted(sessionEventLog, mutationId)) {
-            sendJson(response, 200, { session });
+        if (sessionMutationCompleted(session, mutationId)) {
+            sendJson(response, 200, { session: session.snapshot() });
             return;
         }
-        if (!sessionMutationCanApply(request, response, session, sessionEventLog)) return;
+        if (!sessionMutationCanApply(request, response, session)) return;
         try {
-            const goal = await runtimeConfig.agents.goal.changeGoalStatus(
+            await session.changeGoalStatus(
                 ctx,
-                session.agentId,
-                body.status,
-                mutationId === undefined ? undefined : { operationId: mutationId },
+                body,
+                mutationId === undefined ? {} : { mutationId },
             );
-            sendJson<GoalSessionResponse>(response, 200, {
-                session: { ...session, goal },
-            });
+            sendJson<GoalSessionResponse>(response, 200, { session: session.snapshot() });
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
             sendJson(response, 409, {
@@ -4608,23 +4740,42 @@ async function handleRequest(
 
     if (request.method === "DELETE" && route.name === "goal") {
         const mutationId = requestMutationId(request);
-        if (sessionMutationCompleted(sessionEventLog, mutationId)) {
-            sendJson(response, 200, { session });
+        if (sessionMutationCompleted(session, mutationId)) {
+            sendJson(response, 200, { session: session.snapshot() });
             return;
         }
-        if (!sessionMutationCanApply(request, response, session, sessionEventLog)) return;
-        await runtimeConfig.agents.goal.clearGoal(
-            ctx,
-            session.agentId,
-            mutationId === undefined ? undefined : { operationId: mutationId },
-        );
-        const { goal: _goal, ...withoutGoal } = session;
-        sendJson<GoalSessionResponse>(response, 200, { session: withoutGoal });
+        if (!sessionMutationCanApply(request, response, session)) return;
+        await session.clearGoal(ctx, mutationId);
+        sendJson<GoalSessionResponse>(response, 200, { session: session.snapshot() });
         return;
     }
 
     if (request.method === "POST" && route.name === "user-input") {
-        sendAgentsModeUnavailable(response, "Answering questions");
+        const body = await readJson<AnswerUserInputRequest>(request);
+        const mutationId = body.mutationId ?? requestMutationId(request);
+        if (sessionMutationCompleted(session, mutationId)) {
+            sendJson(response, 200, { session: session.snapshot() });
+            return;
+        }
+        if (!sessionMutationCanApply(request, response, session)) return;
+        try {
+            const snapshot = await session.answerUserInput(ctx, route.requestId, {
+                ...body,
+                ...(mutationId === undefined ? {} : { mutationId }),
+            });
+            if (snapshot === undefined) {
+                sendJson(response, 409, {
+                    error: "This question is no longer waiting for an answer.",
+                });
+                return;
+            }
+            sendJson(response, 200, { session: snapshot });
+        } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
+            sendJson(response, 400, {
+                error: error instanceof Error ? error.message : "The answer is invalid.",
+            });
+        }
         return;
     }
 
@@ -4641,7 +4792,7 @@ async function handleRequest(
             sendJson(response, 400, { error: "Session message limit is invalid." });
             return;
         }
-        const events = sessionEventLog.since(after);
+        const events = session.events.since(after);
         if (events === undefined) {
             sendJson(response, 409, { error: "Event cursor not found" });
             return;
@@ -4662,13 +4813,11 @@ async function handleRequest(
             ctx,
             request,
             response,
-            conversations,
-            resources.liveEvents,
             session,
-            sessionEventLog,
             url.searchParams.get("after") ?? undefined,
+            sessionEventStreamLeases,
             parseTurnLimit(url.searchParams.get("turns")),
-            await querySubagentSummaries(withDatabase(ctx, resources.database), sessionId),
+            await store.listSubagents(ctx, sessionId),
         );
         return;
     }
@@ -4706,13 +4855,13 @@ function providerCredential(
 
 async function resolveProjectScopeDirectory(
     ctx: Context,
-    projects: Pick<DaemonResources["projects"], "getProject" | "getWorkspace">,
+    store: SessionStore,
     scope: ProjectScope,
 ): Promise<{ ok: true; path: string } | { error: string; ok: false; status: 404 | 409 }> {
-    const project = await projects.getProject(ctx, scope.projectId);
+    const project = await store.getProject(ctx, scope.projectId);
     if (project === undefined) return { error: "Project not found", ok: false, status: 404 };
     if (scope.workspaceId === undefined) return { ok: true, path: project.path };
-    const workspace = await projects.getWorkspace(ctx, scope.projectId, scope.workspaceId);
+    const workspace = await store.getWorkspace(ctx, scope.projectId, scope.workspaceId);
     if (workspace === undefined) {
         return { error: "Workspace not found", ok: false, status: 404 };
     }
@@ -4763,8 +4912,7 @@ function parseArchivedFilter(value: string | null): boolean | "all" | undefined 
 
 async function resolveAppletContext(
     ctx: Context,
-    conversations: Pick<ConversationRepository, "readSnapshot">,
-    projects: Pick<DaemonResources["projects"], "getProject" | "getWorkspace">,
+    store: SessionStore,
     applet: Applet,
     request: ResolveAppletOpenRequest,
 ): Promise<
@@ -4778,7 +4926,7 @@ async function resolveAppletContext(
     let context: AppletContext;
     let scope: SlotScope;
     if (request.sessionId !== undefined) {
-        const session = await conversations.readSnapshot(ctx, request.sessionId);
+        const session = await store.get(ctx, request.sessionId);
         if (session === undefined) {
             return {
                 code: "invalid_request",
@@ -4786,15 +4934,7 @@ async function resolveAppletContext(
                 type: "error",
             };
         }
-        const identity =
-            session.scope.kind === "project"
-                ? { projectId: session.scope.projectId }
-                : session.scope.kind === "workspace"
-                  ? {
-                        projectId: session.scope.projectId,
-                        workspaceId: session.scope.workspaceId,
-                    }
-                  : undefined;
+        const identity = session.projectIdentity();
         if (request.projectId !== undefined && request.projectId !== identity?.projectId) {
             return {
                 code: "invalid_request",
@@ -4833,7 +4973,7 @@ async function resolveAppletContext(
         }
         if (
             request.projectId !== undefined &&
-            (await projects.getProject(ctx, request.projectId)) === undefined
+            (await store.getProject(ctx, request.projectId)) === undefined
         ) {
             return {
                 code: "invalid_request",
@@ -4844,7 +4984,7 @@ async function resolveAppletContext(
         if (
             request.projectId !== undefined &&
             request.workspaceId !== undefined &&
-            (await projects.getWorkspace(ctx, request.projectId, request.workspaceId)) === undefined
+            (await store.getWorkspace(ctx, request.projectId, request.workspaceId)) === undefined
         ) {
             return {
                 code: "invalid_request",
@@ -4907,6 +5047,7 @@ function matchRoute(pathname: string):
               | "live-events-stream"
               | "catalog"
               | "global-events-trim"
+              | "external-tool-calls"
               | "config"
               | "global-instructions"
               | "global-security-policy"
@@ -5098,6 +5239,7 @@ function matchRoute(pathname: string):
               | "draft"
               | "effort"
               | "events"
+              | "external-tool-calls"
               | "fork"
               | "goal"
               | "messages"
@@ -5133,6 +5275,7 @@ function matchRoute(pathname: string):
           sessionId: string;
       }
     | { name: "user-input"; requestId: string; sessionId: string }
+    | { name: "external-tool-call"; externalToolCallId: string; sessionId: string }
     | { name: "scheduled-message-cancel"; scheduledMessageId: string; sessionId: string }
     | { name: "secret"; secretId: string; sessionId: string }
     | { name: "background-process"; processSessionId: number; sessionId: string }
@@ -5171,6 +5314,7 @@ function matchRoute(pathname: string):
     if (pathname === "/catalog") return { name: "catalog" };
     if (pathname === "/timeline") return { name: "timeline" };
     if (pathname === "/events/trim") return { name: "global-events-trim" };
+    if (pathname === "/external-tool-calls") return { name: "external-tool-calls" };
     if (pathname === "/models") return { name: "models" };
     if (pathname === "/messages") return { name: "messages" };
     if (pathname === "/git/watch") return { name: "git-watch" };
@@ -5526,6 +5670,13 @@ function matchRoute(pathname: string):
             sessionId,
         };
     }
+    if (parts.length === 4 && parts[2] === "external-tool-calls" && parts[3] !== undefined) {
+        return {
+            name: "external-tool-call",
+            externalToolCallId: decodeURIComponent(parts[3]),
+            sessionId,
+        };
+    }
     if (
         parts.length === 5 &&
         parts[2] === "attachments" &&
@@ -5589,6 +5740,9 @@ function matchRoute(pathname: string):
     if (parts[2] === "draft") return { name: "draft", sessionId };
     if (parts[2] === "effort") return { name: "effort", sessionId };
     if (parts[2] === "events") return { name: "events", sessionId };
+    if (parts[2] === "external-tool-calls") {
+        return { name: "external-tool-calls", sessionId };
+    }
     if (parts[2] === "fork") return { name: "fork", sessionId };
     if (parts[2] === "goal") return { name: "goal", sessionId };
     if (parts[2] === "messages") return { name: "messages", sessionId };
@@ -5621,7 +5775,6 @@ function decodeUrlComponent(value: string | undefined): string | undefined {
 }
 
 type DownloadableAttachment = Extract<Attachment, { kind: "audio" | "file" | "image" | "video" }>;
-const MAX_ATTACHMENT_FILE_BYTES = 32 * 1024 * 1024;
 
 async function readSessionAttachmentFile(
     attachment: Attachment,
@@ -5790,13 +5943,19 @@ async function handleWorkletRequest(
     ctx: Context,
     runtimeConfig: ProtocolServerRuntimeConfig,
 ): Promise<void> {
-    const worklets = runtimeConfig.agents.worklets;
+    const worklets = runtimeConfig.worklets;
+    if (worklets === undefined) {
+        sendWorkletManagementError(
+            response,
+            503,
+            "worklet_not_found",
+            "This Rig daemon is running without worklets.",
+        );
+        return;
+    }
     if (route.name === "worklets") {
         if (request.method === "GET") {
-            sendJson<ListWorkletsResponse>(response, 200, {
-                version: createWorkletCatalogVersion(),
-                worklets: await worklets.list(ctx, WORKLET_HTTP_AGENT_ID),
-            });
+            sendJson<ListWorkletsResponse>(response, 200, await worklets.catalog(ctx));
             return;
         }
         if (request.method !== "POST") {
@@ -5821,7 +5980,7 @@ async function handleWorkletRequest(
         }
         try {
             sendJson<WorkletResponse>(response, 201, {
-                worklet: await worklets.install(ctx, WORKLET_HTTP_AGENT_ID, body),
+                worklet: await worklets.install(ctx, body),
             });
         } catch (error) {
             sendWorkletFailure(response, error);
@@ -5833,12 +5992,23 @@ async function handleWorkletRequest(
             sendJson(response, 405, { error: "Method not allowed" });
             return;
         }
-        sendWorkletManagementError(
-            response,
-            503,
-            "worklet_unavailable",
-            "Worklet icons are unavailable because the feature does not expose icon assets.",
-        );
+        const icon = await worklets.readIcon(ctx, route.workletName, route.format);
+        if (icon.type !== "file") {
+            sendWorkletManagementError(
+                response,
+                404,
+                "worklet_not_found",
+                "Worklet icon not found.",
+            );
+            return;
+        }
+        response.writeHead(200, {
+            "cache-control": "private, max-age=31536000, immutable",
+            "content-length": icon.data.byteLength,
+            "content-type": icon.contentType,
+            "x-content-type-options": "nosniff",
+        });
+        response.end(icon.data);
         return;
     }
     if (route.name === "worklet-log") {
@@ -5847,30 +6017,8 @@ async function handleWorkletRequest(
             return;
         }
         try {
-            const status = await worklets.status(ctx, WORKLET_HTTP_AGENT_ID, route.workletName);
-            if (status === undefined) {
-                sendWorkletManagementError(
-                    response,
-                    404,
-                    "worklet_not_found",
-                    `No worklet named ${JSON.stringify(route.workletName)} exists.`,
-                );
-                return;
-            }
-            if (status.detail?.includes("unavailable") === true) {
-                sendWorkletManagementError(
-                    response,
-                    503,
-                    "worklet_unavailable",
-                    "Worklet runtime logs are unavailable because no worklet runtime is configured.",
-                );
-                return;
-            }
-            const log = await worklets.readLogs(ctx, WORKLET_HTTP_AGENT_ID, route.workletName);
-            sendJson<WorkletLogResponse>(response, 200, {
-                log: log.lines.map((line) => line.text).join("\n"),
-                truncated: log.nextCursor !== undefined,
-            });
+            const log = await worklets.readLog(ctx, route.workletName);
+            sendJson<WorkletLogResponse>(response, 200, log);
         } catch (error) {
             sendWorkletFailure(response, error);
         }
@@ -5878,7 +6026,7 @@ async function handleWorkletRequest(
     }
     if (route.name === "worklet") {
         if (request.method === "GET") {
-            const worklet = await worklets.get(ctx, WORKLET_HTTP_AGENT_ID, route.workletName);
+            const worklet = await worklets.get(ctx, route.workletName);
             if (worklet === undefined) {
                 sendWorkletManagementError(
                     response,
@@ -5896,7 +6044,7 @@ async function handleWorkletRequest(
             return;
         }
         try {
-            await worklets.remove(ctx, WORKLET_HTTP_AGENT_ID, route.workletName);
+            await worklets.uninstall(ctx, route.workletName);
             sendJson(response, 200, {});
         } catch (error) {
             sendWorkletFailure(response, error);
@@ -5926,7 +6074,7 @@ async function handleWorkletRequest(
         }
         try {
             sendJson<WorkletResponse>(response, 200, {
-                worklet: await worklets.update(ctx, WORKLET_HTTP_AGENT_ID, route.workletName, body),
+                worklet: await worklets.update(ctx, route.workletName, body),
             });
         } catch (error) {
             sendWorkletFailure(response, error);
@@ -5944,7 +6092,7 @@ async function handleWorkletRequest(
     }
     try {
         sendJson<WorkletResponse>(response, 200, {
-            worklet: await worklets.revert(ctx, WORKLET_HTTP_AGENT_ID, route.workletName, body),
+            worklet: await worklets.revert(ctx, route.workletName, body),
         });
     } catch (error) {
         sendWorkletFailure(response, error);
@@ -5952,12 +6100,15 @@ async function handleWorkletRequest(
 }
 
 function sendWorkletFailure(response: ServerResponse, error: unknown): void {
-    const message = error instanceof Error ? error.message : "The worklet request failed.";
-    if (/\b(?:not found|does not exist)\b/iu.test(message)) {
-        sendWorkletManagementError(response, 404, "worklet_not_found", message);
+    if (error instanceof WorkletInvalidError) {
+        sendWorkletManagementError(response, 400, "invalid_worklet", error.message);
         return;
     }
-    sendWorkletManagementError(response, 400, "invalid_worklet", message);
+    if (error instanceof WorkletNotFoundError) {
+        sendWorkletManagementError(response, 404, "worklet_not_found", error.message);
+        return;
+    }
+    throw error;
 }
 
 function sendInvalidWorkletBody(response: ServerResponse, error: unknown): void {
@@ -5981,7 +6132,7 @@ function sendInvalidWorkletBody(response: ServerResponse, error: unknown): void 
 function sendWorkletManagementError(
     response: ServerResponse,
     status: number,
-    code: WorkletManagementErrorCode | "worklet_unavailable",
+    code: WorkletManagementErrorCode,
     message: string,
 ): void {
     sendJson(response, status, { error: { code, message } });
@@ -6064,6 +6215,7 @@ function isSessionMutation(routeName: string, method: string | undefined): boole
                 "background-processes-stop",
                 "compact",
                 "context",
+                "external-tool-call",
                 "fork",
                 "messages",
                 "read",
@@ -6253,8 +6405,7 @@ function parseEntityVersion(value: string | readonly string[] | undefined): numb
 function sessionMutationCanApply(
     request: IncomingMessage,
     response: ServerResponse,
-    session: ProtocolSession,
-    events: SessionEventLog,
+    session: Pick<SessionEventSource, "events" | "snapshot">,
 ): boolean {
     const header = request.headers["if-match"];
     if (header === undefined) return true;
@@ -6263,21 +6414,21 @@ function sessionMutationCanApply(
         sendJson(response, 400, { error: "The session version is invalid." });
         return false;
     }
-    if (expected === events.lastEventId()) return true;
+    if (expected === session.events.lastEventId()) return true;
     sendJson(response, 409, {
         error: "The session changed before this action could be applied.",
-        session,
+        session: session.snapshot(),
     });
     return false;
 }
 
 function sessionMutationCompleted(
-    events: SessionEventLog,
+    session: Pick<SessionEventSource, "events">,
     mutationId: string | undefined,
 ): boolean {
     if (mutationId === undefined) return false;
     return (
-        events.since(undefined)?.some((event) => {
+        session.events.since(undefined)?.some((event) => {
             if (event.data === null || typeof event.data !== "object") return false;
             return (event.data as { mutationId?: unknown }).mutationId === mutationId;
         }) === true
@@ -6305,15 +6456,41 @@ class InvalidJsonBodyError extends Error {}
 
 class RequestBodyTooLargeError extends Error {}
 
+function isExternalToolCallResolution(value: unknown): value is ResolveExternalToolCallRequest {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+    if (JSON.stringify(value).length > 1_048_576) return false;
+    const candidate = value as Record<string, unknown>;
+    if (candidate.status === "failed") {
+        if (candidate.error === null || typeof candidate.error !== "object") return false;
+        const error = candidate.error as Record<string, unknown>;
+        return (
+            typeof error.message === "string" &&
+            (error.code === undefined || typeof error.code === "string")
+        );
+    }
+    if (candidate.status !== "completed") return false;
+    if (candidate.content === undefined) return true;
+    return (
+        Array.isArray(candidate.content) &&
+        candidate.content.every((block) => {
+            if (block === null || typeof block !== "object" || Array.isArray(block)) return false;
+            const content = block as Record<string, unknown>;
+            return content.type === "text"
+                ? typeof content.text === "string"
+                : content.type === "image" &&
+                      typeof content.mediaType === "string" &&
+                      typeof content.data === "string";
+        })
+    );
+}
+
 async function streamEvents(
     ctx: Context,
     request: IncomingMessage,
     response: ServerResponse,
-    conversations: ConversationRepository,
-    liveEvents: DaemonResources["liveEvents"],
-    session: ProtocolSession,
-    events: SessionEventLog,
+    session: SessionEventSource,
     after: string | undefined,
+    sessionEventStreamLeases: Set<SessionEventStreamLease>,
     turnLimit: number | undefined,
     subagents: readonly SubagentSummary[],
 ): Promise<void> {
@@ -6324,7 +6501,7 @@ async function streamEvents(
     // A client attaching without a cursor is already caught up by the snapshot
     // in the hello frame, which reflects every event through `lastEventId`.
     // Replaying the log on top of it would send the conversation twice.
-    const catchup = resumed ? events.since(resumeFrom) : [];
+    const catchup = resumed ? session.events.since(resumeFrom) : [];
     if (catchup === undefined) {
         sendJson(response, 409, { error: "Event cursor not found" });
         return;
@@ -6338,15 +6515,7 @@ async function streamEvents(
     });
     // The hello frame is written before the catch-up batch so a client can apply
     // everything that follows without asking the daemon anything else.
-    const hello = await conversationStreamHello(
-        ctx,
-        conversations,
-        session,
-        events,
-        resumed,
-        turnLimit,
-        subagents,
-    );
+    const hello = await sessionStreamHello(ctx, session, resumed, turnLimit, subagents);
 
     // A resumed client applies durable history first, then the current overlay.
     // If the connection drops mid-catch-up, its cursor advances only through
@@ -6359,17 +6528,32 @@ async function streamEvents(
     }, 15_000);
     heartbeat.unref?.();
 
-    const unsubscribe = liveEvents.subscribe((entry) => {
-        if ("sessionId" in entry.event && entry.event.sessionId === session.id) {
-            writeSseEvent(response, entry.event as SessionEvent);
-        }
+    const unsubscribe = session.events.subscribe((event) => {
+        writeSseEvent(response, event);
     });
+    const lease = { session };
+    sessionEventStreamLeases.add(lease);
 
     request.once("close", () => {
         clearInterval(heartbeat);
         unsubscribe();
+        sessionEventStreamLeases.delete(lease);
         response.end();
     });
+}
+
+interface SessionEventSource {
+    readonly events: SessionEventLog;
+    activity: () => SessionActivity;
+    partialMessage: () => SessionPartialMessage | undefined;
+    clientSnapshot: () => ProtocolSession;
+    snapshot: () => ProtocolSession;
+    transcriptWindow: (ctx: Context, turnLimit?: number) => Promise<SessionTranscriptWindow>;
+    usage: () => SessionUsageSummary;
+}
+
+interface SessionEventStreamLease {
+    readonly session: SessionEventSource;
 }
 
 function writeSseHello(response: ServerResponse, hello: SessionStreamHello): void {
@@ -6408,21 +6592,38 @@ function parseTurnLimit(value: string | null): number {
  */
 async function buildGroupCatalog(
     ctx: Context,
-    resources: DaemonResources,
-    conversations: ConversationRepository,
+    store: SessionStore,
     modelCatalog: ModelCatalog,
     identity: DaemonIdentity,
     sessionTerminals: SessionTerminalTracker,
 ): Promise<Omit<GlobalStreamHello, "cursor">> {
-    const sessions = (await conversations.listActive(ctx))
-        .map((summary) => ({ ...summary, inboxItems: [] }))
+    const inboxItems = new Map<
+        string,
+        Awaited<ReturnType<SessionStore["listDurableUserInputs"]>>
+    >();
+    for (const call of await store.listDurableUserInputs(ctx)) {
+        if (!isOpenQuestion(call) && call.response === undefined) continue;
+        inboxItems.set(call.sessionId, [...(inboxItems.get(call.sessionId) ?? []), call]);
+    }
+    const sessions = (await store.listActive(ctx))
+        .map((summary) => ({
+            ...summary,
+            inboxItems: (inboxItems.get(summary.id) ?? []).map((call) => ({
+                ...(call.response === undefined ? {} : { answers: call.response.answers }),
+                createdAt: call.createdAt,
+                questions: call.request.questions,
+                requestId: call.request.requestId,
+                ...(call.resolvedAt === undefined ? {} : { resolvedAt: call.resolvedAt }),
+                status: call.response === undefined ? ("pending" as const) : ("answered" as const),
+            })),
+        }))
         .map((summary) => sessionSummaryWithTerminalPresence(summary, sessionTerminals))
         .filter((summary) => !summary.archived);
-    const projects = (await resources.projects.listProjects(ctx)).filter(
+    const projects = (await store.listProjects(ctx)).filter(
         (project) => project.archivedAt === undefined,
     );
     const projectIds = new Set(projects.map((project) => project.id));
-    const workspaces = (await resources.projects.listWorkspaces(ctx)).filter(
+    const workspaces = (await store.listWorkspaces(ctx)).filter(
         (workspace) =>
             projectIds.has(workspace.projectId) &&
             workspace.archivedAt === undefined &&
@@ -6432,17 +6633,15 @@ async function buildGroupCatalog(
     const workspaceIds = new Set(workspaces.map((workspace) => workspace.id));
     return {
         catalog: modelCatalog,
-        folders: (await resources.folders.listFolders(ctx)).filter(
-            (folder) => folder.archivedAt === undefined,
-        ),
-        folderItems: (await resources.folders.folderCatalog(ctx)).items.filter(
+        folders: (await store.listFolders(ctx)).filter((folder) => folder.archivedAt === undefined),
+        folderItems: (await store.folderCatalog(ctx)).items.filter(
             (item) => item.archivedAt === undefined,
         ),
         identity,
-        presence: resources.presence.state(),
+        presence: store.presence.state(),
         protocolVersion: RIG_PROTOCOL_VERSION,
         projects,
-        terminalGroups: resources.remoteTerminals.groups().flatMap((group) =>
+        terminalGroups: store.remoteTerminals.groups().flatMap((group) =>
             !projectIds.has(group.scope.projectId) ||
             (group.scope.workspaceId !== undefined && !workspaceIds.has(group.scope.workspaceId))
                 ? []
@@ -6470,46 +6669,36 @@ async function buildGroupCatalog(
  * builder serves both the stream and the request-response bootstrap, so the two
  * cannot drift into describing the same session differently.
  */
-async function conversationStreamHello(
+async function sessionStreamHello(
     ctx: Context,
-    conversations: ConversationRepository,
-    session: ProtocolSession,
-    events: SessionEventLog,
+    session: SessionEventSource,
     resumed: boolean,
     turnLimit: number | undefined,
     subagents: readonly SubagentSummary[],
 ): Promise<SessionStreamHello> {
-    const lastEventId = events.lastEventId();
+    const lastEventId = session.events.lastEventId();
+    const partial = session.partialMessage();
     // A resuming client already holds the transcript, so it is sent only to a
     // client attaching fresh. The window is cut on turn boundaries so a tool
     // result never arrives without the call it belongs to.
     const transcript = resumed
         ? undefined
-        : projectClientTranscript(
-              (await conversations.transcriptPage(
-                  ctx,
-                  session.id,
-                  turnLimit ?? SESSION_STREAM_TURN_LIMIT,
-              )) ?? { complete: true, messages: [], turns: [] },
-          );
-    const currentSession = session;
+        : projectClientTranscript(await session.transcriptWindow(ctx, turnLimit));
+    const currentSession = session.clientSnapshot();
     const full = resumed ? undefined : currentSession;
-    const usage =
-        full === undefined
-            ? undefined
-            : aggregateSessionUsage(events.all(), { type: session.agent.type });
+    const usage = full === undefined ? undefined : session.usage();
     const snapshot =
         full === undefined || transcript === undefined
             ? undefined
             : {
                   ...full,
-                  shellCommands: events.shellCommandStates(),
+                  shellCommands: session.events.shellCommandStates(),
                   subagents,
                   // The bounded transcript is the single copy of visible history.
                   snapshot: { ...full.snapshot, messages: [] },
               };
     const hello: SessionStreamHello = {
-        activity: session.activity,
+        activity: session.activity(),
         resumed,
         ...(resumed
             ? {
@@ -6524,10 +6713,21 @@ async function conversationStreamHello(
                       ...(currentSession.interruption === undefined
                           ? {}
                           : { interruption: currentSession.interruption }),
+                      ...(currentSession.externalTools === undefined
+                          ? {}
+                          : { externalTools: currentSession.externalTools }),
                       mcpServers: currentSession.mcpServers,
+                      ...(currentSession.pendingExternalToolCalls === undefined
+                          ? {}
+                          : {
+                                pendingExternalToolCalls: currentSession.pendingExternalToolCalls,
+                            }),
                       projectSecretIds: currentSession.projectSecretIds,
                       secretIds: currentSession.secretIds,
                       sessionSecretIds: currentSession.sessionSecretIds,
+                      ...(currentSession.skills === undefined
+                          ? {}
+                          : { skills: currentSession.skills }),
                       ...(currentSession.scheduledMessages === undefined
                           ? {}
                           : { scheduledMessages: currentSession.scheduledMessages }),
@@ -6553,7 +6753,7 @@ async function conversationStreamHello(
                   usage: {
                       currentProviderId: full.providerId,
                       groups: usage.groups,
-                      quotas: [...events.latestProviderQuotas().entries()].map(
+                      quotas: [...session.events.latestProviderQuotas().entries()].map(
                           ([providerId, quota]) => ({ providerId, quota }),
                       ),
                       sessionTokenCount: usage.sessionTokenCount,
@@ -6565,6 +6765,7 @@ async function conversationStreamHello(
         ...(snapshot === undefined || transcript === undefined
             ? {}
             : { session: snapshot, transcript }),
+        ...(partial === undefined ? {} : { partial }),
         ...(lastEventId === undefined ? {} : { lastEventId }),
     };
     return hello;
@@ -6577,23 +6778,13 @@ async function conversationStreamHello(
  * The session-scoped stream uses the same single-copy transcript projection.
  * This request-response variant additionally drops completed shell commands.
  */
-async function conversationStateHello(
+async function sessionStateHello(
     ctx: Context,
-    conversations: ConversationRepository,
-    session: ProtocolSession,
-    events: SessionEventLog,
+    session: SessionEventSource,
     turnLimit: number | undefined,
     subagents: readonly SubagentSummary[],
 ): Promise<SessionStreamHello> {
-    const hello = await conversationStreamHello(
-        ctx,
-        conversations,
-        session,
-        events,
-        false,
-        turnLimit,
-        subagents,
-    );
+    const hello = await sessionStreamHello(ctx, session, false, turnLimit, subagents);
     if (hello.session === undefined) return hello;
     const { contextMessages: _contextMessages, ...agentSnapshot } = hello.session.snapshot;
     return {
@@ -6705,7 +6896,7 @@ async function authorizeRemoteSessionTarget(
     ctx: Context,
     request: IncomingMessage,
     response: ServerResponse,
-    projects: Pick<DaemonResources["projects"], "getProject" | "listWorkspaces">,
+    store: SessionStore,
     body: CreateSessionRequest,
 ): Promise<boolean> {
     const peerId = p2pPeerId(request);
@@ -6714,11 +6905,11 @@ async function authorizeRemoteSessionTarget(
     const workspace =
         body.workspaceId === undefined
             ? undefined
-            : (await projects.listWorkspaces(ctx)).find(
+            : (await store.listWorkspaces(ctx)).find(
                   (candidate) => candidate.id === body.workspaceId,
               );
     const projectId = body.projectId ?? workspace?.projectId;
-    const project = projectId === undefined ? undefined : await projects.getProject(ctx, projectId);
+    const project = projectId === undefined ? undefined : await store.getProject(ctx, projectId);
     if (
         project === undefined ||
         (body.workspaceId !== undefined && workspace === undefined) ||
@@ -6786,12 +6977,12 @@ function authorizeP2pRemoteWork(
     return false;
 }
 
-async function prepareConversationGitCredential(
+async function prepareSessionGitCredential(
     ctx: Context,
     request: IncomingMessage,
     response: ServerResponse,
-    resources: DaemonResources,
-    session: ProtocolSession,
+    store: SessionStore,
+    sessionId: string,
     identity: string | null | undefined,
     githubToken: string | undefined,
 ): Promise<boolean> {
@@ -6804,10 +6995,9 @@ async function prepareConversationGitCredential(
         return false;
     }
     try {
-        await refreshConversationGitCredential(
+        await store.refreshSessionGitCredential(
             ctx,
-            resources,
-            session,
+            sessionId,
             { instanceId: peerId, profileId: identity },
             githubToken,
         );
@@ -6817,22 +7007,4 @@ async function prepareConversationGitCredential(
         sendJson(response, 409, { error: errorToMessage(error) });
         return false;
     }
-}
-
-async function refreshConversationGitCredential(
-    ctx: Context,
-    resources: DaemonResources,
-    session: ProtocolSession,
-    creator: { instanceId: string; profileId: string },
-    githubToken: string,
-): Promise<void> {
-    if (session.scope.kind !== "project" && session.scope.kind !== "workspace") {
-        throw new Error("Only project conversations can receive Git credentials.");
-    }
-    await resources.projects.refreshGitCredential(
-        ctx,
-        session.scope.projectId,
-        creator,
-        githubToken,
-    );
 }

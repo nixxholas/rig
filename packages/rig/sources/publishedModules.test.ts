@@ -36,6 +36,10 @@ describe("published modules", () => {
     CreateRemoteTerminalRequest,
     CreateSessionRequest,
     CreateSessionResponse,
+    DurableSkillDefinition,
+    ExternalToolCall,
+    ExternalToolCallResolution,
+    ExternalToolDefinition,
     GetDaemonConfigResponse,
     HealthResponse,
     ListModelsResponse,
@@ -47,6 +51,8 @@ describe("published modules", () => {
     RegisterSecretResponse,
     RemoteTerminalResponse,
     RemoteTerminalSummary,
+    ResolveExternalToolCallRequest,
+    ResolveExternalToolCallResponse,
     SecretSummary,
     SubmitMessageRequest,
     SubmitMessageResponse,
@@ -57,6 +63,7 @@ describe("published modules", () => {
 } from "@slopus/rig/types";
 import type { ProtocolSession as LegacyProtocolSession } from "@slopus/rig/dist/protocol/index.js";
 import type { RemoteTerminalSummary as LegacyRemoteTerminalSummary } from "@slopus/rig/dist/terminal/index.js";
+import type { ExternalToolDefinition as LegacyExternalToolDefinition } from "@slopus/rig/dist/external-tools/index.js";
 
 export type RigTypes = [
     AttachSecretRequest,
@@ -65,6 +72,10 @@ export type RigTypes = [
     CreateRemoteTerminalRequest,
     CreateSessionRequest,
     CreateSessionResponse,
+    DurableSkillDefinition,
+    ExternalToolCall,
+    ExternalToolCallResolution,
+    ExternalToolDefinition,
     GetDaemonConfigResponse,
     HealthResponse,
     ListModelsResponse,
@@ -76,6 +87,8 @@ export type RigTypes = [
     RegisterSecretResponse,
     RemoteTerminalResponse,
     RemoteTerminalSummary,
+    ResolveExternalToolCallRequest,
+    ResolveExternalToolCallResponse,
     SecretSummary,
     SubmitMessageRequest,
     SubmitMessageResponse,
@@ -85,6 +98,7 @@ export type RigTypes = [
     UpdateDaemonConfigRequest,
     LegacyProtocolSession,
     LegacyRemoteTerminalSummary,
+    LegacyExternalToolDefinition,
 ];
 `,
             );

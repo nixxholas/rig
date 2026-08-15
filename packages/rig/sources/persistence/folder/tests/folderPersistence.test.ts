@@ -18,7 +18,7 @@ import {
 } from "../folderMutationReceipt.js";
 import { queryFolder } from "../queryFolder.js";
 import { queryFolders } from "../queryFolders.js";
-import { sessionMoveScope } from "../../conversations/sessionMoveScope.js";
+import { sessionMoveScope } from "../../session/sessionMoveScope.js";
 
 describe("folder persistence", () => {
     it("records and reads folder mutation receipts through the semantic boundary", async () => {
@@ -627,7 +627,9 @@ async function insertSession(
             createdAtMs: 1,
             cwd: "/workspace",
             depth: 0,
+            durableSkillsJson: "[]",
             elapsedMs: 0,
+            externalToolsJson: "[]",
             id: sessionId,
             interrupted: false,
             modelId: "model",

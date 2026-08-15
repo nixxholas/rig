@@ -8,6 +8,7 @@ export type {
     SecretReference,
     SecretRegistration,
 } from "../secrets/index.js";
+export { getDefaultSessionDatabasePath } from "./getDefaultSessionDatabasePath.js";
 export {
     createProtocolHttpServer,
     type ProtocolHttpServerOptions,

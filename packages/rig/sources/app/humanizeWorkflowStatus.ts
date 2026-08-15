@@ -1,11 +1,8 @@
-import type { WorkflowStatus } from "@slopus/happy-agent-features";
+import type { WorkflowRunStatus } from "../workflows/index.js";
 
-export function humanizeWorkflowStatus(status: WorkflowStatus): string {
+export function humanizeWorkflowStatus(status: WorkflowRunStatus): string {
     if (status === "completed") return "Completed";
-    if (status === "failed") return "Failed";
-    if (status === "cancelled") return "Cancelled";
-    if (status === "unavailable") return "Unavailable";
-    if (status === "queued") return "Queued";
-    if (status === "paused") return "Paused";
+    if (status === "error") return "Failed";
+    if (status === "stopped") return "Stopped";
     return "Running";
 }

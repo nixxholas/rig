@@ -30,7 +30,7 @@
     },
     "dependencies": {
         "@sinclair/typebox": "^0.34.49",
-        "@slopus/happy-agent-features": "workspace:*"
+        "@slopus/happy-agent-modules": "workspace:*"
     },
     "devDependencies": {
         "@slopus/rig": "workspace:*",

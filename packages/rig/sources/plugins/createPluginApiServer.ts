@@ -59,29 +59,21 @@ import {
 } from "happy-plugins/internal";
 
 import { errorToMessage } from "../errorToMessage.js";
-import type { RigAgentService } from "../agent/RigAgentService.js";
-import type { ConversationRepository } from "../conversations/ConversationRepository.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
 import type { GeneratedMediaStore } from "../generated-media/index.js";
-import type { LiveGlobalEventQueue } from "../global-event/LiveGlobalEventQueue.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import type {
     PluginSummary,
     Project,
     ProjectWorkspace,
-    ProtocolSession,
     SessionSummary,
 } from "../protocol/index.js";
-import { configureConversationRequest } from "../conversations/configureConversationRequest.js";
-import type { ProjectRepository } from "../project/ProjectRepository.js";
-import {
-    SlotEntryInvalidError,
-    SlotEntryNotFoundError,
-    type SlotEntryStore,
-} from "../slots/index.js";
+import { configureSessionRequest } from "../session/configureSessionRequest.js";
+import type { SessionStore } from "../session/SessionStore.js";
+import { SlotEntryInvalidError, SlotEntryNotFoundError } from "../slots/index.js";
 import { isAuthorizedProtocolRequest } from "../server/isAuthorizedProtocolRequest.js";
 import { sendJson } from "../server/sendJson.js";
-import { withRequestContext, withWorkerContext } from "../observability/index.js";
+import { withRequestContext } from "../observability/index.js";
 import type { PluginHookConnection } from "./PluginHookRegistry.js";
 import {
     PluginComputeError,
@@ -100,13 +92,10 @@ const MAX_WORKSPACE_FILE_REQUEST_BYTES = 2 * 1024 * 1024;
 const MAX_MEDIA_REQUEST_BYTES = 15 * 1024 * 1024;
 
 export interface CreatePluginApiServerOptions {
-    agents: RigAgentService;
     compute?: PluginComputeConnection;
     computeRegistry?: PluginComputeRegistry;
-    conversations: ConversationRepository;
     defaultDocker?: DockerExecutionConfig;
     generatedMedia?: GeneratedMediaStore;
-    liveEvents: LiveGlobalEventQueue;
     listPlugins: () => Promise<readonly PluginSummary[]>;
     listProviderUsage?: () => readonly HappyProviderUsageEntry[];
     hooks?: PluginHookConnection;
@@ -116,9 +105,8 @@ export interface CreatePluginApiServerOptions {
     pluginFolder: string;
     pluginDataDirectory?: string;
     pluginName: string;
-    projects: ProjectRepository;
-    slots: SlotEntryStore;
     startup: PluginStartupState;
+    store: SessionStore;
     token: string;
 }
 
@@ -219,7 +207,7 @@ async function handleRequest(
     }
     if (request.method === "GET" && url.pathname === "/projects") {
         sendJson<{ projects: readonly HappyProject[] }>(response, 200, {
-            projects: (await options.projects.listProjects(ctx)).map(toHappyProject),
+            projects: (await options.store.listProjects(ctx)).map(toHappyProject),
         });
         return;
     }
@@ -232,7 +220,7 @@ async function handleRequest(
             "Workspace list settings",
         );
         sendJson<{ workspaces: readonly HappyWorkspace[] }>(response, 200, {
-            workspaces: (await options.projects.listWorkspaces(ctx, input.projectId)).map(
+            workspaces: (await options.store.listWorkspaces(ctx, input.projectId)).map(
                 toHappyWorkspace,
             ),
         });
@@ -244,7 +232,7 @@ async function handleRequest(
             "content-type": "application/x-ndjson",
         });
         response.flushHeaders();
-        const unsubscribe = options.liveEvents.subscribe((entry) => {
+        const unsubscribe = options.store.liveEvents.subscribe((entry) => {
             if (
                 (entry.event.type !== "workspace_created" &&
                     entry.event.type !== "workspace_updated") ||
@@ -263,24 +251,24 @@ async function handleRequest(
         return;
     }
     if (request.method === "GET" && url.pathname === "/sessions") {
-        const summaries = await options.conversations.list(ctx);
+        const summaries = await options.store.list(ctx);
         sendJson<{ sessions: readonly HappySession[] }>(response, 200, {
             sessions: await Promise.all(
-                summaries.map((session) => toHappySession(ctx, options.conversations, session)),
+                summaries.map((session) => toHappySession(ctx, options.store, session)),
             ),
         });
         return;
     }
     if (request.method === "POST" && url.pathname === "/sessions") {
         const body = await readJson(request, createSessionInputSchema, "Session settings");
-        const session = await options.conversations.create(
+        const session = await options.store.create(
             ctx,
-            await configureConversationRequest(body, options.defaultDocker, () =>
-                options.projects.queryProjectSettings(ctx, body.cwd),
+            await configureSessionRequest(body, options.defaultDocker, () =>
+                options.store.queryProjectSettings(ctx, body.cwd),
             ),
         );
         sendJson<{ session: HappySession }>(response, 201, {
-            session: toHappySessionSnapshot(session),
+            session: await toHappySession(ctx, options.store, session.snapshot()),
         });
         return;
     }
@@ -381,7 +369,7 @@ async function handleRequest(
             "Slot list settings",
         );
         sendJson<{ entries: readonly HappySlotEntry[] }>(response, 200, {
-            entries: await options.slots.list(ctx, input),
+            entries: await options.store.slots.list(ctx, input),
         });
         return;
     }
@@ -389,7 +377,7 @@ async function handleRequest(
         const body = await readJson(request, createHappySlotEntryInputSchema, "Slot entry");
         try {
             sendJson<{ entry: HappySlotEntry }>(response, 201, {
-                entry: await options.slots.create(ctx, {
+                entry: await options.store.slots.create(ctx, {
                     ...body,
                     author: {
                         folder: options.pluginFolder,
@@ -630,7 +618,7 @@ async function handleRequest(
         const body = await readJson(request, updateHappySlotEntryInputSchema, "Slot entry update");
         try {
             sendJson<{ entry: HappySlotEntry }>(response, 200, {
-                entry: await options.slots.update(ctx, parts[1], body),
+                entry: await options.store.slots.update(ctx, parts[1], body),
             });
         } catch (error) {
             if (error instanceof SlotEntryInvalidError) {
@@ -652,7 +640,7 @@ async function handleRequest(
     ) {
         try {
             sendJson<{ entry: HappySlotEntry }>(response, 200, {
-                entry: await options.slots.remove(ctx, parts[1]),
+                entry: await options.store.slots.remove(ctx, parts[1]),
             });
         } catch (error) {
             if (error instanceof SlotEntryNotFoundError) {
@@ -669,7 +657,7 @@ async function handleRequest(
         parts[0] === "workspaces" &&
         parts[1] !== undefined
     ) {
-        const workspace = (await options.projects.listWorkspaces(ctx)).find(
+        const workspace = (await options.store.listWorkspaces(ctx)).find(
             (candidate) => candidate.id === parts[1],
         );
         if (workspace === undefined) {
@@ -1014,12 +1002,12 @@ async function handleRequest(
         parts[2] === "messages"
     ) {
         const body = await readJson(request, sendAgentMessageBodySchema, "Agent message");
-        const conversationId = await options.conversations.conversationIdForAgent(ctx, parts[1]);
-        if (conversationId === undefined) {
+        const target = await options.store.findByAgentId(ctx, parts[1]);
+        if (target === undefined) {
             sendJson(response, 404, { error: "No agent has that Agent ID." });
             return;
         }
-        const delivered = await options.agents.deliverMessage(ctx, conversationId, {
+        const delivered = await target.deliverNotification(ctx, {
             displayText: `${options.pluginName}: ${body.message}`,
             text: [
                 `Message from the Rig plugin ${JSON.stringify(options.pluginName)}.`,
@@ -1045,7 +1033,7 @@ async function handleRequest(
         if (request.method === "POST" && parts.length === 3) {
             const body = await readJson(request, createWorkspaceBodySchema, "Workspace settings");
             try {
-                const workspace = await options.projects.createWorkspace(ctx, projectId, {
+                const workspace = await options.store.createWorkspace(ctx, projectId, {
                     ...(body.baseRef === undefined ? {} : { baseRef: body.baseRef }),
                     ...(body.id === undefined ? {} : { id: body.id }),
                     name: body.name,
@@ -1076,7 +1064,7 @@ async function handleRequest(
                 renameWorkspaceBodySchema,
                 "Workspace rename settings",
             );
-            const workspace = await options.projects.renameWorkspace(
+            const workspace = await options.store.renameWorkspace(
                 ctx,
                 projectId,
                 workspaceId,
@@ -1103,7 +1091,7 @@ async function handleRequest(
                 archiveWorkspaceBodySchema,
                 "Workspace archive settings",
             );
-            const workspace = await options.projects.beginWorkspaceArchive(
+            const workspace = await options.store.archiveWorkspace(
                 ctx,
                 projectId,
                 workspaceId,
@@ -1116,11 +1104,6 @@ async function handleRequest(
             sendJson<{ workspace: HappyWorkspace }>(response, 202, {
                 workspace: toHappyWorkspace(workspace),
             });
-            if (workspace.status === "archiving") {
-                void withWorkerContext("plugin-workspace-archive", (workerCtx) =>
-                    options.projects.removeArchivedWorkspace(workerCtx, projectId, workspaceId),
-                ).catch(() => undefined);
-            }
             return;
         }
     }
@@ -1173,30 +1156,21 @@ function toHappyWorkspace(workspace: ProjectWorkspace): HappyWorkspace {
 
 async function toHappySession(
     ctx: Context,
-    conversations: ConversationRepository,
+    store: SessionStore,
     session: Pick<
         SessionSummary,
         "archived" | "cwd" | "id" | "projectId" | "status" | "title" | "workspaceId"
     >,
 ): Promise<HappySession> {
-    const snapshot = await conversations.readSnapshot(ctx, session.id);
-    if (snapshot === undefined) {
+    const agentId = (await store.get(ctx, session.id))?.agentIdentity().agentId;
+    if (agentId === undefined) {
         throw new Error(`Rig could not resolve the agent for session ${session.id}.`);
     }
-    return toHappySessionSnapshot(snapshot);
-}
-
-function toHappySessionSnapshot(
-    session: Pick<
-        ProtocolSession,
-        "agentId" | "archived" | "cwd" | "id" | "projectId" | "status" | "title" | "workspaceId"
-    >,
-): HappySession {
     if (session.projectId === undefined) {
         throw new Error("Happy plugin sessions must belong to a project or workspace.");
     }
     return {
-        agentId: session.agentId,
+        agentId,
         archived: session.archived,
         cwd: session.cwd,
         id: session.id,

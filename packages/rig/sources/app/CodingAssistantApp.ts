@@ -34,7 +34,7 @@ import { errorToMessage } from "../errorToMessage.js";
 import { ONLINE_PRESENCE_ID } from "../presence/index.js";
 import type { NativeProcessManager } from "../processes/index.js";
 import { humanizeMcpName } from "../mcp/humanizeMcpName.js";
-import type { ServiceTier, Usage } from "../protocol/index.js";
+import type { ServiceTier, Usage } from "@slopus/rig-execution";
 import {
     DEFAULT_INFERENCE_MAX_RETRIES,
     MAX_INFERENCE_MAX_RETRIES,
@@ -62,6 +62,7 @@ import type {
     SecretAttachmentScope,
 } from "../secrets/index.js";
 import type { UserInputRequest, UserInputResponse } from "../user-input/index.js";
+import { humanizeWorkflowName } from "../workflows/index.js";
 import { createCodeReviewPrompt } from "../review/index.js";
 import type { AppTranscriptEntry } from "./AppTranscriptEntry.js";
 import type { CodexMcpToolCall } from "./CodexMcpToolCall.js";
@@ -108,7 +109,6 @@ import { humanizeProviderId } from "./humanizeProviderId.js";
 import { humanizePermissionReviewLevel } from "./humanizePermissionReviewLevel.js";
 import { humanizeGoalStatus } from "./humanizeGoalStatus.js";
 import { humanizeToolName } from "./humanizeToolName.js";
-import { humanizeWorkflowName } from "./humanizeWorkflowName.js";
 import { parseCodexMcpToolInvocation } from "./parseCodexMcpToolInvocation.js";
 import {
     readClipboardImage,
@@ -143,7 +143,7 @@ import type { TerminalTheme } from "./TerminalTheme.js";
 import type { StartupStatusCardModel } from "./StartupStatusCardModel.js";
 import { SecretMenuController } from "./SecretMenuController.js";
 import { TemporaryFullscreenController } from "./TemporaryFullscreenController.js";
-import { updateSessionTokenCount } from "../protocol/usage/updateSessionTokenCount.js";
+import { updateSessionTokenCount } from "../session/usage/updateSessionTokenCount.js";
 import { renderFullscreenComponent } from "./renderFullscreenComponent.js";
 
 const RESET = "\x1b[0m";
@@ -1040,16 +1040,13 @@ export class CodingAssistantApp implements Component, Focusable {
 
         if (event.type === "workflow_changed") {
             const previous = this.#workflows.find(
-                (workflow) => workflow.id === event.data.workflow.id,
+                (workflow) => workflow.runId === event.data.update.runId,
             );
-            this.#workflows = applyWorkflowRunUpdate(this.#workflows, event.data.workflow);
-            const next = this.#workflows.find((workflow) => workflow.id === event.data.workflow.id);
-            if (
-                previous !== undefined &&
-                isActiveWorkflowStatus(previous.status) &&
-                next !== undefined &&
-                !isActiveWorkflowStatus(next.status)
-            ) {
+            this.#workflows = applyWorkflowRunUpdate(this.#workflows, event.data.update);
+            const next = this.#workflows.find(
+                (workflow) => workflow.runId === event.data.update.runId,
+            );
+            if (previous?.status === "running" && next !== undefined && next.status !== "running") {
                 this.#recordWorkflowCompletion(next);
             }
             this.#requestRender();
@@ -2552,7 +2549,7 @@ export class CodingAssistantApp implements Component, Focusable {
             role: "event",
             title: "Tasks",
             text: this.#tasks
-                .map((task) => `#${task.id} · ${status[task.status]} · ${task.title}`)
+                .map((task) => `#${task.id} · ${status[task.status]} · ${task.subject}`)
                 .join("\n"),
         });
     }
@@ -2711,6 +2708,7 @@ export class CodingAssistantApp implements Component, Focusable {
         this.#showSelectionPanel(
             createWorkflowMonitor({
                 theme: this.#theme,
+                getSubagents: () => this.#subagents,
                 getWorkflows: () => this.#workflows,
                 ...(initialRunId === undefined ? {} : { initialRunId }),
                 now: this.#now,
@@ -6175,12 +6173,10 @@ export class CodingAssistantApp implements Component, Focusable {
         const outcome =
             workflow.status === "completed"
                 ? "completed"
-                : workflow.status === "cancelled"
-                  ? "was cancelled"
-                  : workflow.status === "unavailable"
-                    ? "is unavailable"
-                    : "failed";
-        const displayText = `Workflow ${humanizeWorkflowName(workflow.workflow)} ${outcome}.`;
+                : workflow.status === "stopped"
+                  ? "was stopped"
+                  : "failed";
+        const displayText = `Workflow ${humanizeWorkflowName(workflow.name)} ${outcome}.`;
         this.#recordCompletionNotice(displayText, "Workflow", "Workflow ");
     }
 
@@ -7107,8 +7103,4 @@ export class CodingAssistantApp implements Component, Focusable {
             this.#compactionStartedAtMs = undefined;
         }
     }
-}
-
-function isActiveWorkflowStatus(status: WorkflowRun["status"]): boolean {
-    return status === "queued" || status === "running" || status === "paused";
 }

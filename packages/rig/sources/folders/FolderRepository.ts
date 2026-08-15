@@ -58,9 +58,9 @@ import {
     SESSION_SCOPE_MUTATION_ACTION,
     sessionMoveScope,
     type SessionScopeMove,
-} from "../persistence/conversations/sessionMoveScope.js";
-import { querySessionMutationReceipt } from "../persistence/conversations/querySessionMutationReceipt.js";
-import { sessionRecordMutationReceipt } from "../persistence/conversations/sessionRecordMutationReceipt.js";
+} from "../persistence/session/sessionMoveScope.js";
+import { querySessionMutationReceipt } from "../persistence/session/querySessionMutationReceipt.js";
+import { sessionRecordMutationReceipt } from "../persistence/session/sessionRecordMutationReceipt.js";
 import type { SessionDatabase } from "../persistence/database/openSessionDatabase.js";
 import { withDatabase } from "../persistence/database/databaseContext.js";
 import { inTx } from "../persistence/inTx.js";

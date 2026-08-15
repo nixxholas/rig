@@ -1,6 +1,6 @@
 # Agent Base system prompts lack Rig host context
 
-`SystemPromptFeature` now gives the Agent Base path the provider- and model-specific base prompt,
+`SystemPromptModule` now gives the Agent Base path the provider- and model-specific base prompt,
 but that is only the model identity and behavioral contract. The new path still omits the
 per-agent host context that Rig must compose around that prompt.
 
@@ -19,7 +19,7 @@ None of these reaches inference through `RigAgentService` today.
 
 ## Why this is host debt
 
-This cannot simply move into `SystemPromptFeature`. One feature instance serves every agent in
+This cannot simply move into `SystemPromptModule`. One module instance serves every agent in
 the daemon, while each Rig agent has a different working directory, project instruction chain,
 permission mode, protected-path set, and potentially a different container. Those values belong
 to the host and must be resolved for the agent whose inference is running.
@@ -29,5 +29,5 @@ The feature package has no such boundary today. As described in
 `debt/compute-feature-per-agent.md`, Rig cannot supply one shared `Compute` safely and the current
 compute surface has no agent identity with which a Rig-side façade could select the correct
 workspace or container. Until a per-agent host-context or compute resolver exists, adding this
-logic to `SystemPromptFeature` would either leak one agent's context to another or bypass Rig's
+logic to `SystemPromptModule` would either leak one agent's context to another or bypass Rig's
 filesystem and permission model.
