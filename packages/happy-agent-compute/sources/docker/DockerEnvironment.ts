@@ -245,10 +245,13 @@ export class DockerEnvironment {
                         },
                     ],
                     // Restricted commands create their own user, PID, mount, and network
-                    // namespaces with the native supervisor. Docker's default seccomp profile
-                    // blocks those unprivileged namespace operations before the supervisor can
-                    // apply the narrower command boundary.
-                    SecurityOpt: ["seccomp=unconfined"],
+                    // namespaces with the native supervisor. Docker's outer seccomp, AppArmor,
+                    // and protected system paths otherwise block setup before the supervisor can
+                    // apply its narrower filter and mounts. The Docker CLI's
+                    // `systempaths=unconfined` shorthand maps to these two empty path arrays.
+                    SecurityOpt: ["seccomp=unconfined", "apparmor=unconfined"],
+                    MaskedPaths: [],
+                    ReadonlyPaths: [],
                 },
             })
             .catch((error: unknown) => {

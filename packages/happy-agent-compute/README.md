@@ -109,11 +109,13 @@ const compute = createHostCompute({ ctx, cwd, hostPolicy });
 by name or one this package created from an image. Managed containers mount the architecture-matched
 static Linux supervisor read-only at `/tools/happy-agent-sandbox`, and restricted commands invoke
 that binary in the container. An attached container must already have the same read-only mount;
-its source must be the matching installed NPM artifact rather than an arbitrary executable. Compute
-fails closed rather than changing a running container. Set `architecture` when Docker runs an
-emulated image, such as `amd64` on an arm64 host. The two configuration shapes are mutually
-exclusive at the validation boundary, and settings that only apply while creating a container
-exist only on the image branch.
+its source must be the matching installed NPM artifact rather than an arbitrary executable. It must
+also be started with `seccomp=unconfined`, `apparmor=unconfined`, and
+`systempaths=unconfined`, allowing the supervisor to replace Docker's outer restrictions with its
+own narrower filter and mounts. Compute fails closed rather than changing a running container. Set
+`architecture` when Docker runs an emulated image, such as `amd64` on an arm64 host. The two
+configuration shapes are mutually exclusive at the validation boundary, and settings that only
+apply while creating a container exist only on the image branch.
 
 ```ts
 const compute = await dockerComputeProvider.create(ctx, {

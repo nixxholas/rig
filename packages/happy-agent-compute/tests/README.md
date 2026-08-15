@@ -17,7 +17,8 @@ The Docker image defaults to `rig-gym:local`. Override it with
 `HAPPY_AGENT_COMPUTE_DOCKER_IMAGE`. The image must contain a POSIX shell and the commands used by
 the live cases. Managed containers receive the static Linux supervisor from the package; attached
 containers must already mount the matching installed NPM artifact read-only at
-`/tools/happy-agent-sandbox`.
+`/tools/happy-agent-sandbox` and use Docker's `seccomp=unconfined`, `apparmor=unconfined`, and
+`systempaths=unconfined` security options so the supervisor can install its own boundary.
 
 Run the host lane outside an already restricted process. macOS Seatbelt and the Linux supervisor
 cannot necessarily nest inside an agent or CI runner sandbox. Run the Docker lane where the Docker

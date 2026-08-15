@@ -248,7 +248,11 @@ describeLive("live Docker compute boundary", () => {
             Image: image,
             Entrypoint: ["/bin/sh", "-c"],
             Cmd: ["trap : TERM INT; while :; do sleep 3600; done"],
-            HostConfig: { SecurityOpt: ["seccomp=unconfined"] },
+            HostConfig: {
+                SecurityOpt: ["seccomp=unconfined", "apparmor=unconfined"],
+                MaskedPaths: [],
+                ReadonlyPaths: [],
+            },
             WorkingDir: "/workspace",
         });
         await container.start();

@@ -79,6 +79,9 @@ describe("DockerEnvironment", () => {
                             Target: DOCKER_SUPERVISOR_PATH,
                         }),
                     ]),
+                    SecurityOpt: ["seccomp=unconfined", "apparmor=unconfined"],
+                    MaskedPaths: [],
+                    ReadonlyPaths: [],
                 }),
             }),
         );

@@ -80,9 +80,10 @@ jobs:
 
             - name: Build the container test image
               if: matrix.docker
-              env:
-                  RIG_GYM_IMAGE: rig-gym:local
-              run: pnpm build:gym
+              run: >-
+                  docker build
+                  --tag rig-gym:local
+                  packages/happy-agent-compute/tests/fixtures
 
             - name: Prove the container boundary
               # GitHub's macOS runners have no Docker daemon, so the container backend is proven on
