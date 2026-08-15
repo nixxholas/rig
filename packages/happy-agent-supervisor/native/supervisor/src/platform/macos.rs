@@ -4,9 +4,10 @@ use crate::platform::child::{
     set_forward_target, wait_for_pid, wait_status_to_workload_status,
 };
 use crate::policy::{PermissionMode, SupervisorPolicy};
-use crate::proxy::OutgoingProxy;
+use crate::proxy::{OutgoingProxy, egress};
 use crate::{SupervisorResult, invalid_input};
 use std::ffi::{CStr, CString, OsString};
+use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
 
 #[link(name = "sandbox")]
@@ -22,10 +23,22 @@ unsafe extern "C" {
 
 pub(crate) fn run(policy: SupervisorPolicy, command: Vec<OsString>) -> SupervisorResult<()> {
     refuse_nested_sandbox()?;
-    // The front-ends are bound before the profile is installed, so the profile can deny binding
-    // outright while the proxy still holds its listeners.
+    // There is no network namespace here, so the split between the two processes is the profile
+    // itself. The egress process is forked first and never has the profile applied to it; this
+    // process binds the front-ends, is sandboxed with the workload, and can reach nothing but its
+    // own loopback ports. A fault in a front-end therefore reaches no more of the network than the
+    // workload does.
+    let mut egress_process = None;
     let proxy = match &policy.network.outgoing_proxy {
-        Some(proxy) => Some(crate::proxy::prepare(proxy)?),
+        Some(proxy_policy) => {
+            let egress = egress::start(&policy.network.allowed_hosts)?;
+            // The link outlives this borrow: the proxy holds it until the process ends, and closing
+            // it is how the egress process is told the workload is finished.
+            egress_process = Some((egress.pid, egress.link.as_raw_fd()));
+            // The front-ends are bound before the profile is installed, so the profile can deny
+            // binding outright while the proxy still holds its listeners.
+            Some(crate::proxy::prepare(proxy_policy, egress.link)?)
+        }
         None => None,
     };
     if policy.mode != PermissionMode::FullAccess {
@@ -39,16 +52,21 @@ pub(crate) fn run(policy: SupervisorPolicy, command: Vec<OsString>) -> Superviso
     }
     match proxy {
         None => exec_target(&command, &[]),
-        Some(proxy) => run_beside_proxy(proxy, &command),
+        Some(proxy) => run_beside_proxy(proxy, &command, egress_process),
     }
 }
 
-/// Runs the workload as a child so the proxy survives it.
+/// Runs the workload as a child so the front-ends survive it.
 ///
 /// `execve` would replace this process image, and with it the front-ends the workload is about to
 /// use, so the two have to be separate processes. The child's exit code or terminating signal is
-/// reproduced here, which keeps the supervisor invisible to whoever ran it.
-fn run_beside_proxy(proxy: OutgoingProxy, command: &[OsString]) -> SupervisorResult<()> {
+/// reproduced here, which keeps the supervisor invisible to whoever ran it, and the egress process
+/// is ended before that happens so nothing outlives the workload.
+fn run_beside_proxy(
+    proxy: OutgoingProxy,
+    command: &[OsString],
+    egress_process: Option<(libc::pid_t, RawFd)>,
+) -> SupervisorResult<()> {
     let environment = proxy.environment().to_vec();
     install_signal_forwarders()?;
     // Forked before the proxy has any threads, so the child reaches `execve` without a chance of
@@ -69,6 +87,9 @@ fn run_beside_proxy(proxy: OutgoingProxy, command: &[OsString]) -> SupervisorRes
     proxy.serve()?;
     let status = wait_for_pid(workload)?;
     set_forward_target(0);
+    if let Some((pid, link)) = egress_process {
+        egress::close(link, pid);
+    }
     let status = wait_status_to_workload_status(status).unwrap_or(WorkloadStatus {
         kind: STATUS_EXIT,
         value: 125,
@@ -134,10 +155,10 @@ fn create_profile(
         file_write,
     ];
     if !front_end_ports.is_empty() {
-        // Every destination is reached through the descriptor the host already connected, so the
-        // workload is given exactly one place to connect to and no name resolution at all. Reads
-        // and writes on an established socket are not a Seatbelt operation, which is what lets the
-        // link keep working under a profile that denies outbound connections.
+        // Every destination is reached through the socketpair created before this profile existed,
+        // so everything under it is given exactly one place to connect to and no name resolution at
+        // all. Reads and writes on an established socket are not a Seatbelt operation, which is
+        // what lets the link keep working under a profile that denies outbound connections.
         sections.push(
             "(allow system-socket (socket-domain AF_INET) (socket-domain AF_INET6))".to_string(),
         );
@@ -262,11 +283,7 @@ mod tests {
                     "egress": true,
                     "allowedHosts": ["example.com"],
                     "localBinding": false,
-                    "outgoingProxy": {
-                        "upstreamFd": 3,
-                        "token": "token",
-                        "frontEnds": ["http", "socks5"]
-                    }
+                    "outgoingProxy": {"frontEnds": ["http", "socks5"]}
                 }
             }"#,
         )

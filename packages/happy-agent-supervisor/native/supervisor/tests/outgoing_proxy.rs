@@ -1,249 +1,50 @@
-//! End-to-end behaviour of the outgoing proxy, with a real host on the other end of a real
-//! descriptor. The test process plays Rig: it connects the link before the supervisor starts,
-//! authenticates the command's token, and applies that command's policy per connection.
+//! End-to-end behaviour of the outgoing proxy, with nothing outside the supervisor taking part.
+//!
+//! The test starts an origin server and then runs the real supervisor, which forks its own egress
+//! process outside the jail, binds its own front-ends inside it, and enforces the command's host
+//! list itself. The workload only ever sees loopback proxy endpoints in its environment.
+//!
+//! `127.0.0.1` appears in the allowed hosts on purpose: it is the one case where an address inside
+//! the machine may be reached, because the policy named that literal itself. The `localhost` cases
+//! are the opposite, and are what proves a name the policy allows cannot be pointed inward.
 
 use serde_json::json;
-use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::os::fd::{IntoRawFd, RawFd};
-use std::os::unix::net::UnixStream;
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Output, Stdio};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 const SUPERVISOR: &str = env!("CARGO_BIN_EXE_happy-agent-supervisor");
-const TOKEN: &str = "command-scoped-token-0123456789";
-const ALLOWED_HOST: &str = "allowed.invalid";
 const DENIED_HOST: &str = "denied.invalid";
-
-const MAGIC: [u8; 4] = *b"HPX1";
-const FRAME_OPEN: u8 = 1;
-const FRAME_OPENED: u8 = 2;
-const FRAME_REFUSED: u8 = 3;
-const FRAME_DATA: u8 = 4;
-const FRAME_END: u8 = 5;
-const FRAME_RESET: u8 = 6;
-const FRAME_WINDOW: u8 = 7;
-const REFUSED_BLOCKED: u8 = 1;
-const INITIAL_WINDOW_BYTES: u32 = 256 * 1024;
 const RUN_TIMEOUT: Duration = Duration::from_secs(30);
 
 // ---------------------------------------------------------------------------------------------
-// The host proxy. One long-lived server would resolve a token to one command's policy; this test
-// is one command, so the policy is fixed and the token check is the same fail-closed check.
+// The origin the egress process connects to on the workload's behalf.
 // ---------------------------------------------------------------------------------------------
 
-#[derive(Clone)]
-struct HostPolicy {
-    token: String,
-    allowed_host: String,
-    origin: SocketAddr,
+struct Origin {
+    address: SocketAddr,
+    connections: Arc<AtomicU64>,
 }
 
-struct Link {
-    reader: UnixStream,
-    writer: Mutex<UnixStream>,
-}
-
-struct HostStream {
-    socket: TcpStream,
-    credit: Arc<(Mutex<u32>, Condvar)>,
-}
-
-/// Authenticates the token and then serves streams under `policy`.
-///
-/// A token that does not authenticate gets a refusal and the link is dropped, which is the only
-/// answer the supervisor turns into "no network at all".
-fn serve_host(link: UnixStream, policy: HostPolicy, opened: Arc<AtomicU64>) {
-    let mut reader = match link.try_clone() {
-        Ok(reader) => reader,
-        Err(_) => return,
-    };
-    let mut hello = [0_u8; 6];
-    if reader.read_exact(&mut hello).is_err() || hello[..4] != MAGIC {
-        return;
-    }
-    let length = u16::from_be_bytes([hello[4], hello[5]]) as usize;
-    let mut token = vec![0_u8; length];
-    if reader.read_exact(&mut token).is_err() {
-        return;
-    }
-    let mut writer = match link.try_clone() {
-        Ok(writer) => writer,
-        Err(_) => return,
-    };
-    if token != policy.token.as_bytes() {
-        let mut refusal = MAGIC.to_vec();
-        refusal.push(1);
-        let _ = writer.write_all(&refusal);
-        let _ = writer.flush();
-        let _ = link.shutdown(Shutdown::Both);
-        return;
-    }
-    let mut acceptance = MAGIC.to_vec();
-    acceptance.push(0);
-    if writer.write_all(&acceptance).is_err() {
-        return;
-    }
-
-    let link = Arc::new(Link {
-        reader: match link.try_clone() {
-            Ok(reader) => reader,
-            Err(_) => return,
-        },
-        writer: Mutex::new(writer),
-    });
-    let mut streams: HashMap<u32, HostStream> = HashMap::new();
-    let mut header = [0_u8; 9];
-    loop {
-        if (&link.reader).read_exact(&mut header).is_err() {
-            break;
-        }
-        let kind = header[0];
-        let id = u32::from_be_bytes([header[1], header[2], header[3], header[4]]);
-        let length = u32::from_be_bytes([header[5], header[6], header[7], header[8]]) as usize;
-        let mut payload = vec![0_u8; length];
-        if (&link.reader).read_exact(&mut payload).is_err() {
-            break;
-        }
-        match kind {
-            FRAME_OPEN => {
-                let port = u16::from_be_bytes([payload[0], payload[1]]);
-                let host_length = u16::from_be_bytes([payload[2], payload[3]]) as usize;
-                let host = String::from_utf8_lossy(&payload[4..4 + host_length]).into_owned();
-                if host != policy.allowed_host {
-                    let mut refusal = vec![REFUSED_BLOCKED];
-                    refusal.extend_from_slice(
-                        format!("{host}:{port} is not in this command's allow list").as_bytes(),
-                    );
-                    write_frame(&link, FRAME_REFUSED, id, &refusal);
-                    continue;
-                }
-                let Ok(socket) = TcpStream::connect(policy.origin) else {
-                    write_frame(&link, FRAME_REFUSED, id, &[3]);
-                    continue;
-                };
-                opened.fetch_add(1, Ordering::SeqCst);
-                write_frame(&link, FRAME_OPENED, id, &[]);
-                let credit = Arc::new((Mutex::new(INITIAL_WINDOW_BYTES), Condvar::new()));
-                let Ok(download) = socket.try_clone() else {
-                    break;
-                };
-                streams.insert(
-                    id,
-                    HostStream {
-                        socket: match socket.try_clone() {
-                            Ok(socket) => socket,
-                            Err(_) => break,
-                        },
-                        credit: Arc::clone(&credit),
-                    },
-                );
-                let link = Arc::clone(&link);
-                std::thread::spawn(move || forward_destination(download, link, id, credit));
-            }
-            FRAME_DATA => {
-                if let Some(stream) = streams.get_mut(&id) {
-                    if (&stream.socket).write_all(&payload).is_err() {
-                        streams.remove(&id);
-                        continue;
-                    }
-                    write_frame(&link, FRAME_WINDOW, id, &(payload.len() as u32).to_be_bytes());
-                }
-            }
-            FRAME_END => {
-                if let Some(stream) = streams.get(&id) {
-                    let _ = stream.socket.shutdown(Shutdown::Write);
-                }
-            }
-            FRAME_RESET => {
-                if let Some(stream) = streams.remove(&id) {
-                    let _ = stream.socket.shutdown(Shutdown::Both);
-                }
-            }
-            FRAME_WINDOW => {
-                if let Some(stream) = streams.get(&id) {
-                    let granted =
-                        u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                    let (credit, signal) = &*stream.credit;
-                    let mut available = credit.lock().unwrap_or_else(|error| error.into_inner());
-                    *available = available.saturating_add(granted);
-                    signal.notify_all();
-                }
-            }
-            _ => break,
-        }
-    }
-    for stream in streams.values() {
-        let _ = stream.socket.shutdown(Shutdown::Both);
-    }
-}
-
-/// Sends destination bytes back, never exceeding the credit the supervisor granted.
-fn forward_destination(
-    mut socket: TcpStream,
-    link: Arc<Link>,
-    id: u32,
-    credit: Arc<(Mutex<u32>, Condvar)>,
-) {
-    let mut buffer = [0_u8; 16 * 1024];
-    loop {
-        let read = match socket.read(&mut buffer) {
-            Ok(0) | Err(_) => break,
-            Ok(read) => read,
-        };
-        let mut sent = 0;
-        while sent < read {
-            let allowed = {
-                let (available, signal) = &*credit;
-                let mut available =
-                    available.lock().unwrap_or_else(|error| error.into_inner());
-                while *available == 0 {
-                    available = signal
-                        .wait(available)
-                        .unwrap_or_else(|error| error.into_inner());
-                }
-                let allowed = (read - sent).min(*available as usize);
-                *available -= allowed as u32;
-                allowed
-            };
-            write_frame(&link, FRAME_DATA, id, &buffer[sent..sent + allowed]);
-            sent += allowed;
-        }
-    }
-    write_frame(&link, FRAME_END, id, &[]);
-}
-
-fn write_frame(link: &Link, kind: u8, id: u32, payload: &[u8]) {
-    let mut frame = Vec::with_capacity(9 + payload.len());
-    frame.push(kind);
-    frame.extend_from_slice(&id.to_be_bytes());
-    frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-    frame.extend_from_slice(payload);
-    let mut writer = link.writer.lock().unwrap_or_else(|error| error.into_inner());
-    let _ = writer.write_all(&frame);
-    let _ = writer.flush();
-}
-
-// ---------------------------------------------------------------------------------------------
-// The origin the host proxy connects to on the command's behalf.
-// ---------------------------------------------------------------------------------------------
-
-fn start_origin() -> SocketAddr {
+fn start_origin() -> Origin {
     let listener = TcpListener::bind("127.0.0.1:0")
         .unwrap_or_else(|error| panic!("bind origin listener: {error}"));
     let address = listener
         .local_addr()
         .unwrap_or_else(|error| panic!("origin address: {error}"));
+    let connections = Arc::new(AtomicU64::new(0));
+    let counted = Arc::clone(&connections);
     std::thread::spawn(move || {
         for connection in listener.incoming() {
             let Ok(mut connection) = connection else {
                 return;
             };
+            counted.fetch_add(1, Ordering::SeqCst);
             std::thread::spawn(move || {
                 // The origin answers one request and echoes anything else, which covers both the
                 // forwarded plaintext path and the opaque tunnel paths.
@@ -276,53 +77,44 @@ fn start_origin() -> SocketAddr {
             });
         }
     });
-    address
+    Origin {
+        address,
+        connections,
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
-// Running the supervisor with the link already connected.
+// Running the supervisor.
 // ---------------------------------------------------------------------------------------------
 
 struct ProxiedRun {
     output: Output,
-    opened_streams: u64,
+    origin_connections: u64,
 }
 
-fn run_workload(operation: &str, token_the_host_expects: &str, front_ends: &[&str]) -> ProxiedRun {
+fn run_workload(operation: &str, allowed_hosts: &[&str], front_ends: &[&str]) -> ProxiedRun {
     let workspace =
         tempfile::tempdir().unwrap_or_else(|error| panic!("temporary workspace: {error}"));
     let origin = start_origin();
-    let (host_end, supervisor_end) =
-        UnixStream::pair().unwrap_or_else(|error| panic!("create the proxy link: {error}"));
-    let opened = Arc::new(AtomicU64::new(0));
-    let host_opened = Arc::clone(&opened);
-    let policy = HostPolicy {
-        token: token_the_host_expects.to_string(),
-        allowed_host: ALLOWED_HOST.to_string(),
-        origin,
-    };
-    let host = std::thread::spawn(move || serve_host(host_end, policy, host_opened));
-
     let output = supervise(
         &workspace,
-        supervisor_end,
+        allowed_hosts,
         front_ends,
         operation,
-        &[("SUPERVISOR_TEST_ORIGIN", origin.to_string())],
+        &origin.address.to_string(),
     );
-    let _ = host.join();
     ProxiedRun {
         output,
-        opened_streams: opened.load(Ordering::SeqCst),
+        origin_connections: origin.connections.load(Ordering::SeqCst),
     }
 }
 
 fn supervise(
     workspace: &TempDir,
-    supervisor_end: UnixStream,
+    allowed_hosts: &[&str],
     front_ends: &[&str],
     operation: &str,
-    environment: &[(&str, String)],
+    origin: &str,
 ) -> Output {
     let policy_path = workspace.path().join("policy.json");
     std::fs::write(
@@ -331,13 +123,9 @@ fn supervise(
             "mode": "workspace_write",
             "network": {
                 "egress": true,
-                "allowedHosts": [ALLOWED_HOST],
+                "allowedHosts": allowed_hosts,
                 "localBinding": false,
-                "outgoingProxy": {
-                    "upstreamFd": 3,
-                    "token": TOKEN,
-                    "frontEnds": front_ends
-                }
+                "outgoingProxy": {"frontEnds": front_ends}
             }
         }))
         .unwrap_or_else(|error| panic!("serialize policy: {error}")),
@@ -353,24 +141,9 @@ fn supervise(
         .arg(std::env::current_exe().unwrap_or_else(|error| panic!("current test binary: {error}")))
         .args(["--exact", "proxy_workload_process", "--nocapture"])
         .env("SUPERVISOR_TEST_PROXY_WORKLOAD", operation)
+        .env("SUPERVISOR_TEST_ORIGIN", origin)
         .stdin(Stdio::null());
-    for (key, value) in environment {
-        command.env(key, value);
-    }
-    let link = supervisor_end.into_raw_fd();
-    unsafe {
-        command.pre_exec(move || {
-            // Rig hands over the descriptor it already connected. Nothing inside the sandbox ever
-            // has to find the proxy by address.
-            if libc::dup2(link, 3) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    let output = run_bounded(command);
-    close_fd(link);
-    output
+    run_bounded(command)
 }
 
 /// Runs the supervisor with a deadline.
@@ -422,10 +195,14 @@ fn read_to_end(mut source: impl Read) -> Vec<u8> {
     buffer
 }
 
-fn close_fd(descriptor: RawFd) {
-    unsafe {
-        libc::close(descriptor);
-    }
+fn assert_succeeded(run: &ProxiedRun) -> String {
+    let stdout = String::from_utf8_lossy(&run.output.stdout).into_owned();
+    assert!(
+        run.output.status.success(),
+        "stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&run.output.stderr)
+    );
+    stdout
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -434,102 +211,112 @@ fn close_fd(descriptor: RawFd) {
 
 #[test]
 fn an_allowed_host_is_reachable_through_the_http_front_end() {
-    let run = run_workload("http_forward", TOKEN, &["http", "socks5"]);
-    let stdout = String::from_utf8_lossy(&run.output.stdout);
+    let run = run_workload("http_forward", &["127.0.0.1"], &["http", "socks5"]);
+    let stdout = assert_succeeded(&run);
 
-    assert!(
-        run.output.status.success(),
-        "stdout:\n{stdout}\nstderr:\n{}",
-        String::from_utf8_lossy(&run.output.stderr)
-    );
     assert!(stdout.contains("http-forward=origin-ok"), "stdout:\n{stdout}");
-    assert_eq!(run.opened_streams, 1);
+    assert_eq!(run.origin_connections, 1);
 }
 
 #[test]
 fn an_allowed_host_is_reachable_through_connect_and_socks() {
-    let run = run_workload("tunnels", TOKEN, &["http", "socks5"]);
-    let stdout = String::from_utf8_lossy(&run.output.stdout);
+    let run = run_workload("tunnels", &["127.0.0.1"], &["http", "socks5"]);
+    let stdout = assert_succeeded(&run);
 
-    assert!(
-        run.output.status.success(),
-        "stdout:\n{stdout}\nstderr:\n{}",
-        String::from_utf8_lossy(&run.output.stderr)
-    );
     assert!(stdout.contains("connect-tunnel=tunnelled"), "stdout:\n{stdout}");
     assert!(stdout.contains("socks-tunnel=tunnelled"), "stdout:\n{stdout}");
-    assert_eq!(run.opened_streams, 2);
+    assert_eq!(run.origin_connections, 2);
 }
 
 #[test]
 fn a_denied_host_is_refused_in_each_front_end_vocabulary() {
-    let run = run_workload("denied", TOKEN, &["http", "socks5"]);
-    let stdout = String::from_utf8_lossy(&run.output.stdout);
+    let run = run_workload("denied", &["127.0.0.1"], &["http", "socks5"]);
+    let stdout = assert_succeeded(&run);
 
-    assert!(
-        run.output.status.success(),
-        "stdout:\n{stdout}\nstderr:\n{}",
-        String::from_utf8_lossy(&run.output.stderr)
-    );
     assert!(stdout.contains("connect-denied=403"), "stdout:\n{stdout}");
     assert!(stdout.contains("forward-denied=403"), "stdout:\n{stdout}");
     assert!(stdout.contains("socks-denied=2"), "stdout:\n{stdout}");
-    assert_eq!(run.opened_streams, 0);
+    assert_eq!(run.origin_connections, 0);
+}
+
+#[test]
+fn an_allowed_name_that_resolves_inward_is_refused() {
+    let run = run_workload("private_address", &["localhost"], &["http", "socks5"]);
+    let stdout = assert_succeeded(&run);
+
+    assert!(stdout.contains("connect-private=403"), "stdout:\n{stdout}");
+    assert!(stdout.contains("socks-private=2"), "stdout:\n{stdout}");
+    assert_eq!(
+        run.origin_connections, 0,
+        "a name the policy allows must not reach an address it does not"
+    );
+}
+
+#[test]
+fn a_front_end_credential_that_is_missing_or_wrong_is_refused() {
+    let run = run_workload("credentials", &["127.0.0.1"], &["http", "socks5"]);
+    let stdout = assert_succeeded(&run);
+
+    assert!(stdout.contains("no-credential=407"), "stdout:\n{stdout}");
+    assert!(stdout.contains("wrong-credential=407"), "stdout:\n{stdout}");
+    assert!(stdout.contains("socks-without-authentication=255"), "stdout:\n{stdout}");
+    assert!(stdout.contains("socks-wrong-credential=1"), "stdout:\n{stdout}");
+    assert_eq!(run.origin_connections, 0);
 }
 
 #[test]
 fn the_workload_cannot_reach_the_destination_without_the_proxy() {
-    let run = run_workload("direct", TOKEN, &["http", "socks5"]);
-    let stdout = String::from_utf8_lossy(&run.output.stdout);
+    let run = run_workload("direct", &["127.0.0.1"], &["http", "socks5"]);
+    let stdout = assert_succeeded(&run);
 
-    assert!(
-        run.output.status.success(),
-        "stdout:\n{stdout}\nstderr:\n{}",
-        String::from_utf8_lossy(&run.output.stderr)
-    );
     assert!(stdout.contains("direct-connect=refused"), "stdout:\n{stdout}");
-    assert!(stdout.contains("upstream-descriptor=closed"), "stdout:\n{stdout}");
-    assert_eq!(run.opened_streams, 0);
+    assert!(stdout.contains("inherited-sockets=0"), "stdout:\n{stdout}");
+    assert_eq!(run.origin_connections, 0);
 }
 
+/// The proxy adds a process on each side of the workload, and neither may stand between the
+/// workload's own status and the shell that ran the supervisor.
 #[test]
-fn a_token_the_host_does_not_recognise_stops_the_command() {
-    let run = run_workload("http_forward", "a-different-command's-token", &["http"]);
-    let stderr = String::from_utf8_lossy(&run.output.stderr);
-
-    assert_eq!(run.output.status.code(), Some(125));
-    assert!(
-        String::from_utf8_lossy(&run.output.stdout).is_empty(),
-        "the workload must not run at all"
+fn the_workload_status_still_reaches_the_caller_beside_the_proxy() {
+    let exited = run_workload("exit_37", &["127.0.0.1"], &["http", "socks5"]);
+    assert_eq!(
+        exited.output.status.code(),
+        Some(37),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&exited.output.stderr)
     );
-    assert!(stderr.contains("refused the command authentication token"), "stderr:\n{stderr}");
+
+    let signalled = run_workload("terminate", &["127.0.0.1"], &["http", "socks5"]);
+    assert_eq!(
+        signalled.output.status.code(),
+        None,
+        "stderr:\n{}",
+        String::from_utf8_lossy(&signalled.output.stderr)
+    );
+    assert_eq!(
+        signalled.output.status.signal(),
+        Some(libc::SIGTERM),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&signalled.output.stderr)
+    );
 }
 
 #[test]
 fn a_transfer_larger_than_one_window_completes_in_both_directions() {
-    let run = run_workload("large_transfer", TOKEN, &["socks5"]);
-    let stdout = String::from_utf8_lossy(&run.output.stdout);
+    let run = run_workload("large_transfer", &["127.0.0.1"], &["socks5"]);
+    let stdout = assert_succeeded(&run);
 
-    assert!(
-        run.output.status.success(),
-        "stdout:\n{stdout}\nstderr:\n{}",
-        String::from_utf8_lossy(&run.output.stderr)
-    );
     assert!(stdout.contains("large-transfer=1048576"), "stdout:\n{stdout}");
 }
 
 #[test]
 fn only_the_requested_front_ends_are_offered() {
-    let run = run_workload("front_ends", TOKEN, &["socks5"]);
-    let stdout = String::from_utf8_lossy(&run.output.stdout);
+    let run = run_workload("front_ends", &["127.0.0.1"], &["socks5"]);
+    let stdout = assert_succeeded(&run);
 
-    assert!(
-        run.output.status.success(),
-        "stdout:\n{stdout}\nstderr:\n{}",
-        String::from_utf8_lossy(&run.output.stderr)
-    );
     assert!(stdout.contains("http-proxy=unset"), "stdout:\n{stdout}");
     assert!(stdout.contains("all-proxy=socks5h"), "stdout:\n{stdout}");
+    assert!(stdout.contains("all-proxy-credentials=present"), "stdout:\n{stdout}");
     assert!(stdout.contains("no-proxy=empty"), "stdout:\n{stdout}");
 }
 
@@ -542,76 +329,98 @@ fn proxy_workload_process() {
     let Ok(operation) = std::env::var("SUPERVISOR_TEST_PROXY_WORKLOAD") else {
         return;
     };
+    let origin = std::env::var("SUPERVISOR_TEST_ORIGIN")
+        .unwrap_or_else(|error| panic!("origin address: {error}"));
+    let origin_port = origin
+        .rsplit(':')
+        .next()
+        .unwrap_or_default()
+        .parse::<u16>()
+        .unwrap_or_else(|error| panic!("origin port: {error}"));
     match operation.as_str() {
         "http_forward" => {
-            let response = http_proxy_request(&format!("http://{ALLOWED_HOST}/probe"));
+            let response = http_proxy_request(&format!("http://{origin}/probe"), &origin);
             println!(
                 "http-forward={}",
                 response.rsplit("\r\n\r\n").next().unwrap_or_default()
             );
         }
         "tunnels" => {
-            let mut connect = connect_to(http_proxy_endpoint());
-            write_all(
-                &mut connect,
-                format!("CONNECT {ALLOWED_HOST}:443 HTTP/1.1\r\nHost: {ALLOWED_HOST}:443\r\n\r\n")
-                    .as_bytes(),
-            );
-            let status = read_head_line(&mut connect);
-            assert!(status.starts_with("HTTP/1.1 200"), "CONNECT said: {status}");
-            // The blank line ending the response head belongs to the proxy exchange, not to the
-            // tunnel, so it is consumed before the tunnel carries anything.
-            while !read_head_line(&mut connect).is_empty() {}
+            let mut connect = open_tunnel("127.0.0.1", origin_port);
             println!("connect-tunnel={}", echo_through(&mut connect));
 
-            let mut socks = socks_connect(ALLOWED_HOST, 443);
+            let mut socks = socks_connect("127.0.0.1", origin_port);
             println!("socks-tunnel={}", echo_through(&mut socks));
         }
         "denied" => {
-            let mut connect = connect_to(http_proxy_endpoint());
-            write_all(
-                &mut connect,
-                format!("CONNECT {DENIED_HOST}:443 HTTP/1.1\r\n\r\n").as_bytes(),
-            );
-            println!("connect-denied={}", status_code(&read_head_line(&mut connect)));
+            println!("connect-denied={}", connect_status(DENIED_HOST, 443));
 
-            let forwarded = http_proxy_request(&format!("http://{DENIED_HOST}/probe"));
+            let forwarded =
+                http_proxy_request(&format!("http://{DENIED_HOST}/probe"), DENIED_HOST);
             println!(
                 "forward-denied={}",
                 status_code(forwarded.lines().next().unwrap_or_default())
             );
 
-            let mut socks = connect_to(socks_proxy_endpoint());
+            println!("socks-denied={}", socks_reply(DENIED_HOST, 443));
+        }
+        "private_address" => {
+            println!("connect-private={}", connect_status("localhost", origin_port));
+            println!("socks-private={}", socks_reply("localhost", origin_port));
+        }
+        "credentials" => {
+            let mut client = connect_to(proxy(HTTP_PROXY).address);
+            write_all(
+                &mut client,
+                format!("CONNECT 127.0.0.1:{origin_port} HTTP/1.1\r\n\r\n").as_bytes(),
+            );
+            println!("no-credential={}", status_code(&read_head_line(&mut client)));
+
+            let wrong = proxy(HTTP_PROXY);
+            let mut client = connect_to(wrong.address.clone());
+            write_all(
+                &mut client,
+                format!(
+                    "CONNECT 127.0.0.1:{origin_port} HTTP/1.1\r\nProxy-Authorization: Basic {}\r\n\r\n",
+                    base64(format!("{}:not-the-secret", wrong.user).as_bytes())
+                )
+                .as_bytes(),
+            );
+            println!("wrong-credential={}", status_code(&read_head_line(&mut client)));
+
+            let mut socks = connect_to(proxy(ALL_PROXY).address);
             write_all(&mut socks, &[5, 1, 0]);
             let mut greeting = [0_u8; 2];
             read_exact(&mut socks, &mut greeting);
-            let mut request = vec![5, 1, 0, 3, DENIED_HOST.len() as u8];
-            request.extend_from_slice(DENIED_HOST.as_bytes());
-            request.extend_from_slice(&443_u16.to_be_bytes());
-            write_all(&mut socks, &request);
-            let mut reply = [0_u8; 10];
-            read_exact(&mut socks, &mut reply);
-            println!("socks-denied={}", reply[1]);
+            println!("socks-without-authentication={}", greeting[1]);
+
+            let credential = proxy(ALL_PROXY);
+            let mut socks = connect_to(credential.address.clone());
+            write_all(&mut socks, &[5, 1, 2]);
+            let mut greeting = [0_u8; 2];
+            read_exact(&mut socks, &mut greeting);
+            assert_eq!(greeting, [5, 2], "the SOCKS front-end must demand a credential");
+            let mut authentication = vec![1, credential.user.len() as u8];
+            authentication.extend_from_slice(credential.user.as_bytes());
+            authentication.push(b"not-the-secret".len() as u8);
+            authentication.extend_from_slice(b"not-the-secret");
+            write_all(&mut socks, &authentication);
+            let mut result = [0_u8; 2];
+            read_exact(&mut socks, &mut result);
+            println!("socks-wrong-credential={}", result[1]);
         }
         "direct" => {
-            let origin = std::env::var("SUPERVISOR_TEST_ORIGIN")
-                .unwrap_or_else(|error| panic!("origin address: {error}"));
-            let direct = TcpStream::connect(&origin);
             println!(
                 "direct-connect={}",
-                match direct {
-                    Ok(_) => "reached".to_string(),
-                    Err(_) => "refused".to_string(),
+                match TcpStream::connect(&origin) {
+                    Ok(_) => "reached",
+                    Err(_) => "refused",
                 }
             );
-            let descriptor = unsafe { libc::fcntl(3, libc::F_GETFD) };
-            println!(
-                "upstream-descriptor={}",
-                if descriptor < 0 { "closed" } else { "inherited" }
-            );
+            println!("inherited-sockets={}", inherited_sockets());
         }
         "large_transfer" => {
-            let mut socks = socks_connect(ALLOWED_HOST, 443);
+            let mut socks = socks_connect("127.0.0.1", origin_port);
             let payload = vec![b'x'; 1024 * 1024];
             let mut sender = socks
                 .try_clone()
@@ -630,6 +439,12 @@ fn proxy_workload_process() {
             }
             println!("large-transfer={}", echoed.len());
         }
+        "exit_37" => {
+            std::process::exit(37);
+        }
+        "terminate" => {
+            unsafe { libc::raise(libc::SIGTERM) };
+        }
         "front_ends" => {
             println!(
                 "http-proxy={}",
@@ -638,13 +453,18 @@ fn proxy_workload_process() {
                     Err(_) => "unset".to_string(),
                 }
             );
+            let all_proxy = std::env::var("ALL_PROXY").unwrap_or_default();
             println!(
                 "all-proxy={}",
-                std::env::var("ALL_PROXY")
-                    .unwrap_or_default()
-                    .split("://")
-                    .next()
-                    .unwrap_or_default()
+                all_proxy.split("://").next().unwrap_or_default()
+            );
+            println!(
+                "all-proxy-credentials={}",
+                if all_proxy.contains('@') {
+                    "present"
+                } else {
+                    "absent"
+                }
             );
             println!(
                 "no-proxy={}",
@@ -659,20 +479,34 @@ fn proxy_workload_process() {
     }
 }
 
-fn http_proxy_endpoint() -> String {
-    endpoint(&std::env::var("HTTP_PROXY").unwrap_or_else(|error| panic!("HTTP_PROXY: {error}")))
+const HTTP_PROXY: &str = "HTTP_PROXY";
+const ALL_PROXY: &str = "ALL_PROXY";
+
+/// One front-end address and the credential the supervisor delivered with it.
+struct ProxyEndpoint {
+    address: String,
+    user: String,
+    secret: String,
 }
 
-fn socks_proxy_endpoint() -> String {
-    endpoint(&std::env::var("ALL_PROXY").unwrap_or_else(|error| panic!("ALL_PROXY: {error}")))
-}
-
-fn endpoint(url: &str) -> String {
-    url.split("://")
+fn proxy(variable: &str) -> ProxyEndpoint {
+    let url = std::env::var(variable).unwrap_or_else(|error| panic!("{variable}: {error}"));
+    let rest = url
+        .split("://")
         .nth(1)
         .unwrap_or_default()
-        .trim_end_matches('/')
-        .to_string()
+        .trim_end_matches('/');
+    let (user_information, address) = rest
+        .rsplit_once('@')
+        .unwrap_or_else(|| panic!("{variable} must carry the proxy credential: {url}"));
+    let (user, secret) = user_information
+        .split_once(':')
+        .unwrap_or_else(|| panic!("{variable} must carry a user and a secret: {url}"));
+    ProxyEndpoint {
+        address: address.to_string(),
+        user: user.to_string(),
+        secret: secret.to_string(),
+    }
 }
 
 fn connect_to(endpoint: String) -> TcpStream {
@@ -680,32 +514,91 @@ fn connect_to(endpoint: String) -> TcpStream {
         .unwrap_or_else(|error| panic!("connect to the front-end {endpoint}: {error}"))
 }
 
-fn http_proxy_request(url: &str) -> String {
-    let mut client = connect_to(http_proxy_endpoint());
+fn authorization(endpoint: &ProxyEndpoint) -> String {
+    base64(format!("{}:{}", endpoint.user, endpoint.secret).as_bytes())
+}
+
+fn http_proxy_request(url: &str, host: &str) -> String {
+    let endpoint = proxy(HTTP_PROXY);
+    let mut client = connect_to(endpoint.address.clone());
     write_all(
         &mut client,
-        format!("GET {url} HTTP/1.1\r\nHost: {ALLOWED_HOST}\r\nProxy-Connection: keep-alive\r\n\r\n")
-            .as_bytes(),
+        format!(
+            "GET {url} HTTP/1.1\r\nHost: {host}\r\nProxy-Authorization: Basic {}\r\n\r\n",
+            authorization(&endpoint)
+        )
+        .as_bytes(),
     );
     let mut response = String::new();
     let _ = client.read_to_string(&mut response);
     response
 }
 
-fn socks_connect(host: &str, port: u16) -> TcpStream {
-    let mut socks = connect_to(socks_proxy_endpoint());
-    write_all(&mut socks, &[5, 1, 0]);
+/// Opens a `CONNECT` tunnel and consumes the response head, so only tunnelled bytes remain.
+fn open_tunnel(host: &str, port: u16) -> TcpStream {
+    let endpoint = proxy(HTTP_PROXY);
+    let mut client = connect_to(endpoint.address.clone());
+    write_all(
+        &mut client,
+        format!(
+            "CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\nProxy-Authorization: Basic {}\r\n\r\n",
+            authorization(&endpoint)
+        )
+        .as_bytes(),
+    );
+    let status = read_head_line(&mut client);
+    assert!(status.starts_with("HTTP/1.1 200"), "CONNECT said: {status}");
+    while !read_head_line(&mut client).is_empty() {}
+    client
+}
+
+fn connect_status(host: &str, port: u16) -> String {
+    let endpoint = proxy(HTTP_PROXY);
+    let mut client = connect_to(endpoint.address.clone());
+    write_all(
+        &mut client,
+        format!(
+            "CONNECT {host}:{port} HTTP/1.1\r\nProxy-Authorization: Basic {}\r\n\r\n",
+            authorization(&endpoint)
+        )
+        .as_bytes(),
+    );
+    status_code(&read_head_line(&mut client))
+}
+
+fn socks_greet(host: &str, port: u16) -> (TcpStream, [u8; 10]) {
+    let endpoint = proxy(ALL_PROXY);
+    let mut socks = connect_to(endpoint.address.clone());
+    write_all(&mut socks, &[5, 1, 2]);
     let mut greeting = [0_u8; 2];
     read_exact(&mut socks, &mut greeting);
-    assert_eq!(greeting, [5, 0]);
+    assert_eq!(greeting, [5, 2], "the SOCKS front-end must demand a credential");
+    let mut authentication = vec![1, endpoint.user.len() as u8];
+    authentication.extend_from_slice(endpoint.user.as_bytes());
+    authentication.push(endpoint.secret.len() as u8);
+    authentication.extend_from_slice(endpoint.secret.as_bytes());
+    write_all(&mut socks, &authentication);
+    let mut accepted = [0_u8; 2];
+    read_exact(&mut socks, &mut accepted);
+    assert_eq!(accepted, [1, 0], "the SOCKS credential was refused");
+
     let mut request = vec![5, 1, 0, 3, host.len() as u8];
     request.extend_from_slice(host.as_bytes());
     request.extend_from_slice(&port.to_be_bytes());
     write_all(&mut socks, &request);
     let mut reply = [0_u8; 10];
     read_exact(&mut socks, &mut reply);
+    (socks, reply)
+}
+
+fn socks_connect(host: &str, port: u16) -> TcpStream {
+    let (socks, reply) = socks_greet(host, port);
     assert_eq!(reply[1], 0, "SOCKS refused an allowed host: {}", reply[1]);
     socks
+}
+
+fn socks_reply(host: &str, port: u16) -> u8 {
+    socks_greet(host, port).1[1]
 }
 
 fn echo_through(stream: &mut TcpStream) -> String {
@@ -713,6 +606,20 @@ fn echo_through(stream: &mut TcpStream) -> String {
     let mut echoed = [0_u8; 9];
     read_exact(stream, &mut echoed);
     String::from_utf8_lossy(&echoed).into_owned()
+}
+
+/// Counts the sockets the workload inherited, which must not include the proxy link.
+fn inherited_sockets() -> usize {
+    let mut sockets = 0;
+    for descriptor in 3..64 {
+        let mut status = unsafe { std::mem::zeroed::<libc::stat>() };
+        if unsafe { libc::fstat(descriptor, &mut status) } == 0
+            && (status.st_mode & libc::S_IFMT) == libc::S_IFSOCK
+        {
+            sockets += 1;
+        }
+    }
+    sockets
 }
 
 fn read_head_line(stream: &mut TcpStream) -> String {
@@ -749,4 +656,30 @@ fn read_exact(stream: &mut TcpStream, buffer: &mut [u8]) {
     stream
         .read_exact(buffer)
         .unwrap_or_else(|error| panic!("read from the front-end: {error}"));
+}
+
+/// The workload has to speak the client half of the credential itself, which is the whole point of
+/// delivering it in the proxy address.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut text = String::new();
+    for chunk in bytes.chunks(3) {
+        let packed = (u32::from(chunk[0]) << 16)
+            | (chunk.get(1).copied().map_or(0, u32::from) << 8)
+            | chunk.get(2).copied().map_or(0, u32::from);
+        text.push(char::from(ALPHABET[(packed >> 18) as usize & 0x3f]));
+        text.push(char::from(ALPHABET[(packed >> 12) as usize & 0x3f]));
+        text.push(if chunk.len() > 1 {
+            char::from(ALPHABET[(packed >> 6) as usize & 0x3f])
+        } else {
+            '='
+        });
+        text.push(if chunk.len() > 2 {
+            char::from(ALPHABET[packed as usize & 0x3f])
+        } else {
+            '='
+        });
+    }
+    text
 }

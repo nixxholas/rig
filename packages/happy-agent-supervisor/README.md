@@ -51,10 +51,41 @@ workspace write root. Denials win over grants. Linux write-denied paths and
 writable roots must already exist so the supervisor never creates a
 user-visible mount point while privileged.
 
-Egress with a non-empty `allowedHosts` currently fails closed. Phase 2 will
-provide the managed CONNECT bridge needed to enforce hostname filtering
-without direct network bypass or TLS interception. A host list with egress
-disabled is already enforced by the isolated network namespace.
+## Outgoing proxy
+
+Filtered egress is asked for by adding `network.outgoingProxy`, which names only
+the front-ends to offer inside the sandbox:
+
+```json
+{
+    "network": {
+        "egress": true,
+        "allowedHosts": ["example.com", "*.internal.example.com"],
+        "localBinding": false,
+        "outgoingProxy": { "frontEnds": ["http", "socks5"] }
+    }
+}
+```
+
+The supervisor provides the whole proxy. It forks an egress process before the
+sandbox exists and joins the two with a socketpair, so the caller supplies no
+descriptor and no token, and nothing inside the sandbox reaches the proxy — or
+anything else — by address. The workload is given ordinary `HTTP_PROXY` and
+`ALL_PROXY` addresses on loopback, carrying a secret generated for that one
+invocation; both front-ends refuse a client that does not present it, as HTTP
+Basic and as RFC 1929 respectively.
+
+The egress process decides every destination. The requested name must match one
+`allowedHosts` entry exactly or under one `*.suffix`, and the address that name
+actually resolved to must not be loopback, private, link-local, or multicast
+unless the policy named that IP literal directly. A bare `*` is refused: open
+egress is expressed by configuring no proxy at all, and an empty list with a
+proxy configured reaches nothing.
+
+Egress with a non-empty `allowedHosts` and no proxy fails closed, because nothing
+would be enforcing the list. A host list with egress disabled is already enforced
+by the isolated network namespace. No TLS is terminated anywhere, so the boundary
+is which host may be reached rather than what is sent to it.
 
 ## Binary resolution
 

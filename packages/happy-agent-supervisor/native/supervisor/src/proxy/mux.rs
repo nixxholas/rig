@@ -1,41 +1,24 @@
-//! The multiplexed link the supervisor shares with the host proxy.
+//! The front-end half of the link the supervisor's egress process serves.
 //!
-//! One pre-connected descriptor carries every stream, so the sandbox needs no route to anything.
-//! The frame layer is deliberately small: an existing multiplexer would pull a dependency tree into
-//! the one component that must stay auditable, and the only thing being multiplexed is
-//! `open_stream(host, port)` plus its bytes. What the protocol does not skip is per-stream credit,
-//! because a single workload connection that stops reading would otherwise stall every other
-//! stream sharing the descriptor.
+//! One socketpair carries every stream, so the jail needs no route to anything. This side opens
+//! streams and relays bytes; the far side owns the command's host list, the name resolution, and
+//! the `connect`. Neither side is reachable by address, and the workload holds neither.
 
+use crate::proxy::locks::{guard, wait};
+use crate::proxy::protocol::{
+    FRAME_DATA, FRAME_END, FRAME_HEADER_BYTES, FRAME_OPEN, FRAME_OPENED, FRAME_REFUSED,
+    FRAME_RESET, FRAME_WINDOW, HANDSHAKE_ACCEPTED, INITIAL_WINDOW_BYTES, MAGIC, MAX_CHUNK_BYTES,
+    MAX_CONCURRENT_STREAMS, MAX_HOST_BYTES, MAX_MESSAGE_BYTES, MAX_PAYLOAD_BYTES,
+    WINDOW_UPDATE_THRESHOLD_BYTES, decode_window, encode_frame,
+};
 use crate::{SupervisorResult, invalid_input};
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{Read, Write};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex};
 
-/// Longest authentication token accepted in the handshake.
-pub(crate) const MAX_TOKEN_BYTES: usize = 512;
-
-const MAGIC: [u8; 4] = *b"HPX1";
-const HANDSHAKE_ACCEPTED: u8 = 0;
-const FRAME_HEADER_BYTES: usize = 9;
-const MAX_PAYLOAD_BYTES: usize = 65_535;
-const MAX_CHUNK_BYTES: usize = 32 * 1024;
-const MAX_HOST_BYTES: usize = 255;
-const MAX_MESSAGE_BYTES: usize = 512;
-const INITIAL_WINDOW_BYTES: u32 = 256 * 1024;
-const WINDOW_UPDATE_THRESHOLD_BYTES: u32 = INITIAL_WINDOW_BYTES / 2;
-const MAX_CONCURRENT_STREAMS: usize = 256;
-
-const FRAME_OPEN: u8 = 1;
-const FRAME_OPENED: u8 = 2;
-const FRAME_REFUSED: u8 = 3;
-const FRAME_DATA: u8 = 4;
-const FRAME_END: u8 = 5;
-const FRAME_RESET: u8 = 6;
-const FRAME_WINDOW: u8 = 7;
-
-/// Why the host would not open a stream. Each front-end renders these in its own vocabulary.
+/// Why the egress process would not open a stream. Each front-end renders these in its own
+/// vocabulary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RefusalReason {
     /// The command's policy does not permit this destination.
@@ -108,14 +91,11 @@ struct StreamState {
 }
 
 impl Mux {
-    /// Authenticates on the pre-connected descriptor and starts the reader.
+    /// Greets the egress process on the socketpair and confirms it is serving.
     ///
     /// A handshake that is not accepted returns an error, and the caller refuses to run the
     /// workload at all. There is no path here that degrades into direct network access.
-    pub(crate) fn connect(link: File, token: &str) -> SupervisorResult<Arc<Self>> {
-        if token.is_empty() || token.len() > MAX_TOKEN_BYTES {
-            return Err(invalid_input("outgoing proxy token has an unusable length").into());
-        }
+    pub(crate) fn connect(link: File) -> SupervisorResult<Arc<Self>> {
         let mux = Arc::new(Self {
             link,
             write_lock: Mutex::new(()),
@@ -125,22 +105,21 @@ impl Mux {
                 closed: false,
             }),
         });
-        let mut hello = Vec::with_capacity(MAGIC.len() + 2 + token.len());
-        hello.extend_from_slice(&MAGIC);
-        hello.extend_from_slice(&(token.len() as u16).to_be_bytes());
-        hello.extend_from_slice(token.as_bytes());
-        mux.write_all(&hello)?;
+        mux.write_all(&MAGIC)?;
         let mut reply = [0_u8; MAGIC.len() + 1];
         (&mux.link).read_exact(&mut reply).map_err(|error| {
-            std::io::Error::other(format!("outgoing proxy did not answer the handshake: {error}"))
+            std::io::Error::other(format!(
+                "the sandbox egress process did not answer the handshake: {error}"
+            ))
         })?;
         if reply[..MAGIC.len()] != MAGIC {
-            return Err(invalid_input("outgoing proxy answered with an unknown protocol").into());
+            return Err(invalid_input(
+                "the sandbox egress process answered with an unknown protocol",
+            )
+            .into());
         }
         if reply[MAGIC.len()] != HANDSHAKE_ACCEPTED {
-            return Err(
-                invalid_input("outgoing proxy refused the command authentication token").into(),
-            );
+            return Err(invalid_input("the sandbox egress process refused the link").into());
         }
         Ok(mux)
     }
@@ -158,7 +137,7 @@ impl Mux {
         Ok(())
     }
 
-    /// Asks the host to connect to `host:port` and waits for its verdict.
+    /// Asks the egress process to connect to `host:port` and waits for its verdict.
     pub(crate) fn open(
         self: &Arc<Self>,
         host: &str,
@@ -277,7 +256,7 @@ impl Mux {
                     state.refusal = Some(OpenFailure::new(
                         RefusalReason::from_code(code),
                         if message.is_empty() {
-                            "the host proxy refused the connection".to_string()
+                            "the sandbox egress process refused the connection".to_string()
                         } else {
                             message
                         },
@@ -285,8 +264,8 @@ impl Mux {
                 }
             }
             FRAME_DATA => {
-                // Data past the window the host was granted is a protocol violation, and the only
-                // safe response on a trusted link is to stop believing it.
+                // Data past the window the far side was granted is a protocol violation, and the
+                // only safe response on a trusted link is to stop believing it.
                 if state.inbound.len() + payload.len() > INITIAL_WINDOW_BYTES as usize {
                     return false;
                 }
@@ -295,13 +274,7 @@ impl Mux {
             FRAME_END => state.inbound_ended = true,
             FRAME_RESET => state.aborted = true,
             FRAME_WINDOW => {
-                let granted = u32::from_be_bytes([
-                    payload.first().copied().unwrap_or(0),
-                    payload.get(1).copied().unwrap_or(0),
-                    payload.get(2).copied().unwrap_or(0),
-                    payload.get(3).copied().unwrap_or(0),
-                ]);
-                state.send_credit = state.send_credit.saturating_add(granted);
+                state.send_credit = state.send_credit.saturating_add(decode_window(payload));
             }
             _ => return false,
         }
@@ -336,12 +309,7 @@ impl Mux {
     }
 
     fn write_frame(&self, kind: u8, id: u32, payload: &[u8]) -> std::io::Result<()> {
-        let mut frame = Vec::with_capacity(FRAME_HEADER_BYTES + payload.len());
-        frame.push(kind);
-        frame.extend_from_slice(&id.to_be_bytes());
-        frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-        frame.extend_from_slice(payload);
-        self.write_all(&frame)
+        self.write_all(&encode_frame(kind, id, payload))
     }
 
     fn write_all(&self, bytes: &[u8]) -> std::io::Result<()> {
@@ -383,7 +351,7 @@ impl MuxStream {
         Ok(())
     }
 
-    /// Reads bytes the host sent, returning zero once the destination is finished.
+    /// Reads bytes the destination sent, returning zero once it is finished.
     pub(crate) fn receive(&self, buffer: &mut [u8]) -> std::io::Result<usize> {
         let (copied, consumed_total) = {
             let mut state = guard(&self.shared.state);
@@ -446,14 +414,13 @@ impl MuxStream {
 }
 
 impl Drop for MuxStream {
+    /// Every finished stream is reset, including one that closed cleanly.
+    ///
+    /// The far side is a process rather than a library call now, and it holds a real socket and two
+    /// threads per stream. Telling it unconditionally is what keeps a long-lived workload from
+    /// accumulating destination sockets it has already finished with.
     fn drop(&mut self) {
-        let needs_reset = {
-            let state = guard(&self.shared.state);
-            !(state.send_ended && state.inbound_ended)
-        };
-        if needs_reset {
-            let _ = self.mux.write_frame(FRAME_RESET, self.id, &[]);
-        }
+        let _ = self.mux.write_frame(FRAME_RESET, self.id, &[]);
         self.abort();
         self.mux.forget(self.id);
     }
@@ -464,20 +431,4 @@ fn link_closed() -> OpenFailure {
         RefusalReason::Unreachable,
         "the sandbox proxy link is not available",
     )
-}
-
-/// Poisoning cannot occur in a release build, which aborts on panic, and a poisoned lock in a debug
-/// build still describes the state accurately enough to keep failing closed.
-fn guard<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
-    match lock.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
-
-fn wait<'a, T>(signal: &Condvar, state: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
-    match signal.wait(state) {
-        Ok(state) => state,
-        Err(poisoned) => poisoned.into_inner(),
-    }
 }

@@ -5,6 +5,7 @@
 //! No TLS is unwrapped here and no certificate is ever minted here.
 
 use crate::proxy::bridge::relay;
+use crate::proxy::credential::ProxyCredential;
 use crate::proxy::mux::{Mux, MuxStream, OpenFailure, RefusalReason};
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
@@ -13,7 +14,7 @@ use std::sync::Arc;
 const MAX_HEAD_BYTES: usize = 64 * 1024;
 const READ_BUFFER_BYTES: usize = 8 * 1024;
 
-pub(crate) fn serve(mux: &Arc<Mux>, mut client: TcpStream) {
+pub(crate) fn serve(mux: &Arc<Mux>, credential: &ProxyCredential, mut client: TcpStream) {
     let head = match read_head(&mut client) {
         Ok(head) => head,
         Err(_) => {
@@ -26,6 +27,14 @@ pub(crate) fn serve(mux: &Arc<Mux>, mut client: TcpStream) {
         return;
     };
     let (header_block, remainder) = head.bytes.split_at(split);
+    if !is_authorized(header_block, credential) {
+        respond(
+            &mut client,
+            407,
+            "The sandbox proxy requires the credentials in the proxy address.",
+        );
+        return;
+    }
     let Some(request) = parse_request(header_block) else {
         respond(&mut client, 400, "The proxy request could not be understood.");
         return;
@@ -79,6 +88,28 @@ fn send_forwarded(stream: &MuxStream, forwarded: &[u8], remainder: &[u8]) -> std
         stream.send(remainder)?;
     }
     Ok(())
+}
+
+/// Whether the client proved it is the workload this proxy was created for.
+///
+/// The first `Proxy-Authorization` header decides, so a client cannot follow a wrong credential
+/// with a right one and have the second counted.
+fn is_authorized(block: &[u8], credential: &ProxyCredential) -> bool {
+    let Ok(text) = std::str::from_utf8(block) else {
+        return false;
+    };
+    for line in text.split("\r\n").skip(1) {
+        if line.is_empty() {
+            break;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.trim().eq_ignore_ascii_case("proxy-authorization") {
+            return credential.authorizes_http(value.trim());
+        }
+    }
+    false
 }
 
 fn read_head(client: &mut TcpStream) -> std::io::Result<Head> {
@@ -207,12 +238,18 @@ fn respond(client: &mut TcpStream, status: u16, message: &str) {
     let reason = match status {
         400 => "Bad Request",
         403 => "Forbidden",
+        407 => "Proxy Authentication Required",
         431 => "Request Header Fields Too Large",
         _ => "Bad Gateway",
     };
+    let challenge = if status == 407 {
+        "Proxy-Authenticate: Basic realm=\"Sandbox proxy\"\r\n"
+    } else {
+        ""
+    };
     let body = format!("{message}\n");
     let response = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status} {reason}\r\n{challenge}Content-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     let _ = client.write_all(response.as_bytes());
@@ -223,7 +260,32 @@ fn respond(client: &mut TcpStream, status: u16, message: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{RequestBody, parse_request};
+    use super::{RequestBody, is_authorized, parse_request};
+    use crate::proxy::credential::ProxyCredential;
+
+    #[test]
+    fn only_the_first_proxy_authorization_header_is_consulted() {
+        let credential =
+            ProxyCredential::generate().unwrap_or_else(|error| panic!("generate: {error}"));
+        let authorization = credential.http_authorization();
+
+        assert!(is_authorized(
+            format!("CONNECT example.com:443 HTTP/1.1\r\nProxy-Authorization: {authorization}\r\n\r\n")
+                .as_bytes(),
+            &credential,
+        ));
+        assert!(!is_authorized(
+            b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com\r\n\r\n",
+            &credential,
+        ));
+        assert!(!is_authorized(
+            format!(
+                "CONNECT example.com:443 HTTP/1.1\r\nProxy-Authorization: Basic d3Jvbmc=\r\nProxy-Authorization: {authorization}\r\n\r\n"
+            )
+            .as_bytes(),
+            &credential,
+        ));
+    }
 
     #[test]
     fn connect_requests_name_a_destination_without_a_body() {

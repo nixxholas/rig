@@ -4,10 +4,11 @@ use crate::platform::child::{
     set_forward_target, wait_for_pid, wait_status_to_workload_status,
 };
 use crate::policy::{PermissionMode, SupervisorPolicy};
-use crate::proxy::OutgoingProxy;
+use crate::proxy::{OutgoingProxy, egress};
 use crate::{SupervisorResult, invalid_input};
 use std::ffi::{CString, OsString};
 use std::fs;
+use std::fs::File;
 use std::io::{Read, Write};
 use std::mem::size_of;
 use std::os::fd::{FromRawFd, RawFd};
@@ -56,9 +57,16 @@ type OutgoingProxySetup = Option<OutgoingProxy>;
 
 pub(crate) fn run(policy: SupervisorPolicy, command: Vec<OsString>) -> SupervisorResult<()> {
     enter_user_namespace()?;
-    // A configured proxy isolates the network exactly as hard as no egress at all. The link to the
-    // host was connected before this point and survives the unshare, so the sandbox keeps a way
-    // out without keeping a route to anything.
+    // A configured proxy isolates the network exactly as hard as no egress at all. The egress
+    // process is forked here, before any namespace is unshared, so it keeps the original network
+    // namespace while everything below shares an empty one. Its socketpair is created with it, and
+    // a socketpair is unaffected by the unshare that follows.
+    let egress = match &policy.network.outgoing_proxy {
+        Some(_) => Some(egress::start(&policy.network.allowed_hosts)?),
+        None => None,
+    };
+    let egress_pid = egress.as_ref().map(|egress| egress.pid);
+    let egress_link = egress.map(|egress| egress.link);
     let isolate_network = !policy.network.egress || policy.network.outgoing_proxy.is_some();
     let namespace_flags = libc::CLONE_NEWNS
         | libc::CLONE_NEWPID
@@ -85,14 +93,19 @@ pub(crate) fn run(policy: SupervisorPolicy, command: Vec<OsString>) -> Superviso
     }
     if namespace_init == 0 {
         close_fd(status_read);
-        run_namespace_init(policy, command, status_write);
+        run_namespace_init(policy, command, status_write, egress_link);
     }
 
     close_fd(status_write);
+    // Only the namespace init keeps the link now, so its exit is what the egress process sees.
+    drop(egress_link);
     set_forward_target(namespace_init);
     drop_all_capabilities_and_lock_privileges()?;
     let init_wait_status = wait_for_pid(namespace_init)?;
     set_forward_target(0);
+    if let Some(pid) = egress_pid {
+        egress::stop(pid);
+    }
     let workload_status = read_status(status_read).unwrap_or_else(|| {
         wait_status_to_workload_status(init_wait_status).unwrap_or(WorkloadStatus {
             kind: STATUS_EXIT,
@@ -102,7 +115,12 @@ pub(crate) fn run(policy: SupervisorPolicy, command: Vec<OsString>) -> Superviso
     reproduce_status(workload_status)
 }
 
-fn run_namespace_init(policy: SupervisorPolicy, command: Vec<OsString>, status_write: RawFd) -> ! {
+fn run_namespace_init(
+    policy: SupervisorPolicy,
+    command: Vec<OsString>,
+    status_write: RawFd,
+    egress_link: Option<File>,
+) -> ! {
     let setup = (|| -> SupervisorResult<OutgoingProxySetup> {
         syscall_zero("terminate namespace init if its supervisor exits", unsafe {
             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0)
@@ -112,7 +130,12 @@ fn run_namespace_init(policy: SupervisorPolicy, command: Vec<OsString>, status_w
         // The front-end listeners are bound here, before the filter below denies `bind` and
         // `listen` for everything that runs afterwards, so serving them re-opens nothing.
         let proxy = match &policy.network.outgoing_proxy {
-            Some(proxy) => Some(crate::proxy::prepare(proxy)?),
+            Some(proxy) => {
+                let link = egress_link.ok_or_else(|| {
+                    invalid_input("the outgoing proxy has no link to its egress process")
+                })?;
+                Some(crate::proxy::prepare(proxy, link)?)
+            }
             None => None,
         };
         if !policy.network.local_binding {

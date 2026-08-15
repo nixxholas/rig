@@ -1,4 +1,4 @@
-use crate::proxy::MAX_TOKEN_BYTES;
+use crate::proxy::MAX_HOST_BYTES;
 use crate::{SupervisorResult, invalid_input};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -19,29 +19,15 @@ pub(crate) enum ProxyFrontEnd {
     Socks5,
 }
 
-/// Host-side TLS termination, which the supervisor requests but never performs.
+/// The front-ends to expose inside the sandbox.
 ///
-/// The supervisor holds no TLS stack and no private key. Its whole contribution is pointing the
-/// workload's certificate trust at the file the host wrote, so a caller that never asked for
-/// termination never has a certificate authority injected into its environment.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub(crate) struct TlsTerminationPolicy {
-    pub(crate) certificate_authority_file: PathBuf,
-}
-
-/// The pre-connected link to the host proxy, plus the front-ends to expose over it.
-///
-/// One descriptor carries every stream. It is connected by Rig before the sandbox exists, so
-/// nothing inside the sandbox ever reaches the proxy — or anything else — by address.
+/// The supervisor provides the proxy itself: it forks an egress process outside the jail and joins
+/// the two with a socketpair, so nothing inside the sandbox ever reaches the proxy — or anything
+/// else — by address, and the caller supplies no descriptor and no token.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct OutgoingProxyPolicy {
-    pub(crate) upstream_fd: i32,
-    pub(crate) token: String,
     pub(crate) front_ends: Vec<ProxyFrontEnd>,
-    #[serde(default)]
-    pub(crate) tls_termination: Option<TlsTerminationPolicy>,
 }
 
 impl OutgoingProxyPolicy {
@@ -87,8 +73,8 @@ impl SupervisorPolicy {
         {
             validate_absolute_path(path)?;
         }
-        if self.network.allowed_hosts.iter().any(String::is_empty) {
-            return Err(invalid_input("network.allowedHosts cannot contain an empty host").into());
+        for host in &self.network.allowed_hosts {
+            validate_allowed_host(host)?;
         }
         if self.mode == PermissionMode::FullAccess {
             let mut restrictions = Vec::new();
@@ -118,9 +104,9 @@ impl SupervisorPolicy {
                 .into());
             }
         }
-        // The supervisor cannot enforce a host list itself: it never resolves a name and never
-        // opens a socket to a destination. The list is enforced by the host proxy that owns the
-        // token, so naming hosts without that proxy still has to fail closed.
+        // The host list is enforced in the egress process, which only exists when a proxy is
+        // configured. Naming hosts without that proxy would leave egress unfiltered, so it fails
+        // closed instead.
         if self.network.egress
             && !self.network.allowed_hosts.is_empty()
             && self.network.outgoing_proxy.is_none()
@@ -155,25 +141,41 @@ fn validate_outgoing_proxy(proxy: &OutgoingProxyPolicy, egress: bool) -> Supervi
         )
         .into());
     }
-    if proxy.upstream_fd <= libc::STDERR_FILENO {
-        return Err(
-            invalid_input("network.outgoingProxy.upstreamFd must be greater than 2").into(),
-        );
-    }
-    if proxy.token.is_empty() || proxy.token.len() > MAX_TOKEN_BYTES {
-        return Err(invalid_input(format!(
-            "network.outgoingProxy.token must be between 1 and {MAX_TOKEN_BYTES} bytes"
-        ))
-        .into());
-    }
     if proxy.front_ends.is_empty() {
         return Err(invalid_input(
             "network.outgoingProxy.frontEnds must name at least one front-end",
         )
         .into());
     }
-    if let Some(tls) = &proxy.tls_termination {
-        validate_absolute_path(&tls.certificate_authority_file)?;
+    Ok(())
+}
+
+/// One entry names one host, or one `*.suffix`.
+///
+/// A bare `*` is refused rather than read as open egress: a policy that meant to reach everything
+/// says so by configuring no proxy at all, and a wildcard that slipped into a list would otherwise
+/// silently undo every other entry beside it.
+fn validate_allowed_host(host: &str) -> SupervisorResult<()> {
+    if host.is_empty() {
+        return Err(invalid_input("network.allowedHosts cannot contain an empty host").into());
+    }
+    if host.len() > MAX_HOST_BYTES {
+        return Err(invalid_input(format!(
+            "network.allowedHosts entries must be at most {MAX_HOST_BYTES} bytes: {host}"
+        ))
+        .into());
+    }
+    let name = host.strip_prefix("*.").unwrap_or(host);
+    let unusable = name.is_empty()
+        || name.contains('*')
+        || host
+            .bytes()
+            .any(|byte| byte <= b' ' || byte == b'/' || byte == b'@' || byte == 0x7f);
+    if unusable {
+        return Err(invalid_input(format!(
+            "network.allowedHosts entries name one host or one *.suffix, so {host} cannot be used"
+        ))
+        .into());
     }
     Ok(())
 }
@@ -275,13 +277,9 @@ mod tests {
                 "mode": "workspace_write",
                 "network": {
                     "egress": true,
-                    "allowedHosts": ["example.com"],
+                    "allowedHosts": ["example.com", "*.internal.example.com", "127.0.0.1"],
                     "localBinding": false,
-                    "outgoingProxy": {
-                        "upstreamFd": 3,
-                        "token": "abc",
-                        "frontEnds": ["http", "socks5"]
-                    }
+                    "outgoingProxy": {"frontEnds": ["http", "socks5"]}
                 }
             }"#,
         )
@@ -294,41 +292,54 @@ mod tests {
             .network
             .outgoing_proxy
             .unwrap_or_else(|| panic!("proxy section should be present"));
-        assert_eq!(proxy.upstream_fd, 3);
         assert!(proxy.exposes(ProxyFrontEnd::Http));
         assert!(proxy.exposes(ProxyFrontEnd::Socks5));
-        assert!(proxy.tls_termination.is_none());
+    }
+
+    #[test]
+    fn a_proxy_no_longer_accepts_a_descriptor_or_a_token() {
+        for proxy in [
+            r#"{"upstreamFd": 3, "frontEnds": ["http"]}"#,
+            r#"{"token": "abc", "frontEnds": ["http"]}"#,
+            r#"{"frontEnds": ["http"], "tlsTermination": {"certificateAuthorityFile": "/tmp/ca.pem"}}"#,
+        ] {
+            let parsed = serde_json::from_str::<SupervisorPolicy>(&format!(
+                r#"{{
+                    "mode": "workspace_write",
+                    "network": {{"egress": true, "localBinding": false, "outgoingProxy": {proxy}}}
+                }}"#
+            ));
+            assert!(parsed.is_err(), "should be rejected outright: {proxy}");
+        }
     }
 
     #[test]
     fn proxy_policies_fail_closed_on_unusable_input() {
         let cases = [
+            (r#""allowedHosts": [], "outgoingProxy": {"frontEnds": []}"#, "frontEnds"),
+            (r#""allowedHosts": [""], "outgoingProxy": {"frontEnds": ["http"]}"#, "empty host"),
+            (r#""allowedHosts": ["*"], "outgoingProxy": {"frontEnds": ["http"]}"#, "*.suffix"),
             (
-                r#"{"upstreamFd": 2, "token": "abc", "frontEnds": ["http"]}"#,
-                "upstreamFd",
+                r#""allowedHosts": ["*.*.example.com"], "outgoingProxy": {"frontEnds": ["http"]}"#,
+                "*.suffix",
             ),
             (
-                r#"{"upstreamFd": 3, "token": "", "frontEnds": ["http"]}"#,
-                "token",
-            ),
-            (r#"{"upstreamFd": 3, "token": "abc", "frontEnds": []}"#, "frontEnds"),
-            (
-                r#"{"upstreamFd": 3, "token": "abc", "frontEnds": ["http"], "tlsTermination": {"certificateAuthorityFile": "relative.pem"}}"#,
-                "absolute",
+                r#""allowedHosts": ["user@example.com"], "outgoingProxy": {"frontEnds": ["http"]}"#,
+                "*.suffix",
             ),
         ];
-        for (proxy, expected) in cases {
+        for (network, expected) in cases {
             let policy: SupervisorPolicy = serde_json::from_str(&format!(
                 r#"{{
                     "mode": "workspace_write",
-                    "network": {{"egress": true, "localBinding": false, "outgoingProxy": {proxy}}}
+                    "network": {{"egress": true, "localBinding": false, {network}}}
                 }}"#
             ))
-            .unwrap_or_else(|error| panic!("policy should parse ({proxy}): {error}"));
+            .unwrap_or_else(|error| panic!("policy should parse ({network}): {error}"));
             let error = policy
                 .validate()
                 .err()
-                .unwrap_or_else(|| panic!("policy should fail closed: {proxy}"));
+                .unwrap_or_else(|| panic!("policy should fail closed: {network}"));
             assert!(
                 error.to_string().contains(expected),
                 "expected {expected} in {error}"
@@ -344,7 +355,7 @@ mod tests {
                 "network": {
                     "egress": false,
                     "localBinding": false,
-                    "outgoingProxy": {"upstreamFd": 3, "token": "abc", "frontEnds": ["http"]}
+                    "outgoingProxy": {"frontEnds": ["http"]}
                 }
             }"#,
         )
@@ -364,7 +375,7 @@ mod tests {
                 "network": {
                     "egress": true,
                     "localBinding": true,
-                    "outgoingProxy": {"upstreamFd": 3, "token": "abc", "frontEnds": ["http"]}
+                    "outgoingProxy": {"frontEnds": ["http"]}
                 }
             }"#,
         )

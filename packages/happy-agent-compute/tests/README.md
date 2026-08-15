@@ -206,22 +206,10 @@ Seatbelt intentionally makes the system temporary directory writable, so a sibli
 - An outside write grant applies to only the operation that carries it; the next operation does not
   retain it.
 
-### Unified egress proxy
-
-Run with the supervisor binary built (`cargo +1.96.0 build --manifest-path native/Cargo.toml` in
-`packages/happy-agent-supervisor`), outside any enclosing sandbox:
-
-```sh
-HAPPY_AGENT_COMPUTE_LIVE_TEST=1 pnpm --filter @slopus/happy-agent-compute \
-  exec vitest run tests/live/unifiedEgressProxy.live.test.ts
-```
-
-- The real supervisor binary, given a descriptor connected by `spawn`, reaches a real origin
-  through the loopback HTTP front-end.
-- The same path through the SOCKS5 front-end.
-- A host outside the command's allow list comes back as `403` to the workload and as a recorded
-  denial on the host.
-- A token the proxy does not know stops the command at exit 125 with no workload output.
+The supervisor's own outgoing proxy is no longer exercised from here. It needs nothing from this
+package: the supervisor forks its own egress process and enforces the command's host list itself,
+so its end-to-end coverage lives in
+`packages/happy-agent-supervisor/native/supervisor/tests/outgoing_proxy.rs`.
 
 ## Known unproven or failing claims
 

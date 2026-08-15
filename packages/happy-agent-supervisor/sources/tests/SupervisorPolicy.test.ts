@@ -17,37 +17,29 @@ describe("parseSupervisorPolicy", () => {
         });
     });
 
-    it("accepts an outgoing proxy on an already-connected descriptor", () => {
+    it("accepts an outgoing proxy that names only its front-ends", () => {
         const policy = parseSupervisorPolicy({
             mode: "workspace_write",
             network: {
                 egress: true,
-                allowedHosts: ["example.com"],
+                allowedHosts: ["example.com", "*.internal.example.com"],
                 localBinding: false,
-                outgoingProxy: {
-                    upstreamFd: 3,
-                    token: "command-scoped-token",
-                    frontEnds: ["http", "socks5"],
-                    tlsTermination: { certificateAuthorityFile: "/tmp/authority.pem" },
-                },
+                outgoingProxy: { frontEnds: ["http", "socks5"] },
             },
         });
 
-        expect(policy.network.outgoingProxy).toEqual({
-            upstreamFd: 3,
-            token: "command-scoped-token",
-            frontEnds: ["http", "socks5"],
-            tlsTermination: { certificateAuthorityFile: "/tmp/authority.pem" },
-        });
+        expect(policy.network.outgoingProxy).toEqual({ frontEnds: ["http", "socks5"] });
     });
 
     it("rejects a proxy the supervisor could not act on", () => {
         for (const outgoingProxy of [
-            { upstreamFd: 2, token: "token", frontEnds: ["http"] },
-            { upstreamFd: 3, token: "", frontEnds: ["http"] },
-            { upstreamFd: 3, token: "token", frontEnds: [] },
-            { upstreamFd: 3, token: "token", frontEnds: ["ftp"] },
-            { upstreamFd: 3, token: "token", frontEnds: ["http"], certificate: "/tmp/ca.pem" },
+            { frontEnds: [] },
+            { frontEnds: ["ftp"] },
+            { frontEnds: ["http"], certificate: "/tmp/ca.pem" },
+            // The supervisor provides the proxy itself, so it accepts neither of these any more.
+            { upstreamFd: 3, frontEnds: ["http"] },
+            { token: "command-scoped-token", frontEnds: ["http"] },
+            { frontEnds: ["http"], tlsTermination: { certificateAuthorityFile: "/tmp/ca.pem" } },
         ]) {
             expect(() =>
                 parseSupervisorPolicy({

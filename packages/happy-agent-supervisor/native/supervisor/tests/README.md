@@ -17,12 +17,19 @@ libtest runs each test body on a spawned thread, and `unshare(CLONE_NEWUSER)`
 returns `EINVAL` for a process with more than one thread, so it has to drive the
 real binary as a subprocess.
 
-`outgoing_proxy.rs` plays Rig: it connects a real descriptor, authenticates a
-command token, and applies that command's policy per connection while the real
-supervisor serves its front-ends inside the sandbox. It covers the allowed and
-denied paths of both front-ends, a refused token stopping the command outright,
-a transfer larger than one credit window, and the workload's inability to reach
-the destination without the proxy.
+`outgoing_proxy.rs` starts an origin server and nothing else: the supervisor
+forks its own egress process, binds its own front-ends, and enforces the
+command's host list itself. It covers the allowed and denied paths of both
+front-ends, an allowlisted name that resolves inward, a missing and a wrong
+front-end credential, a transfer larger than one credit window, and the
+workload's inability to reach the destination without the proxy.
+
+`127.0.0.1` appears in those allowed-host lists deliberately. It is the one case
+where an address inside the machine may be reached, because the policy named that
+literal itself, and it is what lets an origin on loopback stand in for a real
+destination. The `localhost` cases are the opposite: the name is allowed and the
+address it resolves to is not, which is what the resolved-address check exists
+for.
 
 ## Running them on Linux from a macOS host
 

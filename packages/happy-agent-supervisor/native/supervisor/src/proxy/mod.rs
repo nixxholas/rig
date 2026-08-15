@@ -1,49 +1,59 @@
 //! The outgoing proxy the workload sees as ordinary loopback proxy endpoints.
 //!
-//! Everything here is plaintext protocol translation onto one pre-connected descriptor. The host
-//! proxy on the other end owns the policy, the name resolution, the certificate authority, and any
-//! TLS termination; the supervisor holds no key material and opens no socket to a destination.
+//! The supervisor owns both ends. Inside the jail, `http.rs` and `socks.rs` translate the proxy
+//! protocols a client already speaks into `open_stream(host, port)` on a socketpair. Outside the
+//! jail, `egress.rs` decides whether that destination is allowed, resolves it, and connects. No TLS
+//! is unwrapped anywhere here and no certificate is ever minted here: the boundary is which host may
+//! be reached, not what is sent to it.
+
+pub(crate) mod egress;
 
 mod bridge;
+mod credential;
+mod hosts;
 mod http;
+mod locks;
 mod mux;
+mod protocol;
 mod socks;
 
-pub(crate) use mux::MAX_TOKEN_BYTES;
+pub(crate) use protocol::MAX_HOST_BYTES;
 
 use crate::exec::EnvironmentOverride;
 use crate::policy::{OutgoingProxyPolicy, ProxyFrontEnd};
-use crate::{SupervisorResult, invalid_input};
+use crate::SupervisorResult;
+use credential::ProxyCredential;
 use mux::Mux;
 use std::ffi::OsString;
 use std::fs::File;
 use std::net::TcpListener;
-use std::os::fd::FromRawFd;
 use std::sync::Arc;
 
-/// Listeners bound and authenticated, but not yet serving.
+/// Listeners bound and the link greeted, but nothing serving yet.
 ///
-/// Binding has to finish before the seccomp filter that denies `bind` and `listen` is installed,
-/// and serving has to start after the workload is forked, so those two moments are separate.
+/// Binding has to finish before the boundary that denies `bind` and `listen` is established, and
+/// serving has to start after the workload is forked, so those two moments are separate.
 pub(crate) struct OutgoingProxy {
     mux: Arc<Mux>,
+    credential: Arc<ProxyCredential>,
     http: Option<TcpListener>,
     socks: Option<TcpListener>,
     environment: Vec<EnvironmentOverride>,
 }
 
-/// Binds the requested front-ends on loopback and authenticates the command's token.
+/// Binds the requested front-ends on loopback and greets the egress process.
 ///
-/// A refused or unreachable host proxy is an error, which stops the whole invocation. The workload
-/// never falls back to reaching the network directly.
-pub(crate) fn prepare(policy: &OutgoingProxyPolicy) -> SupervisorResult<OutgoingProxy> {
+/// An egress process that does not answer is an error, which stops the whole invocation. The
+/// workload never falls back to reaching the network directly.
+pub(crate) fn prepare(policy: &OutgoingProxyPolicy, link: File) -> SupervisorResult<OutgoingProxy> {
+    let credential = Arc::new(ProxyCredential::generate()?);
     let http = bind_front_end(policy, ProxyFrontEnd::Http)?;
     let socks = bind_front_end(policy, ProxyFrontEnd::Socks5)?;
-    let link = take_upstream_descriptor(policy.upstream_fd)?;
-    let mux = Mux::connect(link, &policy.token)?;
-    let environment = proxy_environment(policy, http.as_ref(), socks.as_ref())?;
+    let mux = Mux::connect(link)?;
+    let environment = proxy_environment(&credential, http.as_ref(), socks.as_ref())?;
     Ok(OutgoingProxy {
         mux,
+        credential,
         http,
         socks,
         environment,
@@ -73,14 +83,16 @@ impl OutgoingProxy {
         self.mux.start_reader()?;
         if let Some(listener) = self.http {
             let mux = Arc::clone(&self.mux);
+            let credential = Arc::clone(&self.credential);
             spawn_accept_loop("supervisor-proxy-http", listener, move |stream| {
-                http::serve(&mux, stream);
+                http::serve(&mux, &credential, stream);
             })?;
         }
         if let Some(listener) = self.socks {
             let mux = Arc::clone(&self.mux);
+            let credential = Arc::clone(&self.credential);
             spawn_accept_loop("supervisor-proxy-socks", listener, move |stream| {
-                socks::serve(&mux, stream);
+                socks::serve(&mux, &credential, stream);
             })?;
         }
         Ok(())
@@ -128,42 +140,25 @@ fn bind_front_end(
     Ok(Some(listener))
 }
 
-/// Takes ownership of the descriptor Rig connected, and keeps it out of the workload's hands.
-fn take_upstream_descriptor(descriptor: i32) -> SupervisorResult<File> {
-    // The descriptor is inherited across `exec` unless this is set, and the workload must not be
-    // able to speak the link protocol itself or desynchronise it.
-    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
-    if flags < 0 {
-        return Err(std::io::Error::other(format!(
-            "the outgoing proxy descriptor {descriptor} is not open: {}",
-            std::io::Error::last_os_error()
-        ))
-        .into());
-    }
-    if unsafe { libc::fcntl(descriptor, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
-        return Err(std::io::Error::other(format!(
-            "close the outgoing proxy descriptor on exec: {}",
-            std::io::Error::last_os_error()
-        ))
-        .into());
-    }
-    // The invocation contract transfers ownership of the descriptor to the supervisor.
-    Ok(unsafe { File::from_raw_fd(descriptor) })
-}
-
 /// Every proxy variable the workload could act on, whether or not this policy offers a front-end
 /// for it. A front-end that was not requested must arrive unset rather than inherited.
 const HTTP_PROXY_VARIABLES: &[&str] = &["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"];
 const SOCKS_PROXY_VARIABLES: &[&str] = &["ALL_PROXY", "all_proxy"];
 
 fn proxy_environment(
-    policy: &OutgoingProxyPolicy,
+    credential: &ProxyCredential,
     http: Option<&TcpListener>,
     socks: Option<&TcpListener>,
 ) -> SupervisorResult<Vec<EnvironmentOverride>> {
     let mut environment = Vec::new();
+    // The secret travels with the address, so a client that can find the proxy can also
+    // authenticate to it and nothing else on the machine can.
+    let user_information = credential.url_user_information();
     let http_url = match http {
-        Some(listener) => Some(format!("http://127.0.0.1:{}", listener.local_addr()?.port())),
+        Some(listener) => Some(format!(
+            "http://{user_information}@127.0.0.1:{}",
+            listener.local_addr()?.port()
+        )),
         None => None,
     };
     for name in HTTP_PROXY_VARIABLES {
@@ -176,10 +171,10 @@ fn proxy_environment(
         OsString::from("NODE_USE_ENV_PROXY"),
         http_url.as_ref().map(|_| OsString::from("1")),
     ));
-    // `socks5h` keeps name resolution on the host side of the link.
+    // `socks5h` keeps name resolution on the far side of the link.
     let socks_url = match socks {
         Some(listener) => Some(format!(
-            "socks5h://127.0.0.1:{}",
+            "socks5h://{user_information}@127.0.0.1:{}",
             listener.local_addr()?.port()
         )),
         None => None,
@@ -194,19 +189,6 @@ fn proxy_environment(
     // replaced rather than left alone.
     for name in ["NO_PROXY", "no_proxy"] {
         environment.push((OsString::from(name), Some(OsString::new())));
-    }
-    if let Some(tls) = &policy.tls_termination {
-        let path = tls.certificate_authority_file.as_os_str();
-        if !tls.certificate_authority_file.exists() {
-            return Err(invalid_input(format!(
-                "the certificate authority for TLS termination does not exist: {}",
-                tls.certificate_authority_file.display()
-            ))
-            .into());
-        }
-        for name in ["NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"] {
-            environment.push((OsString::from(name), Some(path.to_os_string())));
-        }
     }
     Ok(environment)
 }
