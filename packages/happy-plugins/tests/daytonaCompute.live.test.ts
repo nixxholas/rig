@@ -1,4 +1,5 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
@@ -9,7 +10,7 @@ const apiKey = process.env.DAYTONA_TEST_API_KEY;
 
 describe.skipIf(apiKey === undefined)("Daytona compute live (on demand)", () => {
     it("runs a real sandbox lifecycle and always cleans it up", async () => {
-        const source = await mkdtemp(join(process.cwd(), "daytona-live-"));
+        const source = await mkdtemp(join(tmpdir(), "daytona-live-"));
         await writeFile(join(source, "message.txt"), "hello");
         const provider = createDaytonaComputeProvider({ apiKey: apiKey! });
         const context = {

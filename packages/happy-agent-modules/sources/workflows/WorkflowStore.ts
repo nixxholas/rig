@@ -5,19 +5,32 @@ import type { Context } from "@steve.kite/stdlib";
 import {
     workflowAgentIdSchema,
     workflowIdSchema,
+    workflowLegacyStatusFor,
     workflowLaunchRequestSchema,
     workflowLogPageSchema,
     workflowLogQuerySchema,
     workflowMutationRequestSchema,
     workflowMutationResultSchema,
+    workflowObservedRunSchema,
     workflowPageQuerySchema,
     workflowPageSchema,
     workflowRunSchema,
     type WorkflowLogPage,
     type WorkflowMutationResult,
     type WorkflowPage,
+    type WorkflowObservedRun,
     type WorkflowRun,
 } from "./Workflow.js";
+
+const workflowAbortSignalSchema = Type.Unsafe<AbortSignal>(
+    Type.Object(
+        {
+            aborted: Type.Boolean(),
+            addEventListener: Type.Function([], Type.Any()),
+        },
+        { additionalProperties: true },
+    ),
+);
 
 /** External runner capability. Durable run state is owned by WorkflowsModule. */
 export const workflowRuntimeSchema = Type.Object(
@@ -51,6 +64,7 @@ export const workflowRuntimeSchema = Type.Object(
                 Type.Unsafe<Context>(Type.Object({}, { additionalProperties: false })),
                 workflowAgentIdSchema,
                 workflowIdSchema,
+                Type.Optional(workflowAbortSignalSchema),
             ],
             Type.Promise(workflowRunSchema),
         ),
@@ -138,6 +152,12 @@ export function assertWorkflowRun(value: unknown): asserts value is WorkflowRun 
     if (value.updatedAt < value.createdAt) {
         throw new Error("Workflow store returned a run with invalid timestamp ordering.");
     }
+    if (
+        value.legacyStatus !== undefined &&
+        value.legacyStatus !== workflowLegacyStatusFor(value.status)
+    ) {
+        throw new Error("Workflow store returned an invalid legacy workflow status.");
+    }
     if ("startedAt" in value && value.startedAt !== undefined) {
         if (value.startedAt < value.createdAt || value.startedAt > value.updatedAt) {
             throw new Error("Workflow store returned a run with invalid start time.");
@@ -155,6 +175,13 @@ export function assertWorkflowRun(value: unknown): asserts value is WorkflowRun 
     ) {
         throw new Error("Workflow store returned a terminal run with invalid finish time.");
     }
+}
+
+export function assertWorkflowObservedRun(value: unknown): asserts value is WorkflowObservedRun {
+    if (!Value.Check(workflowObservedRunSchema, value)) {
+        throw new Error("Workflow module returned an incomplete workflow observation.");
+    }
+    assertWorkflowRun(value);
 }
 
 export function assertWorkflowPage(value: unknown): asserts value is WorkflowPage {

@@ -7,6 +7,7 @@ import {
     workspaceMigrations,
     workspaceModuleOptionsSchema,
     workspaceSchema,
+    workspaceHostSchema,
     WorkspacesModule,
 } from "../../sources/workspaces/index.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
@@ -136,6 +137,185 @@ describe("WorkspacesModule", () => {
                       )`,
             );
             expect(rows).toEqual([]);
+        } finally {
+            database.close();
+        }
+    });
+
+    it("delegates optional lifecycle hooks and preserves host paths and transitional statuses", async () => {
+        const createCalls: string[] = [];
+        const archiveCalls: string[] = [];
+        const workspaces = new WorkspacesModule({
+            host: {
+                create: async (_ctx, agentId, input, operation) => {
+                    createCalls.push(`${agentId}:${operation.operationId}`);
+                    return {
+                        id: input.id,
+                        ownerAgentId: input.ownerAgentId,
+                        projectRef: input.projectRef ?? "host-project",
+                        path: "/tmp/host-workspace",
+                        ...(input.baseRef === undefined ? {} : { baseRef: input.baseRef }),
+                        name: input.name,
+                        status: "initializing",
+                        createdAt: 10,
+                        updatedAt: 10,
+                    };
+                },
+                archive: async (_ctx, agentId, input, operation) => {
+                    archiveCalls.push(`${agentId}:${operation.operationId}:${input.workspaceId}`);
+                    return {
+                        id: input.workspaceId,
+                        ownerAgentId: agentId,
+                        projectRef: "host-project",
+                        path: "/tmp/host-workspace",
+                        name: "Provisioned workspace",
+                        status: "archiving",
+                        createdAt: 10,
+                        updatedAt: 11,
+                    };
+                },
+            },
+        });
+        expect(
+            Value.Check(workspaceHostSchema, {
+                create: async () => undefined,
+            }),
+        ).toBe(true);
+        const database = moduleDatabase(workspaces.migrations, "workspaces-host-lifecycle-test");
+        await database.ready;
+
+        try {
+            const created = await workspaces.create(database.context, "agent-a", {
+                id: "workspace-host",
+                operationId: "create-host",
+                name: "Provisioned workspace",
+            });
+            expect(created).toMatchObject({
+                id: "workspace-host",
+                path: "/tmp/host-workspace",
+                status: "initializing",
+            });
+            expect(createCalls).toEqual(["agent-a:create-host"]);
+
+            const archived = await workspaces.archive(
+                database.context,
+                "agent-a",
+                "workspace-host",
+                { operationId: "archive-host" },
+            );
+            expect(archived).toMatchObject({
+                id: "workspace-host",
+                path: "/tmp/host-workspace",
+                status: "archiving",
+            });
+            expect(archiveCalls).toEqual(["agent-a:archive-host:workspace-host"]);
+            expect(
+                (await workspaces.list(database.context, "agent-a")).map((row) => row.id),
+            ).toEqual(["workspace-host"]);
+            expect(
+                await workspaces.list(database.context, "agent-a", { includeArchived: false }),
+            ).toEqual([]);
+        } finally {
+            database.close();
+        }
+    });
+
+    it("renames workspaces, emits a rename event, and keeps the path across a fresh module", async () => {
+        const eventTypes: string[] = [];
+        const workspaces = new WorkspacesModule({
+            eventIdFactory: () => "event-rename",
+            listener: {
+                onEventTransactional: async (_ctx, event) => {
+                    eventTypes.push(event.type);
+                },
+            },
+        });
+        const database = moduleDatabase(workspaces.migrations, "workspaces-rename-test");
+        await database.ready;
+
+        try {
+            await workspaces.create(database.context, "agent-a", {
+                id: "workspace-rename",
+                operationId: "create-rename",
+                name: "Placeholder",
+                path: "/tmp/rename-workspace",
+            });
+            const renamed = await workspaces.rename(database.context, "agent-a", {
+                workspaceId: "workspace-rename",
+                operationId: "rename-workspace",
+                name: "Actual name",
+            });
+            expect(renamed).toMatchObject({
+                id: "workspace-rename",
+                name: "Actual name",
+                path: "/tmp/rename-workspace",
+            });
+            expect(eventTypes).toEqual(["workspace_created", "workspace_renamed"]);
+
+            const fresh = new WorkspacesModule({});
+            await expect(
+                fresh.get(database.context, "agent-a", "workspace-rename"),
+            ).resolves.toMatchObject({
+                name: "Actual name",
+                path: "/tmp/rename-workspace",
+            });
+            await expect(
+                fresh.transfer(database.context, "agent-a", {
+                    workspaceId: "workspace-rename",
+                    targetProjectRef: "project-new",
+                    operationId: "transfer-project",
+                }),
+            ).resolves.toMatchObject({
+                state: "transferred",
+                workspace: {
+                    path: "/tmp/rename-workspace",
+                },
+            });
+        } finally {
+            database.close();
+        }
+    });
+
+    it("reviews archive and transfer without requesting Full access", async () => {
+        const workspaces = new WorkspacesModule({});
+        const database = moduleDatabase(workspaces.migrations, "workspaces-review-test");
+        await database.ready;
+
+        try {
+            const scope = {
+                agent: { id: "agent-a" },
+            } as Parameters<WorkspacesModule["tools"]>[1];
+            const tools = workspaces.tools(database.context, scope);
+            const transfer = tools.find((tool) => tool.name === "transfer_workspace");
+            const archive = tools.find((tool) => tool.name === "archive_workspace");
+            expect(transfer).toBeDefined();
+            expect(archive).toBeDefined();
+            expect(
+                await transfer!.shouldReviewInAutoMode(
+                    { targetWorkspaceId: "workspace-target" },
+                    database.context,
+                ),
+            ).toBe(true);
+            expect(
+                transfer!.describeAutoPermissionAction?.(
+                    { targetWorkspaceId: "workspace-target" },
+                    database.context,
+                ),
+            ).toContain("local working state");
+            expect(transfer!.shouldRunInFullAccessInAutoMode).toBeUndefined();
+            expect(
+                await archive!.shouldReviewInAutoMode(
+                    { workspaceId: "workspace-a" },
+                    database.context,
+                ),
+            ).toBe(true);
+            expect(
+                archive!.describeAutoPermissionAction?.(
+                    { workspaceId: "workspace-a" },
+                    database.context,
+                ),
+            ).toContain("worktree");
+            expect(archive!.shouldRunInFullAccessInAutoMode).toBeUndefined();
         } finally {
             database.close();
         }

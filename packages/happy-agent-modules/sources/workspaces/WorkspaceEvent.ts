@@ -5,6 +5,7 @@ import {
     MAX_WORKSPACE_EVENT_ID_LENGTH,
     workspaceAgentIdSchema,
     workspaceIdSchema,
+    workspaceNameSchema,
     workspaceProjectRefSchema,
     workspaceSchema,
     workspaceTimestampSchema,
@@ -41,6 +42,15 @@ export const workspaceEventSchema = Type.Union([
             type: Type.Literal("workspace_transferred"),
             workspace: workspaceSchema,
             previousProjectRef: Type.Optional(workspaceProjectRefSchema),
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            ...eventEnvelope,
+            type: Type.Literal("workspace_renamed"),
+            workspace: workspaceSchema,
+            previousName: workspaceNameSchema,
         },
         { additionalProperties: false },
     ),

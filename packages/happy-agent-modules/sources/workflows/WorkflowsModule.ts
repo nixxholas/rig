@@ -12,6 +12,7 @@ import { afterCommit, type Context } from "@steve.kite/stdlib";
 
 import {
     MAX_WORKFLOW_CURSOR,
+    MAX_WORKFLOW_ARGS_BYTES,
     MAX_WORKFLOW_ID_LENGTH,
     MAX_WORKFLOW_LOG_LINE_LENGTH,
     MAX_WORKFLOW_LOG_LINES,
@@ -19,7 +20,9 @@ import {
     MAX_WORKFLOW_OUTPUT_CHARACTERS,
     MAX_WORKFLOW_PAGE_SIZE,
     workflowAgentIdSchema,
+    workflowArgsSchema,
     workflowIdSchema,
+    workflowLegacyStatusFor,
     workflowLaunchInputSchema,
     workflowLaunchToolInputSchema,
     workflowLogQuerySchema,
@@ -39,6 +42,7 @@ import {
     type WorkflowMutationRequest,
     type WorkflowMutationResult,
     type WorkflowMutationToolInput,
+    type WorkflowObservedRun,
     type WorkflowPage,
     type WorkflowPageQuery,
     type WorkflowRun,
@@ -54,6 +58,7 @@ import {
 import {
     assertWorkflowLogPage,
     assertWorkflowMutationResult,
+    assertWorkflowObservedRun,
     assertWorkflowPage,
     assertWorkflowRun,
     workflowRuntimeSchema,
@@ -82,6 +87,7 @@ const maxOutputSchema = Type.Integer({
 });
 const workflowModuleOptionsSchema = Type.Object(
     {
+        enabled: Type.Optional(Type.Boolean()),
         runtime: workflowRuntimeSchema,
         idFactory: Type.Optional(
             Type.Function(
@@ -134,6 +140,7 @@ const DROP_WORKFLOW_REPLAY_TABLES_MIGRATION_KEY = "002-workflows-drop-replay-evi
 export class WorkflowsModule implements AgentModule {
     readonly name = "workflows";
     readonly #store: WorkflowDatabase;
+    readonly #enabled: boolean;
     readonly #idFactory: NonNullable<WorkflowModuleOptions["idFactory"]>;
     readonly #eventIdFactory: NonNullable<WorkflowModuleOptions["eventIdFactory"]>;
     readonly #clock: NonNullable<WorkflowModuleOptions["clock"]>;
@@ -218,6 +225,7 @@ export class WorkflowsModule implements AgentModule {
             throw new Error("Workflow module options are invalid.");
         }
         this.#store = createWorkflowDatabase(options.runtime as WorkflowRuntime);
+        this.#enabled = options.enabled ?? true;
         this.#idFactory = options.idFactory ?? (() => globalThis.crypto.randomUUID());
         this.#eventIdFactory = options.eventIdFactory ?? (() => globalThis.crypto.randomUUID());
         this.#clock = options.clock ?? Date.now;
@@ -255,26 +263,30 @@ export class WorkflowsModule implements AgentModule {
         this.#now();
     }
 
-    readonly tools = (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => [
-        runWorkflowTool(this, scope.agent.id),
-        listWorkflowsTool(this, scope.agent.id),
-        workflowStatusTool(this, scope.agent.id),
-        cancelWorkflowTool(this, scope.agent.id),
-        resumeWorkflowTool(this, scope.agent.id),
-        waitWorkflowTool(this, scope.agent.id),
-        workflowLogsTool(this, scope.agent.id),
-    ];
+    readonly tools = (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] =>
+        this.#enabled
+            ? [
+                  runWorkflowTool(this, scope.agent.id),
+                  listWorkflowsTool(this, scope.agent.id),
+                  workflowStatusTool(this, scope.agent.id),
+                  cancelWorkflowTool(this, scope.agent.id),
+                  resumeWorkflowTool(this, scope.agent.id),
+                  waitWorkflowTool(this, scope.agent.id),
+                  workflowLogsTool(this, scope.agent.id),
+              ]
+            : [];
 
-    async launch(ctx: Context, agentId: string, input: WorkflowLaunchInput): Promise<WorkflowRun> {
+    async launch(
+        ctx: Context,
+        agentId: string,
+        input: WorkflowLaunchInput,
+    ): Promise<WorkflowObservedRun> {
+        this.#assertEnabled();
         this.#assertAgentId(agentId);
         this.#assertInput(workflowLaunchInputSchema, input, "workflow launch");
-        const normalized = normalizeLaunchInput(input);
-        const operationId = normalized.operationId ?? (await this.#newOperationId(ctx, agentId));
-        return await this.#launch(
-            ctx,
-            agentId,
-            { ...normalized, operationId },
-        );
+        assertWorkflowLaunchBounds(input);
+        const operationId = input.operationId ?? (await this.#newOperationId(ctx, agentId));
+        return await this.#launch(ctx, agentId, normalizeLaunchInput(input, operationId));
     }
 
     async launchForTool(
@@ -282,23 +294,21 @@ export class WorkflowsModule implements AgentModule {
         agentId: string,
         input: WorkflowLaunchToolInput,
         callId: string,
-    ): Promise<WorkflowRun> {
+    ): Promise<WorkflowObservedRun> {
+        this.#assertEnabled();
         this.#assertAgentId(agentId);
         this.#assertInput(workflowLaunchToolInputSchema, input, "workflow launch tool");
         this.#assertId(callId);
-        const normalizedInput = normalizeWorkflowInput(input.input);
-        return await this.#launch(
-            ctx,
-            agentId,
-            {
-                workflow: input.workflow,
-                ...(normalizedInput === undefined ? {} : { input: normalizedInput }),
-                operationId: callId,
-            },
-        );
+        assertWorkflowLaunchBounds(input);
+        return await this.#launch(ctx, agentId, normalizeLaunchInput(input, callId));
     }
 
-    async status(ctx: Context, agentId: string, id: string): Promise<WorkflowRun | undefined> {
+    async status(
+        ctx: Context,
+        agentId: string,
+        id: string,
+    ): Promise<WorkflowObservedRun | undefined> {
+        this.#assertEnabled();
         this.#assertAgentId(agentId);
         this.#assertId(id);
         const run = await this.#getStoreRun(ctx, agentId, id);
@@ -313,6 +323,7 @@ export class WorkflowsModule implements AgentModule {
         agentId: string,
         query: WorkflowPageQuery = {},
     ): Promise<WorkflowPage> {
+        this.#assertEnabled();
         this.#assertAgentId(agentId);
         this.#assertInput(workflowPageQuerySchema, query, "workflow page query");
         const requestedLimit = query.limit ?? this.#maxPageSize;
@@ -334,6 +345,7 @@ export class WorkflowsModule implements AgentModule {
         agentId: string,
         input: WorkflowMutationInput,
     ): Promise<WorkflowMutationResult> {
+        this.#assertEnabled();
         return await this.#publicMutation(ctx, agentId, input, "cancel");
     }
 
@@ -343,6 +355,7 @@ export class WorkflowsModule implements AgentModule {
         input: WorkflowMutationToolInput,
         callId: string,
     ): Promise<WorkflowMutationResult> {
+        this.#assertEnabled();
         return await this.#toolMutation(ctx, agentId, input, callId, "cancel");
     }
 
@@ -351,6 +364,7 @@ export class WorkflowsModule implements AgentModule {
         agentId: string,
         input: WorkflowMutationInput,
     ): Promise<WorkflowMutationResult> {
+        this.#assertEnabled();
         return await this.#publicMutation(ctx, agentId, input, "resume");
     }
 
@@ -360,22 +374,21 @@ export class WorkflowsModule implements AgentModule {
         input: WorkflowMutationToolInput,
         callId: string,
     ): Promise<WorkflowMutationResult> {
+        this.#assertEnabled();
         return await this.#toolMutation(ctx, agentId, input, callId, "resume");
     }
 
-    async wait(ctx: Context, agentId: string, id: string): Promise<WorkflowRun> {
+    async wait(ctx: Context, agentId: string, id: string): Promise<WorkflowObservedRun> {
+        this.#assertEnabled();
         return await this.#wait(ctx, agentId, id);
     }
 
-    async waitForTool(ctx: Context, agentId: string, id: string): Promise<WorkflowRun> {
+    async waitForTool(ctx: Context, agentId: string, id: string): Promise<WorkflowObservedRun> {
+        this.#assertEnabled();
         return await this.#wait(ctx, agentId, id);
     }
 
-    async #wait(
-        ctx: Context,
-        agentId: string,
-        id: string,
-    ): Promise<WorkflowRun> {
+    async #wait(ctx: Context, agentId: string, id: string): Promise<WorkflowObservedRun> {
         this.#assertAgentId(agentId);
         this.#assertId(id);
         const run = await this.#waitStoreRun(ctx, agentId, id);
@@ -396,6 +409,7 @@ export class WorkflowsModule implements AgentModule {
     }
 
     async logs(ctx: Context, agentId: string, query: WorkflowLogQuery): Promise<WorkflowLogPage> {
+        this.#assertEnabled();
         this.#assertAgentId(agentId);
         this.#assertInput(workflowLogQuerySchema, query, "workflow log query");
         const requestedLimit = Math.min(query.limit ?? this.#maxLogLines, this.#maxLogLines);
@@ -424,7 +438,23 @@ export class WorkflowsModule implements AgentModule {
 
     formatRunForModel(run: WorkflowRun): string {
         assertWorkflowRun(run);
-        const pieces = [`${run.id}: ${run.workflow}`, `status: ${run.status}`];
+        const logs = run.logs ?? [];
+        const logOutputReserve =
+            `\nlogs (${MAX_WORKFLOW_LOG_LINES} accumulated):`.length +
+            "\nlogs_truncated: true".length;
+        const scalarTruncationReserve = "\noutput_truncated: true\nerror_truncated: true".length;
+        const pieces = [
+            `${run.id}: ${run.workflow}`,
+            `status: ${run.status}`,
+            `legacy_status: ${run.legacyStatus ?? workflowLegacyStatusFor(run.status)}`,
+            `agent_count: ${run.agentCount ?? 0}`,
+        ];
+        if (
+            pieces.join("\n").length + logOutputReserve + scalarTruncationReserve >
+            this.#maxOutputCharacters
+        ) {
+            return formatCompactRunForModel(run, this.#maxOutputCharacters);
+        }
         for (const [label, value] of [
             ["output", "output" in run ? run.output : undefined],
             ["error", "error" in run ? run.error : undefined],
@@ -432,11 +462,59 @@ export class WorkflowsModule implements AgentModule {
             if (value === undefined) continue;
             const prefix = `${label}: `;
             const available =
-                this.#maxOutputCharacters - pieces.join("\n").length - 1 - prefix.length;
-            if (available <= 0) break;
-            pieces.push(`${prefix}${value.slice(0, available)}`);
+                this.#maxOutputCharacters -
+                pieces.join("\n").length -
+                1 -
+                prefix.length -
+                logOutputReserve -
+                scalarTruncationReserve;
+            if (available <= 0) {
+                pieces.push(`${label}_truncated: true`);
+                continue;
+            }
+            const text = value.slice(0, available);
+            pieces.push(`${prefix}${text}`);
+            if (text.length !== value.length) pieces.push(`${label}_truncated: true`);
         }
-        return pieces.join("\n");
+        let output = pieces.join("\n");
+        const logHeader = `logs (${logs.length} accumulated):`;
+        output += `\n${logHeader}`;
+        let logsTruncated = run.logsTruncated === true;
+        let renderedLogCount = 0;
+        const truncationMarker = "\nlogs_truncated: true";
+        for (const [index, log] of logs.entries()) {
+            const prefix = `\n${index + 1}: `;
+            const available = this.#maxOutputCharacters - output.length - truncationMarker.length;
+            if (available <= prefix.length) {
+                logsTruncated = true;
+                break;
+            }
+            const textBudget = available - prefix.length;
+            const text =
+                log.length <= textBudget
+                    ? log
+                    : textBudget <= 1
+                      ? "…"
+                      : `${log.slice(0, textBudget - 1)}…`;
+            if (text.length !== log.length) logsTruncated = true;
+            output += `${prefix}${text}`;
+            renderedLogCount += 1;
+            if (logsTruncated) break;
+        }
+        if (renderedLogCount < logs.length) logsTruncated = true;
+        if (logsTruncated) {
+            output += truncationMarker;
+        }
+        if (output.length > this.#maxOutputCharacters) {
+            throw new Error("Workflow status exceeded the model output bound.");
+        }
+        return output;
+    }
+
+    #assertEnabled(): void {
+        if (!this.#enabled) {
+            throw new Error("Workflows are disabled by configuration.");
+        }
     }
 
     formatLogsForModel(page: WorkflowLogPage): string {
@@ -471,7 +549,7 @@ export class WorkflowsModule implements AgentModule {
         ctx: Context,
         agentId: string,
         request: WorkflowLaunchRequest,
-    ): Promise<WorkflowRun> {
+    ): Promise<WorkflowObservedRun> {
         const existing = await this.#getStoreRun(ctx, agentId, request.operationId);
         if (existing !== undefined) {
             throw new Error(`Workflow run "${request.operationId}" already exists.`);
@@ -498,11 +576,7 @@ export class WorkflowsModule implements AgentModule {
             return persisted;
         });
         assertRunOwner(persisted, agentId, "Workflow transaction returned another agent's run.");
-        assertRunId(
-            persisted,
-            request.operationId,
-            "Workflow transaction returned the wrong run.",
-        );
+        assertRunId(persisted, request.operationId, "Workflow transaction returned the wrong run.");
         return structuredClone(persisted);
     }
 
@@ -515,12 +589,7 @@ export class WorkflowsModule implements AgentModule {
         this.#assertAgentId(agentId);
         this.#assertInput(workflowMutationInputSchema, input, `workflow ${operation}`);
         const operationId = input.operationId ?? (await this.#newOperationId(ctx, agentId));
-        return await this.#mutate(
-            ctx,
-            agentId,
-            { id: input.id, operationId },
-            operation,
-        );
+        return await this.#mutate(ctx, agentId, { id: input.id, operationId }, operation);
     }
 
     async #toolMutation(
@@ -533,12 +602,7 @@ export class WorkflowsModule implements AgentModule {
         this.#assertAgentId(agentId);
         this.#assertInput(workflowMutationToolInputSchema, input, `workflow ${operation} tool`);
         this.#assertId(callId);
-        return await this.#mutate(
-            ctx,
-            agentId,
-            { id: input.id, operationId: callId },
-            operation,
-        );
+        return await this.#mutate(ctx, agentId, { id: input.id, operationId: callId }, operation);
     }
 
     async #mutate(
@@ -552,9 +616,19 @@ export class WorkflowsModule implements AgentModule {
         assertRunOwner(current, agentId, "Workflow store returned another agent's run.");
         assertRunId(current, request.id, "Workflow store returned the wrong run.");
         if (!workflowMutationInvokesRuntime(current, operation)) {
-            return { agentId, operationId: request.operationId, run: structuredClone(current), changed: false };
+            return {
+                agentId,
+                operationId: request.operationId,
+                run: structuredClone(current),
+                changed: false,
+            };
         }
-        const mutation = await this.#mutateStoreRun(ctx, agentId, structuredClone(request), operation);
+        const mutation = await this.#mutateStoreRun(
+            ctx,
+            agentId,
+            structuredClone(request),
+            operation,
+        );
         assertMutationOwner(mutation, agentId, request);
         const changed = assertMutationTransition(current, mutation.run, request.id, operation);
         if (mutation.changed !== changed) {
@@ -583,7 +657,7 @@ export class WorkflowsModule implements AgentModule {
         ctx: Context,
         agentId: string,
         request: WorkflowLaunchRequest,
-    ): Promise<WorkflowRun> {
+    ): Promise<WorkflowObservedRun> {
         const raw: unknown = Reflect.apply(this.#store.launch, this.#store, [
             ctx,
             agentId,
@@ -591,19 +665,19 @@ export class WorkflowsModule implements AgentModule {
         ]);
         const resolved = await workflowStorePromise(raw, "launch");
         assertWorkflowRun(resolved);
-        return resolved;
+        return normalizeWorkflowRun(resolved);
     }
 
     async #getStoreRun(
         ctx: Context,
         agentId: string,
         id: string,
-    ): Promise<WorkflowRun | undefined> {
+    ): Promise<WorkflowObservedRun | undefined> {
         const raw: unknown = Reflect.apply(this.#store.get, this.#store, [ctx, agentId, id]);
         const resolved = await workflowStorePromise(raw, "get");
         if (resolved === undefined) return undefined;
         assertWorkflowRun(resolved);
-        return resolved;
+        return normalizeWorkflowRun(resolved);
     }
 
     async #listStorePage(
@@ -614,7 +688,10 @@ export class WorkflowsModule implements AgentModule {
         const raw: unknown = Reflect.apply(this.#store.list, this.#store, [ctx, agentId, query]);
         const resolved = await workflowStorePromise(raw, "list");
         assertWorkflowPage(resolved);
-        return resolved;
+        return {
+            ...resolved,
+            runs: resolved.runs.map(normalizeWorkflowRun),
+        };
     }
 
     async #mutateStoreRun(
@@ -627,18 +704,23 @@ export class WorkflowsModule implements AgentModule {
         const raw: unknown = Reflect.apply(method, this.#store, [ctx, agentId, request]);
         const resolved = await workflowStorePromise(raw, operation);
         assertWorkflowMutationResult(resolved);
-        return resolved;
+        return {
+            ...resolved,
+            run: normalizeWorkflowRun(resolved.run),
+        };
     }
 
-    async #waitStoreRun(ctx: Context, agentId: string, id: string): Promise<WorkflowRun> {
+    async #waitStoreRun(ctx: Context, agentId: string, id: string): Promise<WorkflowObservedRun> {
         const raw: unknown = Reflect.apply(this.#store.wait, this.#store, [ctx, agentId, id]);
-        const resolved = await workflowStorePromise(raw, "wait");
+        const waiting = workflowStorePromise(raw, "wait");
+        const resolved = await raceWorkflowWait(waiting, ctx.lifetime);
         assertWorkflowRun(resolved);
-        return resolved;
+        return normalizeWorkflowRun(resolved);
     }
 
     async #saveStoreRun(ctx: Context, run: WorkflowRun): Promise<void> {
-        const raw: unknown = Reflect.apply(this.#store.save, this.#store, [ctx, run]);
+        const normalized = normalizeWorkflowRun(run);
+        const raw: unknown = Reflect.apply(this.#store.save, this.#store, [ctx, normalized]);
         const resolved = await workflowStorePromise(raw, "save");
         if (resolved !== undefined) {
             throw new Error("Workflow save must resolve to undefined.");
@@ -759,6 +841,33 @@ async function workflowStorePromise(value: unknown, label: string): Promise<unkn
     return await (value as PromiseLike<unknown>);
 }
 
+async function raceWorkflowWait<T>(
+    waiting: Promise<T>,
+    signal: AbortSignal | undefined,
+): Promise<T> {
+    if (signal === undefined) return await waiting;
+    if (signal.aborted) {
+        throw new Error(
+            "Workflow wait was cancelled; the workflow continues running in the background.",
+        );
+    }
+    let onAbort: (() => void) | undefined;
+    const aborted = new Promise<never>((_resolve, reject) => {
+        onAbort = () =>
+            reject(
+                new Error(
+                    "Workflow wait was cancelled; the workflow continues running in the background.",
+                ),
+            );
+        signal.addEventListener("abort", onAbort, { once: true });
+    });
+    try {
+        return await Promise.race([waiting, aborted]);
+    } finally {
+        if (onAbort !== undefined) signal.removeEventListener("abort", onAbort);
+    }
+}
+
 async function workflowFactoryResult(value: unknown, label: string): Promise<unknown> {
     if (value === null || (typeof value !== "object" && typeof value !== "function")) return value;
     const then = Reflect.get(value, "then");
@@ -812,13 +921,85 @@ function normalizeWorkflowInput(input: string | undefined): string | undefined {
     return input === undefined ? undefined : input.replace(/\r\n?/g, "\n");
 }
 
-function normalizeLaunchInput(input: WorkflowLaunchInput): WorkflowLaunchInput {
-    const normalizedInput = normalizeWorkflowInput(input.input);
+function normalizeWorkflowScript(script: string): string {
+    return script.replace(/\r\n?/g, "\n");
+}
+
+function assertWorkflowLaunchBounds(input: WorkflowLaunchInput | WorkflowLaunchToolInput): void {
+    if (!("args" in input) || input.args === undefined) return;
+    try {
+        if (!Value.Check(workflowArgsSchema, input.args)) {
+            throw new Error("Workflow args do not match the bounded JSON input shape.");
+        }
+        const encoded = JSON.stringify(input.args);
+        if (
+            encoded === undefined ||
+            new TextEncoder().encode(encoded).byteLength > MAX_WORKFLOW_ARGS_BYTES
+        ) {
+            throw new Error("Workflow args exceed their encoded-byte bound.");
+        }
+    } catch (error: unknown) {
+        if (error instanceof Error) throw error;
+        throw new Error("Workflow args are not valid JSON.");
+    }
+}
+
+function normalizeLaunchInput(
+    input: WorkflowLaunchInput | WorkflowLaunchToolInput,
+    operationId: string,
+): WorkflowLaunchRequest {
+    if ("workflow" in input) {
+        const normalizedInput = normalizeWorkflowInput(input.input);
+        return {
+            workflow: input.workflow,
+            ...(normalizedInput === undefined ? {} : { input: normalizedInput }),
+            operationId,
+        };
+    }
+
+    const requestedName = input.name?.trim();
+    const workflow =
+        requestedName === undefined || requestedName.length === 0
+            ? "scriptPath" in input
+                ? workflowNameFromScriptPath(input.scriptPath)
+                : "dynamic-workflow"
+            : requestedName;
+    const description = input.description?.trim();
+    const normalizedDescription =
+        description === undefined || description.length === 0 ? `Run ${workflow}` : description;
+    const args = input.args === undefined ? undefined : structuredClone(input.args);
+    const source =
+        "script" in input
+            ? { script: normalizeWorkflowScript(input.script) }
+            : { scriptPath: input.scriptPath };
     return {
-        workflow: input.workflow,
-        ...(normalizedInput === undefined ? {} : { input: normalizedInput }),
-        ...(input.operationId === undefined ? {} : { operationId: input.operationId }),
+        workflow,
+        ...source,
+        ...(args === undefined ? {} : { args }),
+        ...(requestedName === undefined || requestedName.length === 0
+            ? {}
+            : { name: requestedName }),
+        description: normalizedDescription,
+        ...(input.resumeFromRunId === undefined ? {} : { resumeFromRunId: input.resumeFromRunId }),
+        operationId,
     };
+}
+
+function workflowNameFromScriptPath(path: string): string {
+    const leaf = path.split(/[\\/]/u).at(-1)?.replace(/\.py$/iu, "") ?? "";
+    return leaf.length > 0 && leaf.length <= MAX_WORKFLOW_NAME_LENGTH ? leaf : "dynamic-workflow";
+}
+
+function normalizeWorkflowRun(run: WorkflowRun): WorkflowObservedRun {
+    const normalized = {
+        ...structuredClone(run),
+        agentCount: run.agentCount ?? 0,
+        logs: run.logs === undefined ? [] : [...run.logs],
+        logsTruncated: run.logsTruncated ?? false,
+        legacyStatus: workflowLegacyStatusFor(run.status),
+    };
+    assertWorkflowObservedRun(normalized);
+    return normalized;
 }
 
 function assertRunOwner(run: WorkflowRun, agentId: string, message: string): void {
@@ -928,6 +1109,10 @@ function sameWorkflowRunObject(left: WorkflowRun, right: WorkflowRun): boolean {
         "startedAt",
         "pausedAt",
         "finishedAt",
+        "agentCount",
+        "logs",
+        "logsTruncated",
+        "legacyStatus",
     ] as const;
     return keys.every((key) => sameWorkflowRunField(left, right, key));
 }
@@ -947,10 +1132,24 @@ function sameWorkflowRunField(
         | "updatedAt"
         | "startedAt"
         | "pausedAt"
-        | "finishedAt",
+        | "finishedAt"
+        | "agentCount"
+        | "logs"
+        | "logsTruncated"
+        | "legacyStatus",
 ): boolean {
     const leftHasKey = Object.prototype.hasOwnProperty.call(left, key);
     const rightHasKey = Object.prototype.hasOwnProperty.call(right, key);
+    if (key === "logs" && leftHasKey && rightHasKey) {
+        const leftLogs = left.logs;
+        const rightLogs = right.logs;
+        return (
+            leftLogs !== undefined &&
+            rightLogs !== undefined &&
+            leftLogs.length === rightLogs.length &&
+            leftLogs.every((line, index) => line === rightLogs[index])
+        );
+    }
     return (
         leftHasKey === rightHasKey &&
         (!leftHasKey || Reflect.get(left, key) === Reflect.get(right, key))
@@ -1064,4 +1263,23 @@ function formatCursorSuffix(
 
 function formatRunRow(run: WorkflowRun): string {
     return `${run.id}: ${run.workflow} [${run.status}]`;
+}
+
+function formatCompactRunForModel(run: WorkflowRun, maxCharacters: number): string {
+    const logs = run.logs ?? [];
+    const lines = [
+        `${run.id}/${run.workflow}`,
+        `s:${run.status}`,
+        `l:${run.legacyStatus ?? workflowLegacyStatusFor(run.status)}`,
+        `a:${run.agentCount ?? 0}`,
+        `g:${logs.length}`,
+    ];
+    let output = lines.join("\n");
+    let logsTruncated = run.logsTruncated === true;
+    if (logs.length > 0) logsTruncated = true;
+    if (logsTruncated) {
+        output += "\nlogs_truncated";
+    }
+    if (output.length <= maxCharacters) return output;
+    return lines.join("\n");
 }

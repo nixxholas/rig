@@ -20,6 +20,11 @@ export const imageGeneratorRequestSchema = Type.Object(
         operationId: imageOperationIdSchema,
         prompt: imagePromptSchema,
         options: Type.Optional(imageGenerationOptionsSchema),
+        preferredProviderId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+        recentImageCount: Type.Optional(Type.Integer({ minimum: 1, maximum: 5 })),
+        referencedImagePaths: Type.Optional(
+            Type.Array(Type.String({ minLength: 1, maxLength: 1_024 }), { maxItems: 5 }),
+        ),
     },
     { additionalProperties: false },
 );

@@ -9,6 +9,7 @@ export const MAX_SCHEDULING_TIMESTAMP = 8_640_000_000_000_000;
 export const MAX_SCHEDULING_ID_LENGTH = 128;
 export const MAX_SCHEDULING_MESSAGE_LENGTH = 50_000;
 export const MAX_SCHEDULING_FAILURE_LENGTH = 2_000;
+export const MAX_SCHEDULING_DURATION_TEXT_LENGTH = 256;
 export const MAX_SCHEDULING_PAGE_SIZE = 100;
 export const MAX_SCHEDULING_CURSOR_LENGTH = 512;
 export const MAX_SCHEDULING_DETAIL_PAGE_SIZE = 4_096;
@@ -44,42 +45,102 @@ const durationValueSchema = Type.Number({
     minimum: 0,
     maximum: MAX_SCHEDULING_TIMESTAMP,
 });
+const durationTextSchema = Type.String({
+    minLength: 1,
+    maxLength: MAX_SCHEDULING_DURATION_TEXT_LENGTH,
+});
 
 /**
- * The model-facing duration is a deliberately small discriminated union. It avoids asking a
- * model to invent a duration grammar while still allowing useful fractional values such as
- * `1.5` hours when they resolve to a whole number of milliseconds.
+ * The duration accepts the compact object form used by the module API as well as the human
+ * duration forms accepted by the legacy scheduling tools. Compound fields are intentionally
+ * represented as a union whose variants each require at least one unit.
  */
 export const schedulingDurationSchema = Type.Union([
+    durationTextSchema,
     Type.Object(
-        { unit: Type.Union([Type.Literal("seconds"), Type.Literal("second")]), value: durationValueSchema },
+        {
+            unit: Type.Union([Type.Literal("seconds"), Type.Literal("second")]),
+            value: durationValueSchema,
+        },
         { additionalProperties: false },
     ),
     Type.Object(
-        { unit: Type.Union([Type.Literal("minutes"), Type.Literal("minute")]), value: durationValueSchema },
+        {
+            unit: Type.Union([Type.Literal("minutes"), Type.Literal("minute")]),
+            value: durationValueSchema,
+        },
         { additionalProperties: false },
     ),
     Type.Object(
-        { unit: Type.Union([Type.Literal("hours"), Type.Literal("hour")]), value: durationValueSchema },
+        {
+            unit: Type.Union([Type.Literal("hours"), Type.Literal("hour")]),
+            value: durationValueSchema,
+        },
         { additionalProperties: false },
     ),
     Type.Object(
-        { unit: Type.Union([Type.Literal("days"), Type.Literal("day")]), value: durationValueSchema },
+        {
+            unit: Type.Union([Type.Literal("days"), Type.Literal("day")]),
+            value: durationValueSchema,
+        },
         { additionalProperties: false },
     ),
-    Type.Object({ seconds: durationValueSchema }, { additionalProperties: false }),
-    Type.Object({ minutes: durationValueSchema }, { additionalProperties: false }),
-    Type.Object({ hours: durationValueSchema }, { additionalProperties: false }),
-    Type.Object({ days: durationValueSchema }, { additionalProperties: false }),
+    Type.Object(
+        {
+            duration: durationTextSchema,
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            seconds: durationValueSchema,
+            minutes: Type.Optional(durationValueSchema),
+            hours: Type.Optional(durationValueSchema),
+            days: Type.Optional(durationValueSchema),
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            seconds: Type.Optional(durationValueSchema),
+            minutes: durationValueSchema,
+            hours: Type.Optional(durationValueSchema),
+            days: Type.Optional(durationValueSchema),
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            seconds: Type.Optional(durationValueSchema),
+            minutes: Type.Optional(durationValueSchema),
+            hours: durationValueSchema,
+            days: Type.Optional(durationValueSchema),
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            seconds: Type.Optional(durationValueSchema),
+            minutes: Type.Optional(durationValueSchema),
+            hours: Type.Optional(durationValueSchema),
+            days: durationValueSchema,
+        },
+        { additionalProperties: false },
+    ),
 ]);
 
-/** A timezone-bearing ISO-8601 instant. Semantic validation also checks Date.parse. */
-export const schedulingInstantSchema = Type.String({
-    minLength: 16,
-    maxLength: 64,
-    pattern:
-        "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(?::\\d{2}(?:\\.\\d{1,9})?)?(?:Z|[+-]\\d{2}:\\d{2})$",
-});
+/**
+ * An instant may be an ISO 8601 or RFC 2822 string, or a Unix timestamp in seconds or
+ * milliseconds. Semantic validation normalizes all accepted forms to a bounded millisecond
+ * timestamp.
+ */
+export const schedulingInstantSchema = Type.Union([
+    Type.String({ minLength: 1, maxLength: 128 }),
+    Type.Number({
+        minimum: -MAX_SCHEDULING_TIMESTAMP,
+        maximum: MAX_SCHEDULING_TIMESTAMP,
+    }),
+]);
 
 export const schedulingWaitKindSchema = Type.Union([
     Type.Literal("wait"),
@@ -99,13 +160,55 @@ const waitInputIdentity = {
     id: Type.Optional(schedulingWaitIdSchema),
 };
 
-export const schedulingWaitInputSchema = Type.Object(
-    {
-        ...waitInputIdentity,
-        duration: schedulingDurationSchema,
-    },
-    { additionalProperties: false },
-);
+export const schedulingWaitInputSchema = Type.Union([
+    Type.Object(
+        {
+            ...waitInputIdentity,
+            duration: schedulingDurationSchema,
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            ...waitInputIdentity,
+            seconds: durationValueSchema,
+            minutes: Type.Optional(durationValueSchema),
+            hours: Type.Optional(durationValueSchema),
+            days: Type.Optional(durationValueSchema),
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            ...waitInputIdentity,
+            seconds: Type.Optional(durationValueSchema),
+            minutes: durationValueSchema,
+            hours: Type.Optional(durationValueSchema),
+            days: Type.Optional(durationValueSchema),
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            ...waitInputIdentity,
+            seconds: Type.Optional(durationValueSchema),
+            minutes: Type.Optional(durationValueSchema),
+            hours: durationValueSchema,
+            days: Type.Optional(durationValueSchema),
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            ...waitInputIdentity,
+            seconds: Type.Optional(durationValueSchema),
+            minutes: Type.Optional(durationValueSchema),
+            hours: Type.Optional(durationValueSchema),
+            days: durationValueSchema,
+        },
+        { additionalProperties: false },
+    ),
+]);
 
 export const schedulingWaitUntilInputSchema = Type.Object(
     {
@@ -230,10 +333,11 @@ export const schedulingScheduleInputSchema = Type.Union([
     ),
 ]);
 
-/** Model-facing scheduling never exposes a target or the durable call identity. */
+/** Model-facing scheduling uses the legacy snake_case recipient field and omits durable identity. */
 export const schedulingScheduleToolInputSchema = Type.Union([
     Type.Object(
         {
+            agent_id: schedulingAgentIdSchema,
             message: Type.String({ minLength: 1, maxLength: MAX_SCHEDULING_MESSAGE_LENGTH }),
             in: schedulingDurationSchema,
         },
@@ -241,6 +345,7 @@ export const schedulingScheduleToolInputSchema = Type.Union([
     ),
     Type.Object(
         {
+            agent_id: schedulingAgentIdSchema,
             message: Type.String({ minLength: 1, maxLength: MAX_SCHEDULING_MESSAGE_LENGTH }),
             at: schedulingInstantSchema,
         },
@@ -367,17 +472,13 @@ export type SchedulingScheduleInput = Static<typeof schedulingScheduleInputSchem
 export type SchedulingScheduleToolInput = Static<typeof schedulingScheduleToolInputSchema>;
 export type SchedulingCancelInput = Static<typeof schedulingCancelInputSchema>;
 export type SchedulingSchedulePageQuery = Static<typeof schedulingSchedulePageQuerySchema>;
-export type SchedulingScheduleToolPageQuery = Static<
-    typeof schedulingScheduleToolPageQuerySchema
->;
+export type SchedulingScheduleToolPageQuery = Static<typeof schedulingScheduleToolPageQuerySchema>;
 export type SchedulingSchedulePage = Static<typeof schedulingSchedulePageSchema>;
 export type SchedulingMessagePage = SchedulingSchedulePage;
 export type SchedulingMessagePageQuery = SchedulingSchedulePageQuery;
 export type SchedulingScheduleDetailQuery = Static<typeof schedulingScheduleDetailQuerySchema>;
 export type SchedulingScheduleDetailPage = Static<typeof schedulingScheduleDetailPageSchema>;
-export type SchedulingDeliveryOutcomeInput = Static<
-    typeof schedulingDeliveryOutcomeInputSchema
->;
+export type SchedulingDeliveryOutcomeInput = Static<typeof schedulingDeliveryOutcomeInputSchema>;
 export type SchedulingDeliveryOutcomeRequest = Static<
     typeof schedulingDeliveryOutcomeRequestSchema
 >;

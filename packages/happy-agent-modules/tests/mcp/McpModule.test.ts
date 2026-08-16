@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
     McpModule,
     type McpHost,
+    type McpServerPage,
     type McpToolResult,
     createMcpProtocolTools,
     createMcpTrustUserInputRequest,
@@ -71,12 +72,7 @@ describe("McpModule", () => {
 
         const page = await module.listServerPage(ctx, "agent-a", {}, "auto");
         expect(page.servers[0]?.name).toBe("deployment_service");
-        expect(listServers).toHaveBeenCalledWith(
-            ctx,
-            "agent-a",
-            "auto",
-            { limit: 50 },
-        );
+        expect(listServers).toHaveBeenCalledWith(ctx, "agent-a", "auto", { limit: 50 });
 
         const tools = await module.tools(ctx, {
             agent: { id: "agent-a", permissionMode: "auto" },
@@ -99,6 +95,180 @@ describe("McpModule", () => {
         const call = tools.find((candidate) => candidate.name === "call_mcp_tool");
         expect(call?.requiresAutoOrFullAccess).toBe(true);
         expect(await call?.shouldReviewInAutoMode({} as never, ctx)).toBe(true);
+    });
+
+    it("quarantines only a server whose normalized tool names collide", async () => {
+        const module = new McpModule({
+            host: host({
+                listServers: async () => ({
+                    servers: [
+                        {
+                            name: "broken_server",
+                            status: "connected" as const,
+                            toolCount: 2,
+                        },
+                        {
+                            name: "healthy_server",
+                            status: "connected" as const,
+                            toolCount: 1,
+                        },
+                    ],
+                }),
+                listTools: async (_ctx, _agentId, query) =>
+                    query.server === "broken_server"
+                        ? {
+                              tools: [tool("publish.release"), tool("publish release")],
+                          }
+                        : { tools: [tool("status")] },
+            }),
+        });
+
+        const tools = await module.tools(ctx, {
+            agent: { id: "agent-a", permissionMode: "auto" },
+        } as never);
+        const names = tools.map((candidate) => candidate.name);
+        expect(names).toContain("mcp__healthy_server__status");
+        expect(names).not.toContain("mcp__broken_server__publish_release");
+
+        const listServers = tools.find((candidate) => candidate.name === "list_mcp_servers");
+        expect(listServers).toBeDefined();
+        const page = (await listServers?.execute(ctx, {}, undefined as never)) as McpServerPage;
+        const broken = page?.servers.find((server) => server.name === "broken_server");
+        expect(broken).toMatchObject({
+            status: "failed",
+            toolCount: 0,
+        });
+        expect(broken?.errorMessage).toContain("collision");
+    });
+
+    it("quarantines every server involved in a cross-server normalized collision", async () => {
+        const module = new McpModule({
+            host: host({
+                listServers: async () => ({
+                    servers: [
+                        {
+                            name: "first.server",
+                            status: "connected" as const,
+                            toolCount: 1,
+                        },
+                        {
+                            name: "first server",
+                            status: "connected" as const,
+                            toolCount: 1,
+                        },
+                        {
+                            name: "healthy_server",
+                            status: "connected" as const,
+                            toolCount: 1,
+                        },
+                    ],
+                }),
+                listTools: async (_ctx, _agentId, query) =>
+                    query.server === "healthy_server"
+                        ? { tools: [tool("status")] }
+                        : { tools: [tool("run")] },
+            }),
+        });
+
+        const tools = await module.tools(ctx, {
+            agent: { id: "agent-a", permissionMode: "auto" },
+        } as never);
+        const names = tools.map((candidate) => candidate.name);
+        expect(names).toContain("mcp__healthy_server__status");
+        expect(names).not.toContain("mcp__first_server__run");
+
+        const listServers = tools.find((candidate) => candidate.name === "list_mcp_servers");
+        if (listServers === undefined) throw new Error("MCP server list tool missing.");
+        const page = (await listServers.execute(ctx, {}, undefined as never)) as McpServerPage;
+        expect(
+            page.servers
+                .filter((server) => server.name.startsWith("first"))
+                .map((server) => server.status),
+        ).toEqual(["failed", "failed"]);
+    });
+
+    it("enforces enabled and disabled tool policy before host dispatch", async () => {
+        const callTool = vi.fn(
+            async (): Promise<McpToolResult> => ({ content: [{ type: "text", text: "ok" }] }),
+        );
+        const module = new McpModule({
+            host: host({
+                callTool,
+                listServers: async () => ({
+                    servers: [
+                        {
+                            name: "deployment_service",
+                            status: "connected" as const,
+                            toolCount: 3,
+                            enabledTools: ["publish_release"],
+                            disabledTools: ["delete_release"],
+                        },
+                    ],
+                }),
+            }),
+        });
+        const tools = await module.tools(ctx, {
+            agent: { id: "agent-a", permissionMode: "auto" },
+        } as never);
+        const dynamic = tools.find((candidate) => candidate.name === "call_mcp_tool");
+        if (dynamic === undefined) throw new Error("MCP dynamic call tool missing.");
+        await expect(
+            dynamic.execute(
+                ctx,
+                {
+                    arguments: {},
+                    name: "delete_release",
+                    server: "deployment_service",
+                },
+                undefined as never,
+            ),
+        ).rejects.toThrow('The MCP tool "delete_release" is disabled by the server policy.');
+        expect(callTool).not.toHaveBeenCalled();
+
+        await expect(
+            module.callTool(ctx, "agent-a", {
+                arguments: {},
+                name: "delete_release",
+                server: "deployment_service",
+            }),
+        ).rejects.toThrow('The MCP tool "delete_release" is disabled by the server policy.');
+        await expect(
+            module.callTool(ctx, "agent-a", {
+                arguments: {},
+                name: "read_release",
+                server: "deployment_service",
+            }),
+        ).rejects.toThrow('The MCP tool "read_release" is disabled by the server policy.');
+        expect(callTool).not.toHaveBeenCalled();
+
+        await expect(
+            module.callTool(ctx, "agent-a", {
+                arguments: {},
+                name: "publish_release",
+                server: "deployment_service",
+            }),
+        ).resolves.toEqual({ content: [{ type: "text", text: "ok" }] });
+        expect(callTool).toHaveBeenCalledTimes(1);
+    });
+
+    it("uses the optional host policy seam when present", async () => {
+        const callTool = vi.fn(
+            async (): Promise<McpToolResult> => ({ content: [{ type: "text", text: "ok" }] }),
+        );
+        const getToolPolicy = vi.fn(async () => ({ disabledTools: ["publish_release"] }));
+        const module = new McpModule({
+            host: host({ callTool, getToolPolicy }),
+        });
+
+        await expect(
+            module.callTool(ctx, "agent-a", {
+                arguments: {},
+                name: "publish_release",
+                server: "deployment_service",
+            }),
+        ).rejects.toThrow('The MCP tool "publish_release" is disabled by the server policy.');
+        expect(getToolPolicy).toHaveBeenCalledWith(ctx, "agent-a", "deployment_service");
+        expect(callTool).not.toHaveBeenCalled();
     });
 
     it("accepts a bound one-argument elicitation service", () => {
@@ -192,11 +362,15 @@ describe("McpModule", () => {
         expect(dynamic).toBeDefined();
         if (direct === undefined || dynamic === undefined) throw new Error("MCP tools missing.");
         const directResult = await direct.execute(ctx, {}, undefined as never);
-        const dynamicResult = await dynamic.execute(ctx, {
-            arguments: {},
-            name: "publish_release",
-            server: "deployment_service",
-        }, undefined as never);
+        const dynamicResult = await dynamic.execute(
+            ctx,
+            {
+                arguments: {},
+                name: "publish_release",
+                server: "deployment_service",
+            },
+            undefined as never,
+        );
         expect(direct.isError?.(directResult)).toBe(true);
         expect(dynamic.isError?.(dynamicResult)).toBe(true);
         expect(direct.toLLM(directResult)).toEqual([

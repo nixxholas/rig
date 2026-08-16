@@ -56,7 +56,21 @@ export const appletAssetPathSchema = Type.String({
     pattern: "^[^\\u0000]+$",
 });
 
-export const appletScopeRefSchema = appletRefSchema;
+export const appletScopeSchema = Type.Union([
+    Type.Literal("everywhere"),
+    Type.Literal("project"),
+    Type.Literal("workspace"),
+    Type.Literal("session"),
+]);
+
+export const defaultAppletAllowedScopes = [
+    "everywhere",
+    "project",
+    "workspace",
+    "session",
+] as const;
+
+export const appletScopeRefSchema = appletScopeSchema;
 export const appletActionRefSchema = appletRefSchema;
 
 export const appletVersionNumberSchema = Type.Integer({
@@ -84,34 +98,67 @@ export const appletVersionSchema = Type.Object(
     { additionalProperties: false },
 );
 
-/**
- * The host catalog's safe applet metadata. Optional icon/HTTP fields preserve compatibility with
- * hosts that expose them, while keeping their paths and serving policy outside this package.
- */
-export const appletSchema = Type.Object(
+export const appletIconThumbhashSchema = Type.String({ minLength: 1, maxLength: 4_096 });
+export const appletIconUrlSchema = Type.String({ minLength: 1, maxLength: 4_096 });
+const appletIconMetadataPresentSchema = Type.Object(
     {
-        name: appletNameSchema,
-        description: appletDescriptionSchema,
-        purpose: appletPurposeSchema,
-        authorSessionId: appletRefSchema,
-        allowedScopes: Type.Array(appletScopeRefSchema, {
-            minItems: 1,
-            maxItems: 32,
-            uniqueItems: true,
-        }),
-        sourceDescription: Type.Optional(Type.String({ maxLength: 2_000 })),
-        iconThumbhash: Type.Optional(Type.String({ minLength: 1, maxLength: 4_096 })),
-        iconUrl: Type.Optional(Type.String({ minLength: 1, maxLength: 4_096 })),
-        currentVersion: appletVersionNumberSchema,
-        versions: Type.Array(appletVersionSchema, {
-            minItems: 1,
-            maxItems: MAX_APPLET_VERSIONS,
-        }),
-        createdAt: appletTimestampSchema,
-        updatedAt: appletTimestampSchema,
+        iconThumbhash: appletIconThumbhashSchema,
+        iconUrl: appletIconUrlSchema,
     },
     { additionalProperties: false },
 );
+const appletIconMetadataAbsentSchema = Type.Object(
+    {
+        iconThumbhash: Type.Optional(Type.Undefined()),
+        iconUrl: Type.Optional(Type.Undefined()),
+    },
+    { additionalProperties: false },
+);
+export const appletIconMetadataSchema = Type.Union([
+    appletIconMetadataPresentSchema,
+    appletIconMetadataAbsentSchema,
+]);
+
+const appletFields = {
+    name: appletNameSchema,
+    description: appletDescriptionSchema,
+    purpose: appletPurposeSchema,
+    authorSessionId: appletRefSchema,
+    allowedScopes: Type.Array(appletScopeRefSchema, {
+        minItems: 1,
+        maxItems: defaultAppletAllowedScopes.length,
+        uniqueItems: true,
+    }),
+    sourceDescription: Type.Optional(Type.String({ maxLength: 2_000 })),
+    currentVersion: appletVersionNumberSchema,
+    versions: Type.Array(appletVersionSchema, {
+        minItems: 1,
+        maxItems: MAX_APPLET_VERSIONS,
+    }),
+    createdAt: appletTimestampSchema,
+    updatedAt: appletTimestampSchema,
+};
+
+/**
+ * The host catalog's safe applet metadata. Identity icon fields are an atomic pair: an applet
+ * either has both durable fields or neither.
+ */
+export const appletSchema = Type.Union([
+    Type.Object(
+        {
+            ...appletFields,
+            ...appletIconMetadataPresentSchema.properties,
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            ...appletFields,
+            ...appletIconMetadataAbsentSchema.properties,
+        },
+        { additionalProperties: false },
+    ),
+]);
 
 /**
  * Public creation input. `path` is an absolute source folder and `iconPath` an optional absolute
@@ -128,7 +175,7 @@ export const appletImportInputSchema = Type.Object(
         allowedScopes: Type.Optional(
             Type.Array(appletScopeRefSchema, {
                 minItems: 1,
-                maxItems: 32,
+                maxItems: defaultAppletAllowedScopes.length,
                 uniqueItems: true,
             }),
         ),
@@ -142,6 +189,7 @@ export const appletImportInputSchema = Type.Object(
 /** A descriptive alias for hosts that call the first import “create”. */
 export const appletCreateInputSchema = appletImportInputSchema;
 
+/** A new version imports source files; identity icons are accepted only on the initial import. */
 export const appletUpdateInputSchema = Type.Object(
     {
         path: appletSourcePathSchema,
@@ -149,14 +197,13 @@ export const appletUpdateInputSchema = Type.Object(
         allowedScopes: Type.Optional(
             Type.Array(appletScopeRefSchema, {
                 minItems: 1,
-                maxItems: 32,
+                maxItems: defaultAppletAllowedScopes.length,
                 uniqueItems: true,
             }),
         ),
         description: Type.Optional(appletDescriptionSchema),
         purpose: Type.Optional(appletPurposeSchema),
         sourceDescription: Type.Optional(Type.String({ maxLength: 2_000 })),
-        iconPath: Type.Optional(appletSourcePathSchema),
         operationId: Type.Optional(appletRefSchema),
     },
     { additionalProperties: false },
@@ -273,6 +320,7 @@ export type AppletPurpose = Static<typeof appletPurposeSchema>;
 export type AppletRef = Static<typeof appletRefSchema>;
 export type AppletSourcePath = Static<typeof appletSourcePathSchema>;
 export type AppletAssetPath = Static<typeof appletAssetPathSchema>;
+export type AppletScope = Static<typeof appletScopeSchema>;
 export type AppletScopeRef = Static<typeof appletScopeRefSchema>;
 export type AppletActionRef = Static<typeof appletActionRefSchema>;
 export type AppletVersionNumber = Static<typeof appletVersionNumberSchema>;
@@ -281,6 +329,7 @@ export type AppletChangeDescription = Static<typeof appletChangeDescriptionSchem
 export type AppletAssetEncoding = Static<typeof appletAssetEncodingSchema>;
 export type AppletVersion = Static<typeof appletVersionSchema>;
 export type Applet = Static<typeof appletSchema>;
+export type AppletIconMetadata = Static<typeof appletIconMetadataPresentSchema>;
 export type AppletImportInput = Static<typeof appletImportInputSchema>;
 export type AppletCreateInput = Static<typeof appletCreateInputSchema>;
 export type AppletUpdateInput = Static<typeof appletUpdateInputSchema>;

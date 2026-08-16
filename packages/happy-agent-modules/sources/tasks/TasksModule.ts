@@ -22,6 +22,7 @@ import {
 } from "./TaskEvent.js";
 import {
     taskCreateInputSchema,
+    taskActiveFormSchema,
     taskDetailSchema,
     taskIdSchema,
     taskPrioritySchema,
@@ -30,8 +31,14 @@ import {
     taskTitleSchema,
     taskTimestampSchema,
     taskUpdateInputSchema,
+    taskOwnerSchema,
+    assertTaskMetadata,
+    assertTaskMetadataPatch,
+    TaskValidationError,
     type Task,
     type TaskCreateInput,
+    type TaskMetadata,
+    type TaskMetadataPatch,
     type TaskPriority,
     type TaskUpdateInput,
 } from "./Task.js";
@@ -54,6 +61,7 @@ import { completeTaskTool } from "./tools/complete_task.js";
 import { createTaskTool } from "./tools/create_task.js";
 import { getTaskTool } from "./tools/get_task.js";
 import { listTasksTool } from "./tools/list_tasks.js";
+import { removeTaskTool } from "./tools/remove_task.js";
 import { updateTaskTool } from "./tools/update_task.js";
 
 /** The largest list a module will accept, regardless of host configuration. */
@@ -107,11 +115,6 @@ interface TaskChange<Result> {
     readonly event?: TaskEvent;
 }
 
-interface TaskUpdateCandidate {
-    readonly task: Task;
-    readonly changed: boolean;
-}
-
 /**
  * A bounded persistent task list.
  *
@@ -148,7 +151,7 @@ export class TasksModule implements AgentModule {
         | undefined;
     readonly #eventIdFactory: (ctx: Context, agentId: string) => string | Promise<string>;
 
-    constructor(options: TasksModuleOptions) {
+    constructor(options: TasksModuleOptions = {}) {
         assertTasksModuleOptions(options);
         this.#maxTasks = options.maxTasks ?? DEFAULT_MAX_TASKS;
         if (!Value.Check(maxTasksSchema, this.#maxTasks)) {
@@ -191,7 +194,8 @@ export class TasksModule implements AgentModule {
         }
         const offset = query.offset ?? 0;
         const tasks = await this.#read(ctx, agentId);
-        const requestedTasks = tasks.slice(offset, offset + limit);
+        const visibleTasks = tasks.map((task) => taskForTaskList(task, tasks));
+        const requestedTasks = visibleTasks.slice(offset, offset + limit);
         const pageTasks = this.#fitModelPage(requestedTasks, offset, tasks.length);
         const page: TaskPage = {
             tasks: pageTasks,
@@ -259,11 +263,7 @@ export class TasksModule implements AgentModule {
     }
 
     /** Create one task. An existing ID is always a conflict. */
-    async create(
-        ctx: Context,
-        agentId: string,
-        input: TaskCreateInput,
-    ): Promise<Task> {
+    async create(ctx: Context, agentId: string, input: TaskCreateInput): Promise<Task> {
         this.#assertAgentId(agentId);
         this.#assertInput(taskCreateInputSchema, input, "create");
         const id = input.id ?? (await this.#newTaskId(ctx, agentId));
@@ -274,28 +274,48 @@ export class TasksModule implements AgentModule {
             this.#assertTaskId(id);
             const existing = tasks.find((task) => task.id === id);
             if (existing !== undefined) {
-                throw new Error(`Task "${id}" already exists.`);
+                throw new TaskValidationError(`Task "${id}" already exists.`);
             }
             if (tasks.length >= this.#maxTasks) {
-                throw new Error(`This agent already has the maximum of ${this.#maxTasks} tasks.`);
+                throw new TaskValidationError(
+                    `This agent already has the maximum of ${this.#maxTasks} tasks.`,
+                );
             }
             const dependsOn = [...(input.dependsOn ?? [])];
-            this.#validateDependencies(tasks, id, dependsOn);
+            validateDependencyIds(tasks, id, dependsOn);
+            const metadata =
+                input.metadata === undefined ? undefined : cloneMetadata(input.metadata);
             const task: Task = {
                 id,
                 title,
                 ...(detail === undefined ? {} : { detail }),
+                ...(input.activeForm === undefined
+                    ? {}
+                    : { activeForm: normalizeActiveForm(input.activeForm) }),
+                blocks: [],
                 status: "pending",
                 priority,
                 dependsOn,
+                ...(metadata === undefined ? {} : { metadata }),
+                ...(input.owner === undefined ? {} : { owner: normalizeOwner(input.owner) }),
                 createdAt: at,
                 updatedAt: at,
                 ordering: nextOrdering(tasks),
             };
-            this.#validateTasks([...tasks, task]);
+            const nextTasks = syncDependencyEdges([...tasks, task]);
+            this.#validateTasks(nextTasks);
             return {
-                result: task,
-                event: this.#event({ type: "task_created", agentId, task }, eventId, at),
+                result: nextTasks.find((candidate) => candidate.id === id) as Task,
+                tasks: nextTasks,
+                event: this.#event(
+                    {
+                        type: "task_created",
+                        agentId,
+                        task: nextTasks.find((candidate) => candidate.id === id) as Task,
+                    },
+                    eventId,
+                    at,
+                ),
             };
         });
         return change.result;
@@ -313,26 +333,28 @@ export class TasksModule implements AgentModule {
         this.#assertInput(taskUpdateInputSchema, changes, "update");
         const change = await this.#change(ctx, agentId, (txCtx, tasks, eventId, at) => {
             const existing = tasks.find((task) => task.id === taskId);
-            if (existing === undefined) throw new Error(`Task "${taskId}" does not exist.`);
-            const candidate = this.#candidate(existing, changes, at);
+            if (existing === undefined) {
+                throw new TaskValidationError(`Task "${taskId}" does not exist.`);
+            }
+            const candidate = this.#applyUpdate(tasks, taskId, changes, at);
             if (!candidate.changed) return { result: existing };
-            this.#validateDependencies(tasks, taskId, candidate.task.dependsOn);
-            this.#validateTasks(tasks.map((task) => (task.id === taskId ? candidate.task : task)));
+            const updatedTask = candidate.tasks.find((task) => task.id === taskId) as Task;
             void txCtx;
             const event =
-                candidate.task.status === "completed" && existing.status !== "completed"
+                updatedTask.status === "completed" && existing.status !== "completed"
                     ? this.#event(
-                          { type: "task_completed", agentId, task: candidate.task },
+                          { type: "task_completed", agentId, task: updatedTask },
                           eventId,
                           at,
                       )
                     : this.#event(
-                          { type: "task_updated", agentId, task: candidate.task, changes },
+                          { type: "task_updated", agentId, task: updatedTask, changes },
                           eventId,
                           at,
                       );
             return {
-                result: candidate.task,
+                result: updatedTask,
+                tasks: candidate.tasks,
                 event,
             };
         });
@@ -340,16 +362,14 @@ export class TasksModule implements AgentModule {
     }
 
     /** Mark one task complete. Completing it twice returns the same task. */
-    async complete(
-        ctx: Context,
-        agentId: string,
-        taskId: string,
-    ): Promise<Task> {
+    async complete(ctx: Context, agentId: string, taskId: string): Promise<Task> {
         this.#assertAgentId(agentId);
         this.#assertTaskId(taskId);
         const change = await this.#change(ctx, agentId, (txCtx, tasks, eventId, at) => {
             const existing = tasks.find((task) => task.id === taskId);
-            if (existing === undefined) throw new Error(`Task "${taskId}" does not exist.`);
+            if (existing === undefined) {
+                throw new TaskValidationError(`Task "${taskId}" does not exist.`);
+            }
             if (existing.status === "completed") return { result: existing };
             const task: Task = {
                 ...existing,
@@ -359,33 +379,38 @@ export class TasksModule implements AgentModule {
             void txCtx;
             return {
                 result: task,
+                tasks: tasks.map((candidate) => (candidate.id === taskId ? task : candidate)),
                 event: this.#event({ type: "task_completed", agentId, task }, eventId, at),
             };
         });
         return change.result;
     }
 
-    /** Remove a task. Removal is refused while another task depends on it. */
+    /** Remove a task and unlink it from every remaining task's dependency graph. */
     async remove(ctx: Context, agentId: string, taskId: string): Promise<boolean> {
         this.#assertAgentId(agentId);
         this.#assertTaskId(taskId);
         const change = await this.#change(ctx, agentId, (txCtx, tasks, eventId, at) => {
             const existing = tasks.find((task) => task.id === taskId);
             if (existing === undefined) return { result: false };
-            const dependent = tasks.find((task) => task.dependsOn.includes(taskId));
-            if (dependent !== undefined) {
-                throw new Error(
-                    `Task "${taskId}" cannot be removed while "${dependent.id}" depends on it.`,
-                );
-            }
             const remaining = compactOrdering(
                 tasks.filter((task) => task.id !== taskId),
                 at,
             );
+            const unlinked = remaining.map((task) =>
+                task.dependsOn.includes(taskId)
+                    ? {
+                          ...task,
+                          dependsOn: task.dependsOn.filter((dependency) => dependency !== taskId),
+                          updatedAt: at,
+                      }
+                    : task,
+            );
+            const normalized = syncDependencyEdges(unlinked);
             void txCtx;
             return {
                 result: true,
-                tasks: remaining,
+                tasks: normalized,
                 event: this.#event({ type: "task_removed", agentId, taskId }, eventId, at),
             };
         });
@@ -400,28 +425,35 @@ export class TasksModule implements AgentModule {
     ): Promise<readonly Task[]> {
         this.#assertAgentId(agentId);
         if (!Value.Check(taskReorderIdsSchema, taskIds)) {
-            throw new Error("Task reorder expects a unique bounded list of task IDs.");
+            throw new TaskValidationError(
+                "Task reorder expects a unique bounded list of task IDs.",
+            );
         }
         const change = await this.#change(ctx, agentId, (txCtx, tasks, eventId, at) => {
             if (taskIds.length !== tasks.length) {
-                throw new Error("Task reorder must include every current task exactly once.");
+                throw new TaskValidationError(
+                    "Task reorder must include every current task exactly once.",
+                );
             }
             const byId = new Map(tasks.map((task) => [task.id, task]));
             const reordered = taskIds.map((taskId, ordering) => {
                 const task = byId.get(taskId);
-                if (task === undefined) throw new Error(`Task "${taskId}" does not exist.`);
+                if (task === undefined) {
+                    throw new TaskValidationError(`Task "${taskId}" does not exist.`);
+                }
                 return task.ordering === ordering ? task : { ...task, ordering, updatedAt: at };
             });
-            this.#validateTasks(reordered);
+            const normalized = syncDependencyEdges(reordered);
+            this.#validateTasks(normalized);
             if (reordered.every((task, index) => task.id === tasks[index]?.id)) {
                 return { result: this.#sort(tasks) };
             }
             void txCtx;
             return {
-                result: reordered,
-                tasks: reordered,
+                result: normalized,
+                tasks: normalized,
                 event: this.#event(
-                    { type: "tasks_reordered", agentId, tasks: reordered },
+                    { type: "tasks_reordered", agentId, tasks: [...normalized] },
                     eventId,
                     at,
                 ),
@@ -456,23 +488,33 @@ export class TasksModule implements AgentModule {
         getTaskTool(this, scope.agent.id),
         updateTaskTool(this, scope.agent.id),
         completeTaskTool(this, scope.agent.id),
+        removeTaskTool(this, scope.agent.id),
     ];
 
     /** Render a bounded model-facing task summary without changing the structured result. */
     formatForModel(tasks: readonly Task[]): string {
+        const completed = new Set(
+            tasks.filter((task) => task.status === "completed").map((task) => task.id),
+        );
         const full =
             tasks.length === 0
                 ? "No tasks."
                 : tasks
-                      .map((task) =>
-                          [
-                              `${task.id} [${task.status}, ${task.priority}] ${task.title}`,
-                              ...(task.detail === undefined ? [] : [`  Detail: ${task.detail}`]),
-                              ...(task.dependsOn.length === 0
+                      .map((task) => {
+                          const unresolved = task.dependsOn.filter(
+                              (dependency) => !completed.has(dependency),
+                          );
+                          return [
+                              compactTaskRow({ ...task, dependsOn: unresolved }),
+                              ...(task.activeForm === undefined
                                   ? []
-                                  : [`  Depends on: ${task.dependsOn.join(", ")}`]),
-                          ].join("\n"),
-                      )
+                                  : [`  Active form: ${task.activeForm}`]),
+                              ...(task.detail === undefined ? [] : [`  Detail: ${task.detail}`]),
+                              ...(task.metadata === undefined
+                                  ? []
+                                  : [`  Metadata: ${JSON.stringify(task.metadata)}`]),
+                          ].join("\n");
+                      })
                       .join("\n");
         if (full.length <= this.#maxOutputCharacters) return full;
         return `${full.slice(0, this.#maxOutputCharacters - 32)}\n[task list truncated]`;
@@ -584,36 +626,117 @@ export class TasksModule implements AgentModule {
         await kv.write(ctx, this.#sort(tasks));
     }
 
-    #candidate(existing: Task, changes: TaskUpdateInput, at: number): TaskUpdateCandidate {
-        const title = changes.title === undefined ? existing.title : normalizeTitle(changes.title);
-        const detail =
-            changes.detail === undefined
-                ? existing.detail
-                : normalizeDetail(changes.detail ?? undefined);
-        const priority = changes.priority ?? existing.priority;
-        const status = changes.status ?? existing.status;
-        const dependsOn =
-            changes.dependsOn === undefined ? existing.dependsOn : [...changes.dependsOn];
-        const changed =
-            existing.title !== title ||
-            existing.detail !== detail ||
-            existing.priority !== priority ||
-            existing.status !== status ||
-            !sameIds(existing.dependsOn, dependsOn);
-        if (!changed) return { task: existing, changed: false };
-        const { detail: _existingDetail, ...withoutDetail } = existing;
-        const task: Task = {
-            ...withoutDetail,
+    #applyUpdate(
+        tasks: readonly Task[],
+        taskId: string,
+        changes: TaskUpdateInput,
+        at: number,
+    ): { readonly tasks: readonly Task[]; readonly task: Task; readonly changed: boolean } {
+        const original = new Map(tasks.map((task) => [task.id, structuredClone(task)]));
+        const working = new Map(tasks.map((task) => [task.id, structuredClone(task)]));
+        const existing = working.get(taskId);
+        if (existing === undefined) {
+            throw new TaskValidationError(`Task "${taskId}" does not exist.`);
+        }
+
+        let detail = existing.detail;
+        if (changes.detail !== undefined) detail = normalizeDetail(changes.detail ?? undefined);
+        let activeForm = existing.activeForm;
+        if (changes.activeForm !== undefined) {
+            activeForm =
+                changes.activeForm === null ? undefined : normalizeActiveForm(changes.activeForm);
+        }
+        let owner = existing.owner;
+        if (changes.owner !== undefined) {
+            owner = changes.owner === null ? undefined : normalizeOwner(changes.owner);
+        }
+        let metadata = existing.metadata;
+        if (changes.metadata !== undefined) {
+            assertTaskMetadataPatch(changes.metadata);
+            metadata = applyMetadataPatch(existing.metadata, changes.metadata);
+        }
+        const candidate: Task = {
+            ...existing,
             ...(detail === undefined ? {} : { detail }),
-            title,
-            priority,
-            status,
-            dependsOn,
-            updatedAt: at,
+            ...(activeForm === undefined ? {} : { activeForm }),
+            ...(owner === undefined ? {} : { owner }),
+            ...(metadata === undefined ? {} : { metadata }),
+            title: changes.title === undefined ? existing.title : normalizeTitle(changes.title),
+            priority: changes.priority ?? existing.priority,
+            status: changes.status ?? existing.status,
+            dependsOn:
+                changes.dependsOn === undefined ? [...existing.dependsOn] : [...changes.dependsOn],
         };
+        if (detail === undefined) delete candidate.detail;
+        if (activeForm === undefined) delete candidate.activeForm;
+        if (owner === undefined) delete candidate.owner;
+        if (metadata === undefined) delete candidate.metadata;
+        working.set(taskId, candidate);
+
+        for (const dependency of [
+            ...(changes.dependsOn ?? []),
+            ...(changes.addBlockedBy ?? []),
+            ...(changes.removeBlockedBy ?? []),
+        ]) {
+            this.#assertTaskId(dependency);
+            if (dependency === taskId) {
+                throw new TaskValidationError(`Task "${taskId}" cannot depend on itself.`);
+            }
+            if (!working.has(dependency)) {
+                throw new TaskValidationError(`Task dependency "${dependency}" does not exist.`);
+            }
+        }
+        for (const blockedTaskId of [
+            ...(changes.addBlocks ?? []),
+            ...(changes.removeBlocks ?? []),
+        ]) {
+            this.#assertTaskId(blockedTaskId);
+            if (blockedTaskId === taskId) {
+                throw new TaskValidationError(`Task "${taskId}" cannot depend on itself.`);
+            }
+            if (!working.has(blockedTaskId)) {
+                throw new TaskValidationError(`Task dependency "${blockedTaskId}" does not exist.`);
+            }
+        }
+
+        const updated = working.get(taskId) as Task;
+        if (changes.addBlockedBy !== undefined) {
+            updated.dependsOn = appendUnique(updated.dependsOn, changes.addBlockedBy);
+        }
+        if (changes.removeBlockedBy !== undefined) {
+            updated.dependsOn = updated.dependsOn.filter(
+                (dependency) => !changes.removeBlockedBy?.includes(dependency),
+            );
+        }
+        for (const blockedTaskId of changes.addBlocks ?? []) {
+            const blockedTask = working.get(blockedTaskId) as Task;
+            blockedTask.dependsOn = appendUnique(blockedTask.dependsOn, [taskId]);
+        }
+        for (const blockedTaskId of changes.removeBlocks ?? []) {
+            const blockedTask = working.get(blockedTaskId) as Task;
+            blockedTask.dependsOn = blockedTask.dependsOn.filter(
+                (dependency) => dependency !== taskId,
+            );
+        }
+
+        const changedIds = new Set<string>();
+        for (const [id, task] of working) {
+            const before = original.get(id) as Task;
+            if (!sameTask(before, task)) changedIds.add(id);
+        }
+        if (changedIds.size === 0) {
+            return { task: existing, tasks, changed: false };
+        }
+        for (const id of changedIds) {
+            const task = working.get(id) as Task;
+            working.set(id, { ...task, updatedAt: at });
+        }
+        const normalized = syncDependencyEdges([...working.values()]);
+        this.#validateTasks(normalized);
         return {
+            task: normalized.find((task) => task.id === taskId) as Task,
+            tasks: normalized,
             changed: true,
-            task,
         };
     }
 
@@ -646,56 +769,52 @@ export class TasksModule implements AgentModule {
         }
     }
 
-    #validateDependencies(tasks: readonly Task[], taskId: string, dependsOn: readonly string[]) {
-        for (const dependency of dependsOn) {
-            this.#assertTaskId(dependency);
-            if (dependency === taskId) {
-                throw new Error(`Task "${taskId}" cannot depend on itself.`);
-            }
-            if (!tasks.some((task) => task.id === dependency)) {
-                throw new Error(`Task dependency "${dependency}" does not exist.`);
-            }
-        }
-        const candidate = tasks.map((task) =>
-            task.id === taskId ? { ...task, dependsOn: [...dependsOn] } : task,
-        );
-        if (hasCycle(candidate)) {
-            throw new Error("Task dependencies cannot contain a cycle.");
-        }
-    }
-
     #validateTasks(tasks: readonly Task[]): void {
         if (tasks.length > this.#maxTasks || !Value.Check(taskListSchema, tasks)) {
-            throw new Error("The task list exceeds its configured bounds or has an invalid shape.");
+            throw new TaskValidationError(
+                "The task list exceeds its configured bounds or has an invalid shape.",
+            );
         }
         if (new Set(tasks.map((task) => task.id)).size !== tasks.length) {
-            throw new Error("Task IDs must be unique.");
+            throw new TaskValidationError("Task IDs must be unique.");
         }
         const orderings = [...tasks]
             .map((task) => task.ordering)
             .sort((left, right) => left - right);
         if (!orderings.every((ordering, index) => ordering === index)) {
-            throw new Error("Task ordering must be unique and contiguous from zero.");
+            throw new TaskValidationError("Task ordering must be unique and contiguous from zero.");
         }
-        if (hasCycle(tasks)) throw new Error("Task dependencies cannot contain a cycle.");
+        if (hasCycle(tasks)) {
+            throw new TaskValidationError("Task dependencies cannot contain a cycle.");
+        }
         for (const task of tasks) {
             if (task.updatedAt < task.createdAt) {
-                throw new Error(`Task "${task.id}" has an invalid timestamp order.`);
+                throw new TaskValidationError(`Task "${task.id}" has an invalid timestamp order.`);
             }
             if (normalizeTitle(task.title) !== task.title) {
-                throw new Error(`Task "${task.id}" has an invalid title.`);
+                throw new TaskValidationError(`Task "${task.id}" has an invalid title.`);
             }
             if (task.detail !== undefined && normalizeDetail(task.detail) !== task.detail) {
-                throw new Error(`Task "${task.id}" has invalid detail.`);
+                throw new TaskValidationError(`Task "${task.id}" has invalid detail.`);
             }
-            this.#validateDependenciesExist(tasks, task);
+            if (
+                task.activeForm !== undefined &&
+                normalizeActiveForm(task.activeForm) !== task.activeForm
+            ) {
+                throw new TaskValidationError(`Task "${task.id}" has invalid active form.`);
+            }
+            if (task.owner !== undefined && normalizeOwner(task.owner) !== task.owner) {
+                throw new TaskValidationError(`Task "${task.id}" has invalid owner.`);
+            }
+            if (task.metadata !== undefined) assertTaskMetadata(task.metadata);
+            validateDependencyIds(tasks, task.id, task.dependsOn);
         }
-    }
-
-    #validateDependenciesExist(tasks: readonly Task[], task: Task): void {
-        for (const dependency of task.dependsOn) {
-            if (dependency === task.id || !tasks.some((candidate) => candidate.id === dependency)) {
-                throw new Error(`Task "${task.id}" has an invalid dependency.`);
+        const expectedBlocks = deriveBlocks(tasks);
+        for (const task of tasks) {
+            if (!sameIds(task.blocks, expectedBlocks.get(task.id) ?? [])) {
+                throw new TaskValidationError(
+                    `Task "${task.id}" has inconsistent reverse dependencies.`,
+                );
             }
         }
     }
@@ -705,15 +824,21 @@ export class TasksModule implements AgentModule {
         value: unknown,
         action: string,
     ): void {
-        if (!Value.Check(schema, value)) throw new Error(`Invalid task ${action} input.`);
+        if (!Value.Check(schema, value)) {
+            throw new TaskValidationError(`Invalid task ${action} input.`);
+        }
     }
 
     #assertAgentId(agentId: string): void {
-        if (!Value.Check(agentIdSchema, agentId)) throw new Error("Task agent ID is invalid.");
+        if (!Value.Check(agentIdSchema, agentId)) {
+            throw new TaskValidationError("Task agent ID is invalid.");
+        }
     }
 
     #assertTaskId(taskId: string): void {
-        if (!Value.Check(taskIdSchema, taskId)) throw new Error("Task ID is invalid.");
+        if (!Value.Check(taskIdSchema, taskId)) {
+            throw new TaskValidationError("Task ID is invalid.");
+        }
     }
 
     #assertEventId(eventId: string): void {
@@ -804,7 +929,9 @@ export class TasksModule implements AgentModule {
 function normalizeTitle(title: string): string {
     const normalized = title.trim();
     if (!Value.Check(taskTitleSchema, normalized)) {
-        throw new Error("Task title must not be empty and must be at most 500 characters.");
+        throw new TaskValidationError(
+            "Task title must not be empty and must be at most 500 characters.",
+        );
     }
     return normalized;
 }
@@ -813,9 +940,121 @@ function normalizeDetail(detail: string | undefined): string | undefined {
     if (detail === undefined) return undefined;
     const normalized = detail.trim();
     if (!Value.Check(taskDetailSchema, normalized)) {
-        throw new Error("Task detail must be at most 4000 characters.");
+        throw new TaskValidationError("Task detail must be at most 4000 characters.");
     }
     return normalized.length === 0 ? undefined : normalized;
+}
+
+function normalizeActiveForm(activeForm: string): string {
+    const normalized = activeForm.trim();
+    if (!Value.Check(taskActiveFormSchema, normalized)) {
+        throw new TaskValidationError(
+            "Task active form must not be empty and must be at most 500 characters.",
+        );
+    }
+    return normalized;
+}
+
+function normalizeOwner(owner: string): string {
+    const normalized = owner.trim();
+    if (!Value.Check(taskOwnerSchema, normalized)) {
+        throw new TaskValidationError(
+            "Task owner must not be empty and must be at most 256 characters.",
+        );
+    }
+    return normalized;
+}
+
+function cloneMetadata(metadata: TaskMetadata): TaskMetadata {
+    assertTaskMetadata(metadata);
+    return structuredClone(metadata);
+}
+
+function applyMetadataPatch(
+    existing: TaskMetadata | undefined,
+    patch: TaskMetadataPatch,
+): TaskMetadata {
+    const next: Record<string, unknown> = existing === undefined ? {} : structuredClone(existing);
+    for (const [key, value] of Object.entries(patch)) {
+        if (value === null) delete next[key];
+        else next[key] = structuredClone(value);
+    }
+    assertTaskMetadata(next);
+    return next as TaskMetadata;
+}
+
+function validateDependencyIds(
+    tasks: readonly Task[],
+    taskId: string,
+    dependsOn: readonly string[],
+): void {
+    for (const dependency of dependsOn) {
+        if (dependency === taskId) {
+            throw new TaskValidationError(`Task "${taskId}" cannot depend on itself.`);
+        }
+        if (!tasks.some((task) => task.id === dependency)) {
+            throw new TaskValidationError(`Task dependency "${dependency}" does not exist.`);
+        }
+    }
+}
+
+function appendUnique(values: readonly string[], additions: readonly string[]): string[] {
+    const next = [...values];
+    for (const value of additions) {
+        if (!next.includes(value)) next.push(value);
+    }
+    return next;
+}
+
+function syncDependencyEdges(tasks: readonly Task[]): readonly Task[] {
+    const blocks = deriveBlocks(tasks);
+    return tasks.map((task) => ({
+        ...structuredClone(task),
+        blocks: [...(blocks.get(task.id) ?? [])],
+    }));
+}
+
+function deriveBlocks(tasks: readonly Task[]): Map<string, string[]> {
+    const blocks = new Map(tasks.map((task) => [task.id, [] as string[]]));
+    for (const task of [...tasks].sort((left, right) => left.ordering - right.ordering)) {
+        for (const dependency of task.dependsOn) {
+            const dependents = blocks.get(dependency);
+            if (dependents !== undefined && !dependents.includes(task.id)) {
+                dependents.push(task.id);
+            }
+        }
+    }
+    return blocks;
+}
+
+function sameTask(left: Task, right: Task): boolean {
+    return (
+        left.id === right.id &&
+        left.title === right.title &&
+        left.detail === right.detail &&
+        left.activeForm === right.activeForm &&
+        left.owner === right.owner &&
+        left.status === right.status &&
+        left.priority === right.priority &&
+        sameIds(left.dependsOn, right.dependsOn) &&
+        sameIds(left.blocks, right.blocks) &&
+        left.createdAt === right.createdAt &&
+        left.updatedAt === right.updatedAt &&
+        left.ordering === right.ordering &&
+        JSON.stringify(left.metadata) === JSON.stringify(right.metadata)
+    );
+}
+
+function taskForTaskList(task: Task, tasks: readonly Task[]): Task {
+    const completed = new Set(
+        tasks
+            .filter((candidate) => candidate.status === "completed")
+            .map((candidate) => candidate.id),
+    );
+    return {
+        ...structuredClone(task),
+        dependsOn: task.dependsOn.filter((dependency) => !completed.has(dependency)),
+    };
 }
 
 function sameIds(left: readonly string[], right: readonly string[]): boolean {
@@ -835,13 +1074,19 @@ function compactOrdering(tasks: readonly Task[], at: number): readonly Task[] {
 }
 
 function compactTaskRow(task: Task): string {
-    const prefix = `${task.id} [${task.status}, ${task.priority}] `;
+    const fixedPrefix = `${task.id} [${task.status}, ${task.priority}] `;
+    const ownerPrefix =
+        task.owner === undefined ? fixedPrefix : `${fixedPrefix.slice(0, -1)} (${task.owner}) `;
+    const prefix = ownerPrefix.length <= 150 ? ownerPrefix : fixedPrefix;
     const maxTitleCharacters = Math.max(1, 200 - prefix.length);
     const title =
         task.title.length <= maxTitleCharacters
             ? task.title
             : `${task.title.slice(0, Math.max(1, maxTitleCharacters - 1))}…`;
-    return `${prefix}${title}`;
+    const dependencyText =
+        task.dependsOn.length === 0 ? "" : ` [blocked by ${task.dependsOn.join(", ")}]`;
+    const row = `${prefix}${title}`;
+    return row.length + dependencyText.length <= 200 ? `${row}${dependencyText}` : row;
 }
 
 function formatTaskDetailPage(
@@ -849,6 +1094,12 @@ function formatTaskDetailPage(
     maxOutputCharacters?: number,
 ): string {
     const lines = [compactTaskRow(page.task)];
+    if (page.task.activeForm !== undefined) {
+        lines.push(`Active form: ${page.task.activeForm}`);
+    }
+    if (page.task.owner !== undefined) {
+        lines.push(`Owner: ${page.task.owner}`);
+    }
     if (page.detail.length > 0) {
         lines.push(`Detail [${page.detailOffset}/${page.detailTotal}]: ${page.detail}`);
     }
@@ -856,6 +1107,12 @@ function formatTaskDetailPage(
         lines.push(
             `Depends on [${page.dependencyOffset}/${page.dependencyTotal}]: ${page.dependencies.join(", ")}`,
         );
+    }
+    if (page.task.blocks.length > 0) {
+        lines.push(`Blocks: ${page.task.blocks.join(", ")}`);
+    }
+    if (page.task.metadata !== undefined) {
+        lines.push(`Metadata: ${JSON.stringify(page.task.metadata)}`);
     }
     if (page.nextDetailOffset !== undefined) {
         lines.push(`More detail starts at offset ${page.nextDetailOffset}.`);

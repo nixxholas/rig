@@ -19,19 +19,20 @@ import { FileReadLog } from "./impl/FileReadLog.js";
 import { editFileTool } from "./tools/edit_file.js";
 import { findFilesTool } from "./tools/find_files.js";
 import { listDirectoryTool } from "./tools/list_directory.js";
+import { deleteFileTool } from "./tools/delete_file.js";
+import { moveFileTool } from "./tools/move_file.js";
 import { readCommandOutputTool } from "./tools/read_command_output.js";
 import { readFileTool } from "./tools/read_file.js";
 import { runCommandTool } from "./tools/run_command.js";
 import { searchFilesTool } from "./tools/search_files.js";
 import { sendCommandInputTool } from "./tools/send_command_input.js";
 import { stopCommandTool } from "./tools/stop_command.js";
+import { viewImageTool } from "./tools/view_image.js";
 import { writeFileTool } from "./tools/write_file.js";
 
 const exact = { additionalProperties: false } as const;
 const callableSchema = Type.Function([], Type.Any());
-const contextSchema = Type.Unsafe<Context>(
-    Type.Object({}, { additionalProperties: true }),
-);
+const contextSchema = Type.Unsafe<Context>(Type.Object({}, { additionalProperties: true }));
 
 const computeFileSystemSchema = Type.Object(
     {
@@ -122,10 +123,7 @@ export const computeModuleOptionsSchema = Type.Object(
     { provider: Type.Optional(hostComputeProviderSchema) },
     exact,
 );
-export type ComputeModuleOptions = Omit<
-    Static<typeof computeModuleOptionsSchema>,
-    "provider"
-> & {
+export type ComputeModuleOptions = Omit<Static<typeof computeModuleOptionsSchema>, "provider"> & {
     provider?: HostComputeProvider;
 };
 
@@ -182,9 +180,7 @@ export class ComputeModule implements AgentModule {
                 const cached = this.#computes.get(agentId);
                 if (cached !== undefined) {
                     if (cached.cwd !== config.cwd) {
-                        throw new Error(
-                            "An agent's cached compute configuration cannot change.",
-                        );
+                        throw new Error("An agent's cached compute configuration cannot change.");
                     }
                     return cached.compute;
                 }
@@ -231,19 +227,14 @@ export class ComputeModule implements AgentModule {
             await Promise.allSettled([...this.#activeOperations]);
             const cached = [...this.#computes.values()];
             this.#computes.clear();
-            await Promise.all(
-                cached.map(async ({ compute }) => await compute.dispose(ctx)),
-            );
+            await Promise.all(cached.map(async ({ compute }) => await compute.dispose(ctx)));
         })();
         return await this.#disposePromise;
     }
 
-    readonly instructions = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-    ): Promise<string> => {
+    readonly instructions = async (ctx: Context, scope: AgentModuleScope): Promise<string> => {
         const compute = await this.resolve(ctx, scope.agent.id);
-        return compute === undefined ? "" : computeInstructions(compute);
+        return compute === undefined ? "" : computeInstructions();
     };
 
     readonly tools = async (
@@ -295,17 +286,14 @@ export class ComputeModule implements AgentModule {
             compute.shell.cwd !== config.cwd
         ) {
             await compute.dispose(ctx);
-            throw new Error(
-                "Host compute provider returned mismatched working directories.",
-            );
+            throw new Error("Host compute provider returned mismatched working directories.");
         }
         return compute as HostCompute;
     }
 }
 
-function computeInstructions(compute: HostCompute): string {
+function computeInstructions(): string {
     return [
-        `You are working on a machine whose working directory is ${compute.cwd}. Paths that are not absolute are relative to it.`,
         "Read a file before changing it. write_file and edit_file refuse a file you have not read, and refuse one that changed on disk after you read it; read it again and reconsider the change.",
         "A command that outlives its timeout is not killed. It keeps running and comes back with a command ID, and every later read of it returns only what is new.",
     ].join("\n");
@@ -314,8 +302,11 @@ function computeInstructions(compute: HostCompute): string {
 function computeTools(compute: HostCompute, reads: FileReadLog): readonly AnyAgentTool[] {
     return [
         readFileTool(compute, reads),
+        viewImageTool(compute, reads),
         writeFileTool(compute, reads),
         editFileTool(compute, reads),
+        deleteFileTool(compute, reads),
+        moveFileTool(compute, reads),
         listDirectoryTool(compute),
         findFilesTool(compute),
         searchFilesTool(compute),

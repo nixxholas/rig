@@ -21,15 +21,19 @@ const machine = compute.createHostCompute({ ctx, cwd });
 
 `startHappyAgentDaemon` is the top-level composition root. It:
 
-- creates the private home and public home;
+- resolves one Happy root (default `~/.happy`) before any subsystem starts;
+- derives the private `<happyHome>/agent` and sibling public `<parent>/Happy` homes;
+- loads global `Happy/Config/happy.toml`, project `rig.toml` (or `happy.toml`) from the current
+  directory, and `<happyHome>/agent/runtime.toml`, with runtime values overriding project and
+  global values;
 - opens the authenticated Unix socket first, reporting `status: "starting"` until the Agent
   System is ready;
-- opens `<agentHome>/agent.sqlite` through asynchronous libSQL and takes an exclusive process
+- opens `<happyHome>/agent/agent.sqlite` through asynchronous libSQL and takes an exclusive process
   lock;
-- creates a host compute rooted at `publicHome`;
+- creates a host compute rooted at the derived public home;
 - installs every standard module and runs its migrations;
 - restores or creates the home’s stable root agent;
-- listens on a mode-`0600` Unix socket, normally `<agentHome>/server.sock`;
+- listens on a mode-`0600` Unix socket, normally `<happyHome>/agent/server.sock`;
 - closes HTTP, the agent system, compute, lock, and database together.
 
 ```ts
@@ -37,8 +41,7 @@ import { createRootContext } from "@steve.kite/stdlib";
 import { startHappyAgentDaemon } from "@slopus/happy-agent";
 
 const daemon = await startHappyAgentDaemon(createRootContext(), {
-    agentHome: "~/.happy/agent",
-    publicHome: "~/Happy",
+    happyHome: "~/.happy",
     providers,
     provider: "codex",
     models,
@@ -54,13 +57,22 @@ Capabilities that reach another service remain explicit in `integrations`: colla
 MCP, search, image generation, scheduling, user input, workflow/worklet runtimes, and slot
 projection.
 
+The resolved `daemon.configuration.paths` is the authoritative immutable layout. A custom
+`<parent>/.happy` always uses `<parent>/Happy` as its public home; callers do not provide
+`agentHome`, `publicHome`, socket, token, or database paths separately. Unknown TOML settings are
+ignored and listed on the corresponding configuration source; malformed TOML and invalid known
+values fail startup.
+
 The lower-level `loadHappyAgent(ctx, options)` remains available when a host wants the standard
-agent lifetime without the HTTP daemon.
+agent lifetime without the HTTP daemon; its `configuration` field accepts the same resolved
+configuration object.
 
 ## Unix-socket API
 
-Every endpoint is under `/v0`. The implemented session and event surface is consumable through
-Rig's protocol client, while capabilities explicitly excluded from this daemon remain unsupported.
+Every endpoint is under `/v0`. Happy Agent speaks Rig protocol version 17 directly, so the existing
+`rig-connect` client can consume its catalog, sessions, transcript windows, and live updates
+without a connector-specific compatibility path. Capabilities explicitly excluded from this daemon
+remain unsupported.
 
 - `GET /v0/health` — readiness, model catalog, and daemon identity.
 - `GET /v0/agent` — root agent metadata, active state, installed modules, and event cursor.
@@ -78,6 +90,11 @@ Rig's protocol client, while capabilities explicitly excluded from this daemon r
 - `GET /v0/events/live` — live Server-Sent Events with replay and `Last-Event-ID`.
 - `GET /v0/events/stream` — durable global SSE replay.
 - `GET /v0/catalog` — a Rig-shaped catalog snapshot.
+- `GET /v0/folders`, `/v0/plugins`, `/v0/worklets`, `/v0/profiles`, `/v0/sharing`,
+  `/v0/provider-usage`, `/v0/secrets`, and `/v0/external-tool-calls` — protocol-valid empty or
+  unavailable snapshots for optional Rig views that Happy Agent does not host yet.
+- `PUT|DELETE /v0/sessions/:sessionId/terminal-connections/:connectionId` — no-op terminal
+  presence acknowledgements so an existing Rig client can open and close a Happy Agent chat.
 - `POST /v0/timeline` — global timeline snapshot; project/workspace/session timelines are not
   claimed unless their host is configured.
 - `GET|POST /v0/sessions...` — conversation creation, listing, messages, state, transcript, and
@@ -85,6 +102,9 @@ Rig's protocol client, while capabilities explicitly excluded from this daemon r
 - `GET|POST|PATCH /v0/projects...` — local project/workspace/file/Git routes. Remote cloning,
   Docker workspaces, and other excluded host capabilities return an explicit unsupported response.
 - `POST /v0/shutdown` — close the daemon started by `startHappyAgentDaemon`.
+
+Compatibility reads do not claim unavailable capabilities. Their mutation routes remain
+unsupported instead of reporting fake success.
 
 Message bodies accept either a string or text/image input blocks. The same request may select the
 provider, model, reasoning effort, service tier, and permission mode. An optional caller-generated
@@ -97,9 +117,9 @@ retained verbatim. Rig sessions also receive an explicit indexed UI projection b
 event; the projection never replaces or casts away provider data.
 
 SSE frames use the durable UUID as `id`, the update type as `event`, and the complete event envelope
-as JSON `data`. Reconnect with `Last-Event-ID` or `?after=`. A client with an expired bounded cursor
-receives `409 Event cursor not found` and should reload `/v0/agent`; a new client starts at the
-current cursor instead of replaying history it did not request. Both global and session streams
+as JSON `data`. Reconnect with `Last-Event-ID` or `?after=`. The Rig-compatible global stream
+reports an expired bounded cursor as `gap: true` in its hello so `rig-connect` reloads the catalog;
+the lower-level durable stream still reports a missing cursor as a conflict. Both global and session streams
 queue whole frames, stop writing until Node emits `drain`, cap pending and writable bytes, skip
 heartbeats under pressure, and disconnect slow consumers so they can replay from their last
 successfully applied cursor.

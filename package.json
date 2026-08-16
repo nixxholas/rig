@@ -9,6 +9,8 @@
         "check:root": "tsc --noEmit -p tsconfig.json",
         "database:inspect": "TMPDIR=\"$PWD/.local\" tsx scripts/database/inspectRigDatabaseCli.ts",
         "dev": "pnpm --filter @slopus/happy-providers build && pnpm --filter @slopus/happy-agent-modules build && pnpm --filter @slopus/happy-agent-compute build && pnpm --filter happy-worklets build && pnpm --filter @slopus/rig-dev dev",
+        "dev2": "pnpm --filter @slopus/happy-providers build && pnpm --filter @slopus/happy-agent-modules build && pnpm --filter @slopus/happy-agent-compute build && pnpm --filter @slopus/happy-agent build && pnpm --filter @slopus/rig-dev dev2",
+        "dev2:global": "RIG_DEV2_GLOBAL=1 pnpm dev2",
         "dev:global": "pnpm exec tsx packages/rig-dev/sources/global.ts",
         "format": "oxfmt --write .",
         "format:check": "oxfmt --check .",

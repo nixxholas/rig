@@ -110,4 +110,188 @@ describe("SecretsModule", () => {
             database.close();
         }
     });
+
+    it("enforces host-only references and reserves managed credential IDs", async () => {
+        const database = moduleDatabase(secretsMigrations, "secrets-policy-test");
+        await database.ready;
+        try {
+            const module = new SecretsModule();
+            for (const id of ["github", "GitHub", "GITHUB", "gItHuB"]) {
+                await expect(
+                    module.register(database.context, "agent-a", {
+                        id,
+                        description: "Spoofed GitHub token",
+                        environment: { GH_TOKEN: "token" },
+                    }),
+                ).rejects.toThrow("reserved for GitHub CLI credentials");
+            }
+            for (const id of ["project-git", "PROJECT-GIT", "Project-Git"]) {
+                await expect(
+                    module.register(database.context, "agent-a", {
+                        id,
+                        description: "Spoofed project Git token",
+                        environment: { GIT_TOKEN: "token" },
+                    }),
+                ).rejects.toThrow("reserved for managed project Git access");
+            }
+
+            await module.register(database.context, "agent-a", {
+                id: "managed",
+                description: "Host credential",
+                environment: { TOKEN: "host-only" },
+                availableToModel: false,
+            });
+            await expect(
+                module.reference(database.context, "agent-a", "managed"),
+            ).resolves.toMatchObject({
+                id: "managed",
+                availableToModel: false,
+            });
+            await expect(
+                module.attach(database.context, "agent-a", "scope-1", "managed"),
+            ).rejects.toThrow("cannot be attached to agent commands");
+
+            await expect(
+                module.update(database.context, "agent-a", "managed", {
+                    availableToModel: true,
+                }),
+            ).resolves.toMatchObject({ availableToModel: true });
+            await expect(
+                module.attach(database.context, "agent-a", "scope-1", "managed"),
+            ).resolves.toEqual({
+                scopeRef: "scope-1",
+                secretId: "managed",
+            });
+            await expect(
+                module.resolveForCommand(database.context, "agent-a", "scope-1"),
+            ).resolves.toEqual({
+                environment: { TOKEN: "host-only" },
+                hiddenEnvironmentVariables: ["TOKEN"],
+            });
+            await expect(
+                module.update(database.context, "agent-a", "managed", {
+                    availableToModel: false,
+                }),
+            ).resolves.toMatchObject({ availableToModel: false });
+            await expect(
+                module.resolveForCommand(database.context, "agent-a", "scope-1"),
+            ).rejects.toThrow("not available to agent commands");
+            await expect(
+                module.resolveForCommand(database.context, "agent-a", "scope-1", ["managed"]),
+            ).rejects.toThrow("not available to agent commands");
+        } finally {
+            database.close();
+        }
+    });
+
+    it("rejects colliding selected environments and returns command hiding metadata", async () => {
+        const database = moduleDatabase(secretsMigrations, "secrets-command-resolution-test");
+        await database.ready;
+        try {
+            const module = new SecretsModule();
+            await module.register(database.context, "agent-a", {
+                id: "first",
+                description: "First",
+                environment: { TOKEN: "first" },
+            });
+            await module.register(database.context, "agent-a", {
+                id: "second",
+                description: "Second",
+                environment: { token: "second", OTHER: "second" },
+            });
+            await module.attach(database.context, "agent-a", "scope-1", "second");
+            await module.attach(database.context, "agent-a", "scope-1", "first");
+
+            await expect(
+                module.resolveForHost(database.context, "agent-a", "scope-1"),
+            ).rejects.toThrow("both define token");
+            await expect(
+                module.resolveForHost(database.context, "agent-a", "scope-1", ["first"]),
+            ).resolves.toEqual({ TOKEN: "first" });
+            await expect(
+                module.resolveForCommand(database.context, "agent-a", "scope-1", ["first"]),
+            ).resolves.toEqual({
+                environment: { TOKEN: "first" },
+                hiddenEnvironmentVariables: ["OTHER", "TOKEN"],
+            });
+        } finally {
+            database.close();
+        }
+    });
+
+    it("validates an injected command resolver and preserves its selected result", async () => {
+        const database = moduleDatabase(
+            secretsMigrations,
+            "secrets-command-resolver-contract-test",
+        );
+        await database.ready;
+        try {
+            const calls: unknown[][] = [];
+            const module = new SecretsModule({
+                resolveForCommand: async (...args) => {
+                    calls.push(args);
+                    return [{ secretId: "selected", environment: { DYNAMIC_TOKEN: "host-only" } }];
+                },
+            });
+            await module.register(database.context, "agent-a", {
+                id: "selected",
+                description: "Selected",
+                environment: { TOKEN: "database-value" },
+            });
+            await module.attach(database.context, "agent-a", "scope-1", "selected");
+            await expect(
+                module.resolveForCommand(database.context, "agent-a", "scope-1", ["selected"]),
+            ).resolves.toEqual({
+                environment: { DYNAMIC_TOKEN: "host-only" },
+                hiddenEnvironmentVariables: ["DYNAMIC_TOKEN", "TOKEN"],
+            });
+            expect(calls).toHaveLength(1);
+            expect(calls[0]?.[1]).toBe("agent-a");
+            expect(calls[0]?.[2]).toBe("scope-1");
+            expect(calls[0]?.[3]).toEqual(["selected"]);
+
+            expect(
+                () =>
+                    new SecretsModule({
+                        resolveForCommand: {} as never,
+                    }),
+            ).toThrow("options are invalid");
+        } finally {
+            database.close();
+        }
+    });
+
+    it("rejects collisions from an injected resolver regardless of result order", async () => {
+        const database = moduleDatabase(
+            secretsMigrations,
+            "secrets-command-resolver-collision-test",
+        );
+        await database.ready;
+        try {
+            const module = new SecretsModule({
+                resolveForCommand: async () => [
+                    { secretId: "second", environment: { token: "second" } },
+                    { secretId: "first", environment: { TOKEN: "first" } },
+                ],
+            });
+            await module.register(database.context, "agent-a", {
+                id: "first",
+                description: "First",
+                environment: { TOKEN: "database-first" },
+            });
+            await module.register(database.context, "agent-a", {
+                id: "second",
+                description: "Second",
+                environment: { token: "database-second" },
+            });
+            await module.attach(database.context, "agent-a", "scope-1", "second");
+            await module.attach(database.context, "agent-a", "scope-1", "first");
+
+            await expect(
+                module.resolveForCommand(database.context, "agent-a", "scope-1"),
+            ).rejects.toThrow("both define token");
+        } finally {
+            database.close();
+        }
+    });
 });

@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -248,7 +248,7 @@ export async function createHappyPluginTestHost(
     // macOS caps Unix socket paths near 104 bytes. The OS temp root plus this deliberately short
     // generated name keeps the authenticated socket well below that limit without touching the
     // plugin's authored source folder.
-    const root = await mkdtemp(join(options.temporaryDirectory ?? tmpdir(), "hp-"));
+    const root = await realpath(await mkdtemp(join(options.temporaryDirectory ?? tmpdir(), "hp-")));
     const socketPath = join(root, "h.sock");
     const pluginDirectory = join(root, "data");
     await mkdir(pluginDirectory, { mode: 0o700, recursive: true });

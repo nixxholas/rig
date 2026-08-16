@@ -9,6 +9,7 @@ import {
     MAX_HISTORY_POSITION,
     MAX_HISTORY_TOTAL_MESSAGES,
 } from "./HistoryMessage.js";
+import { historyAgentTargetSchema } from "./HistoryAgent.js";
 import { historyStatsSchema } from "./impl/summarizeHistory.js";
 
 const boundedCountSchema = Type.Integer({
@@ -60,7 +61,7 @@ export const historyQuerySchema = Type.Object(
         /** Return only messages in these roles. */
         roles: Type.Optional(Type.Array(historyRoleSchema, { maxItems: 4 })),
         /** Which agent to read. Omitted means the one asking. */
-        target: Type.Optional(historyAgentIdSchema),
+        target: Type.Optional(historyAgentTargetSchema),
     },
     { additionalProperties: false },
 );

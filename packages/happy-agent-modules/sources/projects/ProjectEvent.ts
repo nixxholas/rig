@@ -51,6 +51,39 @@ export const projectEventSchema = Type.Union([
     Type.Object(
         {
             ...projectEventEnvelope,
+            type: Type.Literal("project_unarchived"),
+            project: projectSchema,
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            ...projectEventEnvelope,
+            type: Type.Literal("project_reordered"),
+            previousOrderKey: projectSchema.properties.orderKey,
+            project: projectSchema,
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            ...projectEventEnvelope,
+            type: Type.Literal("project_avatar_updated"),
+            project: projectSchema,
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            ...projectEventEnvelope,
+            type: Type.Literal("project_avatar_cleared"),
+            project: projectSchema,
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            ...projectEventEnvelope,
             type: Type.Literal("project_settings_updated"),
             projectId: projectIdSchema,
             settings: projectSettingsSchema,

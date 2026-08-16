@@ -71,6 +71,43 @@ export const searchQuerySchema = Type.Object(
     { additionalProperties: false },
 );
 
+export const searchProviderSchema = Type.Union([
+    Type.Literal("bedrock"),
+    Type.Literal("claude"),
+    Type.Literal("codex"),
+    Type.Literal("gemini"),
+    Type.Literal("grok"),
+    Type.Literal("grok-x"),
+]);
+
+const searchProviderIdSchema = Type.String({
+    minLength: 1,
+    maxLength: 256,
+});
+
+const searchDomainSchema = Type.String({
+    minLength: 1,
+    maxLength: 253,
+});
+
+/**
+ * One provider-routed search request. The ordinary tools expose vendor-shaped argument schemas;
+ * this is the normalized host boundary shared by those tools.
+ */
+export const searchProviderRequestSchema = Type.Object(
+    {
+        provider: searchProviderSchema,
+        query: searchTextSchema,
+        providerId: Type.Optional(searchProviderIdSchema),
+        allowedDomains: Type.Optional(Type.Array(searchDomainSchema, { maxItems: 100 })),
+        blockedDomains: Type.Optional(Type.Array(searchDomainSchema, { maxItems: 100 })),
+        latest: Type.Optional(Type.Boolean()),
+        limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })),
+        cursor: Type.Optional(searchCursorSchema),
+    },
+    { additionalProperties: false },
+);
+
 export const searchPageSchema = Type.Object(
     {
         query: searchTextSchema,
@@ -105,6 +142,8 @@ export const fetchResultSchema = Type.Object(
 
 export type SearchResult = Static<typeof searchResultSchema>;
 export type SearchQuery = Static<typeof searchQuerySchema>;
+export type SearchProvider = Static<typeof searchProviderSchema>;
+export type SearchProviderRequest = Static<typeof searchProviderRequestSchema>;
 export type SearchPage = Static<typeof searchPageSchema>;
 export type FetchInput = Static<typeof fetchInputSchema>;
 export type FetchResult = Static<typeof fetchResultSchema>;

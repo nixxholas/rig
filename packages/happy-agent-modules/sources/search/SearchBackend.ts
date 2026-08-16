@@ -6,6 +6,7 @@ import {
     fetchResultSchema,
     searchAgentIdSchema,
     searchPageSchema,
+    searchProviderRequestSchema,
     searchQuerySchema,
 } from "./Search.js";
 
@@ -23,6 +24,16 @@ export const searchBackendSchema = Type.Object(
         search: Type.Function(
             [searchContextSchema, searchAgentIdSchema, searchQuerySchema],
             Type.Promise(searchPageSchema),
+        ),
+        /**
+         * Routes one ordinary vendor search tool through a host-owned provider implementation.
+         * This is not a lifted server tool: the host performs one bounded search and returns data.
+         */
+        searchProvider: Type.Optional(
+            Type.Function(
+                [searchContextSchema, searchAgentIdSchema, searchProviderRequestSchema],
+                Type.Promise(searchPageSchema),
+            ),
         ),
         fetch: Type.Function(
             [searchContextSchema, searchAgentIdSchema, fetchInputSchema],

@@ -3,17 +3,47 @@ import { Value } from "@sinclair/typebox/value";
 import type { Context } from "@steve.kite/stdlib";
 
 import { presenceContextSchema, type PresenceEvent } from "./PresenceEvent.js";
+import { presenceDatabaseSchema, type PresenceDatabase } from "./PresenceDatabase.js";
 import {
+    presenceScheduleInputSchema,
     presenceScheduleSchema,
     type PresenceSchedule,
     type PresenceScheduleInput,
 } from "./PresenceSchedule.js";
-import { presenceStateSchema, type PresenceState } from "./PresenceState.js";
+import {
+    presenceDefinitionSchema,
+    presenceIdSchema,
+    presenceStateSchema,
+    type PresenceDefinition,
+    type PresenceState,
+} from "./PresenceState.js";
 
-export const presenceStoreSchema = Type.Unknown();
-export const presenceScheduleStoreSchema = Type.Unknown();
+export const presenceStoreSchema = presenceDatabaseSchema;
+export const presenceScheduleStoreSchema = Type.Object(
+    {
+        list: Type.Function(
+            [
+                presenceContextSchema,
+                Type.Object(
+                    { limit: Type.Integer({ minimum: 1, maximum: 10_000 }) },
+                    { additionalProperties: false },
+                ),
+            ],
+            Type.Promise(Type.Array(presenceScheduleSchema, { maxItems: 10_000 })),
+        ),
+        set: Type.Function(
+            [presenceContextSchema, presenceScheduleInputSchema, presenceIdSchema],
+            Type.Promise(presenceScheduleSchema),
+        ),
+        clear: Type.Function(
+            [presenceContextSchema, presenceIdSchema],
+            Type.Promise(Type.Boolean()),
+        ),
+    },
+    { additionalProperties: false },
+);
 
-export type PresenceStore = import("./PresenceDatabase.js").PresenceDatabase;
+export type PresenceStore = PresenceDatabase;
 
 export const presenceReaderSchema = Type.Object(
     {
@@ -34,6 +64,14 @@ export function assertPresenceStateResult(value: unknown): asserts value is Pres
     }
 }
 
+export function assertPresenceDefinitionResult(
+    value: unknown,
+): asserts value is PresenceDefinition {
+    if (!Value.Check(presenceDefinitionSchema, value)) {
+        throw new Error("Presence database returned an invalid presence definition.");
+    }
+}
+
 export function assertPresenceScheduleResult(value: unknown): asserts value is PresenceSchedule {
     if (!Value.Check(presenceScheduleSchema, value)) {
         throw new Error("Presence database returned an invalid presence schedule.");
@@ -46,4 +84,10 @@ export function assertPresenceContext(value: unknown): asserts value is Context 
     }
 }
 
-export type { PresenceEvent, PresenceSchedule, PresenceScheduleInput, PresenceState };
+export type {
+    PresenceDefinition,
+    PresenceEvent,
+    PresenceSchedule,
+    PresenceScheduleInput,
+    PresenceState,
+};

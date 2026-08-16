@@ -17,7 +17,11 @@ export function importAppletTool(applets: AppletModule, agentId: string) {
         parameters: appletToolImportInputSchema,
         returnType: Type.Object({ applet: appletSchema }),
         durable: false,
-        shouldReviewInAutoMode: () => false,
+        requiresAutoOrFullAccess: true,
+        shouldReviewInAutoMode: () => true,
+        shouldRunInFullAccessInAutoMode: () => true,
+        describeAutoPermissionAction: (input) =>
+            applets.describeImportAutoPermission(input, "import"),
         execute: async (ctx, input: AppletToolImportInput, call) => ({
             applet: await applets.importForAgent(ctx, agentId, input, call.id),
         }),

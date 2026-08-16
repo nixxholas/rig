@@ -11,6 +11,7 @@ export const MAX_MCP_AGENT_ID_LENGTH = 256;
 export const MAX_MCP_SERVER_NAME_LENGTH = 128;
 export const MAX_MCP_TOOL_NAME_LENGTH = 128;
 export const MAX_MCP_DESCRIPTION_LENGTH = 16_384;
+export const MAX_MCP_ERROR_MESSAGE_LENGTH = 2_000;
 export const MAX_MCP_URI_LENGTH = 128;
 export const MAX_MCP_CURSOR_LENGTH = 32;
 export const MAX_MCP_PAGE_SIZE = 100;
@@ -349,9 +350,30 @@ export const mcpFingerprintSchema = Type.String({
     pattern: "^[0-9a-f]{64}$",
 });
 
+const mcpToolPolicyProperties = {
+    disabledTools: Type.Optional(
+        Type.Array(mcpToolNameSchema, {
+            maxItems: MAX_MCP_PAGE_SIZE,
+            uniqueItems: true,
+        }),
+    ),
+    enabledTools: Type.Optional(
+        Type.Array(mcpToolNameSchema, {
+            maxItems: MAX_MCP_PAGE_SIZE,
+            uniqueItems: true,
+        }),
+    ),
+} as const;
+
+export const mcpToolPolicySchema = Type.Object(mcpToolPolicyProperties, {
+    additionalProperties: false,
+});
+export type McpToolPolicy = Static<typeof mcpToolPolicySchema>;
+
 export const mcpServerSummarySchema = Type.Object(
     {
-        errorMessage: Type.Optional(Type.String({ maxLength: 2_000 })),
+        ...mcpToolPolicyProperties,
+        errorMessage: Type.Optional(Type.String({ maxLength: MAX_MCP_ERROR_MESSAGE_LENGTH })),
         fingerprint: Type.Optional(mcpFingerprintSchema),
         name: mcpServerNameSchema,
         promptSupport: Type.Optional(Type.Boolean()),
@@ -522,17 +544,8 @@ export type McpGetPromptInput = Static<typeof mcpGetPromptInputSchema>;
  * boundary, never used to create a client or choose a process/path in this package.
  */
 const mcpCommonConfig = {
-    disabledTools: Type.Optional(
-        Type.Array(Type.String({ minLength: 1, maxLength: MAX_MCP_TOOL_NAME_LENGTH }), {
-            maxItems: MAX_MCP_PAGE_SIZE,
-        }),
-    ),
+    ...mcpToolPolicyProperties,
     enabled: Type.Optional(Type.Boolean()),
-    enabledTools: Type.Optional(
-        Type.Array(Type.String({ minLength: 1, maxLength: MAX_MCP_TOOL_NAME_LENGTH }), {
-            maxItems: MAX_MCP_PAGE_SIZE,
-        }),
-    ),
     startupTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: 600_000 })),
     toolTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: 600_000 })),
 } as const;
@@ -546,9 +559,13 @@ export const mcpStdioServerConfigSchema = Type.Object(
         command: Type.String({ minLength: 1, maxLength: 4_096 }),
         cwd: Type.Optional(Type.String({ minLength: 1, maxLength: 4_096 })),
         env: Type.Optional(
-            Type.Record(Type.String({ minLength: 1, maxLength: 256 }), Type.String({ maxLength: 16_384 }), {
-                maxProperties: MAX_MCP_JSON_OBJECT_PROPERTIES,
-            }),
+            Type.Record(
+                Type.String({ minLength: 1, maxLength: 256 }),
+                Type.String({ maxLength: 16_384 }),
+                {
+                    maxProperties: MAX_MCP_JSON_OBJECT_PROPERTIES,
+                },
+            ),
         ),
         transport: Type.Literal("stdio"),
     },
@@ -560,14 +577,20 @@ export const mcpHttpServerConfigSchema = Type.Object(
         ...mcpCommonConfig,
         bearerTokenEnvVar: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
         headers: Type.Optional(
-            Type.Record(Type.String({ minLength: 1, maxLength: 256 }), Type.String({ maxLength: 16_384 }), {
-                maxProperties: MAX_MCP_JSON_OBJECT_PROPERTIES,
-            }),
+            Type.Record(
+                Type.String({ minLength: 1, maxLength: 256 }),
+                Type.String({ maxLength: 16_384 }),
+                {
+                    maxProperties: MAX_MCP_JSON_OBJECT_PROPERTIES,
+                },
+            ),
         ),
         oauthClientIdEnvVar: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
         oauthClientSecretEnvVar: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
         oauthScopes: Type.Optional(
-            Type.Array(Type.String({ minLength: 1, maxLength: 256 }), { maxItems: MAX_MCP_PAGE_SIZE }),
+            Type.Array(Type.String({ minLength: 1, maxLength: 256 }), {
+                maxItems: MAX_MCP_PAGE_SIZE,
+            }),
         ),
         transport: Type.Literal("http"),
         url: Type.String({ minLength: 1, maxLength: MAX_MCP_URI_LENGTH }),

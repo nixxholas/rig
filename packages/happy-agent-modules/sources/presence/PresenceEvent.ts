@@ -1,6 +1,7 @@
 import { Type, type Static } from "@sinclair/typebox";
 import type { Context } from "@steve.kite/stdlib";
 
+import { presenceDefinitionSchema } from "./PresenceState.js";
 import { presenceScheduleSchema } from "./PresenceSchedule.js";
 import { presenceStateSchema } from "./PresenceState.js";
 
@@ -51,6 +52,24 @@ export const presenceEventSchema = Type.Union([
             eventId: eventIdSchema,
             at: eventAtSchema,
             scheduleId: eventIdSchema,
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            type: Type.Literal("presence_definition_set"),
+            eventId: eventIdSchema,
+            at: eventAtSchema,
+            definition: presenceDefinitionSchema,
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            type: Type.Literal("presence_definition_cleared"),
+            eventId: eventIdSchema,
+            at: eventAtSchema,
+            presenceId: eventIdSchema,
         },
         { additionalProperties: false },
     ),

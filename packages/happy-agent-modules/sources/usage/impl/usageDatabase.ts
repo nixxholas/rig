@@ -1,8 +1,5 @@
 import { sql } from "drizzle-orm";
-import {
-    agentDatabaseRows,
-    agentDatabaseRun,
-} from "@slopus/happy-agent-base";
+import { agentDatabaseRows, agentDatabaseRun } from "@slopus/happy-agent-base";
 import { Value } from "@sinclair/typebox/value";
 import type { Context } from "@steve.kite/stdlib";
 
@@ -125,6 +122,21 @@ export class UsageDatabase {
         const allGroups = [...groups.values()];
         const cursor = query.cursor ?? 0;
         const page = allGroups.slice(cursor, cursor + maxGroups);
+        let latestTurn: Extract<UsageRecord, { kind: "turn" }> | undefined;
+        for (const record of records) {
+            if (record.kind === "turn") latestTurn = record;
+        }
+        const currentContext =
+            latestTurn?.contextTokens === undefined
+                ? undefined
+                : {
+                      approximate: false,
+                      contextTokens: latestTurn.contextTokens,
+                      provider: latestTurn.provider,
+                      ...(latestTurn.model === undefined ? {} : { model: latestTurn.model }),
+                      ...(latestTurn.effort === undefined ? {} : { effort: latestTurn.effort }),
+                      ...(latestTurn.tier === undefined ? {} : { tier: latestTurn.tier }),
+                  };
         const summary: UsageSummary = {
             ...(query.agentId === undefined ? {} : { agentId: query.agentId }),
             cursor,
@@ -154,6 +166,7 @@ export class UsageDatabase {
                 0,
             ),
             totalDurationMs: records.reduce((sum, record) => sum + record.durationMs, 0),
+            ...(currentContext === undefined ? {} : { currentContext }),
             groups: page,
             ...(cursor + page.length < allGroups.length
                 ? { nextCursor: cursor + page.length }

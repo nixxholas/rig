@@ -128,7 +128,11 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
                 if (host.cloneRemote === undefined) {
                     throw new AgentHttpError(503, "Remote project cloning is unavailable.");
                 }
-                const destination = join(options.agent.publicHome, "Projects", body.name);
+                const destination = join(
+                    options.agent.configuration.paths.publicHome,
+                    "Projects",
+                    body.name,
+                );
                 await host.cloneRemote(ctx, {
                     destination,
                     source:

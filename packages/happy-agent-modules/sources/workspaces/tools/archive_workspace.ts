@@ -19,7 +19,9 @@ export function archiveWorkspaceTool(workspaces: WorkspacesModule, agentId: stri
         returnType: workspaceSchema,
         durable: true,
         transactional: true,
-        shouldReviewInAutoMode: () => false,
+        shouldReviewInAutoMode: () => true,
+        describeAutoPermissionAction: ({ workspaceId }) =>
+            `archive workspace ${JSON.stringify(workspaceId)} and remove its host-managed worktree or folder`,
         execute: async (ctx, { workspaceId }, call) =>
             await workspaces.archive(ctx, agentId, workspaceId, { operationId: call.id }),
         toLLM: (workspace) => [

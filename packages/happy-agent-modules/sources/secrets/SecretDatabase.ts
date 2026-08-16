@@ -10,13 +10,16 @@ import { Value } from "@sinclair/typebox/value";
 
 import {
     secretEnvironmentVariableNameSchema,
+    secretEnvironmentVariableNamesSchema,
     secretHostEnvironmentSchema,
+    secretIdSchema,
     secretPageSchema,
     secretReferenceSchema,
     type SecretAgentId,
     type SecretAttachInput,
     type SecretAttachment,
     type SecretHostEnvironment,
+    type SecretId,
     type SecretListQuery,
     type SecretPage,
     type SecretReference,
@@ -35,6 +38,7 @@ export const SECRETS_MIGRATION_KEY = "001-secrets";
 
 const SECRETS_TABLE = "happy_agent_secrets";
 const ATTACHMENTS_TABLE = "happy_agent_secret_attachments";
+const MAX_RESOLVED_SECRET_ROWS = 256;
 
 export const secretsMigrations: readonly AgentModuleMigration[] = [
     [
@@ -124,11 +128,22 @@ export interface SecretDatabase {
         scopeRef: string,
         secretIds?: readonly string[],
     ) => Promise<SecretHostEnvironment>;
+    readonly environmentVariableNamesForScope: (
+        ctx: Context,
+        agentId: SecretAgentId,
+        scopeRef: string,
+    ) => Promise<readonly string[]>;
+    readonly attachedSecretIdsForScope: (
+        ctx: Context,
+        agentId: SecretAgentId,
+        scopeRef: string,
+    ) => Promise<readonly SecretId[]>;
 }
 
 export function createSecretDatabase(): SecretDatabase {
     const rowReference = (row: SecretRow): SecretReference => {
         const environment = parseEnvironment(row.environment_json);
+        const availableToModel = registrationAvailableToModel(row);
         const reference = {
             id: row.id,
             description: row.description,
@@ -136,9 +151,7 @@ export function createSecretDatabase(): SecretDatabase {
                 left.localeCompare(right),
             ),
             revision: row.revision,
-            ...(row.available_to_model === null
-                ? {}
-                : { availableToModel: Number(row.available_to_model) !== 0 }),
+            ...(availableToModel === undefined ? {} : { availableToModel }),
             ...(row.kind === null ? {} : { kind: row.kind }),
         };
         if (!Value.Check(secretReferenceSchema, reference)) {
@@ -219,7 +232,9 @@ export function createSecretDatabase(): SecretDatabase {
             const changed =
                 previous === undefined ||
                 previous.description !== registration.description ||
-                JSON.stringify(existingEnvironment) !== JSON.stringify(registration.environment);
+                JSON.stringify(existingEnvironment) !== JSON.stringify(registration.environment) ||
+                registrationAvailableToModel(previous) !==
+                    (registration.availableToModel ?? undefined);
             const revision =
                 previous === undefined
                     ? "1"
@@ -235,12 +250,21 @@ export function createSecretDatabase(): SecretDatabase {
                      available_to_model, kind)
                     VALUES (
                         ${agentId}, ${registration.id}, ${registration.description},
-                        ${JSON.stringify(registration.environment)}, ${revision}, ${null}, ${null}
+                        ${JSON.stringify(registration.environment)}, ${revision},
+                        ${
+                            registration.availableToModel === undefined
+                                ? null
+                                : registration.availableToModel
+                                  ? 1
+                                  : 0
+                        },
+                        ${null}
                     )
                     ON CONFLICT (owner_agent_id, id) DO UPDATE SET
                         description = EXCLUDED.description,
                         environment_json = EXCLUDED.environment_json,
-                        revision = EXCLUDED.revision`,
+                        revision = EXCLUDED.revision,
+                        available_to_model = EXCLUDED.available_to_model`,
             );
             const row = await rowFor(ctx, agentId, registration.id);
             if (row === undefined)
@@ -270,7 +294,12 @@ export function createSecretDatabase(): SecretDatabase {
                 }
             }
             const description = input.description ?? previous.description;
-            const changed = description !== previous.description || environmentChanged;
+            const previousAvailableToModel = registrationAvailableToModel(previous);
+            const availableToModel = input.availableToModel ?? previousAvailableToModel;
+            const changed =
+                description !== previous.description ||
+                environmentChanged ||
+                availableToModel !== previousAvailableToModel;
             const revision = environmentChanged
                 ? incrementRevision(previous.revision)
                 : previous.revision;
@@ -279,7 +308,10 @@ export function createSecretDatabase(): SecretDatabase {
                 sql`UPDATE ${sql.raw(SECRETS_TABLE)}
                     SET description = ${description},
                         environment_json = ${JSON.stringify(environment)},
-                        revision = ${revision}
+                        revision = ${revision},
+                        available_to_model = ${
+                            availableToModel === undefined ? null : availableToModel ? 1 : 0
+                        }
                     WHERE owner_agent_id = ${agentId} AND id = ${secretId}`,
             );
             const row = await rowFor(ctx, agentId, secretId);
@@ -353,6 +385,14 @@ export function createSecretDatabase(): SecretDatabase {
                 : { operation: "detach", detached: true, attachment: structuredClone(input) };
         },
         resolveForHost: async (ctx, agentId, scopeRef, secretIds) => {
+            if (
+                secretIds !== undefined &&
+                (secretIds.length > 256 ||
+                    new Set(secretIds).size !== secretIds.length ||
+                    secretIds.some((secretId) => !Value.Check(secretIdSchema, secretId)))
+            ) {
+                throw new Error("Secrets database received an invalid selection.");
+            }
             const clauses = [sql`a.owner_agent_id = ${agentId}`, sql`a.scope_ref = ${scopeRef}`];
             if (secretIds !== undefined) {
                 if (secretIds.length === 0) return {};
@@ -363,22 +403,101 @@ export function createSecretDatabase(): SecretDatabase {
                     )})`,
                 );
             }
+            const rows = await agentDatabaseRows<{
+                secret_id: string;
+                environment_json: string;
+            }>(
+                ctx.db,
+                sql`SELECT a.secret_id, s.environment_json
+                    FROM ${sql.raw(ATTACHMENTS_TABLE)} a
+                    JOIN ${sql.raw(SECRETS_TABLE)} s
+                      ON s.owner_agent_id = a.owner_agent_id AND s.id = a.secret_id
+                    WHERE ${sql.join(clauses, sql` AND `)}
+                    ORDER BY a.secret_id
+                    LIMIT ${MAX_RESOLVED_SECRET_ROWS + 1}`,
+            );
+            if (rows.length > MAX_RESOLVED_SECRET_ROWS) {
+                throw new Error("Secrets database returned too many attached secrets.");
+            }
+            const environment = Object.create(null) as Record<string, string>;
+            const owners = new Map<string, string>();
+            for (const row of rows) {
+                for (const [name, value] of Object.entries(
+                    parseEnvironment(row.environment_json),
+                )) {
+                    const normalizedName = name.toUpperCase();
+                    const owner = owners.get(normalizedName);
+                    if (owner !== undefined) {
+                        throw new Error(
+                            `Secrets '${owner}' and '${row.secret_id}' both define ${name}. Select only one of them for this command.`,
+                        );
+                    }
+                    owners.set(normalizedName, row.secret_id);
+                    environment[name] = value;
+                }
+            }
+            if (!Value.Check(secretHostEnvironmentSchema, environment)) {
+                throw new Error("Secrets database produced an invalid host environment.");
+            }
+            return structuredClone(environment);
+        },
+        environmentVariableNamesForScope: async (ctx, agentId, scopeRef) => {
             const rows = await agentDatabaseRows<{ environment_json: string }>(
                 ctx.db,
                 sql`SELECT s.environment_json
                     FROM ${sql.raw(ATTACHMENTS_TABLE)} a
                     JOIN ${sql.raw(SECRETS_TABLE)} s
                       ON s.owner_agent_id = a.owner_agent_id AND s.id = a.secret_id
-                    WHERE ${sql.join(clauses, sql` AND `)}
-                    ORDER BY a.secret_id`,
+                    WHERE a.owner_agent_id = ${agentId}
+                      AND a.scope_ref = ${scopeRef}
+                    ORDER BY a.secret_id
+                    LIMIT ${MAX_RESOLVED_SECRET_ROWS + 1}`,
             );
-            const environment: Record<string, string> = {};
-            for (const row of rows)
-                Object.assign(environment, parseEnvironment(row.environment_json));
-            if (!Value.Check(secretHostEnvironmentSchema, environment)) {
-                throw new Error("Secrets database produced an invalid host environment.");
+            if (rows.length > MAX_RESOLVED_SECRET_ROWS) {
+                throw new Error("Secrets database returned too many attached secrets.");
             }
-            return structuredClone(environment);
+            const namesByUppercase = new Map<string, string>();
+            for (const row of rows) {
+                for (const name of Object.keys(parseEnvironment(row.environment_json))) {
+                    const normalizedName = name.toUpperCase();
+                    if (namesByUppercase.has(normalizedName)) continue;
+                    namesByUppercase.set(normalizedName, name);
+                    if (namesByUppercase.size > 256) {
+                        throw new Error(
+                            "Secrets database returned too many environment variable names.",
+                        );
+                    }
+                }
+            }
+            const names = [...namesByUppercase.values()].sort((left, right) =>
+                left.localeCompare(right),
+            );
+            if (!Value.Check(secretEnvironmentVariableNamesSchema, names)) {
+                throw new Error("Secrets database returned invalid environment variable names.");
+            }
+            return names;
+        },
+        attachedSecretIdsForScope: async (ctx, agentId, scopeRef) => {
+            const rows = await agentDatabaseRows<{ secret_id: string }>(
+                ctx.db,
+                sql`SELECT secret_id
+                    FROM ${sql.raw(ATTACHMENTS_TABLE)}
+                    WHERE owner_agent_id = ${agentId}
+                      AND scope_ref = ${scopeRef}
+                    ORDER BY secret_id
+                    LIMIT ${MAX_RESOLVED_SECRET_ROWS + 1}`,
+            );
+            if (rows.length > MAX_RESOLVED_SECRET_ROWS) {
+                throw new Error("Secrets database returned too many attached secrets.");
+            }
+            const secretIds = rows.map(({ secret_id }) => secret_id);
+            if (
+                new Set(secretIds).size !== secretIds.length ||
+                secretIds.some((secretId) => !Value.Check(secretIdSchema, secretId))
+            ) {
+                throw new Error("Secrets database returned invalid attached secret IDs.");
+            }
+            return structuredClone(secretIds) as SecretId[];
         },
     };
 }
@@ -408,7 +527,23 @@ function parseEnvironment(value: string): Record<string, string> {
     if (!Value.Check(schema, parsed)) {
         throw new Error("Secrets database contains an invalid environment.");
     }
-    return structuredClone(parsed) as Record<string, string>;
+    const environment = structuredClone(parsed) as Record<string, string>;
+    const names = new Set<string>();
+    for (const name of Object.keys(environment)) {
+        const normalized = name.toUpperCase();
+        if (names.has(normalized)) {
+            throw new Error("Secrets database contains colliding environment variable names.");
+        }
+        names.add(normalized);
+    }
+    return environment;
+}
+
+function registrationAvailableToModel(row: SecretRow | undefined): boolean | undefined {
+    if (row === undefined || row.available_to_model === null) return undefined;
+    if (row.available_to_model === 0 || row.available_to_model === "0") return false;
+    if (row.available_to_model === 1 || row.available_to_model === "1") return true;
+    throw new Error("Secrets database contains an invalid model-availability flag.");
 }
 
 function incrementRevision(value: string): string {

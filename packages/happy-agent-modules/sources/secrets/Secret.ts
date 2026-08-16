@@ -13,6 +13,15 @@ export const secretIdSchema = Type.String({
     pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
 });
 
+/** IDs owned by host-managed credentials rather than user registrations. */
+export const GITHUB_SECRET_ID = "github" as const;
+export const PROJECT_GIT_SECRET_ID = "project-git" as const;
+
+export const secretReservedIdSchema = Type.Union([
+    Type.Literal(GITHUB_SECRET_ID),
+    Type.Literal(PROJECT_GIT_SECRET_ID),
+]);
+
 export const secretScopeRefSchema = Type.String({
     minLength: 1,
     /**
@@ -38,6 +47,14 @@ export const secretEnvironmentVariableNameSchema = Type.String({
     maxLength: 256,
     pattern: "^[A-Za-z_][A-Za-z0-9_]*$",
 });
+
+export const secretEnvironmentVariableNamesSchema = Type.Array(
+    secretEnvironmentVariableNameSchema,
+    {
+        maxItems: 256,
+        uniqueItems: true,
+    },
+);
 
 /**
  * Values cross the module boundary only between a trusted host and its resolver/store.
@@ -87,10 +104,7 @@ export const secretReferenceSchema = Type.Object(
     {
         id: secretIdSchema,
         description: secretDescriptionSchema,
-        environmentVariables: Type.Array(secretEnvironmentVariableNameSchema, {
-            maxItems: 256,
-            uniqueItems: true,
-        }),
+        environmentVariables: secretEnvironmentVariableNamesSchema,
         revision: secretRevisionSchema,
         availableToModel: Type.Optional(Type.Boolean()),
         kind: Type.Optional(
@@ -110,6 +124,7 @@ export const secretRegistrationSchema = Type.Object(
         id: secretIdSchema,
         description: secretDescriptionSchema,
         environment: secretEnvironmentSchema,
+        availableToModel: Type.Optional(Type.Boolean()),
     },
     { additionalProperties: false },
 );
@@ -120,6 +135,7 @@ export const secretRegistrationInputSchema = Type.Object(
         id: Type.Optional(secretIdSchema),
         description: secretDescriptionSchema,
         environment: secretEnvironmentSchema,
+        availableToModel: Type.Optional(Type.Boolean()),
     },
     { additionalProperties: false },
 );
@@ -129,6 +145,7 @@ export const secretUpdateInputSchema = Type.Object(
     {
         description: Type.Optional(secretDescriptionSchema),
         environment: Type.Optional(secretEnvironmentPatchSchema),
+        availableToModel: Type.Optional(Type.Boolean()),
     },
     { additionalProperties: false, minProperties: 1 },
 );
@@ -209,6 +226,32 @@ export const secretHostEnvironmentSchema = Type.Record(
     },
 );
 
+/**
+ * The command-facing result of resolving selected attachments. `hiddenEnvironmentVariables` tells
+ * the command host which ambient names to remove before adding `environment`; values never enter a
+ * model-facing shape.
+ */
+export const secretCommandEnvironmentSchema = Type.Object(
+    {
+        environment: secretHostEnvironmentSchema,
+        hiddenEnvironmentVariables: secretEnvironmentVariableNamesSchema,
+    },
+    { additionalProperties: false },
+);
+
+/** Per-secret values returned by an injected command resolver before module-owned merging. */
+export const secretCommandResolverEntrySchema = Type.Object(
+    {
+        secretId: secretIdSchema,
+        environment: secretHostEnvironmentSchema,
+    },
+    { additionalProperties: false },
+);
+
+export const secretCommandResolverResultSchema = Type.Array(secretCommandResolverEntrySchema, {
+    maxItems: 256,
+});
+
 /** The kind of mutation a store applied; a tag on store mutation results. */
 export const secretMutationOperationSchema = Type.Union([
     Type.Literal("register"),
@@ -220,9 +263,11 @@ export const secretMutationOperationSchema = Type.Union([
 
 export type SecretAgentId = Static<typeof secretAgentIdSchema>;
 export type SecretId = Static<typeof secretIdSchema>;
+export type SecretReservedId = Static<typeof secretReservedIdSchema>;
 export type SecretScopeRef = Static<typeof secretScopeRefSchema>;
 export type SecretCursor = Static<typeof secretCursorSchema>;
 export type SecretEnvironmentVariableName = Static<typeof secretEnvironmentVariableNameSchema>;
+export type SecretEnvironmentVariableNames = Static<typeof secretEnvironmentVariableNamesSchema>;
 export type SecretEnvironmentVariableValue = Static<typeof secretEnvironmentVariableValueSchema>;
 export type SecretRevision = Static<typeof secretRevisionSchema>;
 export type SecretReference = Static<typeof secretReferenceSchema>;
@@ -237,4 +282,7 @@ export type SecretListInput = Static<typeof secretListInputSchema>;
 export type SecretListQuery = Static<typeof secretListQuerySchema>;
 export type SecretPage = Static<typeof secretPageSchema>;
 export type SecretHostEnvironment = Static<typeof secretHostEnvironmentSchema>;
+export type SecretCommandEnvironment = Static<typeof secretCommandEnvironmentSchema>;
+export type SecretCommandResolverEntry = Static<typeof secretCommandResolverEntrySchema>;
+export type SecretCommandResolverResult = Static<typeof secretCommandResolverResultSchema>;
 export type SecretMutationOperation = Static<typeof secretMutationOperationSchema>;

@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import { agentDatabaseRows } from "@slopus/happy-agent-base";
 import { Value } from "@sinclair/typebox/value";
+import { withLifetime } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
 import * as WorkflowExports from "../../sources/workflows/index.js";
@@ -9,6 +10,7 @@ import {
     workflowModuleOptionsSchema,
 } from "../../sources/workflows/WorkflowsModule.js";
 import {
+    workflowLaunchToolInputSchema,
     workflowMutationResultSchema,
     workflowRunSchema,
     type WorkflowLaunchRequest,
@@ -166,6 +168,7 @@ describe("WorkflowsModule", () => {
         expect(WorkflowExports.WorkflowsModule).toBe(WorkflowsModule);
         expect(WorkflowExports.workflowModuleOptionsSchema).toBe(workflowModuleOptionsSchema);
         expect(WorkflowExports.workflowRunSchema).toBe(workflowRunSchema);
+        expect(WorkflowExports.workflowObservedRunSchema).toBeDefined();
         expect(WorkflowExports.workflowMutationResultSchema).toBe(workflowMutationResultSchema);
         expect("workflowCallOperationSchema" in WorkflowExports).toBe(false);
         expect("workflowOperationReceiptSchema" in WorkflowExports).toBe(false);
@@ -243,6 +246,153 @@ describe("WorkflowsModule", () => {
         }
     });
 
+    it("accepts bounded script orchestration inputs and forwards them to the host", async () => {
+        const test = workflowTest("workflow-script-launch");
+        await test.database.ready;
+        try {
+            const tool = test.module
+                .tools(test.database.context, { agent: { id: OWNER } } as never)
+                .find(({ name }) => name === "run_workflow");
+            expect(tool).toBeDefined();
+            await tool!.execute(
+                test.database.context,
+                {
+                    script: "print('review')\r\n",
+                    args: { files: ["a.ts", "b.ts"] },
+                    name: "review",
+                    description: "Review changed files",
+                    resumeFromRunId: "prior-run",
+                },
+                toolCall("script-call"),
+            );
+
+            expect(test.launchRequests).toEqual([
+                {
+                    workflow: "review",
+                    script: "print('review')\n",
+                    args: { files: ["a.ts", "b.ts"] },
+                    name: "review",
+                    description: "Review changed files",
+                    resumeFromRunId: "prior-run",
+                    operationId: "script-call",
+                },
+            ]);
+            expect(
+                Value.Check(workflowLaunchToolInputSchema, {
+                    scriptPath: "workflows/review.py",
+                    args: null,
+                }),
+            ).toBe(true);
+            expect(
+                Value.Check(workflowLaunchToolInputSchema, {
+                    script: "one",
+                    scriptPath: "two.py",
+                }),
+            ).toBe(false);
+        } finally {
+            test.database.close();
+        }
+    });
+
+    it("includes accumulated logs, agent count, and a legacy status projection", async () => {
+        const test = workflowTest("workflow-observations");
+        await test.database.ready;
+        try {
+            await test.module.launch(test.database.context, OWNER, {
+                workflow: "demo",
+                operationId: "run-1",
+            });
+            test.runtimeRuns.set("run-1", {
+                ...run("run-1", "completed", { updatedAt: 3, startedAt: 1 }),
+                agentCount: 3,
+                logs: ["phase one", "phase two"],
+                logsTruncated: false,
+            });
+
+            const result = await test.module.wait(test.database.context, OWNER, "run-1");
+            expect(result).toMatchObject({
+                agentCount: 3,
+                logs: ["phase one", "phase two"],
+                logsTruncated: false,
+                legacyStatus: "completed",
+            });
+            await expect(
+                test.module.status(test.database.context, OWNER, "run-1"),
+            ).resolves.toMatchObject({
+                agentCount: 3,
+                logs: ["phase one", "phase two"],
+                legacyStatus: "completed",
+            });
+            expect(test.module.formatRunForModel(result)).toContain("agent_count: 3");
+            expect(test.module.formatRunForModel(result)).toContain("phase one");
+        } finally {
+            test.database.close();
+        }
+    });
+
+    it("marks model-facing accumulated logs when the character budget truncates them", async () => {
+        const test = workflowTest("workflow-log-formatting");
+        await test.database.ready;
+        try {
+            const text = test.module.formatRunForModel({
+                ...run("run-1", "completed", { updatedAt: 2 }),
+                agentCount: 2,
+                logs: Array.from({ length: 10 }, () => "x".repeat(4_000)),
+            });
+            expect(text.length).toBeLessThanOrEqual(12_000);
+            expect(text).toContain("logs_truncated: true");
+        } finally {
+            test.database.close();
+        }
+    });
+
+    it("cancels only the wait when the calling lifetime is aborted", async () => {
+        let release!: (value: WorkflowRun) => void;
+        let receivedSignal: AbortSignal | undefined;
+        const module = new WorkflowsModule({
+            runtime: {
+                launch: async () => run("unused"),
+                cancel: async () => ({
+                    agentId: OWNER,
+                    operationId: "cancel",
+                    run: run("run-1", "cancelled", { updatedAt: 2 }),
+                    changed: true,
+                }),
+                resume: async () => ({
+                    agentId: OWNER,
+                    operationId: "resume",
+                    run: run("run-1", "running"),
+                    changed: true,
+                }),
+                wait: async (_ctx, _agentId, _id, signal) => {
+                    receivedSignal = signal;
+                    return await new Promise<WorkflowRun>((resolve) => {
+                        release = resolve;
+                    });
+                },
+            },
+        });
+        const database = moduleDatabase(module.migrations, "workflow-wait-cancel");
+        await database.ready;
+        const controller = new AbortController();
+        try {
+            const pending = module.wait(
+                withLifetime(database.context, controller.signal),
+                OWNER,
+                "run-1",
+            );
+            await Promise.resolve();
+            controller.abort();
+            await expect(pending).rejects.toThrow(
+                "Workflow wait was cancelled; the workflow continues running in the background.",
+            );
+            expect(receivedSignal).toBe(controller.signal);
+            release(run("run-1", "completed", { updatedAt: 2 }));
+        } finally {
+            database.close();
+        }
+    });
+
     it("marks database reads transactional and host-runtime tools non-durable", async () => {
         const test = workflowTest("workflow-tool-contracts");
         await test.database.ready;
@@ -264,6 +414,12 @@ describe("WorkflowsModule", () => {
                 expect(tool).toMatchObject({ durable: false });
                 expect(tool?.transactional).toBeUndefined();
             }
+            expect(
+                tools.find((candidate) => candidate.name === "run_workflow")?.description,
+            ).toContain("Only use this when the user explicitly asks");
+            expect(
+                tools.find((candidate) => candidate.name === "wait_workflow")?.description,
+            ).toContain("only this wait is cancelled");
         } finally {
             test.database.close();
         }

@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -397,7 +398,7 @@ describe("Daytona compute example", () => {
 });
 
 async function createSource(): Promise<string> {
-    const directory = await mkdtemp(join(process.cwd(), "daytona-test-"));
+    const directory = await mkdtemp(join(tmpdir(), "daytona-test-"));
     directories.push(directory);
     await mkdir(join(directory, "nested"));
     await writeFile(join(directory, "message.txt"), "hello");

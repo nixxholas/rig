@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -18,7 +19,7 @@ afterEach(async () => {
 
 describe("plugin workspace operations", () => {
     it("validates symlinks canonically while returning the unresolved workspace path", async () => {
-        const workspace = await mkdtemp(join(process.cwd(), ".workspace-operations-"));
+        const workspace = await mkdtemp(join(tmpdir(), "happy-plugin-workspace-operations-"));
         temporaryDirectories.push(workspace);
         await mkdir(join(workspace, "target"));
         await symlink(join(workspace, "target"), join(workspace, "link"));

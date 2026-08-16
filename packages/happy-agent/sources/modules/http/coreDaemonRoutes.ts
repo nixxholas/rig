@@ -1,20 +1,10 @@
-import { Type } from "@sinclair/typebox";
-import { Value } from "@sinclair/typebox/value";
-
 import { AgentHttpError, sendJson } from "./errors.js";
 import { createRouteGroup, type AgentHttpRouteGroup } from "./router.js";
-
-const catalogModelSchema = Type.Object(
-    {
-        defaultEffort: Type.String(),
-        effortLevels: Type.Array(Type.String()),
-        id: Type.String(),
-        name: Type.String(),
-        providerId: Type.String(),
-        serviceTiers: Type.Optional(Type.Array(Type.String())),
-    },
-    { additionalProperties: false },
-);
+import {
+    createRigModelCatalog,
+    HAPPY_AGENT_RIG_PROTOCOL_VERSION,
+    type RigModelCatalog,
+} from "./rigProtocol.js";
 
 export function createCoreDaemonRoutes(): AgentHttpRouteGroup {
     return createRouteGroup("core-daemon", [
@@ -22,13 +12,14 @@ export function createCoreDaemonRoutes(): AgentHttpRouteGroup {
             method: "GET",
             path: "/v0/health",
             handle: async ({ dependencies, response }) => {
-                const catalog = createModelCatalog(dependencies.agent.system.models);
+                const catalog = createRigModelCatalog(dependencies.agent.system.models);
                 sendJson(response, 200, {
                     catalog,
-                    durableGlobalEventQueue: true,
+                    durableGlobalEventQueue:
+                        dependencies.configuration?.durableGlobalEventQueue ?? false,
                     healthy: true,
                     identity: daemonIdentity(dependencies),
-                    protocolVersion: 0,
+                    protocolVersion: HAPPY_AGENT_RIG_PROTOCOL_VERSION,
                     ready: true,
                     status: "ready",
                 });
@@ -45,7 +36,7 @@ export function createCoreDaemonRoutes(): AgentHttpRouteGroup {
                         schemaVersion: dependencies.agent.installation.schemaVersion,
                         status: "initialized",
                     },
-                    daemonProtocolVersion: 0,
+                    daemonProtocolVersion: HAPPY_AGENT_RIG_PROTOCOL_VERSION,
                     daemonVersion: daemonIdentity(dependencies).version,
                     formatVersion: 1,
                     source: "daemon",
@@ -57,7 +48,7 @@ export function createCoreDaemonRoutes(): AgentHttpRouteGroup {
             path: "/v0/models",
             handle: async ({ dependencies, response }) => {
                 sendJson(response, 200, {
-                    catalog: createModelCatalog(dependencies.agent.system.models),
+                    catalog: createRigModelCatalog(dependencies.agent.system.models),
                 });
             },
         },
@@ -75,41 +66,7 @@ export function createCoreDaemonRoutes(): AgentHttpRouteGroup {
     ]);
 }
 
-export interface HappyModelCatalog {
-    readonly defaultModelId: string;
-    readonly defaultProviderId: string;
-    readonly models: readonly unknown[];
-    readonly providers: readonly {
-        readonly models: readonly unknown[];
-        readonly providerId: string;
-    }[];
-}
-
-function createModelCatalog(models: readonly unknown[]): HappyModelCatalog {
-    const typedModels = models.filter(isModel);
-    const providerIds = [...new Set(typedModels.map((model) => model.providerId))];
-    const first = typedModels[0];
-    return {
-        defaultModelId: first?.id ?? "",
-        defaultProviderId: first?.providerId ?? "",
-        models: typedModels,
-        providers: providerIds.map((providerId) => ({
-            models: typedModels.filter((model) => model.providerId === providerId),
-            providerId,
-        })),
-    };
-}
-
-function isModel(value: unknown): value is {
-    readonly defaultEffort: string;
-    readonly effortLevels: readonly string[];
-    readonly id: string;
-    readonly name: string;
-    readonly providerId: string;
-    readonly serviceTiers?: readonly string[];
-} {
-    return Value.Check(catalogModelSchema, value);
-}
+export type HappyModelCatalog = RigModelCatalog;
 
 function daemonIdentity(dependencies: { readonly version?: string }): { readonly version: string } {
     return { version: dependencies.version ?? "0.0.0" };

@@ -133,13 +133,16 @@ export const historyToolCallBlockSchema = Type.Object(
     { additionalProperties: false },
 );
 
-/** What a tool answered, summarized and already bounded by whoever recorded it. */
+/**
+ * What a tool answered, summarized and already bounded by whoever recorded it. Lifecycle
+ * recording always supplies a one-line display summary; direct host records may omit it.
+ */
 export const historyToolResultBlockSchema = Type.Object(
     {
         type: Type.Literal("tool_result"),
         callId: boundedIdentifier(MAX_HISTORY_CALL_ID_LENGTH),
         toolName: boundedIdentifier(MAX_HISTORY_TOOL_NAME_LENGTH),
-        /** The one-line summary a person would have seen. */
+        /** A bounded one-line summary suitable for a person-facing history view. */
         display: Type.Optional(Type.String({ maxLength: MAX_HISTORY_TOOL_DISPLAY_LENGTH })),
         /** What the model was shown, as text. */
         output: Type.String({ maxLength: MAX_HISTORY_TOOL_OUTPUT_LENGTH }),

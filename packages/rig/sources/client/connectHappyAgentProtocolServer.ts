@@ -5,6 +5,7 @@ import { Value } from "@sinclair/typebox/value";
 
 import { readTokenIfPresent } from "./ensureLocalProtocolServer.js";
 import { ProtocolHttpClient } from "./ProtocolHttpClient.js";
+import { getLocalServerPaths, type LocalServerPaths } from "../server/index.js";
 
 const connectHappyAgentProtocolServerOptionsSchema = Type.Object(
     {
@@ -21,6 +22,7 @@ export type ConnectHappyAgentProtocolServerOptions = Static<
 
 export interface HappyAgentProtocolServerConnection {
     readonly client: ProtocolHttpClient;
+    readonly paths: LocalServerPaths;
     readonly socketPath: string;
     readonly token: string;
     readonly tokenPath: string;
@@ -65,5 +67,14 @@ export async function connectHappyAgentProtocolServer(
         token,
     });
     await client.health();
-    return { client, socketPath, token, tokenPath };
+    const directory = dirname(socketPath);
+    const paths = {
+        ...getLocalServerPaths(process.getuid?.() ?? 0, {
+            databasePath: join(directory, "agent.sqlite"),
+            directory,
+        }),
+        socketPath,
+        tokenPath,
+    };
+    return { client, paths, socketPath, token, tokenPath };
 }

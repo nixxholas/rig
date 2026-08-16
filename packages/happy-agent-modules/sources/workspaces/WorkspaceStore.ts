@@ -1,9 +1,5 @@
 import { sql } from "drizzle-orm";
-import {
-    agentDatabaseRows,
-    agentDatabaseRun,
-    type AgentDatabase,
-} from "@slopus/happy-agent-base";
+import { agentDatabaseRows, agentDatabaseRun, type AgentDatabase } from "@slopus/happy-agent-base";
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type { Context } from "@steve.kite/stdlib";
@@ -12,8 +8,11 @@ import {
     workspaceIdSchema,
     workspaceMutationOperationSchema,
     workspaceOperationIdSchema,
+    workspaceNameSchema,
+    workspacePathSchema,
     workspaceProjectRefSchema,
     workspaceSchema,
+    workspaceTimestampSchema,
     type Workspace,
 } from "./Workspace.js";
 import {
@@ -56,6 +55,7 @@ export const workspaceStoreCreateInputSchema = Type.Object(
         id: workspaceIdSchema,
         ownerAgentId: workspaceAgentIdSchema,
         projectRef: Type.Optional(workspaceProjectRefSchema),
+        path: Type.Optional(workspacePathSchema),
         name: Type.String({ minLength: 1, maxLength: 500 }),
         baseRef: Type.Optional(Type.String({ minLength: 1, maxLength: 1_024 })),
     },
@@ -64,6 +64,15 @@ export const workspaceStoreCreateInputSchema = Type.Object(
 
 export const workspaceStoreArchiveInputSchema = Type.Object(
     { workspaceId: workspaceIdSchema },
+    { additionalProperties: false },
+);
+
+export const workspaceStoreRenameInputSchema = Type.Object(
+    {
+        workspaceId: workspaceIdSchema,
+        name: workspaceNameSchema,
+        expectedUpdatedAt: Type.Optional(workspaceTimestampSchema),
+    },
     { additionalProperties: false },
 );
 
@@ -91,8 +100,39 @@ export const workspaceArchiveResultSchema = Type.Object(
     { additionalProperties: false },
 );
 
+export const workspaceRenameResultSchema = Type.Object(
+    {
+        ...workspaceMutationEnvelope,
+        operation: Type.Literal("rename"),
+        workspace: workspaceSchema,
+    },
+    { additionalProperties: false },
+);
+
+export const workspaceCreateStoreResultSchema = Type.Union([
+    workspaceCreateResultSchema,
+    workspaceSchema,
+    Type.Undefined(),
+    Type.Void(),
+]);
+
+export const workspaceArchiveStoreResultSchema = Type.Union([
+    workspaceArchiveResultSchema,
+    workspaceSchema,
+    Type.Undefined(),
+    Type.Void(),
+]);
+
+export const workspaceRenameStoreResultSchema = Type.Union([
+    workspaceRenameResultSchema,
+    workspaceSchema,
+    Type.Undefined(),
+    Type.Void(),
+]);
+
 export const workspaceStoreMutationResultSchema = Type.Union([
     workspaceCreateResultSchema,
+    workspaceRenameResultSchema,
     workspaceArchiveResultSchema,
     workspaceTransferResultSchema,
 ]);
@@ -170,6 +210,15 @@ export const workspaceStoreSchema = Type.Object(
             ],
             Type.Promise(workspaceArchiveResultSchema),
         ),
+        rename: Type.Function(
+            [
+                workspaceContextSchema,
+                workspaceAgentIdSchema,
+                workspaceStoreRenameInputSchema,
+                workspaceMutationRequestSchema,
+            ],
+            Type.Promise(workspaceRenameResultSchema),
+        ),
         branchMetadata: Type.Function(
             [workspaceContextSchema, workspaceAgentIdSchema, workspaceIdSchema],
             Type.Promise(workspaceBranchMetadataSchema),
@@ -181,9 +230,14 @@ export const workspaceStoreSchema = Type.Object(
 export type WorkspaceStore = Static<typeof workspaceStoreSchema>;
 export type WorkspaceStoreCreateInput = Static<typeof workspaceStoreCreateInputSchema>;
 export type WorkspaceStoreArchiveInput = Static<typeof workspaceStoreArchiveInputSchema>;
+export type WorkspaceStoreRenameInput = Static<typeof workspaceStoreRenameInputSchema>;
 export type WorkspaceMutationRequest = Static<typeof workspaceMutationRequestSchema>;
 export type WorkspaceCreateResult = Static<typeof workspaceCreateResultSchema>;
 export type WorkspaceArchiveResult = Static<typeof workspaceArchiveResultSchema>;
+export type WorkspaceRenameResult = Static<typeof workspaceRenameResultSchema>;
+export type WorkspaceCreateStoreResult = Static<typeof workspaceCreateStoreResultSchema>;
+export type WorkspaceArchiveStoreResult = Static<typeof workspaceArchiveStoreResultSchema>;
+export type WorkspaceRenameStoreResult = Static<typeof workspaceRenameStoreResultSchema>;
 export type WorkspaceStoreMutationResult = Static<typeof workspaceStoreMutationResultSchema>;
 export type WorkspaceTransactionChange = Static<typeof workspaceTransactionChangeSchema>;
 
@@ -243,6 +297,14 @@ export function assertWorkspaceArchiveResult(
     }
 }
 
+export function assertWorkspaceRenameResult(
+    value: unknown,
+): asserts value is WorkspaceRenameResult {
+    if (!Value.Check(workspaceRenameResultSchema, value)) {
+        throw new Error("Workspace store returned an invalid rename result.");
+    }
+}
+
 export function assertWorkspaceStoreMutationResult(
     value: unknown,
 ): asserts value is WorkspaceStoreMutationResult {
@@ -269,18 +331,55 @@ export function assertWorkspaceTransactionChange(
 
 export const workspaceHostSchema = Type.Object(
     {
-        branchMetadata: Type.Function(
-            [workspaceContextSchema, workspaceAgentIdSchema, workspaceIdSchema],
-            Type.Promise(workspaceBranchMetadataSchema),
+        create: Type.Optional(
+            Type.Function(
+                [
+                    workspaceContextSchema,
+                    workspaceAgentIdSchema,
+                    workspaceStoreCreateInputSchema,
+                    workspaceMutationRequestSchema,
+                ],
+                Type.Promise(workspaceCreateStoreResultSchema),
+            ),
         ),
-        transfer: Type.Function(
-            [
-                workspaceContextSchema,
-                workspaceAgentIdSchema,
-                workspaceTransferInputSchema,
-                workspaceMutationRequestSchema,
-            ],
-            Type.Promise(workspaceTransferStoreResultSchema),
+        archive: Type.Optional(
+            Type.Function(
+                [
+                    workspaceContextSchema,
+                    workspaceAgentIdSchema,
+                    workspaceStoreArchiveInputSchema,
+                    workspaceMutationRequestSchema,
+                ],
+                Type.Promise(workspaceArchiveStoreResultSchema),
+            ),
+        ),
+        rename: Type.Optional(
+            Type.Function(
+                [
+                    workspaceContextSchema,
+                    workspaceAgentIdSchema,
+                    workspaceStoreRenameInputSchema,
+                    workspaceMutationRequestSchema,
+                ],
+                Type.Promise(workspaceRenameStoreResultSchema),
+            ),
+        ),
+        branchMetadata: Type.Optional(
+            Type.Function(
+                [workspaceContextSchema, workspaceAgentIdSchema, workspaceIdSchema],
+                Type.Promise(workspaceBranchMetadataSchema),
+            ),
+        ),
+        transfer: Type.Optional(
+            Type.Function(
+                [
+                    workspaceContextSchema,
+                    workspaceAgentIdSchema,
+                    workspaceTransferInputSchema,
+                    workspaceMutationRequestSchema,
+                ],
+                Type.Promise(workspaceTransferStoreResultSchema),
+            ),
         ),
     },
     { additionalProperties: false },
@@ -288,9 +387,12 @@ export const workspaceHostSchema = Type.Object(
 
 export type WorkspaceHost = Static<typeof workspaceHostSchema>;
 
-type WorkspaceStoreOptions = {
-    readonly host?: WorkspaceHost;
-};
+export const workspaceStoreOptionsSchema = Type.Object(
+    { host: Type.Optional(workspaceHostSchema) },
+    { additionalProperties: false },
+);
+
+export type WorkspaceStoreOptions = Static<typeof workspaceStoreOptionsSchema>;
 
 type WorkspaceRow = {
     readonly id: string;
@@ -299,6 +401,7 @@ type WorkspaceRow = {
     readonly base_ref: string | null;
     readonly name: string;
     readonly status: string;
+    readonly path: string | null;
     readonly created_at: number | string;
     readonly updated_at: number | string;
     readonly archived_at: number | string | null;
@@ -366,16 +469,43 @@ export const workspaceMigrations = [
             );
         },
     ],
+    [
+        "003-workspace-path",
+        async (_ctx: Context, database: AgentDatabase): Promise<void> => {
+            await agentDatabaseRun(
+                database,
+                sql`ALTER TABLE ${sql.raw(WORKSPACES_TABLE)} ADD COLUMN path TEXT`,
+            );
+        },
+    ],
 ] as const;
 
 export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): WorkspaceStore {
+    if (!Value.Check(workspaceStoreOptionsSchema, options)) {
+        throw new Error("Workspace store options are invalid.");
+    }
     return {
         create: async (ctx, actingAgentId, input, operation) => {
+            const hostResult =
+                options.host?.create === undefined
+                    ? undefined
+                    : await options.host.create(ctx, actingAgentId, input, operation);
+            if (hostResult !== undefined) {
+                const result = normalizeCreateStoreResult(
+                    hostResult,
+                    actingAgentId,
+                    input,
+                    operation,
+                );
+                await insertWorkspace(ctx.db, result.workspace);
+                return result;
+            }
             const at = Date.now();
             const workspace: Workspace = {
                 id: input.id,
                 ownerAgentId: input.ownerAgentId,
                 projectRef: input.projectRef ?? "default",
+                ...(input.path === undefined ? {} : { path: input.path }),
                 ...(input.baseRef === undefined ? {} : { baseRef: input.baseRef }),
                 name: input.name,
                 status: "ready",
@@ -383,17 +513,7 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
                 updatedAt: at,
             };
             assertWorkspace(workspace);
-            await agentDatabaseRun(
-                ctx.db,
-                sql`INSERT INTO ${sql.raw(WORKSPACES_TABLE)} (
-                    id, owner_agent_id, project_ref, base_ref, name, status,
-                    created_at, updated_at, archived_at
-                ) VALUES (
-                    ${workspace.id}, ${workspace.ownerAgentId}, ${workspace.projectRef},
-                    ${workspace.baseRef ?? null}, ${workspace.name}, ${workspace.status},
-                    ${workspace.createdAt}, ${workspace.updatedAt}, ${null}
-                )`,
-            );
+            await insertWorkspace(ctx.db, workspace);
             return {
                 operation: "create",
                 agentId: actingAgentId,
@@ -409,18 +529,18 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
             const rows = await agentDatabaseRows<WorkspaceRow>(
                 database,
                 query.projectRef === undefined
-                    ? query.includeArchived === true
+                    ? query.includeArchived !== false
                         ? sql`SELECT * FROM ${sql.raw(WORKSPACES_TABLE)} ORDER BY id LIMIT ${limit} OFFSET ${offset}`
                         : sql`SELECT * FROM ${sql.raw(WORKSPACES_TABLE)}
-                               WHERE status <> 'archived'
+                               WHERE status NOT IN ('archived', 'archiving')
                                ORDER BY id LIMIT ${limit} OFFSET ${offset}`
-                    : query.includeArchived === true
+                    : query.includeArchived !== false
                       ? sql`SELECT * FROM ${sql.raw(WORKSPACES_TABLE)}
                              WHERE project_ref = ${query.projectRef}
                              ORDER BY id LIMIT ${limit} OFFSET ${offset}`
                       : sql`SELECT * FROM ${sql.raw(WORKSPACES_TABLE)}
                              WHERE project_ref = ${query.projectRef}
-                               AND status <> 'archived'
+                               AND status NOT IN ('archived', 'archiving')
                              ORDER BY id LIMIT ${limit} OFFSET ${offset}`,
             );
             const workspaces = rows.map(workspaceFromRow);
@@ -443,7 +563,7 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
         transfer: async (ctx, actingAgentId, input, operation) => {
             const database = ctx.db;
             const hostResult =
-                options.host === undefined
+                options.host?.transfer === undefined
                     ? undefined
                     : await options.host.transfer(ctx, actingAgentId, input, operation);
             const result =
@@ -460,6 +580,7 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
                         id: result.id,
                         projectRef: result.projectRef,
                         ownerAgentId: result.ownerAgentId,
+                        ...(result.path === undefined ? {} : { path: result.path }),
                     },
                 };
             }
@@ -486,6 +607,60 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
             }
             return result;
         },
+        rename: async (ctx, actingAgentId, input, operation) => {
+            const database = ctx.db;
+            const before = await readWorkspace(database, input.workspaceId);
+            if (before === undefined) {
+                throw new Error(`Workspace "${input.workspaceId}" was not found.`);
+            }
+            if (
+                input.expectedUpdatedAt !== undefined &&
+                input.expectedUpdatedAt !== before.updatedAt
+            ) {
+                throw new Error("Workspace changed before it could be renamed.");
+            }
+            const hostResult =
+                options.host?.rename === undefined
+                    ? undefined
+                    : await options.host.rename(ctx, actingAgentId, input, operation);
+            if (hostResult !== undefined) {
+                const result = normalizeRenameStoreResult(
+                    hostResult,
+                    actingAgentId,
+                    input,
+                    operation,
+                    before,
+                );
+                if (result.workspace.id !== input.workspaceId) {
+                    throw new Error("Workspace rename host returned a different workspace.");
+                }
+                await persistWorkspace(database, result.workspace);
+                return result;
+            }
+            const changed = before.name !== input.name;
+            const updatedAt = changed
+                ? Math.max(Date.now(), before.updatedAt + 1)
+                : before.updatedAt;
+            if (changed) {
+                await agentDatabaseRun(
+                    database,
+                    sql`UPDATE ${sql.raw(WORKSPACES_TABLE)}
+                        SET name = ${input.name}, updated_at = ${updatedAt}
+                        WHERE id = ${input.workspaceId}`,
+                );
+            }
+            return {
+                operation: "rename",
+                agentId: actingAgentId,
+                operationId: operation.operationId,
+                changed,
+                workspace: {
+                    ...before,
+                    name: input.name,
+                    updatedAt,
+                },
+            };
+        },
         archive: async (ctx, actingAgentId, input, operation) => {
             const database = ctx.db;
             const before = await readWorkspace(database, input.workspaceId);
@@ -499,6 +674,23 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
                     changed: false,
                     workspace: before,
                 };
+            }
+            const hostResult =
+                options.host?.archive === undefined
+                    ? undefined
+                    : await options.host.archive(ctx, actingAgentId, input, operation);
+            if (hostResult !== undefined) {
+                const result = normalizeArchiveStoreResult(
+                    hostResult,
+                    actingAgentId,
+                    input,
+                    operation,
+                );
+                if (result.workspace.id !== input.workspaceId) {
+                    throw new Error("Workspace archive host returned a different workspace.");
+                }
+                await persistWorkspace(database, result.workspace);
+                return result;
             }
             const updatedAt = Date.now();
             await agentDatabaseRun(
@@ -522,7 +714,7 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
             };
         },
         branchMetadata: async (ctx, actingAgentId, workspaceId) => {
-            if (options.host === undefined) {
+            if (options.host?.branchMetadata === undefined) {
                 throw new Error("Workspace branch metadata requires an injected host service.");
             }
             return await options.host.branchMetadata(ctx, actingAgentId, workspaceId);
@@ -543,11 +735,27 @@ async function readWorkspace(
     return row === undefined ? undefined : workspaceFromRow(row);
 }
 
+async function insertWorkspace(database: AgentDatabase, workspace: Workspace): Promise<void> {
+    await agentDatabaseRun(
+        database,
+        sql`INSERT INTO ${sql.raw(WORKSPACES_TABLE)} (
+            id, owner_agent_id, project_ref, path, base_ref, name, status,
+            created_at, updated_at, archived_at
+        ) VALUES (
+            ${workspace.id}, ${workspace.ownerAgentId}, ${workspace.projectRef},
+            ${workspace.path ?? null}, ${workspace.baseRef ?? null}, ${workspace.name},
+            ${workspace.status}, ${workspace.createdAt}, ${workspace.updatedAt},
+            ${workspace.archivedAt ?? null}
+        )`,
+    );
+}
+
 function workspaceFromRow(row: WorkspaceRow): Workspace {
     const workspace: Workspace = {
         id: row.id,
         ownerAgentId: row.owner_agent_id,
         projectRef: row.project_ref,
+        ...(row.path === null ? {} : { path: row.path }),
         ...(row.base_ref === null ? {} : { baseRef: row.base_ref }),
         name: row.name,
         status: row.status as Workspace["status"],
@@ -585,21 +793,26 @@ async function defaultWorkspaceTransfer(
     }
     const workspace = await readWorkspace(database, input.workspaceId);
     if (workspace === undefined) throw new Error(`Workspace "${input.workspaceId}" was not found.`);
-    await agentDatabaseRun(
-        database,
-        sql`UPDATE ${sql.raw(WORKSPACES_TABLE)}
-            SET project_ref = ${input.targetProjectRef}, updated_at = ${Date.now()}
-            WHERE id = ${input.workspaceId}`,
-    );
+    const changed = workspace.projectRef !== input.targetProjectRef;
+    if (changed) {
+        const updatedAt = Math.max(Date.now(), workspace.updatedAt + 1);
+        await agentDatabaseRun(
+            database,
+            sql`UPDATE ${sql.raw(WORKSPACES_TABLE)}
+                SET project_ref = ${input.targetProjectRef}, updated_at = ${updatedAt}
+                WHERE id = ${input.workspaceId}`,
+        );
+    }
     return {
         agentId,
         operationId: operation.operationId,
-        changed: workspace.projectRef !== input.targetProjectRef,
+        changed,
         state: "transferred",
         workspace: {
             id: workspace.id,
             projectRef: input.targetProjectRef,
             ownerAgentId: workspace.ownerAgentId,
+            ...(workspace.path === undefined ? {} : { path: workspace.path }),
         },
     };
 }
@@ -610,6 +823,7 @@ async function persistWorkspace(database: AgentDatabase, workspace: Workspace): 
         sql`UPDATE ${sql.raw(WORKSPACES_TABLE)}
             SET owner_agent_id = ${workspace.ownerAgentId},
                 project_ref = ${workspace.projectRef},
+                path = ${workspace.path ?? null},
                 base_ref = ${workspace.baseRef ?? null},
                 name = ${workspace.name},
                 status = ${workspace.status},
@@ -618,4 +832,110 @@ async function persistWorkspace(database: AgentDatabase, workspace: Workspace): 
                 archived_at = ${workspace.archivedAt ?? null}
             WHERE id = ${workspace.id}`,
     );
+}
+
+function normalizeCreateStoreResult(
+    raw: WorkspaceCreateStoreResult,
+    agentId: string,
+    input: WorkspaceStoreCreateInput,
+    operation: WorkspaceMutationRequest,
+): WorkspaceCreateResult {
+    if (Value.Check(workspaceCreateResultSchema, raw)) {
+        assertWorkspaceCreateResult(raw);
+        assertMutationIdentity(raw, agentId, operation.operationId, "create");
+        assertCreatedInput(raw.workspace, input);
+        return structuredClone(raw);
+    }
+    assertWorkspace(raw);
+    assertCreatedInput(raw, input);
+    return {
+        operation: "create",
+        agentId,
+        operationId: operation.operationId,
+        changed: true,
+        workspace: structuredClone(raw),
+    };
+}
+
+function normalizeArchiveStoreResult(
+    raw: WorkspaceArchiveStoreResult,
+    agentId: string,
+    input: WorkspaceStoreArchiveInput,
+    operation: WorkspaceMutationRequest,
+): WorkspaceArchiveResult {
+    if (Value.Check(workspaceArchiveResultSchema, raw)) {
+        assertWorkspaceArchiveResult(raw);
+        assertMutationIdentity(raw, agentId, operation.operationId, "archive");
+        if (raw.workspace.id !== input.workspaceId) {
+            throw new Error("Workspace archive result has a different workspace identity.");
+        }
+        return structuredClone(raw);
+    }
+    assertWorkspace(raw);
+    if (raw.id !== input.workspaceId) {
+        throw new Error("Workspace archive result has a different workspace identity.");
+    }
+    return {
+        operation: "archive",
+        agentId,
+        operationId: operation.operationId,
+        changed: true,
+        workspace: structuredClone(raw),
+    };
+}
+
+function normalizeRenameStoreResult(
+    raw: WorkspaceRenameStoreResult,
+    agentId: string,
+    input: WorkspaceStoreRenameInput,
+    operation: WorkspaceMutationRequest,
+    before: Workspace,
+): WorkspaceRenameResult {
+    if (Value.Check(workspaceRenameResultSchema, raw)) {
+        assertWorkspaceRenameResult(raw);
+        assertMutationIdentity(raw, agentId, operation.operationId, "rename");
+        if (raw.workspace.id !== input.workspaceId || raw.workspace.name !== input.name) {
+            throw new Error("Workspace rename result does not match the requested workspace.");
+        }
+        return structuredClone(raw);
+    }
+    assertWorkspace(raw);
+    if (raw.id !== input.workspaceId || raw.name !== input.name) {
+        throw new Error("Workspace rename result does not match the requested workspace.");
+    }
+    return {
+        operation: "rename",
+        agentId,
+        operationId: operation.operationId,
+        changed: before.name !== raw.name,
+        workspace: structuredClone(raw),
+    };
+}
+
+function assertMutationIdentity(
+    result: WorkspaceCreateResult | WorkspaceArchiveResult | WorkspaceRenameResult,
+    agentId: string,
+    operationId: string,
+    operation: "create" | "archive" | "rename",
+): void {
+    if (
+        result.agentId !== agentId ||
+        result.operationId !== operationId ||
+        result.operation !== operation
+    ) {
+        throw new Error("Workspace host mutation result identity does not match the request.");
+    }
+}
+
+function assertCreatedInput(workspace: Workspace, input: WorkspaceStoreCreateInput): void {
+    if (
+        workspace.id !== input.id ||
+        workspace.ownerAgentId !== input.ownerAgentId ||
+        workspace.name !== input.name ||
+        (input.projectRef !== undefined && workspace.projectRef !== input.projectRef) ||
+        (input.path !== undefined && workspace.path !== input.path) ||
+        (input.baseRef !== undefined && workspace.baseRef !== input.baseRef)
+    ) {
+        throw new Error("Workspace host create result does not match the requested identity.");
+    }
 }

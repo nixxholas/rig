@@ -1,5 +1,6 @@
 import { createServer, type Server } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -24,7 +25,7 @@ afterEach(async () => {
 
 describe("happy-plugins client", () => {
     it("reports readiness through an explicit startup declaration", async () => {
-        const directory = await mkdtemp(join(process.cwd(), ".c-"));
+        const directory = await mkdtemp(join(tmpdir(), "happy-plugins-client-"));
         temporaryDirectories.push(directory);
         const socketPath = join(directory, "s");
         const server = createServer((request, response) => {
@@ -41,7 +42,7 @@ describe("happy-plugins client", () => {
     });
 
     it("authenticates over the provided Unix socket and validates the response schema", async () => {
-        const directory = await mkdtemp(join(process.cwd(), ".c-"));
+        const directory = await mkdtemp(join(tmpdir(), "happy-plugins-client-"));
         temporaryDirectories.push(directory);
         const socketPath = join(directory, "s");
         const server = createServer((request, response) => {
@@ -67,7 +68,7 @@ describe("happy-plugins client", () => {
     });
 
     it("rejects invalid daemon responses through the TypeBox schema", async () => {
-        const directory = await mkdtemp(join(process.cwd(), ".c-"));
+        const directory = await mkdtemp(join(tmpdir(), "happy-plugins-client-"));
         temporaryDirectories.push(directory);
         const socketPath = join(directory, "s");
         const server = createServer((_request, response) => {
@@ -81,7 +82,7 @@ describe("happy-plugins client", () => {
     });
 
     it("reads provider-neutral usage for application actions", async () => {
-        const directory = await mkdtemp(join(process.cwd(), ".c-"));
+        const directory = await mkdtemp(join(tmpdir(), "happy-plugins-client-"));
         temporaryDirectories.push(directory);
         const socketPath = join(directory, "s");
         const server = createServer((request, response) => {
@@ -125,7 +126,7 @@ describe("happy-plugins client", () => {
     });
 
     it("surfaces daemon errors and missing injected settings in human language", async () => {
-        const directory = await mkdtemp(join(process.cwd(), ".c-"));
+        const directory = await mkdtemp(join(tmpdir(), "happy-plugins-client-"));
         temporaryDirectories.push(directory);
         const socketPath = join(directory, "s");
         const server = createServer((_request, response) => {
@@ -161,7 +162,7 @@ describe("happy-plugins client", () => {
     });
 
     it("does not retain finite connections across clients or daemon restarts", async () => {
-        const directory = await mkdtemp(join(process.cwd(), ".c-"));
+        const directory = await mkdtemp(join(tmpdir(), "happy-plugins-client-"));
         temporaryDirectories.push(directory);
         const socketPath = join(directory, "s");
         const activeConnections = new Set<object>();

@@ -6,6 +6,8 @@ import type { Compute } from "../Compute.js";
 import {
     commandResultSchema,
     createCommandResult,
+    DEFAULT_COMMAND_OUTPUT_TOKENS,
+    MAX_COMMAND_OUTPUT_TOKENS,
     formatCommandResult,
 } from "../impl/commandResult.js";
 
@@ -38,6 +40,12 @@ export function runCommandTool(compute: Compute) {
         parameters: Type.Object(
             {
                 command: Type.String({ description: "The command to run." }),
+                shell: Type.Optional(
+                    Type.String({
+                        description:
+                            "Shell binary to launch. Defaults to the machine's default shell.",
+                    }),
+                ),
                 workdir: Type.Optional(
                     Type.String({
                         description:
@@ -63,6 +71,13 @@ export function runCommandTool(compute: Compute) {
                             "Run under a terminal, for programs that behave differently without one. Defaults to false.",
                     }),
                 ),
+                max_output_tokens: Type.Optional(
+                    Type.Integer({
+                        description: `Output token budget. Defaults to ${String(DEFAULT_COMMAND_OUTPUT_TOKENS)}.`,
+                        minimum: 1,
+                        maximum: MAX_COMMAND_OUTPUT_TOKENS,
+                    }),
+                ),
                 escalate_sandbox: Type.Optional(
                     Type.Boolean({
                         description:
@@ -81,15 +96,28 @@ export function runCommandTool(compute: Compute) {
         returnType: commandResultSchema,
         autoPermissionInstructions:
             "Set escalate_sandbox to true, with a concise justification, only when the workspace sandbox is what stops a command from doing necessary work. Every other command runs sandboxed.",
-        describeAutoPermissionAction: ({ command, workdir, justification }) =>
-            `running ${JSON.stringify(command)} in ${JSON.stringify(workdir ?? compute.cwd)} outside the workspace sandbox, with unrestricted filesystem and network access${
+        describeAutoPermissionAction: ({
+            command,
+            workdir,
+            shell,
+            escalate_sandbox,
+            justification,
+        }) =>
+            `running ${JSON.stringify(command)} in ${JSON.stringify(workdir ?? compute.cwd)} ${
+                escalate_sandbox === true
+                    ? "outside the workspace sandbox, with unrestricted filesystem and network access"
+                    : "inside the current workspace sandbox"
+            }${shell === undefined ? "" : ` using shell ${JSON.stringify(shell)}`}${
                 justification === undefined ? "" : `. Reason given: ${justification}`
             }`,
         // A sandboxed command is the ordinary case and needs no reviewer; leaving the sandbox is
         // the whole of what one is asked about here.
         shouldReviewInAutoMode: ({ escalate_sandbox }) => escalate_sandbox === true,
         shouldRunInFullAccessInAutoMode: ({ escalate_sandbox }) => escalate_sandbox === true,
-        execute: async (ctx, { command, workdir, timeout_ms, background, tty }) => {
+        execute: async (
+            ctx,
+            { command, workdir, timeout_ms, background, tty, shell, max_output_tokens },
+        ) => {
             const startedAt = Date.now();
             const permissions = computePermissions(agentPermissionMode(ctx));
             const sessionId = await compute.shell.startSession({
@@ -98,6 +126,7 @@ export function runCommandTool(compute: Compute) {
                 ...(workdir === undefined ? {} : { cwd: workdir }),
                 maxOutputBytes: CAPTURE_MAX_BYTES,
                 ...(tty === undefined ? {} : { tty }),
+                ...(shell === undefined ? {} : { shell }),
             });
             // A command the model asked to keep is already the turn's own business; one it is
             // waiting on is not, so cancelling the turn takes that one down with it.
@@ -123,7 +152,11 @@ export function runCommandTool(compute: Compute) {
             if (snapshot.status === "running" && ctx.lifetime?.aborted !== true) {
                 compute.shell.detachSession?.(sessionId);
             }
-            return createCommandResult(snapshot, (Date.now() - startedAt) / 1_000);
+            return createCommandResult(
+                snapshot,
+                (Date.now() - startedAt) / 1_000,
+                max_output_tokens === undefined ? {} : { maxOutputTokens: max_output_tokens },
+            );
         },
         isError: (result) => result.exit_code !== undefined && result.exit_code !== 0,
         toLLM: (result) => [{ type: "text", text: formatCommandResult(result) }],

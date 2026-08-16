@@ -10,6 +10,7 @@ import {
     searchCursorSchema,
     type FetchResult,
     type SearchPage,
+    type SearchProviderRequest,
     type SearchQuery,
 } from "../../sources/search/Search.js";
 import type { SearchBackend } from "../../sources/search/SearchBackend.js";
@@ -29,6 +30,11 @@ class ClassBackedSearchBackend implements SearchBackend {
         readonly agentId: string;
         readonly url: string;
         readonly maxCharacters: number | undefined;
+    }> = [];
+    readonly #providerSearchCalls: Array<{
+        readonly ctx: Context;
+        readonly agentId: string;
+        readonly request: SearchProviderRequest;
     }> = [];
     #searchPage: SearchPage = {
         query: "rig",
@@ -55,6 +61,10 @@ class ClassBackedSearchBackend implements SearchBackend {
         return this.#fetchCalls;
     }
 
+    get providerSearchCalls() {
+        return this.#providerSearchCalls;
+    }
+
     get searchPage(): SearchPage {
         return this.#searchPage;
     }
@@ -74,6 +84,15 @@ class ClassBackedSearchBackend implements SearchBackend {
     async search(callCtx: Context, agentId: string, query: SearchQuery): Promise<SearchPage> {
         this.#searchCalls.push({ ctx: callCtx, agentId, query });
         return this.#searchPage;
+    }
+
+    async searchProvider(
+        callCtx: Context,
+        agentId: string,
+        request: SearchProviderRequest,
+    ): Promise<SearchPage> {
+        this.#providerSearchCalls.push({ ctx: callCtx, agentId, request });
+        return { ...this.#searchPage, query: request.query };
     }
 
     async fetch(
@@ -131,11 +150,32 @@ describe("SearchModule", () => {
         ]);
 
         const tools = search.tools(ctx, scope(AGENT_ID));
-        expect(tools.map((tool) => tool.name)).toEqual(["web_search", "web_fetch"]);
-        await tools[0]!.execute(ctx, { query: "rig" }, undefined as never);
-        await tools[1]!.execute(ctx, { url: "https://example.test/one" }, undefined as never);
-        expect(backend.searchCalls.at(-1)?.agentId).toBe(AGENT_ID);
+        expect(tools.map((tool) => tool.name)).toEqual([
+            "web_fetch",
+            "gemini_web_search",
+            "claude_web_search",
+            "codex_web_search",
+            "bedrock_web_search",
+            "grok_web_search",
+            "grok_x_search",
+        ]);
+        await tools[3]!.execute(
+            ctx,
+            { query: "rig", domains: ["example.test"], provider_id: "codex-one" },
+            undefined as never,
+        );
+        await tools[0]!.execute(ctx, { url: "https://example.test/one" }, undefined as never);
+        expect(backend.providerSearchCalls.at(-1)).toMatchObject({
+            agentId: AGENT_ID,
+            request: {
+                provider: "codex",
+                providerId: "codex-one",
+                allowedDomains: ["example.test"],
+                query: "rig",
+            },
+        });
         expect(backend.fetchCalls.at(-1)?.agentId).toBe(AGENT_ID);
+        expect(tools.every((tool) => tool.requiresAutoOrFullAccess === true)).toBe(true);
     });
 
     it("normalizes fetch URLs and requires exact backend identity", async () => {
@@ -455,9 +495,7 @@ describe("SearchModule", () => {
             ...backend.searchPage,
             nextCursor: 6,
         };
-        await expect(searchWithCursor(module(backend), 4)).rejects.toThrow(
-            "returned result count",
-        );
+        await expect(searchWithCursor(module(backend), 4)).rejects.toThrow("returned result count");
 
         backend.searchPage = {
             query: "rig",

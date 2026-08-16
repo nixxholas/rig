@@ -10,8 +10,8 @@ import { Agent } from "@slopus/happy-agent-base";
 import { McpModule } from "@slopus/happy-agent-modules";
 
 const mcp = new McpModule({
-  host: rigMcpHost,
-  userInput: rigUserInput,
+    host: rigMcpHost,
+    userInput: rigUserInput,
 });
 const agent = await Agent.create(ctx, { ...options, modules: [mcp] });
 ```
@@ -41,6 +41,21 @@ change that decision. Intrinsically read-only catalog and resource operations ex
 review while retaining the external-boundary declaration. The module declares these properties
 on tools and never performs permission review or elevation itself.
 
+The host's server summaries may carry `enabledTools` and `disabledTools` policy lists. Before a
+dynamic or direct call is dispatched, the module rejects a tool absent from an enabled list or
+present in a disabled list with a policy error. Hosts that omit both optional lists retain the
+default of allowing the live server to decide.
+
+If normalized direct tool names collide, only the contributing server or servers are quarantined:
+their status becomes `failed`, their tool count becomes zero, and the collision is included in the
+server error message returned by `list_mcp_servers`. Unrelated connected servers keep their tools.
+
+## Blocked on Agent Base
+
+Per-server MCP call serialization is not available in this module. Agent Base's tool contract has
+no lock declaration, and the module contract forbids module-level in-memory locks, so per-server
+serialization cannot be expressed without a change to the frozen base.
+
 Tool results are translated to provider-neutral text/image blocks with the existing 512 KiB text,
 four-image, five-MiB-image, 128-block, and bounded structured-JSON rules. Application results whose
 `isError` is exactly `true` remain MCP errors. Elicitation requests are converted to the host's
@@ -58,7 +73,11 @@ existing safe behavior.
 - `listPrompts`, `getPrompt`
 
 Each list operation is paged at the host boundary. Pages are validated for identity, requested
-limit, duplicate records, and non-advancing cursors before the module returns them. Model-facing
+limit, duplicate records, and non-advancing cursors before the module returns them. Server summaries
+may include the configured `enabledTools` and `disabledTools` lists used for pre-dispatch policy
+enforcement. Hosts may instead provide the optional `getToolPolicy(ctx, agentId, server)` callback
+returning the same bounded policy object; when absent, the module falls back to the summary fields.
+Model-facing
 formatters retain every actionable server/tool/URI identity before optional descriptions, and throw
 if the configured output budget cannot fit a complete identity and continuation.
 

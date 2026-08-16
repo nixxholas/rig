@@ -16,12 +16,11 @@ import {
     type AgentModuleSystemScope,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
+import { createUuidV7Factory } from "@slopus/happy-agent-modules";
 import type { SessionEvent } from "@slopus/happy-providers";
 import type { Context } from "@steve.kite/stdlib";
 import { sql } from "drizzle-orm";
 import type { LibSQLDatabase } from "drizzle-orm/libsql";
-
-import { createUuidV7Factory } from "../events/createUuidV7.js";
 
 export const conversationSessionIdSchema = Type.String({
     minLength: 1,

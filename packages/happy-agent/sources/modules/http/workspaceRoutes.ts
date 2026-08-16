@@ -50,11 +50,17 @@ export function createWorkspaceRoutes(options: WorkspaceRouteOptions): AgentHttp
     const agentId = options.agent.agent.id;
     const projects = options.agent.modules.projects;
     const workspaces = options.agent.modules.workspaces;
+    const assertEnabled = (): void => {
+        if (!options.agent.configuration.values.features.workspaces) {
+            throw new AgentHttpError(503, "Workspaces are disabled by configuration.");
+        }
+    };
     return createRouteGroup("workspaces", [
         {
             method: "GET",
             path: "/v0/projects/:projectId/workspaces",
             handle: async ({ ctx, response, url }) => {
+                assertEnabled();
                 const projectId = requireParam(
                     requireParams(url.pathname, "/v0/projects/:projectId/workspaces"),
                     "projectId",
@@ -75,6 +81,7 @@ export function createWorkspaceRoutes(options: WorkspaceRouteOptions): AgentHttp
             method: "POST",
             path: "/v0/projects/:projectId/workspaces",
             handle: async ({ ctx, request, response, url }) => {
+                assertEnabled();
                 const projectId = requireParam(
                     requireParams(url.pathname, "/v0/projects/:projectId/workspaces"),
                     "projectId",
@@ -116,6 +123,7 @@ export function createWorkspaceRoutes(options: WorkspaceRouteOptions): AgentHttp
             method: "GET",
             path: "/v0/projects/:projectId/workspaces/:workspaceId",
             handle: async ({ ctx, response, url }) => {
+                assertEnabled();
                 const params = requireParams(
                     url.pathname,
                     "/v0/projects/:projectId/workspaces/:workspaceId",
@@ -136,6 +144,7 @@ export function createWorkspaceRoutes(options: WorkspaceRouteOptions): AgentHttp
             method: "PATCH",
             path: "/v0/projects/:projectId/workspaces/:workspaceId",
             handle: async ({ request, url }) => {
+                assertEnabled();
                 requireParams(url.pathname, "/v0/projects/:projectId/workspaces/:workspaceId");
                 await readValidatedBody(request, renameWorkspaceSchema);
                 throw new AgentHttpError(
@@ -148,6 +157,7 @@ export function createWorkspaceRoutes(options: WorkspaceRouteOptions): AgentHttp
             method: "POST",
             path: "/v0/projects/:projectId/workspaces/:workspaceId/archive",
             handle: async ({ ctx, request, response, url }) => {
+                assertEnabled();
                 const params = requireParams(
                     url.pathname,
                     "/v0/projects/:projectId/workspaces/:workspaceId/archive",
@@ -179,6 +189,7 @@ export function createWorkspaceRoutes(options: WorkspaceRouteOptions): AgentHttp
             method: "POST",
             path: "/v0/projects/:projectId/workspaces/:workspaceId/reorder",
             handle: async ({ request, url }) => {
+                assertEnabled();
                 requireParams(
                     url.pathname,
                     "/v0/projects/:projectId/workspaces/:workspaceId/reorder",

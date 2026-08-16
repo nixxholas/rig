@@ -1,56 +1,107 @@
-import type { AgentPermissionMode } from "@slopus/happy-agent-base";
+import { agentPermissionModeSchema } from "@slopus/happy-agent-base";
+import { Type, type Static } from "@sinclair/typebox";
 import type { Context } from "@steve.kite/stdlib";
 
+const permissionContextSchema = Type.Unsafe<Context>(
+    Type.Object({}, { additionalProperties: false }),
+);
+const permissionAgentIdSchema = Type.String({ minLength: 1, maxLength: 128 });
+const permissionCallIdSchema = Type.String({ minLength: 1, maxLength: 256 });
+const permissionToolSchema = Type.String({ minLength: 1, maxLength: 256 });
+const permissionActionSchema = Type.String({ minLength: 1, maxLength: 16_384 });
+const permissionReasonSchema = Type.String({ minLength: 1, maxLength: 4_096 });
+
 /** Everything that happened to one agent's permissions, as the module saw it. */
-export type PermissionEvent =
-    | {
-          readonly type: "permission_mode_changed";
-          readonly agentId: string;
-          readonly previousMode: AgentPermissionMode;
-          readonly mode: AgentPermissionMode;
-      }
-    | {
-          readonly type: "permission_action_reviewed";
-          readonly agentId: string;
-          readonly callId: string;
-          readonly tool: string;
-          /** What the reviewer was deciding on. */
-          readonly action: string;
-          /** Whether allowing it also lifted the sandbox for the length of the call. */
-          readonly elevated: boolean;
-      }
-    | {
-          readonly type: "permission_action_denied";
-          readonly agentId: string;
-          readonly callId: string;
-          readonly tool: string;
-          readonly action: string;
-          /** Why the reviewer refused, in the words it refused with. */
-          readonly reason: string;
-      }
-    | {
-          /** The reviewer never answered, so nothing was decided and the action did not happen. */
-          readonly type: "permission_action_unproven";
-          readonly agentId: string;
-          readonly callId: string;
-          readonly tool: string;
-          readonly action: string;
-          readonly reason: string;
-      }
-    | {
-          /** The tool cannot be contained by the mode in force, so it was not offered a review. */
-          readonly type: "permission_action_out_of_mode";
-          readonly agentId: string;
-          readonly callId: string;
-          readonly tool: string;
-          readonly mode: AgentPermissionMode;
-      }
-    | {
-          /** Refusal after refusal, so the turn was ended rather than left trying. */
-          readonly type: "permission_turn_stopped";
-          readonly agentId: string;
-          readonly refusals: number;
-      };
+export const permissionEventSchema = Type.Union([
+    Type.Object(
+        {
+            type: Type.Literal("permission_mode_changed"),
+            agentId: permissionAgentIdSchema,
+            previousMode: agentPermissionModeSchema,
+            mode: agentPermissionModeSchema,
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            type: Type.Literal("permission_mode_cleanup_failed"),
+            agentId: permissionAgentIdSchema,
+            previousMode: agentPermissionModeSchema,
+            mode: agentPermissionModeSchema,
+            reason: permissionReasonSchema,
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            type: Type.Literal("permission_action_reviewed"),
+            agentId: permissionAgentIdSchema,
+            callId: permissionCallIdSchema,
+            tool: permissionToolSchema,
+            action: permissionActionSchema,
+            elevated: Type.Boolean(),
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            type: Type.Literal("permission_action_denied"),
+            agentId: permissionAgentIdSchema,
+            callId: permissionCallIdSchema,
+            tool: permissionToolSchema,
+            action: permissionActionSchema,
+            reason: permissionReasonSchema,
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            type: Type.Literal("permission_action_unproven"),
+            agentId: permissionAgentIdSchema,
+            callId: permissionCallIdSchema,
+            tool: permissionToolSchema,
+            action: permissionActionSchema,
+            reason: permissionReasonSchema,
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            type: Type.Literal("permission_action_out_of_mode"),
+            agentId: permissionAgentIdSchema,
+            callId: permissionCallIdSchema,
+            tool: permissionToolSchema,
+            mode: agentPermissionModeSchema,
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            type: Type.Literal("permission_turn_stopped"),
+            agentId: permissionAgentIdSchema,
+            refusals: Type.Integer({ minimum: 1 }),
+        },
+        { additionalProperties: false },
+    ),
+]);
+
+export type PermissionEvent = Static<typeof permissionEventSchema>;
+
+/** Runtime contract for the host listener supplied to the module. */
+export const permissionModuleListenerSchema = Type.Object(
+    {
+        onEventTransactional: Type.Optional(
+            Type.Function(
+                [permissionContextSchema, permissionEventSchema],
+                Type.Union([Type.Void(), Type.Promise(Type.Void())]),
+            ),
+        ),
+        onEvent: Type.Optional(
+            Type.Function([permissionContextSchema, permissionEventSchema], Type.Void()),
+        ),
+    },
+    { additionalProperties: false },
+);
 
 /**
  * Whoever the permissions module reports to. Both callbacks see the same events; what differs is
@@ -61,9 +112,4 @@ export type PermissionEvent =
  * its failure rolls both back. `onEvent` runs once the change is durable, and every decision about
  * a single tool call — which commits nothing — is reported only there.
  */
-export interface PermissionModuleListener {
-    /** Called inside the transaction that commits the change, before it commits. */
-    readonly onEventTransactional?: (ctx: Context, event: PermissionEvent) => Promise<void> | void;
-    /** Called once the change is durable, or immediately for events that change nothing. */
-    readonly onEvent?: (ctx: Context, event: PermissionEvent) => void;
-}
+export type PermissionModuleListener = Static<typeof permissionModuleListenerSchema>;

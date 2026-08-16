@@ -3,15 +3,19 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { Socket } from "node:net";
 import { dirname } from "node:path";
 
+import { withAgentDatabase } from "@slopus/happy-agent-base";
 import { span, type Context } from "@steve.kite/stdlib";
 
 import type { LoadedHappyAgent } from "../agent/loadHappyAgent.js";
+import type { HappyAgentConfiguration } from "@slopus/happy-agent-modules";
+import { HAPPY_AGENT_RIG_PROTOCOL_VERSION } from "./rigProtocol.js";
 import { ProjectFilesModule } from "../files/ProjectFilesModule.js";
 import { GitModule } from "../git/GitModule.js";
 import { createLocalProjectWorkspaceHost } from "../projects/ProjectHost.js";
 import { readOrCreateAgentToken, isAuthorizedAgentRequest } from "./auth.js";
 import { AgentHttpError, sendError, sendJson } from "./errors.js";
 import { createAgentRoutes } from "./agentRoutes.js";
+import { createCompatibilityRoutes } from "./compatibilityRoutes.js";
 import { createConfigRoutes } from "./configRoutes.js";
 import { createCoreDaemonRoutes } from "./coreDaemonRoutes.js";
 import { createEventRoutes } from "./eventRoutes.js";
@@ -37,13 +41,11 @@ import {
 export interface StartAgentHttpServerOptions {
     readonly agent?: LoadedHappyAgent;
     /** Required when the socket is opened before the Agent System finishes loading. */
-    readonly agentHome?: string;
+    readonly agentConfiguration: HappyAgentConfiguration;
     readonly configuration?: AgentHttpConfiguration;
     readonly ctx: Context;
     readonly onShutdown?: () => void;
     readonly routeGroups?: readonly AgentHttpRouteGroup[];
-    readonly socketPath?: string;
-    readonly tokenPath?: string;
     readonly version?: string;
 }
 
@@ -57,11 +59,7 @@ export interface AgentHttpServer {
 export async function startAgentHttpServer(
     options: StartAgentHttpServerOptions,
 ): Promise<AgentHttpServer> {
-    const agentHome = options.agent?.agentHome ?? options.agentHome;
-    if (agentHome === undefined) {
-        throw new Error("The Happy agent home is required before opening its daemon socket.");
-    }
-    const paths = resolveAgentDaemonPaths(agentHome, options.socketPath, options.tokenPath);
+    const paths = resolveAgentDaemonPaths(options.agentConfiguration);
     await mkdir(paths.agentHome, { mode: 0o700, recursive: true });
     await mkdir(dirname(paths.tokenPath), { mode: 0o700, recursive: true });
     const token = await readOrCreateAgentToken(paths.tokenPath);
@@ -125,13 +123,21 @@ function routeGroups(
     agent: LoadedHappyAgent,
 ): readonly AgentHttpRouteGroup[] {
     const projectHost = options.configuration?.projectHost ?? createLocalProjectWorkspaceHost();
+    const protectedPaths = [
+        ...new Set([
+            ".git",
+            "AGENTS.md",
+            "AGENTS_SECURITY.md",
+            ...(projectHost.protectedPaths ?? []),
+            ...agent.configuration.values.permissions.protectedPaths,
+            ...agent.configuration.values.workspace.protectedSync,
+        ]),
+    ];
     const projectFiles =
         options.configuration?.projectFiles ??
         new ProjectFilesModule({
             git: projectHost.git,
-            ...(projectHost.protectedPaths === undefined
-                ? {}
-                : { protectedPaths: projectHost.protectedPaths }),
+            protectedPaths,
             projects: agent.modules.projects,
             workspaces: agent.modules.workspaces,
         });
@@ -145,6 +151,7 @@ function routeGroups(
         createCoreDaemonRoutes(),
         createConfigRoutes(),
         createEventRoutes(),
+        createCompatibilityRoutes(),
         createInspectorRoutes(),
         createAgentRoutes(),
         createSessionRoutes(),
@@ -196,10 +203,10 @@ async function handleRequest(
                     models: [],
                     providers: [],
                 },
-                durableGlobalEventQueue: true,
+                durableGlobalEventQueue: options.configuration?.durableGlobalEventQueue ?? false,
                 healthy: true,
                 identity: { version: options.version ?? "0.0.0" },
-                protocolVersion: 0,
+                protocolVersion: HAPPY_AGENT_RIG_PROTOCOL_VERSION,
                 ready: false,
                 status: "starting",
             });
@@ -208,7 +215,7 @@ async function handleRequest(
         sendJson(response, 503, { error: "The Happy agent is still starting." });
         return;
     }
-    const context = routeContext(ctx, request, response, {
+    const context = routeContext(withAgentDatabase(ctx, state.agent.database), request, response, {
         agent: state.agent,
         ...(options.configuration === undefined ? {} : { configuration: options.configuration }),
         ...(options.onShutdown === undefined ? {} : { onShutdown: options.onShutdown }),

@@ -1,5 +1,6 @@
 import { access, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { request as requestHttp } from "node:http";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -22,7 +23,7 @@ afterEach(async () => {
 
 describe("Happy plugin test host", () => {
     it("supports typed system-prompt hooks and non-blocking tracing subscriptions", async () => {
-        const host = await createHappyPluginTestHost({}, { temporaryDirectory: process.cwd() });
+        const host = await createHappyPluginTestHost({}, { temporaryDirectory: tmpdir() });
         hosts.push(host);
         const hook = await host.client.hooks.onSystemPrompt(({ systemPrompt, userPrompt }) => ({
             systemPrompt: `${systemPrompt}\nPlugin saw: ${userPrompt}`,
@@ -80,7 +81,7 @@ describe("Happy plugin test host", () => {
 
     it("retires a required prompt stream while dynamically restoring tracing", async () => {
         const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
-        const host = await createHappyPluginTestHost({}, { temporaryDirectory: process.cwd() });
+        const host = await createHappyPluginTestHost({}, { temporaryDirectory: tmpdir() });
         hosts.push(host);
         const hook = await host.client.hooks.onSystemPrompt(({ systemPrompt }) => ({
             systemPrompt: `${systemPrompt}\nrecovered`,
@@ -121,7 +122,7 @@ describe("Happy plugin test host", () => {
     });
 
     it("rejects late hooks while allowing dynamic tracing after readiness", async () => {
-        const host = await createHappyPluginTestHost({}, { temporaryDirectory: process.cwd() });
+        const host = await createHappyPluginTestHost({}, { temporaryDirectory: tmpdir() });
         hosts.push(host);
 
         await host.client.ready("Ready.");
@@ -159,7 +160,7 @@ describe("Happy plugin test host", () => {
                     },
                 ],
             },
-            { temporaryDirectory: process.cwd() },
+            { temporaryDirectory: tmpdir() },
         );
         hosts.push(host);
 
@@ -213,7 +214,7 @@ describe("Happy plugin test host", () => {
             },
             {
                 onRequest: (request) => observed.push(`${request.method} ${request.path}`),
-                temporaryDirectory: process.cwd(),
+                temporaryDirectory: tmpdir(),
             },
         );
         hosts.push(host);
@@ -264,7 +265,7 @@ describe("Happy plugin test host", () => {
     });
 
     it("creates writable plugin state and removes its temporary root on close", async () => {
-        const host = await createHappyPluginTestHost({}, { temporaryDirectory: process.cwd() });
+        const host = await createHappyPluginTestHost({}, { temporaryDirectory: tmpdir() });
         hosts.push(host);
         const statePath = join(host.environment.HAPPY_PLUGIN_DIRECTORY, "state.txt");
 
@@ -276,7 +277,7 @@ describe("Happy plugin test host", () => {
     });
 
     it("exercises network request handlers and tunnel observers", async () => {
-        const host = await createHappyPluginTestHost({}, { temporaryDirectory: process.cwd() });
+        const host = await createHappyPluginTestHost({}, { temporaryDirectory: tmpdir() });
         hosts.push(host);
         const tunnels: string[] = [];
         const requestSubscription = await host.client.network.onRequest((request) => ({
@@ -329,7 +330,7 @@ describe("Happy plugin test host", () => {
     });
 
     it("mirrors workspace command and file APIs for plugin authoring", async () => {
-        const workspace = await mkdtemp(join(process.cwd(), ".workspace-"));
+        const workspace = await mkdtemp(join(tmpdir(), "happy-plugin-workspace-"));
         try {
             const host = await createHappyPluginTestHost(
                 {
@@ -344,7 +345,7 @@ describe("Happy plugin test host", () => {
                         },
                     ],
                 },
-                { temporaryDirectory: process.cwd() },
+                { temporaryDirectory: tmpdir() },
             );
             hosts.push(host);
 
@@ -386,7 +387,7 @@ describe("Happy plugin test host", () => {
     });
 
     it("returns an initializing workspace reservation before the host completes it", async () => {
-        const host = await createHappyPluginTestHost({}, { temporaryDirectory: process.cwd() });
+        const host = await createHappyPluginTestHost({}, { temporaryDirectory: tmpdir() });
         hosts.push(host);
         const workspace = await host.client.workspaces.create({
             id: "g1l4nup1ppbrfvae0pllq6ul",
@@ -402,7 +403,7 @@ describe("Happy plugin test host", () => {
     });
 
     it("publishes an asynchronous workspace-ready event for a new reservation", async () => {
-        const host = await createHappyPluginTestHost({}, { temporaryDirectory: process.cwd() });
+        const host = await createHappyPluginTestHost({}, { temporaryDirectory: tmpdir() });
         hosts.push(host);
         let resolveReady: (id: string) => void = () => {};
         const ready = new Promise<string>((resolve) => {
@@ -439,7 +440,7 @@ describe("Happy plugin test host", () => {
                     },
                 ],
             },
-            { temporaryDirectory: process.cwd() },
+            { temporaryDirectory: tmpdir() },
         );
         hosts.push(host);
 
@@ -470,7 +471,7 @@ describe("Happy plugin test host", () => {
     });
 
     it("limits each plugin to eight concurrent workspace commands", async () => {
-        const workspace = await mkdtemp(join(process.cwd(), ".workspace-cap-"));
+        const workspace = await mkdtemp(join(tmpdir(), "happy-plugin-workspace-cap-"));
         const commands: Promise<unknown>[] = [];
         try {
             const host = await createHappyPluginTestHost(
@@ -486,7 +487,7 @@ describe("Happy plugin test host", () => {
                         },
                     ],
                 },
-                { temporaryDirectory: process.cwd() },
+                { temporaryDirectory: tmpdir() },
             );
             hosts.push(host);
 
@@ -540,7 +541,7 @@ describe("Happy plugin test host", () => {
                     },
                 ],
             },
-            { temporaryDirectory: process.cwd() },
+            { temporaryDirectory: tmpdir() },
         );
         hosts.push(host);
 
@@ -592,7 +593,7 @@ describe("Happy plugin test host", () => {
             }),
         ).rejects.toThrow();
 
-        const host = await createHappyPluginTestHost({}, { temporaryDirectory: process.cwd() });
+        const host = await createHappyPluginTestHost({}, { temporaryDirectory: tmpdir() });
         hosts.push(host);
         await host.client.mcp.startServer({
             name: "Validation",
@@ -637,7 +638,7 @@ describe("Happy plugin test host", () => {
     it.each(["close", "end", "error"] as const)(
         "retires its catalog after an unexpected stream %s without registering late",
         async (mode) => {
-            const host = await createHappyPluginTestHost({}, { temporaryDirectory: process.cwd() });
+            const host = await createHappyPluginTestHost({}, { temporaryDirectory: tmpdir() });
             hosts.push(host);
             const server = await host.client.mcp.startServer({
                 name: `Recovery ${mode}`,

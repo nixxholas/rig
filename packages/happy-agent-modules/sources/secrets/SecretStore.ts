@@ -4,12 +4,16 @@ import { Value } from "@sinclair/typebox/value";
 import {
     secretAgentIdSchema,
     secretAttachmentSchema,
+    secretCommandEnvironmentSchema,
+    secretCommandResolverResultSchema,
     secretHostEnvironmentSchema,
     secretIdSchema,
     secretPageSchema,
     secretReferenceSchema,
     secretScopeRefSchema,
     type SecretAttachment,
+    type SecretCommandEnvironment,
+    type SecretCommandResolverResult,
     type SecretHostEnvironment,
     type SecretReference,
     type SecretPage,
@@ -86,12 +90,28 @@ export const secretResolverSchema = Type.Function(
         secretContextSchema,
         secretAgentIdSchema,
         secretScopeRefSchema,
-        Type.Optional(Type.Array(secretIdSchema, { maxItems: 256 })),
+        Type.Optional(Type.Array(secretIdSchema, { maxItems: 256, uniqueItems: true })),
     ],
     Type.Promise(secretHostEnvironmentSchema),
 );
 
 export type SecretResolver = Static<typeof secretResolverSchema>;
+
+/**
+ * Host/compute composition contract. The host returns one environment per selected ID; the module
+ * performs the case-insensitive collision-safe merge before returning the command environment.
+ */
+export const secretCommandResolverSchema = Type.Function(
+    [
+        secretContextSchema,
+        secretAgentIdSchema,
+        secretScopeRefSchema,
+        Type.Array(secretIdSchema, { maxItems: 256, uniqueItems: true }),
+    ],
+    Type.Promise(secretCommandResolverResultSchema),
+);
+
+export type SecretCommandResolver = Static<typeof secretCommandResolverSchema>;
 
 export const secretAuthorizationOperationSchema = Type.Union([
     Type.Literal("list"),
@@ -153,6 +173,44 @@ export function assertSecretHostEnvironment(
     if (!Value.Check(secretHostEnvironmentSchema, value)) {
         throw new Error("Secret resolver returned an invalid host environment.");
     }
+    assertUniqueEnvironmentNames(value);
+}
+
+export function assertSecretCommandEnvironment(
+    value: unknown,
+): asserts value is SecretCommandEnvironment {
+    if (!Value.Check(secretCommandEnvironmentSchema, value)) {
+        throw new Error("Secret command resolver returned an invalid environment.");
+    }
+    assertUniqueEnvironmentNames(value.environment);
+    const hidden = new Set<string>();
+    for (const name of value.hiddenEnvironmentVariables) {
+        const normalized = name.toUpperCase();
+        if (hidden.has(normalized)) {
+            throw new Error(
+                "Secret command resolver returned duplicate hidden environment variable names.",
+            );
+        }
+        hidden.add(normalized);
+    }
+    for (const name of Object.keys(value.environment)) {
+        if (!hidden.has(name.toUpperCase())) {
+            throw new Error(
+                "Secret command resolver must hide every resolved environment variable name.",
+            );
+        }
+    }
+}
+
+export function assertSecretCommandResolverResult(
+    value: unknown,
+): asserts value is SecretCommandResolverResult {
+    if (!Value.Check(secretCommandResolverResultSchema, value)) {
+        throw new Error("Secret command resolver returned an invalid per-secret result.");
+    }
+    for (const entry of value) {
+        assertUniqueEnvironmentNames(entry.environment);
+    }
 }
 
 export function assertSecretStoreMutationResult(
@@ -175,10 +233,34 @@ export function assertSecretResolver(value: unknown): asserts value is SecretRes
     }
 }
 
+export function assertSecretCommandResolver(
+    value: unknown,
+): asserts value is SecretCommandResolver {
+    if (!Value.Check(secretCommandResolverSchema, value)) {
+        throw new Error("Secrets module received an invalid command resolver.");
+    }
+}
+
 export function assertSecretAuthorization(value: unknown): asserts value is SecretAuthorization {
     if (!Value.Check(secretAuthorizationSchema, value)) {
         throw new Error("Secrets module received an invalid authorization policy.");
     }
 }
 
-export type { SecretAttachment, SecretHostEnvironment, SecretReference };
+export type {
+    SecretAttachment,
+    SecretCommandResolverResult,
+    SecretHostEnvironment,
+    SecretReference,
+};
+
+function assertUniqueEnvironmentNames(value: Record<string, string>): void {
+    const names = new Set<string>();
+    for (const name of Object.keys(value)) {
+        const normalized = name.toUpperCase();
+        if (names.has(normalized)) {
+            throw new Error("Secret resolver returned colliding environment variable names.");
+        }
+        names.add(normalized);
+    }
+}

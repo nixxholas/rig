@@ -10,6 +10,7 @@ import { Type } from "@sinclair/typebox";
 import type { SessionContext } from "@/core/SessionContext.js";
 import type { SessionReasoningEffort, SessionStructuredOutput } from "@/core/SessionRunRequest.js";
 import type { SessionTool } from "@/core/SessionTool.js";
+import { toLlmParametersSchema } from "@/tools/sanitizeSchema.js";
 import { DEFAULT_INFERENCE_MAX_RETRIES } from "@/core/inferenceRetrySettings.js";
 import type { ClaudeCredential } from "@/vendors/VendorCredential.js";
 import { CLAUDE_SDK_PRIVACY_ENVIRONMENT } from "@/vendors/claude/claudeSdkPrivacyEnvironment.js";
@@ -175,7 +176,7 @@ export function toClaudeMcpToolDefinition(tool: SessionTool) {
             tool.description === undefined || tool.description.trim().length === 0
                 ? `Run ${tool.name} through Rig.`
                 : tool.description,
-        inputSchema: tool.parameters ?? Type.Object({}, { additionalProperties: false }),
+        inputSchema: toLlmParametersSchema(tool.parameters),
         ...(tool.defer === true ? {} : { _meta: { "anthropic/alwaysLoad": true } }),
     };
 }

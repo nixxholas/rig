@@ -28,6 +28,7 @@ export const MAX_IMAGE_LOCATOR_CHARACTERS = 1_024;
 export const MAX_IMAGE_ERROR_CHARACTERS = 2_000;
 export const MAX_IMAGE_METADATA_PROPERTIES = 32;
 export const MAX_IMAGE_METADATA_VALUE_CHARACTERS = 1_024;
+export const MAX_IMAGE_REFERENCES = 5;
 
 /** Context is host-owned and opaque, but injected callbacks still require an object boundary. */
 export const imageContextSchema = Type.Unsafe<Context>(
@@ -136,7 +137,21 @@ export const imageGenerationOptionsSchema = Type.Object(
 export const imageGenerationToolInputSchema = Type.Object(
     {
         prompt: imagePromptSchema,
-        options: Type.Optional(imageGenerationOptionsSchema),
+        num_last_images_to_include: Type.Optional(
+            Type.Union([Type.Integer({ minimum: 1, maximum: MAX_IMAGE_REFERENCES }), Type.Null()]),
+        ),
+        referenced_image_paths: Type.Optional(
+            Type.Union([
+                Type.Array(
+                    Type.String({
+                        minLength: 1,
+                        maxLength: MAX_IMAGE_LOCATOR_CHARACTERS,
+                    }),
+                    { maxItems: MAX_IMAGE_REFERENCES },
+                ),
+                Type.Null(),
+            ]),
+        ),
     },
     { additionalProperties: false },
 );
@@ -147,6 +162,19 @@ export const imageGenerationInputSchema = Type.Object(
         prompt: imagePromptSchema,
         options: Type.Optional(imageGenerationOptionsSchema),
         operationId: Type.Optional(imageOperationIdSchema),
+        preferredProviderId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+        recentImageCount: Type.Optional(
+            Type.Integer({ minimum: 1, maximum: MAX_IMAGE_REFERENCES }),
+        ),
+        referencedImagePaths: Type.Optional(
+            Type.Array(
+                Type.String({
+                    minLength: 1,
+                    maxLength: MAX_IMAGE_LOCATOR_CHARACTERS,
+                }),
+                { maxItems: MAX_IMAGE_REFERENCES },
+            ),
+        ),
     },
     { additionalProperties: false },
 );

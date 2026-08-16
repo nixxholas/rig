@@ -36,6 +36,47 @@ describe("compute command tools", () => {
         expect(result.exit_code).toBe(1);
     });
 
+    it("passes the selected shell and output budget to the compute boundary", async () => {
+        const { compute, tool, call } = await machine();
+        compute.script("printf selected", { chunks: ["1234567890\n"], exitCode: 0 });
+
+        const result = await tool("run_command").execute(
+            ctx,
+            {
+                command: "printf selected",
+                shell: "/bin/zsh",
+                max_output_tokens: 1,
+            },
+            call,
+        );
+
+        expect(compute.startedOptions[0]).toMatchObject({
+            shell: "/bin/zsh",
+        });
+        expect(result.truncated).toBe(true);
+        expect(result.output).toContain("Earlier output was truncated");
+        const run = tool("run_command");
+        expect(await run.shouldReviewInAutoMode({ command: "printf selected" }, ctx)).toBe(false);
+        expect(
+            await run.shouldReviewInAutoMode(
+                { command: "printf selected", shell: "/bin/zsh" },
+                ctx,
+            ),
+        ).toBe(false);
+        expect(
+            await run.shouldRunInFullAccessInAutoMode?.(
+                { command: "printf selected", shell: "/bin/zsh" },
+                ctx,
+            ),
+        ).toBe(false);
+        expect(
+            run.describeAutoPermissionAction?.(
+                { command: "printf selected", shell: "/bin/zsh" },
+                ctx,
+            ),
+        ).toContain("inside the current workspace sandbox");
+    });
+
     it("leaves a background command running, and gives only new output on the next read", async () => {
         const { compute, tool, call } = await machine();
         compute.script("pnpm dev", {

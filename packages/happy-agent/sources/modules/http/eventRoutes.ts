@@ -2,12 +2,15 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
+import { eventIdSchema, type AgentEvent } from "@slopus/happy-agent-modules";
 
 import { readValidatedBody, parsePositiveLimit } from "./body.js";
 import { AgentHttpError, sendJson, serializeJson } from "./errors.js";
 import { createRouteGroup, type AgentHttpRouteGroup } from "./router.js";
+import { createRigModelCatalog, HAPPY_AGENT_RIG_PROTOCOL_VERSION } from "./rigProtocol.js";
+import { readLiveRigPresence } from "./compatibilityRoutes.js";
+import { sessionSummary } from "./sessionRoutes.js";
 import { createSseWriter } from "./sseWriter.js";
-import { happyAgentEventIdSchema, type HappyAgentEvent } from "../events/EventsModule.js";
 
 const timelineSchema = Type.Object(
     {
@@ -52,23 +55,26 @@ export function createEventRoutes(): AgentHttpRouteGroup {
         {
             method: "GET",
             path: "/v0/catalog",
-            handle: async ({ dependencies, response }) => {
+            handle: async ({ ctx, dependencies, response }) => {
                 const cursor = dependencies.agent.modules.events.cursor();
+                const sessions = await dependencies.agent.modules.conversations.list(ctx, {
+                    archived: false,
+                    limit: 50,
+                });
                 sendJson(response, 200, {
-                    catalog: {
-                        defaultModelId: dependencies.agent.system.models[0]?.id ?? "",
-                        defaultProviderId: dependencies.agent.system.models[0]?.providerId ?? "",
-                        models: dependencies.agent.system.models,
-                        providers: groupModels(dependencies.agent.system.models),
-                    },
+                    catalog: createRigModelCatalog(dependencies.agent.system.models),
                     cursor,
                     folderItems: [],
                     folders: [],
                     identity: { version: dependencies.version ?? "0.0.0" },
-                    presence: { kind: "unavailable", reason: "not_configured" },
+                    presence: (await readLiveRigPresence(ctx, dependencies.agent)).presence,
                     projects: [],
-                    protocolVersion: 0,
-                    sessions: [],
+                    protocolVersion: HAPPY_AGENT_RIG_PROTOCOL_VERSION,
+                    sessions: await Promise.all(
+                        sessions.map(
+                            async (session) => await sessionSummary(ctx, dependencies, session),
+                        ),
+                    ),
                     sessionsComplete: true,
                     terminalGroups: [],
                     workspaces: [],
@@ -98,7 +104,7 @@ export function createEventRoutes(): AgentHttpRouteGroup {
             path: "/v0/events",
             handle: async ({ dependencies, response, url }) => {
                 const after = url.searchParams.get("after") ?? undefined;
-                if (after !== undefined && !Value.Check(happyAgentEventIdSchema, after)) {
+                if (after !== undefined && !Value.Check(eventIdSchema, after)) {
                     throw new AgentHttpError(400, "The event cursor must be a UUIDv7 value.");
                 }
                 const limit = parsePositiveLimit(
@@ -164,7 +170,7 @@ function cursorFromRequest(request: IncomingMessage, url: URL): string | undefin
     const value = request.headers["last-event-id"];
     const header = Array.isArray(value) ? value.at(-1) : value;
     const cursor = header ?? url.searchParams.get("after") ?? undefined;
-    if (cursor !== undefined && !Value.Check(happyAgentEventIdSchema, cursor)) {
+    if (cursor !== undefined && !Value.Check(eventIdSchema, cursor)) {
         throw new AgentHttpError(400, "The event cursor must be a UUIDv7 value.");
     }
     return cursor;
@@ -182,11 +188,11 @@ async function streamEvents(
         ) =>
             | {
                   readonly cursor: string;
-                  readonly events: readonly HappyAgentEvent[];
+                  readonly events: readonly AgentEvent[];
                   readonly latestCursor: string;
               }
             | undefined;
-        readonly subscribe: (listener: (event: HappyAgentEvent) => void) => () => void;
+        readonly subscribe: (listener: (event: AgentEvent) => void) => () => void;
     },
     after: string | undefined,
     mode: "durable" | "live",
@@ -195,7 +201,7 @@ async function streamEvents(
     const writer = createSseWriter(request, response);
     let replaying = true;
     let headersStarted = false;
-    const pending: HappyAgentEvent[] = [];
+    const pending: AgentEvent[] = [];
     let pendingBytes = 0;
     let heartbeat: NodeJS.Timeout | undefined;
     let unsubscribe = (): void => undefined;
@@ -212,10 +218,20 @@ async function streamEvents(
             pendingBytes += bytes;
             return;
         }
-        writer.write(sseEventFrame(event, mode));
+        writeEvent(event);
     });
 
-    const replay = events.replay(after, events.capacity());
+    const requestedReplay = events.replay(after, events.capacity());
+    const gap = requestedReplay === undefined;
+    const replay =
+        requestedReplay ??
+        (mode === "live"
+            ? {
+                  cursor: events.cursor(),
+                  events: [] as readonly AgentEvent[],
+                  latestCursor: events.cursor(),
+              }
+            : undefined);
     if (replay === undefined) {
         unsubscribe();
         writer.close();
@@ -245,19 +261,20 @@ async function streamEvents(
             agentId,
             connectedAt: Date.now(),
             cursor: replay.latestCursor,
-            protocolVersion: 0,
-            resumed: after !== undefined,
+            gap,
+            protocolVersion: HAPPY_AGENT_RIG_PROTOCOL_VERSION,
+            resumed: after !== undefined && !gap,
         })}\n\n`,
     );
     const replayed = new Set<string>();
     for (const event of replay.events) {
         replayed.add(event.id);
-        if (!writer.write(sseEventFrame(event, mode))) break;
+        if (!writeEvent(event)) break;
     }
     replaying = false;
     for (const event of pending) {
         if (replayed.has(event.id)) continue;
-        if (!writer.write(sseEventFrame(event, mode))) break;
+        if (!writeEvent(event)) break;
     }
     pending.length = 0;
     pendingBytes = 0;
@@ -271,21 +288,44 @@ async function streamEvents(
     if (headersStarted) {
         writer.close();
     }
-}
 
-function sseEventFrame(event: HappyAgentEvent, mode: "durable" | "live"): string {
-    if (mode === "live") {
-        return `id: ${event.id}\nevent: update\ndata: ${serializeJson({
-            cursor: event.id,
-            event,
-        })}\n\n`;
+    function writeEvent(event: AgentEvent): boolean {
+        if (mode === "durable") return writer.write(sseEventFrame(event));
+        if (event.type === "session.created" && event.agentId !== undefined) {
+            const payload =
+                typeof event.payload === "object" && event.payload !== null
+                    ? (event.payload as { readonly session?: unknown })
+                    : undefined;
+            const session =
+                typeof payload?.session === "object" && payload.session !== null
+                    ? (payload.session as { readonly id?: unknown })
+                    : undefined;
+            if (typeof session?.id !== "string") return true;
+            const sessionValue = payload?.session;
+            if (sessionValue === undefined) return true;
+            return writer.write(
+                `id: ${event.id}\nevent: update\ndata: ${serializeJson({
+                    cursor: event.id,
+                    event: {
+                        createdAt: event.occurredAt,
+                        data: { session: sessionValue },
+                        id: event.id,
+                        sessionId: session.id,
+                        type: "session_current",
+                        worktreeSupport: "unknown",
+                    },
+                })}\n\n`,
+            );
+        }
+        return writer.write(
+            `id: ${event.id}\nevent: update\ndata: ${serializeJson({
+                cursor: event.id,
+                event,
+            })}\n\n`,
+        );
     }
-    return `id: ${event.id}\nevent: ${event.type}\ndata: ${serializeJson(event)}\n\n`;
 }
 
-function groupModels(models: readonly { readonly providerId: string }[]): readonly unknown[] {
-    return [...new Set(models.map((model) => model.providerId))].map((providerId) => ({
-        models: models.filter((model) => model.providerId === providerId),
-        providerId,
-    }));
+function sseEventFrame(event: AgentEvent): string {
+    return `id: ${event.id}\nevent: ${event.type}\ndata: ${serializeJson(event)}\n\n`;
 }

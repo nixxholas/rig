@@ -5,9 +5,12 @@ import {
     agentId as agentRunningInside,
     agentDatabaseRun,
     type AgentBaseInference,
+    type AgentBaseTurn,
     type AgentModule,
+    type AgentModuleAgentLifecycle,
     type AgentModuleAction,
     type AgentModuleScope,
+    type AgentModuleSystemScope,
     type AgentSystemRef,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
@@ -24,6 +27,7 @@ import {
     type GoalModuleListener,
 } from "./GoalEvent.js";
 import { createGoalContinuationPrompt } from "./impl/createGoalContinuationPrompt.js";
+import { createGoalTitle } from "./impl/createGoalTitle.js";
 import {
     clearGoal as clearStoredGoal,
     GOAL_CONTINUATION_ID_KEY,
@@ -38,6 +42,7 @@ import {
 } from "./impl/goalState.js";
 import { goalKV } from "./impl/goalKV.js";
 import { normalizeGoalObjective } from "./impl/normalizeGoalObjective.js";
+import { goalHostSchema, type GoalHost } from "./GoalHost.js";
 import {
     FAILED_TURNS_BEFORE_BLOCKED,
     goalAgentIdSchema,
@@ -46,6 +51,7 @@ import {
     goalStatusSchema,
     goalTimestampSchema,
     MAX_GOAL_OUTPUT_CHARACTERS,
+    type GoalInterruptionReason,
     type GoalStatus,
     type SessionGoal,
 } from "./SessionGoal.js";
@@ -86,6 +92,7 @@ const goalClockSchema = Type.Function(
     [],
     Type.Union([goalTimestampSchema, Type.Promise(goalTimestampSchema)]),
 );
+const goalBooleanPromiseSchema = Type.Promise(Type.Boolean());
 const goalFactoryPromiseSchema = Type.Promise(
     Type.Union([goalOperationIdSchema, goalTimestampSchema]),
 );
@@ -94,6 +101,7 @@ const goalObserverErrorSchema = Type.String({ minLength: 1, maxLength: 500 });
 
 export const goalModuleOptionsSchema = Type.Object(
     {
+        host: Type.Optional(goalHostSchema),
         listener: Type.Optional(goalModuleListenerSchema),
         idFactory: Type.Optional(goalIdFactorySchema),
         eventIdFactory: Type.Optional(goalEventIdFactorySchema),
@@ -141,6 +149,7 @@ export class GoalModule implements AgentModule {
         ],
     ] as const;
 
+    readonly #host: GoalHost | undefined;
     readonly #listener: GoalModuleListener | undefined;
     readonly #idFactory: NonNullable<GoalModuleOptions["idFactory"]>;
     readonly #eventIdFactory: NonNullable<GoalModuleOptions["eventIdFactory"]>;
@@ -150,18 +159,28 @@ export class GoalModule implements AgentModule {
     #agents: AgentSystemRef | undefined;
 
     constructor(options: GoalModuleOptions) {
-        assertGoalModuleOptions(options);
-        this.#listener = options.listener;
-        this.#idFactory = options.idFactory ?? (() => globalThis.crypto.randomUUID());
-        this.#eventIdFactory = options.eventIdFactory ?? (() => globalThis.crypto.randomUUID());
-        this.#clock = options.clock ?? (() => Date.now());
-        this.#maxOutputCharacters = options.maxOutputCharacters ?? 12_000;
-        this.#onPostCommitError = options.onPostCommitError;
+        const normalized = normalizeGoalModuleOptions(options);
+        assertGoalModuleOptions(normalized);
+        this.#host = normalized.host;
+        this.#listener = normalized.listener;
+        this.#idFactory = normalized.idFactory ?? (() => globalThis.crypto.randomUUID());
+        this.#eventIdFactory = normalized.eventIdFactory ?? (() => globalThis.crypto.randomUUID());
+        this.#clock = normalized.clock ?? (() => Date.now());
+        this.#maxOutputCharacters = normalized.maxOutputCharacters ?? 12_000;
+        this.#onPostCommitError = normalized.onPostCommitError;
     }
 
     readonly beforeStart = (_ctx: Context, agents: AgentSystemRef): Promise<void> => {
         this.#agents = agents;
         return Promise.resolve();
+    };
+
+    readonly agentArchivedTransact = async (
+        ctx: Context,
+        _scope: AgentModuleSystemScope,
+        agent: AgentModuleAgentLifecycle,
+    ): Promise<void> => {
+        await this.#pauseActiveGoal(ctx, agent.id, "session_archived");
     };
 
     async goal(ctx: Context, agentId: string): Promise<SessionGoal | undefined> {
@@ -227,6 +246,29 @@ export class GoalModule implements AgentModule {
             throw new Error("Goal inference state is invalid.");
         }
         await scope.runKV.write(ctx, GOAL_LAST_INFERENCE_KEY, value);
+    };
+
+    readonly afterTurnTransact = async (
+        ctx: Context,
+        scope: AgentModuleScope,
+        turn: AgentBaseTurn,
+    ): Promise<void> => {
+        const inference = await scope.runKV.read(ctx, GOAL_LAST_INFERENCE_KEY);
+        if (!Value.Check(Type.Union([goalInferenceSchema, Type.Undefined()]), inference)) {
+            throw new Error("The stored Goal inference state is invalid.");
+        }
+        const failed =
+            turn.aborted ||
+            inference === undefined ||
+            inference.state === undefined ||
+            inference.state === "cancelled" ||
+            inference.state === "error";
+        if (!failed) return;
+        await this.#pauseActiveGoal(
+            ctx,
+            scope.agent.id,
+            turn.aborted ? "session_interrupted" : "session_failed",
+        );
     };
 
     readonly beforeAgentLoopTransact = async (
@@ -322,6 +364,7 @@ export class GoalModule implements AgentModule {
         requestedLifecycleId: string | undefined,
     ): Promise<GoalActivation> {
         this.#assertAgentId(agentId);
+        await this.#assertPrimaryAgent(ctx, agentId);
         const normalized = normalizeGoalObjective(objective);
         if (
             requestedLifecycleId !== undefined &&
@@ -364,6 +407,7 @@ export class GoalModule implements AgentModule {
             updatedAt: at,
         };
         await writeGoal(ctx, kv, goal);
+        await this.#setSessionTitle(ctx, agentId, normalized);
         await this.#activate(ctx, kv, lifecycleId, goal, external);
         await this.#publishEvent(ctx, await this.#event(ctx, { type: "goal_set", agentId, goal }));
         await this.#wakeExternalActivation(ctx, agentId, lifecycleId, goal, external);
@@ -376,11 +420,15 @@ export class GoalModule implements AgentModule {
         status: GoalStatus,
     ): Promise<SessionGoal> {
         this.#assertAgentId(agentId);
+        await this.#assertPrimaryAgent(ctx, agentId);
         this.#assertStatus(status);
         const kv = goalKV(agentId);
         const state = await readGoalAuthoritativeState(ctx, kv, agentId);
         const existing = state.goal;
         if (existing === undefined) throw new Error("This agent does not have a goal.");
+        if (existing.status === "complete" && status === "active") {
+            throw new Error("A completed goal cannot be resumed. Start a new goal instead.");
+        }
         if (existing.status === status) {
             return structuredClone(existing);
         }
@@ -413,12 +461,19 @@ export class GoalModule implements AgentModule {
         );
         if (lifecycleId !== undefined) {
             await this.#wakeExternalActivation(ctx, agentId, lifecycleId, goal, external);
+        } else if (status === "paused" || status === "blocked") {
+            this.#scheduleHostInterruption(
+                ctx,
+                agentId,
+                status === "paused" ? "goal_paused" : "goal_blocked",
+            );
         }
         return structuredClone(goal);
     }
 
     async #clearGoal(ctx: Context, agentId: string): Promise<boolean> {
         this.#assertAgentId(agentId);
+        await this.#assertPrimaryAgent(ctx, agentId);
         const kv = goalKV(agentId);
         const state = await readGoalAuthoritativeState(ctx, kv, agentId);
         const cleared = state.goal !== undefined;
@@ -429,8 +484,78 @@ export class GoalModule implements AgentModule {
                 ctx,
                 await this.#event(ctx, { type: "goal_cleared", agentId }),
             );
+            this.#scheduleHostInterruption(ctx, agentId, "goal_cleared");
         }
         return cleared;
+    }
+
+    async #pauseActiveGoal(
+        ctx: Context,
+        agentId: string,
+        reason: Extract<
+            GoalInterruptionReason,
+            "session_failed" | "session_interrupted" | "session_archived"
+        >,
+    ): Promise<boolean> {
+        this.#assertAgentId(agentId);
+        const kv = goalKV(agentId);
+        const state = await readGoalAuthoritativeState(ctx, kv, agentId);
+        const current = state.goal;
+        if (current?.status !== "active") return false;
+        const paused: SessionGoal = {
+            ...current,
+            status: "paused",
+            updatedAt: await this.#timestamp(ctx),
+        };
+        await writeGoal(ctx, kv, paused);
+        await this.#deactivate(ctx, kv);
+        await this.#publishEvent(
+            ctx,
+            await this.#event(ctx, {
+                type: "goal_status_changed",
+                agentId,
+                goal: paused,
+            }),
+        );
+        this.#scheduleHostInterruption(ctx, agentId, reason);
+        return true;
+    }
+
+    async #assertPrimaryAgent(ctx: Context, agentId: string): Promise<void> {
+        const check = this.#host?.isPrimaryAgent;
+        if (check === undefined) return;
+        const result = check.call(this.#host, ctx, agentId);
+        const primary = Value.Check(goalBooleanPromiseSchema, result) ? await result : result;
+        if (!Value.Check(Type.Boolean(), primary)) {
+            throw new Error("Goal primary-agent policy returned an invalid value.");
+        }
+        if (!primary) {
+            throw new Error("Goals can only be managed from the primary session.");
+        }
+    }
+
+    async #setSessionTitle(ctx: Context, agentId: string, objective: string): Promise<void> {
+        const setTitle = this.#host?.setSessionTitle;
+        if (setTitle === undefined) return;
+        await this.#awaitVoidResult(
+            setTitle.call(this.#host, ctx, agentId, createGoalTitle(objective)),
+            "Goal session title callback",
+        );
+    }
+
+    #scheduleHostInterruption(ctx: Context, agentId: string, reason: GoalInterruptionReason): void {
+        const interrupt = this.#host?.interruptGoalWork;
+        if (interrupt === undefined) return;
+        afterCommit(ctx, async (postCommitCtx) => {
+            try {
+                await this.#awaitVoidResult(
+                    interrupt.call(this.#host, postCommitCtx, agentId, reason),
+                    "Goal host interruption callback",
+                );
+            } catch {
+                // Host cleanup is advisory after the durable Goal transition has committed.
+            }
+        });
     }
 
     async #activate(
@@ -591,25 +716,41 @@ export class GoalModule implements AgentModule {
 }
 
 export function assertGoalModuleOptions(value: unknown): asserts value is GoalModuleOptions {
-    let candidate: unknown = value;
-    try {
-        if (isObjectRecord(value)) {
-            const option = { ...value };
-            const listener = option.listener;
-            if (isClassBacked(listener)) {
-                option.listener = {
-                    onEventTransactional: Reflect.get(listener, "onEventTransactional"),
-                    onEvent: Reflect.get(listener, "onEvent"),
-                };
-            }
-            candidate = option;
-        }
-    } catch {
-        candidate = undefined;
-    }
+    const candidate = normalizeGoalModuleOptions(value);
     if (!Value.Check(goalModuleOptionsSchema, candidate)) {
         throw new Error("Goal module options are invalid.");
     }
+}
+
+function normalizeGoalModuleOptions(value: unknown): unknown {
+    try {
+        if (!isObjectRecord(value)) return value;
+        const option = { ...value };
+        option.listener = normalizeClassBackedCallbacks(option.listener, [
+            "onEventTransactional",
+            "onEvent",
+        ]);
+        option.host = normalizeClassBackedCallbacks(option.host, [
+            "isPrimaryAgent",
+            "setSessionTitle",
+            "interruptGoalWork",
+        ]);
+        return option;
+    } catch {
+        return undefined;
+    }
+}
+
+function normalizeClassBackedCallbacks(value: unknown, names: readonly string[]): unknown {
+    if (!isClassBacked(value)) return value;
+    const normalized: Record<string, unknown> = { ...value };
+    for (const name of names) {
+        const callback = Reflect.get(value, name);
+        if (callback !== undefined) {
+            normalized[name] = typeof callback === "function" ? callback.bind(value) : callback;
+        }
+    }
+    return normalized;
 }
 
 function continuationMessageId(agentId: string, lifecycleId: string, goal: SessionGoal): string {

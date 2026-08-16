@@ -2,8 +2,17 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import { agentPermissionModeSchema, type AgentBaseMessageOptions } from "@slopus/happy-agent-base";
-import { userInputAnswerSchema } from "@slopus/happy-agent-modules";
+import {
+    agentPermissionModeSchema,
+    type AgentBaseMessageOptions,
+    type AgentModel,
+} from "@slopus/happy-agent-base";
+import {
+    eventIdSchema,
+    userInputAnswerSchema,
+    type AgentEvent,
+    type UsageSummary,
+} from "@slopus/happy-agent-modules";
 import type { SessionInputBlock, SessionUserMessage } from "@slopus/happy-providers";
 
 import {
@@ -13,11 +22,17 @@ import {
     type ConversationScope,
 } from "../conversations/ConversationModule.js";
 import type { LoadedHappyAgent } from "../agent/loadHappyAgent.js";
-import type { HappyAgentEvent } from "../events/EventsModule.js";
+import type { EffectiveAgentSelection } from "../../vanillaHappyAgentConfiguration.js";
 import { readValidatedBody } from "./body.js";
 import { AgentHttpError, sendJson, serializeJson } from "./errors.js";
 import { createRouteGroup, type AgentHttpRouteGroup } from "./router.js";
+import { createRigModelCatalog, type RigModelCatalog } from "./rigProtocol.js";
 import { createSseWriter } from "./sseWriter.js";
+import {
+    mergeAgentMessageOptions,
+    resolveAgentMessageSelection,
+    type AgentMessageOptionOverrides,
+} from "./agentMessageOptions.js";
 
 const MAX_SESSION_STREAM_PENDING_BYTES = 1_024 * 1_024;
 
@@ -238,6 +253,22 @@ export function createSessionRoutes(): AgentHttpRouteGroup {
             path: "/v0/sessions",
             handle: async ({ ctx, dependencies, request, response }) => {
                 const body = await readValidatedBody(request, createSessionSchema);
+                if (body.workflowsEnabled === true) assertWorkflowsEnabled(dependencies.agent);
+                resolveAgentMessageSelection(
+                    dependencies.agent.effectiveSelection,
+                    dependencies.agent.system.models,
+                    {
+                        ...(body.modelId === undefined ? {} : { model: body.modelId }),
+                        ...(body.providerId === undefined ? {} : { provider: body.providerId }),
+                        ...(body.effort === undefined ? {} : { effort: body.effort }),
+                        ...(body.serviceTier === undefined
+                            ? {}
+                            : {
+                                  serviceTier:
+                                      body.serviceTier === null ? null : ("priority" as const),
+                              }),
+                    },
+                );
                 const conversation = dependencies.agent.modules.conversations;
                 const existing =
                     body.id === undefined ? undefined : await conversation.get(ctx, body.id);
@@ -262,6 +293,12 @@ export function createSessionRoutes(): AgentHttpRouteGroup {
                         : { permissionMode: body.permissionMode }),
                     ...(body.providerId === undefined ? {} : { providerId: body.providerId }),
                     scope,
+                });
+                const summary = await sessionSummary(ctx, dependencies, session);
+                await dependencies.agent.modules.events.record(ctx, {
+                    agentId: agent.id,
+                    payload: { session: summary },
+                    type: "session.created",
                 });
                 await conversation.appendEvent(ctx, session.id, {
                     payload: { agentId: agent.id },
@@ -347,20 +384,16 @@ function createReadRoutes(): AgentHttpRouteGroup["routes"] {
             path: "/v0/sessions/:sessionId/state",
             handle: async ({ ctx, dependencies, url, response }) => {
                 const session = await requireSession(ctx, dependencies, sessionId(url));
-                const after = url.searchParams.get("after");
-                const events = await dependencies.agent.modules.conversations.events(
-                    ctx,
-                    session.id,
-                    after === null
-                        ? { limit: parseLimit(url.searchParams.get("turns"), 20, 20) }
-                        : { after, limit: parseLimit(url.searchParams.get("turns"), 20, 20) },
+                const after = url.searchParams.get("after") ?? undefined;
+                const turnLimit = parseLimit(url.searchParams.get("turns"), 20, 20);
+                sendJson(
+                    response,
+                    200,
+                    await rigSessionState(ctx, dependencies, session, {
+                        ...(after === undefined ? {} : { after }),
+                        turnLimit,
+                    }),
                 );
-                sendJson(response, 200, {
-                    activity: activityFor(session),
-                    append: url.searchParams.has("after"),
-                    cursor: events.at(-1)?.id ?? dependencies.agent.modules.events.cursor(),
-                    events,
-                });
             },
         },
         {
@@ -368,8 +401,27 @@ function createReadRoutes(): AgentHttpRouteGroup["routes"] {
             path: "/v0/sessions/:sessionId/transcript",
             handle: async ({ ctx, dependencies, url, response }) => {
                 const session = await requireSession(ctx, dependencies, sessionId(url));
-                const page = await historyPage(ctx, dependencies, session.agentId, url);
-                sendJson(response, 200, page);
+                const after = url.searchParams.get("after") ?? undefined;
+                const before = url.searchParams.get("before") ?? undefined;
+                if (after !== undefined && before !== undefined) {
+                    throw new AgentHttpError(
+                        400,
+                        "A transcript request cannot use both after and before.",
+                    );
+                }
+                for (const cursor of [after, before]) {
+                    if (cursor !== undefined && !Value.Check(eventIdSchema, cursor)) {
+                        throw new AgentHttpError(400, "The transcript cursor must be a UUIDv7.");
+                    }
+                }
+                sendJson(
+                    response,
+                    200,
+                    await rigTranscript(dependencies, session, 20, {
+                        ...(after === undefined ? {} : { after }),
+                        ...(before === undefined ? {} : { before }),
+                    }),
+                );
             },
         },
         {
@@ -377,19 +429,20 @@ function createReadRoutes(): AgentHttpRouteGroup["routes"] {
             path: "/v0/sessions/:sessionId/usage",
             handle: async ({ ctx, dependencies, url, response }) => {
                 const session = await requireSession(ctx, dependencies, sessionId(url));
-                sendJson(
-                    response,
-                    200,
-                    await dependencies.agent.modules.usage.read(ctx, session.agentId),
-                );
+                const summary = await dependencies.agent.modules.usage.read(ctx, session.agentId);
+                const catalog = createRigModelCatalog(dependencies.agent.system.models);
+                sendJson(response, 200, protocolUsage(session, summary, catalog));
             },
         },
         {
             method: "GET",
             path: "/v0/sessions/:sessionId/current-provider-quota",
             handle: async ({ ctx, dependencies, url, response }) => {
-                await requireSession(ctx, dependencies, sessionId(url));
-                sendJson(response, 200, { currentProviderId: null, quota: null });
+                const session = await requireSession(ctx, dependencies, sessionId(url));
+                const catalog = createRigModelCatalog(dependencies.agent.system.models);
+                sendJson(response, 200, {
+                    currentProviderId: session.providerId ?? catalog.defaultProviderId,
+                });
             },
         },
         {
@@ -400,9 +453,25 @@ function createReadRoutes(): AgentHttpRouteGroup["routes"] {
                 const page = await dependencies.agent.modules.collaboration.listAgents(
                     ctx,
                     session.agentId,
-                    {},
+                    { ownerAgentId: session.agentId },
                 );
-                sendJson(response, 200, { subagents: page.agents });
+                const catalog = createRigModelCatalog(dependencies.agent.system.models);
+                sendJson(response, 200, {
+                    subagents: page.agents
+                        .filter((agent) => agent.id !== session.agentId)
+                        .map((agent) => ({
+                            agentId: agent.id,
+                            createdAt: agent.createdAt,
+                            depth: agent.parentId === null ? 0 : 1,
+                            description: agent.title ?? agent.role ?? "Collaborating agent",
+                            id: agent.id,
+                            modelId: catalog.defaultModelId,
+                            parentSessionId: session.id,
+                            status: agent.status === "active" ? "running" : "idle",
+                            ...(agent.title === undefined ? {} : { taskName: agent.title }),
+                            updatedAt: agent.updatedAt,
+                        })),
+                });
             },
         },
         {
@@ -787,6 +856,7 @@ function createMutationRoutes(): AgentHttpRouteGroup["routes"] {
             method: "POST",
             path: "/v0/sessions/:sessionId/workflows/:runId/stop",
             handle: async ({ ctx, dependencies, request, response, url }) => {
+                assertWorkflowsEnabled(dependencies.agent);
                 const body = await readValidatedBody(request, workflowStopSchema);
                 const session = await requireSession(ctx, dependencies, sessionId(url));
                 const result = await dependencies.agent.modules.workflows.cancel(
@@ -857,50 +927,237 @@ async function sessionResponse(
 ): Promise<Record<string, unknown>> {
     const agent = await dependencies.agent.system.resolve(ctx, session.agentId);
     const config = await dependencies.agent.system.config(ctx, session.agentId);
-    const history =
-        options.messageLimit === undefined
-            ? undefined
-            : await dependencies.agent.modules.history.read(ctx, session.agentId, {
-                  from: "end",
-                  limit: options.messageLimit,
-              });
+    const transcript = await rigTranscript(dependencies, session, options.messageLimit ?? 20);
+    const catalog = createRigModelCatalog(dependencies.agent.system.models);
+    const tasks = await dependencies.agent.modules.tasks.list(ctx, session.agentId);
+    const goal = await dependencies.agent.modules.goal.goal(ctx, session.agentId);
+    const pendingUserInputs = (
+        await dependencies.agent.modules.userInput.list(ctx, session.agentId, {
+            status: "pending",
+        })
+    ).map((request) => ({
+        ...(request.deadlineAt === undefined
+            ? {}
+            : {
+                  autoResolutionMs: Math.max(0, request.deadlineAt - request.createdAt),
+              }),
+        questions: [
+            {
+                header: "Question",
+                id: request.id,
+                multiSelect: request.options?.multiSelect ?? false,
+                options: request.options?.choices ?? [],
+                question: request.question,
+            },
+        ],
+        requestId: request.id,
+    }));
     return {
-        ...sessionSummaryValue(session),
+        ...sessionSummaryValue(session, catalog, dependencies.agent.effectiveSelection),
         activity: activityFor(session, agent.active),
+        agent: {
+            depth: 0,
+            rootSessionId: session.id,
+            type: "primary",
+        },
         agentId: session.agentId,
+        environment: { type: "local" },
+        goal,
         ...(config?.metadata === undefined ? {} : { metadata: config.metadata }),
-        ...(history === undefined ? {} : { history }),
-        snapshot: { active: agent.active, agentId: session.agentId },
+        mcpServers: configuredMcpServers(),
+        modelCatalog: catalog,
+        modelLocked: false,
+        models: catalog.models,
+        pendingUserInputs,
+        projectSecretIds: [],
+        secretIds: [],
+        sessionSecretIds: [],
+        snapshot: { messages: transcript.messages },
+        subagents: [],
+        tasks,
+        workflows: [],
+        workflowsEnabled: dependencies.agent.configuration.values.features.workflows,
     };
 }
 
-async function sessionSummary(
+function configuredMcpServers(): readonly {
+    readonly name: string;
+    readonly status: "blocked" | "disabled";
+    readonly toolCount: 0;
+}[] {
+    return [];
+}
+
+function assertWorkflowsEnabled(agent: LoadedHappyAgent): void {
+    if (!agent.configuration.values.features.workflows) {
+        throw new AgentHttpError(503, "Workflows are disabled by configuration.");
+    }
+}
+
+export async function sessionSummary(
     ctx: import("@steve.kite/stdlib").Context,
     dependencies: LoadedSessionDependencies,
     session: ConversationRecord,
 ): Promise<Record<string, unknown>> {
     const config = await dependencies.agent.system.config(ctx, session.agentId);
+    const catalog = createRigModelCatalog(dependencies.agent.system.models);
     return {
-        ...sessionSummaryValue(session),
-        ...(config?.metadata === undefined ? {} : { metadata: config.metadata }),
+        ...sessionSummaryValue(session, catalog, dependencies.agent.effectiveSelection),
+        ...(config?.metadata?.title === undefined ? {} : { title: config.metadata.title }),
+        ...(dependencies.agent.modules.events.latestCursor(session.agentId) === undefined
+            ? {}
+            : { lastEventId: dependencies.agent.modules.events.latestCursor(session.agentId) }),
     };
 }
 
-function sessionSummaryValue(session: ConversationRecord): Record<string, unknown> {
+function sessionSummaryValue(
+    session: ConversationRecord,
+    catalog = { defaultModelId: "", defaultProviderId: "" },
+    defaults?: EffectiveAgentSelection,
+): Record<string, unknown> {
     return {
         archived: session.archived,
         createdAt: session.createdAt,
         cwd: session.cwd,
         id: session.id,
-        modelId: session.modelId,
+        modelId: session.modelId ?? defaults?.model ?? catalog.defaultModelId,
         ownerInstanceId: session.ownerInstanceId,
-        permissionMode: session.permissionMode,
-        providerId: session.providerId,
+        permissionMode: session.permissionMode ?? defaults?.permissionMode ?? "auto",
+        providerId: session.providerId ?? defaults?.provider ?? catalog.defaultProviderId,
         scope: session.scope,
         status: session.archived ? "archived" : session.status,
-        titleStatus: session.titleStatus,
-        unread: session.unread,
+        titleStatus: session.titleStatus === "ready" ? "ready" : "idle",
+        ...(session.unread
+            ? {
+                  trackUnread: true,
+                  unread: {
+                      reason: "turn_finished",
+                      since: session.updatedAt,
+                  },
+              }
+            : {}),
         updatedAt: session.updatedAt,
+    };
+}
+
+async function rigSessionState(
+    ctx: import("@steve.kite/stdlib").Context,
+    dependencies: LoadedSessionDependencies,
+    session: ConversationRecord,
+    options: { readonly after?: string; readonly turnLimit: number },
+): Promise<Record<string, unknown>> {
+    const transcript = await rigTranscript(
+        dependencies,
+        session,
+        options.turnLimit,
+        options.after === undefined ? {} : { after: options.after },
+    );
+    const protocolSession = await sessionResponse(ctx, dependencies, session, {
+        messageLimit: options.turnLimit,
+    });
+    return {
+        activity: activityFor(session),
+        ...(options.after === undefined ? {} : { append: true }),
+        cursor: dependencies.agent.modules.events.cursor(),
+        ...(dependencies.agent.modules.events.latestCursor(session.agentId) === undefined
+            ? {}
+            : { lastEventId: dependencies.agent.modules.events.latestCursor(session.agentId) }),
+        resumed: options.after !== undefined,
+        session: {
+            ...protocolSession,
+            snapshot: { messages: transcript.messages },
+        },
+        transcript,
+    };
+}
+
+async function rigTranscript(
+    dependencies: LoadedSessionDependencies,
+    session: ConversationRecord,
+    turnLimit: number,
+    cursor: { readonly after?: string; readonly before?: string } = {},
+): Promise<Record<string, unknown>> {
+    const journal = dependencies.agent.modules.events;
+    const replay = journal.replay(journal.originCursor(), journal.capacity());
+    if (replay === undefined) {
+        throw new Error("The Happy Agent event journal could not build a transcript.");
+    }
+    const projected = replay.events
+        .filter(
+            (event) =>
+                event.agentId === session.agentId &&
+                (cursor.after === undefined || event.id > cursor.after) &&
+                (cursor.before === undefined || event.id < cursor.before),
+        )
+        .flatMap((event) => {
+            const value = projectSessionEvent(event, session.id);
+            return value === undefined ? [] : [{ event, value }];
+        });
+    const messages: Record<string, unknown>[] = [];
+    const messageCreatedAt: Record<string, number> = {};
+    const messageEventId: Record<string, string> = {};
+    const turns = new Map<
+        string,
+        {
+            runId: string;
+            startedAt: number;
+            endedAt?: number;
+            outcome?: "success" | "error" | "stopped";
+            errorMessage?: string;
+            messageIds: string[];
+        }
+    >();
+    for (const { event, value } of projected) {
+        const data = recordValue(value.data);
+        const runId = typeof data?.runId === "string" ? data.runId : undefined;
+        if (data === undefined || runId === undefined) continue;
+        const turn = turns.get(runId) ?? {
+            messageIds: [],
+            runId,
+            startedAt: event.occurredAt,
+        };
+        turn.startedAt = Math.min(turn.startedAt, event.occurredAt);
+        if (value.type === "message_submitted" || value.type === "agent_message") {
+            const message = recordValue(data.message);
+            if (message !== undefined && typeof message.id === "string") {
+                messages.push(message);
+                turn.messageIds.push(message.id);
+                messageCreatedAt[message.id] = event.occurredAt;
+                messageEventId[message.id] = event.id;
+            }
+        }
+        if (value.type === "run_finished") {
+            turn.endedAt = event.occurredAt;
+            const stopReason = data.stopReason;
+            turn.outcome =
+                stopReason === "error" ? "error" : stopReason === "aborted" ? "stopped" : "success";
+            if (stopReason === "error" && typeof data.message === "string") {
+                turn.errorMessage = data.message;
+            }
+        }
+        turns.set(runId, turn);
+    }
+    const orderedTurns = [...turns.values()].sort(
+        (left, right) => left.startedAt - right.startedAt || left.runId.localeCompare(right.runId),
+    );
+    const visibleTurns =
+        cursor.after === undefined
+            ? orderedTurns.slice(Math.max(0, orderedTurns.length - turnLimit))
+            : orderedTurns.slice(0, turnLimit);
+    const visibleMessageIds = new Set(visibleTurns.flatMap((turn) => turn.messageIds));
+    const visibleMessages = messages.filter(
+        (message) => typeof message.id === "string" && visibleMessageIds.has(message.id),
+    );
+    return {
+        complete: visibleTurns.length === orderedTurns.length,
+        messageCreatedAt: Object.fromEntries(
+            Object.entries(messageCreatedAt).filter(([id]) => visibleMessageIds.has(id)),
+        ),
+        messageEventId: Object.fromEntries(
+            Object.entries(messageEventId).filter(([id]) => visibleMessageIds.has(id)),
+        ),
+        messages: visibleMessages,
+        turns: visibleTurns,
     };
 }
 
@@ -917,20 +1174,44 @@ function activityFor(
           };
 }
 
-async function historyPage(
-    ctx: import("@steve.kite/stdlib").Context,
-    dependencies: LoadedSessionDependencies,
-    agentId: string,
-    url: URL,
-): Promise<unknown> {
-    const limit = parseLimit(url.searchParams.get("limit"), 20, 50);
-    const after = url.searchParams.get("after");
-    const cursor = after === null ? undefined : parseCursor(after);
-    return await dependencies.agent.modules.history.read(ctx, agentId, {
-        from: url.searchParams.has("before") ? "end" : "start",
-        ...(cursor === undefined ? {} : { cursor }),
-        limit,
-    });
+function protocolUsage(
+    session: ConversationRecord,
+    summary: UsageSummary,
+    catalog: RigModelCatalog,
+): Record<string, unknown> {
+    const currentProviderId = session.providerId ?? catalog.defaultProviderId;
+    const defaultModelId = session.modelId ?? catalog.defaultModelId;
+    return {
+        currentProviderId,
+        groups: summary.groups.map((group) => {
+            const modelId = group.model ?? defaultModelId;
+            return {
+                kind: "attributed",
+                modelId,
+                providerId: group.provider,
+                requestedModelId: modelId,
+                usage: {
+                    cacheRead: 0,
+                    cacheWrite: 0,
+                    cost: {
+                        cacheRead: 0,
+                        cacheWrite: 0,
+                        input: 0,
+                        output: 0,
+                        total: 0,
+                    },
+                    input: group.inputTokens,
+                    output: group.outputTokens,
+                    totalTokens: group.totalTokens,
+                },
+            };
+        }),
+        quotas: [],
+        sessionTokenCount: {
+            lastContextTokens: 0,
+            totalTokens: summary.totalTokens,
+        },
+    };
 }
 
 async function sendMessage(
@@ -946,7 +1227,12 @@ async function sendMessage(
             ctx,
             session.agentId,
             messageFromBody(body),
-            messageOptions(body),
+            messageOptions(
+                body,
+                session,
+                dependencies.agent.effectiveSelection,
+                dependencies.agent.system.models,
+            ),
         );
     } catch (cause) {
         throw new Error("Agent Base rejected the session message.", { cause });
@@ -974,7 +1260,12 @@ async function steerMessage(
         ctx,
         session.agentId,
         messageFromBody(body),
-        messageOptions(body),
+        messageOptions(
+            body,
+            session,
+            dependencies.agent.effectiveSelection,
+            dependencies.agent.system.models,
+        ),
     );
     return {
         accepted: acceptance.accepted,
@@ -998,18 +1289,41 @@ function messageFromBody(body: SubmitMessage): SessionUserMessage {
 
 function messageOptions(
     body: SubmitMessage,
+    session: ConversationRecord,
+    defaults: EffectiveAgentSelection,
+    models: readonly AgentModel[],
 ): AgentBaseMessageOptions & { readonly await?: boolean } {
-    return {
+    return mergeAgentMessageOptions(defaults, models, {
         ...(body.await === undefined ? {} : { await: body.await }),
         ...(body.clientSubmissionId === undefined ? {} : { id: body.clientSubmissionId }),
-        ...(body.effort === undefined ? {} : { effort: body.effort as never }),
-        ...(body.modelId === undefined ? {} : { model: body.modelId }),
-        ...(body.permissionMode === undefined ? {} : { permissionMode: body.permissionMode }),
-        ...(body.providerId === undefined ? {} : { provider: body.providerId }),
-        ...(body.serviceTier === undefined || body.serviceTier === null
+        ...(body.effort === undefined ? {} : { effort: body.effort }),
+        ...(body.modelId === undefined
+            ? session.modelId === undefined
+                ? {}
+                : { model: session.modelId }
+            : { model: body.modelId }),
+        ...(body.permissionMode === undefined
+            ? session.permissionMode === undefined
+                ? {}
+                : {
+                      permissionMode: session.permissionMode as NonNullable<
+                          AgentMessageOptionOverrides["permissionMode"]
+                      >,
+                  }
+            : {
+                  permissionMode: body.permissionMode as NonNullable<
+                      AgentMessageOptionOverrides["permissionMode"]
+                  >,
+              }),
+        ...(body.providerId === undefined
+            ? session.providerId === undefined
+                ? {}
+                : { provider: session.providerId }
+            : { provider: body.providerId }),
+        ...(body.serviceTier === undefined
             ? {}
-            : { serviceTier: "priority" as never }),
-    };
+            : { serviceTier: body.serviceTier === null ? null : ("priority" as const) }),
+    });
 }
 
 function parseListQuery(url: URL): { readonly archived?: boolean | "all"; readonly limit: number } {
@@ -1043,14 +1357,6 @@ function parseLimit(value: string | null, fallback: number, maximum: number): nu
         throw new AgentHttpError(400, `The limit must be an integer from 1 to ${maximum}.`);
     }
     return parsed;
-}
-
-function parseCursor(value: string): number {
-    const cursor = Number(value);
-    if (!Number.isSafeInteger(cursor) || cursor < 0) {
-        throw new AgentHttpError(400, "The transcript cursor must be a non-negative integer.");
-    }
-    return cursor;
 }
 
 function scopeFromCreate(body: CreateSession): ConversationScope {
@@ -1096,9 +1402,9 @@ async function streamSessionEvents(
     }
     const writer = createSseWriter(request, response);
     let replaying = true;
-    const pending: HappyAgentEvent[] = [];
+    const pending: AgentEvent[] = [];
     let pendingBytes = 0;
-    const unsubscribe = events.subscribe((event: HappyAgentEvent) => {
+    const unsubscribe = events.subscribe((event: AgentEvent) => {
         if (event.agentId !== session.agentId || writer.closed) return;
         if (replaying) {
             const bytes = Buffer.byteLength(serializeJson(event), "utf8");
@@ -1162,7 +1468,7 @@ async function streamSessionEvents(
     clearInterval(heartbeat);
     unsubscribe();
 
-    function writeEvent(event: HappyAgentEvent): boolean {
+    function writeEvent(event: AgentEvent): boolean {
         const projected = projectSessionEvent(event, session.id);
         if (projected === undefined) return true;
         return writer.write(
@@ -1171,8 +1477,8 @@ async function streamSessionEvents(
     }
 }
 
-function projectSessionEvent(
-    event: HappyAgentEvent,
+export function projectSessionEvent(
+    event: AgentEvent,
     sessionIdValue: string,
 ): Record<string, unknown> | undefined {
     const payload = recordValue(event.payload);
@@ -1181,6 +1487,7 @@ function projectSessionEvent(
         createdAt: event.occurredAt,
         id: event.id,
         sessionId: sessionIdValue,
+        worktreeSupport: "unknown",
     };
     const runId = typeof payload.runId === "string" ? payload.runId : undefined;
     if (event.type === "message.accepted" && runId !== undefined) {

@@ -13,11 +13,13 @@ import {
     workspaceCreateInputSchema,
     workspaceIdSchema,
     workspaceOperationIdSchema,
+    workspaceRenameInputSchema,
     workspaceTimestampSchema,
     workspaceSchema,
     type Workspace,
     type WorkspaceArchiveOptions,
     type WorkspaceCreateInput,
+    type WorkspaceRenameInput,
     type WorkspaceMutationOperation,
 } from "./Workspace.js";
 import {
@@ -69,6 +71,7 @@ import {
     assertWorkspaceCreateResult,
     assertWorkspaceList,
     assertWorkspacePage,
+    assertWorkspaceRenameResult,
     assertWorkspaceTransactionChange,
     createWorkspaceStore,
     workspaceHostSchema,
@@ -84,6 +87,7 @@ import {
     type WorkspaceStoreArchiveInput,
     type WorkspaceStoreCreateInput,
     type WorkspaceStoreMutationResult,
+    type WorkspaceStoreRenameInput,
     type WorkspaceTransactionChange,
 } from "./WorkspaceStore.js";
 import { archiveWorkspaceTool } from "./tools/archive_workspace.js";
@@ -123,6 +127,7 @@ const workspaceMaxOutputSchema = Type.Integer({
 
 export const workspaceModuleOptionsSchema = Type.Object(
     {
+        enabled: Type.Optional(Type.Boolean()),
         host: Type.Optional(workspaceHostSchema),
         authorization: Type.Optional(workspaceAuthorizationSchema),
         idFactory: Type.Optional(workspaceIdFactorySchema),
@@ -149,6 +154,7 @@ export class WorkspacesModule implements AgentModule {
     readonly migrations = workspaceMigrations;
 
     readonly #store: WorkspaceStore;
+    readonly #enabled: boolean;
     readonly #authorization: WorkspaceAuthorization | undefined;
     readonly #idFactory: NonNullable<WorkspaceModuleOptions["idFactory"]>;
     readonly #eventIdFactory: NonNullable<WorkspaceModuleOptions["eventIdFactory"]>;
@@ -163,6 +169,7 @@ export class WorkspacesModule implements AgentModule {
         this.#store = createWorkspaceStore({
             ...(options.host === undefined ? {} : { host: options.host }),
         });
+        this.#enabled = options.enabled ?? true;
         this.#authorization = options.authorization;
         this.#idFactory =
             options.idFactory ??
@@ -179,6 +186,7 @@ export class WorkspacesModule implements AgentModule {
 
     readonly tools = (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => {
         this.#assertAgentId(scope.agent.id);
+        if (!this.#enabled) return [];
         return [
             createWorkspaceTool(this, scope.agent.id),
             listWorkspacesTool(this, scope.agent.id),
@@ -189,11 +197,8 @@ export class WorkspacesModule implements AgentModule {
         ];
     };
 
-    async create(
-        ctx: Context,
-        agentId: string,
-        input: WorkspaceCreateInput,
-    ): Promise<Workspace> {
+    async create(ctx: Context, agentId: string, input: WorkspaceCreateInput): Promise<Workspace> {
+        this.#assertEnabled();
         this.#assertAgentId(agentId);
         this.#assertInput(workspaceCreateInputSchema, input, "workspace creation");
         const normalized = structuredClone(input);
@@ -212,6 +217,7 @@ export class WorkspacesModule implements AgentModule {
                 ...(normalized.projectRef === undefined
                     ? {}
                     : { projectRef: normalized.projectRef }),
+                ...(normalized.path === undefined ? {} : { path: normalized.path }),
                 ...(normalized.baseRef === undefined ? {} : { baseRef: normalized.baseRef }),
             };
             const before = await this.#getRequiredOptional(txCtx, agentId, workspaceId);
@@ -254,11 +260,93 @@ export class WorkspacesModule implements AgentModule {
         return structuredClone(requireWorkspaceFromResult(change.result));
     }
 
+    async rename(ctx: Context, agentId: string, input: WorkspaceRenameInput): Promise<Workspace>;
+    async rename(
+        ctx: Context,
+        agentId: string,
+        workspaceId: string,
+        name: string,
+        expectedUpdatedAt?: number,
+    ): Promise<Workspace>;
+    async rename(
+        ctx: Context,
+        agentId: string,
+        inputOrWorkspaceId: WorkspaceRenameInput | string,
+        name?: string,
+        expectedUpdatedAt?: number,
+    ): Promise<Workspace> {
+        this.#assertEnabled();
+        this.#assertAgentId(agentId);
+        const input: WorkspaceRenameInput =
+            typeof inputOrWorkspaceId === "string"
+                ? {
+                      workspaceId: inputOrWorkspaceId,
+                      name: name ?? "",
+                      ...(expectedUpdatedAt === undefined ? {} : { expectedUpdatedAt }),
+                  }
+                : structuredClone(inputOrWorkspaceId);
+        this.#assertInput(workspaceRenameInputSchema, input, "workspace rename");
+        const operationId =
+            input.operationId ??
+            (await this.#newIdentity(ctx, agentId, workspaceOperationIdSchema));
+        const operation = this.#operation("rename", operationId);
+
+        const change = await this.#runTransaction(ctx, agentId, async (txCtx) => {
+            const before = await this.#getRequired(txCtx, agentId, input.workspaceId);
+            this.#assertOwner(agentId, before);
+            const storeInput: WorkspaceStoreRenameInput = {
+                workspaceId: input.workspaceId,
+                name: input.name,
+                ...(input.expectedUpdatedAt === undefined
+                    ? {}
+                    : { expectedUpdatedAt: input.expectedUpdatedAt }),
+            };
+            const raw = await requirePromise(
+                this.#store.rename(txCtx, agentId, storeInput, this.#request(operation)),
+                "Workspace store rename",
+            );
+            assertWorkspaceRenameResult(raw);
+            if (
+                raw.agentId !== agentId ||
+                raw.operation !== "rename" ||
+                raw.operationId !== operation.operationId
+            ) {
+                throw new Error("Workspace rename result identity does not match the request.");
+            }
+            if (raw.workspace.id !== input.workspaceId || raw.workspace.name !== input.name) {
+                throw new Error("Workspace rename result does not match the request.");
+            }
+            const after = await this.#getRequired(txCtx, agentId, input.workspaceId);
+            if (!sameJson(after, raw.workspace)) {
+                throw new Error("Workspace rename result does not match authoritative state.");
+            }
+            const changed = !sameJson(before, after);
+            assertWorkspaceRenameTransition(before, after, input.name, changed);
+            if (raw.changed !== changed) {
+                throw new Error("Workspace rename changed flag is not authoritative.");
+            }
+            const result = structuredClone(raw);
+            if (changed) {
+                const event = await this.#newEvent(txCtx, agentId, {
+                    type: "workspace_renamed",
+                    agentId,
+                    workspace: after,
+                    previousName: before.name,
+                });
+                await this.#observe(txCtx, event);
+                return { result, event };
+            }
+            return { result };
+        });
+        return structuredClone(requireWorkspaceFromResult(change.result));
+    }
+
     async listPage(
         ctx: Context,
         agentId: string,
         query: WorkspacePageQuery = {},
     ): Promise<WorkspacePage> {
+        this.#assertEnabled();
         this.#assertAgentId(agentId);
         this.#assertInput(workspacePageQuerySchema, query, "workspace page query");
         const limit = query.limit ?? this.#maxPageSize;
@@ -266,7 +354,11 @@ export class WorkspacesModule implements AgentModule {
             throw new Error(`Workspace page limit cannot exceed ${String(this.#maxPageSize)}.`);
         }
         if (query.cursor !== undefined) parseCursor(query.cursor);
-        const normalized = { ...structuredClone(query), limit };
+        const normalized = {
+            ...structuredClone(query),
+            includeArchived: query.includeArchived !== false,
+            limit,
+        };
         const raw = await requirePromise(
             this.#store.list(ctx, agentId, normalized),
             "Workspace store list",
@@ -281,7 +373,10 @@ export class WorkspacesModule implements AgentModule {
             ) {
                 throw new Error("Workspace page returned a row outside the requested project.");
             }
-            if (normalized.includeArchived !== true && workspace.status === "archived") {
+            if (
+                normalized.includeArchived === false &&
+                (workspace.status === "archived" || workspace.status === "archiving")
+            ) {
                 throw new Error("Workspace page returned an archived row without includeArchived.");
             }
             await this.#authorize(ctx, agentId, workspace.ownerAgentId, "list");
@@ -294,10 +389,12 @@ export class WorkspacesModule implements AgentModule {
         agentId: string,
         query: WorkspacePageQuery = {},
     ): Promise<Workspace[]> {
+        this.#assertEnabled();
         return (await this.listPage(ctx, agentId, query)).workspaces;
     }
 
     async get(ctx: Context, agentId: string, workspaceId: string): Promise<Workspace | undefined> {
+        this.#assertEnabled();
         this.#assertAgentId(agentId);
         this.#assertId(workspaceId, "workspace");
         const raw = await requirePromise(
@@ -321,6 +418,7 @@ export class WorkspacesModule implements AgentModule {
         workspaceId: string,
         query: WorkspaceDetailQuery = {},
     ): Promise<WorkspaceDetailPage> {
+        this.#assertEnabled();
         this.#assertAgentId(agentId);
         this.#assertId(workspaceId, "workspace");
         if (!Value.Check(workspaceDetailQuerySchema, query)) {
@@ -362,6 +460,7 @@ export class WorkspacesModule implements AgentModule {
         agentId: string,
         input: WorkspaceTransferInput,
     ): Promise<WorkspaceTransferResult> {
+        this.#assertEnabled();
         this.#assertAgentId(agentId);
         this.#assertInput(workspaceTransferInputSchema, input, "workspace transfer");
         const normalized = structuredClone(input);
@@ -444,6 +543,7 @@ export class WorkspacesModule implements AgentModule {
                           if (
                               requestedResult.workspace.id !== target.id ||
                               requestedResult.workspace.projectRef !== target.projectRef ||
+                              requestedResult.workspace.path !== target.path ||
                               (requestedResult.workspace.ownerAgentId !== undefined &&
                                   requestedResult.workspace.ownerAgentId !== target.ownerAgentId)
                           ) {
@@ -501,6 +601,7 @@ export class WorkspacesModule implements AgentModule {
         workspaceId: string,
         options?: WorkspaceArchiveOptions,
     ): Promise<Workspace> {
+        this.#assertEnabled();
         this.#assertAgentId(agentId);
         this.#assertId(workspaceId, "workspace");
         if (options !== undefined) {
@@ -556,6 +657,7 @@ export class WorkspacesModule implements AgentModule {
         agentId: string,
         workspaceId: string,
     ): Promise<WorkspaceBranchMetadata> {
+        this.#assertEnabled();
         this.#assertAgentId(agentId);
         this.#assertId(workspaceId, "workspace");
         const workspace = await this.#getRequired(ctx, agentId, workspaceId);
@@ -576,6 +678,7 @@ export class WorkspacesModule implements AgentModule {
         agentId: string,
         workspaceId: string,
     ): Promise<WorkspaceBranchMetadata> {
+        this.#assertEnabled();
         return await this.branchMetadata(ctx, agentId, workspaceId);
     }
 
@@ -586,6 +689,7 @@ export class WorkspacesModule implements AgentModule {
         workspaceId: string,
         query: WorkspaceBranchMetadataDetailQuery = {},
     ): Promise<WorkspaceBranchMetadataPage> {
+        this.#assertEnabled();
         this.#assertAgentId(agentId);
         this.#assertId(workspaceId, "workspace");
         if (!Value.Check(workspaceBranchMetadataDetailQuerySchema, query)) {
@@ -626,6 +730,7 @@ export class WorkspacesModule implements AgentModule {
         workspaceId: string,
         query: WorkspaceBranchMetadataDetailQuery = {},
     ): Promise<WorkspaceBranchMetadataPage> {
+        this.#assertEnabled();
         return await this.branchMetadataPage(ctx, agentId, workspaceId, query);
     }
 
@@ -648,6 +753,12 @@ export class WorkspacesModule implements AgentModule {
             throw new Error("Workspace model output cannot fit a complete identity.");
         }
         return visible.join("\n");
+    }
+
+    #assertEnabled(): void {
+        if (!this.#enabled) {
+            throw new Error("Workspaces are disabled by configuration.");
+        }
     }
 
     /** Render one complete workspace detail page without silently dropping fields. */
@@ -835,6 +946,12 @@ export class WorkspacesModule implements AgentModule {
                   readonly agentId: string;
                   readonly workspace: Workspace;
                   readonly previousProjectRef?: string;
+              }
+            | {
+                  readonly type: "workspace_renamed";
+                  readonly agentId: string;
+                  readonly workspace: Workspace;
+                  readonly previousName: string;
               }
             | {
                   readonly type: "workspace_archived";
@@ -1032,6 +1149,7 @@ export class WorkspacesModule implements AgentModule {
             workspace.ownerAgentId !== request.ownerAgentId ||
             workspace.name !== request.name ||
             (request.projectRef !== undefined && workspace.projectRef !== request.projectRef) ||
+            (request.path !== undefined && workspace.path !== request.path) ||
             (request.baseRef !== undefined && workspace.baseRef !== request.baseRef)
         ) {
             throw new Error("Workspace create result does not match the requested identity.");
@@ -1104,6 +1222,7 @@ function assertWorkspaceTransferTransition(
     }
     if (
         before.name !== after.name ||
+        before.path !== after.path ||
         before.baseRef !== after.baseRef ||
         before.status !== after.status ||
         before.createdAt !== after.createdAt ||
@@ -1137,14 +1256,47 @@ function assertWorkspaceTransferTransition(
 }
 
 function assertWorkspaceArchiveState(workspace: Workspace): void {
-    if (workspace.status !== "archived") {
-        throw new Error("Workspace archive authoritative state is not archived.");
+    if (workspace.status !== "archived" && workspace.status !== "archiving") {
+        throw new Error("Workspace archive authoritative state is not archived or archiving.");
     }
-    if (workspace.archivedAt === undefined) {
+    if (workspace.status === "archived" && workspace.archivedAt === undefined) {
         throw new Error("Archived workspace is missing archivedAt.");
     }
-    if (workspace.archivedAt < workspace.createdAt || workspace.archivedAt > workspace.updatedAt) {
+    if (
+        workspace.archivedAt !== undefined &&
+        (workspace.archivedAt < workspace.createdAt || workspace.archivedAt > workspace.updatedAt)
+    ) {
         throw new Error("Archived workspace archivedAt is inconsistent with its timestamps.");
+    }
+}
+
+function assertWorkspaceRenameTransition(
+    before: Workspace,
+    after: Workspace,
+    requestedName: string,
+    changed: boolean,
+): void {
+    if (
+        before.id !== after.id ||
+        before.ownerAgentId !== after.ownerAgentId ||
+        before.projectRef !== after.projectRef ||
+        before.path !== after.path ||
+        before.baseRef !== after.baseRef ||
+        before.status !== after.status ||
+        before.createdAt !== after.createdAt ||
+        before.archivedAt !== after.archivedAt ||
+        after.name !== requestedName
+    ) {
+        throw new Error("Workspace rename changed fields outside the requested transition.");
+    }
+    if (!changed) {
+        if (!sameJson(before, after) || before.name !== requestedName) {
+            throw new Error("Workspace rename reported an unchanged but different workspace.");
+        }
+        return;
+    }
+    if (before.name === requestedName || after.updatedAt <= before.updatedAt) {
+        throw new Error("Workspace rename must change its name and advance updatedAt.");
     }
 }
 
@@ -1158,7 +1310,7 @@ function assertWorkspaceRecord(workspace: Workspace): void {
         }
         return;
     }
-    if (workspace.status !== "archived") {
+    if (workspace.status !== "archived" && workspace.status !== "archiving") {
         throw new Error("Non-archived workspace has archivedAt.");
     }
     if (workspace.archivedAt < workspace.createdAt || workspace.archivedAt > workspace.updatedAt) {
@@ -1195,7 +1347,13 @@ function assertWorkspaceArchiveTransition(
         }
         return;
     }
-    if (before.archivedAt !== undefined) {
+    if (before.status === "archiving" && after.status === "archiving" && !changed) {
+        if (!sameJson(before, after)) {
+            throw new Error("Workspace archive changed an already archiving workspace.");
+        }
+        return;
+    }
+    if (before.archivedAt !== undefined && before.status !== "archiving") {
         throw new Error("Workspace archive before-state has an archivedAt before archival.");
     }
     if (!changed) {
@@ -1203,14 +1361,21 @@ function assertWorkspaceArchiveTransition(
     }
     if (
         before.projectRef !== after.projectRef ||
+        before.path !== after.path ||
         before.baseRef !== after.baseRef ||
         before.name !== after.name ||
         before.createdAt !== after.createdAt
     ) {
         throw new Error("Workspace archive changed fields outside the archival transition.");
     }
-    if (after.archivedAt === undefined || after.archivedAt < before.updatedAt) {
+    if (
+        after.status === "archived" &&
+        (after.archivedAt === undefined || after.archivedAt < before.updatedAt)
+    ) {
         throw new Error("Workspace archive archivedAt is inconsistent with the transition.");
+    }
+    if (after.updatedAt < before.updatedAt) {
+        throw new Error("Workspace archive moved updatedAt backwards.");
     }
 }
 
@@ -1244,6 +1409,7 @@ function compactWorkspace(workspace: Workspace): WorkspaceTransferWorkspace {
         id: workspace.id,
         projectRef: workspace.projectRef,
         ownerAgentId: workspace.ownerAgentId,
+        ...(workspace.path === undefined ? {} : { path: workspace.path }),
     };
 }
 
@@ -1300,8 +1466,9 @@ function fitPageForModel(
 
 function workspaceRow(workspace: Workspace): string {
     const prefix = `${workspace.id} [${workspace.status}]`;
-    const remaining = Math.max(0, 160 - prefix.length - 1);
-    return `${prefix} ${workspace.name.slice(0, remaining)}`;
+    const path = workspace.path ?? "(host did not report a path)";
+    const remaining = Math.max(0, 160 - prefix.length - path.length - 8);
+    return `${prefix} ${workspace.name.slice(0, remaining)}\nPath: ${path}`;
 }
 
 function workspaceDetailText(workspace: Workspace): string {
@@ -1310,6 +1477,7 @@ function workspaceDetailText(workspace: Workspace): string {
         `Name: ${workspace.name}`,
         `Status: ${workspace.status}`,
         `Project ref: ${workspace.projectRef}`,
+        `Path: ${workspace.path ?? "(host did not report a path)"}`,
         `Base ref: ${workspace.baseRef ?? "(none)"}`,
         `Owner agent: ${workspace.ownerAgentId}`,
         `Created at: ${String(workspace.createdAt)}`,

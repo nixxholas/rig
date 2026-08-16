@@ -42,6 +42,7 @@ interface FakeSession {
 /** What one file holds, and when it last changed. */
 interface FakeFile {
     content: string;
+    bytes?: Uint8Array;
     mtimeMs: number;
 }
 
@@ -69,6 +70,10 @@ export class FakeCompute implements Compute {
     readonly commands = new Map<string, ScriptedCommand>();
     /** Every command the shell has run. */
     readonly sessions: FakeSession[] = [];
+    /** Exact options passed when each test command starts. */
+    readonly startedOptions: Omit<ComputeRunOptions, "signal">[] = [];
+    /** Optional failure injected into the next move attempt. */
+    moveFailure: Error | undefined;
     /** Commands the tools asked to keep running past the end of a turn. */
     readonly detached = new Set<number>();
     /** Whether the machine refuses to change anything at all. */
@@ -96,6 +101,17 @@ export class FakeCompute implements Compute {
     write(path: string, content: string): void {
         this.#clock += 1_000;
         this.files.set(path, { content, mtimeMs: this.#clock });
+        this.ensureParentDirectories(path);
+    }
+
+    /** Put exact bytes on the machine for image and binary-file tests. */
+    writeBuffer(path: string, bytes: Uint8Array): void {
+        this.#clock += 1_000;
+        this.files.set(path, { content: "", bytes: bytes.slice(), mtimeMs: this.#clock });
+        this.ensureParentDirectories(path);
+    }
+
+    private ensureParentDirectories(path: string): void {
         let directory = parent(path);
         while (directory !== "" && !this.directories.has(directory)) {
             this.directories.add(directory);
@@ -125,7 +141,7 @@ export class FakeCompute implements Compute {
                     isFile: true,
                     isDirectory: false,
                     isSymbolicLink: false,
-                    size: file.content.length,
+                    size: file.bytes?.byteLength ?? file.content.length,
                     mtimeMs: file.mtimeMs,
                 };
             }
@@ -170,6 +186,7 @@ export class FakeCompute implements Compute {
                 return Promise.resolve();
             },
             move: async (_permissions, source, destination) => {
+                if (this.moveFailure !== undefined) throw this.moveFailure;
                 const file = this.files.get(source);
                 if (file === undefined) throw new Error(`No such file: ${source}`);
                 this.files.set(destination, file);
@@ -182,7 +199,9 @@ export class FakeCompute implements Compute {
                     : Promise.resolve(file.content);
             },
             readFileBuffer: async (_permissions, path) => {
-                return new TextEncoder().encode(await this.fs.readFile(_permissions, path));
+                const file = this.files.get(path);
+                if (file === undefined) throw new Error(`No such file: ${path}`);
+                return file.bytes?.slice() ?? new TextEncoder().encode(file.content);
             },
             readdir: (_permissions, path) => {
                 if (!this.directories.has(path)) {
@@ -306,6 +325,7 @@ export class FakeCompute implements Compute {
                 timedOut: false,
             }),
             startSession: (options: Omit<ComputeRunOptions, "signal">) => {
+                this.startedOptions.push(options);
                 const script = this.commands.get(options.command);
                 if (script === undefined) {
                     return Promise.reject(

@@ -16,7 +16,9 @@ export function transferWorkspaceTool(workspaces: WorkspacesModule, agentId: str
         parameters: workspaceSessionTransferToolInputSchema,
         returnType: workspaceTransferResultSchema,
         durable: false,
-        shouldReviewInAutoMode: () => false,
+        shouldReviewInAutoMode: () => true,
+        describeAutoPermissionAction: ({ targetWorkspaceId }) =>
+            `transfer this conversation to workspace ${JSON.stringify(targetWorkspaceId)}, discarding that target's current commit and all local working state`,
         execute: async (ctx, input: WorkspaceSessionTransferInput, call) =>
             await workspaces.transfer(ctx, agentId, { ...input, operationId: call.id }),
         toLLM: (result) => [
@@ -27,7 +29,7 @@ export function transferWorkspaceTool(workspaces: WorkspacesModule, agentId: str
                         ? `Workspace transfer scheduled for ${result.targetWorkspaceId ?? "the requested workspace"}.`
                         : `Workspace transfer completed for ${
                               result.targetWorkspaceId ?? result.workspace.id
-                          }.`,
+                          }. Path: ${result.workspace.path ?? "(host did not report a path)"}.`,
             },
         ],
     });

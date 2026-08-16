@@ -1,8 +1,9 @@
 # Scheduling
 
-Scheduling is a provider-neutral module for an agent's own time. It owns its durable wait and
-scheduled-message tables through Agent Base migrations. Every database operation uses the active
-Drizzle facade from `ctx.db`; the host supplies only the external wait/delivery scheduler.
+Scheduling is a provider-neutral module for durable agent waits and scheduled messages. It owns its
+durable wait and scheduled-message tables through Agent Base migrations. Every database operation
+uses the active Drizzle facade from `ctx.db`; the host supplies only the external wait/delivery
+scheduler.
 
 ```ts
 const scheduling = new SchedulingModule({
@@ -11,17 +12,23 @@ const scheduling = new SchedulingModule({
 ```
 
 Every caller supplies a context carrying the Agent Base database. Every agent receives `wait` and
-`wait_until`. `schedule_message` is included only when the
-injected `scheduleMessagePolicy` allows the calling agent; the module never guesses whether an
-agent is a subagent. The model-facing schedule tool has no target field and always schedules to
-the calling agent itself. A host caller can pass `targetAgentId`, but cross-agent scheduling is
-denied unless the injected authorization policy grants it.
+`wait_until`. `schedule_message` is included only when the injected `scheduleMessagePolicy`
+allows the calling agent; when the policy is absent it is denied, so a host must explicitly supply
+the role-aware policy for non-subagents. The model-facing schedule tool accepts a required
+`agent_id` and can target any known agent. A host caller can pass `targetAgentId`, but cross-agent
+scheduling is denied unless the injected authorization policy grants it.
 
 Waits plan and finalize a durable record in short transactions while both host claim and suspension
 run outside them, then settle the authoritative terminal record in another short transaction.
 New chat messages interrupt the host wait. Results are explicitly `elapsed` or
 `interrupted` and include the actual elapsed milliseconds, which the model rendering turns into
-human-readable English.
+human-readable English. Durations accept seconds, minutes, hours, and days as discrete or
+compound fields, plus human text such as `90 seconds` or `1h 30m`.
+
+`wait_until` and scheduled-message `at` values accept ISO 8601, RFC 2822, and Unix timestamps in
+seconds or milliseconds. A past instant is clamped to the current clock so the operation resolves
+immediately. Waits remain bounded to 24 hours by default. Scheduled messages use the same default
+horizon, which a host can raise with `maxScheduleHorizon` up to the module timestamp bound.
 
 Scheduled messages have `pending`, `delivered`, `undelivered`, and `cancelled` states. Delivery
 attempts, failure details, retention, and process recovery belong to the host. The module exposes

@@ -20,13 +20,14 @@ carried by the current context.
 
 ### `get_usage`
 
-Reads bounded usage for the calling agent only. Cross-agent and whole-collection reads are a host
-API, never something a tool argument can request.
+Reads bounded usage for the calling agent. A host-neutral caller can set `aggregate: true` (or
+construct the exported tool without an agent ID) to read one target or the whole collection; an
+agent-scoped context cannot turn an argument into a cross-agent read.
 
 Arguments (`GetUsageInput`):
 
-- `aggregate?: boolean` — present for symmetry with the host aggregate query; the tool always
-  returns an aggregate summary regardless of its value.
+- `aggregate?: boolean` — a host-neutral `true` requests the collection aggregate; an
+  agent-scoped call remains limited to its own aggregate.
 - `target?: string` — must equal the calling agent's ID if given; any other value throws
   `"Usage can only be read for the current agent."` before the store is touched.
 - `cursor?: number`, `maxGroups?: number` — forwarded to `UsageModule.read` to page through
@@ -35,11 +36,20 @@ Arguments (`GetUsageInput`):
 The tool is `durable: true` and declares `shouldReviewInAutoMode: () => false`, so it never needs
 Auto review — it only reads. It calls `module.read(ctx, agentId, query)` and returns a
 `UsageSummary`. `toLLM` renders the summary through `module.formatForModel`, which is a compact,
-strictly bounded text block: header line, four running totals, then one line per visible group,
+strictly bounded text block: header line, running totals including current context fullness, then one line per visible group,
 each admitted only if the whole candidate output still fits the character budget
 (`MAX_USAGE_OUTPUT_CHARACTERS`, default 8,000). If the model asked for more than fits, the last
 line names the continuation cursor to call `get_usage` with again — `formatForModel` never returns
 a truncated group row, only a note of what to page for next.
+
+### `get_agent_tree_usage`
+
+Reads a bounded, exact lifetime token snapshot for the current agent and every recursively linked
+subagent or delegated agent. The host supplies the tree reader and the model-facing call is denied
+unless the optional `agentTreeAuthorization` policy explicitly allows it. The result includes each
+agent's stable ID, canonical path, provider/model, relation, status, and total tokens, plus the
+tree total. Missing host wiring is reported as unavailable when called and never prevents module
+construction.
 
 ## External functions
 
@@ -53,6 +63,9 @@ a truncated group row, only a note of what to page for next.
 - `aggregate(ctx, query?)` / `readAggregate` / `readAggregateUsage` — a bounded summary for one
   agent (`query.agentId` set) or the whole collection (`query.agentId` omitted). Only reachable
   from a non-agent context; an agent-scoped `ctx` cannot ask for the whole collection.
+- `readAgentTreeUsage(ctx, agentId)` / `readAgentTree` — a validated bounded host tree snapshot.
+  An agent-scoped context requires both `agentTreeReader` and `agentTreeAuthorization`; an
+  unscoped host context may use the reader directly.
 - `reset(ctx, agentId)` / `resetAgentUsage` — deletes one agent's records and returns the
   number removed.
 - `resetAll(ctx)` / `resetAggregateUsage` — resets the whole collection.
@@ -67,6 +80,10 @@ store's transaction) and `onEvent` (after commit, best-effort: a throwing `onEve
 `beforeInferenceTransact`, `beforeTurnTransact`, `afterInferenceTransact`, and
 `afterTurnTransact` are Agent Base lifecycle hooks, not host-facing calls. Base's stable
 `inferenceId` and `turnId` become the corresponding usage record IDs.
+
+`UsageModuleOptions.agentTreeReader` is a structural `(ctx, requesterAgentId) => UsageAgentTree`
+or Promise seam. `agentTreeAuthorization` has the same arguments and returns a boolean decision
+or Promise. Both are optional; authorization defaults to deny for agent-scoped reads.
 
 ## Storage
 
@@ -93,7 +110,9 @@ immutable first migration.
 - `aggregate(ctx, { agentId?, cursor, maxGroups })` returns a `UsageSummary`: running totals
   (`inferenceCount`, `turnCount`, token and duration sums) plus a bounded, paged array of
   `UsageGroup` rows (one per provider/model/effort/tier combination), capped at `MAX_USAGE_GROUPS`
-  (500) groups.
+  (500) groups. It also exposes `currentContext` when the latest turn has a provider-measured
+  context size; the value is exact (`approximate: false`) and disappears after a reset/compaction
+  invalidates the previous measurement until a later response measures the new context.
 - `reset(ctx, agentId | null)` deletes matching records and reports how many were removed.
 - The host transaction is the single read/decide/write boundary every mutation runs inside, and
   stdlib `afterCommit(ctx, callback)` registers post-commit event delivery inside that same

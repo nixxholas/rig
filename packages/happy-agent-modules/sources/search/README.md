@@ -2,8 +2,8 @@
 
 Web search and page fetch, over a backend the host supplies. The module does not talk to any
 search engine or the network itself; it validates and bounds what goes out to the backend and what
-comes back from it, and it is the same two tools for every model rather than a vendor's own search
-surface.
+comes back from it. Every model receives the same fixed ordinary-tool array. The vendor names
+select a host route; they do not lift a provider's server tool into Agent Base.
 
 ```ts
 import { Agent } from "@slopus/happy-agent-base";
@@ -26,14 +26,24 @@ collection; `agentId` is threaded through to the backend on each call.
 
 ## Tools
 
-- **`web_search`** — searches the backend with `{ query, limit?, cursor? }` and returns a
-  `SearchPage`. `query` is trimmed and must be non-empty (max 20,000 characters). `cursor` is a
-  zero-based, bounded offset into the result set (0 to 1,000,000); omit it for the first page.
-  `limit` (1–50) is clamped to the module's `maxResults` and to however many result URLs can fit
-  in `maxOutputCharacters`, so the backend is never asked for more than the model could be shown.
-  The model sees one URL per line, opportunistically followed by ` — title` when it still fits the
-  output budget, and a trailing `next_cursor=<n>` line when there is more to page through; an empty
-  page reads `No search results.`
+The fixed array matches Rig:
+
+- **`web_fetch`**
+- **`gemini_web_search`**
+- **`claude_web_search`**
+- **`codex_web_search`**
+- **`bedrock_web_search`**
+- **`grok_web_search`**
+- **`grok_x_search`**
+
+All seven tools are available to Claude, Codex, Grok, Bedrock, and future providers. Search calls
+use `SearchBackend.searchProvider` when the host implements it, passing the selected vendor,
+optional provider ID, and the vendor-specific domain/latest filters. A backend that predates routed
+search can still serve the calls through its generic `search` function.
+
+Each search returns a bounded `SearchPage`. The model sees one URL per line, opportunistically
+followed by ` — title` when it fits, plus `next_cursor=<n>` when another page exists.
+
 - **`web_fetch`** — fetches one URL through the backend with `{ url, maxCharacters? }` and returns
   a `FetchResult`. `url` must be a valid `http`/`https` URL (max 200 characters after
   normalization); anything else is rejected before the backend is called. `maxCharacters`
@@ -41,11 +51,11 @@ collection; `agentId` is threaded through to the backend on each call.
   the title and content as far as they fit `maxOutputCharacters`, with a `[Content truncated.]`
   marker when the model-visible text or the underlying content was cut.
 
-Both tools are `durable: false` because retrying an interrupted backend call could repeat billed
-or externally observable work. They set `shouldReviewInAutoMode: () => false`, so they run without
-an Auto-mode review — the module treats outbound search and fetch as network reads, not actions on
-the sandboxed machine. Neither tool touches the filesystem or a compute; everything they do goes
-through the injected backend. The URL is always the identity that is kept intact: formatting never
+All tools are `durable: false` because retrying an interrupted backend call could repeat billed or
+externally observable work. They require Auto or Full access and request Auto review because the
+host performs network work outside the local shell sandbox. The module itself does not touch the
+filesystem or a compute; everything goes through the injected backend. The URL is always the
+identity that is kept intact: formatting never
 truncates or drops a URL to make room for a title, snippet, or continuation cursor, so every row
 the model is shown remains one it can act on or follow.
 
@@ -69,10 +79,9 @@ the model is shown remains one it can act on or follow.
   use to turn a validated page or fetch result into model-visible text, exposed so a host can
   render the same output outside a tool call. Both throw if given a page or result that fails the
   corresponding schema.
-- **`search.tools(ctx, scope): readonly AnyAgentTool[]`** — returns `[webSearchTool(this,
-  scope.agent.id), webFetchTool(this, scope.agent.id)]`; this is how `Agent.create` wires the two
-  tools above into a specific agent's tool set. `webSearchTool` and `webFetchTool` are exported
-  directly as well, for a host assembling tools outside the standard module path.
+- **`search.providerSearch(ctx, agentId, request)`** — normalizes a vendor-routed request and uses
+  the routed host boundary, while preserving the same page and output bounds as `search`.
+- **`search.tools(ctx, scope)`** — returns the fixed seven-tool array above for every provider.
 
 None of these functions emit events or take listeners; the module has no async or background work
 of its own; every call resolves or rejects within the single `search`/`fetch` round trip.

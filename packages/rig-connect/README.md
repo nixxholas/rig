@@ -294,10 +294,7 @@ await rig.removeSharingContact(contactIdentity);
 ```
 
 The authoritative snapshot contains the Murmur identity, selected profile ID, connection state,
-confirmed contacts, folder-share synchronization status, and incoming and outgoing requests.
-After contacts are confirmed, `shareFolder(folderId, contactIdentities)` creates one typed Murmur
-group whose encrypted invitation descriptor carries the folder's current virtual subtree. Later
-folder additions, removals, moves, ordering, and metadata changes synchronize through that group.
+confirmed contacts, and incoming and outgoing requests.
 Contact and request profiles may be `null`
 when a remote application sent data outside Rig's profile contract; such a request cannot be
 accepted. A remote profile is display metadata asserted by that authenticated Murmur identity; its
@@ -621,69 +618,6 @@ by arrival, so a snapshot racing a live event cannot make the view go backwards.
 session leaves the tree while remaining known, so restoring it puts it back rather than requiring a
 reconnect.
 
-## The folders
-
-Beside the projects, and not replacing them, is a tree of folders: places to work on media,
-documents, and everything that is not code. `rig.connectFolders` keeps that tree current from the
-same stream and the same opening catalog the groups use, so following it adds no request of its own.
-
-```ts
-const folders = rig.connectFolders({
-    onChange(tree, state) {
-        render(tree, state);
-    },
-});
-
-for (const folder of folders.folders()) {
-    folder.name;
-    folder.icon; // a single emoji, when it has one
-    folder.description; // what it is for
-    folder.rules; // standing instructions for agents working in it
-    folder.path; // its flat storage directory, which never moves
-    folder.children; // the folders nested inside it, ordered
-}
-
-folders.close();
-```
-
-Nesting is virtual. A folder's place in the tree is its parent and its order among its siblings,
-while `path` is a flat directory named after the folder's own id: rearranging the tree moves nothing
-on disk. A folder carries no Git state at all — no branch, no diff, no changed files.
-
-The tree is referentially stable in the same way the project tree is, so a React consumer
-re-renders only the branch that actually moved. An archived folder leaves the tree together with
-everything nested under it.
-
-A chat has one canonical scope. Project and workspace chats appear only in the project tree;
-folder chats appear only in their folder; and Unsorted chats appear only in the global Unsorted
-list.
-
-Changing the tree is entity-first, because the daemon has to derive a folder's place among its
-siblings itself:
-
-```ts
-const mediaId = rig.folders.create({ icon: "🎬", name: "Media" });
-rig.folders.update(mediaId, { description: "Where the videos live." });
-rig.folders.move(travelId, { afterId: mediaId, parentId: null });
-rig.folders.archive(mediaId);
-rig.folders.moveSession(sessionId, {
-    afterId: null,
-    scope: { folderId: mediaId, kind: "folder" },
-});
-rig.folders.setSessionFolder(sessionId, null); // Convenience: back to Unsorted.
-```
-
-A move says where the folder landed — the folder it was dropped into and the sibling it was dropped
-below, each `null` at the root and at the top of a list. Rig derives the fractional order key from
-that pair, so a client never sends or invents one. `update` clears an optional field with an
-explicit `null` and leaves an absent one alone.
-
-Every call returns a mutation ID immediately and applies its prediction synchronously. The
-authoritative result also arrives through the live stream, and conflicts are rebased and retried in
-order. Rig Connect names the folder it creates and reuses that identity across transport retries,
-so an answer lost after the daemon committed converges on the same folder. `{ folderId }` on
-`create` supplies a caller-owned identity.
-
 ## The timeline
 
 `rig.connectTimeline` answers a different question from the groups: not what exists, but when it
@@ -812,9 +746,6 @@ the state directly:
   value a `tool_call` element carries.
 - `GroupStore` does the same for the project tree: it joins projects, worktrees, and sessions,
   merges by ordered identity, and knows nothing about transport.
-- `FolderStore` does the same for the folder tree: it nests folders by their parents, orders
-  siblings, drops what has been archived, and merges by version so a snapshot racing the stream
-  cannot move the tree backwards.
 - `streamLiveEvents` follows the global stream with cursor-based resume and reports frames to
   callbacks.
 - `sessionUnreadAfterEvent` decides the unread state one event leaves a chat in. The daemon

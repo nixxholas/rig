@@ -12,7 +12,7 @@ export function replyToMessageTool(collaboration: CollaborationModule, actingAge
     return defineAgentTool({
         name: "reply_to_agent_message",
         description:
-            "Reply to a collaborator's pending request. Only the requested responder may answer an obligation.",
+            "Reply to a collaborator's pending request. Only the requested responder may answer an obligation. Set readOnly true to switch the recipient to Read only, or false to restore the sender's current permission mode.",
         parameters: collaborationReplyToolInputSchema,
         returnType: collaborationSendResultSchema,
         durable: true,

@@ -1,8 +1,5 @@
 import { sql } from "drizzle-orm";
-import {
-    agentDatabaseRows,
-    agentDatabaseRun,
-} from "@slopus/happy-agent-base";
+import { agentDatabaseRows, agentDatabaseRun } from "@slopus/happy-agent-base";
 import type { Context } from "@steve.kite/stdlib";
 import { Value } from "@sinclair/typebox/value";
 
@@ -227,7 +224,7 @@ export function createWorkflowDatabase(runtime: WorkflowRuntime): WorkflowDataba
             ) {
                 throw new Error("Workflow wait input is invalid.");
             }
-            const run = await runtime.wait.call(runtime, ctx, agentId, id);
+            const run = await runtime.wait.call(runtime, ctx, agentId, id, ctx.lifetime);
             assertWorkflowRun(run);
             if (run.agentId !== agentId || run.id !== id) {
                 throw new Error("Workflow runtime returned an unrelated wait result.");

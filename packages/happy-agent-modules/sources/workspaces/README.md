@@ -1,11 +1,11 @@
 # Workspaces
 
 Isolated places to work — checkouts, worktrees, or whatever a host makes of a project and a base
-ref — that an agent can create, list, inspect, move a session into, and archive without knowing
-anything about Git, paths, or the filesystem. The module owns its catalog and migrations in the
-Agent Base database. Host Git, filesystem, and process operations remain behind
-a narrow optional service. What a workspace actually is, and how creating, transferring, or
-archiving one is carried out, is entirely the host's decision.
+ref — that an agent can create, list, inspect, move a session into, rename, and archive without
+knowing anything about Git or filesystem operations. The module owns its catalog and migrations in
+the Agent Base database. Host Git, filesystem, and process operations remain behind narrow optional
+services. A host may report the workspace's bounded filesystem `path`, and may return
+`initializing` or `archiving` records while provisioning or cleanup continues asynchronously.
 
 Catalog-only mutation tools use Agent Base's stable cuid2 call ID and declare
 `transactional: true`. Transfers cross into the host, retain `call.id` as their operation
@@ -19,8 +19,9 @@ const workspaces = new WorkspacesModule({ host: hostWorkspaceOperations });
 const agent = await Agent.create(ctx, { ...options, modules: [workspaces] });
 ```
 
-`host` is optional and contains only Git/filesystem operations such as branch metadata and
-transfers. `authorization` lets one agent act on another agent's
+`host` is optional and contains only Git/filesystem operations such as creation, archival, renaming,
+branch metadata, and transfers. Each lifecycle hook is optional: when absent, the module's catalog
+fallback remains available. `authorization` lets one agent act on another agent's
 workspaces (self access is always allowed without it); `idFactory`, `eventIdFactory`, and `clock`
 let a host control identity and time generation instead of using `crypto.randomUUID()` and
 `Date.now()`; `listener` receives every workspace event; `maxPageSize` and `maxOutputCharacters`
@@ -33,9 +34,10 @@ durable transaction has already committed.
   calling agent. `projectRef` and `baseRef` are opaque strings the host interprets; `name` is
   required. Agent Base commits the result with the catalog change.
 - **`list_workspaces`** — `{ projectRef?, includeArchived?, cursor?, limit? }`. Lists a page of the
-  calling agent's workspaces, capped at `maxPageSize` (100 by default). `cursor` is an opaque
-  decimal offset returned as `nextCursor`; passing it back continues from exactly where the last
-  page ended.
+  calling agent's workspaces, including archived and archiving rows by default. Set
+  `includeArchived: false` to restrict the page to active rows. Pages are capped at `maxPageSize`
+  (100 by default). `cursor` is an opaque decimal offset returned as `nextCursor`; passing it back
+  continues from exactly where the last page ended.
 - **`get_workspace`** — `{ workspaceId, detailOffset?, detailLimit? }`. Reads one workspace by ID.
   The full record is rendered as a bounded detail string and paged with `detailOffset`/
   `detailLimit` (up to 1,024 characters per page) so a small model-output budget cannot silently
@@ -55,8 +57,10 @@ durable transaction has already committed.
 
 Governing principles across all six tools:
 
-- All use `shouldReviewInAutoMode: () => false` — Auto permission mode never reviews them, since
-  they act only through the host store rather than the local sandbox.
+- Read and create tools use `shouldReviewInAutoMode: () => false`. Archive and transfer use
+  `shouldReviewInAutoMode: () => true` and describe their destructive host-side effects to the
+  Auto reviewer. Neither tool declares `shouldRunInFullAccessInAutoMode`; review does not grant
+  unsandboxed execution.
 - `create_workspace` and `archive_workspace` are durable transactional tools.
   `transfer_workspace` is non-durable because it crosses the host boundary. The three read tools
   are non-durable because a current catalog or Git read does not need replay.
@@ -91,6 +95,9 @@ host wiring (not per agent — `agentId` is passed explicitly on every call):
   `transfer_workspace` does not expose to the model, for hosts that move a workspace between
   projects directly.
 - `archive(ctx, agentId, workspaceId, options?: WorkspaceArchiveOptions): Promise<Workspace>`.
+- `rename(ctx, agentId, input: WorkspaceRenameInput): Promise<Workspace>` — renames an owned
+  workspace while preserving its opaque project, path, and lifecycle fields. A host rename hook may
+  also move its external branch or folder before returning the authoritative row.
 - `branchMetadata` / `getBranchMetadata(ctx, agentId, workspaceId): Promise<WorkspaceBranchMetadata>`
   and `branchMetadataPage` / `getBranchMetadataPage(ctx, agentId, workspaceId, query?)` — the paged
   form backs `get_workspace_branch_metadata`.
@@ -100,8 +107,8 @@ host wiring (not per agent — `agentId` is passed explicitly on every call):
   each tool's `toLLM` uses, exposed so a host can show a model (or a person) the same text outside a
   tool call.
 
-Every changed mutation (`create`, `transfer`, `archive`) emits a `WorkspaceEvent` —
-`workspace_created`, `workspace_transferred`, `workspace_archived`, or
+Every changed mutation (`create`, `rename`, `transfer`, `archive`) emits a `WorkspaceEvent` —
+`workspace_created`, `workspace_renamed`, `workspace_transferred`, `workspace_archived`, or
 `workspace_transfer_scheduled` — carrying `eventId`, `at` (from `clock`), `agentId`, and the
 resulting workspace (or, for a scheduled transfer, the target ID). If `listener.onEventTransactional`
 is set it runs inside the same store transaction as the mutation; `listener.onEvent` runs only
@@ -111,8 +118,8 @@ mutation that already happened.
 
 ## Storage
 
-The module owns the `workspaces` table through its ordered Agent Base migrations. A forward-only
-migration removes the obsolete workspace receipt and proof tables.
+The module owns the `workspaces` table through its ordered Agent Base migrations. Forward-only
+migrations remove the obsolete workspace receipt and proof tables and add the optional host path.
 Every runtime database operation uses `ctx.db`; direct multi-step mutations use `ctx.inTx`.
 Post-commit notification uses stdlib `afterCommit(ctx, ...)`.
 

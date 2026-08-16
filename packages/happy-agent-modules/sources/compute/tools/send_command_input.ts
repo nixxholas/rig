@@ -6,6 +6,8 @@ import type { Compute } from "../Compute.js";
 import {
     commandResultSchema,
     createCommandResult,
+    DEFAULT_COMMAND_OUTPUT_TOKENS,
+    MAX_COMMAND_OUTPUT_TOKENS,
     formatCommandResult,
 } from "../impl/commandResult.js";
 
@@ -36,6 +38,13 @@ export function sendCommandInputTool(compute: Compute) {
                         minimum: 0,
                     }),
                 ),
+                max_output_tokens: Type.Optional(
+                    Type.Integer({
+                        description: `Output token budget. Defaults to ${String(DEFAULT_COMMAND_OUTPUT_TOKENS)}.`,
+                        minimum: 1,
+                        maximum: MAX_COMMAND_OUTPUT_TOKENS,
+                    }),
+                ),
             },
             { additionalProperties: false },
         ),
@@ -45,7 +54,7 @@ export function sendCommandInputTool(compute: Compute) {
         // Typing into a live program is the program acting, not a lookup, so it is decided on;
         // it needs no elevation, because it reaches nothing the command could not already reach.
         shouldReviewInAutoMode: ({ input }) => input.length > 0,
-        execute: async (ctx, { command_id, input, wait_ms }) => {
+        execute: async (ctx, { command_id, input, wait_ms, max_output_tokens }) => {
             const startedAt = Date.now();
             const permissions = computePermissions(agentPermissionMode(ctx));
             if (!compute.shell.supportsSessionInput) {
@@ -64,7 +73,11 @@ export function sendCommandInputTool(compute: Compute) {
             if (snapshot === undefined) {
                 throw new Error(`There is no command ${String(command_id)} on this machine.`);
             }
-            return createCommandResult(snapshot, (Date.now() - startedAt) / 1_000);
+            return createCommandResult(
+                snapshot,
+                (Date.now() - startedAt) / 1_000,
+                max_output_tokens === undefined ? {} : { maxOutputTokens: max_output_tokens },
+            );
         },
         isError: (result) => result.exit_code !== undefined && result.exit_code !== 0,
         toLLM: (result) => [{ type: "text", text: formatCommandResult(result) }],

@@ -13,7 +13,15 @@ const workflows = new WorkflowsModule({
 `runtime` implements `launch`, `cancel`, `resume`, and `wait`. Database operations use the root or
 active transaction facade from `ctx.db`; short persistence steps compose through `ctx.inTx(...)`.
 Optional factories control public operation and event IDs; optional listeners observe lifecycle
-events.
+events. `wait` receives the calling context's optional lifetime signal so a host broker can stop
+waiting without cancelling the workflow itself.
+
+`run_workflow` accepts either a named host workflow (`workflow` plus bounded string `input`) or
+exactly one bounded `script`/`scriptPath`. Script launches also accept bounded JSON `args`, an
+optional `name` and `description`, and `resumeFromRunId`; the host runtime owns reading the path,
+script execution, checkpoint reuse, agent orchestration, and concurrency. Inline scripts are capped
+at 524,288 characters, arguments are finite-depth JSON capped at 65,536 encoded bytes, and a
+script may request at most 1,000 agents through the host contract.
 
 ## Durable tool completion
 
@@ -47,6 +55,17 @@ generates one. Reusing an existing launch ID is a conflict, not a module replay 
 
 Every tool is scoped to `scope.agent.id`. Inputs, runtime results, persisted results, pagination,
 and lifecycle transitions are validated before they reach the model.
+
+Status and wait results always include a bounded `agentCount`, accumulated `logs`, a
+`logsTruncated` marker, and `legacyStatus` (`completed`, `error`, `running`, or `stopped`) beside
+the richer lifecycle status. Runtime adapters from the first module release may omit these
+observations; the module reports bounded empty values in that case. Model-facing summaries include
+an explicit truncation marker when the output budget cannot show every log line.
+
+Cancelling a wait only aborts the broker wait. It never calls workflow cancellation, and the
+workflow remains available through status/log reads. Published Agent Base 0.0.7 has no
+`steerable` or `interruptionMessage` tool fields, so the host must present any preferred
+provider-specific interruption wording outside this module.
 
 ## Persistence and migrations
 

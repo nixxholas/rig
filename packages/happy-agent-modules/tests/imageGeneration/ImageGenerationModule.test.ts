@@ -4,7 +4,7 @@ import { isAbsolute, join, relative } from "node:path";
 
 import { AgentKV, type AgentModuleScope, type AnyAgentTool } from "@slopus/happy-agent-base";
 import { Value } from "@sinclair/typebox/value";
-import { createRootContext, type Context } from "@steve.kite/stdlib";
+import { createRootContext } from "@steve.kite/stdlib";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -67,6 +67,7 @@ function harness(
     overrides: Partial<ImageGenerationModuleOptions> = {},
     persistence = new InMemoryPersistence(),
     agentId = "agent-1",
+    agent: Partial<AgentModuleScope["agent"]> = {},
 ): Harness {
     const module = new ImageGenerationModule({
         generator: service,
@@ -78,7 +79,12 @@ function harness(
     });
     const kv = new AgentKV(persistence, `kv.${agentId}.`).scoped("module", "image-generation");
     const tools = module.tools(root, {
-        agent: { id: agentId },
+        agent: {
+            id: agentId,
+            provider: "claude-primary",
+            providerKind: "claude",
+            ...agent,
+        },
         kv,
     } as AgentModuleScope);
     const tool = tools[0];
@@ -170,23 +176,20 @@ describe("ImageGenerationModule", () => {
         expect(await readFile(created.asset.locator)).toEqual(Buffer.from(PNG_BYTES));
     });
 
-    it("uses the call ID for non-durable generate_image and returns the real path", async () => {
+    it("uses the call ID for non-durable imagegen and returns the real path", async () => {
         const generated = generator();
         const images = harness(generated.generator);
         const call = { id: "tool-call-1" } as never;
 
-        const first = await images.tool.execute(
-            root,
-            { prompt: "  A tiny observatory  " },
-            call,
-        );
+        const first = await images.tool.execute(root, { prompt: "  A tiny observatory  " }, call);
 
         completed(first);
         expect(first.operationId).toBe("tool-call-1");
         expect(generated.generate).toHaveBeenCalledOnce();
-        expect(images.tool.name).toBe("generate_image");
+        expect(images.tool.name).toBe("imagegen");
         expect(images.tool.durable).toBe(false);
-        expect(await images.tool.shouldReviewInAutoMode({ prompt: "A prompt" }, root)).toBe(false);
+        expect(images.tool.requiresAutoOrFullAccess).toBe(true);
+        expect(await images.tool.shouldReviewInAutoMode({ prompt: "A prompt" }, root)).toBe(true);
         expect(Value.Check(images.tool.returnType, first)).toBe(true);
         expect(
             Value.Check(images.tool.parameters, {
@@ -201,6 +204,47 @@ describe("ImageGenerationModule", () => {
         expect(modelText).toContain(`Path: ${first.asset.locator}`);
         expect(modelText).not.toContain(PNG_BYTES.join(","));
         expect(await readFile(first.asset.locator)).toEqual(Buffer.from(PNG_BYTES));
+        expect(generated.generate).toHaveBeenCalledWith(
+            root,
+            expect.objectContaining({ preferredProviderId: "claude-primary" }),
+        );
+    });
+
+    it("uses Rig's Codex surface and forwards bounded edit selectors", async () => {
+        const generated = generator();
+        const images = harness(generated.generator, {}, new InMemoryPersistence(), "agent-1", {
+            provider: "codex-primary",
+            providerKind: "codex",
+        });
+
+        expect(images.tool.name).toBe("codex_imagegen");
+        await images.tool.execute(
+            root,
+            {
+                prompt: "Make the sky darker",
+                referenced_image_paths: ["/tmp/reference.png"],
+            },
+            { id: "tool-call-edit" } as never,
+        );
+
+        expect(generated.generate).toHaveBeenCalledWith(
+            root,
+            expect.objectContaining({
+                preferredProviderId: "codex-primary",
+                referencedImagePaths: ["/tmp/reference.png"],
+            }),
+        );
+        await expect(
+            images.tool.execute(
+                root,
+                {
+                    prompt: "Invalid selectors",
+                    referenced_image_paths: ["/tmp/reference.png"],
+                    num_last_images_to_include: 1,
+                },
+                { id: "tool-call-invalid" } as never,
+            ),
+        ).rejects.toThrow("only one");
     });
 
     it("records one failed outcome and rejects duplicate operation IDs", async () => {

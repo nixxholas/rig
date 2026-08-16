@@ -4,6 +4,7 @@ import {
     workspaceAgentIdSchema,
     workspaceIdSchema,
     workspaceOperationIdSchema,
+    workspacePathSchema,
     workspaceProjectRefSchema,
     workspaceSchema,
 } from "./Workspace.js";
@@ -50,6 +51,7 @@ export const workspaceTransferWorkspaceSchema = Type.Object(
         id: workspaceIdSchema,
         projectRef: workspaceProjectRefSchema,
         ownerAgentId: Type.Optional(workspaceAgentIdSchema),
+        path: Type.Optional(workspacePathSchema),
     },
     { additionalProperties: false },
 );

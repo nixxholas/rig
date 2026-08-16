@@ -33,6 +33,7 @@ import {
     type SchedulingCancelInput,
     type SchedulingDeliveryOutcomeInput,
     type SchedulingDuration,
+    type SchedulingInstant,
     type SchedulingScheduleDetailPage,
     type SchedulingScheduleDetailQuery,
     type SchedulingScheduleInput,
@@ -63,10 +64,7 @@ import {
     type SchedulingScheduler,
     type SchedulingStore,
 } from "./SchedulingStore.js";
-import {
-    createSqliteSchedulingStorage,
-    schedulingMigrations,
-} from "./SqliteSchedulingStorage.js";
+import { createSqliteSchedulingStorage, schedulingMigrations } from "./SqliteSchedulingStorage.js";
 import { cancelScheduledMessageTool } from "./tools/cancel_scheduled_message.js";
 import { listScheduledMessagesTool } from "./tools/list_scheduled_messages.js";
 import { scheduleMessageTool } from "./tools/schedule_message.js";
@@ -75,7 +73,8 @@ import { waitUntilTool } from "./tools/wait_until.js";
 
 const DEFAULT_MAX_WAIT_DURATION = 24 * 60 * 60 * 1_000;
 const DEFAULT_MAX_SCHEDULE_HORIZON = 24 * 60 * 60 * 1_000;
-const MAX_CONFIGURED_SCHEDULING_DURATION = 24 * 60 * 60 * 1_000;
+const MAX_CONFIGURED_WAIT_DURATION = 24 * 60 * 60 * 1_000;
+const MAX_CONFIGURED_SCHEDULE_HORIZON = MAX_SCHEDULING_TIMESTAMP;
 const MAX_SETTLEMENT_CLOCK_DRIFT = 60 * 1_000;
 const DEFAULT_PAGE_SIZE = 50;
 const DEFAULT_OUTPUT_CHARACTERS = 8_000;
@@ -139,17 +138,13 @@ export const schedulingModuleOptionsSchema = Type.Object(
         clock: Type.Optional(schedulingClockSchema),
         listener: Type.Optional(schedulingModuleListenerSchema),
         maxWaitDuration: Type.Optional(
-            Type.Integer({ minimum: 0, maximum: MAX_CONFIGURED_SCHEDULING_DURATION }),
+            Type.Integer({ minimum: 0, maximum: MAX_CONFIGURED_WAIT_DURATION }),
         ),
         maxScheduleHorizon: Type.Optional(
-            Type.Integer({ minimum: 0, maximum: MAX_CONFIGURED_SCHEDULING_DURATION }),
+            Type.Integer({ minimum: 0, maximum: MAX_CONFIGURED_SCHEDULE_HORIZON }),
         ),
-        maxPageSize: Type.Optional(
-            Type.Integer({ minimum: 1, maximum: MAX_SCHEDULING_PAGE_SIZE }),
-        ),
-        maxOutputCharacters: Type.Optional(
-            Type.Integer({ minimum: 256, maximum: 100_000 }),
-        ),
+        maxPageSize: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_SCHEDULING_PAGE_SIZE })),
+        maxOutputCharacters: Type.Optional(Type.Integer({ minimum: 256, maximum: 100_000 })),
         maxMessageLength: Type.Optional(
             Type.Integer({ minimum: 1, maximum: MAX_SCHEDULING_MESSAGE_LENGTH }),
         ),
@@ -159,9 +154,7 @@ export const schedulingModuleOptionsSchema = Type.Object(
 );
 
 export type SchedulingModuleOptions = Static<typeof schedulingModuleOptionsSchema>;
-export type SchedulingAuthorizationAction = Static<
-    typeof schedulingAuthorizationActionSchema
->;
+export type SchedulingAuthorizationAction = Static<typeof schedulingAuthorizationActionSchema>;
 export type SchedulingAuthorization = Static<typeof schedulingAuthorizationSchema>;
 export type SchedulingMessagePolicy = Static<typeof schedulingMessagePolicySchema>;
 
@@ -200,11 +193,9 @@ export class SchedulingModule implements AgentModule {
         this.#listener = validated.listener;
         this.#onPostCommitError = validated.onPostCommitError;
         this.#maxWaitDuration = validated.maxWaitDuration ?? DEFAULT_MAX_WAIT_DURATION;
-        this.#maxScheduleHorizon =
-            validated.maxScheduleHorizon ?? DEFAULT_MAX_SCHEDULE_HORIZON;
+        this.#maxScheduleHorizon = validated.maxScheduleHorizon ?? DEFAULT_MAX_SCHEDULE_HORIZON;
         this.#maxPageSize = validated.maxPageSize ?? DEFAULT_PAGE_SIZE;
-        this.#maxOutputCharacters =
-            validated.maxOutputCharacters ?? DEFAULT_OUTPUT_CHARACTERS;
+        this.#maxOutputCharacters = validated.maxOutputCharacters ?? DEFAULT_OUTPUT_CHARACTERS;
         this.#maxMessageLength = validated.maxMessageLength ?? DEFAULT_MAX_MESSAGE_LENGTH;
     }
 
@@ -548,7 +539,9 @@ export class SchedulingModule implements AgentModule {
             for (const schedule of page.schedules) {
                 assertSchedulingScheduledMessage(schedule);
                 if (schedule.senderAgentId !== senderAgentId) {
-                    throw new Error("Scheduling page returned a message outside the sender filter.");
+                    throw new Error(
+                        "Scheduling page returned a message outside the sender filter.",
+                    );
                 }
             }
             return structuredClone(this.#fitSchedulePage(page, query.cursor));
@@ -579,9 +572,11 @@ export class SchedulingModule implements AgentModule {
             }
             const startedAt = this.#now(txCtx, agentId);
             const dueAt =
-                "duration" in input
-                    ? this.#dueAtFromDuration(startedAt, input.duration)
-                    : this.#dueAtFromInstant(startedAt, input.at);
+                "at" in input
+                    ? this.#dueAtFromInstant(startedAt, input.at)
+                    : "duration" in input
+                      ? this.#dueAtFromDuration(startedAt, input.duration)
+                      : this.#dueAtFromDuration(startedAt, durationFromWaitInput(input));
             return {
                 request: {
                     id,
@@ -781,7 +776,7 @@ export class SchedulingModule implements AgentModule {
     }
 
     async #maySchedule(ctx: Context, agentId: string): Promise<boolean> {
-        if (this.#scheduleMessagePolicy === undefined) return true;
+        if (this.#scheduleMessagePolicy === undefined) return false;
         const owner = this.#scheduleMessagePolicy;
         const policy = typeof owner === "function" ? owner : owner.canSchedule;
         const raw = policy.call(typeof owner === "function" ? undefined : owner, ctx, agentId);
@@ -858,35 +853,7 @@ export class SchedulingModule implements AgentModule {
         if (!Value.Check(schedulingDurationSchema, duration)) {
             throw new Error("Scheduling duration is invalid.");
         }
-        const unit =
-            "unit" in duration
-                ? duration.unit.replace(/s$/u, "")
-                : "seconds" in duration
-                  ? "second"
-                  : "minutes" in duration
-                    ? "minute"
-                    : "hours" in duration
-                      ? "hour"
-                      : "day";
-        const value =
-            "unit" in duration
-                ? duration.value
-                : "seconds" in duration
-                  ? duration.seconds
-                  : "minutes" in duration
-                    ? duration.minutes
-                    : "hours" in duration
-                      ? duration.hours
-                      : duration.days;
-        const multiplier =
-            unit === "second"
-                ? 1_000
-                : unit === "minute"
-                  ? 60_000
-                  : unit === "hour"
-                    ? 3_600_000
-                    : 86_400_000;
-        const amount = value * multiplier;
+        const amount = durationMilliseconds(duration);
         if (!Number.isSafeInteger(amount) || amount < 0) {
             throw new Error(
                 "Scheduling duration must resolve to a finite whole number of milliseconds.",
@@ -902,17 +869,24 @@ export class SchedulingModule implements AgentModule {
         return dueAt;
     }
 
-    #dueAtFromInstant(now: number, instant: string, horizon = this.#maxWaitDuration): number {
-        if (!Value.Check(schedulingInstantSchema, instant) || !isIsoInstant(instant)) {
-            throw new Error("Scheduling time must be a valid ISO 8601 instant.");
+    #dueAtFromInstant(
+        now: number,
+        instant: SchedulingInstant,
+        horizon = this.#maxWaitDuration,
+    ): number {
+        if (!Value.Check(schedulingInstantSchema, instant)) {
+            throw new Error("Scheduling time is invalid.");
         }
-        const dueAt = Date.parse(instant);
-        if (!Value.Check(schedulingTimestampSchema, dueAt)) {
+        const requestedDueAt = schedulingInstantMilliseconds(instant);
+        if (!Number.isSafeInteger(requestedDueAt)) {
             throw new Error("Scheduling due time is invalid.");
         }
-        if (dueAt < now) throw new Error("Scheduling time is in the past.");
+        const dueAt = Math.max(now, requestedDueAt);
         if (dueAt - now > horizon) {
             throw new Error(`Scheduling time cannot be more than ${humanDuration(horizon)} away.`);
+        }
+        if (!Value.Check(schedulingTimestampSchema, dueAt)) {
+            throw new Error("Scheduling due time is invalid.");
         }
         return dueAt;
     }
@@ -1012,8 +986,7 @@ export class SchedulingModule implements AgentModule {
                 this.#schedulePageText({
                     schedules: candidate,
                     limit: candidate.length,
-                    ...(candidate.length < page.schedules.length ||
-                    page.nextCursor !== undefined
+                    ...(candidate.length < page.schedules.length || page.nextCursor !== undefined
                         ? { nextCursor: String(start + candidate.length) }
                         : {}),
                     ...(page.previousCursor === undefined
@@ -1034,9 +1007,7 @@ export class SchedulingModule implements AgentModule {
             ...(visible.length < page.schedules.length || page.nextCursor !== undefined
                 ? { nextCursor: String(start + visible.length) }
                 : {}),
-            ...(page.previousCursor === undefined
-                ? {}
-                : { previousCursor: page.previousCursor }),
+            ...(page.previousCursor === undefined ? {} : { previousCursor: page.previousCursor }),
         };
     }
 
@@ -1194,6 +1165,144 @@ function terminalWaitFromSettlement(
     return terminal;
 }
 
+function durationFromWaitInput(input: SchedulingWaitInput): SchedulingDuration {
+    if ("duration" in input) return input.duration;
+    if ("seconds" in input && input.seconds !== undefined) {
+        return {
+            seconds: input.seconds,
+            ...(input.minutes === undefined ? {} : { minutes: input.minutes }),
+            ...(input.hours === undefined ? {} : { hours: input.hours }),
+            ...(input.days === undefined ? {} : { days: input.days }),
+        };
+    }
+    if ("minutes" in input && input.minutes !== undefined) {
+        return {
+            ...(input.seconds === undefined ? {} : { seconds: input.seconds }),
+            minutes: input.minutes,
+            ...(input.hours === undefined ? {} : { hours: input.hours }),
+            ...(input.days === undefined ? {} : { days: input.days }),
+        };
+    }
+    if ("hours" in input && input.hours !== undefined) {
+        return {
+            ...(input.seconds === undefined ? {} : { seconds: input.seconds }),
+            ...(input.minutes === undefined ? {} : { minutes: input.minutes }),
+            hours: input.hours,
+            ...(input.days === undefined ? {} : { days: input.days }),
+        };
+    }
+    if ("days" in input && input.days !== undefined) {
+        return {
+            ...(input.seconds === undefined ? {} : { seconds: input.seconds }),
+            ...(input.minutes === undefined ? {} : { minutes: input.minutes }),
+            ...(input.hours === undefined ? {} : { hours: input.hours }),
+            days: input.days,
+        };
+    }
+    throw new Error("Provide a duration in seconds, minutes, hours, days, or duration text.");
+}
+
+function durationMilliseconds(duration: SchedulingDuration): number {
+    if (typeof duration === "string") return parseDurationText(duration);
+    if ("duration" in duration) return parseDurationText(duration.duration);
+    if ("unit" in duration) {
+        const unit = duration.unit.replace(/s$/u, "");
+        return duration.value * durationMultiplier(unit);
+    }
+    return (
+        (duration.seconds ?? 0) * 1_000 +
+        (duration.minutes ?? 0) * 60_000 +
+        (duration.hours ?? 0) * 3_600_000 +
+        (duration.days ?? 0) * 86_400_000
+    );
+}
+
+function durationMultiplier(unit: string): number {
+    switch (unit) {
+        case "second":
+            return 1_000;
+        case "minute":
+            return 60_000;
+        case "hour":
+            return 3_600_000;
+        case "day":
+            return 86_400_000;
+        default:
+            throw new Error("Scheduling duration unit is invalid.");
+    }
+}
+
+function parseDurationText(value: string): number {
+    const normalized = value.trim().toLowerCase();
+    if (normalized.length === 0) throw new Error("Provide a duration.");
+    const units: Readonly<Record<string, number>> = {
+        d: 86_400_000,
+        day: 86_400_000,
+        days: 86_400_000,
+        h: 3_600_000,
+        hour: 3_600_000,
+        hours: 3_600_000,
+        m: 60_000,
+        min: 60_000,
+        mins: 60_000,
+        minute: 60_000,
+        minutes: 60_000,
+        s: 1_000,
+        sec: 1_000,
+        secs: 1_000,
+        second: 1_000,
+        seconds: 1_000,
+    };
+    let total = 0;
+    let matchedThrough = 0;
+    const pattern = /(\d+(?:\.\d+)?)\s*([a-z]+)/gu;
+    for (const match of normalized.matchAll(pattern)) {
+        const between = normalized.slice(matchedThrough, match.index).trim();
+        if (between.length > 0 && between !== ",") {
+            throw new Error(
+                `The duration could not be understood near ${JSON.stringify(between)}.`,
+            );
+        }
+        const multiplier = units[match[2] ?? ""];
+        if (multiplier === undefined) {
+            throw new Error(`Unknown duration unit ${JSON.stringify(match[2] ?? "")}.`);
+        }
+        total += Number(match[1]) * multiplier;
+        matchedThrough = (match.index ?? 0) + match[0].length;
+    }
+    if (matchedThrough === 0 || normalized.slice(matchedThrough).trim().length > 0) {
+        throw new Error(
+            "The duration could not be understood. Examples: 90 seconds, 2 hours, 1h 30m.",
+        );
+    }
+    return total;
+}
+
+function schedulingInstantMilliseconds(value: SchedulingInstant): number {
+    if (typeof value === "number") return unixTimestampMilliseconds(value);
+    const trimmed = value.trim();
+    if (trimmed.length === 0) throw new Error("Provide a scheduled date.");
+    if (/^[+-]?\d+(?:\.\d+)?$/u.test(trimmed)) {
+        return unixTimestampMilliseconds(Number(trimmed));
+    }
+    const parsed = Date.parse(trimmed);
+    if (!Number.isFinite(parsed)) {
+        throw new Error(
+            "The date could not be understood. Use ISO 8601, RFC 2822, or a Unix timestamp.",
+        );
+    }
+    return parsed;
+}
+
+function unixTimestampMilliseconds(value: number): number {
+    if (!Number.isFinite(value)) throw new Error("The scheduled date must be finite.");
+    const milliseconds = value < 1_000_000_000_000 ? value * 1_000 : value;
+    if (!Number.isSafeInteger(milliseconds)) {
+        throw new Error("The scheduled date must resolve to a whole millisecond timestamp.");
+    }
+    return milliseconds;
+}
+
 function scheduleDetailText(schedule: SchedulingScheduledMessage): string {
     return [
         `Message ID: ${schedule.id}`,
@@ -1235,13 +1344,6 @@ function scheduleStatusLabel(status: SchedulingScheduledMessage["status"]): stri
         case "cancelled":
             return "cancelled before delivery";
     }
-}
-
-function isIsoInstant(value: string): boolean {
-    const match = /^(\d{4})-(\d{2})-(\d{2})T/u.exec(value);
-    if (match === null) return false;
-    const parsed = Date.parse(value);
-    return Number.isFinite(parsed);
 }
 
 function parseCursor(cursor: string | undefined): number {

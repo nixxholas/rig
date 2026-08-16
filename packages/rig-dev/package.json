@@ -7,9 +7,13 @@
     "type": "module",
     "scripts": {
         "check": "tsc --noEmit",
-        "dev": "TMPDIR=\"$PWD/../../.local\" tsx sources/main.ts"
+        "dev": "TMPDIR=\"$PWD/../../.local\" tsx sources/main.ts",
+        "dev2": "TMPDIR=\"$PWD/../../.local\" tsx sources/main2.ts",
+        "dev2:global": "RIG_DEV2_GLOBAL=1 TMPDIR=\"$PWD/../../.local\" tsx sources/main2.ts"
     },
     "dependencies": {
+        "@slopus/happy-agent": "workspace:*",
+        "@steve.kite/stdlib": "0.0.10",
         "tsx": "^4.23.0"
     },
     "devDependencies": {

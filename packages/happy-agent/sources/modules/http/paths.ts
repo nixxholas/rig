@@ -1,6 +1,8 @@
 import { connect } from "node:net";
 import { chmod, lstat, mkdir, unlink } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { dirname } from "node:path";
+
+import type { HappyAgentConfiguration } from "@slopus/happy-agent-modules";
 
 export interface AgentDaemonPaths {
     readonly agentHome: string;
@@ -8,16 +10,11 @@ export interface AgentDaemonPaths {
     readonly tokenPath: string;
 }
 
-export function resolveAgentDaemonPaths(
-    agentHome: string,
-    socketPath?: string,
-    tokenPath?: string,
-): AgentDaemonPaths {
-    const resolvedAgentHome = resolve(agentHome);
+export function resolveAgentDaemonPaths(configuration: HappyAgentConfiguration): AgentDaemonPaths {
     return {
-        agentHome: resolvedAgentHome,
-        socketPath: resolve(socketPath ?? `${resolvedAgentHome}/server.sock`),
-        tokenPath: resolve(tokenPath ?? `${resolvedAgentHome}/token`),
+        agentHome: configuration.paths.agentHome,
+        socketPath: configuration.paths.socketPath,
+        tokenPath: configuration.paths.tokenPath,
     };
 }
 

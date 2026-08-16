@@ -6,22 +6,68 @@ import {
     userInputAgentIdSchema,
     userInputListQuerySchema,
     userInputPageSchema,
+    userInputPresenceStateSchema,
     userInputRequestIdSchema,
     userInputRequestSchema,
+    userInputTimestampSchema,
     userInputTerminalRequestSchema,
     type UserInputPage,
 } from "./UserInputRequest.js";
 import { userInputContextSchema } from "./UserInputEvent.js";
 
-/**
- * The presence policy is intentionally structural. UserInputModule does not import or
- * understand PresenceModule; the host decides whether the human is currently reachable.
- */
+const voidOrPromiseVoidSchema = Type.Union([Type.Void(), Type.Promise(Type.Void())]);
+const userInputPresenceChangeCallbackSchema = Type.Function(
+    [userInputContextSchema, Type.Union([userInputPresenceStateSchema, Type.Undefined()])],
+    voidOrPromiseVoidSchema,
+);
+const userInputPresenceUnsubscribeSchema = Type.Function([], Type.Void());
+
+/** Presence policy is structural; UserInputModule never imports or understands PresenceModule. */
 export const userInputPresencePolicySchema = Type.Object(
     {
-        isAvailable: Type.Function(
-            [userInputContextSchema, userInputAgentIdSchema],
-            Type.Union([Type.Boolean(), Type.Promise(Type.Boolean())]),
+        isAvailable: Type.Optional(
+            Type.Function(
+                [userInputContextSchema, userInputAgentIdSchema],
+                Type.Union([Type.Boolean(), Type.Promise(Type.Boolean())]),
+            ),
+        ),
+        state: Type.Optional(
+            Type.Function(
+                [userInputContextSchema, userInputAgentIdSchema],
+                Type.Union([
+                    userInputPresenceStateSchema,
+                    Type.Undefined(),
+                    Type.Promise(Type.Union([userInputPresenceStateSchema, Type.Undefined()])),
+                ]),
+            ),
+        ),
+        subscribe: Type.Optional(
+            Type.Function(
+                [
+                    userInputContextSchema,
+                    userInputAgentIdSchema,
+                    userInputPresenceChangeCallbackSchema,
+                ],
+                Type.Union([
+                    Type.Void(),
+                    userInputPresenceUnsubscribeSchema,
+                    Type.Promise(Type.Union([Type.Void(), userInputPresenceUnsubscribeSchema])),
+                ]),
+            ),
+        ),
+        onChange: Type.Optional(
+            Type.Function(
+                [
+                    userInputContextSchema,
+                    userInputAgentIdSchema,
+                    userInputPresenceChangeCallbackSchema,
+                ],
+                Type.Union([
+                    Type.Void(),
+                    userInputPresenceUnsubscribeSchema,
+                    Type.Promise(Type.Union([Type.Void(), userInputPresenceUnsubscribeSchema])),
+                ]),
+            ),
         ),
     },
     { additionalProperties: false },
@@ -52,10 +98,22 @@ export const userInputAuthorizationSchema = Type.Object(
 );
 
 /** Narrow view of the internal storage contract; long waits are delegated to UserInputBroker. */
+export const userInputBrokerWaitOptionsSchema = Type.Object(
+    {
+        timeoutAt: Type.Optional(userInputTimestampSchema),
+    },
+    { additionalProperties: false },
+);
+
 export const userInputBrokerSchema = Type.Object(
     {
         wait: Type.Function(
-            [userInputContextSchema, userInputAgentIdSchema, userInputRequestIdSchema],
+            [
+                userInputContextSchema,
+                userInputAgentIdSchema,
+                userInputRequestIdSchema,
+                Type.Optional(userInputBrokerWaitOptionsSchema),
+            ],
             Type.Promise(userInputTerminalRequestSchema),
         ),
     },

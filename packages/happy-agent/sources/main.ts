@@ -7,17 +7,44 @@ import {
     type LoadHappyAgentOptions,
 } from "./modules/agent/loadHappyAgent.js";
 import {
+    applyEffectiveAgentSelection,
+    createVanillaHappyAgentConfiguration,
+    resolveEffectiveAgentSelection,
+} from "./vanillaHappyAgentConfiguration.js";
+import {
     startAgentHttpServer,
     type AgentHttpConfiguration,
     type AgentHttpRouteGroup,
     type AgentHttpServer,
 } from "./modules/http/index.js";
+import { ConfigModule, type HappyAgentConfiguration } from "@slopus/happy-agent-modules";
 
-export interface StartHappyAgentDaemonOptions extends LoadHappyAgentOptions {
-    /** Private Unix socket path. Defaults to `<agentHome>/server.sock`. */
-    readonly socketPath?: string;
-    /** Bearer token path. Defaults to `<agentHome>/token`. */
-    readonly tokenPath?: string;
+export interface StartHappyAgentDaemonOptions extends Omit<
+    LoadHappyAgentOptions,
+    | "configModule"
+    | "configuration"
+    | "effectiveSelection"
+    | "integrations"
+    | "models"
+    | "provider"
+    | "providers"
+> {
+    /** Happy's private root. Defaults to `~/.happy`. */
+    readonly happyHome?: string;
+    /** Override the standard host integrations. */
+    readonly integrations?: LoadHappyAgentOptions["integrations"];
+    /** Override the standard curated model catalog. */
+    readonly models?: LoadHappyAgentOptions["models"];
+    /** Override the standard default provider. */
+    readonly provider?: LoadHappyAgentOptions["provider"];
+    /** Override the configured default model. */
+    readonly model?: string;
+    /** Override the configured default reasoning effort. */
+    readonly effort?: string;
+    /** Override the configured default service tier. */
+    readonly serviceTier?: "fast" | "priority" | null;
+    /** Override the standard provider registry. */
+    readonly providers?: LoadHappyAgentOptions["providers"];
     /** Optional host-backed daemon configuration and inspector capabilities. */
     readonly httpConfiguration?: AgentHttpConfiguration;
     /** Additional route families registered by the composition root. */
@@ -28,6 +55,7 @@ export interface StartHappyAgentDaemonOptions extends LoadHappyAgentOptions {
 
 export interface HappyAgentDaemon {
     readonly agent: LoadedHappyAgent;
+    readonly configuration: HappyAgentConfiguration;
     readonly http: AgentHttpServer;
     readonly socketPath: string;
     readonly tokenPath: string;
@@ -37,17 +65,73 @@ export interface HappyAgentDaemon {
 /** Starts the complete local Happy agent and its private `/v0` Unix-socket API. */
 export async function startHappyAgentDaemon(
     ctx: RootContext,
-    options: StartHappyAgentDaemonOptions,
+    options: StartHappyAgentDaemonOptions = {},
 ): Promise<HappyAgentDaemon> {
+    // Resolve the layout before opening the socket, creating homes, or
+    // constructing the Agent System. Runtime injections remain independent.
+    const configModule = await ConfigModule.load(options.happyHome);
+    const configuration = configModule.configuration;
+    if (
+        Object.keys(configuration.values.mcpServers).length > 0 &&
+        options.integrations?.mcp === undefined
+    ) {
+        throw new Error(
+            "MCP servers are configured, but this daemon has no capable MCP host integration.",
+        );
+    }
+    const vanilla = createVanillaHappyAgentConfiguration(configuration, {
+        filterModels: options.models === undefined,
+    });
+    const configuredProvider =
+        configuration.values.providers[
+            options.provider ?? configuration.values.defaults.providerId ?? vanilla.provider
+        ];
+    if (options.provider === undefined && configuredProvider?.enabled === false) {
+        throw new Error(
+            `Configured default provider "${configuration.values.defaults.providerId ?? vanilla.provider}" is disabled.`,
+        );
+    }
+    const resolvedProvider =
+        options.provider ?? configuration.values.defaults.providerId ?? vanilla.provider;
+    const resolvedModels = options.models ?? vanilla.models;
+    const resolvedProviders = options.providers ?? vanilla.providers;
+    if (resolvedProviders.typeOf(resolvedProvider) === null) {
+        throw new Error(`The default provider '${resolvedProvider}' is not registered.`);
+    }
+    const effectiveSelection = resolveEffectiveAgentSelection(
+        configuration,
+        resolvedModels,
+        resolvedProvider,
+        {
+            ...(options.model === undefined ? {} : { model: options.model }),
+            ...(options.effort === undefined ? {} : { effort: options.effort }),
+            ...(options.serviceTier === undefined ? {} : { serviceTier: options.serviceTier }),
+            fallbackToProviderRoute: options.models !== undefined || options.provider !== undefined,
+        },
+    );
+    const effectiveModels = applyEffectiveAgentSelection(resolvedModels, effectiveSelection);
+    const loadOptions: LoadHappyAgentOptions = {
+        configuration,
+        configModule,
+        effectiveSelection,
+        integrations: options.integrations ?? vanilla.integrations,
+        models: effectiveModels,
+        provider: resolvedProvider,
+        providers: resolvedProviders,
+        ...(options.config === undefined ? {} : { config: options.config }),
+        ...(options.events === undefined ? {} : { events: options.events }),
+    };
+    const httpConfiguration = {
+        durableGlobalEventQueue: configuration.values.settings.durableGlobalEventQueue,
+        inferenceMaxRetries: configuration.values.settings.inferenceMaxRetries,
+        p2pName: configuration.values.p2p.name,
+        ...(options.httpConfiguration ?? {}),
+    };
     let closeDaemon: ((closeCtx?: Context) => Promise<void>) | undefined;
     const http = await startAgentHttpServer({
-        agentHome: options.agentHome,
+        agentConfiguration: configuration,
         ctx: ctx.named("happy-agent-http"),
-        ...(options.socketPath === undefined ? {} : { socketPath: options.socketPath }),
-        ...(options.tokenPath === undefined ? {} : { tokenPath: options.tokenPath }),
-        ...(options.httpConfiguration === undefined
-            ? {}
-            : { configuration: options.httpConfiguration }),
+        configuration: httpConfiguration,
         ...(options.routeGroups === undefined ? {} : { routeGroups: options.routeGroups }),
         ...(options.version === undefined ? {} : { version: options.version }),
         onShutdown: () => {
@@ -56,7 +140,7 @@ export async function startHappyAgentDaemon(
     });
     let agent: LoadedHappyAgent | undefined;
     try {
-        agent = await loadHappyAgent(ctx.named("happy-agent"), options);
+        agent = await loadHappyAgent(ctx.named("happy-agent"), loadOptions);
         await http.setAgent(agent);
     } catch (error) {
         await agent?.close(ctx.named("happy-agent-startup-cleanup")).catch(() => undefined);
@@ -72,10 +156,11 @@ export async function startHappyAgentDaemon(
     };
     return {
         agent,
+        configuration,
         close: closeDaemon,
         http,
-        socketPath: http.socketPath,
-        tokenPath: http.tokenPath,
+        socketPath: configuration.paths.socketPath,
+        tokenPath: configuration.paths.tokenPath,
     };
 }
 

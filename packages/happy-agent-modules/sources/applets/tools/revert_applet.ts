@@ -26,7 +26,11 @@ export function revertAppletTool(applets: AppletModule, agentId: string) {
         returnType: Type.Object({ applet: appletSchema }),
         durable: true,
         transactional: true,
-        shouldReviewInAutoMode: () => false,
+        requiresAutoOrFullAccess: true,
+        shouldReviewInAutoMode: () => true,
+        shouldRunInFullAccessInAutoMode: () => true,
+        describeAutoPermissionAction: ({ name, version }) =>
+            applets.describeRevertAutoPermission(name, version),
         execute: async (
             ctx,
             { name, version }: { name: string } & AppletToolRevertInput,

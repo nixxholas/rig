@@ -11,12 +11,8 @@ import type {
 import { ChatStore } from "./ChatStore.js";
 import type { DocumentDelta, DocumentState } from "./DocumentElement.js";
 import { DocumentStore } from "./DocumentStore.js";
-import type { FolderDelta, FolderView, FoldersState } from "./FolderElement.js";
-import { FolderStore } from "./FolderStore.js";
 import type { GroupDelta, GroupsState, ProjectGroup } from "./GroupElement.js";
 import { GroupStore } from "./GroupStore.js";
-import type { InboxDelta, InboxItem, InboxState } from "./InboxElement.js";
-import { InboxStore } from "./InboxStore.js";
 import { mergeForwardTranscriptWindow } from "./mergeTranscriptWindow.js";
 import type {
     ProviderUsageDelta,
@@ -55,17 +51,9 @@ import type {
     BackgroundProcessSnapshot,
     ComputePreparationEvent,
     CreateDocumentRequest,
-    CreateFolderRequest,
-    CreateFolderItemRequest,
     Document,
     DocumentUpdate,
     DocumentUpdatePage,
-    Folder,
-    FolderItem,
-    MoveFolderRequest,
-    MoveFolderItemRequest,
-    MoveSessionRequest,
-    UpdateFolderRequest,
     WriteDocumentRequest,
     GitChangeSnapshot,
     GitWatchResponse,
@@ -115,7 +103,6 @@ import type {
     SharingOutgoingContactRequestResponse,
     SharingSnapshot,
     CreateSharingInvitationResponse,
-    FolderShareStatus,
     UpdateRigProfileRequest,
     SecretRegistration,
     SecretSummary,
@@ -144,8 +131,6 @@ import {
     sharingOutgoingContactRequestResponseSchema,
     sharingSnapshotSchema,
     createSharingInvitationResponseSchema,
-    createFolderShareRequestSchema,
-    folderShareStatusSchema,
     updateRigProfileRequestSchema,
     createP2pInvitationResponseSchema,
     joinP2pInvitationResponseSchema,
@@ -153,9 +138,6 @@ import {
     documentEventSchema,
     documentResponseSchema,
     documentUpdatePageSchema,
-    folderItemSchema,
-    folderResponseSchema,
-    listFoldersResponseSchema,
     listPluginsResponseSchema,
     listWorkletsResponseSchema,
     workletSummarySchema,
@@ -312,14 +294,6 @@ const pluginCatalogErrorResponseSchema = Type.Object(
     },
     { additionalProperties: false },
 );
-const folderItemMutationResponseSchema = Type.Object(
-    {
-        item: folderItemSchema,
-        revision: Type.Integer({ minimum: 0 }),
-    },
-    { additionalProperties: false },
-);
-
 export interface ConnectRigOptions {
     endpoint: string;
     token: string;
@@ -423,18 +397,6 @@ export interface RigSharingConnection {
     snapshot: () => SharingSnapshot | undefined;
 }
 
-export interface RigInboxSubscriptionOptions {
-    onChange: (items: readonly InboxItem[], state: InboxState) => void;
-    onDelta?: (delta: InboxDelta) => void;
-    onError?: (error: unknown) => void;
-}
-
-export interface RigFoldersSubscriptionOptions {
-    onChange: (view: FolderView, state: FoldersState) => void;
-    onDelta?: (delta: FolderDelta) => void;
-    onError?: (error: unknown) => void;
-}
-
 export interface RigDocumentSubscriptionOptions {
     documentId: string;
     onChange: (
@@ -494,19 +456,6 @@ export interface RigGroupsConnection {
     projects: () => readonly ProjectGroup[];
     remoteTerminals: () => readonly RemoteTerminalGroupState[];
     state: () => GroupsState;
-    close: () => void;
-}
-
-export interface RigInboxConnection {
-    items: () => readonly InboxItem[];
-    state: () => InboxState;
-    close: () => void;
-}
-
-export interface RigFoldersConnection {
-    /** The folder tree and global Unsorted list as one atomic application value. */
-    view: () => FolderView;
-    state: () => FoldersState;
     close: () => void;
 }
 
@@ -670,7 +619,6 @@ export interface CreateSessionInput {
     trackUnread?: boolean;
     workflowsEnabled?: boolean;
     workspaceId?: string;
-    scope?: Extract<SessionScope, { kind: "folder" | "unsorted" }>;
 }
 
 export interface CreateWorkspaceInput {
@@ -729,16 +677,6 @@ export class ProjectRegistrationError extends Error {
     }
 }
 
-export interface FolderCreateOptions {
-    /** Reuses a caller-owned identity. Rig Connect creates one when this is absent. */
-    folderId?: string;
-}
-
-export interface FolderItemLinkOptions {
-    /** Reuses a caller-owned identity. Rig Connect creates one when this is absent. */
-    itemId?: string;
-}
-
 export interface DocumentCreateOptions {
     /** Reuses a caller-owned identity. Rig Connect creates one when this is absent. */
     documentId?: string;
@@ -748,49 +686,6 @@ export interface DocumentUpdatesLoadOptions {
     afterVersion?: number;
     limit?: number;
     signal?: AbortSignal;
-}
-
-/**
- * Everything a view does to the folder tree.
- *
- * Each call applies its prediction immediately and returns the mutation identity used to reconcile
- * the daemon's response and live echo. The daemon still derives authoritative order keys, which is
- * why moves name their destination and preceding folder or item rather than inventing an order key.
- */
-export interface RigFolders {
-    /**
-     * Creates one folder.
-     *
-     * The client names what it creates, so an answer lost after Rig committed still converges on
-     * the same folder when the request is retried.
-     */
-    create(request: CreateFolderRequest, options?: FolderCreateOptions): MutationId;
-    /** Changes a folder's own fields. An explicit `null` clears one. */
-    update(folderId: string, request: UpdateFolderRequest): MutationId;
-    /**
-     * Applies one drag-and-drop: the folder it was dropped into and the folder or item it landed
-     * below.
-     *
-     * `parentId` is `null` at the root and `afterId` is `null` when it landed first. Rig derives
-     * the order key from that pair.
-     */
-    move(folderId: string, request: MoveFolderRequest): MutationId;
-    /** Puts a folder away together with everything nested under it. */
-    archive(folderId: string): MutationId;
-    /** Links one project, workspace, or document into this folder's shared direct-child list. */
-    linkItem(
-        folderId: string,
-        request: CreateFolderItemRequest,
-        options?: FolderItemLinkOptions,
-    ): MutationId;
-    /** Moves an item into or within a folder without changing its target's own ordering. */
-    moveItem(itemId: string, request: Omit<MoveFolderItemRequest, "mutationId">): MutationId;
-    /** Removes the link only. The project, workspace, or document remains unchanged. */
-    unlinkItem(itemId: string): MutationId;
-    /** Moves one chat within the folder tree or Unsorted ordering domain. */
-    moveSession(sessionId: string, request: Omit<MoveSessionRequest, "mutationId">): MutationId;
-    /** Files one chat into a folder, or moves it to Unsorted with `null`. */
-    setSessionFolder(sessionId: string, folderId: string | null): MutationId;
 }
 
 export interface RigDocuments {
@@ -836,14 +731,6 @@ export interface RigConnection {
     compatibility: () => ServerCompatibility;
     connectSession: (options: RigSessionSubscriptionOptions) => RigSessionConnection;
     connectGroups: (options: RigGroupsSubscriptionOptions) => RigGroupsConnection;
-    connectInbox: (options: RigInboxSubscriptionOptions) => RigInboxConnection;
-    /**
-     * Follows the folder tree, ordered and already nested.
-     *
-     * Folders ride the same stream and the same opening catalog as the groups, so following them
-     * adds no request of its own.
-     */
-    connectFolders: (options: RigFoldersSubscriptionOptions) => RigFoldersConnection;
     /** Follows one opaque document snapshot over the shared global stream. */
     connectDocument: (options: RigDocumentSubscriptionOptions) => RigDocumentConnection;
     /** Follows the authoritative status plus this client's pending Happy Cloud choices. */
@@ -864,12 +751,6 @@ export interface RigConnection {
     createSharingInvitation: (options?: {
         signal?: AbortSignal;
     }) => Promise<CreateSharingInvitationResponse>;
-    /** Creates one Murmur group whose invitation descriptor carries the folder's current tree. */
-    shareFolder: (
-        folderId: string,
-        contacts: readonly string[],
-        options?: { signal?: AbortSignal },
-    ) => Promise<FolderShareStatus>;
     requestSharingContact: (
         invitation: string,
         options?: { signal?: AbortSignal },
@@ -954,8 +835,6 @@ export interface RigConnection {
     ) => Promise<UninstalledPluginSummary>;
     /** Entity-first project catalog actions. */
     projects: RigProjects;
-    /** Entity-first folder tree actions. */
-    folders: RigFolders;
     /** Entity-first live document actions. */
     documents: RigDocuments;
     /** Reads enrollment, profile status, and every independently denied/granted capability. */
@@ -1051,30 +930,6 @@ interface SessionSubscriber extends RigSessionSubscriptionOptions {
 
 interface GroupSubscriber extends RigGroupsSubscriptionOptions {
     closed: boolean;
-}
-
-interface InboxSubscriber extends RigInboxSubscriptionOptions {
-    closed: boolean;
-}
-
-interface InboxEntry {
-    store: InboxStore;
-    subscribers: Set<InboxSubscriber>;
-}
-
-interface FolderSubscriber extends RigFoldersSubscriptionOptions {
-    closed: boolean;
-}
-
-interface FolderEntry {
-    folderBaselineApplied: boolean;
-    hasFolderSnapshot: boolean;
-    loadedRevision: number;
-    loading?: Promise<void>;
-    reloadGeneration: number;
-    requiredRevision: number;
-    store: FolderStore;
-    subscribers: Set<FolderSubscriber>;
 }
 
 interface DocumentSubscriber extends RigDocumentSubscriptionOptions {
@@ -1379,7 +1234,6 @@ interface PendingMutation {
 
 interface ReconcileOutput {
     documentDeltas?: ReadonlyMap<string, readonly DocumentDelta[]>;
-    folderDeltas?: readonly FolderDelta[];
     groupDeltas?: readonly GroupDelta[];
     sessionDeltas?: ReadonlyMap<string, readonly ChatDelta[]>;
 }
@@ -1427,7 +1281,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     const queues = new Map<string, PendingMutation[]>();
     const activeWorkers = new Set<string>();
     const pendingOverlays: PendingMutation[] = [];
-    const pendingFolderCreates = new Map<string, { promise: Promise<void>; resolve: () => void }>();
     const pendingDocumentCreates = new Map<string, PendingDocumentCreate>();
     const knownSessionCursors = new Map<string, string>();
     const knownGroupVersions = new Map<string, number>();
@@ -1438,8 +1291,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     let p2pEntry: P2pEntry | undefined;
     let profilesEntry: ProfilesEntry | undefined;
     let sharingEntry: SharingEntry | undefined;
-    let inboxEntry: InboxEntry | undefined;
-    let folderEntry: FolderEntry | undefined;
     let pluginsEntry: PluginsEntry | undefined;
     let workletsEntry: WorkletsEntry | undefined;
     let providerUsageEntry: ProviderUsageEntryState | undefined;
@@ -1452,20 +1303,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     let gitWatchSignature = "";
     let gitWatchTimer: ReturnType<typeof setTimeout> | undefined;
     let closed = false;
-
-    const createFolderEntry = (): FolderEntry => {
-        if (folderEntry !== undefined) return folderEntry;
-        folderEntry = {
-            folderBaselineApplied: false,
-            hasFolderSnapshot: false,
-            loadedRevision: 0,
-            reloadGeneration: 0,
-            requiredRevision: 0,
-            store: new FolderStore(),
-            subscribers: new Set(),
-        };
-        return folderEntry;
-    };
 
     const createDocumentEntry = (documentId: string): DocumentEntry => {
         const known = documentEntries.get(documentId);
@@ -1588,24 +1425,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         }
     };
 
-    const publishInbox = (deltas: readonly InboxDelta[]): void => {
-        if (closed || deltas.length === 0 || inboxEntry === undefined) return;
-        for (const subscriber of [...inboxEntry.subscribers]) {
-            if (subscriber.closed) continue;
-            subscriber.onChange(inboxEntry.store.items(), inboxEntry.store.state());
-            for (const delta of deltas) subscriber.onDelta?.(delta);
-        }
-    };
-
-    const publishFolders = (deltas: readonly FolderDelta[]): void => {
-        if (closed || deltas.length === 0 || folderEntry === undefined) return;
-        for (const subscriber of [...folderEntry.subscribers]) {
-            if (subscriber.closed) continue;
-            subscriber.onChange(folderEntry.store.view(), folderEntry.store.state());
-            for (const delta of deltas) subscriber.onDelta?.(delta);
-        }
-    };
-
     const publishDocument = (entry: DocumentEntry, deltas: readonly DocumentDelta[]): void => {
         if (closed || deltas.length === 0) return;
         for (const subscriber of [...entry.subscribers]) {
@@ -1662,7 +1481,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         if (output.groupDeltas !== undefined && groupsEntry !== undefined) {
             publishGroups(groupsEntry, output.groupDeltas);
         }
-        if (output.folderDeltas !== undefined) publishFolders(output.folderDeltas);
     };
 
     const acknowledge = (mutationId: string | undefined): void => {
@@ -1673,10 +1491,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         mutation.attemptController?.abort();
         const index = pendingOverlays.indexOf(mutation);
         if (index >= 0) pendingOverlays.splice(index, 1);
-        if (mutation.action === "create_folder") {
-            pendingFolderCreates.get(mutation.id)?.resolve();
-            pendingFolderCreates.delete(mutation.id);
-        }
         if (mutation.action === "create_document") {
             pendingDocumentCreates.get(mutation.id)?.settle(true);
             pendingDocumentCreates.delete(mutation.id);
@@ -1740,8 +1554,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 updates: entry.store.updates(),
             });
         }
-        const folderBefore = folderEntry?.store.view();
-
         for (const mutation of [...relevant].reverse()) mutation.undo();
         const output = authoritative();
         acknowledge(mutationId);
@@ -1825,16 +1637,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             publishGroups(groupCapture.entry, semantic);
         } else if (output.groupDeltas !== undefined && groupsEntry !== undefined) {
             publishGroups(groupsEntry, output.groupDeltas);
-        }
-        if (folderEntry !== undefined && folderBefore !== undefined) {
-            const semantic: FolderDelta[] = [...(output.folderDeltas ?? [])].filter(
-                (delta) => delta.type !== "folders_changed",
-            );
-            const view = folderEntry.store.view();
-            if (view !== folderBefore) semantic.unshift({ type: "folders_changed", view });
-            publishFolders(semantic);
-        } else if (output.folderDeltas !== undefined) {
-            publishFolders(output.folderDeltas);
         }
     };
 
@@ -1950,9 +1752,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         if (
             mutation.sessionId !== undefined &&
             isProtocolSessionResponse(session) &&
-            (sessionEntries.has(mutation.sessionId) ||
-                groupsEntry !== undefined ||
-                folderEntry !== undefined)
+            (sessionEntries.has(mutation.sessionId) || groupsEntry !== undefined)
         ) {
             const event: SessionEvent = {
                 createdAt: now(),
@@ -1970,9 +1770,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     ...(groupsEntry === undefined
                         ? {}
                         : { groupDeltas: groupsEntry.store.apply(event) }),
-                    ...(folderEntry === undefined
-                        ? {}
-                        : { folderDeltas: folderEntry.store.apply(event) }),
                     ...(sessionEntries.has(mutation.sessionId as string)
                         ? {
                               sessionDeltas: new Map([
@@ -2060,9 +1857,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 ...(groupsEntry === undefined
                     ? {}
                     : { groupDeltas: groupsEntry.store.apply(event) }),
-                ...(folderEntry === undefined
-                    ? {}
-                    : { folderDeltas: folderEntry.store.apply(event) }),
                 ...(entry === undefined
                     ? {}
                     : {
@@ -2122,14 +1916,9 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                       state: documentEntry.store.state(),
                       updates: documentEntry.store.updates(),
                   };
-        const folderCapture = folderEntry?.store.view();
         for (const candidate of [...sameEntity].reverse()) candidate.undo();
         const index = pendingOverlays.indexOf(mutation);
         if (index >= 0) pendingOverlays.splice(index, 1);
-        if (mutation.action === "create_folder") {
-            pendingFolderCreates.get(mutation.id)?.resolve();
-            pendingFolderCreates.delete(mutation.id);
-        }
         if (mutation.action === "create_document") {
             pendingDocumentCreates.get(mutation.id)?.settle(false);
             pendingDocumentCreates.delete(mutation.id);
@@ -2183,12 +1972,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 });
             }
             publishGroups(groupCapture.entry, deltas);
-        }
-        if (folderEntry !== undefined && folderCapture !== undefined) {
-            const deltas: FolderDelta[] = [rejection];
-            const view = folderEntry.store.view();
-            if (view !== folderCapture) deltas.unshift({ type: "folders_changed", view });
-            publishFolders(deltas);
         }
         if (documentCapture !== undefined) {
             const deltas: DocumentDelta[] = [rejection];
@@ -2589,82 +2372,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         if (liveStreamOpen) void requestDocumentReload(entry);
     };
 
-    const requestFolderReload = (entry: FolderEntry): Promise<void> => {
-        if (entry.loading !== undefined) return entry.loading;
-        const generation = entry.reloadGeneration;
-        entry.loading = (async () => {
-            let retryDelay = options.mutationRetryDelayMs ?? INITIAL_MUTATION_RETRY_MS;
-            do {
-                try {
-                    const response = await request(endpointUrl(options.endpoint, "folders"), {
-                        headers: {
-                            accept: "application/json",
-                            authorization: `Bearer ${options.token}`,
-                        },
-                        signal: rootController.signal,
-                    });
-                    const data = await readResponseBody(response);
-                    if (generation !== entry.reloadGeneration) return;
-                    if (!response.ok) {
-                        throw new MutationHttpError(
-                            response.status,
-                            humanMutationError(data, response.status),
-                            retryAfterMilliseconds(response.headers.get("retry-after"), now()),
-                            data,
-                        );
-                    }
-                    const snapshot = Value.Decode(listFoldersResponseSchema, data);
-                    const minimumRevision = Math.max(entry.loadedRevision, entry.requiredRevision);
-                    // A request already in flight can predate a later invalidation. Keep the
-                    // applied tree until a response includes that revision, or this stale
-                    // snapshot would publish a false removal before the loop refetches.
-                    if (!entry.folderBaselineApplied || snapshot.revision >= minimumRevision) {
-                        entry.folderBaselineApplied = true;
-                        entry.hasFolderSnapshot = true;
-                        entry.loadedRevision = snapshot.revision;
-                        reconcile(["folder-tree"], undefined, [], false, () => ({
-                            folderDeltas: entry.store.replaceFolders(
-                                snapshot.folders,
-                                snapshot.items,
-                            ),
-                        }));
-                    }
-                    retryDelay = options.mutationRetryDelayMs ?? INITIAL_MUTATION_RETRY_MS;
-                } catch (error) {
-                    if (generation !== entry.reloadGeneration) return;
-                    if (!isRetryableMutationError(error)) throw error;
-                    const delay =
-                        error instanceof MutationHttpError && error.retryAfterMs !== undefined
-                            ? Math.min(MAXIMUM_MUTATION_RETRY_MS, error.retryAfterMs)
-                            : retryDelay;
-                    await wait(delay, rootController.signal);
-                    retryDelay = Math.min(MAXIMUM_MUTATION_RETRY_MS, retryDelay * 2);
-                }
-            } while (
-                !closed &&
-                folderEntry === entry &&
-                generation === entry.reloadGeneration &&
-                entry.loadedRevision < entry.requiredRevision
-            );
-        })()
-            .catch((error: unknown) => {
-                if (closed || folderEntry !== entry) return;
-                publishFolders(entry.store.setConnection("closed"));
-                for (const subscriber of entry.subscribers) subscriber.onError?.(error);
-            })
-            .finally(() => {
-                if (folderEntry === entry) delete entry.loading;
-                releaseUnusedEntries();
-            });
-        return entry.loading;
-    };
-
-    const requestFolderReloadAfterCurrent = async (entry: FolderEntry): Promise<void> => {
-        await entry.loading;
-        if (closed || folderEntry !== entry) return;
-        await requestFolderReload(entry);
-    };
-
     const loadCatalog = async (entry: GroupEntry): Promise<void> => {
         const version = ++entry.bootstrapVersion;
         let hello: GlobalStreamHello;
@@ -2713,35 +2420,11 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     ...entry.store.setConnection("live"),
                     ...entry.store.applyHello(hello),
                 ];
-                const sessions = entry.store.sessionSummaries();
-                let folderDeltas: readonly FolderDelta[] | undefined;
-                if (folderEntry !== undefined) {
-                    const folderHelloApplies = !folderEntry.hasFolderSnapshot;
-                    if (folderHelloApplies) folderEntry.folderBaselineApplied = true;
-                    folderDeltas = [
-                        ...folderEntry.store.setConnection("live"),
-                        ...(folderHelloApplies
-                            ? folderEntry.store.applyHello({ ...hello, sessions })
-                            : folderEntry.store.applyCatalogSessions(sessions)),
-                    ];
-                }
                 return {
                     groupDeltas,
-                    ...(folderDeltas === undefined ? {} : { folderDeltas }),
                 };
             },
         );
-        if (inboxEntry !== undefined) {
-            publishInbox([
-                ...inboxEntry.store.setConnection("live"),
-                ...inboxEntry.store.applyHello(hello),
-            ]);
-        }
-        if (folderEntry !== undefined) {
-            if (folderEntry.loadedRevision < folderEntry.requiredRevision) {
-                void requestFolderReload(folderEntry);
-            }
-        }
         queueGitWatchSync();
     };
 
@@ -2758,27 +2441,12 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         if (closed || entry.controller.signal.aborted) return;
         publishGroups(entry, entry.store.setConnection("closed"));
         for (const subscriber of [...entry.subscribers]) subscriber.onError?.(error);
-        if (inboxEntry !== undefined) {
-            publishInbox(inboxEntry.store.setConnection("closed"));
-            for (const subscriber of [...inboxEntry.subscribers]) {
-                subscriber.onError?.(error);
-            }
-        }
-        if (folderEntry !== undefined) {
-            publishFolders(folderEntry.store.setConnection("closed"));
-            for (const subscriber of [...folderEntry.subscribers]) {
-                subscriber.onError?.(error);
-            }
-        }
     };
 
     const reportInvalidWorkspaceEvent = (): void => {
         const error = new Error("Rig ignored an invalid live workspace update.");
         if (groupsEntry !== undefined) {
             for (const subscriber of [...groupsEntry.subscribers]) subscriber.onError?.(error);
-        }
-        if (inboxEntry !== undefined) {
-            for (const subscriber of [...inboxEntry.subscribers]) subscriber.onError?.(error);
         }
     };
 
@@ -3008,12 +2676,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     if (groupsEntry !== undefined) {
                         publishGroups(groupsEntry, groupsEntry.store.setConnection("live"));
                     }
-                    if (inboxEntry !== undefined) {
-                        publishInbox(inboxEntry.store.setConnection("live"));
-                    }
-                    if (folderEntry !== undefined) {
-                        publishFolders(folderEntry.store.setConnection("live"));
-                    }
                     for (const entry of documentEntries.values()) {
                         if (entry.started) {
                             publishDocument(entry, entry.store.setConnection("live"));
@@ -3048,10 +2710,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 }
                 for (const entry of documentEntries.values()) {
                     if (entry.started) void requestDocumentReload(entry);
-                }
-                if (hello.gap && folderEntry !== undefined) {
-                    folderEntry.reloadGeneration += 1;
-                    void requestFolderReloadAfterCurrent(folderEntry);
                 }
                 const groups = groupsEntry;
                 if (groups !== undefined && groups.started) {
@@ -3196,18 +2854,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     }
                     return;
                 }
-                if (event.type === "folders_changed") {
-                    const entry = folderEntry;
-                    if (entry === undefined) return;
-                    const changed = event.data as {
-                        mutationId?: string;
-                        revision: number;
-                    };
-                    entry.requiredRevision = Math.max(entry.requiredRevision, changed.revision);
-                    acknowledge(changed.mutationId);
-                    void requestFolderReload(entry);
-                    return;
-                }
                 if (event.type === "document_changed") {
                     let changed: Static<typeof documentEventSchema>;
                     try {
@@ -3292,9 +2938,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                         ...(groupsEntry === undefined
                             ? {}
                             : { groupDeltas: groupsEntry.store.apply(event, cursor) }),
-                        ...(folderEntry === undefined
-                            ? {}
-                            : { folderDeltas: folderEntry.store.apply(event) }),
                         ...(session === undefined ||
                         sessionId === undefined ||
                         session.pending !== undefined
@@ -3307,7 +2950,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     }),
                 );
                 if (session !== undefined) ensureProfilesForSession(session);
-                if (inboxEntry !== undefined) publishInbox(inboxEntry.store.apply(event));
                 for (const entry of [...timelineEntries.values()]) {
                     if (entry.started) publishTimeline(entry, entry.store.apply(event));
                 }
@@ -3325,12 +2967,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 liveStreamOpen = false;
                 if (groupsEntry !== undefined) {
                     publishGroups(groupsEntry, groupsEntry.store.setConnection("reconnecting"));
-                }
-                if (inboxEntry !== undefined) {
-                    publishInbox(inboxEntry.store.setConnection("reconnecting"));
-                }
-                if (folderEntry !== undefined) {
-                    publishFolders(folderEntry.store.setConnection("reconnecting"));
                 }
                 for (const entry of documentEntries.values()) {
                     if (entry.started) {
@@ -3356,12 +2992,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 if (groupsEntry !== undefined) {
                     publishGroups(groupsEntry, groupsEntry.store.setConnection("closed"));
                     for (const subscriber of [...groupsEntry.subscribers]) {
-                        subscriber.onError?.(error);
-                    }
-                }
-                if (inboxEntry !== undefined) {
-                    publishInbox(inboxEntry.store.setConnection("closed"));
-                    for (const subscriber of [...inboxEntry.subscribers]) {
                         subscriber.onError?.(error);
                     }
                 }
@@ -3396,9 +3026,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 if (closed || rootController.signal.aborted) return;
                 if (groupsEntry !== undefined) {
                     publishGroups(groupsEntry, groupsEntry.store.setConnection("closed"));
-                }
-                if (inboxEntry !== undefined) {
-                    publishInbox(inboxEntry.store.setConnection("closed"));
                 }
                 if (pluginsEntry !== undefined) {
                     publishPlugins(pluginsEntry.store.setConnection("closed"));
@@ -3657,28 +3284,15 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             // the chat's project and whether it is tracked at all are known, so
             // asking for them keeps it loaded with no view open.
             options.onSessionFinished === undefined &&
-            inboxEntry === undefined &&
             // Session-only clients still need project ownership and credential requirements for
             // deterministic remote sends, including the first message after a daemon restart.
             sessionEntries.size === 0 &&
-            // The folder tree arrives in the same opening catalog, so a folder view keeps it
-            // loaded exactly as an inbox view does.
-            folderEntry === undefined &&
             pendingOverlays.length === 0 &&
             queues.size === 0
         ) {
             groupsEntry.controller.abort();
             groupsEntry.detachRoot();
             groupsEntry = undefined;
-        }
-        if (
-            folderEntry !== undefined &&
-            folderEntry.subscribers.size === 0 &&
-            folderEntry.loading === undefined &&
-            !pendingOverlays.some((mutation) => mutation.entityKey === "folder-tree") &&
-            (queues.get("folder-tree")?.length ?? 0) === 0
-        ) {
-            folderEntry = undefined;
         }
     };
 
@@ -3746,52 +3360,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             projects: () => entry.store.projects(),
             remoteTerminals: () => entry.store.remoteTerminals(),
             state: () => entry.store.state(),
-            close: () => {
-                if (subscriber.closed) return;
-                subscriber.closed = true;
-                entry.subscribers.delete(subscriber);
-                releaseUnusedEntries();
-            },
-        };
-    };
-
-    const connectInbox = (subscription: RigInboxSubscriptionOptions): RigInboxConnection => {
-        if (closed) throw new Error("This Rig connection is closed.");
-        inboxEntry ??= { store: new InboxStore(), subscribers: new Set() };
-        const subscriber: InboxSubscriber = { ...subscription, closed: false };
-        inboxEntry.subscribers.add(subscriber);
-        subscriber.onChange(inboxEntry.store.items(), inboxEntry.store.state());
-        startGroupEntry(createGroupEntry());
-        return {
-            items: () => inboxEntry?.store.items() ?? [],
-            state: () => inboxEntry?.store.state() ?? { connection: "closed" },
-            close: () => {
-                if (subscriber.closed) return;
-                subscriber.closed = true;
-                inboxEntry?.subscribers.delete(subscriber);
-                if (inboxEntry?.subscribers.size === 0) inboxEntry = undefined;
-                releaseUnusedEntries();
-            },
-        };
-    };
-
-    const connectFolders = (subscription: RigFoldersSubscriptionOptions): RigFoldersConnection => {
-        if (closed) throw new Error("This Rig connection is closed.");
-        const entry = createFolderEntry();
-        const subscriber: FolderSubscriber = { ...subscription, closed: false };
-        entry.subscribers.add(subscriber);
-        subscriber.onChange(entry.store.view(), entry.store.state());
-        const groups = createGroupEntry();
-        const alreadyLoaded = groups.started;
-        startGroupEntry(groups);
-        // The tree rides the opening catalog, so a folder view mounted after that catalog has
-        // already loaded would have nothing to show until it is loaded again.
-        if (alreadyLoaded && liveStreamOpen) {
-            void loadCatalog(groups).catch((error: unknown) => reportCatalogError(groups, error));
-        }
-        return {
-            view: () => folderEntry?.store.view() ?? { folders: [], unsorted: [] },
-            state: () => folderEntry?.store.state() ?? { connection: "closed" },
             close: () => {
                 if (subscriber.closed) return;
                 subscriber.closed = true;
@@ -4419,531 +3987,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             } finally {
                 operation.detach();
             }
-        },
-    };
-
-    const enqueueFolderMutation = (
-        action: Extract<
-            MutationAction,
-            "archive_folder" | "create_folder" | "move_folder" | "update_folder"
-        >,
-        id: MutationId,
-        applyOptimistic: PendingMutation["applyOptimistic"],
-        prepare: PendingMutation["prepare"],
-        relatedSessionIds?: ReadonlySet<string>,
-    ): MutationId => {
-        const entry = createFolderEntry();
-        return enqueue({
-            acknowledged: false,
-            action,
-            applyAcceptedResponse: (data) => {
-                let response;
-                try {
-                    response = Value.Decode(folderResponseSchema, data);
-                } catch {
-                    return false;
-                }
-                const entry = folderEntry;
-                acknowledge(id);
-                if (entry !== undefined) {
-                    entry.requiredRevision = Math.max(entry.requiredRevision, response.revision);
-                    void requestFolderReload(entry);
-                }
-                return true;
-            },
-            applyOptimistic,
-            entityKey: "folder-tree",
-            id,
-            matchesAuthoritative: (data) => {
-                if (action !== "create_folder") return false;
-                try {
-                    return Value.Decode(folderResponseSchema, data).folder.id === id;
-                } catch {
-                    return false;
-                }
-            },
-            prepare,
-            ...(relatedSessionIds === undefined ? {} : { relatedSessionIds }),
-            ready: async () => {
-                if (action === "create_folder") {
-                    await entry.loading;
-                    return;
-                }
-                if (!entry.hasFolderSnapshot && entry.loading === undefined) {
-                    await requestFolderReload(entry);
-                } else {
-                    await entry.loading;
-                }
-                if (!entry.hasFolderSnapshot) {
-                    throw new Error("Rig could not load the folder catalog.");
-                }
-            },
-            rebaseOnConflict: (data) => {
-                let response;
-                try {
-                    response = Value.Decode(folderResponseSchema, data);
-                } catch {
-                    return false;
-                }
-                const entry = folderEntry;
-                if (entry === undefined) return false;
-                entry.requiredRevision = Math.max(entry.requiredRevision, response.revision);
-                reconcile(["folder-tree"], undefined, [], false, () => ({
-                    folderDeltas: entry.store.applyFolder(response.folder),
-                }));
-                return true;
-            },
-            undo: () => undefined,
-        });
-    };
-
-    const enqueueFolderItemMutation = (
-        action: Extract<
-            MutationAction,
-            "link_folder_item" | "move_folder_item" | "unlink_folder_item"
-        >,
-        id: MutationId,
-        applyOptimistic: PendingMutation["applyOptimistic"],
-        prepare: PendingMutation["prepare"],
-        pendingDocumentCreate?: PendingDocumentCreate,
-    ): MutationId => {
-        const entry = createFolderEntry();
-        let conflictRebases = 0;
-        return enqueue({
-            acknowledged: false,
-            action,
-            applyAcceptedResponse: (data) => {
-                let response: Static<typeof folderItemMutationResponseSchema>;
-                try {
-                    response = Value.Decode(folderItemMutationResponseSchema, data);
-                } catch {
-                    return false;
-                }
-                const current = folderEntry;
-                if (current === undefined) {
-                    acknowledge(id);
-                    return true;
-                }
-                current.requiredRevision = Math.max(current.requiredRevision, response.revision);
-                reconcile(["folder-tree"], id, [], false, () => ({
-                    folderDeltas: current.store.applyItem(response.item),
-                }));
-                void requestFolderReload(current);
-                return true;
-            },
-            applyOptimistic,
-            entityKey: "folder-tree",
-            id,
-            prepare,
-            ready: async () => {
-                if (!entry.hasFolderSnapshot && entry.loading === undefined) {
-                    await requestFolderReload(entry);
-                } else {
-                    await entry.loading;
-                }
-                if (!entry.hasFolderSnapshot) {
-                    throw new Error("Rig could not load the folder catalog.");
-                }
-                if (pendingDocumentCreate !== undefined && !(await pendingDocumentCreate.promise)) {
-                    throw new MutationHttpError(
-                        409,
-                        "Rig could not create that document.",
-                        undefined,
-                        undefined,
-                    );
-                }
-            },
-            rebaseOnConflict: (data) => {
-                let response: Static<typeof folderItemMutationResponseSchema>;
-                try {
-                    response = Value.Decode(folderItemMutationResponseSchema, data);
-                } catch {
-                    return false;
-                }
-                const current = folderEntry;
-                if (current === undefined || conflictRebases >= 8) return false;
-                conflictRebases += 1;
-                current.requiredRevision = Math.max(current.requiredRevision, response.revision);
-                reconcile(["folder-tree"], undefined, [], false, () => ({
-                    folderDeltas: current.store.applyItem(response.item),
-                }));
-                return true;
-            },
-            undo: () => undefined,
-        });
-    };
-
-    const moveSession = (
-        sessionId: string,
-        request: Omit<MoveSessionRequest, "mutationId">,
-    ): MutationId => {
-        const id = nextMutationId();
-        const key = sessionKey(sessionId);
-        const { afterId, scope } = request;
-        return enqueue({
-            acknowledged: false,
-            action: "move_session",
-            applyOptimistic: (publish) => {
-                const orderKey =
-                    folderEntry?.store.optimisticSessionOrderKey(scope, afterId) ?? "\uffff";
-                const undos: (() => void)[] = [];
-                const groupDeltas: GroupDelta[] = [];
-                const folderDeltas: FolderDelta[] = [];
-                if (groupsEntry !== undefined) {
-                    const changed = groupsEntry.store.applyOptimisticSessionPatch(sessionId, {
-                        orderKey,
-                        scope,
-                    });
-                    undos.push(changed.undo);
-                    if (publish) groupDeltas.push(...changed.deltas);
-                }
-                if (folderEntry !== undefined) {
-                    const changed = folderEntry.store.applyOptimisticSessionScope(
-                        sessionId,
-                        scope,
-                        orderKey,
-                    );
-                    undos.push(changed.undo);
-                    if (publish) folderDeltas.push(...changed.deltas);
-                }
-                if (publish && groupsEntry !== undefined) publishGroups(groupsEntry, groupDeltas);
-                if (publish) publishFolders(folderDeltas);
-                return () => {
-                    for (const undo of undos.reverse()) undo();
-                };
-            },
-            entityKey: key,
-            id,
-            rebaseOnConflict: (data) => {
-                const session = responseEntity(data, "session");
-                if (!isProtocolSessionResponse(session)) return false;
-                const event: SessionEvent = {
-                    createdAt: now(),
-                    data: { session },
-                    id: session.lastEventId ?? id,
-                    sessionId,
-                    type: "session_updated",
-                };
-                reconcile([key], undefined, [sessionId], true, () => ({
-                    ...(groupsEntry === undefined
-                        ? {}
-                        : { groupDeltas: groupsEntry.store.apply(event) }),
-                    ...(folderEntry === undefined
-                        ? {}
-                        : { folderDeltas: folderEntry.store.apply(event) }),
-                }));
-                return true;
-            },
-            prepare: () => ({
-                body: { afterId, mutationId: id, scope },
-                headers: {
-                    ...ifMatchHeader(currentSessionCursor(sessionId)),
-                    "x-rig-mutation-id": id,
-                },
-                method: "PUT",
-                url: endpointUrl(
-                    options.endpoint,
-                    `sessions/${encodeURIComponent(sessionId)}/scope`,
-                ),
-            }),
-            ready: async () => {
-                if (scope.kind !== "folder") return;
-                const pending = pendingFolderCreates.get(scope.folderId);
-                if (pending === undefined) return;
-                await pending.promise;
-                if (folderEntry?.store.folder(scope.folderId) === undefined) {
-                    throw new Error("That folder no longer exists.");
-                }
-            },
-            sessionId,
-            undo: () => undefined,
-            versionSessionId: sessionId,
-        });
-    };
-
-    const folders: RigFolders = {
-        create: (folderRequest, createOptions = {}) => {
-            const id = createOptions.folderId ?? folderRequest.id ?? nextEntityId();
-            let resolveFolderCreate!: () => void;
-            const folderCreatePromise = new Promise<void>((resolve) => {
-                resolveFolderCreate = resolve;
-            });
-            pendingFolderCreates.set(id, {
-                promise: folderCreatePromise,
-                resolve: resolveFolderCreate,
-            });
-            const createdAt = now();
-            const optimistic: Folder = {
-                createdAt,
-                id,
-                name: folderRequest.name.trim(),
-                orderKey: "\uffff",
-                path: "",
-                shared: false,
-                updatedAt: createdAt,
-                version: 0,
-                ...(folderRequest.description === undefined
-                    ? {}
-                    : { description: folderRequest.description }),
-                ...(folderRequest.icon === undefined ? {} : { icon: folderRequest.icon }),
-                ...(folderRequest.parentId === undefined
-                    ? {}
-                    : { parentId: folderRequest.parentId }),
-                ...(folderRequest.rules === undefined ? {} : { rules: folderRequest.rules }),
-            };
-            return enqueueFolderMutation(
-                "create_folder",
-                id,
-                (publish) => {
-                    if (folderEntry === undefined) return () => undefined;
-                    folderEntry.folderBaselineApplied = true;
-                    const changed = folderEntry.store.applyOptimisticFolder(optimistic);
-                    if (publish) publishFolders(changed.deltas);
-                    return changed.undo;
-                },
-                () => ({
-                    body: { ...folderRequest, id, mutationId: id },
-                    headers: { "x-rig-mutation-id": id },
-                    method: "POST",
-                    url: endpointUrl(options.endpoint, "folders"),
-                }),
-            );
-        },
-        update: (folderId, folderRequest) => {
-            const id = nextMutationId();
-            return enqueueFolderMutation(
-                "update_folder",
-                id,
-                (publish) => {
-                    if (folderEntry === undefined) return () => undefined;
-                    const patch: Partial<Folder> = {
-                        ...(folderRequest.name === undefined ? {} : { name: folderRequest.name }),
-                    };
-                    if (typeof folderRequest.description === "string") {
-                        patch.description = folderRequest.description;
-                    }
-                    if (typeof folderRequest.icon === "string") patch.icon = folderRequest.icon;
-                    if (typeof folderRequest.rules === "string") patch.rules = folderRequest.rules;
-                    const changed = folderEntry.store.applyOptimisticFolderPatch(folderId, patch, [
-                        ...(folderRequest.description === null ? (["description"] as const) : []),
-                        ...(folderRequest.icon === null ? (["icon"] as const) : []),
-                        ...(folderRequest.rules === null ? (["rules"] as const) : []),
-                    ]);
-                    if (publish) publishFolders(changed.deltas);
-                    return changed.undo;
-                },
-                () => ({
-                    body: { ...folderRequest, mutationId: id },
-                    headers: {
-                        ...ifMatchHeader(requiredFolderVersion(folderEntry, folderId)),
-                        "x-rig-mutation-id": id,
-                    },
-                    method: "PATCH",
-                    url: endpointUrl(options.endpoint, `folders/${encodeURIComponent(folderId)}`),
-                }),
-            );
-        },
-        move: (folderId, folderRequest) => {
-            const id = nextMutationId();
-            return enqueueFolderMutation(
-                "move_folder",
-                id,
-                (publish) => {
-                    if (folderEntry === undefined) return () => undefined;
-                    const changed = folderEntry.store.applyOptimisticMove(
-                        folderId,
-                        folderRequest.parentId,
-                        folderRequest.afterId,
-                    );
-                    if (publish) publishFolders(changed.deltas);
-                    return changed.undo;
-                },
-                () => ({
-                    body: { ...folderRequest, mutationId: id },
-                    headers: {
-                        ...ifMatchHeader(requiredFolderVersion(folderEntry, folderId)),
-                        "x-rig-mutation-id": id,
-                    },
-                    method: "POST",
-                    url: endpointUrl(
-                        options.endpoint,
-                        `folders/${encodeURIComponent(folderId)}/move`,
-                    ),
-                }),
-            );
-        },
-        archive: (folderId) => {
-            const id = nextMutationId();
-            const relatedSessionIds = new Set<string>();
-            return enqueueFolderMutation(
-                "archive_folder",
-                id,
-                (publish) => {
-                    if (folderEntry === undefined) return () => undefined;
-                    const changed = folderEntry.store.applyOptimisticArchive(folderId, now());
-                    for (const sessionId of changed.sessionIds) {
-                        relatedSessionIds.add(sessionId);
-                    }
-                    const folderIds = new Set(changed.folderIds);
-                    for (const session of groupsEntry?.store.sessionSummaries() ?? []) {
-                        if (
-                            session.scope.kind === "folder" &&
-                            folderIds.has(session.scope.folderId)
-                        ) {
-                            relatedSessionIds.add(session.id);
-                        }
-                    }
-                    for (const [sessionId, entry] of sessionEntries) {
-                        const scope = entry.store.session().scope;
-                        if (scope.kind === "folder" && folderIds.has(scope.folderId)) {
-                            relatedSessionIds.add(sessionId);
-                        }
-                    }
-                    const undos: (() => void)[] = [changed.undo];
-                    const sessionChanges: {
-                        deltas: readonly ChatDelta[];
-                        entry: SessionEntry;
-                    }[] = [];
-                    if (groupsEntry !== undefined) {
-                        for (const sessionId of relatedSessionIds) {
-                            const groupChange = groupsEntry.store.applyOptimisticSessionArchived(
-                                sessionId,
-                                true,
-                            );
-                            undos.push(groupChange.undo);
-                        }
-                    }
-                    for (const sessionId of relatedSessionIds) {
-                        const entry = sessionEntries.get(sessionId);
-                        if (entry === undefined) continue;
-                        const sessionChange = entry.store.applyOptimisticSession({
-                            archived: true,
-                        });
-                        undos.push(sessionChange.undo);
-                        sessionChanges.push({ deltas: sessionChange.deltas, entry });
-                    }
-                    if (publish) {
-                        for (const sessionChange of sessionChanges) {
-                            publishSession(sessionChange.entry, sessionChange.deltas);
-                        }
-                        publishFolders(changed.deltas);
-                    }
-                    return () => {
-                        for (const undo of undos.reverse()) undo();
-                    };
-                },
-                () => ({
-                    headers: {
-                        ...ifMatchHeader(requiredFolderVersion(folderEntry, folderId)),
-                        "x-rig-mutation-id": id,
-                    },
-                    method: "POST",
-                    url: endpointUrl(
-                        options.endpoint,
-                        `folders/${encodeURIComponent(folderId)}/archive`,
-                    ),
-                }),
-                relatedSessionIds,
-            );
-        },
-        linkItem: (folderId, itemRequest, linkOptions = {}) => {
-            const id = linkOptions.itemId ?? itemRequest.id ?? nextEntityId();
-            const createdAt = now();
-            const pendingDocumentCreate =
-                itemRequest.target.kind === "document"
-                    ? pendingDocumentCreates.get(itemRequest.target.documentId)
-                    : undefined;
-            return enqueueFolderItemMutation(
-                "link_folder_item",
-                id,
-                (publish) => {
-                    if (folderEntry === undefined) return () => undefined;
-                    const optimistic: FolderItem = {
-                        createdAt,
-                        folderId,
-                        id,
-                        orderKey: folderEntry.store.optimisticItemOrderKey(
-                            folderId,
-                            itemRequest.afterId,
-                        ),
-                        target: itemRequest.target,
-                        updatedAt: createdAt,
-                        version: 0,
-                    };
-                    const changed = folderEntry.store.applyOptimisticItemCreate(optimistic);
-                    if (publish) publishFolders(changed.deltas);
-                    return changed.undo;
-                },
-                () => ({
-                    body: { ...itemRequest, id, mutationId: id },
-                    headers: { "x-rig-mutation-id": id },
-                    method: "POST",
-                    url: endpointUrl(
-                        options.endpoint,
-                        `folders/${encodeURIComponent(folderId)}/items`,
-                    ),
-                }),
-                pendingDocumentCreate,
-            );
-        },
-        moveItem: (itemId, itemRequest) => {
-            const id = nextMutationId();
-            return enqueueFolderItemMutation(
-                "move_folder_item",
-                id,
-                (publish) => {
-                    if (folderEntry === undefined) return () => undefined;
-                    const changed = folderEntry.store.applyOptimisticItemMove(
-                        itemId,
-                        itemRequest.folderId,
-                        itemRequest.afterId,
-                    );
-                    if (publish) publishFolders(changed.deltas);
-                    return changed.undo;
-                },
-                () => ({
-                    body: { ...itemRequest, mutationId: id },
-                    headers: {
-                        ...ifMatchHeader(requiredFolderItemVersion(folderEntry, itemId)),
-                        "x-rig-mutation-id": id,
-                    },
-                    method: "POST",
-                    url: endpointUrl(
-                        options.endpoint,
-                        `folder-items/${encodeURIComponent(itemId)}/move`,
-                    ),
-                }),
-            );
-        },
-        moveSession,
-        setSessionFolder: (sessionId, folderId) =>
-            moveSession(sessionId, {
-                afterId: null,
-                scope: folderId === null ? { kind: "unsorted" } : { folderId, kind: "folder" },
-            }),
-        unlinkItem: (itemId) => {
-            const id = nextMutationId();
-            return enqueueFolderItemMutation(
-                "unlink_folder_item",
-                id,
-                (publish) => {
-                    if (folderEntry === undefined) return () => undefined;
-                    const changed = folderEntry.store.applyOptimisticItemArchive(itemId, now());
-                    if (publish) publishFolders(changed.deltas);
-                    return changed.undo;
-                },
-                () => ({
-                    headers: {
-                        ...ifMatchHeader(requiredFolderItemVersion(folderEntry, itemId)),
-                        "x-rig-mutation-id": id,
-                    },
-                    method: "POST",
-                    url: endpointUrl(
-                        options.endpoint,
-                        `folder-items/${encodeURIComponent(itemId)}/archive`,
-                    ),
-                }),
-            );
         },
     };
 
@@ -5681,26 +4724,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             operationOptions,
         );
 
-    const shareFolder: RigConnection["shareFolder"] = (
-        folderId,
-        contacts,
-        operationOptions = {},
-    ) => {
-        const body = { contacts: [...contacts], folderId };
-        if (!Value.Check(createFolderShareRequestSchema, body)) {
-            return Promise.reject(
-                new Error("A folder share needs a folder and at least one Sharing contact."),
-            );
-        }
-        return requestSharing<FolderShareStatus>(
-            "sharing/folders",
-            "POST",
-            folderShareStatusSchema,
-            operationOptions,
-            body,
-        );
-    };
-
     const requestSharingContact: RigConnection["requestSharingContact"] = async (
         invitation,
         operationOptions = {},
@@ -6137,36 +5160,10 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
 
     const createSession = (input: CreateSessionInput): MutationId => {
         const id = nextEntityId();
-        const createdAt = now();
-        const optimistic =
-            input.scope === undefined
-                ? undefined
-                : {
-                      archived: false,
-                      createdAt,
-                      cwd: input.cwd,
-                      id,
-                      modelId: input.modelId ?? "",
-                      orderKey:
-                          folderEntry?.store.optimisticSessionOrderKey(input.scope) ?? "\uffff",
-                      permissionMode: input.permissionMode ?? "auto",
-                      providerId: input.providerId ?? "",
-                      scope: input.scope,
-                      status: "idle" as const,
-                      titleStatus: "idle",
-                      updatedAt: createdAt,
-                  };
         return enqueue({
             acknowledged: false,
             action: "create_session",
-            applyOptimistic: (publish) => {
-                if (folderEntry === undefined || optimistic === undefined) {
-                    return () => undefined;
-                }
-                const changed = folderEntry.store.applyOptimisticSessionCreate(optimistic);
-                if (publish) publishFolders(changed.deltas);
-                return changed.undo;
-            },
+            applyOptimistic: () => () => undefined,
             entityKey: sessionKey(id),
             id,
             prepare: () => {
@@ -6185,16 +5182,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 };
             },
             ready: async () => {
-                if (usesPeerEndpoint && input.scope === undefined) {
-                    await ensureGroupCatalogForMutation();
-                }
-                if (input.scope?.kind !== "folder") return;
-                const pending = pendingFolderCreates.get(input.scope.folderId);
-                if (pending === undefined) return;
-                await pending.promise;
-                if (folderEntry?.store.folder(input.scope.folderId) === undefined) {
-                    throw new Error("That folder no longer exists.");
-                }
+                if (usesPeerEndpoint) await ensureGroupCatalogForMutation();
             },
             sessionId: id,
             undo: () => undefined,
@@ -7421,8 +6409,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             rootController.abort();
             for (const mutation of [...pendingOverlays].reverse()) mutation.undo();
             pendingOverlays.length = 0;
-            for (const pending of pendingFolderCreates.values()) pending.resolve();
-            pendingFolderCreates.clear();
             for (const pending of pendingDocumentCreates.values()) pending.settle(false);
             pendingDocumentCreates.clear();
             queues.clear();
@@ -7480,10 +6466,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 workletsEntry.subscribers.clear();
                 workletsEntry = undefined;
             }
-            inboxEntry?.subscribers.clear();
-            inboxEntry = undefined;
-            folderEntry?.subscribers.clear();
-            folderEntry = undefined;
             for (const entry of timelineEntries.values()) {
                 entry.controller.abort();
                 entry.detachRoot();
@@ -7498,13 +6480,11 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         clearGoal,
         compactSession,
         connectDocument,
-        connectFolders,
         connectGroups,
         connectHappyCloud,
         connectP2p,
         connectProfiles,
         connectSharing,
-        connectInbox,
         connectPlugins,
         connectWorklets,
         connectProviderUsage,
@@ -7529,7 +6509,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         getP2pPairing,
         getSharing,
         joinP2pInvitation,
-        folders,
         listProfiles,
         listSecrets,
         projects,
@@ -7544,7 +6523,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         rejectSharingContactRequest,
         removeSharingContact,
         resetSharing,
-        shareFolder,
         rewindSession,
         runShellCommand,
         sendMessage,
@@ -7630,18 +6608,6 @@ function mutationIdOf(event: SessionEvent | GlobalEvent): string | undefined {
 
 function ifMatchHeader(value: string | number | undefined): Record<string, string> {
     return value === undefined ? {} : { "if-match": JSON.stringify(String(value)) };
-}
-
-function requiredFolderVersion(entry: FolderEntry | undefined, folderId: string): number {
-    const version = entry?.store.folder(folderId)?.version;
-    if (version === undefined) throw new Error("That folder no longer exists.");
-    return version;
-}
-
-function requiredFolderItemVersion(entry: FolderEntry | undefined, itemId: string): number {
-    const version = entry?.store.item(itemId)?.version;
-    if (version === undefined) throw new Error("That folder item no longer exists.");
-    return version;
 }
 
 function composeUndo(undos: readonly (() => void)[]): () => void {

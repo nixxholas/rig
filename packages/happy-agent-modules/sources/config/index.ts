@@ -1,0 +1,15 @@
+export {
+    ConfigModule,
+    happyAgentConfigSourceSchema,
+    happyAgentConfigValuesSchema,
+    happyAgentConfigurationInputSchema,
+    happyAgentConfigurationPathsSchema,
+    happyAgentConfigurationSchema,
+    loadHappyAgentConfiguration,
+    parseHappyAgentConfigToml,
+    type HappyAgentConfigSource,
+    type HappyAgentConfigValues,
+    type HappyAgentConfiguration,
+    type HappyAgentConfigurationInput,
+    type HappyAgentConfigurationPaths,
+} from "./ConfigModule.js";

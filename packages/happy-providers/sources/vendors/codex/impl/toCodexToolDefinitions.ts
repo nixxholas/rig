@@ -1,6 +1,6 @@
 import { Type } from "@sinclair/typebox";
 import type { SessionTool } from "@/core/SessionTool.js";
-import { toJsonSchema } from "@/vendors/codex/impl/toJsonSchema.js";
+import { toLlmParametersSchema } from "@/tools/sanitizeSchema.js";
 import type { NamespaceTool, Tool } from "openai/resources/responses/responses.js";
 
 const clientToolSearch = {
@@ -70,7 +70,17 @@ function humanizeNamespace(namespace: string): string {
 
 function toCodexTool(tool: SessionTool): Tool {
     if (tool.server !== undefined) {
-        return structuredClone(tool.server) as Tool;
+        const server = structuredClone(tool.server) as Tool & {
+            parameters?: unknown;
+            input_schema?: unknown;
+        };
+        if (server.parameters && typeof server.parameters === "object") {
+            server.parameters = toLlmParametersSchema(server.parameters as any);
+        }
+        if (server.input_schema && typeof server.input_schema === "object") {
+            server.input_schema = toLlmParametersSchema(server.input_schema as any);
+        }
+        return server;
     }
     if (tool.grammar !== undefined) {
         return {
@@ -86,6 +96,6 @@ function toCodexTool(tool: SessionTool): Tool {
         ...(tool.description === undefined ? {} : { description: tool.description }),
         strict: false,
         ...(tool.defer === true ? { defer_loading: true } : {}),
-        parameters: tool.parameters === undefined ? null : toJsonSchema(tool.parameters),
+        parameters: tool.parameters === undefined ? null : toLlmParametersSchema(tool.parameters),
     };
 }

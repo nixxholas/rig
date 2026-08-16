@@ -8,6 +8,11 @@ export const MAX_USER_INPUT_AGENT_ID_LENGTH = 128;
 export const MAX_USER_INPUT_REQUEST_ID_LENGTH = 128;
 export const MAX_USER_INPUT_EVENT_ID_LENGTH = 128;
 export const MAX_USER_INPUT_CURSOR_LENGTH = 512;
+export const MAX_USER_INPUT_HEADER_CHARACTERS = 12;
+export const MAX_USER_INPUT_QUESTION_ID_LENGTH = 128;
+export const MAX_USER_INPUT_BATCH_QUESTION_COUNT = 4;
+export const MIN_USER_INPUT_AUTO_RESOLUTION_MS = 60_000;
+export const MAX_USER_INPUT_AUTO_RESOLUTION_MS = 240_000;
 
 export const MAX_USER_INPUT_QUESTION_CHARACTERS = 4_000;
 export const MAX_USER_INPUT_CONTEXT_CHARACTERS = 100_000;
@@ -18,6 +23,9 @@ export const MAX_USER_INPUT_OPTION_DESCRIPTION_CHARACTERS = 2_000;
 export const MAX_USER_INPUT_CANCEL_REASON_CHARACTERS = 2_000;
 export const MAX_USER_INPUT_DETAIL_PAGE_CHARACTERS = 4_000;
 export const MAX_USER_INPUT_DETAIL_TOTAL_CHARACTERS = 200_000;
+export const MAX_USER_INPUT_PRESENCE_TITLE_CHARACTERS = 128;
+export const MAX_USER_INPUT_PRESENCE_EMOJI_CHARACTERS = 32;
+export const MAX_USER_INPUT_PRESENCE_PROMPT_CHARACTERS = 2_000;
 
 export const userInputTimestampSchema = Type.Integer({
     minimum: 0,
@@ -35,10 +43,18 @@ export const userInputEventIdSchema = Type.String({
     minLength: 1,
     maxLength: MAX_USER_INPUT_EVENT_ID_LENGTH,
 });
+export const userInputQuestionIdSchema = Type.String({
+    minLength: 1,
+    maxLength: MAX_USER_INPUT_QUESTION_ID_LENGTH,
+});
 
 export const userInputQuestionSchema = Type.String({
     minLength: 1,
     maxLength: MAX_USER_INPUT_QUESTION_CHARACTERS,
+});
+export const userInputHeaderSchema = Type.String({
+    minLength: 1,
+    maxLength: MAX_USER_INPUT_HEADER_CHARACTERS,
 });
 export const userInputContextSchema = Type.String({
     minLength: 1,
@@ -61,6 +77,30 @@ export const userInputCancelReasonSchema = Type.String({
     maxLength: MAX_USER_INPUT_CANCEL_REASON_CHARACTERS,
 });
 
+/**
+ * The narrow presence projection needed by user-input. The host or Presence module owns the
+ * effective state and supplies this snapshot; UserInputModule never imports PresenceModule.
+ */
+export const userInputPresenceStateSchema = Type.Object(
+    {
+        answerWaitMs: Type.Union([
+            Type.Null(),
+            Type.Integer({ minimum: 0, maximum: MAX_USER_INPUT_TIMESTAMP }),
+        ]),
+        title: Type.String({
+            minLength: 1,
+            maxLength: MAX_USER_INPUT_PRESENCE_TITLE_CHARACTERS,
+        }),
+        emoji: Type.String({
+            minLength: 1,
+            maxLength: MAX_USER_INPUT_PRESENCE_EMOJI_CHARACTERS,
+        }),
+        prompt: Type.String({ maxLength: MAX_USER_INPUT_PRESENCE_PROMPT_CHARACTERS }),
+        changesAt: Type.Optional(userInputTimestampSchema),
+    },
+    { additionalProperties: false },
+);
+
 /** A bounded choice shown alongside the free-form answer field. */
 export const userInputChoiceSchema = Type.Object(
     {
@@ -80,6 +120,48 @@ export const userInputOptionsSchema = Type.Object(
     },
     { additionalProperties: false },
 );
+
+/**
+ * A question in a batched request. IDs are optional at the model boundary because Claude's
+ * surface numbers questions for the model; the module assigns a stable ID before persistence.
+ */
+const userInputBatchQuestionOptionsInputSchema = Type.Union([
+    userInputOptionsSchema,
+    Type.Array(userInputChoiceSchema, {
+        minItems: 1,
+        maxItems: MAX_USER_INPUT_OPTION_COUNT,
+    }),
+]);
+
+export const userInputBatchQuestionInputSchema = Type.Object(
+    {
+        id: Type.Optional(userInputQuestionIdSchema),
+        header: Type.Optional(userInputHeaderSchema),
+        question: userInputQuestionSchema,
+        options: Type.Optional(userInputBatchQuestionOptionsInputSchema),
+        multiSelect: Type.Optional(Type.Boolean()),
+    },
+    { additionalProperties: false },
+);
+
+/** The normalized, persisted representation of one question in a batched request. */
+export const userInputBatchQuestionSchema = Type.Object(
+    {
+        id: userInputQuestionIdSchema,
+        header: Type.Optional(userInputHeaderSchema),
+        question: userInputQuestionSchema,
+        options: Type.Optional(userInputOptionsSchema),
+    },
+    { additionalProperties: false },
+);
+export const userInputBatchQuestionsSchema = Type.Array(userInputBatchQuestionSchema, {
+    minItems: 1,
+    maxItems: MAX_USER_INPUT_BATCH_QUESTION_COUNT,
+});
+export const userInputBatchQuestionInputsSchema = Type.Array(userInputBatchQuestionInputSchema, {
+    minItems: 1,
+    maxItems: MAX_USER_INPUT_BATCH_QUESTION_COUNT,
+});
 
 /**
  * Answers may be a plain free-form string or a structured payload containing both a free-form
@@ -117,12 +199,24 @@ export const userInputAnswerSchema = Type.Union([
     userInputAnswerObjectSchema,
 ]);
 
+const userInputBatchAnswersSchema = Type.Record(userInputQuestionIdSchema, userInputAnswerSchema, {
+    maxProperties: MAX_USER_INPUT_BATCH_QUESTION_COUNT,
+});
+
 export const userInputRequestCommonProperties = {
     id: userInputRequestIdSchema,
     askingAgentId: userInputAgentIdSchema,
     question: userInputQuestionSchema,
+    header: Type.Optional(userInputHeaderSchema),
     context: userInputContextSchema,
     options: Type.Optional(userInputOptionsSchema),
+    questions: Type.Optional(userInputBatchQuestionsSchema),
+    autoResolutionMs: Type.Optional(
+        Type.Integer({
+            minimum: MIN_USER_INPUT_AUTO_RESOLUTION_MS,
+            maximum: MAX_USER_INPUT_AUTO_RESOLUTION_MS,
+        }),
+    ),
     deadlineAt: Type.Optional(userInputTimestampSchema),
     createdAt: userInputTimestampSchema,
     updatedAt: userInputTimestampSchema,
@@ -145,6 +239,7 @@ const userInputAnsweredRequestSchema = Type.Object(
         ...userInputRequestCommonProperties,
         status: Type.Literal("answered"),
         answer: userInputAnswerSchema,
+        answers: Type.Optional(userInputBatchAnswersSchema),
         answeredAt: userInputTimestampSchema,
     },
     { additionalProperties: false },
@@ -164,6 +259,8 @@ const userInputAwayRequestSchema = Type.Object(
     {
         ...userInputRequestCommonProperties,
         status: Type.Literal("away"),
+        presence: Type.Optional(userInputPresenceStateSchema),
+        waitedMs: Type.Optional(Type.Integer({ minimum: 0, maximum: MAX_USER_INPUT_TIMESTAMP })),
         completedAt: Type.Optional(userInputTimestampSchema),
     },
     { additionalProperties: false },
@@ -174,6 +271,8 @@ const userInputTimedOutRequestSchema = Type.Object(
         ...userInputRequestCommonProperties,
         status: Type.Literal("timed_out"),
         deadlineAt: userInputTimestampSchema,
+        presence: Type.Optional(userInputPresenceStateSchema),
+        waitedMs: Type.Optional(Type.Integer({ minimum: 0, maximum: MAX_USER_INPUT_TIMESTAMP })),
         timedOutAt: Type.Optional(userInputTimestampSchema),
     },
     { additionalProperties: false },
@@ -207,16 +306,42 @@ export const userInputListStatusSchema = Type.Union([
     Type.Literal("terminal"),
 ]);
 
-export const userInputAskInputSchema = Type.Object(
+const userInputSingleAskInputSchema = Type.Object(
     {
         question: userInputQuestionSchema,
+        header: Type.Optional(userInputHeaderSchema),
         context: userInputContextSchema,
         options: Type.Optional(userInputOptionsSchema),
+        autoResolutionMs: Type.Optional(
+            Type.Integer({
+                minimum: MIN_USER_INPUT_AUTO_RESOLUTION_MS,
+                maximum: MAX_USER_INPUT_AUTO_RESOLUTION_MS,
+            }),
+        ),
         deadlineAt: Type.Optional(userInputTimestampSchema),
     },
     { additionalProperties: false },
 );
 
+const userInputBatchedAskInputSchema = Type.Object(
+    {
+        questions: userInputBatchQuestionInputsSchema,
+        context: userInputContextSchema,
+        autoResolutionMs: Type.Optional(
+            Type.Integer({
+                minimum: MIN_USER_INPUT_AUTO_RESOLUTION_MS,
+                maximum: MAX_USER_INPUT_AUTO_RESOLUTION_MS,
+            }),
+        ),
+        deadlineAt: Type.Optional(userInputTimestampSchema),
+    },
+    { additionalProperties: false },
+);
+
+export const userInputAskInputSchema = Type.Union([
+    userInputSingleAskInputSchema,
+    userInputBatchedAskInputSchema,
+]);
 export const userInputToolInputSchema = userInputAskInputSchema;
 
 export const userInputWaitInputSchema = Type.Object(
@@ -227,13 +352,25 @@ export const userInputWaitInputSchema = Type.Object(
 );
 export const userInputWaitToolInputSchema = userInputWaitInputSchema;
 
-export const userInputAnswerInputSchema = Type.Object(
+const userInputSingleAnswerInputSchema = Type.Object(
     {
         requestId: userInputRequestIdSchema,
         answer: userInputAnswerSchema,
     },
     { additionalProperties: false },
 );
+export const userInputBatchAnswerInputSchema = Type.Object(
+    {
+        requestId: userInputRequestIdSchema,
+        answers: userInputBatchAnswersSchema,
+    },
+    { additionalProperties: false },
+);
+export const userInputAnswerInputSchema = Type.Union([
+    userInputSingleAnswerInputSchema,
+    userInputBatchAnswerInputSchema,
+]);
+export const userInputAnswerInputUnionSchema = userInputAnswerInputSchema;
 
 export const userInputCancelInputSchema = Type.Object(
     {
@@ -295,7 +432,9 @@ export const userInputCompleteInputSchema = Type.Union([
 export const userInputListQuerySchema = Type.Object(
     {
         limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
-        cursor: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_USER_INPUT_CURSOR_LENGTH })),
+        cursor: Type.Optional(
+            Type.String({ minLength: 1, maxLength: MAX_USER_INPUT_CURSOR_LENGTH }),
+        ),
         status: Type.Optional(userInputListStatusSchema),
         askingAgentId: Type.Optional(userInputAgentIdSchema),
     },
@@ -360,6 +499,12 @@ export const userInputDetailPageSchema = Type.Object(
 export type UserInputTimestamp = Static<typeof userInputTimestampSchema>;
 export type UserInputAgentId = Static<typeof userInputAgentIdSchema>;
 export type UserInputQuestion = Static<typeof userInputQuestionSchema>;
+export type UserInputQuestionId = Static<typeof userInputQuestionIdSchema>;
+export type UserInputHeader = Static<typeof userInputHeaderSchema>;
+export type UserInputPresenceState = Static<typeof userInputPresenceStateSchema>;
+export type UserInputBatchQuestion = Static<typeof userInputBatchQuestionSchema>;
+export type UserInputBatchQuestionInput = Static<typeof userInputBatchQuestionInputSchema>;
+export type UserInputBatchQuestions = Static<typeof userInputBatchQuestionsSchema>;
 export type UserInputRequestId = Static<typeof userInputRequestIdSchema>;
 export type UserInputEventId = Static<typeof userInputEventIdSchema>;
 export type UserInputChoice = Static<typeof userInputChoiceSchema>;
@@ -369,11 +514,12 @@ export type UserInputRequest = Static<typeof userInputRequestSchema>;
 export type UserInputTerminalRequest = Static<typeof userInputTerminalRequestSchema>;
 export type UserInputStatus = Static<typeof userInputStatusSchema>;
 export type UserInputListStatus = Static<typeof userInputListStatusSchema>;
-export type UserInputAskInput = Static<typeof userInputAskInputSchema>;
+export type UserInputAskInput = Static<typeof userInputToolInputSchema>;
 export type UserInputToolInput = Static<typeof userInputToolInputSchema>;
 export type UserInputWaitInput = Static<typeof userInputWaitInputSchema>;
 export type UserInputWaitToolInput = Static<typeof userInputWaitToolInputSchema>;
-export type UserInputAnswerInput = Static<typeof userInputAnswerInputSchema>;
+export type UserInputAnswerInput = Static<typeof userInputAnswerInputUnionSchema>;
+export type UserInputBatchAnswerInput = Static<typeof userInputBatchAnswerInputSchema>;
 export type UserInputCancelInput = Static<typeof userInputCancelInputSchema>;
 export type UserInputCompleteOutcome = Static<typeof userInputCompleteOutcomeSchema>;
 export type UserInputCompleteInput = Static<typeof userInputCompleteInputSchema>;
@@ -394,8 +540,28 @@ export function assertUserInputRequest(value: unknown): asserts value is UserInp
         throw new Error("User input request deadline precedes its creation.");
     }
     assertUserInputOptions(request.options);
+    assertUserInputBatchQuestions(request.questions);
+    if (request.questions !== undefined) {
+        const first = request.questions[0]!;
+        if (
+            request.question !== first.question ||
+            request.header !== first.header ||
+            !sameValue(request.options, first.options)
+        ) {
+            throw new Error("User input request primary question disagrees with its batch.");
+        }
+    }
     if (request.status === "answered") {
         assertUserInputAnswer(request.answer, request.options);
+        if (request.questions === undefined && request.answers !== undefined) {
+            throw new Error("A singular user input request cannot contain batch answers.");
+        }
+        if (request.questions !== undefined) {
+            if (request.answers === undefined) {
+                throw new Error("An answered batch user input request must contain batch answers.");
+            }
+            assertUserInputBatchAnswers(request.answers, request.questions);
+        }
         if (request.answeredAt < request.createdAt) {
             throw new Error("User input answer timestamp precedes request creation.");
         }
@@ -466,8 +632,44 @@ export function assertUserInputAnswer(
     }
 }
 
+export function assertUserInputBatchQuestions(
+    value: readonly UserInputBatchQuestion[] | undefined,
+): void {
+    if (value === undefined) return;
+    const ids = new Set<string>();
+    for (const question of value) {
+        if (ids.has(question.id)) {
+            throw new Error("Batched user input questions must have unique IDs.");
+        }
+        ids.add(question.id);
+        assertUserInputOptions(question.options);
+    }
+}
+
+export function assertUserInputBatchAnswers(
+    value: Readonly<Record<string, UserInputAnswer>>,
+    questions: readonly UserInputBatchQuestion[],
+): void {
+    const questionById = new Map(questions.map((question) => [question.id, question]));
+    const answerIds = Object.keys(value);
+    if (answerIds.length !== questions.length) {
+        throw new Error("A batched user input answer must answer every question.");
+    }
+    for (const id of answerIds) {
+        const question = questionById.get(id);
+        if (question === undefined) {
+            throw new Error(`User input answer references unknown question "${id}".`);
+        }
+        assertUserInputAnswer(value[id]!, question.options);
+    }
+}
+
 export function isUserInputTerminal(
     request: UserInputRequest,
 ): request is Exclude<UserInputRequest, { status: "pending" }> {
     return request.status !== "pending";
+}
+
+function sameValue(left: unknown, right: unknown): boolean {
+    return JSON.stringify(left) === JSON.stringify(right);
 }

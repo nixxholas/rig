@@ -1,5 +1,47 @@
 /** Public surface of `@slopus/happy-agent-modules`, re-exported by module. */
 
+// Config: the resolved filesystem layout and layered Happy Agent settings.
+export {
+    ConfigModule,
+    happyAgentConfigSourceSchema,
+    happyAgentConfigValuesSchema,
+    happyAgentConfigurationInputSchema,
+    happyAgentConfigurationPathsSchema,
+    happyAgentConfigurationSchema,
+    loadHappyAgentConfiguration,
+    parseHappyAgentConfigToml,
+    type HappyAgentConfigSource,
+    type HappyAgentConfigValues,
+    type HappyAgentConfiguration,
+    type HappyAgentConfigurationInput,
+    type HappyAgentConfigurationPaths,
+} from "./config/index.js";
+
+// Events: bounded in-memory queue of raw events with strict UUIDv7 identifiers.
+export {
+    appendEventInputSchema,
+    eventAgentIdSchema,
+    eventContextSchema,
+    eventIdSchema,
+    eventListenerSchema,
+    eventReplaySchema,
+    eventSchema,
+    eventTypeSchema,
+    eventsModuleListenerSchema,
+    EVENT_TYPE,
+    EventsModule,
+    MAX_EVENT_AGENT_ID_LENGTH,
+    MAX_EVENT_TYPE_LENGTH,
+    type AgentEvent,
+    type AppendEventInput,
+    type EventListener,
+    type EventReplay,
+    type EventsModuleListener,
+    type EventsModuleOptions,
+    type EventType,
+} from "./events/index.js";
+export { createUuidV7Factory } from "./events/index.js";
+
 // Goal: long-running work the agent keeps pursuing until it is complete or blocked.
 export {
     GoalModule,
@@ -45,14 +87,43 @@ export { formatGoalForModel } from "./goal/impl/formatGoalForModel.js";
 
 // System prompt: the instructions each model is written for, chosen by the model in force.
 export {
+    agentsMdGlobalInstructionsReaderSchema,
     SystemPromptModule,
+    MAX_SYSTEM_PROMPT_AVAILABLE_MODEL_FIELD_LENGTH,
+    MAX_SYSTEM_PROMPT_AVAILABLE_MODELS_BYTES,
+    MAX_SYSTEM_PROMPT_AVAILABLE_MODELS,
     MAX_SYSTEM_PROMPT_OUTPUT_BYTES,
+    systemPromptAvailableModelSchema,
+    systemPromptAvailableModelsSchema,
     systemPromptModuleOptionsSchema,
     systemPromptIdentitySchema,
     systemPromptSelectionSchema,
+    type AgentsMdGlobalInstructionsReader,
+    type SystemPromptAvailableModel,
+    type SystemPromptAvailableModels,
     type SystemPromptModuleOptions,
     type SystemPromptSelection,
 } from "./systemPrompt/SystemPromptModule.js";
+export {
+    AGENTS_MD_SPEC,
+    MAX_AGENTS_MD_AGENT_ID_LENGTH,
+    MAX_AGENTS_MD_DOCUMENT_BYTES,
+    MAX_AGENTS_MD_DOCUMENTS,
+    MAX_AGENTS_MD_GLOBAL_BYTES,
+    MAX_AGENTS_MD_OUTPUT_CHARACTERS,
+    MAX_AGENTS_MD_PATH_LENGTH,
+    MAX_AGENTS_MD_TOTAL_BYTES,
+    MAX_AGENTS_SECURITY_MD_BYTES,
+    agentsMdAgentIdSchema,
+    agentsMdDocumentSchema,
+    agentsMdGlobalDocumentSchema,
+    agentsMdPathSchema,
+    agentsMdSnapshotSchema,
+    type AgentsMdAgentId,
+    type AgentsMdDocument,
+    type AgentsMdGlobalDocument,
+    type AgentsMdSnapshot,
+} from "./systemPrompt/AgentsMd.js";
 export {
     DEFAULT_SYSTEM_PROMPT_IDENTITY,
     MAX_SYSTEM_PROMPT_IDENTITY_NAME_LENGTH,
@@ -235,6 +306,13 @@ export {
 
 // Presence: host-owned current status, temporary fallbacks, and optional recurring windows.
 export {
+    BUILT_IN_PRESENCES,
+    ONLINE_PRESENCE,
+    AWAY_PRESENCE,
+    OFFLINE_PRESENCE,
+    DND_PRESENCE,
+} from "./presence/PresenceCatalog.js";
+export {
     PresenceModule,
     presenceModuleOptionsSchema,
     type PresenceModuleOptions,
@@ -259,11 +337,14 @@ export {
     assertPresenceToolInput,
     assertTemporaryPresenceInput,
     presenceFallbackSchema,
+    presenceStoredStateSchema,
     presenceStateSchema,
     presenceStatusSchema,
     presenceToolInputSchema,
     temporaryPresenceInputSchema,
     type PresenceFallback,
+    type PresenceDefinition,
+    type PresenceStoredState,
     type PresenceState,
     type PresenceStatus,
     type PresenceToolInput,
@@ -582,10 +663,14 @@ export {
     searchCursorSchema,
     searchQuerySchema,
     searchPageSchema,
+    searchProviderRequestSchema,
+    searchProviderSchema,
     searchResultSchema,
     type FetchInput,
     type FetchResult,
     type SearchPage,
+    type SearchProvider,
+    type SearchProviderRequest,
     type SearchQuery,
     type SearchResult,
 } from "./search/Search.js";
@@ -599,8 +684,13 @@ export {
     searchModuleOptionsSchema,
     type SearchModuleOptions,
 } from "./search/SearchModule.js";
+export { bedrockWebSearchTool } from "./search/tools/bedrock_web_search.js";
+export { claudeWebSearchTool } from "./search/tools/claude_web_search.js";
+export { codexWebSearchTool } from "./search/tools/codex_web_search.js";
+export { geminiWebSearchTool } from "./search/tools/gemini_web_search.js";
+export { grokWebSearchTool } from "./search/tools/grok_web_search.js";
+export { grokXSearchTool } from "./search/tools/grok_x_search.js";
 export { webFetchTool } from "./search/tools/web_fetch.js";
-export { webSearchTool } from "./search/tools/web_search.js";
 
 // Slots: host-owned UI slot entries and opaque applet actions.
 export {
@@ -731,11 +821,10 @@ export * from "./projects/index.js";
 // User input: questions the agent asks a person, and the answers it waits for.
 export * from "./userInput/index.js";
 
-// Integration modules: Happy clients, MCP servers, skills, and AGENTS.md instructions.
+// Integration modules: Happy clients, MCP servers, and skills.
 export * from "./happy/index.js";
 export * from "./mcp/index.js";
 export * from "./skills/index.js";
-export * from "./agentsMd/index.js";
 
 export {
     assertHistoryReader,

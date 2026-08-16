@@ -29,6 +29,7 @@ import {
     mcpResourceTemplatePageSchema,
     mcpServerPageQuerySchema,
     mcpServerPageSchema,
+    mcpToolPolicySchema,
     mcpToolPageQuerySchema,
     mcpToolPageSchema,
     mcpToolResultSchema,
@@ -52,14 +53,10 @@ import {
     type McpTool,
     type McpToolPage,
     type McpToolPageQuery,
+    type McpToolPolicy,
     type McpToolResult,
 } from "./Mcp.js";
-import {
-    assertMcpHost,
-    mcpHostCallOptionsSchema,
-    mcpHostSchema,
-    type McpHost,
-} from "./McpHost.js";
+import { assertMcpHost, mcpHostCallOptionsSchema, mcpHostSchema, type McpHost } from "./McpHost.js";
 import { createMcpProtocolTools } from "./createMcpProtocolTools.js";
 import { createMcpTool } from "./createMcpTool.js";
 import {
@@ -76,6 +73,7 @@ import {
 } from "./mcpPageAssertions.js";
 import { listMcpServersTool } from "./tools/list_mcp_servers.js";
 import { mcpResultToContentBlocks } from "./mcpResultToContentBlocks.js";
+import { mergeMcpTools } from "./mergeMcpTools.js";
 
 const DEFAULT_PAGE_SIZE = 50;
 const DEFAULT_OUTPUT_CHARACTERS = 12_000;
@@ -107,9 +105,7 @@ export const mcpModuleOptionsSchema = Type.Object(
     {
         host: mcpHostSchema,
         maxOutputCharacters: Type.Optional(outputCharactersSchema),
-        maxPageSize: Type.Optional(
-            Type.Integer({ minimum: 1, maximum: MAX_MCP_PAGE_SIZE }),
-        ),
+        maxPageSize: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_MCP_PAGE_SIZE })),
         userInput: Type.Optional(mcpUserInputServiceSchema),
     },
     { additionalProperties: false },
@@ -146,15 +142,8 @@ export class McpModule implements AgentModule {
      * host remains authoritative for live calls; this snapshot is only written through the
      * caller's Agent Storage transaction.
      */
-    readonly beforeAgentLoop = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-    ): Promise<void> => {
-        const servers = await this.#listAllServers(
-            ctx,
-            scope.agent.id,
-            scope.agent.permissionMode,
-        );
+    readonly beforeAgentLoop = async (ctx: Context, scope: AgentModuleScope): Promise<void> => {
+        const servers = await this.#listAllServers(ctx, scope.agent.id, scope.agent.permissionMode);
         await ctx.inTx(async (txCtx) => {
             await agentDatabaseRun(
                 txCtx.db,
@@ -199,41 +188,32 @@ export class McpModule implements AgentModule {
         scope: AgentModuleScope,
     ): Promise<readonly AnyAgentTool[]> => {
         const agentId = assertAgentId(scope.agent.id);
-        const servers = await this.#listAllServers(
-            ctx,
-            agentId,
-            scope.agent.permissionMode,
-        );
+        const servers = await this.#listAllServers(ctx, agentId, scope.agent.permissionMode);
         const connected = servers.filter((server) => server.status === "connected");
-        const directTools: AnyAgentTool[] = [];
-        const directNames = new Set<string>();
+        const loadedTools: AnyAgentTool[] = [];
         for (const server of connected) {
             const tools = await this.#listAllTools(ctx, agentId, server.name);
-            if (directTools.length + tools.length > MAX_MCP_TOTAL_TOOLS) {
+            if (loadedTools.length + tools.length > MAX_MCP_TOTAL_TOOLS) {
                 throw new Error("MCP tool catalog exceeded its bound.");
             }
             for (const tool of tools) {
-                const direct = createMcpTool(this, agentId, server.name, tool);
-                if (directNames.has(direct.name)) {
-                    throw new Error(
-                        `MCP tool names collide after normalization for server "${server.name}".`,
-                    );
-                }
-                directNames.add(direct.name);
-                directTools.push(direct);
+                loadedTools.push(createMcpTool(this, agentId, server.name, tool));
             }
         }
-        const protocolTools =
-            connected.length === 0
-                ? []
-                : createMcpProtocolTools(
-                      this,
-                      agentId,
-                      connected.map((server) => ({ name: server.name })),
-                  );
+        const merged = mergeMcpTools([], { servers: connected, tools: loadedTools });
+        const quarantined = merged.servers.filter((server) => server.status === "failed");
+        const protocolTools = merged.servers.every((server) => server.status !== "connected")
+            ? []
+            : createMcpProtocolTools(
+                  this,
+                  agentId,
+                  merged.servers
+                      .filter((server) => server.status === "connected")
+                      .map((server) => ({ name: server.name })),
+              );
         return [
-            listMcpServersTool(this, agentId, scope.agent.permissionMode),
-            ...directTools,
+            listMcpServersTool(this, agentId, scope.agent.permissionMode, quarantined),
+            ...merged.tools,
             ...protocolTools,
         ];
     };
@@ -256,17 +236,15 @@ export class McpModule implements AgentModule {
                 this.#maximumVisibleRows(24),
             ),
         };
-        const raw = await this.#host.listServers(
-            ctx,
-            agentId,
-            permissionMode,
-            normalized,
-        );
+        const raw = await this.#host.listServers(ctx, agentId, permissionMode, normalized);
         assertServerPage(raw);
         if (raw.servers.length > normalized.limit) {
             throw new Error("MCP host returned more servers than requested.");
         }
-        assertUnique(raw.servers.map((server) => server.name), "server");
+        assertUnique(
+            raw.servers.map((server) => server.name),
+            "server",
+        );
         assertCursorProgress(query.cursor, raw.nextCursor, raw.servers.length);
         return structuredClone(raw);
     }
@@ -303,7 +281,10 @@ export class McpModule implements AgentModule {
         if (raw.tools.length > normalized.limit) {
             throw new Error("MCP host returned more tools than requested.");
         }
-        assertUnique(raw.tools.map((tool) => tool.name), "tool");
+        assertUnique(
+            raw.tools.map((tool) => tool.name),
+            "tool",
+        );
         assertCursorProgress(query.cursor, raw.nextCursor, raw.tools.length);
         return structuredClone(raw);
     }
@@ -314,11 +295,7 @@ export class McpModule implements AgentModule {
         server: string,
         cursor?: string,
     ): Promise<readonly McpTool[]>;
-    async listTools(
-        ctx: Context,
-        agentId: string,
-        query: McpToolPageQuery,
-    ): Promise<McpToolPage>;
+    async listTools(ctx: Context, agentId: string, query: McpToolPageQuery): Promise<McpToolPage>;
     async listTools(
         ctx: Context,
         agentId: string,
@@ -356,7 +333,10 @@ export class McpModule implements AgentModule {
         if (raw.resources.length > normalized.limit) {
             throw new Error("MCP host returned more resources than requested.");
         }
-        assertUnique(raw.resources.map((resource) => resource.uri), "resource");
+        assertUnique(
+            raw.resources.map((resource) => resource.uri),
+            "resource",
+        );
         assertCursorProgress(query.cursor, raw.nextCursor, raw.resources.length);
         return structuredClone(raw);
     }
@@ -409,7 +389,10 @@ export class McpModule implements AgentModule {
         if (raw.resourceTemplates.length > normalized.limit) {
             throw new Error("MCP host returned more resource templates than requested.");
         }
-        assertUnique(raw.resourceTemplates.map((template) => template.uriTemplate), "resource template");
+        assertUnique(
+            raw.resourceTemplates.map((template) => template.uriTemplate),
+            "resource template",
+        );
         assertCursorProgress(query.cursor, raw.nextCursor, raw.resourceTemplates.length);
         return structuredClone(raw);
     }
@@ -437,7 +420,10 @@ export class McpModule implements AgentModule {
         if (raw.prompts.length > normalized.limit) {
             throw new Error("MCP host returned more prompts than requested.");
         }
-        assertUnique(raw.prompts.map((prompt) => prompt.name), "prompt");
+        assertUnique(
+            raw.prompts.map((prompt) => prompt.name),
+            "prompt",
+        );
         assertCursorProgress(query.cursor, raw.nextCursor, raw.prompts.length);
         return structuredClone(raw);
     }
@@ -460,6 +446,10 @@ export class McpModule implements AgentModule {
                 : inputOrServer;
         if (!Value.Check(mcpCallToolInputSchema, input)) {
             throw new Error("MCP tool call input is invalid.");
+        }
+        const policy = await this.#toolPolicy(ctx, agentId, input.server);
+        if (policy !== undefined && !isMcpToolAllowed(policy, input.name)) {
+            throw new Error(`The MCP tool "${input.name}" is disabled by the server policy.`);
         }
         const options = {
             onElicitation: async (request: McpElicitationRequest) =>
@@ -494,11 +484,7 @@ export class McpModule implements AgentModule {
             throw new Error("MCP host returned an invalid resource result.");
         }
         for (const content of raw.contents) {
-            if (
-                isRecord(content) &&
-                typeof content.uri === "string" &&
-                content.uri !== input.uri
-            ) {
+            if (isRecord(content) && typeof content.uri === "string" && content.uri !== input.uri) {
                 throw new Error("MCP resource result belongs to a different URI.");
             }
         }
@@ -600,14 +586,20 @@ export class McpModule implements AgentModule {
         );
     }
 
-    formatToolResultForModel(result: McpToolResult): readonly ReturnType<typeof mcpResultToContentBlocks>[number][] {
+    formatToolResultForModel(
+        result: McpToolResult,
+    ): readonly ReturnType<typeof mcpResultToContentBlocks>[number][] {
         if (!Value.Check(mcpToolResultSchema, result)) {
             throw new Error("Cannot format an invalid MCP tool result.");
         }
         return mcpResultToContentBlocks(result);
     }
 
-    async #listAllTools(ctx: Context, agentId: string, server: string): Promise<readonly McpTool[]> {
+    async #listAllTools(
+        ctx: Context,
+        agentId: string,
+        server: string,
+    ): Promise<readonly McpTool[]> {
         const tools: McpTool[] = [];
         let cursor: string | undefined;
         for (let pageCount = 0; pageCount < MAX_MCP_PAGE_SIZE; pageCount += 1) {
@@ -618,7 +610,10 @@ export class McpModule implements AgentModule {
             });
             tools.push(...page.tools);
             if (page.nextCursor === undefined) {
-                assertUnique(tools.map((tool) => tool.name), "tool");
+                assertUnique(
+                    tools.map((tool) => tool.name),
+                    "tool",
+                );
                 return tools;
             }
             cursor = page.nextCursor;
@@ -645,7 +640,10 @@ export class McpModule implements AgentModule {
             );
             servers.push(...page.servers);
             if (page.nextCursor === undefined) {
-                assertUnique(servers.map((server) => server.name), "server");
+                assertUnique(
+                    servers.map((server) => server.name),
+                    "server",
+                );
                 return servers;
             }
             cursor = page.nextCursor;
@@ -654,14 +652,42 @@ export class McpModule implements AgentModule {
     }
 
     #maximumVisibleRows(rowOverhead: number): number {
-        const continuationBudget =
-            "More results at cursor ".length + MAX_MCP_CURSOR_LENGTH + 1;
+        const continuationBudget = "More results at cursor ".length + MAX_MCP_CURSOR_LENGTH + 1;
         const rowBudget = 128 + rowOverhead + 1;
         const available = this.#maxOutputCharacters - continuationBudget;
-        return Math.max(
-            1,
-            Math.min(MAX_MCP_PAGE_SIZE, Math.floor((available + 1) / rowBudget)),
+        return Math.max(1, Math.min(MAX_MCP_PAGE_SIZE, Math.floor((available + 1) / rowBudget)));
+    }
+
+    async #toolPolicy(
+        ctx: Context,
+        agentId: string,
+        serverName: string,
+    ): Promise<McpToolPolicy | undefined> {
+        if (this.#host.getToolPolicy !== undefined) {
+            const policy = await this.#host.getToolPolicy(ctx, agentId, serverName);
+            if (!Value.Check(mcpToolPolicySchema, policy)) {
+                throw new Error("MCP host returned an invalid tool policy.");
+            }
+            return structuredClone(policy);
+        }
+        const server = (await this.#listAllServers(ctx, agentId, "auto")).find(
+            (candidate) => candidate.name === serverName,
         );
+        const policy =
+            server === undefined
+                ? undefined
+                : {
+                      ...(server.disabledTools === undefined
+                          ? {}
+                          : { disabledTools: [...server.disabledTools] }),
+                      ...(server.enabledTools === undefined
+                          ? {}
+                          : { enabledTools: [...server.enabledTools] }),
+                  };
+        if (policy !== undefined && !Value.Check(mcpToolPolicySchema, policy)) {
+            throw new Error("MCP server summary contained an invalid tool policy.");
+        }
+        return policy === undefined ? undefined : structuredClone(policy);
     }
 }
 
@@ -684,6 +710,9 @@ function runtimeOptions(options: McpModuleOptions): McpModuleOptions {
                       ...host,
                       callTool: host.callTool,
                       getPrompt: host.getPrompt,
+                      ...(host.getToolPolicy === undefined
+                          ? {}
+                          : { getToolPolicy: host.getToolPolicy }),
                       listPrompts: host.listPrompts,
                       listResourceTemplates: host.listResourceTemplates,
                       listResources: host.listResources,
@@ -715,6 +744,13 @@ function assertUnique(values: readonly string[], kind: string): void {
     }
 }
 
+function isMcpToolAllowed(server: McpToolPolicy, name: string): boolean {
+    return (
+        (server.enabledTools === undefined || server.enabledTools.includes(name)) &&
+        !server.disabledTools?.includes(name)
+    );
+}
+
 function assertCursorProgress(
     requested: string | undefined,
     next: string | undefined,
@@ -733,7 +769,8 @@ function formatIdentityRows(
     maximumCharacters: number,
     empty: string,
 ): string {
-    const continuation = nextCursor === undefined ? undefined : `More results at cursor ${nextCursor}.`;
+    const continuation =
+        nextCursor === undefined ? undefined : `More results at cursor ${nextCursor}.`;
     const rows = identities.map((identity, index) => `${identity}${suffixes[index] ?? ""}`);
     let output = rows.length === 0 ? empty : rows.join("\n");
     if (continuation !== undefined) output = `${output}\n${continuation}`;
@@ -744,8 +781,7 @@ function formatIdentityRows(
     let count = 0;
     for (const row of visible) {
         const nextSize = size + row.length + (count === 0 ? 0 : 1);
-        const continuationSize =
-            continuation === undefined ? 0 : continuation.length + 1;
+        const continuationSize = continuation === undefined ? 0 : continuation.length + 1;
         if (nextSize + continuationSize > maximumCharacters) break;
         count += 1;
         size = nextSize;
@@ -776,7 +812,6 @@ function formatIdentityRows(
     }
     return compact.join("\n");
 }
-
 
 function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null && !Array.isArray(value);

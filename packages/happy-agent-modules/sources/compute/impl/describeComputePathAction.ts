@@ -1,6 +1,7 @@
 import { isProtectedGitControlPath } from "@slopus/happy-agent-compute";
 
 import type { Compute } from "../Compute.js";
+import { isProtectedComputePath, projectProtectedComputePaths } from "./isProtectedComputePath.js";
 import { isPathInside, resolveComputePath } from "./resolveComputePath.js";
 
 /**
@@ -21,10 +22,13 @@ export function describeComputePathAction(
         // Keep the written path so the reviewer still sees what was proposed.
     }
     const access =
-        options.write === true && isProtectedGitControlPath(resolvedPath)
-            ? "protected Git control path requiring Full access"
-            : isPathInside(compute.cwd, resolvedPath)
-              ? "reviewed filesystem path requiring Full access after canonical path checks"
-              : "unrestricted filesystem access outside the workspace sandbox";
+        options.write === true &&
+        isProtectedComputePath(resolvedPath, projectProtectedComputePaths(compute.cwd))
+            ? "protected project config requiring Full access"
+            : options.write === true && isProtectedGitControlPath(resolvedPath)
+              ? "protected Git control path requiring Full access"
+              : isPathInside(compute.cwd, resolvedPath)
+                ? "reviewed filesystem path requiring Full access after canonical path checks"
+                : "unrestricted filesystem access outside the workspace sandbox";
     return `${operation} ${JSON.stringify(resolvedPath)}. Access: ${access}`;
 }

@@ -5,6 +5,7 @@ import type { Context } from "@steve.kite/stdlib";
 
 import { createNodeAgentContext } from "../agent/index.js";
 import {
+    connectHappyAgentProtocolServer,
     ensureLocalProtocolServer,
     RemoteAgent,
     type SessionTerminalConnection,
@@ -56,6 +57,7 @@ export interface RunAppOptions {
     cwd?: string;
     debug?: boolean;
     effort?: string;
+    happyAgentHome?: string;
     instructions?: string;
     modelId?: string;
     providerId?: string;
@@ -175,12 +177,17 @@ export async function runApp(ctx: Context, options: RunAppOptions = {}): Promise
     const opened = await (async () => {
         let sessionTerminal: SessionTerminalConnection | undefined;
         try {
-            const connection = await ensureLocalProtocolServer({
-                confirmRestart: (request) => startup.confirmDaemonRestart(request),
-                onStatus: (message) => {
-                    startup.setStatus(message);
-                },
-            });
+            const connection =
+                options.happyAgentHome === undefined
+                    ? await ensureLocalProtocolServer({
+                          confirmRestart: (request) => startup.confirmDaemonRestart(request),
+                          onStatus: (message) => {
+                              startup.setStatus(message);
+                          },
+                      })
+                    : await connectHappyAgentProtocolServer({
+                          agentHome: options.happyAgentHome,
+                      });
             let resumeSessionId = options.resumeSessionId;
             if (options.sessionSelection !== undefined) {
                 resumeSessionId = await resolveStartupSessionId({

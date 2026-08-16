@@ -1,0 +1,36 @@
+import { defineAgentTool } from "@slopus/happy-agent-base";
+import { Type, type Static } from "@sinclair/typebox";
+
+import { searchPageSchema } from "../Search.js";
+import type { SearchModule } from "../SearchModule.js";
+
+const inputSchema = Type.Object(
+    {
+        query: Type.String({ minLength: 2, maxLength: 20_000 }),
+        provider_id: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+    },
+    { additionalProperties: false },
+);
+
+type Input = Static<typeof inputSchema>;
+
+export function bedrockWebSearchTool(search: SearchModule, agentId: string) {
+    return defineAgentTool({
+        name: "bedrock_web_search",
+        description: "Search Amazon Bedrock's hosted web index and return bounded source results.",
+        parameters: inputSchema,
+        returnType: searchPageSchema,
+        durable: false,
+        requiresAutoOrFullAccess: true,
+        shouldReviewInAutoMode: () => true,
+        describeAutoPermissionAction: ({ query }) =>
+            `searching the web through Amazon Bedrock for "${query}". Access: external provider network`,
+        execute: async (ctx, input: Input) =>
+            await search.providerSearch(ctx, agentId, {
+                provider: "bedrock",
+                query: input.query,
+                ...(input.provider_id === undefined ? {} : { providerId: input.provider_id }),
+            }),
+        toLLM: (page) => [{ type: "text", text: search.formatSearchForModel(page) }],
+    });
+}

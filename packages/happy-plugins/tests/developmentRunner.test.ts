@@ -1,12 +1,15 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it } from "vitest";
 
 const execFileAsync = promisify(execFile);
 const cleanup: string[] = [];
+const packageRoot = fileURLToPath(new URL("../", import.meta.url));
 
 afterEach(async () => {
     await Promise.all(
@@ -16,11 +19,19 @@ afterEach(async () => {
 
 describe("happy-plugin development runner", () => {
     it("starts TypeScript, seeds projects, lists tools, and calls one without Docker", async () => {
-        const directory = await mkdtemp(join(process.cwd(), ".happy-plugin-runner-"));
+        const directory = await mkdtemp(join(tmpdir(), "happy-plugin-runner-"));
         cleanup.push(directory);
+        const temporaryDirectory = await mkdtemp(join(tmpdir(), "happy-plugin-runner-tmp-"));
+        cleanup.push(temporaryDirectory);
         const entryPath = join(directory, "index.ts");
         const seedPath = join(directory, "seed.json");
-        const temporaryDirectory = join(process.cwd(), "..", "..", ".local");
+        const nodeModules = join(directory, "node_modules");
+        await mkdir(nodeModules);
+        await symlink(
+            packageRoot,
+            join(nodeModules, "happy-plugins"),
+            process.platform === "win32" ? "junction" : "dir",
+        );
         await writeFile(
             entryPath,
             [
@@ -52,7 +63,7 @@ describe("happy-plugin development runner", () => {
         );
 
         await execFileAsync("pnpm", ["run", "build"], {
-            cwd: process.cwd(),
+            cwd: packageRoot,
             env: {
                 ...process.env,
                 TMPDIR: temporaryDirectory,
@@ -61,7 +72,7 @@ describe("happy-plugin development runner", () => {
         const { stdout } = await execFileAsync(
             process.execPath,
             [
-                join(process.cwd(), "dist", "developmentRunner.js"),
+                join(packageRoot, "dist", "developmentRunner.js"),
                 "dev",
                 entryPath,
                 "--seed",
@@ -81,7 +92,7 @@ describe("happy-plugin development runner", () => {
         expect(stdout).toContain('"tool": "list_projects"');
         expect(stdout).toContain('\\"name\\":\\"Rig\\"');
         expect(stdout).toContain('\\"persisted\\":\\"persisted by plugin\\"');
-        expect(await readdir(directory)).toEqual(["index.ts", "seed.json"]);
+        expect(await readdir(directory)).toEqual(["index.ts", "node_modules", "seed.json"]);
 
         await mkdir(join(directory, "app"));
         await writeFile(join(directory, "app", "index.html"), "<h1>App</h1>");
@@ -108,7 +119,7 @@ describe("happy-plugin development runner", () => {
         await expect(
             execFileAsync(
                 process.execPath,
-                [join(process.cwd(), "dist", "developmentRunner.js"), "dev", entryPath],
+                [join(packageRoot, "dist", "developmentRunner.js"), "dev", entryPath],
                 { env: { ...process.env, TMPDIR: temporaryDirectory }, timeout: 15_000 },
             ),
         ).rejects.toMatchObject({ stderr: expect.stringContaining("page must name an HTML") });
@@ -135,13 +146,13 @@ describe("happy-plugin development runner", () => {
         await expect(
             execFileAsync(
                 process.execPath,
-                [join(process.cwd(), "dist", "developmentRunner.js"), "dev", entryPath],
+                [join(packageRoot, "dist", "developmentRunner.js"), "dev", entryPath],
                 { env: { ...process.env, TMPDIR: temporaryDirectory }, timeout: 15_000 },
             ),
         ).rejects.toMatchObject({ stderr: expect.stringContaining("icon must be an image") });
 
         const packageJson = JSON.parse(
-            await readFile(join(process.cwd(), "package.json"), "utf8"),
+            await readFile(join(packageRoot, "package.json"), "utf8"),
         ) as { engines?: { node?: string } };
         expect(packageJson.engines?.node).toBe(">=22.6.0");
     });

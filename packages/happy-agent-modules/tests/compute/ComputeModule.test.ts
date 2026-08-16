@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import {
     ComputeModule,
+    SystemPromptModule,
     createComputeModules,
     type HostComputeProvider,
 } from "../../sources/index.js";
@@ -24,6 +25,12 @@ describe("ComputeModule", () => {
             },
         };
         const created = createComputeModules({ provider });
+        const systemPrompt = new SystemPromptModule({
+            compute: {
+                resolve: async (resolveCtx, agentId) =>
+                    await created.computeModule.resolve(resolveCtx, agentId),
+            },
+        });
         const agentACtx = withAgentConfig(ctx, {
             modules: { compute: { cwd: "/workspace/a" } },
         });
@@ -40,18 +47,12 @@ describe("ComputeModule", () => {
         expect(agentAAgain).toBe(agentA);
         expect(agentB).not.toBe(agentA);
         expect(computes).toHaveLength(2);
-        expect(created.modules.map((module) => module.name)).toEqual([
-            "compute",
-            "agents-md",
-            "skills",
-        ]);
+        expect(created.modules.map((module) => module.name)).toEqual(["compute", "skills"]);
 
         const fakeA = agentA as FakeCompute;
         fakeA.directories.add("/workspace/a/.git");
         fakeA.write("/workspace/a/AGENTS.md", "Agent A instructions.");
-        await expect(
-            created.agentsMdModule.read(agentACtx, "agent-a"),
-        ).resolves.toMatchObject({
+        await expect(systemPrompt.readAgentsMd(agentACtx, "agent-a")).resolves.toMatchObject({
             cwd: "/workspace/a",
             documents: [{ text: "Agent A instructions." }],
         });
@@ -61,26 +62,15 @@ describe("ComputeModule", () => {
         fakeA.disposeWait = new Promise<void>((resolve) => {
             finishDisposal = resolve;
         });
-        const archiving = created.computeModule.agentArchived?.(
-            ctx,
-            {} as never,
-            { id: "agent-a" },
-        );
-        const replacementPending = created.computeModule.resolve(
-            agentACtx,
-            "agent-a",
-        );
+        const archiving = created.computeModule.agentArchived?.(ctx, {} as never, {
+            id: "agent-a",
+        });
+        const replacementPending = created.computeModule.resolve(agentACtx, "agent-a");
         await expect(
-            Promise.race([
-                archiving?.then(() => "archived"),
-                Promise.resolve("disposing"),
-            ]),
+            Promise.race([archiving?.then(() => "archived"), Promise.resolve("disposing")]),
         ).resolves.toBe("disposing");
         await expect(
-            Promise.race([
-                replacementPending.then(() => "replaced"),
-                Promise.resolve("disposing"),
-            ]),
+            Promise.race([replacementPending.then(() => "replaced"), Promise.resolve("disposing")]),
         ).resolves.toBe("disposing");
         finishDisposal?.();
         await archiving;
@@ -93,17 +83,18 @@ describe("ComputeModule", () => {
     it("does nothing for an agent without compute configuration", async () => {
         const module = new ComputeModule();
         await expect(module.resolve(ctx, "agent-a")).resolves.toBeUndefined();
-        await expect(
-            module.tools(ctx, { agent: { id: "agent-a" } } as never),
-        ).resolves.toEqual([]);
+        await expect(module.tools(ctx, { agent: { id: "agent-a" } } as never)).resolves.toEqual([]);
     });
 
-    it("offers every model the same ten tools", async () => {
+    it("offers every model the same common compute tools", async () => {
         const { tools } = await computeToolset(ctx, new FakeCompute());
         expect(tools.map((tool) => tool.name)).toEqual([
             "read_file",
+            "view_image",
             "write_file",
             "edit_file",
+            "delete_file",
+            "move_file",
             "list_directory",
             "find_files",
             "search_files",
@@ -114,7 +105,7 @@ describe("ComputeModule", () => {
         ]);
     });
 
-    it("tells each model where its own compute is", async () => {
+    it("tells each model its compute rules", async () => {
         const compute = new FakeCompute("/srv/app");
         const provider: HostComputeProvider = {
             id: "host",
@@ -124,12 +115,11 @@ describe("ComputeModule", () => {
         const agentCtx = withAgentConfig(ctx, {
             modules: { compute: { cwd: "/srv/app" } },
         });
-        const instructions = await module.instructions(
-            agentCtx,
-            { agent: { id: "agent-a" } } as never,
-        );
+        const instructions = await module.instructions(agentCtx, {
+            agent: { id: "agent-a" },
+        } as never);
 
-        expect(instructions).toContain("/srv/app");
+        expect(instructions).not.toContain("/srv/app");
         expect(instructions).toContain("Read a file before changing it");
         expect(instructions).toContain("comes back with a command ID");
     });
@@ -187,6 +177,37 @@ describe("ComputeModule", () => {
         );
     });
 
+    it.each(["rig.toml", "happy.toml", "AGENTS_SECURITY.md"])(
+        "reviews writes to protected project config %s",
+        async (name) => {
+            const compute = new FakeCompute();
+            compute.write(`/workspace/${name}`, "protected\n");
+            const { tool } = await computeToolset(ctx, compute);
+
+            expect(await tool("write_file").shouldReviewInAutoMode({ path: name }, ctx)).toBe(true);
+            expect(tool("write_file").describeAutoPermissionAction?.({ path: name }, ctx)).toBe(
+                `writing "/workspace/${name}". Access: protected project config requiring Full access`,
+            );
+        },
+    );
+
+    it("reviews a workspace link that points at protected project config", async () => {
+        const compute = new FakeCompute();
+        compute.write("/workspace/rig.toml", "protected\n");
+        compute.links.set("/workspace/config-alias.toml", "/workspace/rig.toml");
+        const { tool } = await computeToolset(ctx, compute);
+
+        expect(
+            await tool("write_file").shouldReviewInAutoMode({ path: "config-alias.toml" }, ctx),
+        ).toBe(true);
+        expect(
+            await tool("write_file").shouldRunInFullAccessInAutoMode?.(
+                { path: "config-alias.toml" },
+                ctx,
+            ),
+        ).toBe(true);
+    });
+
     it("sees a link out of the workspace for what it is", async () => {
         const compute = new FakeCompute();
         compute.write("/workspace/escape.txt", "");
@@ -196,12 +217,7 @@ describe("ComputeModule", () => {
         expect(await tool("read_file").shouldReviewInAutoMode({ path: "escape.txt" }, ctx)).toBe(
             true,
         );
-        expect(
-            tool("read_file").describeAutoPermissionAction?.(
-                { path: "escape.txt" },
-                ctx,
-            ),
-        ).toBe(
+        expect(tool("read_file").describeAutoPermissionAction?.({ path: "escape.txt" }, ctx)).toBe(
             'reading "/workspace/escape.txt". Access: reviewed filesystem path requiring Full access after canonical path checks',
         );
     });

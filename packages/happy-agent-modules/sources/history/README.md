@@ -19,12 +19,17 @@ const agent = await Agent.create(ctx, { ...options, modules: [history] });
 ```
 
 `HistoryModuleOptions` also accepts `resolveTarget`, a callback the host provides to let one
-agent's history tool read another agent's history (self-access always works without it), and
-`toolOutputLimit`, how many characters of a tool's output are worth recording (default `16_000`,
-separate from `MAX_HISTORY_TOOL_OUTPUT_LENGTH`, the hard persistence cap). `failureMode` defaults
-to `"propagate"`: an archive failure rolls back the Agent Base transaction it happened inside.
-Passing `"best-effort"` is an explicit opt-in for hosts that treat history as advisory; a store
-failure is then swallowed and the record is dropped.
+agent's history tool read another agent's history (self-access always works without it). The
+callback receives either a Stable Agent ID or a canonical session-tree path and should report
+not-found and ambiguous-path errors itself. `listAgents` supplies the bounded session-tree
+summaries returned with every tool response; without it, self-history still reports the current
+agent with its archive count. `toolDisplay` optionally supplies the one-line summary that the host
+would show for a tool result. When it is absent, lifecycle recording uses a bounded generic
+success/error summary. `toolOutputLimit` controls how many characters of a tool's output are worth
+recording (default `16_000`, separate from `MAX_HISTORY_TOOL_OUTPUT_LENGTH`, the hard persistence
+cap). `failureMode` defaults to `"propagate"`: an archive failure rolls back the Agent Base
+transaction it happened inside. Passing `"best-effort"` is an explicit opt-in for hosts that treat
+history as advisory; a store failure is then swallowed and the record is dropped.
 
 ## Tools
 
@@ -50,9 +55,12 @@ Arguments:
 - `roles` — restrict to up to four of `"user"`, `"assistant"`, `"error"`, `"system"`.
 - `include_tools` — include simplified tool calls and truncated tool results in the rendering.
   Defaults to `true`; it never changes what `query` searches.
-- `target` — the agent whose history to read. Omitted means the caller.
+- `target` — a Stable Agent ID or canonical session-tree path such as `/root/audit`. Omitted means
+  the caller; paths are resolved by the host and may be rejected as missing or ambiguous.
 
-The response is a rendering, not a replay: `history` is chronological text capped at 80,000
+The response always includes `agents`, the bounded session-tree roster with `agent_id`,
+`description`, `message_count`, `path`, and `status`, so a model can discover targets before
+reading them. The response is a rendering, not a replay: `history` is chronological text capped at 80,000
 characters (`MAX_HISTORY_CHARACTERS`), one numbered block per message, with long text truncated,
 tool arguments and output truncated separately and more tightly, images represented only by media
 type, and reasoning the provider hid marked `[redacted]` rather than fabricated. Because the cap is
@@ -74,16 +82,21 @@ tool calls, and tool results), let the model size what it did and did not see wi
 - `stats(ctx, agentId): Promise<HistoryStats>` — exact totals for the whole archive, read through
   the store's bounded page operation rather than derived from a sampled page, since a caller such
   as model handoff may keep only a two-ended sample while still needing the true totals.
+- `listAgents(ctx, requesterAgentId, targetAgentId?): Promise<HistoryAgentSummaries>` — the bounded
+  related-agent roster supplied by the host, or a self/target fallback when no roster adapter is
+  configured.
 - `resolveTarget(ctx, requesterAgentId, requestedTarget): Promise<string | undefined>` — the
   access check behind the tool's `target` argument. Requesting one's own ID always resolves;
-  anything else is delegated to the constructor's `resolveTarget`, or refused when none was given.
+  anything else, including a canonical path, is delegated to the constructor's `resolveTarget`, or
+  refused when none was given.
 
 The module also implements the `AgentModule` lifecycle hooks that do the recording:
 `onEventTransact` (buffers each completed text/thinking/tool-call block), `messageAcceptedTransact`
 (records an accepted user message), `beforeToolCallTransact`/`afterToolCallTransact` (record one
-tool result per call), `afterInferenceTransact` (writes the finished response and, if inference
-failed, a separate `role: "error"` message), and `afterAgentSettledTransact` (flushes any response
-blocks still pending after an interruption). These are not meant to be called directly by a host.
+tool result per call, including its one-line display summary), `afterInferenceTransact` (writes the
+finished response and, if inference failed, a separate `role: "error"` message), and
+`afterAgentSettledTransact` (flushes any response blocks still pending after an interruption).
+These are not meant to be called directly by a host.
 
 ## Storage
 

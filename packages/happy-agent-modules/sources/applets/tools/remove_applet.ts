@@ -17,7 +17,10 @@ export function removeAppletTool(applets: AppletModule, agentId: string) {
         parameters: removeAppletInputSchema,
         returnType: Type.Boolean(),
         durable: false,
-        shouldReviewInAutoMode: () => false,
+        requiresAutoOrFullAccess: true,
+        shouldReviewInAutoMode: () => true,
+        shouldRunInFullAccessInAutoMode: () => true,
+        describeAutoPermissionAction: ({ name }) => applets.describeRemoveAutoPermission(name),
         execute: async (ctx, { name }, call) =>
             await applets.removeForAgent(ctx, agentId, name, call.id),
         toLLM: (removed) => [{ type: "text", text: applets.formatRemovalForModel(removed) }],

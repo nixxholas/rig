@@ -4,6 +4,7 @@ import type { Context } from "@steve.kite/stdlib";
 import type { Compute } from "../Compute.js";
 import { computePermissionsForContext } from "./computePermissionsForContext.js";
 import { canonicalComputePath } from "./canonicalComputePath.js";
+import { isProtectedComputePath, projectProtectedComputePaths } from "./isProtectedComputePath.js";
 import { isPathInside, resolveComputePath } from "./resolveComputePath.js";
 
 /**
@@ -34,7 +35,9 @@ export async function shouldReviewComputePath(
     if (!isPathInside(canonicalRoot, canonicalTarget)) return true;
     if (
         options.write &&
-        (isProtectedGitControlPath(resolvedPath) ||
+        (isProtectedComputePath(resolvedPath, projectProtectedComputePaths(compute.cwd)) ||
+            isProtectedComputePath(canonicalTarget, projectProtectedComputePaths(canonicalRoot)) ||
+            isProtectedGitControlPath(resolvedPath) ||
             isProtectedGitControlPath(canonicalTarget))
     ) {
         return true;

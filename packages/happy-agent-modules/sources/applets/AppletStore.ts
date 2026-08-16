@@ -9,6 +9,9 @@ import {
     appletChangeDescriptionSchema,
     appletCurrentResultSchema,
     appletDescriptionSchema,
+    defaultAppletAllowedScopes,
+    appletIconThumbhashSchema,
+    appletIconUrlSchema,
     appletImportInputSchema,
     appletListPageSchema,
     appletListQuerySchema,
@@ -106,46 +109,54 @@ export const appletCatalogMutationResultSchema = Type.Union([
  * owns the filesystem and generates the icon files itself, so it hands the
  * catalog only the durable metadata to persist, never a path.
  */
-const appletIconThumbhashSchema = Type.String({ minLength: 1, maxLength: 4_096 });
-const appletIconUrlSchema = Type.String({ minLength: 1, maxLength: 4_096 });
-
 /** The catalog input for the initial metadata row and source version. */
-export const appletCatalogCreateInputSchema = Type.Object(
-    {
-        name: appletImportInputSchema.properties.name,
-        description: appletDescriptionSchema,
-        purpose: appletPurposeSchema,
-        authorSessionId: appletImportInputSchema.properties.authorSessionId,
-        allowedScopes: Type.Optional(appletImportInputSchema.properties.allowedScopes),
-        sourceDescription: Type.Optional(appletImportInputSchema.properties.sourceDescription),
-        iconThumbhash: Type.Optional(appletIconThumbhashSchema),
-        iconUrl: Type.Optional(appletIconUrlSchema),
-        initialVersion: Type.Object(
-            {
-                version: Type.Literal(1),
-                changeDescription: Type.Literal("Initial import"),
-                createdAt: appletVersionSchema.properties.createdAt,
-                operationId: appletRefSchema,
-            },
-            { additionalProperties: false },
-        ),
-        operationId: appletRefSchema,
-    },
-    { additionalProperties: false },
-);
+const appletCatalogCreateFields = {
+    name: appletImportInputSchema.properties.name,
+    description: appletDescriptionSchema,
+    purpose: appletPurposeSchema,
+    authorSessionId: appletImportInputSchema.properties.authorSessionId,
+    allowedScopes: Type.Optional(appletImportInputSchema.properties.allowedScopes),
+    sourceDescription: Type.Optional(appletImportInputSchema.properties.sourceDescription),
+    initialVersion: Type.Object(
+        {
+            version: Type.Literal(1),
+            changeDescription: Type.Literal("Initial import"),
+            createdAt: appletVersionSchema.properties.createdAt,
+            operationId: appletRefSchema,
+        },
+        { additionalProperties: false },
+    ),
+    operationId: appletRefSchema,
+};
+
+export const appletCatalogCreateInputSchema = Type.Union([
+    Type.Object(
+        {
+            ...appletCatalogCreateFields,
+            iconThumbhash: appletIconThumbhashSchema,
+            iconUrl: appletIconUrlSchema,
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            ...appletCatalogCreateFields,
+            iconThumbhash: Type.Optional(Type.Undefined()),
+            iconUrl: Type.Optional(Type.Undefined()),
+        },
+        { additionalProperties: false },
+    ),
+]);
 
 /** The catalog input for one newly imported version and optional metadata changes. */
 export const appletCatalogUpdateInputSchema = Type.Object(
     {
-        version: appletVersionNumberSchema,
         changeDescription: appletChangeDescriptionSchema,
         createdAt: appletVersionSchema.properties.createdAt,
         allowedScopes: Type.Optional(appletUpdateInputSchema.properties.allowedScopes),
         description: Type.Optional(appletUpdateInputSchema.properties.description),
         purpose: Type.Optional(appletUpdateInputSchema.properties.purpose),
         sourceDescription: Type.Optional(appletUpdateInputSchema.properties.sourceDescription),
-        iconThumbhash: Type.Optional(appletIconThumbhashSchema),
-        iconUrl: Type.Optional(appletIconUrlSchema),
         operationId: appletRefSchema,
     },
     { additionalProperties: false },
@@ -178,6 +189,7 @@ export const appletCatalogSchema = Type.Object(
             [opaqueContextSchema, appletNameSchema],
             Type.Promise(Type.Union([appletSchema, Type.Undefined()])),
         ),
+        lock: Type.Function([opaqueContextSchema, appletNameSchema], Type.Promise(appletSchema)),
         create: Type.Function(
             [opaqueContextSchema, appletCatalogCreateInputSchema],
             Type.Promise(appletCatalogMutationResultSchema),

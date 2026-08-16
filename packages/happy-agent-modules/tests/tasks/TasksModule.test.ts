@@ -22,11 +22,9 @@ describe("TasksModule durable tools", () => {
                 }) as never;
             const scope = { agent: { id: "agent-a" } } as Parameters<TasksModule["tools"]>[1];
             const [create, , , update, complete] = tasks.tools(database.context, scope);
-            expect([create?.transactional, update?.transactional, complete?.transactional]).toEqual([
-                true,
-                true,
-                true,
-            ]);
+            expect([create?.transactional, update?.transactional, complete?.transactional]).toEqual(
+                [true, true, true],
+            );
 
             const created = await create!.execute(
                 database.context,
@@ -55,7 +53,11 @@ describe("TasksModule durable tools", () => {
                     { title: "Ship the task cleanup" },
                     call("call-task-1"),
                 ),
-            ).rejects.toThrow('Task "call-task-1" already exists.');
+            ).resolves.toMatchObject({
+                success: false,
+                taskId: "call-task-1",
+                error: 'Task "call-task-1" already exists.',
+            });
         } finally {
             database.close();
         }
@@ -75,6 +77,156 @@ describe("TasksModule durable tools", () => {
             await expect(tasks.create(database.context, "agent-a", input)).rejects.toThrow(
                 'Task "existing" already exists.',
             );
+        } finally {
+            database.close();
+        }
+    });
+
+    it("keeps task metadata, assignments, and both dependency directions in sync", async () => {
+        const tasks = new TasksModule({
+            clock: () => 123,
+            eventIdFactory: (() => {
+                let id = 0;
+                return () => `event-${++id}`;
+            })(),
+        });
+        const database = moduleDatabase(tasks.migrations, "tasks-parity-fields-test");
+        await database.ready;
+
+        try {
+            await tasks.create(database.context, "agent-a", {
+                id: "blocking",
+                title: "Blocking task",
+            });
+            await tasks.create(database.context, "agent-a", {
+                id: "blocked",
+                title: "Blocked task",
+                activeForm: "Building the feature",
+                metadata: { source: "legacy", nested: { count: 1 } },
+                owner: "worker-1",
+            });
+
+            const updated = await tasks.update(database.context, "agent-a", "blocked", {
+                addBlockedBy: ["blocking"],
+            });
+            expect(updated.dependsOn).toEqual(["blocking"]);
+            expect(updated.activeForm).toBe("Building the feature");
+            expect(updated.owner).toBe("worker-1");
+            expect(updated.metadata).toEqual({ source: "legacy", nested: { count: 1 } });
+            expect((await tasks.get(database.context, "agent-a", "blocking"))?.blocks).toEqual([
+                "blocked",
+            ]);
+
+            await tasks.update(database.context, "agent-a", "blocking", {
+                removeBlocks: ["blocked"],
+            });
+            expect((await tasks.get(database.context, "agent-a", "blocking"))?.blocks).toEqual([]);
+
+            await tasks.update(database.context, "agent-a", "blocking", {
+                addBlocks: ["blocked"],
+            });
+            expect((await tasks.get(database.context, "agent-a", "blocked"))?.dependsOn).toEqual([
+                "blocking",
+            ]);
+
+            await tasks.update(database.context, "agent-a", "blocked", {
+                metadata: { source: null, added: true },
+                removeBlockedBy: ["blocking"],
+                activeForm: null,
+                owner: null,
+            });
+            expect(await tasks.get(database.context, "agent-a", "blocked")).toMatchObject({
+                dependsOn: [],
+                metadata: { nested: { count: 1 }, added: true },
+            });
+            expect((await tasks.get(database.context, "agent-a", "blocking"))?.blocks).toEqual([]);
+        } finally {
+            database.close();
+        }
+    });
+
+    it("returns normal tool results for validation failures, filters completed blockers, and removes tasks", async () => {
+        const tasks = new TasksModule({
+            clock: () => 123,
+            eventIdFactory: (() => {
+                let id = 0;
+                return () => `event-${++id}`;
+            })(),
+        });
+        const database = moduleDatabase(tasks.migrations, "tasks-tool-parity-test");
+        await database.ready;
+
+        try {
+            const call = (id: string) =>
+                ({
+                    id,
+                    providerCallId: `provider-${id}`,
+                    kv: {},
+                }) as never;
+            const scope = { agent: { id: "agent-a" } } as Parameters<TasksModule["tools"]>[1];
+            const [create, , get, update, complete, remove] = tasks.tools(database.context, scope);
+            const blocking = await create!.execute(
+                database.context,
+                { title: "Blocking task" },
+                call("blocking"),
+            );
+            await create!.execute(
+                database.context,
+                { title: "Blocked task", dependsOn: [blocking.task.id] },
+                call("blocked"),
+            );
+
+            await complete!.execute(
+                database.context,
+                { id: blocking.task.id },
+                call("complete-blocking"),
+            );
+            const page = await tasks.listPage(database.context, "agent-a");
+            expect(page.tasks.find((task) => task.id === "blocked")?.dependsOn).toEqual([]);
+            const detail = await get!.execute(
+                database.context,
+                { id: "blocked" },
+                call("get-blocked"),
+            );
+            expect(detail).toMatchObject({ dependencies: ["blocking"] });
+
+            const unknownUpdate = await update!.execute(
+                database.context,
+                { id: "missing", title: "No task" },
+                call("update-missing"),
+            );
+            expect(unknownUpdate).toMatchObject({
+                success: false,
+                taskId: "missing",
+            });
+
+            const selfDependency = await create!.execute(
+                database.context,
+                { title: "Invalid", dependsOn: ["self"] },
+                call("self"),
+            );
+            expect(selfDependency).toMatchObject({
+                success: false,
+                taskId: "self",
+            });
+
+            const removed = await remove!.execute(
+                database.context,
+                { id: "blocking" },
+                call("remove-blocking"),
+            );
+            expect(removed).toEqual({ removed: true, taskId: "blocking" });
+            expect(await tasks.get(database.context, "agent-a", "blocking")).toBeUndefined();
+            expect((await tasks.get(database.context, "agent-a", "blocked"))?.dependsOn).toEqual(
+                [],
+            );
+            const deleted = await update!.execute(
+                database.context,
+                { id: "blocked", status: "deleted" },
+                call("delete-blocked"),
+            );
+            expect(deleted).toEqual({ removed: true, taskId: "blocked" });
+            expect(await tasks.get(database.context, "agent-a", "blocked")).toBeUndefined();
         } finally {
             database.close();
         }

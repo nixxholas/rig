@@ -1,9 +1,11 @@
 import {
     agentConfigSchema,
+    agentPermissionMode,
     type AgentModule,
     type AgentModuleScope,
     type AgentMetadataChange,
     type AnyAgentTool,
+    type AgentPermissionMode,
 } from "@slopus/happy-agent-base";
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
@@ -14,15 +16,21 @@ import {
     COLLABORATION_METADATA_MAX_DEPTH,
     COLLABORATION_METADATA_MAX_ENCODED_BYTES,
     collaborationAgentIdSchema,
+    collaborationAgentObservationSchema,
     collaborationAgentPageQuerySchema,
     collaborationAgentSchema,
+    collaborationAgentSelectionSchema,
     collaborationCreateInputSchema,
+    collaborationModelCatalogSchema,
     collaborationMetadataSchema,
     type CollaborationAgent,
+    type CollaborationAgentObservation,
     type CollaborationAgentPage,
     type CollaborationAgentPageQuery,
     type CollaborationCreateInput,
+    type CollaborationModelCatalog,
     type CollaborationMetadata,
+    type CollaborationSpawnCapacity,
 } from "./CollaborationAgent.js";
 import {
     collaborationEventIdSchema,
@@ -39,7 +47,9 @@ import {
     collaborationReplyInputSchema,
     collaborationSendInputSchema,
     collaborationSendResultSchema,
+    collaborationWaitForAgentInputSchema,
     collaborationWaitInputSchema,
+    collaborationWaitResultSchema,
     type CollaborationMessage,
     type CollaborationObligation,
     type CollaborationObligationPage,
@@ -48,11 +58,15 @@ import {
     type CollaborationSendInput,
     type CollaborationSendResult,
     type CollaborationWaitInput,
+    type CollaborationWaitForAgentInput,
+    type CollaborationWaitResult,
 } from "./CollaborationMessage.js";
 import {
     assertCollaborationAgentPage,
+    assertCollaborationAgentObservation,
     assertCollaborationBrokerAgentResult,
     assertCollaborationObligationPage,
+    assertCollaborationSpawnCapacity,
     assertCollaborationVoidResult,
     collaborationAuthorizationSchema,
     collaborationBrokerSchema,
@@ -64,6 +78,7 @@ import {
     type CollaborationStore,
 } from "./CollaborationStore.js";
 import { createAgentTool } from "./tools/create_agent.js";
+import { interruptAgentTool } from "./tools/interrupt_agent.js";
 import { listAgentsTool } from "./tools/list_agents.js";
 import { replyToMessageTool } from "./tools/reply_to_message.js";
 import { sendMessageTool } from "./tools/send_message.js";
@@ -90,6 +105,7 @@ const eventFactorySchema = Type.Function(
 const collaborationModuleOptionsSchema = Type.Object(
     {
         broker: collaborationBrokerSchema,
+        modelCatalog: Type.Optional(collaborationModelCatalogSchema),
         authorization: Type.Optional(collaborationAuthorizationSchema),
         idFactory: Type.Optional(idFactorySchema),
         messageIdFactory: Type.Optional(messageIdFactorySchema),
@@ -127,6 +143,7 @@ export class CollaborationModule implements AgentModule {
     readonly #roster: CollaborationRoster;
     readonly #store: CollaborationStore;
     readonly #broker: CollaborationBroker;
+    readonly #modelCatalog: CollaborationModelCatalog | undefined;
     readonly #authorization: CollaborationAuthorization | undefined;
     readonly #listener: CollaborationModuleListener | undefined;
     readonly #idFactory: NonNullable<CollaborationModuleOptions["idFactory"]>;
@@ -143,6 +160,11 @@ export class CollaborationModule implements AgentModule {
         this.#roster = storage.roster;
         this.#store = storage.store;
         this.#broker = validated.broker;
+        this.#modelCatalog =
+            validated.modelCatalog === undefined
+                ? undefined
+                : structuredClone(validated.modelCatalog);
+        if (this.#modelCatalog !== undefined) assertModelCatalog(this.#modelCatalog);
         this.#authorization = validated.authorization;
         this.#listener = validated.listener;
         this.#idFactory = validated.idFactory ?? ((_ctx, _acting) => generatedId("a"));
@@ -178,6 +200,15 @@ export class CollaborationModule implements AgentModule {
             }
         }
         this.#assertInput(collaborationCreateInputSchema, input, "create agent");
+        const permissionMode = agentPermissionMode(ctx);
+        const selection = this.#validateSelection({
+            model: input.model,
+            effort: input.effort,
+            ...(input.provider === undefined ? {} : { provider: input.provider }),
+            ...(input.serviceTier === undefined ? {} : { serviceTier: input.serviceTier }),
+        });
+        const readOnly = normalizeReadOnly(permissionMode, input.readOnly);
+        const fork = normalizeFork(input.context, input.forkTurns);
         const id =
             input.id ??
             (await this.#generatedId(
@@ -232,18 +263,36 @@ export class CollaborationModule implements AgentModule {
                 ...(input.title === undefined ? {} : { title: input.title }),
                 ...(metadata === undefined ? {} : { metadata }),
                 status: "idle",
+                runVersion: 0,
                 createdAt: at,
                 updatedAt: at,
             };
             this.#assertAgent(roster);
-            return { config: expectedConfig, roster };
+            return {
+                config: expectedConfig,
+                context: fork.context,
+                ...(fork.forkTurns === undefined ? {} : { forkTurns: fork.forkTurns }),
+                permissionMode,
+                readOnly,
+                roster,
+                selection,
+            };
         });
 
         const brokerConfig = await this.#broker.config(ctx, id);
         if (brokerConfig === undefined) {
+            await this.#assertCanSpawn(
+                ctx,
+                planned.roster.parentId === null ? actingAgentId : planned.roster.parentId,
+            );
             const createdRaw: unknown = this.#broker.create(ctx, structuredClone(planned.config), {
                 id,
                 parent: planned.roster.parentId,
+                selection: structuredClone(planned.selection),
+                context: planned.context,
+                permissionMode: planned.permissionMode,
+                ...(planned.forkTurns === undefined ? {} : { forkTurns: planned.forkTurns }),
+                ...(planned.readOnly === undefined ? {} : { readOnly: planned.readOnly }),
             });
             const created = await requirePromise(createdRaw, "Collaboration broker create");
             assertCollaborationBrokerAgentResult(created);
@@ -252,6 +301,7 @@ export class CollaborationModule implements AgentModule {
             }
         }
         await this.#assertBrokerConfig(ctx, id, planned.config);
+        await this.#assertBrokerSelection(ctx, id, planned.selection);
 
         return await ctx.inTx(async (txCtx) => {
             const existing = await this.#readAgent(txCtx, id);
@@ -375,6 +425,42 @@ export class CollaborationModule implements AgentModule {
         return await this.replyMessage(ctx, actingAgentId, input);
     }
 
+    /**
+     * Interrupt a collaborator's current turn while keeping its durable identity and queued
+     * follow-up work. The host broker owns the actual Agent Base cancellation.
+     */
+    async interruptAgent(
+        ctx: Context,
+        actingAgentId: string,
+        targetAgentId: string,
+    ): Promise<CollaborationAgentObservation> {
+        this.#assertAgentId(actingAgentId, "acting agent");
+        this.#assertAgentId(targetAgentId, "target agent");
+        await this.#readRequiredAgent(ctx, actingAgentId);
+        const target = await this.#readRequiredAgent(ctx, targetAgentId);
+        await this.#authorize(ctx, actingAgentId, target, "interrupt");
+
+        const before = await this.#observeAgent(ctx, actingAgentId, targetAgentId);
+        await this.#reconcileObservation(ctx, actingAgentId, before);
+        if (!isInterruptibleStatus(before.status)) {
+            throw new Error(`Collaborator "${targetAgentId}" is not running.`);
+        }
+        const interruptedRaw: unknown = this.#broker.interrupt(ctx, actingAgentId, targetAgentId);
+        const interrupted = await requirePromise(interruptedRaw, "Collaboration broker interrupt");
+        assertCollaborationAgentObservation(interrupted);
+        if (interrupted.agentId !== targetAgentId) {
+            throw new Error("Collaboration broker interrupted a different agent.");
+        }
+        if (!isTerminalInterruptStatus(interrupted.status)) {
+            throw new Error("Collaboration broker did not stop the collaborator's current turn.");
+        }
+        if (interrupted.version <= before.version) {
+            throw new Error("Collaboration broker returned a stale interruption result.");
+        }
+        await this.#reconcileObservation(ctx, actingAgentId, interrupted);
+        return structuredClone(interrupted);
+    }
+
     async listObligations(
         ctx: Context,
         actingAgentId: string,
@@ -436,13 +522,16 @@ export class CollaborationModule implements AgentModule {
     async waitForReply(
         ctx: Context,
         actingAgentId: string,
-        inputOrObligationId: CollaborationWaitInput | string,
-    ): Promise<CollaborationObligation> {
+        inputOrWait: CollaborationWaitInput | CollaborationWaitForAgentInput | string,
+    ): Promise<CollaborationWaitResult> {
         this.#assertAgentId(actingAgentId, "acting agent");
-        const input =
-            typeof inputOrObligationId === "string"
-                ? { obligationId: inputOrObligationId }
-                : inputOrObligationId;
+        const input = typeof inputOrWait === "string" ? { obligationId: inputOrWait } : inputOrWait;
+
+        if (isRecord(input) && "agentId" in input) {
+            this.#assertInput(collaborationWaitForAgentInputSchema, input, "agent wait");
+            return await this.#waitForAgent(ctx, actingAgentId, input);
+        }
+
         this.#assertInput(collaborationWaitInputSchema, input, "wait");
 
         await ctx.inTx(async (txCtx) => {
@@ -478,28 +567,34 @@ export class CollaborationModule implements AgentModule {
             if (!sameValue(current, waited)) {
                 throw new Error("Collaboration wait result disagrees with the host obligation.");
             }
-            return structuredClone(current);
+            const result = structuredClone(current);
+            this.#assertValue(collaborationWaitResultSchema, result, "wait result");
+            return result;
         });
     }
 
     async wait(
         ctx: Context,
         actingAgentId: string,
-        inputOrObligationId: CollaborationWaitInput | string,
-    ): Promise<CollaborationObligation> {
-        return await this.waitForReply(ctx, actingAgentId, inputOrObligationId);
+        inputOrWait: CollaborationWaitInput | CollaborationWaitForAgentInput | string,
+    ): Promise<CollaborationWaitResult> {
+        return await this.waitForReply(ctx, actingAgentId, inputOrWait);
     }
 
     readonly tools = async (
-        _ctx: Context,
+        ctx: Context,
         scope: AgentModuleScope,
     ): Promise<readonly AnyAgentTool[]> => {
+        const capacity = await this.#spawnCapacity(ctx, scope.agent.id);
         const tools: AnyAgentTool[] = [
-            createAgentTool(this, scope.agent.id),
+            createAgentTool(this, scope.agent.id, {
+                capacity,
+            }),
             listAgentsTool(this, scope.agent.id, this.#maxOutputCharacters),
             sendMessageTool(this, scope.agent.id),
             replyToMessageTool(this, scope.agent.id),
             waitForReplyTool(this, scope.agent.id),
+            interruptAgentTool(this, scope.agent.id),
         ];
         return tools;
     };
@@ -541,6 +636,89 @@ export class CollaborationModule implements AgentModule {
         await this.#setStatus(ctx, scope.agent.id, "idle");
     };
 
+    /** Render the injected model catalog and current capacity for the create tool description. */
+    describeCreateAgentCapability(capacity: CollaborationSpawnCapacity): string {
+        this.#assertSpawnCapacity(capacity);
+        const models =
+            this.#modelCatalog?.availableModels.map(
+                (model) =>
+                    `- ${model.providerId} + ${model.id} (${model.name}; effort: ${model.effortLevels.join(", ")}${
+                        model.serviceTiers === undefined
+                            ? ""
+                            : `; tiers: ${model.serviceTiers.join(", ")}`
+                    })`,
+            ) ?? [];
+        const disabled =
+            this.#modelCatalog?.disabledProviders.map(
+                (provider) => `- ${provider.id} (${provider.reason.replaceAll("_", " ")})`,
+            ) ?? [];
+        const active =
+            capacity.maxActive === undefined
+                ? ""
+                : ` Active collaborators: ${capacity.active ?? 0}/${capacity.maxActive}.`;
+        const depth = ` Spawn depth: ${capacity.depth}/${capacity.maxDepth}.`;
+        const availability = capacity.canSpawn
+            ? "Spawning is currently available."
+            : "Spawning is currently unavailable; do not call create_agent.";
+        const text = [
+            "Choose an exact model and effort when creating a collaborator. Provider is optional when the model ID is unambiguous.",
+            availability + depth + active,
+            ...(this.#modelCatalog === undefined
+                ? [
+                      "Model catalog unavailable; the host will validate the requested model and effort.",
+                  ]
+                : ["Available model/provider pairs:", ...models]),
+            ...(disabled.length === 0 ? [] : ["Disabled providers:", ...disabled]),
+            "Use context `task` for a fresh task prompt, or `parent` to fork parent context. `forkTurns` may be `none`, `all`, or a positive integer string.",
+            "Set readOnly true to force Read only, or false to restore the sender's current permission mode.",
+        ].join("\n");
+        return truncateForModel(
+            text,
+            this.#maxOutputCharacters,
+            "[collaboration creation guidance truncated]",
+        );
+    }
+
+    /** Bound the complete model-facing create description, including the tool's fixed preface. */
+    formatCreateAgentDescription(preface: string, capacity: CollaborationSpawnCapacity): string {
+        return truncateForModel(
+            `${preface}\n\n${this.describeCreateAgentCapability(capacity)}`,
+            this.#maxOutputCharacters,
+            "[collaboration creation guidance truncated]",
+        );
+    }
+
+    /** Render a bounded collaborator observation for model-facing tool output. */
+    formatAgentObservationForModel(observation: CollaborationAgentObservation): string {
+        this.#assertValue(collaborationAgentObservationSchema, observation, "agent observation");
+        const prefix = `Collaborator ${observation.agentId}${
+            observation.path === undefined ? "" : ` (${observation.path})`
+        } is ${observation.status}.`;
+        if (observation.output === undefined) {
+            return truncateForModel(
+                prefix,
+                this.#maxOutputCharacters,
+                "[agent observation truncated]",
+            );
+        }
+        const marker = " [output truncated]";
+        const outputLabel = "\nOutput: ";
+        const available =
+            this.#maxOutputCharacters - prefix.length - outputLabel.length - marker.length;
+        if (available > 0) {
+            const output =
+                observation.output.length > available
+                    ? `${observation.output.slice(0, available)}${marker}`
+                    : observation.output;
+            return `${prefix}${outputLabel}${output}`;
+        }
+        return truncateForModel(
+            `${prefix}${outputLabel}${observation.output}`,
+            this.#maxOutputCharacters,
+            "[agent observation truncated]",
+        );
+    }
+
     async #send(
         ctx: Context,
         actingAgentId: string,
@@ -548,6 +726,8 @@ export class CollaborationModule implements AgentModule {
         kind: "send" | "reply",
     ): Promise<CollaborationSendResult> {
         const recipientId = input.toAgentId;
+        const permissionMode = agentPermissionMode(ctx);
+        const readOnly = normalizeReadOnly(permissionMode, input.readOnly);
         const messageId =
             input.messageId ??
             (await this.#generatedId(
@@ -561,6 +741,9 @@ export class CollaborationModule implements AgentModule {
             await this.#readRequiredAgent(txCtx, actingAgentId);
             const recipient = await this.#readRequiredAgent(txCtx, recipientId);
             await this.#authorize(txCtx, actingAgentId, recipient, kind);
+            if (input.readOnly !== undefined) {
+                await this.#authorize(txCtx, actingAgentId, recipient, "permission");
+            }
 
             const replyTo = "replyTo" in input ? input.replyTo : undefined;
             let existingObligation: CollaborationObligation | undefined;
@@ -619,8 +802,24 @@ export class CollaborationModule implements AgentModule {
                 message,
                 obligationId,
                 replyTo,
+                permissionMode,
+                readOnly,
             };
         });
+
+        if (planned.readOnly !== undefined) {
+            const permissionRaw: unknown = this.#broker.setReadOnly(
+                ctx,
+                actingAgentId,
+                recipientId,
+                planned.readOnly,
+                planned.permissionMode,
+            );
+            assertCollaborationVoidResult(
+                await requirePromise(permissionRaw, "Collaboration broker permission switch"),
+                "broker permission switch",
+            );
+        }
 
         const sendRaw: unknown = this.#broker.send(
             ctx,
@@ -736,10 +935,237 @@ export class CollaborationModule implements AgentModule {
         });
     }
 
+    async #waitForAgent(
+        ctx: Context,
+        actingAgentId: string,
+        input: CollaborationWaitForAgentInput,
+    ): Promise<CollaborationAgentObservation> {
+        this.#assertAgentId(input.agentId, "target agent");
+        await ctx.inTx(async (txCtx) => {
+            await this.#readRequiredAgent(txCtx, actingAgentId);
+            const target = await this.#readRequiredAgent(txCtx, input.agentId);
+            await this.#authorize(txCtx, actingAgentId, target, "wait");
+        });
+
+        const waitedRaw: unknown = this.#broker.waitForAgent(
+            ctx,
+            actingAgentId,
+            input.agentId,
+            input.timeoutMs ?? 3_600_000,
+        );
+        const waited = await requirePromise(waitedRaw, "Collaboration broker agent wait");
+        assertCollaborationAgentObservation(waited);
+        if (waited.agentId !== input.agentId) {
+            throw new Error("Collaboration broker waited for a different agent.");
+        }
+        await this.#reconcileObservation(ctx, actingAgentId, waited);
+        return structuredClone(waited);
+    }
+
+    async #observeAgent(
+        ctx: Context,
+        actingAgentId: string,
+        targetAgentId: string,
+    ): Promise<CollaborationAgentObservation> {
+        const observedRaw: unknown = this.#broker.observe(ctx, actingAgentId, targetAgentId);
+        const observed = await requirePromise(observedRaw, "Collaboration broker observe");
+        assertCollaborationAgentObservation(observed);
+        if (observed.agentId !== targetAgentId) {
+            throw new Error("Collaboration broker observed a different agent.");
+        }
+        return structuredClone(observed);
+    }
+
+    async #spawnCapacity(ctx: Context, actingAgentId: string): Promise<CollaborationSpawnCapacity> {
+        const raw: unknown = this.#broker.spawnCapacity(ctx, actingAgentId);
+        const capacity = await requirePromise(raw, "Collaboration broker spawn capacity");
+        this.#assertSpawnCapacity(capacity);
+        return structuredClone(capacity);
+    }
+
+    async #assertCanSpawn(ctx: Context, actingAgentId: string): Promise<void> {
+        const capacity = await this.#spawnCapacity(ctx, actingAgentId);
+        if (!capacity.canSpawn) {
+            if (capacity.depth >= capacity.maxDepth) {
+                throw new Error("This agent has reached the maximum subagent depth.");
+            }
+            if (
+                capacity.maxActive !== undefined &&
+                capacity.active !== undefined &&
+                capacity.active >= capacity.maxActive
+            ) {
+                throw new Error("The maximum number of active collaborators has been reached.");
+            }
+            throw new Error("This agent cannot create a collaborator right now.");
+        }
+    }
+
+    #assertSpawnCapacity(value: unknown): asserts value is CollaborationSpawnCapacity {
+        assertCollaborationSpawnCapacity(value);
+        if (value.depth > value.maxDepth) {
+            throw new Error("Collaboration broker returned an invalid spawn depth.");
+        }
+        if (
+            value.maxActive !== undefined &&
+            value.active !== undefined &&
+            value.active > value.maxActive
+        ) {
+            throw new Error("Collaboration broker returned invalid active capacity.");
+        }
+        if (value.canSpawn === true && value.depth >= value.maxDepth) {
+            throw new Error("Collaboration broker returned inconsistent spawn capacity.");
+        }
+        if (
+            value.canSpawn === true &&
+            value.maxActive !== undefined &&
+            value.active !== undefined &&
+            value.active >= value.maxActive
+        ) {
+            throw new Error("Collaboration broker returned inconsistent active capacity.");
+        }
+    }
+
+    #validateSelection(input: {
+        readonly model: string;
+        readonly effort: CollaborationCreateInput["effort"];
+        readonly provider?: string;
+        readonly serviceTier?: CollaborationCreateInput["serviceTier"];
+    }): Static<typeof collaborationAgentSelectionSchema> {
+        const selection = {
+            model: input.model,
+            effort: input.effort,
+            ...(input.provider === undefined ? {} : { provider: input.provider }),
+            ...(input.serviceTier === undefined ? {} : { serviceTier: input.serviceTier }),
+        };
+        this.#assertValue(collaborationAgentSelectionSchema, selection, "agent selection");
+        if (this.#modelCatalog === undefined) return structuredClone(selection);
+        const catalog = this.#modelCatalog;
+        if (
+            input.provider !== undefined &&
+            catalog.disabledProviders.some(({ id }) => id === input.provider)
+        ) {
+            throw new Error(`Provider "${input.provider}" is disabled for collaborators.`);
+        }
+        if (input.provider === undefined) {
+            const providers = new Set(
+                catalog.availableModels
+                    .filter((model) => model.id === input.model)
+                    .map(({ providerId }) => providerId),
+            );
+            if (providers.size > 1) {
+                throw new Error(
+                    `Provider is required because model "${input.model}" is available from multiple providers.`,
+                );
+            }
+        }
+        const disabledProviders = new Set(catalog.disabledProviders.map(({ id }) => id));
+        const candidates = catalog.availableModels.filter(
+            (model) =>
+                model.id === input.model &&
+                (input.provider === undefined || model.providerId === input.provider) &&
+                !disabledProviders.has(model.providerId),
+        );
+        if (candidates.length === 0) {
+            throw new Error(
+                input.provider === undefined
+                    ? `Model "${input.model}" is not available for collaborators.`
+                    : `Model "${input.model}" is not available for provider "${input.provider}".`,
+            );
+        }
+        const effortCandidates = candidates.filter((model) =>
+            model.effortLevels.includes(input.effort),
+        );
+        if (effortCandidates.length === 0) {
+            throw new Error(
+                `Effort "${input.effort}" is not available for collaborator model "${input.model}".`,
+            );
+        }
+        const candidate = effortCandidates.find(
+            (model) =>
+                input.serviceTier === undefined ||
+                model.serviceTiers?.includes(input.serviceTier) === true,
+        );
+        if (input.serviceTier !== undefined && candidate === undefined) {
+            throw new Error(
+                `Service tier "${input.serviceTier}" is not available for collaborator model "${input.model}".`,
+            );
+        }
+        return structuredClone(selection);
+    }
+
+    async #reconcileObservation(
+        ctx: Context,
+        actingAgentId: string,
+        observation: CollaborationAgentObservation,
+    ): Promise<void> {
+        await ctx.inTx(async (txCtx) => {
+            await this.#readRequiredAgent(txCtx, actingAgentId);
+            const current = await this.#readRequiredAgent(txCtx, observation.agentId);
+            await this.#authorize(txCtx, actingAgentId, current, "read");
+            const sameRunVersion =
+                current.runVersion === observation.version && current.runId === observation.runId;
+            if (
+                observation.version < current.runVersion ||
+                (observation.version === current.runVersion &&
+                    current.runId !== undefined &&
+                    current.runId !== observation.runId) ||
+                (sameRunVersion &&
+                    current.observationUpdatedAt !== undefined &&
+                    observation.updatedAt !== undefined &&
+                    observation.updatedAt < current.observationUpdatedAt) ||
+                (sameRunVersion &&
+                    current.status !== observation.status &&
+                    (observation.updatedAt === undefined ||
+                        (current.observationUpdatedAt !== undefined &&
+                            observation.updatedAt <= current.observationUpdatedAt)))
+            ) {
+                throw new Error(`Collaboration observation for "${observation.agentId}" is stale.`);
+            }
+            const statusChanged = current.status !== observation.status;
+            const runChanged =
+                current.runVersion !== observation.version || current.runId !== observation.runId;
+            const observationTimestampChanged =
+                observation.updatedAt !== undefined &&
+                observation.updatedAt !== current.observationUpdatedAt;
+            const base =
+                observation.updatedAt === undefined && !sameRunVersion
+                    ? withoutObservationUpdatedAt(current)
+                    : current;
+            const next: CollaborationAgent = {
+                ...base,
+                status: observation.status,
+                runId: observation.runId,
+                runVersion: observation.version,
+                ...(observation.updatedAt === undefined
+                    ? {}
+                    : { observationUpdatedAt: observation.updatedAt }),
+                ...(statusChanged || runChanged || observationTimestampChanged
+                    ? { updatedAt: this.#now() }
+                    : {}),
+            };
+            this.#assertAgent(next);
+            if (sameValue(next, current)) return;
+            await this.#writeAgent(txCtx, next);
+            const persisted = await this.#readRequiredAgent(txCtx, observation.agentId);
+            if (!sameValue(persisted, next)) {
+                throw new Error("Collaboration roster substituted agent observation state.");
+            }
+            if (statusChanged) {
+                const event = await this.#event(txCtx, {
+                    type: "agent_status_changed",
+                    actingAgentId,
+                    agentId: observation.agentId,
+                    status: observation.status,
+                });
+                await this.#announce(txCtx, event);
+            }
+        });
+    }
+
     async #setStatus(
         ctx: Context,
         agentId: string,
-        status: "active" | "idle" | "waiting",
+        status: CollaborationAgent["status"],
     ): Promise<void> {
         const current = await this.#readRequiredAgent(ctx, agentId);
         if (current.status === status) return;
@@ -771,6 +1197,7 @@ export class CollaborationModule implements AgentModule {
             ownerAgentId: agentId,
             parentId: null,
             status: "idle",
+            runVersion: 0,
             createdAt: at,
             updatedAt: at,
         });
@@ -788,7 +1215,7 @@ export class CollaborationModule implements AgentModule {
                   readonly type: "agent_status_changed";
                   readonly actingAgentId: string;
                   readonly agentId: string;
-                  readonly status: "active" | "idle" | "waiting";
+                  readonly status: CollaborationAgent["status"];
               }
             | {
                   readonly type: "message_sent";
@@ -859,6 +1286,22 @@ export class CollaborationModule implements AgentModule {
         const detached = structuredClone(actual);
         if (!sameValue(detached, expected)) {
             throw new Error(`Agent "${id}" has a different Agent Base configuration.`);
+        }
+    }
+
+    async #assertBrokerSelection(
+        ctx: Context,
+        id: string,
+        expected: Static<typeof collaborationAgentSelectionSchema>,
+    ): Promise<void> {
+        const raw: unknown = this.#broker.selection(ctx, id);
+        const actual = await requirePromise(raw, "Collaboration broker selection");
+        if (actual === undefined) {
+            throw new Error(`Collaboration broker did not persist selection for "${id}".`);
+        }
+        this.#assertValue(collaborationAgentSelectionSchema, actual, "broker selection");
+        if (!sameValue(structuredClone(actual), expected)) {
+            throw new Error(`Agent "${id}" has a different collaborator model selection.`);
         }
     }
 
@@ -1208,7 +1651,18 @@ function validateOptions(options: unknown): CollaborationModuleOptions {
     const source = options as Record<string, unknown>;
     const view = {
         ...source,
-        broker: methodView(source.broker, ["create", "config", "send", "wait"]),
+        broker: methodView(source.broker, [
+            "create",
+            "config",
+            "selection",
+            "send",
+            "wait",
+            "interrupt",
+            "observe",
+            "waitForAgent",
+            "setReadOnly",
+            "spawnCapacity",
+        ]),
         ...(source.authorization === undefined
             ? {}
             : { authorization: methodView(source.authorization, ["authorize"]) }),
@@ -1232,6 +1686,86 @@ function methodView(value: unknown, keys: readonly string[]): unknown {
     const view: Record<string, unknown> = {};
     for (const key of keys) view[key] = source[key];
     return view;
+}
+
+function assertModelCatalog(value: CollaborationModelCatalog): void {
+    const pairs = new Set<string>();
+    for (const model of value.availableModels) {
+        if (!model.effortLevels.includes(model.defaultEffort)) {
+            throw new Error(`Model "${model.id}" has a default effort it does not support.`);
+        }
+        const pair = `${model.providerId}\u0000${model.id}`;
+        if (pairs.has(pair)) {
+            throw new Error(
+                `Model "${model.id}" is duplicated for provider "${model.providerId}".`,
+            );
+        }
+        pairs.add(pair);
+    }
+    const disabled = new Set<string>();
+    for (const provider of value.disabledProviders) {
+        if (disabled.has(provider.id)) {
+            throw new Error(`Provider "${provider.id}" is duplicated in the disabled catalog.`);
+        }
+        disabled.add(provider.id);
+    }
+}
+
+function normalizeFork(
+    context: CollaborationCreateInput["context"],
+    forkTurns: CollaborationCreateInput["forkTurns"],
+): {
+    readonly context: "parent" | "task";
+    readonly forkTurns?: CollaborationCreateInput["forkTurns"];
+} {
+    if (forkTurns === undefined) {
+        return { context: context ?? "task" };
+    }
+    const derivedContext = forkTurns === "none" ? "task" : "parent";
+    if (context !== undefined && context !== derivedContext) {
+        throw new Error("Collaboration context and forkTurns request different contexts.");
+    }
+    return {
+        context: derivedContext,
+        forkTurns,
+    };
+}
+
+/**
+ * `false` means inherit the sender's mode. A read-only sender must never be able to turn that
+ * request into a wider child mode, so the broker receives the equivalent explicit reduction.
+ */
+function normalizeReadOnly(
+    mode: AgentPermissionMode,
+    requested: boolean | undefined,
+): boolean | undefined {
+    return requested === false && mode === "read_only" ? true : requested;
+}
+
+function withoutObservationUpdatedAt(
+    agent: CollaborationAgent,
+): Omit<CollaborationAgent, "observationUpdatedAt"> {
+    const { observationUpdatedAt: _observationUpdatedAt, ...rest } = agent;
+    return rest;
+}
+
+function truncateForModel(text: string, maximum: number, marker: string): string {
+    if (text.length <= maximum) return text;
+    if (marker.length >= maximum) return marker.slice(0, maximum);
+    return `${text.slice(0, maximum - marker.length)}${marker}`;
+}
+
+function isInterruptibleStatus(status: CollaborationAgentObservation["status"]): boolean {
+    return status === "active" || status === "running";
+}
+
+function isTerminalInterruptStatus(status: CollaborationAgentObservation["status"]): boolean {
+    return (
+        status === "completed" ||
+        status === "error" ||
+        status === "aborted" ||
+        status === "suspended"
+    );
 }
 
 function mergedMetadata(

@@ -1,0 +1,39 @@
+import { defineAgentTool } from "@slopus/happy-agent-base";
+import { Type, type Static } from "@sinclair/typebox";
+
+import { searchPageSchema } from "../Search.js";
+import type { SearchModule } from "../SearchModule.js";
+
+const inputSchema = Type.Object(
+    {
+        query: Type.String({ minLength: 2, maxLength: 20_000 }),
+        domains: Type.Optional(Type.Array(Type.String(), { maxItems: 100 })),
+        provider_id: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+    },
+    { additionalProperties: false },
+);
+
+type Input = Static<typeof inputSchema>;
+
+export function codexWebSearchTool(search: SearchModule, agentId: string) {
+    return defineAgentTool({
+        name: "codex_web_search",
+        description:
+            "Research the live web through Codex when current documentation, releases, or facts need direct sources.",
+        parameters: inputSchema,
+        returnType: searchPageSchema,
+        durable: false,
+        requiresAutoOrFullAccess: true,
+        shouldReviewInAutoMode: () => true,
+        describeAutoPermissionAction: ({ query }) =>
+            `searching the web through Codex for "${query}". Access: external provider network`,
+        execute: async (ctx, input: Input) =>
+            await search.providerSearch(ctx, agentId, {
+                provider: "codex",
+                query: input.query,
+                ...(input.domains === undefined ? {} : { allowedDomains: input.domains }),
+                ...(input.provider_id === undefined ? {} : { providerId: input.provider_id }),
+            }),
+        toLLM: (page) => [{ type: "text", text: search.formatSearchForModel(page) }],
+    });
+}

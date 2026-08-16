@@ -11,7 +11,7 @@ export function waitTool(scheduling: SchedulingModule, agentId: string) {
     return defineAgentTool({
         name: "wait",
         description:
-            "Pause this agent for a bounded duration. The host owns the durable wait; a new message interrupts it and the result reports the time that actually elapsed.",
+            "Pause this agent for a bounded duration. Use seconds, minutes, hours, or days, including compound fields or human text such as '90 seconds' or '1h 30m'. The host owns the durable wait; a new message interrupts it and the result reports the time that actually elapsed.",
         parameters: schedulingWaitToolInputSchema,
         returnType: schedulingWaitResultSchema,
         durable: true,

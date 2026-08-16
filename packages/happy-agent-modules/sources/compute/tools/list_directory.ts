@@ -17,12 +17,18 @@ export function listDirectoryTool(compute: Compute) {
         description: `List the entries of one directory on the machine you are working on.
 
 - Names are sorted, and a directory's name ends with a slash.
+- Dot-files and dot-directories are hidden by default; set show_hidden when they are needed.
 - This lists one level. Use find_files to look through a whole tree.`,
         parameters: Type.Object(
             {
                 path: Type.Optional(
                     Type.String({
                         description: "The directory to list. Defaults to the working directory.",
+                    }),
+                ),
+                show_hidden: Type.Optional(
+                    Type.Boolean({
+                        description: "Include dot-files and dot-directories. Defaults to false.",
                     }),
                 ),
             },
@@ -42,16 +48,16 @@ export function listDirectoryTool(compute: Compute) {
             shouldReviewComputePath(compute, path ?? ".", { write: false }, ctx),
         shouldRunInFullAccessInAutoMode: ({ path }, ctx) =>
             shouldReviewComputePath(compute, path ?? ".", { write: false }, ctx),
-        execute: async (ctx, { path }) => {
+        execute: async (ctx, { path, show_hidden }) => {
             const permissions = computePermissions(agentPermissionMode(ctx));
             const directory = resolveComputePath(path ?? ".", compute.cwd, compute.fs.home);
             const stat = await compute.fs.stat(permissions, directory);
             if (!stat.isDirectory) {
                 throw new Error(`This path is not a directory. Use read_file for it: ${directory}`);
             }
-            const names = [...(await compute.fs.readdir(permissions, directory))].sort((left, right) =>
-                left < right ? -1 : left > right ? 1 : 0,
-            );
+            const names = [...(await compute.fs.readdir(permissions, directory))]
+                .filter((name) => show_hidden === true || !name.startsWith("."))
+                .sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
             const shown = names.slice(0, MAX_ENTRIES);
             const stats = await compute.fs.lstatMany(
                 permissions,

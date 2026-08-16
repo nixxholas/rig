@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import {
     agentDatabaseRun,
@@ -27,12 +27,15 @@ import {
     appletAssetSchema,
     appletChangeDescriptionSchema,
     appletCurrentResultSchema,
+    defaultAppletAllowedScopes,
     appletImportInputSchema,
     appletListPageSchema,
     appletListQuerySchema,
     appletNameSchema,
     appletRefSchema,
     appletRevertInputSchema,
+    appletScopeSchema,
+    appletSourcePathSchema,
     appletTimestampSchema,
     appletToolImportInputSchema,
     appletToolRevertInputSchema,
@@ -42,6 +45,7 @@ import {
     type Applet,
     type AppletAsset,
     type AppletAssetReadInput,
+    type AppletIconMetadata,
     type AppletImportInput,
     type AppletListPage,
     type AppletListQuery,
@@ -49,6 +53,7 @@ import {
     type AppletToolImportInput,
     type AppletToolRevertInput,
     type AppletToolUpdateInput,
+    type AppletScope,
     type AppletUpdateInput,
 } from "./Applet.js";
 import {
@@ -86,7 +91,13 @@ import {
 } from "./AppletDatabase.js";
 import { appletIconUrl, defaultAppletsRootDirectory } from "./appletPaths.js";
 import { stageAppletIcon } from "./appletIcon.js";
-import { copyAppletTree } from "./copyAppletTree.js";
+import {
+    appletSourceReaderSchema,
+    assertAppletSourceReader,
+    readAppletTree,
+    type AppletSourceReader,
+    type AppletTreeFile,
+} from "./copyAppletTree.js";
 import { readAppletAssetFile } from "./readAppletAssetFile.js";
 import { createAppletTool } from "./tools/create_applet.js";
 import { getAppletTool } from "./tools/get_applet.js";
@@ -103,6 +114,14 @@ const asyncOperationIdSchema = Type.Union([operationIdSchema, Type.Promise(opera
 const asyncVoidSchema = Type.Union([Type.Void(), Type.Promise(Type.Void())]);
 
 const appletRootDirectorySchema = Type.String({ minLength: 1, maxLength: 4_096 });
+const appletSourceReaderFactorySchema = Type.Function(
+    [opaqueContextSchema],
+    Type.Promise(appletSourceReaderSchema),
+);
+const appletSourcePathPolicySchema = Type.Function(
+    [opaqueContextSchema, appletSourcePathSchema],
+    Type.Promise(appletSourcePathSchema),
+);
 
 const appletModuleOptionsSchema = Type.Object(
     {
@@ -113,6 +132,16 @@ const appletModuleOptionsSchema = Type.Object(
          * beside the version folders.
          */
         rootDirectory: Type.Optional(appletRootDirectorySchema),
+        /**
+         * Resolves the agent-visible source reader. The host must enforce the
+         * agent's filesystem boundary in this reader.
+         */
+        sourceReaderFactory: Type.Optional(appletSourceReaderFactorySchema),
+        /**
+         * Canonicalizes and authorizes a source or icon path. Imports fail
+         * closed when the host has not supplied this policy.
+         */
+        sourcePathPolicy: Type.Optional(appletSourcePathPolicySchema),
         listener: Type.Optional(appletModuleListenerSchema),
         /**
          * Resolves the host's opaque author identity from the agent scope.  A
@@ -176,16 +205,19 @@ type StageRegistration = {
 };
 
 /**
- * Files copied into a hidden staging directory before the module database transaction.
- * On commit the staging directory is atomically renamed into place; on rollback
- * it is removed and any target moved aside is restored.
+ * A bounded, in-memory import prepared while the catalog transaction is open.
+ * The destination filesystem is not touched until the catalog transaction commits,
+ * because a database rollback cannot undo a filesystem write.
  */
 type StagedImport = {
-    readonly stagingPath: string;
     readonly targetPath: string;
-    readonly orphanPath?: string;
-    readonly iconThumbhash?: string;
-    readonly iconUrl?: string;
+    readonly filesRoot: string;
+    readonly files: readonly AppletTreeFile[];
+    readonly iconFiles?: {
+        readonly png: Buffer;
+        readonly ico: Buffer;
+    };
+    readonly iconMetadata?: AppletIconMetadata;
     readonly fileCount: number;
     readonly byteCount: number;
 };
@@ -195,6 +227,8 @@ export class AppletModule implements AgentModule {
     readonly name = "applets";
     readonly #catalog: AppletDatabase;
     readonly #rootDirectory: string;
+    readonly #sourceReaderFactory: NonNullable<AppletModuleOptions["sourceReaderFactory"]>;
+    readonly #sourcePathPolicy: NonNullable<AppletModuleOptions["sourcePathPolicy"]>;
     readonly #listener: AppletModuleListener | undefined;
     readonly #authorFactory: NonNullable<AppletModuleOptions["authorFactory"]>;
     readonly #idFactory: NonNullable<AppletModuleOptions["idFactory"]>;
@@ -207,6 +241,7 @@ export class AppletModule implements AgentModule {
     readonly #maxSourceFileBytes: number;
     readonly #maxAssetBytes: number;
     readonly #onPostCommitError: AppletModuleOptions["onPostCommitError"];
+    #postCommitChain: Promise<void> = Promise.resolve();
 
     readonly migrations: readonly AgentModuleMigration[] = [
         [
@@ -254,6 +289,16 @@ export class AppletModule implements AgentModule {
         assertAppletModuleOptions(options);
         this.#catalog = createAppletDatabase();
         this.#rootDirectory = options.rootDirectory ?? defaultAppletsRootDirectory();
+        this.#sourceReaderFactory =
+            options.sourceReaderFactory ??
+            (async () => {
+                throw new Error("Applet source reader is not configured.");
+            });
+        this.#sourcePathPolicy =
+            options.sourcePathPolicy ??
+            (async () => {
+                throw new Error("Applet source path policy is not configured.");
+            });
         this.#listener = options.listener;
         this.#authorFactory =
             options.authorFactory ??
@@ -295,14 +340,11 @@ export class AppletModule implements AgentModule {
                     description: input.description,
                     purpose: input.purpose,
                     authorSessionId: input.authorSessionId,
-                    allowedScopes: input.allowedScopes ?? ["global"],
+                    allowedScopes: input.allowedScopes ?? [...defaultAppletAllowedScopes],
                     ...(input.sourceDescription === undefined
                         ? {}
                         : { sourceDescription: input.sourceDescription }),
-                    ...(stage.iconThumbhash === undefined
-                        ? {}
-                        : { iconThumbhash: stage.iconThumbhash }),
-                    ...(stage.iconUrl === undefined ? {} : { iconUrl: stage.iconUrl }),
+                    ...(stage.iconMetadata === undefined ? {} : stage.iconMetadata),
                     initialVersion: {
                         version: 1,
                         changeDescription: "Initial import",
@@ -432,46 +474,59 @@ export class AppletModule implements AgentModule {
         return structuredClone(result);
     }
 
+    /**
+     * The Slots host calls this before accepting an open-applet action. The
+     * applet module owns the allowed-scope metadata but does not import Slots.
+     */
+    async assertScopeAllowed(ctx: Context, name: string, scope: AppletScope): Promise<void> {
+        assertName(name);
+        if (!Value.Check(appletScopeSchema, scope)) {
+            throw new Error("Applet scope is invalid.");
+        }
+        const applet = await this.#get(ctx, name);
+        if (applet === undefined || applet.allowedScopes.includes(scope)) return;
+        throw new Error(`Applet "${name}" is not allowed from the ${scope} scope.`);
+    }
+
     async update(ctx: Context, name: string, input: AppletUpdateInput): Promise<Applet> {
         assertName(name);
         assertInput(appletUpdateInputSchema, input, "applet update");
         const operation = await this.#operation(ctx, "update", input.operationId);
         return await this.#runTransaction(ctx, "update", async (txCtx) => {
-            const existing = await this.#requireApplet(txCtx, name);
-            // Reverts change the current pointer but never reclaim a version
-            // number.  The next import is always one beyond the archive.
-            const targetVersion = existing.versions.length + 1;
-            if (targetVersion > MAX_APPLET_VERSIONS) {
+            // A catalog row update acquires the database's write lock before
+            // the external source is staged. This serializes version
+            // allocation across processes without a module heap lock.
+            const existing = await this.#catalogLock(txCtx, name);
+            if (existing.versions.length >= MAX_APPLET_VERSIONS) {
                 throw new Error("Applet has reached the maximum version count.");
             }
             const versionTimestamp = this.#now();
+            const mutation = await this.#catalogUpdate(txCtx, name, {
+                changeDescription: input.changeDescription,
+                createdAt: versionTimestamp,
+                ...(input.allowedScopes === undefined
+                    ? {}
+                    : { allowedScopes: input.allowedScopes }),
+                ...(input.description === undefined ? {} : { description: input.description }),
+                ...(input.purpose === undefined ? {} : { purpose: input.purpose }),
+                ...(input.sourceDescription === undefined
+                    ? {}
+                    : { sourceDescription: input.sourceDescription }),
+                operationId: operation.operationId,
+            });
+            const targetVersion = mutation.targetVersion;
+            this.#assertMutation(mutation, operation, name, input, {
+                before: existing,
+                targetVersion,
+                versionTimestamp,
+            });
             const stage = await this.#stage(txCtx, {
                 name,
                 version: targetVersion,
                 sourcePath: input.path,
-                ...(input.iconPath === undefined ? {} : { iconPath: input.iconPath }),
             });
             let registration: StageRegistration | undefined;
             try {
-                const mutation = await this.#catalogUpdate(txCtx, name, {
-                    version: targetVersion,
-                    changeDescription: input.changeDescription,
-                    createdAt: versionTimestamp,
-                    ...(input.allowedScopes === undefined
-                        ? {}
-                        : { allowedScopes: input.allowedScopes }),
-                    ...(input.description === undefined ? {} : { description: input.description }),
-                    ...(input.purpose === undefined ? {} : { purpose: input.purpose }),
-                    ...(input.sourceDescription === undefined
-                        ? {}
-                        : { sourceDescription: input.sourceDescription }),
-                    operationId: operation.operationId,
-                });
-                this.#assertMutation(mutation, operation, name, input, {
-                    before: existing,
-                    targetVersion,
-                    versionTimestamp,
-                });
                 const event = await this.#event(
                     { type: "applet_updated", applet: mutation.applet },
                     txCtx,
@@ -503,11 +558,7 @@ export class AppletModule implements AgentModule {
         });
     }
 
-    async revert(
-        ctx: Context,
-        name: string,
-        input: AppletRevertInput,
-    ): Promise<Applet> {
+    async revert(ctx: Context, name: string, input: AppletRevertInput): Promise<Applet> {
         assertName(name);
         assertInput(appletRevertInputSchema, input, "applet revert");
         const operation = await this.#operation(ctx, "revert", input.operationId);
@@ -619,6 +670,24 @@ export class AppletModule implements AgentModule {
         return structuredClone(result);
     }
 
+    describeImportAutoPermission(input: AppletToolImportInput, label: "create" | "import"): string {
+        const icon =
+            input.iconPath === undefined ? "" : ` with icon ${quoteVisibleExact(input.iconPath)}`;
+        return `${label} applet ${quoteVisibleExact(input.name)} from folder ${quoteVisibleExact(input.path)}${icon} under ${quoteVisibleExact(this.#rootDirectory)}. Access: reads the source through the host filesystem boundary and copies files into the served applets directory`;
+    }
+
+    describeUpdateAutoPermission(name: string, input: AppletToolUpdateInput): string {
+        return `import folder ${quoteVisibleExact(input.path)} as the next version of applet ${quoteVisibleExact(name)} under ${quoteVisibleExact(this.#rootDirectory)} and make it current. Access: reads the source through the host filesystem boundary and copies files into the served applets directory`;
+    }
+
+    describeRevertAutoPermission(name: string, version: number): string {
+        return `make version v${String(version)} of applet ${quoteVisibleExact(name)} current without deleting any version`;
+    }
+
+    describeRemoveAutoPermission(name: string): string {
+        return `remove applet ${quoteVisibleExact(name)} and delete its installed folder ${quoteVisibleExact(join(this.#rootDirectory, name))}`;
+    }
+
     formatForModel(applets: readonly Applet[]): string {
         const text = this.#formatAppletRows(applets);
         if (text.length > this.#maxOutputCharacters) {
@@ -643,21 +712,20 @@ export class AppletModule implements AgentModule {
     formatAppletForModel(applet: Applet | undefined): string {
         if (applet === undefined) return "Applet not found.";
         assertApplet(applet);
-        const firstVersion = applet.versions[0]!.version;
-        const lastVersion = applet.versions[applet.versions.length - 1]!.version;
-        const versionRange =
-            firstVersion === lastVersion ? `${firstVersion}` : `${firstVersion}-${lastVersion}`;
-        const identity = `${applet.name} v${applet.currentVersion}: Versions: ${versionRange}`;
+        const identity = `${applet.name} v${applet.currentVersion}`;
         if (identity.length > this.#maxOutputCharacters) {
             throw new Error("Applet model output cannot fit the complete applet identity.");
         }
-        const details = ` ${applet.description}`;
-        return `${identity}${truncateText(details, this.#maxOutputCharacters - identity.length, "\n[details truncated]")}`;
+        return truncateText(
+            this.#formatAppletDetails(applet),
+            this.#maxOutputCharacters,
+            "\n[details truncated]",
+        );
     }
 
     formatOperationForModel(label: string, applet: Applet): string {
         assertApplet(applet);
-        const text = `${label}: ${applet.name} v${applet.currentVersion}`;
+        const text = `${label}: ${this.formatAppletForModel(applet)}`;
         if (text.length > this.#maxOutputCharacters) {
             throw new Error("Applet model output cannot fit the complete applet identity.");
         }
@@ -751,20 +819,47 @@ export class AppletModule implements AgentModule {
         return 0;
     }
 
-    #formatAppletRows(applets: readonly Applet[]): string {
+    #formatAppletRows(applets: readonly Applet[], maximum = this.#maxOutputCharacters): string {
         const lines = applets.map((applet) => {
             assertApplet(applet);
-            // Keep every source identity visible. Descriptions and versions
-            // are available through get_applet; including them here would let
-            // one long description hide the cursor-bearing rows.
-            return `${applet.name} v${applet.currentVersion}`;
+            return truncateText(
+                this.#formatAppletDetails(applet),
+                maximum,
+                "\n[details truncated]",
+            );
         });
-        return lines.length === 0 ? "No applets." : lines.join("\n");
+        return lines.length === 0 ? "No applets." : lines.join("\n\n");
+    }
+
+    #formatAppletDetails(applet: Applet): string {
+        const versionIdentities = applet.versions
+            .map((version) => `v${String(version.version)}`)
+            .join(", ");
+        const changes = applet.versions
+            .map(
+                (version) =>
+                    `v${String(version.version)} (${String(version.createdAt)}): ${version.changeDescription}`,
+            )
+            .join("; ");
+        return [
+            `${applet.name} v${String(applet.currentVersion)}`,
+            `Versions: ${versionIdentities}`,
+            `Description: ${applet.description}`,
+            `Purpose: ${applet.purpose}`,
+            `Author session: ${applet.authorSessionId}`,
+            `Allowed scopes: ${applet.allowedScopes.join(", ")}`,
+            `Source: ${applet.sourceDescription ?? "not provided"}`,
+            `Changes: ${changes}`,
+        ].join("\n");
     }
 
     #formatListPage(page: AppletListPage): string {
-        const rows = this.#formatAppletRows(page.applets);
-        return page.nextCursor === undefined ? rows : `${rows}\nNext cursor: ${page.nextCursor}`;
+        const suffix = page.nextCursor === undefined ? "" : `\nNext cursor: ${page.nextCursor}`;
+        const rows = this.#formatAppletRows(
+            page.applets,
+            Math.max(1, this.#maxOutputCharacters - suffix.length),
+        );
+        return `${rows}${suffix}`;
     }
 
     async #runTransaction<Result>(
@@ -797,6 +892,15 @@ export class AppletModule implements AgentModule {
         assertApplet(result);
         if (result.name !== name) {
             throw new Error("Applet catalog get returned a different applet name.");
+        }
+        return structuredClone(result);
+    }
+
+    async #catalogLock(ctx: Context, name: string): Promise<Applet> {
+        const result = await requirePromise(this.#catalog.lock(ctx, name), "Applet catalog lock");
+        assertApplet(result);
+        if (result.name !== name) {
+            throw new Error("Applet catalog lock returned a different applet name.");
         }
         return structuredClone(result);
     }
@@ -867,13 +971,23 @@ export class AppletModule implements AgentModule {
         return raw as AppletCatalogRemoveResult;
     }
 
-    /**
-     * Verifies the source and copies it into a hidden staging directory beside
-     * its final destination. The staged files are not visible at their served
-     * location until the catalog transaction commits.
-     */
+    async #resolveSourcePath(ctx: Context, path: string): Promise<string> {
+        const raw = await this.#sourcePathPolicy(ctx, path);
+        if (!Value.Check(appletSourcePathSchema, raw)) {
+            throw new Error("Applet source path policy returned an invalid path.");
+        }
+        return raw;
+    }
+
+    async #sourceReader(ctx: Context): Promise<AppletSourceReader> {
+        const raw = await this.#sourceReaderFactory(ctx);
+        assertAppletSourceReader(raw);
+        return raw;
+    }
+
+    /** Reads and validates an import without touching the served filesystem. */
     async #stage(
-        _ctx: Context,
+        ctx: Context,
         input: {
             readonly name: string;
             readonly version: number;
@@ -886,63 +1000,37 @@ export class AppletModule implements AgentModule {
             maxBytes: this.#maxSourceBytes,
             maxFileBytes: this.#maxSourceFileBytes,
         };
+        const sourcePath = await this.#resolveSourcePath(ctx, input.sourcePath);
+        const sourceReader = await this.#sourceReader(ctx);
+        const iconPath =
+            input.iconPath === undefined
+                ? undefined
+                : await this.#resolveSourcePath(ctx, input.iconPath);
         const appletRoot = join(this.#rootDirectory, input.name);
+        const copied = await readAppletTree(sourcePath, bounds, sourceReader);
+        const targetPath =
+            input.version === 1 ? appletRoot : join(appletRoot, `v${String(input.version)}`);
+        if (input.version > 1) await this.#assertMissingTarget(targetPath);
 
-        if (input.version === 1) {
-            const targetPath = appletRoot;
-            const stagingPath = join(this.#rootDirectory, `.${input.name}-${randomUUID()}`);
-            await mkdir(this.#rootDirectory, { recursive: true });
-            const orphanPath = await this.#moveTargetAside(targetPath);
-            try {
-                await mkdir(stagingPath);
-                const copied = await copyAppletTree(
-                    input.sourcePath,
-                    join(stagingPath, "v1"),
-                    bounds,
-                );
-                let iconUrl: string | undefined;
-                if (input.iconPath !== undefined) {
-                    const icon = await stageAppletIcon(input.iconPath);
-                    await Promise.all([
-                        writeFile(join(stagingPath, "favicon.png"), icon.png),
-                        writeFile(join(stagingPath, "favicon.ico"), icon.ico),
-                    ]);
-                    iconUrl = appletIconUrl(input.name);
-                }
-                return {
-                    stagingPath,
-                    targetPath,
-                    ...(orphanPath === undefined ? {} : { orphanPath }),
-                    ...(iconUrl === undefined ? {} : { iconUrl }),
-                    fileCount: copied.fileCount,
-                    byteCount: copied.byteCount,
-                };
-            } catch (error: unknown) {
-                await rm(stagingPath, { force: true, recursive: true }).catch(() => undefined);
-                if (orphanPath !== undefined) {
-                    await rename(orphanPath, targetPath).catch(() => undefined);
-                }
-                throw error;
-            }
-        }
-
-        const targetPath = join(appletRoot, `v${String(input.version)}`);
-        await mkdir(appletRoot, { recursive: true });
-        await this.#assertMissingTarget(targetPath);
-        const stagingPath = join(appletRoot, `.v${String(input.version)}-${randomUUID()}`);
-        try {
-            await mkdir(stagingPath);
-            const copied = await copyAppletTree(input.sourcePath, stagingPath, bounds);
-            return {
-                stagingPath,
-                targetPath,
-                fileCount: copied.fileCount,
-                byteCount: copied.byteCount,
+        let iconMetadata: AppletIconMetadata | undefined;
+        let iconFiles: StagedImport["iconFiles"];
+        if (iconPath !== undefined) {
+            const icon = await stageAppletIcon(iconPath, sourceReader);
+            iconFiles = { png: icon.png, ico: icon.ico };
+            iconMetadata = {
+                iconThumbhash: icon.thumbhash,
+                iconUrl: appletIconUrl(input.name),
             };
-        } catch (error: unknown) {
-            await rm(stagingPath, { force: true, recursive: true }).catch(() => undefined);
-            throw error;
         }
+        return {
+            targetPath,
+            filesRoot: input.version === 1 ? "v1" : "",
+            files: copied.files,
+            ...(iconFiles === undefined ? {} : { iconFiles }),
+            ...(iconMetadata === undefined ? {} : { iconMetadata }),
+            fileCount: copied.fileCount,
+            byteCount: copied.byteCount,
+        };
     }
 
     async #registerStage(
@@ -956,9 +1044,8 @@ export class AppletModule implements AgentModule {
             settled = true;
             await this.#rollbackStage(rollbackCtx, stage);
         };
-        afterCommit(
-            ctx,
-            async (postCommitCtx) => {
+        afterCommit(ctx, (postCommitCtx) =>
+            this.#enqueuePostCommit(async () => {
                 if (settled) return;
                 try {
                     await this.#commitStage(postCommitCtx, stage);
@@ -968,25 +1055,49 @@ export class AppletModule implements AgentModule {
                     await rollbackNow(postCommitCtx);
                     await this.#reportPostCommitError(postCommitCtx, event, error);
                 }
-            },
+            }),
         );
         return { rollbackNow };
     }
 
-    /** Moves the staged files into their served location once the catalog commits. */
+    /** Materializes the bounded import once the catalog transaction commits. */
     async #commitStage(_ctx: Context, stage: StagedImport): Promise<void> {
         await mkdir(dirname(stage.targetPath), { recursive: true });
-        await rename(stage.stagingPath, stage.targetPath);
-        if (stage.orphanPath !== undefined) {
-            await rm(stage.orphanPath, { force: true, recursive: true }).catch(() => undefined);
+        const stagingPath = join(
+            dirname(stage.targetPath),
+            `.${basename(stage.targetPath)}-${randomUUID()}`,
+        );
+        let orphanPath: string | undefined;
+        try {
+            await mkdir(stagingPath, { recursive: true });
+            for (const file of stage.files) {
+                const destinationPath = join(stagingPath, stage.filesRoot, file.path);
+                await mkdir(dirname(destinationPath), { recursive: true });
+                await writeFile(destinationPath, file.bytes);
+            }
+            if (stage.iconFiles !== undefined) {
+                await Promise.all([
+                    writeFile(join(stagingPath, "favicon.png"), stage.iconFiles.png),
+                    writeFile(join(stagingPath, "favicon.ico"), stage.iconFiles.ico),
+                ]);
+            }
+            orphanPath = await this.#moveTargetAside(stage.targetPath);
+            await rename(stagingPath, stage.targetPath);
+            if (orphanPath !== undefined) {
+                await rm(orphanPath, { force: true, recursive: true }).catch(() => undefined);
+            }
+        } catch (error: unknown) {
+            await rm(stagingPath, { force: true, recursive: true }).catch(() => undefined);
+            if (orphanPath !== undefined) {
+                await rename(orphanPath, stage.targetPath).catch(() => undefined);
+            }
+            throw error;
         }
     }
 
-    async #rollbackStage(_ctx: Context, stage: StagedImport): Promise<void> {
-        await rm(stage.stagingPath, { force: true, recursive: true }).catch(() => undefined);
-        if (stage.orphanPath !== undefined) {
-            await rename(stage.orphanPath, stage.targetPath).catch(() => undefined);
-        }
+    async #rollbackStage(_ctx: Context, _stage: StagedImport): Promise<void> {
+        // Imports are held in bounded memory until commit, so a transaction rollback
+        // has no filesystem side effect to compensate.
     }
 
     /**
@@ -995,16 +1106,26 @@ export class AppletModule implements AgentModule {
      * applet.
      */
     #registerRemoval(ctx: Context, name: string, event?: AppletEvent): void {
-        afterCommit(ctx, async (postCommitCtx) => {
-            try {
-                await rm(join(this.#rootDirectory, name), { force: true, recursive: true });
-                if (event !== undefined) {
-                    await this.#notifyPostCommit(postCommitCtx, event);
+        afterCommit(ctx, (postCommitCtx) =>
+            this.#enqueuePostCommit(async () => {
+                try {
+                    await rm(join(this.#rootDirectory, name), { force: true, recursive: true });
+                    if (event !== undefined) {
+                        await this.#notifyPostCommit(postCommitCtx, event);
+                    }
+                } catch (error: unknown) {
+                    await this.#reportPostCommitError(postCommitCtx, event, error);
                 }
-            } catch (error: unknown) {
-                await this.#reportPostCommitError(postCommitCtx, event, error);
-            }
-        });
+            }),
+        );
+    }
+
+    #enqueuePostCommit(work: () => Promise<void>): Promise<void> {
+        // This only orders already-committed filesystem effects. Version allocation
+        // remains database-owned in AppletDatabase and does not use this queue.
+        const next = this.#postCommitChain.then(work, work);
+        this.#postCommitChain = next.catch(() => undefined);
+        return next;
     }
 
     async #moveTargetAside(targetPath: string): Promise<string | undefined> {
@@ -1050,9 +1171,7 @@ export class AppletModule implements AgentModule {
     async #observe(ctx: Context, event: AppletEvent): Promise<void> {
         const frozen = await this.#observeTransactional(ctx, event);
         // Registering the callback is synchronous; its body may be async.
-        afterCommit(ctx, (postCommitCtx) =>
-            this.#notifyPostCommit(postCommitCtx, frozen),
-        );
+        afterCommit(ctx, (postCommitCtx) => this.#notifyPostCommit(postCommitCtx, frozen));
     }
 
     async #notifyPostCommit(ctx: Context, event: AppletEvent): Promise<void> {
@@ -1193,7 +1312,7 @@ export class AppletModule implements AgentModule {
             }
             const requested = requireImportInput(input);
             const initial = applet.versions[0];
-            const expectedScopes = requested.allowedScopes ?? ["global"];
+            const expectedScopes = requested.allowedScopes ?? [...defaultAppletAllowedScopes];
             if (
                 targetVersion !== 1 ||
                 mutation.currentVersion !== 1 ||
@@ -1232,30 +1351,44 @@ export class AppletModule implements AgentModule {
                 throw new Error("Applet update result is missing its normalized input.");
             }
             const requested = requireUpdateInput(input);
-            const expectedVersion = before.versions.length + 1;
+            const expectedVersion = targetVersion;
             const appended = applet.versions[applet.versions.length - 1];
+            const beforeIsImmediate =
+                before.versions.length + 1 === expectedVersion &&
+                sameValue(applet.versions.slice(0, before.versions.length), before.versions);
+            const requestedMetadataMatches =
+                (requested.description === undefined ||
+                    applet.description === requested.description) &&
+                (requested.purpose === undefined || applet.purpose === requested.purpose) &&
+                (requested.allowedScopes === undefined ||
+                    sameValue(applet.allowedScopes, requested.allowedScopes)) &&
+                (requested.sourceDescription === undefined ||
+                    sameOptionalField(applet, "sourceDescription", requested.sourceDescription));
+            const carriedMetadataMatches =
+                !beforeIsImmediate ||
+                (applet.description === (requested.description ?? before.description) &&
+                    applet.purpose === (requested.purpose ?? before.purpose) &&
+                    sameValue(
+                        applet.allowedScopes,
+                        requested.allowedScopes ?? before.allowedScopes,
+                    ) &&
+                    sameOptionalField(
+                        applet,
+                        "sourceDescription",
+                        requested.sourceDescription,
+                        before,
+                    ));
             if (
                 targetVersion !== expectedVersion ||
-                applet.versions.length !== before.versions.length + 1 ||
-                !sameValue(applet.versions.slice(0, before.versions.length), before.versions) ||
+                applet.versions.length !== expectedVersion ||
                 appended?.version !== expectedVersion ||
                 appended.changeDescription !== requested.changeDescription ||
                 appended.operationId !== operation.operationId ||
                 appended.createdAt !== details.versionTimestamp ||
                 mutation.currentVersion !== expectedVersion ||
                 applet.updatedAt !== details.versionTimestamp ||
-                applet.description !== (requested.description ?? before.description) ||
-                applet.purpose !== (requested.purpose ?? before.purpose) ||
-                !sameValue(applet.allowedScopes, requested.allowedScopes ?? before.allowedScopes) ||
-                !sameOptionalField(
-                    applet,
-                    "sourceDescription",
-                    requested.sourceDescription,
-                    before,
-                ) ||
-                (requested.iconPath === undefined &&
-                    (!sameOptionalField(applet, "iconThumbhash", undefined, before) ||
-                        !sameOptionalField(applet, "iconUrl", undefined, before)))
+                !requestedMetadataMatches ||
+                !carriedMetadataMatches
             ) {
                 throw new Error(
                     "Applet update result did not append exactly one version or apply the exact normalized input.",
@@ -1419,6 +1552,10 @@ function truncateText(text: string, maximum: number, marker: string): string {
     if (text.length <= maximum) return text;
     if (maximum <= marker.length) return text.slice(0, maximum);
     return `${text.slice(0, maximum - marker.length)}${marker}`;
+}
+
+function quoteVisibleExact(value: string): string {
+    return JSON.stringify(value);
 }
 
 async function requirePromise<T>(value: unknown, operation: string): Promise<T> {

@@ -8,20 +8,26 @@ import { Value } from "@sinclair/typebox/value";
 import { afterCommit, type Context } from "@steve.kite/stdlib";
 
 import {
+    GITHUB_SECRET_ID,
+    PROJECT_GIT_SECRET_ID,
     secretAgentIdSchema,
     secretAttachReferenceResultSchema,
     secretAttachInputSchema,
+    secretCommandEnvironmentSchema,
+    secretEnvironmentVariableNamesSchema,
     secretIdSchema,
     secretListInputSchema,
     secretListQuerySchema,
     secretRegistrationInputSchema,
     secretRegistrationSchema,
+    secretReservedIdSchema,
     secretScopeRefSchema,
     secretUpdateInputSchema,
     type SecretAgentId,
     type SecretAttachReferenceResult,
     type SecretAttachInput,
     type SecretAttachment,
+    type SecretCommandEnvironment,
     type SecretHostEnvironment,
     type SecretId,
     type SecretListInput,
@@ -36,13 +42,18 @@ import {
 import {
     secretAuthorizationSchema,
     secretAuthorizationOperationSchema,
+    assertSecretCommandEnvironment,
+    assertSecretCommandResolverResult,
     secretResolverSchema,
+    secretCommandResolverSchema,
     assertSecretAttachment,
     assertSecretHostEnvironment,
     assertSecretPage,
     assertSecretReference,
     assertSecretStoreMutationResult,
     type SecretAuthorization,
+    type SecretCommandResolver,
+    type SecretCommandResolverResult,
     type SecretStoreAttachResult,
     type SecretStoreDetachResult,
     type SecretStoreRegisterResult,
@@ -89,6 +100,7 @@ const postCommitErrorSchema = Type.Function(
 const secretModuleOptionsSchema = Type.Object(
     {
         resolveForHost: Type.Optional(secretResolverSchema),
+        resolveForCommand: Type.Optional(secretCommandResolverSchema),
         idFactory: Type.Optional(idFactorySchema),
         eventIdFactory: Type.Optional(eventFactorySchema),
         clock: Type.Optional(clockSchema),
@@ -123,8 +135,8 @@ type SecretChange<Result> = {
 /**
  * Module-owned secret metadata and attachment management.
  *
- * Secret values are never returned to the model. `resolveForHost` remains an optional trusted-host
- * capability and is intentionally not exposed as a model tool.
+ * Secret values are never returned to the model. `resolveForHost` and `resolveForCommand` remain
+ * optional trusted-host capabilities and are intentionally not exposed as model tools.
  *
  * Every mutation simply overwrites: calling `register`, `update`, `attach`, or `detach` again with
  * the same or a different value applies again and succeeds. There is no retry ledger.
@@ -135,6 +147,7 @@ export class SecretsModule implements AgentModule {
 
     readonly #store: SecretDatabase;
     readonly #resolver: SecretsModuleOptions["resolveForHost"];
+    readonly #commandResolver: SecretCommandResolver | undefined;
     readonly #idFactory: SecretIdFactory;
     readonly #eventIdFactory: SecretEventFactory;
     readonly #clock: SecretClock;
@@ -148,6 +161,7 @@ export class SecretsModule implements AgentModule {
         assertSecretsModuleOptions(options);
         this.#store = createSecretDatabase();
         this.#resolver = options.resolveForHost;
+        this.#commandResolver = options.resolveForCommand;
         this.#idFactory = options.idFactory ?? (() => globalThis.crypto.randomUUID());
         this.#eventIdFactory = options.eventIdFactory ?? (() => globalThis.crypto.randomUUID());
         this.#clock = options.clock ?? (() => Date.now());
@@ -432,6 +446,11 @@ export class SecretsModule implements AgentModule {
             if (reference === undefined) {
                 throw new Error("The secret reference does not exist.");
             }
+            if (reference.availableToModel === false) {
+                throw new Error(
+                    `Secret '${input.secretId}' is managed by the host and cannot be attached to agent commands.`,
+                );
+            }
             const before = await this.#attachment(txCtx, actingAgentId, input);
             const raw = await this.#store.attach(txCtx, actingAgentId, structuredClone(input));
             const mutation = this.#asAttachResult(raw, input);
@@ -533,15 +552,10 @@ export class SecretsModule implements AgentModule {
         this.#assertContext(ctx);
         this.#assertAgentId(actingAgentId);
         this.#assertScopeRef(scopeRef);
+        const normalizedSecretIds = this.#normalizeSecretSelection(secretIds);
         await this.#authorizeOperation(ctx, actingAgentId, "resolve", scopeRef);
-        if (
-            secretIds !== undefined &&
-            (!Array.isArray(secretIds) ||
-                secretIds.length > MAX_SECRET_LIST_ITEMS ||
-                new Set(secretIds).size !== secretIds.length ||
-                secretIds.some((secretId) => !Value.Check(secretIdSchema, secretId)))
-        ) {
-            throw new Error("Secret resolver selection is invalid.");
+        if (normalizedSecretIds !== undefined) {
+            await this.#assertSelectionAttached(ctx, actingAgentId, scopeRef, normalizedSecretIds);
         }
         const environment =
             this.#resolver === undefined
@@ -549,16 +563,87 @@ export class SecretsModule implements AgentModule {
                       ctx,
                       actingAgentId,
                       scopeRef,
-                      secretIds === undefined ? undefined : structuredClone(secretIds),
+                      normalizedSecretIds,
                   )
-                : await this.#resolver(
-                      ctx,
-                      actingAgentId,
-                      scopeRef,
-                      secretIds === undefined ? undefined : structuredClone(secretIds),
-                  );
+                : await this.#resolver(ctx, actingAgentId, scopeRef, normalizedSecretIds);
         assertSecretHostEnvironment(environment);
         return structuredClone(environment);
+    }
+
+    /**
+     * Resolve selected attachments for a command host. The returned names must be removed from
+     * the command's ambient environment case-insensitively before `environment` is added.
+     */
+    async resolveForCommand(
+        ctx: Context,
+        actingAgentId: string,
+        scopeRef: string,
+        secretIds?: readonly string[],
+    ): Promise<SecretCommandEnvironment> {
+        this.#assertContext(ctx);
+        this.#assertAgentId(actingAgentId);
+        this.#assertScopeRef(scopeRef);
+        const normalizedSecretIds = this.#normalizeSecretSelection(secretIds);
+
+        return await ctx.inTx(async (txCtx) => {
+            await this.#authorizeOperation(txCtx, actingAgentId, "resolve", scopeRef);
+            const selectedSecretIds = await this.#resolveCommandSecretIds(
+                txCtx,
+                actingAgentId,
+                scopeRef,
+                normalizedSecretIds,
+            );
+            const attachedNames = await this.#store.environmentVariableNamesForScope(
+                txCtx,
+                actingAgentId,
+                scopeRef,
+            );
+
+            let environment: SecretHostEnvironment;
+            if (this.#commandResolver === undefined) {
+                environment =
+                    this.#resolver === undefined
+                        ? await this.#store.resolveForHost(
+                              txCtx,
+                              actingAgentId,
+                              scopeRef,
+                              selectedSecretIds,
+                          )
+                        : await this.#resolver(txCtx, actingAgentId, scopeRef, selectedSecretIds);
+                assertSecretHostEnvironment(environment);
+            } else {
+                const raw = await this.#commandResolver(
+                    txCtx,
+                    actingAgentId,
+                    scopeRef,
+                    selectedSecretIds,
+                );
+                assertSecretCommandResolverResult(raw);
+                environment = mergeCommandResolverEnvironments(raw, selectedSecretIds);
+            }
+
+            assertSecretHostEnvironment(environment);
+            const result = {
+                environment,
+                hiddenEnvironmentVariables: mergeEnvironmentVariableNames(
+                    attachedNames,
+                    Object.keys(environment),
+                ),
+            };
+            assertSecretCommandEnvironment(result);
+            if (!Value.Check(secretCommandEnvironmentSchema, result)) {
+                throw new Error("Secrets module created an invalid command environment.");
+            }
+            if (
+                !Value.Check(
+                    secretEnvironmentVariableNamesSchema,
+                    result.hiddenEnvironmentVariables,
+                )
+            ) {
+                throw new Error("Secrets module created invalid hidden environment names.");
+            }
+            return structuredClone(result);
+        });
     }
 
     /** Common provider-neutral tools. None can call the raw host resolver. */
@@ -792,7 +877,8 @@ export class SecretsModule implements AgentModule {
         }
         if (
             authoritative.description !== request.description ||
-            !sameEnvironmentNames(authoritative.environmentVariables, request.environment)
+            !sameEnvironmentNames(authoritative.environmentVariables, request.environment) ||
+            authoritative.availableToModel !== request.availableToModel
         ) {
             throw new Error("Secret store did not authoritatively persist the registration.");
         }
@@ -816,9 +902,11 @@ export class SecretsModule implements AgentModule {
             before.environmentVariables,
             request.environment,
         );
+        const expectedAvailableToModel = request.availableToModel ?? before.availableToModel;
         if (
             authoritative.description !== expectedDescription ||
-            !sameStrings(authoritative.environmentVariables, expectedEnvironmentNames)
+            !sameStrings(authoritative.environmentVariables, expectedEnvironmentNames) ||
+            authoritative.availableToModel !== expectedAvailableToModel
         ) {
             throw new Error("Secret store did not authoritatively persist the update.");
         }
@@ -991,10 +1079,14 @@ export class SecretsModule implements AgentModule {
     #normalizeRegistration(
         input: SecretRegistrationInput & { readonly id: SecretId },
     ): SecretRegistration {
+        assertUserSecretId(input.id);
         const registration = {
             id: input.id,
             description: normalizeText(input.description),
             environment: normalizeEnvironment(input.environment),
+            ...(input.availableToModel === undefined
+                ? {}
+                : { availableToModel: input.availableToModel }),
         };
         if (!Value.Check(secretRegistrationSchema, registration)) {
             throw new Error("Secret registration is invalid.");
@@ -1072,6 +1164,60 @@ export class SecretsModule implements AgentModule {
         return normalized;
     }
 
+    #normalizeSecretSelection(secretIds: readonly string[] | undefined): SecretId[] | undefined {
+        if (secretIds === undefined) return undefined;
+        if (
+            !Array.isArray(secretIds) ||
+            secretIds.length > MAX_SECRET_LIST_ITEMS ||
+            new Set(secretIds).size !== secretIds.length ||
+            secretIds.some((secretId) => !Value.Check(secretIdSchema, secretId))
+        ) {
+            throw new Error("Secret resolver selection is invalid.");
+        }
+        return structuredClone(secretIds) as SecretId[];
+    }
+
+    async #resolveCommandSecretIds(
+        ctx: Context,
+        actingAgentId: SecretAgentId,
+        scopeRef: SecretScopeRef,
+        requestedSecretIds: SecretId[] | undefined,
+    ): Promise<SecretId[]> {
+        const selectedSecretIds =
+            requestedSecretIds === undefined
+                ? [...(await this.#store.attachedSecretIdsForScope(ctx, actingAgentId, scopeRef))]
+                : structuredClone(requestedSecretIds);
+        await this.#assertSelectionAttached(ctx, actingAgentId, scopeRef, selectedSecretIds);
+        for (const secretId of selectedSecretIds) {
+            const reference = await this.#reference(ctx, actingAgentId, secretId);
+            if (reference === undefined) {
+                throw new Error("Secret command selection refers to a missing secret.");
+            }
+            if (reference.availableToModel === false) {
+                throw new Error(`Secret '${secretId}' is not available to agent commands.`);
+            }
+        }
+        return selectedSecretIds;
+    }
+
+    async #assertSelectionAttached(
+        ctx: Context,
+        actingAgentId: SecretAgentId,
+        scopeRef: SecretScopeRef,
+        secretIds: readonly SecretId[],
+    ): Promise<void> {
+        for (const secretId of secretIds) {
+            if (
+                (await this.#attachment(ctx, actingAgentId, {
+                    scopeRef,
+                    secretId,
+                })) === undefined
+            ) {
+                throw new Error(`Secret '${secretId}' is not attached to scope '${scopeRef}'.`);
+            }
+        }
+    }
+
     #attachArguments(
         scopeOrInput: string | SecretAttachInput,
         secretId: string | undefined,
@@ -1140,11 +1286,25 @@ export function assertSecretsModuleOptions(value: unknown): asserts value is Sec
     }
 }
 
+function assertUserSecretId(value: SecretId): void {
+    const normalized = value.toLowerCase();
+    if (!Value.Check(secretReservedIdSchema, normalized)) return;
+    if (normalized === GITHUB_SECRET_ID) {
+        throw new Error("Secret ID 'github' is reserved for GitHub CLI credentials.");
+    }
+    if (normalized === PROJECT_GIT_SECRET_ID) {
+        throw new Error("Secret ID 'project-git' is reserved for managed project Git access.");
+    }
+}
+
 function normalizeRegistrationInput(input: SecretRegistrationInput): SecretRegistrationInput {
     const normalized = {
         ...(input.id === undefined ? {} : { id: input.id }),
         description: normalizeText(input.description),
         environment: normalizeEnvironment(input.environment),
+        ...(input.availableToModel === undefined
+            ? {}
+            : { availableToModel: input.availableToModel }),
     };
     if (!Value.Check(secretRegistrationInputSchema, normalized)) {
         throw new Error("Secret registration input is invalid after normalization.");
@@ -1160,6 +1320,9 @@ function normalizeUpdateInput(input: SecretUpdateInput): SecretUpdateInput {
         ...(input.environment === undefined
             ? {}
             : { environment: normalizeEnvironmentPatch(input.environment) }),
+        ...(input.availableToModel === undefined
+            ? {}
+            : { availableToModel: input.availableToModel }),
     };
     if (!Value.Check(secretUpdateInputSchema, normalized)) {
         throw new Error("Secret update input is invalid after normalization.");
@@ -1255,6 +1418,53 @@ function applyEnvironmentPatch(
 
 function sortEnvironmentNames(names: readonly string[]): string[] {
     return [...names].sort((left, right) => left.localeCompare(right));
+}
+
+function mergeEnvironmentVariableNames(...nameLists: readonly (readonly string[])[]): string[] {
+    const names = new Map<string, string>();
+    for (const nameList of nameLists) {
+        for (const name of nameList) {
+            const normalized = name.toUpperCase();
+            if (!names.has(normalized)) names.set(normalized, name);
+        }
+    }
+    return sortEnvironmentNames([...names.values()]);
+}
+
+function mergeCommandResolverEnvironments(
+    entries: SecretCommandResolverResult,
+    selectedSecretIds: readonly SecretId[],
+): SecretHostEnvironment {
+    const selected = new Set(selectedSecretIds);
+    if (entries.length !== selectedSecretIds.length) {
+        throw new Error("Secret command resolver did not return every selected secret.");
+    }
+    const seen = new Set<string>();
+    const environment = Object.create(null) as Record<string, string>;
+    const owners = new Map<string, string>();
+    for (const entry of [...entries].sort((left, right) =>
+        left.secretId.localeCompare(right.secretId),
+    )) {
+        if (!selected.has(entry.secretId) || seen.has(entry.secretId)) {
+            throw new Error("Secret command resolver returned an unexpected secret identity.");
+        }
+        seen.add(entry.secretId);
+        for (const [name, value] of Object.entries(entry.environment) as [string, string][]) {
+            const normalizedName = name.toUpperCase();
+            const owner = owners.get(normalizedName);
+            if (owner !== undefined) {
+                throw new Error(
+                    `Secrets '${owner}' and '${entry.secretId}' both define ${name}. Select only one of them for this command.`,
+                );
+            }
+            owners.set(normalizedName, entry.secretId);
+            environment[name] = value;
+        }
+    }
+    if (seen.size !== selected.size) {
+        throw new Error("Secret command resolver did not return every selected secret.");
+    }
+    return environment;
 }
 
 function sameJson(left: unknown, right: unknown): boolean {

@@ -9,20 +9,23 @@ import { afterCommit, type Context } from "@steve.kite/stdlib";
 
 import {
     assertUserInputAnswer,
+    assertUserInputBatchAnswers,
     assertUserInputOptions,
     assertUserInputRequest,
     isUserInputTerminal,
     MAX_USER_INPUT_ANSWER_CHARACTERS,
+    MAX_USER_INPUT_BATCH_QUESTION_COUNT,
     MAX_USER_INPUT_CANCEL_REASON_CHARACTERS,
     MAX_USER_INPUT_CONTEXT_CHARACTERS,
     MAX_USER_INPUT_DETAIL_PAGE_CHARACTERS,
+    MAX_USER_INPUT_HEADER_CHARACTERS,
     MAX_USER_INPUT_OPTION_COUNT,
     MAX_USER_INPUT_OPTION_DESCRIPTION_CHARACTERS,
     MAX_USER_INPUT_OPTION_LABEL_CHARACTERS,
     MAX_USER_INPUT_QUESTION_CHARACTERS,
+    MAX_USER_INPUT_TIMESTAMP,
     userInputAgentIdSchema,
-    userInputAnswerInputSchema,
-    userInputAskInputSchema,
+    userInputAnswerInputUnionSchema,
     userInputCancelInputSchema,
     userInputCompleteInputSchema,
     userInputDetailPageSchema,
@@ -31,8 +34,9 @@ import {
     userInputListQuerySchema,
     userInputPageSchema,
     userInputRequestIdSchema,
-    userInputRequestSchema,
     userInputTimestampSchema,
+    userInputPresenceStateSchema,
+    userInputToolInputSchema,
     type UserInputAnswer,
     type UserInputAnswerInput,
     type UserInputAskInput,
@@ -43,6 +47,11 @@ import {
     type UserInputListQuery,
     type UserInputPage,
     type UserInputRequest,
+    type UserInputBatchQuestion,
+    type UserInputBatchQuestionInput,
+    type UserInputPresenceState,
+    type UserInputOptions,
+    type UserInputToolInput,
     type UserInputWaitInput,
 } from "./UserInputRequest.js";
 import {
@@ -65,6 +74,7 @@ import {
     type UserInputStore,
 } from "./UserInputStore.js";
 import { createSqliteUserInputStorage, userInputMigrations } from "./SqliteUserInputStorage.js";
+import { cancelAskTool } from "./tools/cancel_ask.js";
 import { requestUserInputTool } from "./tools/request_user_input.js";
 
 const DEFAULT_PAGE_SIZE = 50;
@@ -77,6 +87,7 @@ const DEFAULT_MAX_OPTION_LABEL_CHARACTERS = MAX_USER_INPUT_OPTION_LABEL_CHARACTE
 const DEFAULT_MAX_OPTION_DESCRIPTION_CHARACTERS = MAX_USER_INPUT_OPTION_DESCRIPTION_CHARACTERS;
 const DEFAULT_MAX_CANCEL_REASON_CHARACTERS = MAX_USER_INPUT_CANCEL_REASON_CHARACTERS;
 const DEFAULT_MAX_DETAIL_PAGE_CHARACTERS = MAX_USER_INPUT_DETAIL_PAGE_CHARACTERS;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 const voidOrPromiseVoidSchema = Type.Union([Type.Void(), Type.Promise(Type.Void())]);
 export const userInputIdFactorySchema = Type.Function(
@@ -144,6 +155,21 @@ export const userInputPostCommitErrorSchema = Type.Function(
 
 export type UserInputModuleOptions = Static<typeof userInputModuleOptionsSchema>;
 
+type UserInputWaitOutcome =
+    | {
+          readonly outcome: "away";
+          readonly presence?: UserInputPresenceState;
+          readonly waitedMs?: number;
+          readonly timerDriven?: boolean;
+      }
+    | {
+          readonly outcome: "timed_out";
+          readonly deadlineAt: number;
+          readonly presence?: UserInputPresenceState;
+          readonly waitedMs?: number;
+          readonly timerDriven?: boolean;
+      };
+
 /**
  * One shared user-input capability serves every agent. Request rows are the only durable
  * module state.
@@ -207,7 +233,7 @@ export class UserInputModule implements AgentModule {
 
     readonly tools = (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => {
         this.#assertAgentId(scope.agent.id);
-        return [requestUserInputTool(this, scope.agent.id)];
+        return [requestUserInputTool(this, scope.agent.id), cancelAskTool(this, scope.agent.id)];
     };
 
     async ask(
@@ -217,9 +243,9 @@ export class UserInputModule implements AgentModule {
         requestId?: string,
     ): Promise<UserInputRequest> {
         this.#assertAgentId(agentId);
-        this.#assertInput(userInputAskInputSchema, input, "user input request");
+        this.#assertInput(userInputToolInputSchema, input, "user input request");
         this.#assertAskBounds(input);
-        const id = requestId ?? await this.#newIdentity(ctx, agentId);
+        const id = requestId ?? (await this.#newIdentity(ctx, agentId));
         this.#assertValue(userInputRequestIdSchema, id, "request identity");
         const request = await ctx.inTx((txCtx) =>
             this.#createOrResume(txCtx, agentId, id, structuredClone(input)),
@@ -254,7 +280,7 @@ export class UserInputModule implements AgentModule {
             return structuredClone(request);
         }
 
-        const waited = await this.#waitOutsideTransaction(ctx, agentId, input.requestId);
+        const waited = await this.#waitOutsideTransaction(ctx, agentId, input.requestId, current);
         const authoritative = await this.#readRequiredRequest(ctx, input.requestId);
         await this.#authorize(ctx, agentId, authoritative.askingAgentId, "wait");
         this.#assertWaitResult(authoritative, waited, current.askingAgentId);
@@ -267,31 +293,29 @@ export class UserInputModule implements AgentModule {
         input: UserInputAnswerInput,
     ): Promise<UserInputRequest> {
         this.#assertAgentId(agentId);
-        this.#assertInput(userInputAnswerInputSchema, input, "user input answer");
-        if (answerCharacters(input.answer) > this.#maxAnswerCharacters) {
+        this.#assertInput(userInputAnswerInputUnionSchema, input, "user input answer");
+        if (answerCharactersForInput(input) > this.#maxAnswerCharacters) {
             throw new Error("User input answer exceeds its configured bound.");
         }
         const request = await ctx.inTx(async (txCtx) => {
             const current = await this.#readRequiredRequest(txCtx, input.requestId);
             await this.#authorize(txCtx, agentId, current.askingAgentId, "answer");
-            assertUserInputAnswer(input.answer, current.options);
             if (isUserInputTerminal(current)) {
                 return current;
             }
             const at = this.#now(ctx, agentId);
+            const answeredFields =
+                "answer" in input
+                    ? this.#singleAnswerFields(current, input.answer)
+                    : this.#batchAnswerFields(current, input.answers);
             const answered: UserInputRequest = {
                 ...current,
                 status: "answered",
-                answer: structuredClone(input.answer),
+                ...answeredFields,
                 answeredAt: at,
                 updatedAt: at,
             };
-            return await this.#persistTransition(
-                txCtx,
-                agentId,
-                "user_input_answered",
-                answered,
-            );
+            return await this.#persistTransition(txCtx, agentId, "user_input_answered", answered);
         });
         return structuredClone(request);
     }
@@ -317,12 +341,7 @@ export class UserInputModule implements AgentModule {
                 { outcome: "cancelled", reason: input.reason },
                 this.#now(ctx, agentId),
             );
-            return await this.#persistTransition(
-                txCtx,
-                agentId,
-                "user_input_cancelled",
-                cancelled,
-            );
+            return await this.#persistTransition(txCtx, agentId, "user_input_cancelled", cancelled);
         });
         return structuredClone(request);
     }
@@ -347,9 +366,7 @@ export class UserInputModule implements AgentModule {
             return await this.#persistTransition(
                 txCtx,
                 agentId,
-                terminal.status === "cancelled"
-                    ? "user_input_cancelled"
-                    : "user_input_completed",
+                terminal.status === "cancelled" ? "user_input_cancelled" : "user_input_completed",
                 terminal,
             );
         });
@@ -390,7 +407,8 @@ export class UserInputModule implements AgentModule {
         const seen = new Set<string>();
         for (const request of page.requests) {
             this.#assertRequest(request);
-            if (seen.has(request.id)) throw new Error("User input store returned duplicate requests.");
+            if (seen.has(request.id))
+                throw new Error("User input store returned duplicate requests.");
             seen.add(request.id);
             if (request.askingAgentId !== targetAgentId) {
                 throw new Error("User input store returned a request outside the requested agent.");
@@ -399,7 +417,9 @@ export class UserInputModule implements AgentModule {
                 (normalized.status === "pending" && request.status !== "pending") ||
                 (normalized.status === "terminal" && request.status === "pending")
             ) {
-                throw new Error("User input store returned a request outside the requested filter.");
+                throw new Error(
+                    "User input store returned a request outside the requested filter.",
+                );
             }
         }
         return structuredClone(fitUserInputPage(page, this.#maxOutputCharacters));
@@ -489,12 +509,20 @@ export class UserInputModule implements AgentModule {
             return current;
         }
         const at = this.#now(ctx, agentId);
+        const questions = normalizeQuestions(input);
+        const first = questions[0]!;
+        const isBatch = "questions" in input;
         const request: UserInputRequest = {
             id: requestId,
             askingAgentId: agentId,
-            question: input.question,
+            question: first.question,
+            ...(first.header === undefined ? {} : { header: first.header }),
             context: input.context,
-            ...(input.options === undefined ? {} : { options: structuredClone(input.options) }),
+            ...(first.options === undefined ? {} : { options: structuredClone(first.options) }),
+            ...(isBatch ? { questions: structuredClone(questions) } : {}),
+            ...(input.autoResolutionMs === undefined
+                ? {}
+                : { autoResolutionMs: input.autoResolutionMs }),
             ...(input.deadlineAt === undefined ? {} : { deadlineAt: input.deadlineAt }),
             status: "pending",
             createdAt: at,
@@ -511,10 +539,7 @@ export class UserInputModule implements AgentModule {
         ctx: Context,
         agentId: string,
         requestId: string,
-        outcome: { readonly outcome: "away" } | {
-            readonly outcome: "timed_out";
-            readonly deadlineAt: number;
-        },
+        outcome: UserInputWaitOutcome,
     ): Promise<UserInputRequest> {
         const current = await this.#readRequiredRequest(ctx, requestId);
         await this.#authorize(ctx, agentId, current.askingAgentId, "wait");
@@ -522,12 +547,7 @@ export class UserInputModule implements AgentModule {
             return current;
         }
         const terminal = this.#terminalRequest(current, outcome, this.#now(ctx, agentId));
-        return await this.#persistTransition(
-            ctx,
-            agentId,
-            "user_input_completed",
-            terminal,
-        );
+        return await this.#persistTransition(ctx, agentId, "user_input_completed", terminal);
     }
 
     async #persistTransition(
@@ -574,7 +594,10 @@ export class UserInputModule implements AgentModule {
 
     async #notifyPostCommit(ctx: Context, event: UserInputEvent): Promise<void> {
         try {
-            await invokeVoid(this.#listener?.onEvent?.(ctx, event), "User input post-commit listener");
+            await invokeVoid(
+                this.#listener?.onEvent?.(ctx, event),
+                "User input post-commit listener",
+            );
         } catch (error: unknown) {
             try {
                 await invokeVoid(
@@ -599,7 +622,8 @@ export class UserInputModule implements AgentModule {
 
     async #readRequiredRequest(ctx: Context, requestId: string): Promise<UserInputRequest> {
         const value = await this.#readRequest(ctx, requestId);
-        if (value === undefined) throw new Error(`User input request "${requestId}" was not found.`);
+        if (value === undefined)
+            throw new Error(`User input request "${requestId}" was not found.`);
         return value;
     }
 
@@ -615,34 +639,177 @@ export class UserInputModule implements AgentModule {
         ctx: Context,
         agentId: string,
         requestId: string,
+        request: Extract<UserInputRequest, { status: "pending" }>,
     ): Promise<UserInputRequest> {
-        const waited = await this.#broker.wait(ctx, agentId, requestId);
-        this.#assertRequest(waited);
-        if (!isUserInputTerminal(waited)) {
-            throw new Error("User input broker returned a pending request.");
+        let presence = await this.#readPresenceState(ctx, agentId);
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let unsubscribe: (() => void) | undefined;
+        let resolveOutcome: ((outcome: UserInputWaitOutcome) => void) | undefined;
+        let rejectOutcome: ((error: unknown) => void) | undefined;
+        let settled = false;
+        const timeout = new Promise<UserInputWaitOutcome>((resolve, reject) => {
+            resolveOutcome = resolve;
+            rejectOutcome = reject;
+        });
+        const elapsed = (): number =>
+            Math.min(
+                MAX_USER_INPUT_TIMESTAMP,
+                Math.max(0, this.#now(ctx, agentId) - request.createdAt),
+            );
+        const clearTimer = (): void => {
+            if (timer === undefined) return;
+            clearTimeout(timer);
+            timer = undefined;
+        };
+        const complete = (outcome: UserInputWaitOutcome): void => {
+            if (settled) return;
+            settled = true;
+            clearTimer();
+            resolveOutcome?.(outcome);
+        };
+        const armTimer = (dueAt: number | undefined, state: UserInputPresenceState | undefined) => {
+            clearTimer();
+            if (dueAt === undefined) return;
+            const delay = Math.max(0, dueAt - this.#now(ctx, agentId));
+            timer = setTimeout(
+                () => {
+                    timer = undefined;
+                    if (delay > MAX_TIMER_DELAY_MS) {
+                        armTimer(dueAt, state);
+                        return;
+                    }
+                    complete({
+                        outcome: "timed_out",
+                        deadlineAt: dueAt,
+                        ...(state === undefined ? {} : { presence: state }),
+                        waitedMs: elapsed(),
+                        timerDriven: true,
+                    });
+                },
+                Math.min(MAX_TIMER_DELAY_MS, delay),
+            );
+            timer.unref?.();
+        };
+        const rearm = (state: UserInputPresenceState | undefined): void => {
+            presence = state;
+            if (state?.answerWaitMs === 0) {
+                complete({
+                    outcome: "away",
+                    presence: state,
+                    waitedMs: elapsed(),
+                });
+                return;
+            }
+            const requestDeadline = this.#requestDeadline(request);
+            const presenceDeadline =
+                state?.answerWaitMs === null || state === undefined
+                    ? undefined
+                    : this.#safeAdd(this.#now(ctx, agentId), state.answerWaitMs);
+            const deadlineAt =
+                requestDeadline === undefined
+                    ? presenceDeadline
+                    : presenceDeadline === undefined
+                      ? requestDeadline
+                      : Math.min(requestDeadline, presenceDeadline);
+            armTimer(
+                deadlineAt,
+                presenceDeadline !== undefined && presenceDeadline <= (requestDeadline ?? Infinity)
+                    ? state
+                    : undefined,
+            );
+        };
+        try {
+            rearm(presence);
+            if (this.#presence !== undefined) {
+                const subscribe = this.#presence.subscribe ?? this.#presence.onChange;
+                if (subscribe !== undefined) {
+                    const callback = async (
+                        _changeCtx: Context,
+                        state: UserInputPresenceState | undefined,
+                    ) => {
+                        try {
+                            if (state !== undefined) {
+                                this.#assertValue(
+                                    userInputPresenceStateSchema,
+                                    state,
+                                    "user input presence state",
+                                );
+                            }
+                            rearm(state === undefined ? undefined : structuredClone(state));
+                        } catch (error: unknown) {
+                            settled = true;
+                            clearTimer();
+                            rejectOutcome?.(error);
+                        }
+                    };
+                    const returned = await subscribe.call(this.#presence, ctx, agentId, callback);
+                    if (returned !== undefined && typeof returned !== "function") {
+                        throw new Error(
+                            "User input presence subscription returned an invalid cleanup.",
+                        );
+                    }
+                    if (typeof returned === "function") unsubscribe = returned;
+                }
+            }
+            const requestDeadline = this.#requestDeadline(request);
+            const waitedPromise = this.#broker.wait(
+                ctx,
+                agentId,
+                requestId,
+                requestDeadline === undefined ? undefined : { timeoutAt: requestDeadline },
+            );
+            const result = await Promise.race([waitedPromise, timeout]);
+            if ("outcome" in result) {
+                return await ctx.inTx((txCtx) =>
+                    this.#settlePending(txCtx, agentId, requestId, result),
+                );
+            }
+            this.#assertRequest(result);
+            if (!isUserInputTerminal(result)) {
+                throw new Error("User input broker returned a pending request.");
+            }
+            return structuredClone(result);
+        } finally {
+            settled = true;
+            clearTimer();
+            try {
+                unsubscribe?.();
+            } catch {
+                // Presence cleanup is advisory once the wait has settled.
+            }
         }
-        return structuredClone(waited);
     }
 
     async #immediateWaitOutcome(
         ctx: Context,
         agentId: string,
         request: Extract<UserInputRequest, { status: "pending" }>,
-    ): Promise<
-        | { readonly outcome: "away" }
-        | { readonly outcome: "timed_out"; readonly deadlineAt: number }
-        | undefined
-    > {
+    ): Promise<UserInputWaitOutcome | undefined> {
         const now = this.#now(ctx, agentId);
-        if (request.deadlineAt !== undefined && request.deadlineAt <= now) {
-            return { outcome: "timed_out", deadlineAt: request.deadlineAt };
+        const presence = await this.#readPresenceState(ctx, agentId);
+        const deadlineAt = this.#requestDeadline(request);
+        if (deadlineAt !== undefined && deadlineAt <= now) {
+            return {
+                outcome: "timed_out",
+                deadlineAt,
+                ...(presence === undefined ? {} : { presence }),
+                waitedMs: Math.min(MAX_USER_INPUT_TIMESTAMP, Math.max(0, now - request.createdAt)),
+            };
         }
-        if (this.#presence === undefined) return undefined;
-        const available = await this.#presence.isAvailable(ctx, agentId);
-        if (typeof available !== "boolean") {
-            throw new Error("User input presence policy returned a non-boolean result.");
+        if (presence !== undefined) {
+            if (presence.answerWaitMs === 0) {
+                return {
+                    outcome: "away",
+                    presence,
+                    waitedMs: Math.min(
+                        MAX_USER_INPUT_TIMESTAMP,
+                        Math.max(0, now - request.createdAt),
+                    ),
+                };
+            }
+            return undefined;
         }
-        return available ? undefined : { outcome: "away" };
+        return undefined;
     }
 
     #assertWaitResult(
@@ -662,15 +829,20 @@ export class UserInputModule implements AgentModule {
 
     #terminalRequest(
         current: Extract<UserInputRequest, { status: "pending" }>,
-        outcome: UserInputCompleteInput extends infer _Input
-            ? { readonly outcome: "away" }
-                | { readonly outcome: "timed_out"; readonly deadlineAt: number }
-                | { readonly outcome: "cancelled"; readonly reason: string }
-            : never,
+        outcome: UserInputWaitOutcome | { readonly outcome: "cancelled"; readonly reason: string },
         at: number,
     ): UserInputRequest {
         if (outcome.outcome === "away") {
-            return { ...current, status: "away", completedAt: at, updatedAt: at };
+            return {
+                ...current,
+                status: "away",
+                ...(outcome.presence === undefined
+                    ? {}
+                    : { presence: structuredClone(outcome.presence) }),
+                ...(outcome.waitedMs === undefined ? {} : { waitedMs: outcome.waitedMs }),
+                completedAt: at,
+                updatedAt: at,
+            };
         }
         if (outcome.outcome === "cancelled") {
             return {
@@ -681,19 +853,38 @@ export class UserInputModule implements AgentModule {
                 updatedAt: at,
             };
         }
-        this.#assertTimeout(current, outcome.deadlineAt, at);
-        return { ...current, status: "timed_out", timedOutAt: at, updatedAt: at };
+        this.#assertTimeout(current, outcome.deadlineAt, at, true, outcome.timerDriven === true);
+        const timedOutAt = outcome.timerDriven ? Math.max(at, outcome.deadlineAt) : at;
+        return {
+            ...current,
+            status: "timed_out",
+            ...(outcome.presence === undefined
+                ? {}
+                : { presence: structuredClone(outcome.presence) }),
+            ...(outcome.waitedMs === undefined ? {} : { waitedMs: outcome.waitedMs }),
+            deadlineAt: outcome.deadlineAt,
+            timedOutAt,
+            updatedAt: timedOutAt,
+        };
     }
 
     #assertTimeout(
         current: UserInputRequest,
         deadlineAt: number,
         now: number,
+        allowUnconfigured = false,
+        allowClockNotReached = false,
     ): asserts current is UserInputRequest & { readonly deadlineAt: number } {
-        if (current.deadlineAt !== deadlineAt) {
+        const requestDeadline = this.#requestDeadline(current);
+        if (
+            (requestDeadline !== undefined && requestDeadline !== deadlineAt) ||
+            (requestDeadline === undefined && !allowUnconfigured)
+        ) {
             throw new Error("User input timeout deadline does not match the request.");
         }
-        if (now < deadlineAt) throw new Error("User input request has not reached its deadline.");
+        if (!allowClockNotReached && now < deadlineAt) {
+            throw new Error("User input request has not reached its deadline.");
+        }
     }
 
     #assertSameRequest(
@@ -702,13 +893,25 @@ export class UserInputModule implements AgentModule {
         requestId: string,
         agentId: string,
     ): void {
+        const questions = normalizeQuestions(input);
+        const currentQuestions = current.questions ?? [
+            {
+                id: "question_1",
+                ...(current.header === undefined ? {} : { header: current.header }),
+                question: current.question,
+                ...(current.options === undefined ? {} : { options: current.options }),
+            },
+        ];
         if (
             current.id !== requestId ||
             current.askingAgentId !== agentId ||
-            current.question !== input.question ||
             current.context !== input.context ||
-            !sameValue(current.options, input.options) ||
-            current.deadlineAt !== input.deadlineAt
+            !sameValue(currentQuestions, questions) ||
+            current.autoResolutionMs !== input.autoResolutionMs ||
+            !(
+                current.deadlineAt === input.deadlineAt ||
+                (input.deadlineAt === undefined && current.status === "timed_out")
+            )
         ) {
             throw new Error(`User input request "${requestId}" belongs to different input.`);
         }
@@ -724,12 +927,7 @@ export class UserInputModule implements AgentModule {
         const allowed =
             this.#authorization === undefined
                 ? false
-                : await this.#authorization.authorize(
-                    ctx,
-                    actingAgentId,
-                    askingAgentId,
-                    action,
-                );
+                : await this.#authorization.authorize(ctx, actingAgentId, askingAgentId, action);
         if (typeof allowed !== "boolean") {
             throw new Error("User input authorization returned a non-boolean result.");
         }
@@ -743,25 +941,126 @@ export class UserInputModule implements AgentModule {
     }
 
     #assertAskBounds(input: UserInputAskInput): void {
-        if (input.question.length > this.#maxQuestionCharacters) {
-            throw new Error("User input question exceeds its configured bound.");
-        }
         if (input.context.length > this.#maxContextCharacters) {
             throw new Error("User input context exceeds its configured bound.");
         }
-        assertUserInputOptions(input.options);
-        if (input.options === undefined) return;
-        if (input.options.choices.length > this.#maxOptionCount) {
-            throw new Error("User input options exceed their configured count.");
+        const questions = normalizeQuestions(input);
+        if (questions.length > MAX_USER_INPUT_BATCH_QUESTION_COUNT) {
+            throw new Error("User input question batch exceeds its configured count.");
         }
-        for (const choice of input.options.choices) {
-            if (choice.label.length > this.#maxOptionLabelCharacters) {
-                throw new Error("User input option label exceeds its configured bound.");
+        const ids = new Set<string>();
+        for (const question of questions) {
+            if (question.question.length > this.#maxQuestionCharacters) {
+                throw new Error("User input question exceeds its configured bound.");
             }
-            if (choice.description.length > this.#maxOptionDescriptionCharacters) {
-                throw new Error("User input option description exceeds its configured bound.");
+            if (
+                question.header !== undefined &&
+                question.header.length > MAX_USER_INPUT_HEADER_CHARACTERS
+            ) {
+                throw new Error("User input question header exceeds its configured bound.");
+            }
+            if (ids.has(question.id)) {
+                throw new Error("User input question IDs must be unique.");
+            }
+            ids.add(question.id);
+            assertUserInputOptions(question.options);
+            if (question.options === undefined) continue;
+            if (question.options.choices.length > this.#maxOptionCount) {
+                throw new Error("User input options exceed their configured count.");
+            }
+            for (const choice of question.options.choices) {
+                if (choice.label.length > this.#maxOptionLabelCharacters) {
+                    throw new Error("User input option label exceeds its configured bound.");
+                }
+                if (choice.description.length > this.#maxOptionDescriptionCharacters) {
+                    throw new Error("User input option description exceeds its configured bound.");
+                }
             }
         }
+    }
+
+    async #readPresenceState(
+        ctx: Context,
+        agentId: string,
+    ): Promise<UserInputPresenceState | undefined> {
+        if (this.#presence === undefined) return undefined;
+        if (this.#presence.state !== undefined) {
+            const value = await this.#presence.state.call(this.#presence, ctx, agentId);
+            if (value !== undefined) {
+                this.#assertValue(userInputPresenceStateSchema, value, "user input presence state");
+                return structuredClone(value);
+            }
+        }
+        if (this.#presence.isAvailable === undefined) return undefined;
+        const available = await this.#presence.isAvailable.call(this.#presence, ctx, agentId);
+        if (typeof available !== "boolean") {
+            throw new Error("User input presence policy returned a non-boolean result.");
+        }
+        if (available) return undefined;
+        return {
+            answerWaitMs: 0,
+            title: "unavailable",
+            emoji: "⚠️",
+            prompt: "",
+        };
+    }
+
+    #requestDeadline(request: {
+        readonly deadlineAt?: number;
+        readonly autoResolutionMs?: number;
+        readonly createdAt: number;
+    }): number | undefined {
+        const autoDeadline =
+            request.autoResolutionMs === undefined
+                ? undefined
+                : this.#safeAdd(request.createdAt, request.autoResolutionMs);
+        if (request.deadlineAt === undefined) return autoDeadline;
+        if (autoDeadline === undefined) return request.deadlineAt;
+        return Math.min(request.deadlineAt, autoDeadline);
+    }
+
+    #safeAdd(base: number, delta: number): number {
+        return Math.min(MAX_USER_INPUT_TIMESTAMP, base + Math.max(0, delta));
+    }
+
+    #singleAnswerFields(
+        current: Extract<UserInputRequest, { status: "pending" }>,
+        answer: UserInputAnswer,
+    ):
+        | { readonly answer: UserInputAnswer }
+        | {
+              readonly answer: UserInputAnswer;
+              readonly answers: Readonly<Record<string, UserInputAnswer>>;
+          } {
+        if (current.questions !== undefined && current.questions.length > 1) {
+            throw new Error("A batched user input request requires one answer for every question.");
+        }
+        assertUserInputAnswer(answer, current.options);
+        if (current.questions !== undefined) {
+            return {
+                answer: structuredClone(answer),
+                answers: { [current.questions[0]!.id]: structuredClone(answer) },
+            };
+        }
+        return { answer: structuredClone(answer) };
+    }
+
+    #batchAnswerFields(
+        current: Extract<UserInputRequest, { status: "pending" }>,
+        answers: Readonly<Record<string, UserInputAnswer>>,
+    ): {
+        readonly answer: UserInputAnswer;
+        readonly answers: Readonly<Record<string, UserInputAnswer>>;
+    } {
+        if (current.questions === undefined) {
+            throw new Error("A singular user input request cannot receive batch answers.");
+        }
+        assertUserInputBatchAnswers(answers, current.questions);
+        const first = current.questions[0]!;
+        return {
+            answer: structuredClone(answers[first.id]!),
+            answers: structuredClone(answers),
+        };
     }
 
     #assertAgentId(agentId: string): void {
@@ -797,7 +1096,8 @@ export function formatUserInputForModel(
 ): string {
     assertUserInputRequest(request);
     const output = [
-        `Request ${request.id}: ${request.question}`,
+        `Request ${request.id}:`,
+        formatQuestions(request),
         `Status: ${formatOutcomeLabel(request)}`,
         requestModelSupplement(request),
     ]
@@ -833,8 +1133,7 @@ export function formatUserInputDetailPageForModel(
         throw new Error("User input detail page is invalid.");
     }
     if (page.request === null) return "User input request not found.";
-    const continuation =
-        page.nextCursor === undefined ? "" : `\nNext cursor: ${page.nextCursor}`;
+    const continuation = page.nextCursor === undefined ? "" : `\nNext cursor: ${page.nextCursor}`;
     return fitText(
         `${formatUserInputForModel(page.request, maxOutputCharacters)}\n${page.detail}${continuation}`,
         maxOutputCharacters,
@@ -849,7 +1148,9 @@ function fitUserInputPage(page: UserInputPage, maxOutputCharacters: number): Use
     const requests: UserInputRequest[] = [];
     for (const request of page.requests) {
         const candidate = { ...page, requests: [...requests, request] };
-        if (formatUserInputPageForModel(candidate, maxOutputCharacters).length > maxOutputCharacters) {
+        if (
+            formatUserInputPageForModel(candidate, maxOutputCharacters).length > maxOutputCharacters
+        ) {
             break;
         }
         requests.push(request);
@@ -867,22 +1168,58 @@ function fitUserInputPage(page: UserInputPage, maxOutputCharacters: number): Use
     };
 }
 
-function requestDetail(request: UserInputRequest): string {
-    const lines = [`Context:\n${request.context}`];
-    if (request.options !== undefined) {
-        lines.push(
-            `Options:\n${request.options.choices
-                .map((choice) => `- ${choice.label}: ${choice.description}`)
-                .join("\n")}`,
-        );
+function normalizeQuestions(input: UserInputToolInput): UserInputBatchQuestion[] {
+    if ("questions" in input) {
+        return input.questions.map((question, index) => {
+            const options = normalizeQuestionOptions(question.options, question.multiSelect);
+            const normalized: UserInputBatchQuestion = {
+                id: question.id ?? `question_${String(index + 1)}`,
+                ...(question.header === undefined ? {} : { header: question.header }),
+                question: question.question,
+            };
+            if (options !== undefined) normalized.options = options;
+            return normalized;
+        });
     }
-    if (request.status === "answered") lines.push(`Answer:\n${formatAnswer(request.answer)}`);
+    return [
+        {
+            id: "question_1",
+            ...(input.header === undefined ? {} : { header: input.header }),
+            question: input.question,
+            ...(input.options === undefined ? {} : { options: structuredClone(input.options) }),
+        },
+    ];
+}
+
+function normalizeQuestionOptions(
+    options: UserInputBatchQuestionInput["options"],
+    multiSelect: boolean | undefined,
+): UserInputBatchQuestion["options"] {
+    if (options === undefined) return undefined;
+    if (Array.isArray(options)) {
+        return {
+            choices: structuredClone(options),
+            multiSelect: multiSelect ?? false,
+        };
+    }
+    const objectOptions = options as UserInputOptions;
+    if (multiSelect !== undefined && multiSelect !== objectOptions.multiSelect) {
+        throw new Error("User input question multiSelect disagrees with its options.");
+    }
+    return structuredClone(objectOptions);
+}
+
+function requestDetail(request: UserInputRequest): string {
+    const lines = [`Questions:\n${formatQuestions(request)}`, `Context:\n${request.context}`];
+    if (request.status === "answered") {
+        lines.push(`Answer:\n${formatAnswers(request)}`);
+    }
     if (request.status === "cancelled") lines.push(`Cancellation reason:\n${request.reason}`);
     return lines.join("\n\n");
 }
 
 function requestModelSupplement(request: UserInputRequest): string | undefined {
-    if (request.status === "answered") return `Answer: ${formatAnswer(request.answer)}`;
+    if (request.status === "answered") return `Answer:\n${formatAnswers(request)}`;
     if (request.status === "cancelled") return `Reason: ${request.reason}`;
     return undefined;
 }
@@ -896,10 +1233,84 @@ function formatOutcomeLabel(request: UserInputRequest): string {
         case "cancelled":
             return "Cancelled";
         case "away":
-            return "User unavailable";
+            return describeUnansweredQuestion(request);
         case "timed_out":
-            return "Timed out";
+            return describeUnansweredQuestion(request);
     }
+}
+
+function formatQuestions(request: UserInputRequest): string {
+    const questions = request.questions ?? [
+        {
+            id: "question_1",
+            ...(request.header === undefined ? {} : { header: request.header }),
+            question: request.question,
+            ...(request.options === undefined ? {} : { options: request.options }),
+        },
+    ];
+    return questions
+        .map((question) => {
+            const header = question.header === undefined ? "" : `[${question.header}] `;
+            const options =
+                question.options === undefined
+                    ? ""
+                    : `\nOptions:\n${question.options.choices
+                          .map((choice) => `- ${choice.label}: ${choice.description}`)
+                          .join("\n")}`;
+            return `${header}${question.question}${options}`;
+        })
+        .join("\n");
+}
+
+function formatAnswers(request: Extract<UserInputRequest, { status: "answered" }>): string {
+    if (request.answers === undefined) return formatAnswer(request.answer);
+    return Object.entries(request.answers)
+        .map(([id, answer]) => `${id}: ${formatAnswer(answer)}`)
+        .join("\n");
+}
+
+function describeUnansweredQuestion(
+    request: Extract<UserInputRequest, { status: "away" | "timed_out" }>,
+): string {
+    const presence = request.presence;
+    const title = presence?.title ?? "unavailable";
+    const emoji = presence?.emoji ?? "⚠️";
+    const opening =
+        request.status === "away"
+            ? `The question was not asked interactively because the user is ${title} ${emoji}.`
+            : `Nobody answered within ${
+                  request.waitedMs === undefined
+                      ? "the configured wait"
+                      : formatDuration(request.waitedMs)
+              }, and the user is ${title} ${emoji}.`;
+    const sentences = [opening];
+    if (presence?.prompt.trim().length) sentences.push(presence.prompt.trim());
+    if (presence?.changesAt !== undefined && presence.changesAt > request.updatedAt) {
+        sentences.push(
+            `The user expects to change this state in about ${formatDuration(
+                presence.changesAt - request.updatedAt,
+            )}.`,
+        );
+    }
+    sentences.push(
+        `The question is waiting in the user's inbox as ask ${request.id}; call cancel_ask with that id if you no longer need an answer.`,
+        "Continue on your own with your best judgement.",
+    );
+    return sentences.join(" ");
+}
+
+function formatDuration(milliseconds: number): string {
+    const seconds = Math.max(0, Math.round(milliseconds / 1_000));
+    if (seconds < 90) return plural(seconds, "second");
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 60) return plural(minutes, "minute");
+    const hours = Math.round(minutes / 60);
+    if (hours < 24) return plural(hours, "hour");
+    return plural(Math.round(hours / 24), "day");
+}
+
+function plural(count: number, unit: string): string {
+    return `${String(count)} ${unit}${count === 1 ? "" : "s"}`;
 }
 
 function formatAnswer(answer: UserInputAnswer): string {
@@ -908,13 +1319,22 @@ function formatAnswer(answer: UserInputAnswer): string {
         answer.selectedOptions === undefined
             ? undefined
             : `Selected: ${answer.selectedOptions.join(", ")}`;
-    return [selected, answer.text].filter((value): value is string => value !== undefined).join("\n");
+    return [selected, answer.text]
+        .filter((value): value is string => value !== undefined)
+        .join("\n");
 }
 
 function answerCharacters(answer: UserInputAnswer): number {
     if (typeof answer === "string") return answer.length;
-    return (answer.text?.length ?? 0) +
-        (answer.selectedOptions?.reduce((sum, option) => sum + option.length, 0) ?? 0);
+    return (
+        (answer.text?.length ?? 0) +
+        (answer.selectedOptions?.reduce((sum, option) => sum + option.length, 0) ?? 0)
+    );
+}
+
+function answerCharactersForInput(input: UserInputAnswerInput): number {
+    if ("answer" in input) return answerCharacters(input.answer);
+    return Object.values(input.answers).reduce((sum, answer) => sum + answerCharacters(answer), 0);
 }
 
 function detailCursor(query: UserInputDetailQuery): number {
@@ -928,10 +1348,7 @@ function detailCursor(query: UserInputDetailQuery): number {
     return value;
 }
 
-function detailModelCharacterLimit(
-    request: UserInputRequest,
-    maxOutputCharacters: number,
-): number {
+function detailModelCharacterLimit(request: UserInputRequest, maxOutputCharacters: number): number {
     return Math.max(1, maxOutputCharacters - formatUserInputForModel(request).length - 64);
 }
 
@@ -1007,7 +1424,26 @@ function validateOptions(options: unknown): UserInputModuleOptions {
         broker: methodView(source.broker, ["wait"]),
     };
     if (source.presence !== undefined) {
-        view.presence = methodView(source.presence, ["isAvailable"]);
+        view.presence = methodView(source.presence, [
+            "isAvailable",
+            "state",
+            "subscribe",
+            "onChange",
+        ]);
+        if (view.presence === null || typeof view.presence !== "object") {
+            throw new Error("User input presence policy is invalid.");
+        }
+        const presence = view.presence as Record<string, unknown>;
+        if (
+            presence.isAvailable === undefined &&
+            presence.state === undefined &&
+            presence.subscribe === undefined &&
+            presence.onChange === undefined
+        ) {
+            throw new Error(
+                "User input presence policy must expose a state or availability method.",
+            );
+        }
     }
     if (source.authorization !== undefined) {
         view.authorization = methodView(source.authorization, ["authorize"]);
@@ -1025,8 +1461,7 @@ function methodView(value: unknown, names: readonly string[]): unknown {
     if (value === null || (typeof value !== "object" && typeof value !== "function")) return value;
     const source = value as Record<string, (...args: never[]) => unknown>;
     const isPlain =
-        Object.getPrototypeOf(value) === Object.prototype ||
-        Object.getPrototypeOf(value) === null;
+        Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null;
     const view: Record<string, unknown> = isPlain ? { ...source } : {};
     for (const name of names) {
         if (typeof source[name] === "function") {

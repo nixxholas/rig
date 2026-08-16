@@ -1,7 +1,6 @@
-import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { chmod, mkdir } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 
 import { createId } from "@paralleldrive/cuid2";
 import { Type } from "@sinclair/typebox";
@@ -22,10 +21,11 @@ import {
 } from "@slopus/happy-agent-base";
 import { hostComputeProvider } from "@slopus/happy-agent-compute";
 import {
-    AgentsMdModule,
     AppletModule,
+    ConfigModule,
     CollaborationModule,
     ComputeModule,
+    EventsModule,
     GoalModule,
     HappyModule,
     HistoryModule,
@@ -49,7 +49,9 @@ import {
     WorkspacesModule,
     agentComputeConfigSchema,
     createComputeModules,
+    happyAgentConfigurationSchema,
     type CollaborationBroker,
+    type EventsModuleOptions,
     type HappyHost,
     type ImageGenerator,
     type McpHost,
@@ -63,6 +65,7 @@ import {
     type WorkflowRuntime,
     type WorkletRuntime,
     type WorkspaceHost,
+    type PresenceModuleOptions,
 } from "@slopus/happy-agent-modules";
 import { sql } from "drizzle-orm";
 import type { LibSQLDatabase } from "drizzle-orm/libsql";
@@ -70,11 +73,16 @@ import type { Context } from "@steve.kite/stdlib";
 
 import { openHappyAgentDatabase } from "./HappyAgentDatabase.js";
 import { acquireHappyAgentStorageLock } from "./HappyAgentStorageLock.js";
-import { EventsModule, type EventsModuleOptions } from "../events/EventsModule.js";
+import { readGlobalInstructions } from "./readGlobalInstructions.js";
+import type { HappyAgentConfiguration } from "@slopus/happy-agent-modules";
 import { ConversationModule } from "../conversations/ConversationModule.js";
+import type { EffectiveAgentSelection } from "../../vanillaHappyAgentConfiguration.js";
 
-const pathSchema = Type.String({ minLength: 1, maxLength: 4_096 });
 const providerSchema = Type.String({ minLength: 1, maxLength: 256 });
+const loaderProviderInputSchema = Type.Object(
+    { provider: providerSchema },
+    { additionalProperties: false },
+);
 const rootAgentIdSchema = Type.String({
     minLength: 1,
     maxLength: 128,
@@ -110,15 +118,21 @@ const modelSchema = Type.Object(
     },
     { additionalProperties: false },
 );
-const loaderInputSchema = Type.Object(
+const effectiveSelectionSchema = Type.Object(
     {
-        agentHome: pathSchema,
-        provider: providerSchema,
-        publicHome: pathSchema,
+        effort: Type.String({ minLength: 1, maxLength: 32 }),
+        model: Type.String({ minLength: 1, maxLength: 256 }),
+        permissionMode: Type.Union([
+            Type.Literal("read_only"),
+            Type.Literal("workspace_write"),
+            Type.Literal("auto"),
+            Type.Literal("full_access"),
+        ]),
+        provider: Type.String({ minLength: 1, maxLength: 256 }),
+        serviceTier: Type.Optional(Type.Literal("priority")),
     },
     { additionalProperties: false },
 );
-
 export interface HappyAgentIntegrations {
     readonly collaboration: CollaborationBroker;
     readonly happy: HappyHost;
@@ -139,20 +153,20 @@ export interface HappyAgentIntegrations {
 }
 
 export interface LoadHappyAgentOptions {
-    /** Private state, normally `~/.happy/agent` on macOS. */
-    readonly agentHome: string;
-    /** User-visible files and the host compute root, normally `~/Happy`. */
-    readonly publicHome: string;
+    /** The resolved, shared Happy Agent filesystem layout. */
+    readonly configuration: HappyAgentConfiguration;
+    readonly configModule: ConfigModule;
     readonly integrations: HappyAgentIntegrations;
     readonly providers: AgentProviders;
     readonly provider: string;
     readonly models: readonly AgentModel[];
+    readonly effectiveSelection: EffectiveAgentSelection;
     readonly config?: AgentConfig;
     readonly events?: EventsModuleOptions;
 }
 
 export interface HappyAgentModuleCollection {
-    readonly agentsMd: AgentsMdModule;
+    readonly config: ConfigModule;
     readonly applets: AppletModule;
     readonly collaboration: CollaborationModule;
     readonly conversations: ConversationModule;
@@ -183,12 +197,12 @@ export interface HappyAgentModuleCollection {
 
 export interface LoadedHappyAgent {
     readonly agent: Agent<AnyAgentTool, LibSQLDatabase>;
-    readonly agentHome: string;
+    readonly configuration: HappyAgentConfiguration;
+    readonly configModule: ConfigModule;
+    readonly effectiveSelection: EffectiveAgentSelection;
     readonly compute: ComputeModule;
     readonly database: LibSQLDatabase;
-    readonly databasePath: string;
     readonly modules: HappyAgentModuleCollection;
-    readonly publicHome: string;
     readonly installation: {
         readonly epoch: string;
         readonly schemaVersion: number;
@@ -199,7 +213,7 @@ export interface LoadedHappyAgent {
 }
 
 /**
- * Load one durable Happy agent and every standard module over a private home and public home.
+ * Load one durable Happy agent and every standard module from one resolved configuration.
  *
  * The loader owns the SQLite connection, hard store lock, host compute, AgentStorage, and
  * AgentSystem lifetime. External services remain explicit integrations and are validated by the
@@ -213,14 +227,10 @@ export async function loadHappyAgent(
     if (options.providers.typeOf(options.provider) === null) {
         throw new Error(`The default provider '${options.provider}' is not registered.`);
     }
-    const agentHome = expandHome(options.agentHome);
-    const publicHome = expandHome(options.publicHome);
-    if (agentHome === publicHome) {
-        throw new Error("The private agent home and public Happy home must be different folders.");
-    }
-    await prepareHomes(agentHome, publicHome);
+    const { configuration } = options;
+    await prepareHomes(configuration);
 
-    const databasePath = join(agentHome, "agent.sqlite");
+    const databasePath = configuration.paths.databasePath;
     const opened = await openHappyAgentDatabase(databasePath);
     let modules: HappyAgentModuleCollection | undefined;
     let system: AgentSystemLocal<LibSQLDatabase> | undefined;
@@ -235,19 +245,24 @@ export async function loadHappyAgent(
         await chmod(databasePath, 0o600);
         const storage = new AgentStorage({
             acquireLock: async () =>
-                await acquireHappyAgentStorageLock(join(agentHome, "agent.lock")),
+                await acquireHappyAgentStorageLock(configuration.paths.agentLockPath),
             database: opened.database,
         });
-        modules = createModules(options.integrations, agentHome, publicHome, options.events);
+        modules = createModules(
+            options.configModule,
+            options.integrations,
+            options.models,
+            options.events,
+        );
         const loaderStateModule = createLoaderStateModule((identity) => {
             loaderIdentity = identity;
         });
         const orderedModules: AgentModule<AnyAgentTool, LibSQLDatabase>[] = [
+            modules.config,
             modules.systemPrompt,
             modules.conversations,
             modules.history,
             modules.modelSwitch,
-            modules.agentsMd,
             modules.permissions,
             modules.presence,
             modules.goal,
@@ -286,8 +301,9 @@ export async function loadHappyAgent(
         }
         const agentId = identity.rootAgentId;
         const existing = await system.config(ctx, agentId);
-        const config = rootAgentConfig(options.config, publicHome);
-        if (existing !== undefined) assertExistingRootAgentConfig(existing, publicHome);
+        const config = rootAgentConfig(options.config, configuration.paths.publicHome);
+        if (existing !== undefined)
+            assertExistingRootAgentConfig(existing, configuration.paths.publicHome);
         const agent =
             existing === undefined
                 ? await system.create(ctx, config, { id: agentId }).catch((error: unknown) => {
@@ -298,12 +314,12 @@ export async function loadHappyAgent(
         let closed = false;
         return {
             agent,
-            agentHome,
+            configuration,
+            configModule: options.configModule,
+            effectiveSelection: options.effectiveSelection,
             compute: modules.compute,
             database: opened.database,
-            databasePath,
             modules,
-            publicHome,
             installation: {
                 epoch: identity.epoch,
                 schemaVersion: identity.schemaVersion,
@@ -349,12 +365,21 @@ export async function loadHappyAgent(
 }
 
 function createModules(
+    configModule: ConfigModule,
     integrations: HappyAgentIntegrations,
-    agentHome: string,
-    publicHome: string,
+    models: readonly AgentModel[],
     events: EventsModuleOptions | undefined,
 ): HappyAgentModuleCollection {
+    const { configuration } = configModule;
     const history = new HistoryModule();
+    const protectedProjectFiles = [
+        ...new Set([
+            "AGENTS.md",
+            "AGENTS_SECURITY.md",
+            ...configuration.values.permissions.protectedPaths,
+            ...configuration.values.workspace.protectedSync,
+        ]),
+    ];
     const compute = createComputeModules({
         provider: {
             id: "host",
@@ -362,17 +387,51 @@ function createModules(
                 await hostComputeProvider.create(ctx, {
                     ...config,
                     hostPolicy: {
-                        privateDirectories: [agentHome],
-                        protectedProjectFiles: ["AGENTS.md", "AGENTS_SECURITY.md"],
+                        privateDirectories: [configuration.paths.agentHome],
+                        protectedProjectFiles,
                     },
                 }),
         },
     });
+    const initialPresence = configuredInitialPresence(configuration.values.presence);
+    const presenceOptions = {
+        catalog: configuredPresenceCatalog(configuration.values.presence),
+        ...(initialPresence === undefined ? {} : { initialState: initialPresence }),
+    } as unknown as ConstructorParameters<typeof PresenceModule>[0];
+    const presence = new PresenceModule(presenceOptions);
     return {
-        agentsMd: compute.agentsMdModule,
-        applets: new AppletModule({ rootDirectory: join(publicHome, "Applets") }),
-        collaboration: new CollaborationModule({ broker: integrations.collaboration }),
-        conversations: new ConversationModule({ defaultCwd: publicHome }),
+        config: configModule,
+        applets: new AppletModule({ rootDirectory: configuration.paths.appletsPath }),
+        collaboration: new CollaborationModule({
+            broker: integrations.collaboration,
+            modelCatalog: {
+                availableModels: models.map((model) => ({
+                    defaultEffort: model.defaultEffort,
+                    effortLevels: [...model.effortLevels],
+                    id: model.id,
+                    name: model.name,
+                    providerId: model.providerId,
+                    ...(model.serviceTiers === undefined
+                        ? {}
+                        : { serviceTiers: [...model.serviceTiers] }),
+                })),
+                disabledProviders: Object.entries(configuration.values.providers).flatMap(
+                    ([providerId, provider]): {
+                        id: string;
+                        reason: "not_enabled" | "no_models";
+                    }[] => {
+                        if (provider.enabled === false) {
+                            return [{ id: providerId, reason: "not_enabled" as const }];
+                        }
+                        if (!models.some((model) => model.providerId === providerId)) {
+                            return [{ id: providerId, reason: "no_models" as const }];
+                        }
+                        return [];
+                    },
+                ),
+            },
+        }),
+        conversations: new ConversationModule({ defaultCwd: configuration.paths.publicHome }),
         compute: compute.computeModule,
         events: new EventsModule(events),
         goal: new GoalModule({}),
@@ -380,16 +439,21 @@ function createModules(
         history,
         imageGeneration: new ImageGenerationModule({
             generator: integrations.imageGeneration,
-            outputDirectory: join(publicHome, "Generated"),
+            outputDirectory: configuration.paths.generatedPath,
         }),
         mcp: new McpModule({ host: integrations.mcp }),
         modelSwitch: new ModelSwitchModule({ history }),
-        permissions: new PermissionsModule(
-            integrations.permissionReviewer === undefined
+        permissions: new PermissionsModule({
+            ...(integrations.permissionReviewer === undefined
                 ? {}
-                : { reviewer: integrations.permissionReviewer },
-        ),
-        presence: new PresenceModule(),
+                : { reviewer: integrations.permissionReviewer }),
+            killAllSessions: async (_ctx, agentId) => {
+                for (const session of compute.computeModule.runningCommands(agentId)) {
+                    await compute.computeModule.stopCommand(agentId, session.sessionId);
+                }
+            },
+        }),
+        presence,
         projects: new ProjectsModule({}),
         scheduling: new SchedulingModule({ scheduler: integrations.scheduling }),
         search: new SearchModule({ backend: integrations.search }),
@@ -403,18 +467,40 @@ function createModules(
             publisher: integrations.slots.publisher,
             scopeResolver: integrations.slots.scopeResolver,
         }),
-        systemPrompt: new SystemPromptModule(),
+        systemPrompt: new SystemPromptModule({
+            availableModels: models.map((model) => ({
+                id: model.id,
+                name: model.name,
+                providerId: model.providerId,
+            })),
+            compute: {
+                resolve: async (ctx, agentId) => await compute.computeModule.resolve(ctx, agentId),
+            },
+            globalInstructions: {
+                path: configuration.paths.instructionsPath,
+                read: readGlobalInstructions,
+            },
+        }),
         tasks: new TasksModule({}),
         usage: new UsageModule({}),
-        userInput: new UserInputModule({ broker: integrations.userInput }),
-        workflows: new WorkflowsModule({ runtime: integrations.workflows }),
+        userInput: new UserInputModule({
+            broker: integrations.userInput,
+            presence: presence.userInputPolicy,
+        }),
+        workflows: new WorkflowsModule({
+            enabled: configuration.values.features.workflows,
+            runtime: integrations.workflows,
+        }),
         worklets: new WorkletsModule({
-            installRoot: join(publicHome, "Worklets"),
+            installRoot: configuration.paths.workletsPath,
             runtime: integrations.worklets,
         }),
-        workspaces: new WorkspacesModule(
-            integrations.workspaceHost === undefined ? {} : { host: integrations.workspaceHost },
-        ),
+        workspaces: new WorkspacesModule({
+            enabled: configuration.values.features.workspaces,
+            ...(integrations.workspaceHost === undefined
+                ? {}
+                : { host: integrations.workspaceHost }),
+        }),
     };
 }
 
@@ -444,6 +530,88 @@ function rootAgentConfig(config: AgentConfig | undefined, publicHome: string): A
             ...config?.modules,
             compute: { cwd: publicHome, providerId: "host" },
         },
+    };
+}
+
+type ConfiguredPresenceDefinition = NonNullable<PresenceModuleOptions["catalog"]>[number];
+type ConfiguredPresenceState = {
+    readonly presenceId: string;
+    readonly fallbackPresenceId?: string;
+    readonly expiresAt?: number;
+};
+const BUILT_IN_PRESENCE_DEFINITIONS: readonly ConfiguredPresenceDefinition[] = [
+    {
+        id: "online",
+        status: "online",
+        title: "Online",
+        emoji: "🟢",
+        prompt: "The user is at the keyboard and can answer questions right away.",
+        answerWaitMs: null,
+    },
+    {
+        id: "away",
+        status: "away",
+        title: "Away",
+        emoji: "🌙",
+        prompt: "The user is away and cannot be reached.",
+        answerWaitMs: 0,
+    },
+    {
+        id: "offline",
+        status: "offline",
+        title: "Offline",
+        emoji: "⚫",
+        prompt: "The user is offline and cannot be reached.",
+        answerWaitMs: 0,
+    },
+    {
+        id: "dnd",
+        status: "dnd",
+        title: "Do not disturb",
+        emoji: "🔕",
+        prompt: "The user has asked not to be disturbed.",
+        answerWaitMs: 0,
+    },
+];
+
+function configuredPresenceCatalog(
+    presence: HappyAgentConfiguration["values"]["presence"],
+): ConfiguredPresenceDefinition[] {
+    return Object.entries(presence.states).map(([id, state]) => {
+        const builtIn = BUILT_IN_PRESENCE_DEFINITIONS.find((candidate) => candidate.id === id);
+        return {
+            id,
+            status: builtIn?.status ?? "custom",
+            title: state.title ?? builtIn?.title ?? id,
+            emoji: state.emoji ?? builtIn?.emoji ?? "🟣",
+            prompt: state.prompt ?? builtIn?.prompt ?? "",
+            answerWaitMs:
+                state.answerWaitMs === undefined
+                    ? (builtIn?.answerWaitMs ?? 0)
+                    : state.answerWaitMs,
+        };
+    });
+}
+
+function configuredInitialPresence(
+    presence: HappyAgentConfiguration["values"]["presence"],
+): ConfiguredPresenceState | undefined {
+    const current = presence.current;
+    if (current === undefined) return undefined;
+    const catalogIds = new Set([
+        ...BUILT_IN_PRESENCE_DEFINITIONS.map((candidate) => candidate.id),
+        ...Object.keys(presence.states),
+    ]);
+    if (!catalogIds.has(current)) {
+        throw new Error(`Configured current presence "${current}" is not defined.`);
+    }
+    if (presence.fallback !== undefined && !catalogIds.has(presence.fallback)) {
+        throw new Error(`Configured fallback presence "${presence.fallback}" is not defined.`);
+    }
+    return {
+        presenceId: current,
+        ...(presence.fallback === undefined ? {} : { fallbackPresenceId: presence.fallback }),
+        ...(presence.until === undefined ? {} : { expiresAt: presence.until }),
     };
 }
 
@@ -533,33 +701,33 @@ async function ensureLoaderIdentity(database: AgentDatabase): Promise<{
     return { epoch, rootAgentId, schemaVersion };
 }
 
-async function prepareHomes(agentHome: string, publicHome: string): Promise<void> {
-    await mkdir(agentHome, { mode: 0o700, recursive: true });
-    await chmod(agentHome, 0o700);
+async function prepareHomes(configuration: HappyAgentConfiguration): Promise<void> {
+    await mkdir(configuration.paths.agentHome, { mode: 0o700, recursive: true });
+    await chmod(configuration.paths.agentHome, 0o700);
     await Promise.all([
-        mkdir(publicHome, { mode: 0o755, recursive: true }),
-        mkdir(join(publicHome, "Applets"), { mode: 0o755, recursive: true }),
-        mkdir(join(publicHome, "Generated"), { mode: 0o755, recursive: true }),
-        mkdir(join(publicHome, "Worklets"), { mode: 0o755, recursive: true }),
+        mkdir(configuration.paths.publicHome, { mode: 0o755, recursive: true }),
+        mkdir(configuration.paths.appletsPath, { mode: 0o755, recursive: true }),
+        mkdir(configuration.paths.generatedPath, { mode: 0o755, recursive: true }),
+        mkdir(configuration.paths.workletsPath, { mode: 0o755, recursive: true }),
     ]);
 }
 
 function assertLoaderInput(options: LoadHappyAgentOptions): void {
-    const candidate = {
-        agentHome: options.agentHome,
-        provider: options.provider,
-        publicHome: options.publicHome,
-    };
-    if (!Value.Check(loaderInputSchema, candidate)) {
-        throw new Error("The Happy agent loader paths or provider are invalid.");
+    if (!Value.Check(happyAgentConfigurationSchema, options.configuration)) {
+        throw new Error("The Happy agent configuration is invalid.");
+    }
+    if (options.configModule.configuration !== options.configuration) {
+        throw new Error(
+            "The Happy Agent config module and configuration must be the same snapshot.",
+        );
+    }
+    if (!Value.Check(loaderProviderInputSchema, { provider: options.provider })) {
+        throw new Error("The Happy agent loader provider is invalid.");
     }
     if (!Value.Check(Type.Array(modelSchema, { minItems: 1, maxItems: 1_000 }), options.models)) {
         throw new Error("The Happy agent loader models are invalid.");
     }
-}
-
-function expandHome(path: string): string {
-    if (path === "~") return homedir();
-    if (path.startsWith("~/")) return resolve(homedir(), path.slice(2));
-    return resolve(path);
+    if (!Value.Check(effectiveSelectionSchema, options.effectiveSelection)) {
+        throw new Error("The Happy agent effective selection is invalid.");
+    }
 }

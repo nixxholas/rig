@@ -115,6 +115,26 @@ export const collaborationMigrations: readonly AgentModuleMigration[] = [
             );
         },
     ],
+    [
+        "003-collaboration-run-state",
+        async (_ctx, database) => {
+            await agentDatabaseRun(
+                database,
+                sql`ALTER TABLE happy_collaboration_agents
+                    ADD COLUMN run_id TEXT`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`ALTER TABLE happy_collaboration_agents
+                    ADD COLUMN run_version BIGINT NOT NULL DEFAULT 0`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`ALTER TABLE happy_collaboration_agents
+                    ADD COLUMN observation_updated_at BIGINT`,
+            );
+        },
+    ],
 ];
 
 export interface SqliteCollaborationStorage {
@@ -151,6 +171,16 @@ export function createSqliteCollaborationStorage(): SqliteCollaborationStorage {
             ...(row.title === null ? {} : { title: row.title }),
             ...(metadataValue === undefined ? {} : { metadata: metadataValue }),
             status: row.status,
+            ...(row.run_id === null ? {} : { runId: row.run_id }),
+            runVersion: number(row.run_version, "agent runVersion"),
+            ...(row.observation_updated_at === null
+                ? {}
+                : {
+                      observationUpdatedAt: number(
+                          row.observation_updated_at,
+                          "agent observationUpdatedAt",
+                      ),
+                  }),
             createdAt: number(row.created_at, "agent createdAt"),
             updatedAt: number(row.updated_at, "agent updatedAt"),
         };
@@ -197,7 +227,7 @@ export function createSqliteCollaborationStorage(): SqliteCollaborationStorage {
         const rows = await agentDatabaseRows<AgentRow>(
             ctx.db,
             sql`SELECT id, owner_agent_id, parent_id, role, group_id, title, metadata_json,
-                       status, created_at, updated_at
+                       status, run_id, run_version, observation_updated_at, created_at, updated_at
                 FROM happy_collaboration_agents WHERE id = ${id} LIMIT 1`,
         );
         return rows[0] === undefined ? undefined : readAgentRow(rows[0]);
@@ -206,12 +236,14 @@ export function createSqliteCollaborationStorage(): SqliteCollaborationStorage {
         await agentDatabaseRun(
             ctx.db,
             sql`INSERT INTO happy_collaboration_agents
-                (id, owner_agent_id, parent_id, role, group_id, title, metadata_json, status, created_at, updated_at)
+                (id, owner_agent_id, parent_id, role, group_id, title, metadata_json, status,
+                 run_id, run_version, observation_updated_at, created_at, updated_at)
                 VALUES (
                     ${agent.id}, ${agent.ownerAgentId}, ${agent.parentId},
                     ${agent.role ?? null}, ${agent.groupId ?? null}, ${agent.title ?? null},
                     ${agent.metadata === undefined ? null : json(agent.metadata)},
-                    ${agent.status}, ${agent.createdAt}, ${agent.updatedAt}
+                    ${agent.status}, ${agent.runId ?? null}, ${agent.runVersion},
+                    ${agent.observationUpdatedAt ?? null}, ${agent.createdAt}, ${agent.updatedAt}
                 )
                 ON CONFLICT(id) DO UPDATE SET
                     owner_agent_id = excluded.owner_agent_id,
@@ -221,6 +253,9 @@ export function createSqliteCollaborationStorage(): SqliteCollaborationStorage {
                     title = excluded.title,
                     metadata_json = excluded.metadata_json,
                     status = excluded.status,
+                    run_id = excluded.run_id,
+                    run_version = excluded.run_version,
+                    observation_updated_at = excluded.observation_updated_at,
                     created_at = excluded.created_at,
                     updated_at = excluded.updated_at`,
         );
@@ -243,7 +278,7 @@ export function createSqliteCollaborationStorage(): SqliteCollaborationStorage {
         const rows = await agentDatabaseRows<AgentRow>(
             ctx.db,
             sql`SELECT id, owner_agent_id, parent_id, role, group_id, title, metadata_json,
-                       status, created_at, updated_at
+                       status, run_id, run_version, observation_updated_at, created_at, updated_at
                 FROM happy_collaboration_agents
                 WHERE 1 = 1${group}${owner}
                 ORDER BY id
@@ -380,6 +415,9 @@ interface AgentRow {
     readonly title: string | null;
     readonly metadata_json: string | null;
     readonly status: CollaborationAgent["status"];
+    readonly run_id: string | null;
+    readonly run_version: number | string;
+    readonly observation_updated_at: number | string | null;
     readonly created_at: number | string;
     readonly updated_at: number | string;
 }

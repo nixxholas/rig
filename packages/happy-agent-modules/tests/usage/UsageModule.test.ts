@@ -1,10 +1,13 @@
-import { agentDatabaseRows } from "@slopus/happy-agent-base";
+import { agentDatabaseRows, withAgentContext } from "@slopus/happy-agent-base";
 import { withAfterCommit, type Context } from "@steve.kite/stdlib";
 import { sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 
+import type { UsageAgentTree } from "../../sources/usage/Usage.js";
 import { UsageModule } from "../../sources/usage/UsageModule.js";
 import type { UsageEvent } from "../../sources/usage/UsageEvent.js";
+import { getAgentTreeUsageTool } from "../../sources/usage/tools/get_agent_tree_usage.js";
+import { getUsageTool } from "../../sources/usage/tools/get_usage.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
 
 class FakeKV {
@@ -41,10 +44,7 @@ function scope(database: ReturnType<typeof moduleDatabase>["database"], runKV: F
     } as never;
 }
 
-async function inCompletion(
-    ctx: Context,
-    work: (txCtx: Context) => Promise<void>,
-): Promise<void> {
+async function inCompletion(ctx: Context, work: (txCtx: Context) => Promise<void>): Promise<void> {
     const [txCtx, drain] = withAfterCommit(ctx);
     await work(txCtx);
     await drain();
@@ -121,11 +121,157 @@ describe("UsageModule", () => {
                 contextTokens: 14,
             },
         ]);
-        expect(events.map((event) => event.eventId)).toEqual([
-            "inference-base-id",
-            "turn-base-id",
-        ]);
+        expect(events.map((event) => event.eventId)).toEqual(["inference-base-id", "turn-base-id"]);
         expect(runKV.values.size).toBe(0);
+        await expect(module.read(ctx, "agent-1")).resolves.toMatchObject({
+            currentContext: {
+                approximate: false,
+                contextTokens: 14,
+                provider: "provider-main",
+                model: "model-main",
+            },
+        });
+        database.close();
+    });
+
+    it("clears the current context after a turn with no provider measurement", async () => {
+        const database = moduleDatabase([], "usage-current-context-invalidation");
+        const ctx = database.context;
+        let now = 100;
+        const module = new UsageModule({
+            clock: () => now,
+        });
+        await module.migrations[0]![1](database.context, database.database);
+        await module.migrations[1]![1](database.context, database.database);
+        const runKV = new FakeKV();
+        const agentScope = scope(database.database, runKV);
+
+        await module.beforeTurnTransact!(ctx, agentScope, {
+            loopId: "loop-1",
+            turnId: "turn-1",
+            contextTokens: undefined,
+        });
+        now = 120;
+        await inCompletion(ctx, async (txCtx) => {
+            await module.afterTurnTransact!(txCtx, agentScope, {
+                loopId: "loop-1",
+                turnId: "turn-1",
+                contextTokens: 12,
+                aborted: false,
+            });
+        });
+        await expect(module.read(ctx, "agent-1")).resolves.toMatchObject({
+            currentContext: { contextTokens: 12 },
+        });
+
+        now = 140;
+        await module.beforeTurnTransact!(ctx, agentScope, {
+            loopId: "loop-2",
+            turnId: "turn-2",
+            contextTokens: undefined,
+        });
+        now = 160;
+        await inCompletion(ctx, async (txCtx) => {
+            await module.afterTurnTransact!(txCtx, agentScope, {
+                loopId: "loop-2",
+                turnId: "turn-2",
+                contextTokens: undefined,
+                aborted: false,
+            });
+        });
+        const summary = await module.read(ctx, "agent-1");
+        expect(summary).not.toHaveProperty("currentContext");
+        database.close();
+    });
+
+    it("allows the exported usage tool to aggregate for a host-neutral caller", async () => {
+        const database = moduleDatabase([], "usage-host-neutral-tool");
+        const ctx = database.context;
+        let now = 100;
+        const module = new UsageModule({
+            clock: () => now,
+        });
+        await module.migrations[0]![1](database.context, database.database);
+        await module.migrations[1]![1](database.context, database.database);
+        const runKV = new FakeKV();
+        const agentScope = scope(database.database, runKV);
+
+        await module.beforeInferenceTransact!(ctx, agentScope, {
+            loopId: "loop-1",
+            turnId: "turn-1",
+            inferenceId: "inference-1",
+            contextTokens: undefined,
+        });
+        now = 110;
+        await inCompletion(ctx, async (txCtx) => {
+            await module.afterInferenceTransact!(txCtx, agentScope, {
+                loopId: "loop-1",
+                turnId: "turn-1",
+                inferenceId: "inference-1",
+                contextTokens: undefined,
+                state: "normal",
+                tokens: { input: 3, output: 2 },
+            });
+        });
+
+        const tool = getUsageTool(module, "agent-1");
+        const result = await tool.execute(ctx, { aggregate: true }, {} as never);
+        expect(result.agentId).toBeUndefined();
+        expect(result.totalTokens).toBe(5);
+        database.close();
+    });
+
+    it("requires authorization before exposing an injected agent tree", async () => {
+        const database = moduleDatabase([], "usage-agent-tree");
+        const ctx = database.context;
+        const agentCtx = withAgentContext(ctx, {
+            id: "agent-1",
+            provider: "provider-main",
+            model: "model-main",
+            effort: "high",
+            serviceTier: "priority",
+            permissionMode: "auto",
+        });
+        const tree: UsageAgentTree = {
+            sessions: [
+                {
+                    agentId: "agent-1",
+                    modelId: "model-main",
+                    path: "/root",
+                    providerId: "provider-main",
+                    relation: "root",
+                    status: "running",
+                    totalTokens: 10,
+                },
+                {
+                    agentId: "agent-2",
+                    modelId: "model-subagent",
+                    parentAgentId: "agent-1",
+                    path: "/root/audit",
+                    providerId: "provider-main",
+                    relation: "subagent",
+                    status: "completed",
+                    totalTokens: 7,
+                },
+            ],
+            totalTokens: 17,
+        };
+        const reader = () => structuredClone(tree);
+        const denied = new UsageModule({ agentTreeReader: reader });
+        await expect(denied.readAgentTreeUsage(agentCtx, "agent-1")).rejects.toThrow(
+            "not authorized",
+        );
+
+        const module = new UsageModule({
+            agentTreeReader: reader,
+            agentTreeAuthorization: () => true,
+        });
+        await expect(module.readAgentTreeUsage(agentCtx, "agent-1")).resolves.toEqual(tree);
+        const tool = getAgentTreeUsageTool(module, "agent-1");
+        await expect(tool.execute(agentCtx, {}, {} as never)).resolves.toEqual(tree);
+        await expect(module.readAgentTreeUsage(agentCtx, "agent-2")).rejects.toThrow(
+            "current agent",
+        );
         database.close();
     });
 

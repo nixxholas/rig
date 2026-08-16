@@ -5,6 +5,8 @@ import type { Compute } from "../Compute.js";
 import {
     commandResultSchema,
     createCommandResult,
+    DEFAULT_COMMAND_OUTPUT_TOKENS,
+    MAX_COMMAND_OUTPUT_TOKENS,
     formatCommandResult,
 } from "../impl/commandResult.js";
 
@@ -32,6 +34,13 @@ export function readCommandOutputTool(compute: Compute) {
                         minimum: 0,
                     }),
                 ),
+                max_output_tokens: Type.Optional(
+                    Type.Integer({
+                        description: `Output token budget. Defaults to ${String(DEFAULT_COMMAND_OUTPUT_TOKENS)}.`,
+                        minimum: 1,
+                        maximum: MAX_COMMAND_OUTPUT_TOKENS,
+                    }),
+                ),
             },
             { additionalProperties: false },
         ),
@@ -41,7 +50,7 @@ export function readCommandOutputTool(compute: Compute) {
         // Reading output of work Rig itself started stays inside the machine the agent already
         // has, so there is nothing here for a reviewer to weigh.
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, { command_id, wait_ms }) => {
+        execute: async (ctx, { command_id, wait_ms, max_output_tokens }) => {
             const startedAt = Date.now();
             const snapshot = await compute.shell.readSession(command_id, {
                 ...(ctx.lifetime === undefined ? {} : { signal: ctx.lifetime }),
@@ -50,7 +59,11 @@ export function readCommandOutputTool(compute: Compute) {
             if (snapshot === undefined) {
                 throw new Error(`There is no command ${String(command_id)} on this machine.`);
             }
-            return createCommandResult(snapshot, (Date.now() - startedAt) / 1_000);
+            return createCommandResult(
+                snapshot,
+                (Date.now() - startedAt) / 1_000,
+                max_output_tokens === undefined ? {} : { maxOutputTokens: max_output_tokens },
+            );
         },
         isError: (result) => result.exit_code !== undefined && result.exit_code !== 0,
         toLLM: (result) => [{ type: "text", text: formatCommandResult(result) }],

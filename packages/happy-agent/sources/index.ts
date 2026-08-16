@@ -10,3 +10,10 @@ export * from "@slopus/happy-agent-modules";
 export * as compute from "@slopus/happy-agent-compute";
 export * from "./main.js";
 export * from "./modules/index.js";
+export {
+    applyEffectiveAgentSelection,
+    createVanillaHappyAgentConfiguration,
+    resolveEffectiveAgentSelection,
+    type EffectiveAgentSelection,
+    type VanillaHappyAgentConfiguration,
+} from "./vanillaHappyAgentConfiguration.js";

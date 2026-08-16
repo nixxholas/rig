@@ -33,7 +33,8 @@
         "@slopus/happy-agent-compute": "npm:@slopus/happy-agent-compute@0.1.6",
         "@slopus/happy-providers": "0.0.8",
         "@steve.kite/stdlib": "0.0.10",
-        "drizzle-orm": "^0.45.2"
+        "drizzle-orm": "^0.45.2",
+        "smol-toml": "^1.7.0"
     },
     "devDependencies": {
         "@slopus/happy-agent-base": "npm:@slopus/happy-agent-base@0.0.8",

@@ -12,7 +12,10 @@ export function webFetchTool(search: SearchModule, agentId: string) {
         parameters: fetchInputSchema,
         returnType: fetchResultSchema,
         durable: false,
-        shouldReviewInAutoMode: () => false,
+        requiresAutoOrFullAccess: true,
+        shouldReviewInAutoMode: () => true,
+        describeAutoPermissionAction: ({ url }) =>
+            `fetching "${url}". Access: external network outside the local sandbox`,
         execute: async (ctx, input: FetchInput) => await search.fetch(ctx, agentId, input),
         toLLM: (result) => [
             {

@@ -20,15 +20,25 @@ One module instance serves every agent. Each agent's catalog is taken from its
 
 ## Tool
 
-`generate_image` accepts a bounded prompt and optional provider-neutral hints such as dimensions,
-quality, style, and seed. The tool:
+The module uses Rig's provider-facing names over one provider-neutral host boundary:
+
+- Codex and Bedrock OpenAI/GPT agents receive **`codex_imagegen`**.
+- Claude, Grok, and other model families receive **`imagegen`**.
+
+Both accept a bounded prompt. For edits they accept either up to five
+`referenced_image_paths` or `num_last_images_to_include`, never both. The host receives the active
+provider ID as its preferred route, so a single generator integration can select and fall back
+across configured image providers. The tool:
 
 - is `durable: false`, because generation may perform billed external work and cannot safely be
   retried after an interrupted process;
 - uses the stable cuid2 `call.id` supplied by Agent Base as its operation ID;
 - never exposes an operation ID in its model-facing input; and
 - returns bounded metadata including the operation ID, asset ID, media type, and absolute file
-  path, never the image bytes.
+  path.
+
+Image tools require Auto or Full access and request Auto review because generation crosses the
+external provider and generated-files boundaries.
 
 The tool does not maintain call-scoped state, request fingerprints, receipts, or replay handling.
 Calling the module twice with the same operation ID is a conflict, not a request to replay a

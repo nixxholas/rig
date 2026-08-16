@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import {
     AgentProviders,
+    loadHappyAgentConfiguration,
     startAgentHttpServer,
     startHappyAgentDaemon,
     type AgentModel,
@@ -47,15 +48,17 @@ afterEach(async () => {
 describe("Rig client to Happy Agent daemon integration", () => {
     it("exposes authenticated starting health before the Agent System is ready", async () => {
         const directory = await createTestSocketDirectory();
-        const agentHome = join(directory, "agent");
+        const configuration = await loadHappyAgentConfiguration(join(directory, ".happy"));
         const ctx = createRootContext() as unknown as RootContext;
         const http = await startAgentHttpServer({
-            agentHome,
+            agentConfiguration: configuration,
             ctx: ctx.named("starting-http"),
             version: "integration-test",
         });
         try {
-            const connection = await connectHappyAgentProtocolServer({ agentHome });
+            const connection = await connectHappyAgentProtocolServer({
+                agentHome: configuration.paths.agentHome,
+            });
             await expect(connection.client.health()).resolves.toMatchObject({
                 healthy: true,
                 ready: false,
@@ -73,12 +76,12 @@ describe("Rig client to Happy Agent daemon integration", () => {
     it("drives inference and SSE through the replacement Unix socket and survives restart", async () => {
         const first = await startTestDaemon();
         const connection = await connectHappyAgentProtocolServer({
-            agentHome: first.daemon.agent.agentHome,
+            agentHome: first.daemon.configuration.paths.agentHome,
         });
 
         await expect(connection.client.health()).resolves.toMatchObject({
             healthy: true,
-            protocolVersion: 0,
+            protocolVersion: 17,
             ready: true,
             status: "ready",
         });
@@ -196,7 +199,7 @@ describe("Rig client to Happy Agent daemon integration", () => {
         running.delete(first);
         const restarted = await startTestDaemon(first.directory);
         const reconnected = await connectHappyAgentProtocolServer({
-            agentHome: restarted.daemon.agent.agentHome,
+            agentHome: restarted.daemon.configuration.paths.agentHome,
         });
         expect(reconnected.token).toBe(originalToken);
         await expect(reconnected.client.listSessions()).resolves.toMatchObject({
@@ -236,11 +239,11 @@ describe("Rig client to Happy Agent daemon integration", () => {
 
     it("resets a partial block and resumes the same run across daemon restart", async () => {
         const directory = await createTestSocketDirectory();
-        const agentHome = join(directory, "agent");
-        const publicHome = join(directory, "public");
-        const first = await startRestartFixture(agentHome, publicHome, 1);
+        const happyHome = join(directory, ".happy");
+        const configuration = await loadHappyAgentConfiguration(happyHome);
+        const first = await startRestartFixture(happyHome, 1);
         const connection = await connectHappyAgentProtocolServer({
-            agentHome,
+            agentHome: configuration.paths.agentHome,
         });
         const sessions = await connection.client.listSessions();
         const session = sessions.sessions[0];
@@ -279,7 +282,7 @@ describe("Rig client to Happy Agent daemon integration", () => {
         first.kill("SIGKILL");
         await once(first, "exit");
         childDaemons.delete(first);
-        const second = await startRestartFixture(agentHome, publicHome, 2);
+        const second = await startRestartFixture(happyHome, 2);
 
         await reset.promise;
         await expect(finished.promise).resolves.toMatchObject({
@@ -302,8 +305,7 @@ async function startTestDaemon(
     provider: Parameters<AgentProviders["add"]>[1] = scriptedProvider(),
 ) {
     const directory = existingDirectory ?? (await createTestSocketDirectory());
-    const agentHome = join(directory, "agent");
-    const publicHome = join(directory, "public");
+    const happyHome = join(directory, ".happy");
     const providers = new AgentProviders();
     providers.add("scripted", provider, "gym");
     const models: readonly AgentModel[] = [
@@ -317,12 +319,11 @@ async function startTestDaemon(
     ];
     const ctx = createRootContext() as unknown as RootContext;
     const daemon = await startHappyAgentDaemon(ctx as Parameters<typeof startHappyAgentDaemon>[0], {
-        agentHome,
+        happyHome,
         integrations: unavailableIntegrations(),
         models,
         provider: "scripted",
         providers,
-        publicHome,
         version: "integration-test",
     });
     const entry = { ctx, daemon, directory };
@@ -397,14 +398,10 @@ function scriptedProvider(): Parameters<AgentProviders["add"]>[1] {
     } as never;
 }
 
-async function startRestartFixture(
-    agentHome: string,
-    publicHome: string,
-    attempt: number,
-): Promise<ChildProcess> {
+async function startRestartFixture(happyHome: string, attempt: number): Promise<ChildProcess> {
     const child = fork(
         new URL("./fixtures/happyAgentRestartDaemon.ts", import.meta.url),
-        [agentHome, publicHome, String(attempt)],
+        [happyHome, String(attempt)],
         {
             execArgv: ["--import", "tsx"],
             stdio: ["ignore", "pipe", "pipe", "ipc"],
@@ -449,6 +446,9 @@ async function startRestartFixture(
 }
 
 function unavailableIntegrations(): HappyAgentIntegrations {
+    const unavailable = async () => {
+        throw new Error("This integration is unavailable in the Happy Agent integration test.");
+    };
     return {
         collaboration: {
             create: async (
@@ -457,10 +457,16 @@ function unavailableIntegrations(): HappyAgentIntegrations {
                 options: Parameters<HappyAgentIntegrations["collaboration"]["create"]>[2],
             ) => ({ id: options.id }),
             config: async () => undefined,
+            interrupt: unavailable,
+            observe: unavailable,
+            selection: async () => undefined,
             send: async () => undefined,
+            setReadOnly: unavailable,
+            spawnCapacity: async () => ({ canSpawn: false, depth: 0, maxDepth: 0 }),
             wait: async () => {
                 throw new Error("Collaboration waits are unavailable in this integration test.");
             },
+            waitForAgent: unavailable,
         },
         happy: {
             notify: async () => ({ accepted: false }),

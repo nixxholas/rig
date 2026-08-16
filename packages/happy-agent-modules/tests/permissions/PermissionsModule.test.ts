@@ -11,13 +11,17 @@ import { createRootContext, type Context } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
 import {
+    MAX_PERMISSION_ACTION,
     PermissionsModule,
+    mergePermissionToolGuidances,
     permissionModeChangeNotice,
     type PermissionEvent,
     type PermissionReviewDecision,
     type PermissionReviewRequest,
     type PermissionReviewer,
-} from "../../sources/index.js";
+} from "../../sources/permissions/index.js";
+import { PermissionRefusalCircuitBreaker } from "../../sources/permissions/impl/permissionRefusalCircuitBreaker.js";
+import { permissionModeGuidance } from "../../sources/permissions/impl/permissionModeGuidance.js";
 import { agentWorld } from "../support/agentWorld.js";
 import { providersOf, sharedKV, textTurn, toolCallTurn, user } from "../support/fixtures.js";
 import { ScriptedProvider } from "../support/ScriptedProvider.js";
@@ -68,6 +72,45 @@ const externalTool = defineAgentTool({
     toLLM: () => [{ type: "text", text: "called" }],
 });
 
+/** A reviewable tool with the action describer accidentally omitted. */
+const missingDescriptionTool = defineAgentTool({
+    name: "missing_description",
+    returnType: Type.Object({}),
+    shouldReviewInAutoMode: () => true,
+    execute: (toolCtx: Context) => {
+        ran.push({ tool: "missing_description", mode: agentPermissionMode(toolCtx) });
+        return Promise.resolve({});
+    },
+    toLLM: () => [{ type: "text", text: "ran despite the definition error" }],
+});
+
+/** A reviewable tool whose action boundary is deliberately beyond the request limit. */
+const oversizedActionTool = defineAgentTool({
+    name: "oversized_action",
+    returnType: Type.Object({}),
+    shouldReviewInAutoMode: () => true,
+    describeAutoPermissionAction: () => "x".repeat(MAX_PERMISSION_ACTION + 1),
+    execute: (toolCtx: Context) => {
+        ran.push({ tool: "oversized_action", mode: agentPermissionMode(toolCtx) });
+        return Promise.resolve({});
+    },
+    toLLM: () => [{ type: "text", text: "oversized action ran" }],
+});
+
+/** A reviewable tool with unconstrained provider arguments; permissions applies its own bound. */
+const oversizedArgumentsTool = defineAgentTool({
+    name: "oversized_arguments",
+    parameters: Type.Any(),
+    returnType: Type.Object({}),
+    shouldReviewInAutoMode: () => true,
+    describeAutoPermissionAction: () => "Inspect the supplied arguments.",
+    execute: (toolCtx: Context) => {
+        ran.push({ tool: "oversized_arguments", mode: agentPermissionMode(toolCtx) });
+        return Promise.resolve({});
+    },
+    toLLM: () => [{ type: "text", text: "oversized arguments ran" }],
+});
+
 function reviewerAnswering(
     decide: (request: PermissionReviewRequest) => PermissionReviewDecision,
 ): PermissionReviewer & { readonly seen: PermissionReviewRequest[] } {
@@ -90,6 +133,9 @@ async function permissionAgent(
         readonly events?: PermissionEvent[];
         readonly permissionMode?: AgentPermissionMode;
         readonly refusalsBeforeStopping?: number;
+        readonly reviewTimeoutMs?: number;
+        readonly toolGuidance?: readonly { readonly autoPermissionInstructions?: string }[];
+        readonly killAllSessions?: (ctx: Context, agentId: string) => Promise<void> | void;
     } = {},
 ) {
     const world = await agentWorld();
@@ -99,6 +145,11 @@ async function permissionAgent(
         ...(options.refusalsBeforeStopping === undefined
             ? {}
             : { refusalsBeforeStopping: options.refusalsBeforeStopping }),
+        ...(options.reviewTimeoutMs === undefined
+            ? {}
+            : { reviewTimeoutMs: options.reviewTimeoutMs }),
+        ...(options.toolGuidance === undefined ? {} : { toolGuidance: options.toolGuidance }),
+        killAllSessions: options.killAllSessions ?? (() => {}),
         ...(options.events === undefined
             ? {}
             : { listener: { onEvent: (_eventCtx, event) => options.events?.push(event) } }),
@@ -110,7 +161,16 @@ async function permissionAgent(
         persistence: world.storage.persistence(agentId),
         sharedKV: sharedKV(),
         modules: [permissions],
-        initialState: { tools: [routineTool, escalatingTool, externalTool] },
+        initialState: {
+            tools: [
+                routineTool,
+                escalatingTool,
+                externalTool,
+                missingDescriptionTool,
+                oversizedActionTool,
+                oversizedArgumentsTool,
+            ],
+        },
         ...(options.permissionMode === undefined ? {} : { permissionMode: options.permissionMode }),
     });
     return { agent, permissions, provider, world };
@@ -127,10 +187,20 @@ function toolResults(provider: ScriptedProvider): string[] {
     );
 }
 
+function wideArguments(count: number): string {
+    return JSON.stringify(
+        Object.fromEntries(Array.from({ length: count }, (_, index) => [`key-${index}`, index])),
+    );
+}
+
 describe("PermissionsModule", () => {
     it("runs a reviewed action under Full access, and only for that call", async () => {
         ran.length = 0;
-        const reviewer = reviewerAnswering(() => ({ outcome: "allowed" }));
+        const reviewer = reviewerAnswering(() => ({
+            outcome: "allowed",
+            risk: "low",
+            userAuthorization: "high",
+        }));
         const events: PermissionEvent[] = [];
         const { agent, provider } = await permissionAgent(
             "elevating-agent",
@@ -172,6 +242,8 @@ describe("PermissionsModule", () => {
         const reviewer = reviewerAnswering(() => ({
             outcome: "denied",
             reason: "The file belongs to the system, and nothing the user said covers it.",
+            risk: "high",
+            userAuthorization: "low",
         }));
         const { agent, provider } = await permissionAgent(
             "denied-agent",
@@ -192,6 +264,58 @@ describe("PermissionsModule", () => {
         expect(results).toContain("The file belongs to the system");
         expect(results).toContain("materially safer alternative");
         expect(events[0]).toMatchObject({ type: "permission_action_denied", callId: "call-1" });
+    });
+
+    it("does not honor an allowed critical-risk review", async () => {
+        ran.length = 0;
+        const events: PermissionEvent[] = [];
+        const reviewer = reviewerAnswering(() => ({
+            outcome: "allowed",
+            risk: "critical",
+            userAuthorization: "high",
+        }));
+        const { agent, provider } = await permissionAgent(
+            "critical-agent",
+            [
+                toolCallTurn("call-1", "publish", JSON.stringify({ target: "/etc/hosts" })),
+                textTurn("stop"),
+            ],
+            { reviewer, events },
+        );
+
+        await agent.send(ctx, user("publish it"), { await: true });
+        await agent.waitForIdle();
+        await agent.close();
+
+        expect(ran).toEqual([]);
+        expect(toolResults(provider).join("\n")).toContain("independent Auto policy");
+        expect(events[0]).toMatchObject({ type: "permission_action_denied" });
+    });
+
+    it("refuses a high-risk allow without medium user authorization", async () => {
+        ran.length = 0;
+        const reviewer = reviewerAnswering(() => ({
+            outcome: "allowed",
+            risk: "high",
+            userAuthorization: "low",
+        }));
+        const { agent, provider } = await permissionAgent(
+            "high-risk-agent",
+            [
+                toolCallTurn("call-1", "publish", JSON.stringify({ target: "/etc/hosts" })),
+                textTurn("stop"),
+            ],
+            { reviewer },
+        );
+
+        await agent.send(ctx, user("publish it"), { await: true });
+        await agent.waitForIdle();
+        await agent.close();
+
+        expect(ran).toEqual([]);
+        expect(toolResults(provider).join("\n")).toContain(
+            "requires at least medium user authorization",
+        );
     });
 
     it("refuses an action nobody reviewed as unproven rather than as unsafe", async () => {
@@ -218,10 +342,165 @@ describe("PermissionsModule", () => {
         expect(events[0]).toMatchObject({ type: "permission_action_unproven" });
     });
 
+    it("refuses a reviewable tool whose action description is missing", async () => {
+        ran.length = 0;
+        const reviewer = reviewerAnswering(() => ({
+            outcome: "allowed",
+            risk: "low",
+            userAuthorization: "high",
+        }));
+        const { agent, provider } = await permissionAgent(
+            "missing-description-agent",
+            [toolCallTurn("call-1", "missing_description", "{}"), textTurn("stop")],
+            { reviewer },
+        );
+
+        await agent.send(ctx, user("run it"), { await: true });
+        await agent.waitForIdle();
+        await agent.close();
+
+        expect(ran).toEqual([]);
+        expect(reviewer.seen).toEqual([]);
+        expect(toolResults(provider).join("\n")).toContain(
+            "cannot request Auto approval because its permission action is not defined",
+        );
+    });
+
+    it("bounds the action description before asking the reviewer", async () => {
+        ran.length = 0;
+        const reviewer = reviewerAnswering(() => ({
+            outcome: "allowed",
+            risk: "low",
+            userAuthorization: "high",
+        }));
+        const { agent, provider } = await permissionAgent(
+            "oversized-action-agent",
+            [toolCallTurn("call-1", "oversized_action", "{}"), textTurn("stop")],
+            { reviewer },
+        );
+
+        await agent.send(ctx, user("run it"), { await: true });
+        await agent.waitForIdle();
+        await agent.close();
+
+        expect(ran).toEqual([]);
+        expect(reviewer.seen).toEqual([]);
+        expect(toolResults(provider).join("\n")).toContain("permission request is invalid");
+    });
+
+    it("bounds and detaches arguments before asking the reviewer", async () => {
+        ran.length = 0;
+        const reviewer = reviewerAnswering(() => ({
+            outcome: "allowed",
+            risk: "low",
+            userAuthorization: "high",
+        }));
+        const { agent, provider } = await permissionAgent(
+            "oversized-arguments-agent",
+            [toolCallTurn("call-1", "oversized_arguments", wideArguments(257)), textTurn("stop")],
+            { reviewer },
+        );
+
+        await agent.send(ctx, user("inspect it"), { await: true });
+        await agent.waitForIdle();
+        await agent.close();
+
+        expect(ran).toEqual([]);
+        expect(reviewer.seen).toEqual([]);
+        expect(toolResults(provider).join("\n")).toContain("permission request is invalid");
+    });
+
+    it("gives the reviewer a frozen argument snapshot", async () => {
+        ran.length = 0;
+        const reviewer = reviewerAnswering((_request) => ({
+            outcome: "allowed",
+            risk: "low",
+            userAuthorization: "high",
+        }));
+        const seen = reviewer.seen;
+        reviewer.review = (_reviewCtx, request) => {
+            seen.push(request);
+            expect(Object.isFrozen(request.arguments)).toBe(true);
+            return Promise.resolve({
+                outcome: "allowed",
+                risk: "low",
+                userAuthorization: "high",
+            });
+        };
+        const { agent } = await permissionAgent(
+            "frozen-arguments-agent",
+            [
+                toolCallTurn("call-1", "publish", JSON.stringify({ target: "/tmp/output" })),
+                textTurn("done"),
+            ],
+            { reviewer },
+        );
+
+        await agent.send(ctx, user("publish it"), { await: true });
+        await agent.waitForIdle();
+        await agent.close();
+
+        expect(ran).toEqual([{ tool: "publish", mode: "full_access" }]);
+        expect(seen).toHaveLength(1);
+    });
+
+    it("distinguishes an unavailable reviewer from a timeout", async () => {
+        const unavailable = reviewerAnswering(() => {
+            throw new Error("reviewer offline");
+        });
+        const unavailableRun = await permissionAgent(
+            "unavailable-reviewer-agent",
+            [
+                toolCallTurn("call-1", "publish", JSON.stringify({ target: "/etc/hosts" })),
+                textTurn("stop"),
+            ],
+            { reviewer: unavailable },
+        );
+        await unavailableRun.agent.send(ctx, user("publish it"), { await: true });
+        await unavailableRun.agent.waitForIdle();
+        expect(toolResults(unavailableRun.provider).join("\n")).toContain(
+            "Continue with work that does not need this permission",
+        );
+        await unavailableRun.agent.close();
+
+        let timedOutSignal: AbortSignal | undefined;
+        const timeoutReviewer: PermissionReviewer = {
+            review: (_reviewCtx, request) =>
+                new Promise<PermissionReviewDecision>((resolve) => {
+                    timedOutSignal = request.signal;
+                    request.signal.addEventListener("abort", () =>
+                        resolve({
+                            outcome: "denied",
+                            reason: "The reviewer was cancelled.",
+                        }),
+                    );
+                }),
+        };
+        const timedOut = await permissionAgent(
+            "timeout-reviewer-agent",
+            [
+                toolCallTurn("call-1", "publish", JSON.stringify({ target: "/etc/hosts" })),
+                textTurn("stop"),
+            ],
+            { reviewer: timeoutReviewer, reviewTimeoutMs: 5 },
+        );
+        await timedOut.agent.send(ctx, user("publish it"), { await: true });
+        await timedOut.agent.waitForIdle();
+        expect(toolResults(timedOut.provider).join("\n")).toContain(
+            "You may try once more, or ask the user how to proceed",
+        );
+        expect(timedOutSignal?.aborted).toBe(true);
+        await timedOut.agent.close();
+    });
+
     it("keeps a tool that leaves the sandbox out of the restricted modes, without a review", async () => {
         ran.length = 0;
         const events: PermissionEvent[] = [];
-        const reviewer = reviewerAnswering(() => ({ outcome: "allowed" }));
+        const reviewer = reviewerAnswering(() => ({
+            outcome: "allowed",
+            risk: "low",
+            userAuthorization: "high",
+        }));
         const { agent, provider } = await permissionAgent(
             "restricted-agent",
             [
@@ -263,12 +542,53 @@ describe("PermissionsModule", () => {
         expect(instructions).toContain("asking to escalate has no effect");
     });
 
+    it("includes sandbox limits and deduplicated Auto tool guidance", () => {
+        const guidance = permissionModeGuidance("auto", [
+            { autoPermissionInstructions: "Set escalate_sandbox to true when needed." },
+            { autoPermissionInstructions: "Set escalate_sandbox to true when needed." },
+            { autoPermissionInstructions: "Give a concise justification." },
+        ]);
+
+        expect(guidance).toContain("Shell commands run in a sandbox with these limits:");
+        expect(guidance).toContain("Set escalate_sandbox to true when needed.");
+        expect(guidance).toContain("Give a concise justification.");
+        expect(guidance.match(/Set escalate_sandbox to true when needed\./gu)).toHaveLength(1);
+    });
+
+    it("bounds and deduplicates guidance across independently limited sources", () => {
+        const staticGuidance = Array.from({ length: 129 }, (_, index) => ({
+            autoPermissionInstructions: `static-${index}`,
+        }));
+        const providerGuidance = Array.from({ length: 128 }, (_, index) => ({
+            autoPermissionInstructions: `provider-${index}`,
+        }));
+
+        const merged = mergePermissionToolGuidances([staticGuidance, providerGuidance]);
+
+        expect(merged).toHaveLength(256);
+        expect(new Set(merged.map((item) => item.autoPermissionInstructions)).size).toBe(256);
+        expect(merged.at(-1)?.autoPermissionInstructions).toBe("provider-126");
+    });
+
+    it("stops a high refusal rate even when successes reset the consecutive streak", () => {
+        const circuit = new PermissionRefusalCircuitBreaker(100);
+        let stopped = false;
+        for (let index = 0; index < 20 && !stopped; index += 1) {
+            stopped = circuit.recordRefusal().newlyStopped;
+            if (!stopped) circuit.recordAllowed();
+        }
+
+        expect(stopped).toBe(true);
+    });
+
     it("stops a turn that keeps being refused", async () => {
         ran.length = 0;
         const events: PermissionEvent[] = [];
         const reviewer = reviewerAnswering(() => ({
             outcome: "denied",
             reason: "Not authorized.",
+            risk: "high",
+            userAuthorization: "low",
         }));
         const world = await agentWorld();
         const provider = new ScriptedProvider([
@@ -285,11 +605,11 @@ describe("PermissionsModule", () => {
                     callId: "call-2",
                     arguments: JSON.stringify({ target: "b" }),
                 },
-                { type: "toolcall_start", callId: "call-3", name: "publish" },
+                { type: "toolcall_start", callId: "call-3", name: "look" },
                 {
                     type: "toolcall_end",
                     callId: "call-3",
-                    arguments: JSON.stringify({ target: "c" }),
+                    arguments: "{}",
                 },
                 { type: "done", state: "tool_call", tokens: { input: 1, output: 1 } },
             ],
@@ -299,6 +619,7 @@ describe("PermissionsModule", () => {
             reviewer,
             refusalsBeforeStopping: 2,
             listener: { onEvent: (_eventCtx, event) => events.push(event) },
+            killAllSessions: () => {},
         });
         const system = await AgentSystemLocal.create(ctx, world.storage, {
             providers: providersOf(provider),
@@ -314,14 +635,15 @@ describe("PermissionsModule", () => {
 
         expect(ran).toEqual([]);
         expect(events.some((event) => event.type === "permission_turn_stopped")).toBe(true);
-        // The turn was cancelled, so the model was never asked to carry on after the refusals.
-        expect(provider.sessions[0]?.requests).toHaveLength(1);
+        // The delayed routine call was gated even though the provider had already emitted it.
+        expect(toolResults(provider).join("\n")).not.toContain("looked");
         await system.close(ctx);
     });
 
     it("enforces the mode a steered message made effective", async () => {
         ran.length = 0;
         const events: PermissionEvent[] = [];
+        const killedFor: string[] = [];
         const world = await agentWorld();
         const provider = new ScriptedProvider([
             textTurn("noted"),
@@ -330,6 +652,9 @@ describe("PermissionsModule", () => {
         ]);
         const permissions = new PermissionsModule({
             listener: { onEvent: (_eventCtx, event) => events.push(event) },
+            killAllSessions: (_killCtx, agentId) => {
+                killedFor.push(agentId);
+            },
         });
         const system = await AgentSystemLocal.create(ctx, world.storage, {
             providers: providersOf(provider),
@@ -338,7 +663,7 @@ describe("PermissionsModule", () => {
             modules: [permissions],
         });
         const agent = await system.create(ctx, {});
-        agent.state.tools = [routineTool, escalatingTool, externalTool];
+        agent.state.tools = [routineTool, escalatingTool, externalTool, missingDescriptionTool];
 
         // The mode is the agent's, so a host changes it the way anything else about a turn
         // changes: by steering a message that carries it.
@@ -358,6 +683,7 @@ describe("PermissionsModule", () => {
             previousMode: "auto",
             mode: "read_only",
         });
+        expect(killedFor).toEqual([agent.id]);
         const asked = (provider.sessions[0]?.requests ?? []).flatMap((request) =>
             request.context.messages.flatMap((message) =>
                 message.role === "user"
@@ -377,5 +703,40 @@ describe("PermissionsModule", () => {
         await agent.waitForIdle();
         expect(ran).toEqual([{ tool: "look", mode: "read_only" }]);
         await system.close(ctx);
+    });
+
+    it("reports a failed elevated-session cleanup after a mode reduction", async () => {
+        const events: PermissionEvent[] = [];
+        const run = await permissionAgent("cleanup-failure-agent", [textTurn("noted")], {
+            events,
+            killAllSessions: () => {
+                throw new Error("shell cleanup unavailable");
+            },
+        });
+
+        await run.agent.steer(
+            ctx,
+            {
+                role: "user",
+                content: [{ type: "text", text: permissionModeChangeNotice("read_only") }],
+            },
+            { permissionMode: "read_only" },
+        );
+        await run.agent.waitForIdle();
+        await run.agent.close();
+
+        expect(events).toContainEqual({
+            type: "permission_mode_cleanup_failed",
+            agentId: "cleanup-failure-agent",
+            previousMode: "auto",
+            mode: "read_only",
+            reason: "shell cleanup unavailable",
+        });
+        expect(events).toContainEqual({
+            type: "permission_mode_changed",
+            agentId: "cleanup-failure-agent",
+            previousMode: "auto",
+            mode: "read_only",
+        });
     });
 });

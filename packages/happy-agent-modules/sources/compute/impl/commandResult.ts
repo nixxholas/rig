@@ -4,7 +4,9 @@ import type { ComputeSessionSnapshot } from "../Compute.js";
 import { boundOutputText } from "./boundOutputText.js";
 
 /** How much of a command's output one answer may carry. */
-const MAX_COMMAND_OUTPUT_CHARACTERS = 40_000;
+export const DEFAULT_COMMAND_OUTPUT_TOKENS = 10_000;
+export const MAX_COMMAND_OUTPUT_TOKENS = 100_000;
+const CHARACTERS_PER_OUTPUT_TOKEN = 4;
 
 /** What every command tool answers with: how the command is doing, and what it has just said. */
 export const commandResultSchema = Type.Object({
@@ -43,6 +45,7 @@ export type CommandResult = Static<typeof commandResultSchema>;
 export function createCommandResult(
     snapshot: ComputeSessionSnapshot,
     wallTimeSeconds: number,
+    options: { maxOutputTokens?: number } = {},
 ): CommandResult {
     const dropped =
         (snapshot.stdoutDeltaOmittedBytes ?? 0) + (snapshot.stderrDeltaOmittedBytes ?? 0);
@@ -50,7 +53,9 @@ export function createCommandResult(
         .filter((part) => part.length > 0)
         .join("\n");
     const bounded = boundOutputText(produced, {
-        maxCharacters: MAX_COMMAND_OUTPUT_CHARACTERS,
+        maxCharacters:
+            (options.maxOutputTokens ?? DEFAULT_COMMAND_OUTPUT_TOKENS) *
+            CHARACTERS_PER_OUTPUT_TOKEN,
         keep: "tail",
     });
     const running = snapshot.status === "running";

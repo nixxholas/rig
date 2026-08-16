@@ -6,6 +6,7 @@ import type { Compute } from "../Compute.js";
 import { boundOutputText } from "../impl/boundOutputText.js";
 import { describeComputePathAction } from "../impl/describeComputePathAction.js";
 import type { FileReadLog } from "../impl/FileReadLog.js";
+import { computeImageSchema, imageMediaTypeForPath, readImageForModel } from "../impl/readImage.js";
 import { resolveComputePath } from "../impl/resolveComputePath.js";
 import { shouldReviewComputePath } from "../impl/shouldReviewComputePath.js";
 
@@ -19,11 +20,12 @@ const MAX_CHARACTERS = 60_000;
 export function readFileTool(compute: Compute, reads: FileReadLog) {
     return defineAgentTool({
         name: "read_file",
-        description: `Read a text file from the machine you are working on.
+        description: `Read a text or supported image file from the machine you are working on.
 
 - Paths may be absolute or relative to the working directory.
 - Lines are numbered in the output. The numbers are not part of the file: never include them in text you later pass to edit_file.
 - Up to ${String(MAX_LINES)} lines are returned at a time. Use offset and limit to walk through a longer file.
+- PNG, JPEG, GIF, WebP, and BMP files are returned as image content; use view_image when you only need visual inspection.
 - Reading a file is what earns the right to change it: write_file and edit_file refuse a file this agent has not read.`,
         parameters: Type.Object(
             {
@@ -50,6 +52,7 @@ export function readFileTool(compute: Compute, reads: FileReadLog) {
             returned_lines: Type.Integer(),
             total_lines: Type.Integer(),
             truncated: Type.Boolean(),
+            image: Type.Optional(computeImageSchema),
         }),
         // Reading the same file again reads the same file.
         durable: true,
@@ -66,6 +69,18 @@ export function readFileTool(compute: Compute, reads: FileReadLog) {
             const stat = await compute.fs.stat(permissions, filePath);
             if (stat.isDirectory) {
                 throw new Error(`This path is a directory. Use list_directory for it: ${filePath}`);
+            }
+            if (imageMediaTypeForPath(filePath) !== undefined) {
+                const image = await readImageForModel(compute, reads, ctx, permissions, filePath);
+                return {
+                    path: filePath,
+                    content: `[Image: ${image.mime_type}]`,
+                    start_line: 0,
+                    returned_lines: 0,
+                    total_lines: 0,
+                    truncated: false,
+                    image,
+                };
             }
             const raw = await compute.fs.readFile(permissions, filePath);
             const lines = raw.split(/\r?\n/);
@@ -87,17 +102,31 @@ export function readFileTool(compute: Compute, reads: FileReadLog) {
             return result;
         },
         toLLM: (result) => [
-            {
-                type: "text",
-                text:
-                    result.returned_lines === 0
-                        ? result.total_lines > 1
-                            ? `(no lines there; the file has ${String(result.total_lines)} lines)`
-                            : "(empty file)"
-                        : result.truncated
-                          ? `${result.content}\n[Showing lines ${String(result.start_line)} to ${String(result.start_line + result.returned_lines - 1)} of ${String(result.total_lines)}. Read on with offset.]`
-                          : result.content,
-            },
+            ...(result.image === undefined
+                ? [
+                      {
+                          type: "text" as const,
+                          text:
+                              result.returned_lines === 0
+                                  ? result.total_lines > 1
+                                      ? `(no lines there; the file has ${String(result.total_lines)} lines)`
+                                      : "(empty file)"
+                                  : result.truncated
+                                    ? `${result.content}\n[Showing lines ${String(result.start_line)} to ${String(result.start_line + result.returned_lines - 1)} of ${String(result.total_lines)}. Read on with offset.]`
+                                    : result.content,
+                      },
+                  ]
+                : [
+                      {
+                          type: "text" as const,
+                          text: `Image: ${result.path}. Line offset and limit are ignored for image files.`,
+                      },
+                      {
+                          type: "image" as const,
+                          data: result.image.data,
+                          mimeType: result.image.mime_type,
+                      },
+                  ]),
         ],
     });
 }

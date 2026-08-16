@@ -1,99 +1,120 @@
 # System prompt
 
-The instructions a model is written for. Coding models are trained differently, and each one is
-told how to behave in its own words: Claude, Codex, and Grok were each shipped with a system
-prompt tuned to how that vendor's model was trained. `SystemPromptModule` is what puts the right
-one in front of the model an agent is actually running, and keeps it right when the agent switches
-models mid-conversation, because it reads the model from the scope it is handed on every
-`instructions` call rather than deciding once at construction time.
+`SystemPromptModule` is the single instruction module for an agent. It selects the native prompt
+for the model in force, substitutes the configured identity, appends truthful host environment
+details, and supplies the global, security, and project `AGENTS.md` instruction chain.
 
-```ts
-import { Agent } from "@slopus/happy-agent-base";
-import { SystemPromptModule } from "@slopus/happy-agent-modules";
-
-const module = new SystemPromptModule({
-    identity: { name: "Scout", prompt: "You are Scout, built by Happy" }, // optional
-});
-const agent = await Agent.create(ctx, { ...options, modules: [module] });
+```text
+vendor/model prompt
+        │
+        ├── # Environment (when Agent Base carries one)
+        │
+        └── AGENTS.md specification
+              ├── global AGENTS.md
+              ├── project-root AGENTS_SECURITY.md
+              └── project AGENTS.md files, Git root → working directory
 ```
 
-`identity` is optional; a module built without one uses `DEFAULT_SYSTEM_PROMPT_IDENTITY`, which
-names the agent Rig (`name: "Rig"`, `prompt: "You are Rig, built by Happy"`). `identity.name` must
-be non-blank, at most 128 characters, and free of NULs, `\r`, `\n`, `{`, and `}`.
-`identity.prompt` must be non-blank, at most 4,096 characters, free of NULs, and must not itself
-contain a `{{identity}}` or `{{name}}` marker, so a host cannot leave an unresolved template or
-smuggle another substitution through its own text. The constructor validates both the outer
-options object and the identity against their TypeBox schemas and throws
-`"System prompt module options are invalid."` if either fails; it also deep-clones and freezes
-the identity it is given, so later mutation of the object the host passed in has no effect.
+```ts
+const created = createComputeModules();
+const computeResolver = {
+    resolve: async (ctx, agentId) => await created.computeModule.resolve(ctx, agentId),
+};
+const systemPrompt = new SystemPromptModule({
+    identity: { name: "Scout", prompt: "You are Scout, built by Happy" },
+    availableModels: [{ name: "Claude Opus", id: "anthropic/opus-5", providerId: "anthropic" }],
+    compute: computeResolver,
+    globalInstructions: {
+        path: "/user/config/AGENTS.md",
+        read: async (ctx, path, maxBytes) => await readBounded(ctx, path, maxBytes),
+    },
+});
+```
 
-## Prompt selection
+All options are optional. Without an identity the module uses
+`DEFAULT_SYSTEM_PROMPT_IDENTITY`; without compute or a global reader it still supplies the
+AGENTS.md semantics specification. Constructor options are closed TypeBox contracts. Identity and
+model-catalog values are cloned and frozen, while the injected compute resolver and reader remain
+host-owned services.
 
-Selection is driven by `AgentModuleScope.agent.model` and `AgentModuleScope.agent.providerKind`,
-read fresh on every `instructions(ctx, scope)` call, in this order (`impl/systemPromptForModel.ts`):
+The identity name must be non-blank, at most 128 characters, and free of NULs, carriage returns,
+line feeds, `{`, and `}`. The identity prompt must be non-blank, at most 4,096 characters, free
+of NULs, and must not contain `{{identity}}` or `{{name}}` markers. Invalid outer options,
+identity values, model catalogs, and catalog byte totals have distinct stable constructor errors:
+`"System prompt module options are invalid."`, `"System prompt identity is invalid."`,
+`"System prompt available models are invalid."`, and
+`"System prompt available models exceed the configured UTF-8 byte bound."`, respectively.
 
-1. **Model** — if the model ID is an exact key in `promptsByModel`, that model's own prompt wins.
-   Today that covers `anthropic/opus-5`, `anthropic/sonnet-5`, `anthropic/fable-5`, and
-   `anthropic/opus-4-8`.
-2. **Family** — otherwise, the model ID's prefix names its vendor even when the serving provider
-   does not (a Claude model served through Bedrock is still a Claude model): `anthropic/` →
-   `claude`, `openai/` → `codex`, `xai/` → `grok`. That vendor's prompt is used.
-3. **Provider kind** — if the model is absent or its prefix is unrecognized, `providerKind` is
-   consulted as a fallback only; it is never allowed to override a known model family. A
-   `providerKind` of `"claude"`, `"codex"`, or `"grok"` gets that vendor's prompt.
-4. **Fallback** — anything else (`providerKind` of `"bedrock"` or `"gym"`, an unrecognized model
-   with no matching `providerKind`, or no model and no `providerKind` at all) gets
-   `simple_system_prompt`, so there is always a prompt.
+## Prompt selection and assembly
 
-Every prompt is exposed publicly through `SystemPromptModule.promptFor(selection)`, which validates
-`selection` against `systemPromptSelectionSchema` (`model` is a string of at most 256 characters
-with no NUL/CR/LF, or `undefined`; `providerKind` is one of `"bedrock" | "claude" | "codex" |
-"grok" | "gym"`) before delegating to `systemPromptForModel`.
+`promptFor(selection)` synchronously selects and renders the vendor prompt:
 
-Every prompt carries a `{{identity}}` marker, and the Codex prompt additionally carries `{{name}}`
-markers. `promptFor` replaces every `{{name}}` occurrence with `identity.name.trim()` and the
-first `{{identity}}` occurrence with `identity.prompt.trim()`, then checks the UTF-8 byte length of
-the result against `MAX_SYSTEM_PROMPT_OUTPUT_BYTES` (1,000,000 bytes), throwing `"The system
-prompt exceeds the configured output bound."` if it is over. Substitution is literal string
-replacement (`replaceAll`/`replace` with a function argument), so an identity containing
-replacement-string metacharacters such as `$&` is inserted as written rather than interpreted.
+1. An exact model entry wins.
+2. Otherwise a recognized model prefix (`anthropic/`, `openai/`, or `xai/`) selects its family.
+3. Otherwise `providerKind` selects the Claude, Codex, or Grok family.
+4. Everything else receives the simple fallback prompt.
 
-The prompt source files themselves live under `prompts/`, one per vendor directory: `claude/`
-(`claude_opus_5_system_prompt.ts`, `claude_sonnet_5_system_prompt.ts`,
-`claude_fable_5_system_prompt.ts`, `claude_opus_4_8_system_prompt.ts`), `codex/`
-(`codex_agent_instructions.ts`), `grok/` (`grok_4_5_system_prompt.ts`), and `simple/`
-(`simple_system_prompt.ts`), which is the fallback and is documented in its own source as adapted
-from Pi's prompt. All but the Codex prompt are built with `impl/trimIndent.ts`, which strips a
-template literal's common leading indentation and its first and last blank lines so the prompts can
-be written indented in source without that indentation leaking into the model-facing text.
+The prompt sources live under `prompts/`; `impl/systemPromptForModel.ts` owns selection and
+`impl/trimIndent.ts` keeps template indentation out of model-facing text. Identity replacement is
+literal, so replacement-string metacharacters are not interpreted. `promptFor` replaces every
+`{{name}}` marker with the trimmed identity name, but only the first `{{identity}}` marker with
+the trimmed identity prompt, matching the legacy substitution order.
 
-## Tools it provides to the model
+`instructions(ctx, scope)` is asynchronous because AGENTS.md files are discovered live. Its exact
+order is the selected vendor prompt, the optional environment section, then the AGENTS.md
+specification and documents. The environment contains working directory, platform, shell, OS
+version, scratch-directory guidance, final-message visibility, workspace/worktree guidance, and
+the bounded host-supplied model catalog. The catalog accepts at most 1,000 routes, each with a
+non-empty name, model ID, and provider ID of at most 256 characters; its rendered UTF-8 section
+is capped at 512,000 bytes at construction.
 
-None. The module contributes no tools; it installs one hook, `instructions`, which
-`@slopus/happy-agent-base` calls to obtain the agent's system prompt text for the model in force.
-The module holds no state and takes no lock, so any number of agents may ask at once.
+The complete UTF-8 output is capped by `MAX_SYSTEM_PROMPT_OUTPUT_BYTES`. Available-model fields,
+item count, and rendered UTF-8 bytes have their own constructor bounds. AGENTS.md discovery caps
+each document, total bytes, document count, paths, and rendered characters. Oversized instruction
+documents become explicit bounded truncation records, and the final AGENTS.md instruction chain
+is truncated again at assembly when its UTF-8 bytes would exceed the remaining system-prompt
+budget. This keeps the live instruction chain from turning an otherwise valid turn into a
+permanent output-bound failure.
 
-## External functions
+## AGENTS.md discovery and changes
 
-- `new SystemPromptModule(options?: SystemPromptModuleOptions)` — constructs the module; throws
-  on invalid options as described above.
-- `SystemPromptModule.promptFor(selection: SystemPromptSelection): string` — the public,
-  model-neutral way to render a prompt for an arbitrary `{ model, providerKind }` selection,
-  including identity substitution and the output-size bound.
-- `SystemPromptModule.instructions: (ctx: Context, scope: AgentModuleScope) => string` — the
-  `AgentModule` hook Agent Base invokes each turn; it builds a `SystemPromptSelection` from
-  `scope.agent.model` and `scope.agent.providerKind` and calls `promptFor`.
-- `systemPromptForModel(selection: SystemPromptSelection): string` — the standalone selector
-  function used internally by `promptFor`, exported from `sources/index.ts` for callers that want
-  the raw, unsubstituted prompt text for a model without constructing a module.
+The injected compute resolver selects the current agent's compute, so one shared module instance
+can safely serve agents in different workspaces. Discovery reads from the nearest Git root down to
+the compute working directory. It refuses symbolic links at instruction document paths and reads
+through the compute filesystem with the current permission context. `readAgentsMd(ctx, agentId)`
+exposes the same validated snapshot to host callers.
 
-No events or listeners are exposed; every call above is synchronous and stateless.
+The optional global reader is called on every inference. It owns how the host's global
+`AGENTS.md` path is read; this module owns the requested byte bound and validates the result. A
+reader may return at most `maxBytes + 1` characters, where the extra character is only a
+truncation sentinel. Larger host results are rejected before encoding, and the module encodes
+only a bounded prefix.
 
-## Storage
+`readAgentsMd` accepts agent IDs up to `MAX_AGENTS_MD_AGENT_ID_LENGTH`, rejects blank IDs and
+control-line characters, and validates the ID before calling either injected host service.
 
-Nothing is persisted. The module reads only what the agent scope hands it on each call
-(`scope.agent.model`, `scope.agent.providerKind`) and the identity it was constructed with, which
-lives in a private, frozen, in-memory field (`#identity`) for the lifetime of the `SystemPromptModule`
-instance. There is no store, no key, and no value shape to document; switching an agent's model
-takes effect on the very next `instructions` call because the module never caches a previous
-answer.
+After first delivery, the module stores the last instruction fingerprint in its per-agent module
+KV. If a document changes or disappears, `beforeTurn` also persists a pending transition with a
+random notice ID, then emits one hidden durable steering notice. The ID remains stable while that
+transition retries but changes when the same content or removal recurs later, so Agent Base's
+permanent message-ID deduplication cannot suppress a later cycle.
+`messageAcceptedTransact` advances the fingerprint and clears the pending transition only when
+Agent Base durably accepts that exact hidden notice. `beforeTurn` also stores the validated
+instruction snapshot in `runKV`; every inference in that turn uses that same snapshot. A file edit
+after the turn boundary is therefore delivered coherently on the following turn rather than
+mixing one notice version with another system-prompt version.
+
+## Tools, storage, and concurrency
+
+The module exposes no tools and owns no database or filesystem. Its durable Agent Base KV state is
+the per-agent fingerprint plus any pending change notice. Immutable constructor configuration is
+safe to share; live per-agent values are resolved from `ctx`, `scope`, KV, and the injected compute
+on every call.
+
+Public operations are:
+
+- `promptFor(selection)` — render a vendor prompt with identity substitution.
+- `instructions(ctx, scope)` — assemble the complete system prompt.
+- `readAgentsMd(ctx, agentId)` — return the current validated instruction snapshot.
+- `systemPromptForModel(selection)` — select the raw prompt template without constructing the
+  module.

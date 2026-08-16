@@ -23,9 +23,12 @@ import {
     MAX_USAGE_OUTPUT_CHARACTERS,
     MAX_USAGE_PAGE_SIZE,
     MAX_USAGE_RECORDS,
+    MAX_USAGE_TREE_PATH_LENGTH,
+    MAX_USAGE_TREE_SESSIONS,
     MAX_USAGE_TOKEN_COUNT,
     usageAggregateQuerySchema,
     usageAgentIdSchema,
+    usageAgentTreeSchema,
     usageIdSchema,
     usagePageQuerySchema,
     usagePageSchema,
@@ -34,6 +37,7 @@ import {
     usageTimestampSchema,
     usageTokensSchema,
     type UsageAggregateQuery,
+    type UsageAgentTree,
     type UsageInferenceRecord,
     type UsagePage,
     type UsagePageQuery,
@@ -43,7 +47,15 @@ import {
     type UsageTokens,
     type UsageTurnRecord,
 } from "./Usage.js";
-import { usageContextSchema, usageVoidOrPromiseVoidSchema } from "./UsageContracts.js";
+import {
+    usageAgentTreeAuthorizationSchema,
+    usageAgentTreeReaderSchema,
+    usageContextSchema,
+    usageVoidOrPromiseVoidSchema,
+    type UsageAgentTreeAuthorization,
+    type UsageAgentTreeReader,
+} from "./UsageContracts.js";
+import { getAgentTreeUsageTool } from "./tools/get_agent_tree_usage.js";
 import { getUsageTool } from "./tools/get_usage.js";
 import { UsageDatabase } from "./impl/usageDatabase.js";
 
@@ -85,6 +97,8 @@ const usageModuleOptionsSchema = Type.Object(
         maxOutputCharacters: Type.Optional(
             Type.Integer({ minimum: 256, maximum: MAX_USAGE_OUTPUT_CHARACTERS }),
         ),
+        agentTreeReader: Type.Optional(usageAgentTreeReaderSchema),
+        agentTreeAuthorization: Type.Optional(usageAgentTreeAuthorizationSchema),
         onObserverError: Type.Optional(
             Type.Function(
                 [
@@ -163,6 +177,8 @@ export class UsageModule implements AgentModule {
     readonly #maxPageSize: number;
     readonly #maxGroups: number;
     readonly #maxOutputCharacters: number;
+    readonly #agentTreeReader: UsageAgentTreeReader | undefined;
+    readonly #agentTreeAuthorization: UsageAgentTreeAuthorization | undefined;
     readonly #onObserverError: UsageModuleOptions["onObserverError"];
 
     constructor(options: UsageModuleOptions) {
@@ -177,6 +193,8 @@ export class UsageModule implements AgentModule {
         this.#maxPageSize = validated.maxPageSize ?? DEFAULT_PAGE_SIZE;
         this.#maxGroups = validated.maxGroups ?? DEFAULT_MAX_GROUPS;
         this.#maxOutputCharacters = validated.maxOutputCharacters ?? DEFAULT_MAX_OUTPUT_CHARACTERS;
+        this.#agentTreeReader = validated.agentTreeReader;
+        this.#agentTreeAuthorization = validated.agentTreeAuthorization;
         this.#onObserverError = validated.onObserverError;
     }
 
@@ -232,7 +250,12 @@ export class UsageModule implements AgentModule {
             throw new Error(`Usage page limit cannot exceed ${this.#maxPageSize}.`);
         }
         const cursor = query.cursor ?? 0;
-        const page = await new UsageDatabase().read(ctx, agentId, { cursor, limit }, this.#maxPageSize);
+        const page = await new UsageDatabase().read(
+            ctx,
+            agentId,
+            { cursor, limit },
+            this.#maxPageSize,
+        );
         assertUsagePage(page, agentId, cursor, limit);
         return cloneValue(page);
     }
@@ -277,6 +300,52 @@ export class UsageModule implements AgentModule {
         return await this.readAggregate(ctx, query);
     }
 
+    /**
+     * Read a complete bounded subtree snapshot supplied by the host.  A
+     * context with an owning agent requires the explicit authorization seam;
+     * an unscoped host context is already outside model-facing access policy.
+     */
+    async readAgentTreeUsage(ctx: Context, agentId: string): Promise<UsageAgentTree> {
+        assertAgentId(agentId);
+        const owner = contextAgentId(ctx);
+        if (owner !== undefined && owner !== agentId) {
+            throw new Error("Usage access is limited to the current agent.");
+        }
+        const reader = this.#agentTreeReader;
+        if (reader === undefined) {
+            throw new Error("Usage agent tree is unavailable without host wiring.");
+        }
+        if (owner !== undefined) {
+            const authorize = this.#agentTreeAuthorization;
+            if (authorize === undefined) {
+                throw new Error("Usage agent tree access is not authorized.");
+            }
+            const decision = authorize(ctx, agentId);
+            const allowed = await resolveMaybePromise(
+                decision,
+                Type.Boolean(),
+                "Usage agent tree authorization",
+            );
+            if (allowed !== true) {
+                throw new Error("Usage agent tree access is not authorized.");
+            }
+        }
+        const raw = reader(ctx, agentId);
+        const tree = await resolveMaybePromise(
+            raw,
+            usageAgentTreeSchema,
+            "Usage agent tree reader",
+        );
+        const detached = cloneValue(tree);
+        assertUsageAgentTree(detached, agentId);
+        return detached;
+    }
+
+    /** Alias retained for hosts that use a shorter tree-reader name. */
+    async readAgentTree(ctx: Context, agentId: string): Promise<UsageAgentTree> {
+        return await this.readAgentTreeUsage(ctx, agentId);
+    }
+
     /** Reset one agent's usage. */
     async reset(ctx: Context, agentId: string): Promise<number> {
         this.#assertAgentAccess(ctx, agentId);
@@ -302,7 +371,47 @@ export class UsageModule implements AgentModule {
     /** The provider-neutral usage tool available to every agent. */
     readonly tools = (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => [
         getUsageTool(this, scope.agent.id),
+        getAgentTreeUsageTool(this, scope.agent.id),
     ];
+
+    /** Render a bounded subtree snapshot for a model-facing tool result. */
+    formatAgentTreeUsageForModel(
+        tree: UsageAgentTree,
+        maxCharacters = this.#maxOutputCharacters,
+    ): string {
+        assertUsageAgentTree(tree);
+        if (
+            !Number.isInteger(maxCharacters) ||
+            maxCharacters < 256 ||
+            maxCharacters > this.#maxOutputCharacters
+        ) {
+            throw new Error("Usage output bound is invalid.");
+        }
+        const header = `Agent tree usage: ${tree.totalTokens} total tokens across ${tree.sessions.length} agents.`;
+        const lines = [header];
+        for (const session of tree.sessions) {
+            const line = [
+                session.agentId,
+                session.relation,
+                session.status,
+                session.path,
+                `${session.totalTokens} tokens`,
+            ].join(" | ");
+            if (lines.join("\n").length + 1 + line.length > maxCharacters) {
+                lines.push(
+                    `- Output capped at ${maxCharacters} characters; structured result contains ${tree.sessions.length} validated agents.`,
+                );
+                break;
+            }
+            lines.push(line);
+        }
+        const output = lines.join("\n");
+        if (output.length <= maxCharacters) return output;
+        return truncate(
+            `Agent tree usage: ${tree.totalTokens} total tokens across ${tree.sessions.length} agents.`,
+            maxCharacters,
+        );
+    }
 
     /**
      * Render a bounded model-facing summary.  Group rows are admitted one at
@@ -325,6 +434,11 @@ export class UsageModule implements AgentModule {
             `- ${summary.inferenceCount} inferences, ${summary.turnCount} turns`,
             `- ${summary.inputTokens} input tokens, ${summary.outputTokens} output tokens (${summary.totalTokens} total)`,
             `- ${summary.totalDurationMs} ms total (${summary.inferenceDurationMs} ms inference, ${summary.turnDurationMs} ms turn)`,
+            summary.currentContext === undefined
+                ? "- Current context: unavailable (no provider measurement yet)."
+                : `- Current context: ${summary.currentContext.contextTokens} tokens${
+                      summary.currentContext.approximate ? " (approximate)" : ""
+                  }.`,
         ];
         const visibleGroups: string[] = [];
         for (const [index, group] of summary.groups.entries()) {
@@ -650,7 +764,6 @@ export class UsageModule implements AgentModule {
             throw new Error("Usage collection access is not available to an agent context.");
         }
     }
-
 }
 
 function validateOptions(options: unknown): UsageModuleOptions {
@@ -718,6 +831,66 @@ function assertUsageRecord(value: unknown): asserts value is UsageRecord {
     }
     if (value.kind === "inference") {
         assertUsageTokens(value.tokens);
+    }
+}
+
+function assertUsageAgentTree(
+    value: unknown,
+    expectedRootAgentId?: string,
+): asserts value is UsageAgentTree {
+    if (!Value.Check(usageAgentTreeSchema, value)) {
+        throw new Error("Usage agent tree is invalid.");
+    }
+    const tree = value as UsageAgentTree;
+    if (tree.sessions.length === 0 || tree.sessions.length > MAX_USAGE_TREE_SESSIONS) {
+        throw new Error("Usage agent tree is outside its configured bounds.");
+    }
+    const byAgentId = new Map<string, UsageAgentTree["sessions"][number]>();
+    for (const session of tree.sessions) {
+        if (byAgentId.has(session.agentId)) {
+            throw new Error("Usage agent tree contains duplicate agent IDs.");
+        }
+        if (!session.path.startsWith("/") || session.path.length > MAX_USAGE_TREE_PATH_LENGTH) {
+            throw new Error("Usage agent tree contains an invalid canonical path.");
+        }
+        byAgentId.set(session.agentId, session);
+    }
+    const roots = tree.sessions.filter((session) => session.relation === "root");
+    if (roots.length !== 1 || roots[0]!.parentAgentId !== undefined) {
+        throw new Error("Usage agent tree must contain exactly one parentless root.");
+    }
+    const root = roots[0]!;
+    if (expectedRootAgentId !== undefined && root.agentId !== expectedRootAgentId) {
+        throw new Error("Usage agent tree is rooted at the wrong agent.");
+    }
+    for (const session of tree.sessions) {
+        if (session.relation === "root") continue;
+        const parentAgentId = session.parentAgentId;
+        if (parentAgentId === undefined || !byAgentId.has(parentAgentId)) {
+            throw new Error("Usage agent tree contains an unavailable parent.");
+        }
+        if (parentAgentId === session.agentId) {
+            throw new Error("Usage agent tree contains a self-parenting agent.");
+        }
+        const visited = new Set<string>();
+        let current: UsageAgentTree["sessions"][number] | undefined = session;
+        while (current !== undefined && current.relation !== "root") {
+            if (visited.has(current.agentId)) {
+                throw new Error("Usage agent tree contains a parent cycle.");
+            }
+            visited.add(current.agentId);
+            current =
+                current.parentAgentId === undefined
+                    ? undefined
+                    : byAgentId.get(current.parentAgentId);
+        }
+        if (current === undefined) {
+            throw new Error("Usage agent tree does not connect every agent to its root.");
+        }
+    }
+    const totalTokens = tree.sessions.reduce((sum, session) => sum + session.totalTokens, 0);
+    if (totalTokens !== tree.totalTokens) {
+        throw new Error("Usage agent tree total tokens are inconsistent.");
     }
 }
 
@@ -904,6 +1077,20 @@ async function resolvePromise<T>(value: unknown, schema: TSchema, operation: str
         throw new Error(`${operation} returned an invalid result.`);
     }
     return resolved as T;
+}
+
+async function resolveMaybePromise<T>(
+    value: unknown,
+    schema: TSchema,
+    operation: string,
+): Promise<T> {
+    if (Value.Check(Type.Promise(Type.Void()), value)) {
+        return await resolvePromise(value, schema, operation);
+    }
+    if (!Value.Check(schema, value)) {
+        throw new Error(`${operation} returned an invalid result.`);
+    }
+    return value as T;
 }
 
 async function invokeVoid(value: unknown, operation: string): Promise<void> {

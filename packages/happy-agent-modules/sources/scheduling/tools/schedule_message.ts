@@ -11,19 +11,19 @@ export function scheduleMessageTool(scheduling: SchedulingModule, agentId: strin
     return defineAgentTool({
         name: "schedule_message",
         description:
-            "Schedule a message to this agent itself at a bounded future time. The host owns durable delivery; this tool never accepts a target agent.",
+            "Schedule a message to any known agent, including yourself, at a future time. Use ISO 8601, RFC 2822, or a Unix timestamp for at, or use a duration. The host owns durable delivery.",
         parameters: schedulingScheduleToolInputSchema,
         returnType: schedulingScheduledMessageSchema,
         durable: true,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, input: SchedulingScheduleToolInput, call) =>
-            await scheduling.schedule(ctx, agentId, {
-                ...input,
+        execute: async (ctx, input: SchedulingScheduleToolInput, call) => {
+            const { agent_id: targetAgentId, ...scheduleInput } = input;
+            return await scheduling.schedule(ctx, agentId, {
+                ...scheduleInput,
                 id: call.id,
-                targetAgentId: agentId,
-            }),
-        toLLM: (schedule) => [
-            { type: "text", text: scheduling.formatScheduleForModel(schedule) },
-        ],
+                targetAgentId,
+            });
+        },
+        toLLM: (schedule) => [{ type: "text", text: scheduling.formatScheduleForModel(schedule) }],
     });
 }

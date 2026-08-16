@@ -1,8 +1,5 @@
 import { sql } from "drizzle-orm";
-import {
-    agentDatabaseRows,
-    agentDatabaseRun,
-} from "@slopus/happy-agent-base";
+import { agentDatabaseRows, agentDatabaseRun } from "@slopus/happy-agent-base";
 import { Value } from "@sinclair/typebox/value";
 import type { Context } from "@steve.kite/stdlib";
 
@@ -23,6 +20,7 @@ import {
     appletNameSchema,
     appletRefSchema,
     appletVersionSchema,
+    defaultAppletAllowedScopes,
     type Applet,
 } from "./Applet.js";
 
@@ -116,6 +114,22 @@ export function createAppletDatabase(): AppletDatabase {
             return page;
         },
         get,
+        lock: async (ctx, name) => {
+            if (!ValueCheck(appletNameSchema, name)) {
+                throw new Error("Applet lock name is invalid.");
+            }
+            await agentDatabaseRun(
+                ctx.db,
+                sql`UPDATE ${sql.raw(APPLET_TABLE)}
+                    SET applet_json = applet_json
+                    WHERE name = ${name}`,
+            );
+            const applet = await get(ctx, name);
+            if (applet === undefined) {
+                throw new Error(`Applet "${name}" was not found.`);
+            }
+            return applet;
+        },
         create: async (ctx, input) => {
             if (!ValueCheck(appletCatalogCreateInputSchema, input)) {
                 throw new Error("Applet create input is invalid.");
@@ -129,7 +143,7 @@ export function createAppletDatabase(): AppletDatabase {
                 description: input.description,
                 purpose: input.purpose,
                 authorSessionId: input.authorSessionId,
-                allowedScopes: input.allowedScopes ?? ["global"],
+                allowedScopes: input.allowedScopes ?? [...defaultAppletAllowedScopes],
                 ...(input.sourceDescription === undefined
                     ? {}
                     : { sourceDescription: input.sourceDescription }),
@@ -167,54 +181,81 @@ export function createAppletDatabase(): AppletDatabase {
             ) {
                 throw new Error("Applet update input is invalid.");
             }
-            const before = await get(ctx, name);
+            let before = await get(ctx, name);
             if (before === undefined) throw new Error(`Applet "${name}" was not found.`);
-            if (input.version !== before.versions.length + 1 || input.version > MAX_APPLET_VERSIONS) {
-                throw new Error("Applet update version is not the next version.");
+            for (let attempt = 0; attempt < 16; attempt += 1) {
+                const targetVersion = before.versions.length + 1;
+                if (targetVersion > MAX_APPLET_VERSIONS) {
+                    throw new Error("Applet has reached the maximum version count.");
+                }
+                const version = {
+                    version: targetVersion,
+                    changeDescription: input.changeDescription,
+                    createdAt: input.createdAt,
+                    operationId: input.operationId,
+                };
+                if (!ValueCheck(appletVersionSchema, version)) {
+                    throw new Error("Applet update version is invalid.");
+                }
+                const applet: Applet = {
+                    ...before,
+                    ...(input.allowedScopes === undefined
+                        ? {}
+                        : { allowedScopes: input.allowedScopes }),
+                    ...(input.description === undefined ? {} : { description: input.description }),
+                    ...(input.purpose === undefined ? {} : { purpose: input.purpose }),
+                    ...(input.sourceDescription === undefined
+                        ? {}
+                        : { sourceDescription: input.sourceDescription }),
+                    currentVersion: targetVersion,
+                    versions: [...before.versions, version],
+                    updatedAt: input.createdAt,
+                };
+                assertApplet(applet);
+                // Compare-and-swap keeps this portable across SQLite and PostgreSQL while
+                // preserving correctness when two callers share one transaction context.
+                const rows = await agentDatabaseRows<JsonRow>(
+                    ctx.db,
+                    sql`UPDATE ${sql.raw(APPLET_TABLE)}
+                        SET applet_json = ${JSON.stringify(applet)}
+                        WHERE name = ${name}
+                          AND applet_json = ${JSON.stringify(before)}
+                        RETURNING applet_json AS value_json`,
+                );
+                const row = rows[0];
+                if (row === undefined) {
+                    const current = await get(ctx, name);
+                    if (current === undefined) {
+                        throw new Error(`Applet "${name}" disappeared during update.`);
+                    }
+                    before = current;
+                    continue;
+                }
+                let parsed: unknown;
+                try {
+                    parsed = JSON.parse(row.value_json);
+                } catch {
+                    throw new Error("Applet update returned invalid JSON.");
+                }
+                assertApplet(parsed);
+                const committed = structuredClone(parsed);
+                const appended = committed.versions[committed.versions.length - 1];
+                if (appended === undefined) {
+                    throw new Error("Applet update did not append a version.");
+                }
+                const result: AppletCatalogMutationResult = {
+                    operation: "update",
+                    name,
+                    operationId: input.operationId,
+                    targetVersion: appended.version,
+                    currentVersion: committed.currentVersion,
+                    changed: true,
+                    applet: committed,
+                };
+                assertAppletMutation(result);
+                return result;
             }
-            const version = {
-                version: input.version,
-                changeDescription: input.changeDescription,
-                createdAt: input.createdAt,
-                operationId: input.operationId,
-            };
-            if (!ValueCheck(appletVersionSchema, version)) {
-                throw new Error("Applet update version is invalid.");
-            }
-            const applet: Applet = {
-                ...before,
-                ...(input.allowedScopes === undefined ? {} : { allowedScopes: input.allowedScopes }),
-                ...(input.description === undefined ? {} : { description: input.description }),
-                ...(input.purpose === undefined ? {} : { purpose: input.purpose }),
-                ...(input.sourceDescription === undefined
-                    ? {}
-                    : { sourceDescription: input.sourceDescription }),
-                ...(input.iconThumbhash === undefined
-                    ? {}
-                    : { iconThumbhash: input.iconThumbhash }),
-                ...(input.iconUrl === undefined ? {} : { iconUrl: input.iconUrl }),
-                currentVersion: input.version,
-                versions: [...before.versions, version],
-                updatedAt: input.createdAt,
-            };
-            assertApplet(applet);
-            await agentDatabaseRun(
-                ctx.db,
-                sql`UPDATE ${sql.raw(APPLET_TABLE)}
-                    SET applet_json = ${JSON.stringify(applet)}
-                    WHERE name = ${name}`,
-            );
-            const result: AppletCatalogMutationResult = {
-                operation: "update",
-                name,
-                operationId: input.operationId,
-                targetVersion: input.version,
-                currentVersion: applet.currentVersion,
-                changed: true,
-                applet,
-            };
-            assertAppletMutation(result);
-            return result;
+            throw new Error("Applet update conflicted with too many concurrent changes.");
         },
         revert: async (ctx, name, input) => {
             if (

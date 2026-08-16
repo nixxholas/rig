@@ -23,10 +23,8 @@ export interface AgentHttpConfiguration {
     readonly projectHost?: ProjectWorkspaceHost;
     readonly inferenceMaxRetries?: number;
     readonly durableGlobalEventQueue?: boolean;
-    readonly instructionsPath?: string;
     /** Receives unexpected request failures without exposing their details to HTTP clients. */
     readonly onUnexpectedError?: (error: unknown) => void;
-    readonly securityPath?: string;
     readonly inspector?: AgentHttpInspector;
 }
 

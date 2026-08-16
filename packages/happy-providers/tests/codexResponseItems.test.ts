@@ -12,6 +12,38 @@ import { withCodexStreamIdleTimeout } from "@/vendors/codex/impl/codexRetry.js";
 import { toGrokResponseInput } from "@/vendors/grok/impl/toGrokResponseInput.js";
 
 describe("Codex response items", () => {
+    it("does not send unsupported Unicode regex patterns in tool schemas", () => {
+        const definitions = toCodexToolDefinitions([
+            {
+                name: "get_project",
+                parameters: Type.Object(
+                    {
+                        projectId: Type.String({
+                            minLength: 1,
+                            maxLength: 96,
+                            pattern:
+                                "^(?=[\\s\\S]*[^\\p{Cc}\\p{Cf}\\p{Cn}\\p{Cs}\\p{Zs}\\p{Zl}\\p{Zp}\\p{Mn}\\p{Me}])(?:[^\\uD800-\\uDFFF])+$",
+                        }),
+                    },
+                    { additionalProperties: false },
+                ),
+            },
+        ]);
+
+        expect(JSON.stringify(definitions)).not.toContain("pattern");
+        expect(definitions).toMatchObject([
+            {
+                parameters: {
+                    properties: {
+                        projectId: {
+                            description: expect.stringContaining("visible characters"),
+                        },
+                    },
+                },
+            },
+        ]);
+    });
+
     it("deterministically hashes overlong call IDs across opaque calls and their results", () => {
         const overlongCallId = `call_${"x".repeat(78)}`;
         const context: SessionContext = {

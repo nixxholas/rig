@@ -7,9 +7,9 @@ import {
 } from "@slopus/happy-agent";
 import { createRootContext, type RootContext } from "@steve.kite/stdlib";
 
-const [agentHome, publicHome, attemptValue] = process.argv.slice(2);
-if (agentHome === undefined || publicHome === undefined || attemptValue === undefined) {
-    throw new Error("The restart fixture requires agent home, public home, and attempt.");
+const [happyHome, attemptValue] = process.argv.slice(2);
+if (happyHome === undefined || attemptValue === undefined) {
+    throw new Error("The restart fixture requires a Happy root and attempt.");
 }
 const attempt = Number(attemptValue);
 const providers = new AgentProviders();
@@ -28,12 +28,11 @@ let daemon: HappyAgentDaemon | undefined;
 
 try {
     daemon = await startHappyAgentDaemon(ctx, {
-        agentHome,
+        happyHome,
         integrations: unavailableIntegrations(),
         models,
         provider: "scripted",
         providers,
-        publicHome,
         version: "restart-fixture",
     });
     process.send?.({ type: "ready" });
@@ -118,8 +117,14 @@ function unavailableIntegrations(): HappyAgentIntegrations {
                 _config: Parameters<HappyAgentIntegrations["collaboration"]["create"]>[1],
                 options: Parameters<HappyAgentIntegrations["collaboration"]["create"]>[2],
             ) => ({ id: options.id }),
+            interrupt: unavailable,
+            observe: unavailable,
+            selection: async () => undefined,
             send: async () => undefined,
+            setReadOnly: unavailable,
+            spawnCapacity: async () => ({ canSpawn: false, depth: 0, maxDepth: 0 }),
             wait: unavailable,
+            waitForAgent: unavailable,
         },
         happy: {
             notify: async () => ({ accepted: false }),

@@ -17,8 +17,10 @@ import {
     mcpResourcePageQuerySchema,
     mcpResourcePageSchema,
     mcpResourceTemplatePageSchema,
+    mcpServerNameSchema,
     mcpServerPageQuerySchema,
     mcpServerPageSchema,
+    mcpToolPolicySchema,
     mcpToolPageQuerySchema,
     mcpToolPageSchema,
     mcpToolResultSchema,
@@ -30,6 +32,7 @@ import {
  * The host owns every boundary that can reach an MCP server.  In particular, this contract does
  * not expose a Client, Transport, socket, process, credential, or path.  A Rig adapter can hand
  * these calls to its existing McpClientManager, while another host can use a remote MCP broker.
+ * `getToolPolicy` is optional for hosts that already include policy lists in server summaries.
  */
 
 export const mcpElicitationHandlerSchema = Type.Function(
@@ -47,17 +50,18 @@ export const mcpHostCallOptionsSchema = Type.Object(
 export const mcpHostSchema = Type.Object(
     {
         callTool: Type.Function(
-            [
-                mcpContextSchema,
-                mcpAgentIdSchema,
-                mcpCallToolInputSchema,
-                mcpHostCallOptionsSchema,
-            ],
+            [mcpContextSchema, mcpAgentIdSchema, mcpCallToolInputSchema, mcpHostCallOptionsSchema],
             Type.Promise(mcpToolResultSchema),
         ),
         getPrompt: Type.Function(
             [mcpContextSchema, mcpAgentIdSchema, mcpGetPromptInputSchema],
             Type.Promise(mcpGetPromptResultSchema),
+        ),
+        getToolPolicy: Type.Optional(
+            Type.Function(
+                [mcpContextSchema, mcpAgentIdSchema, mcpServerNameSchema],
+                Type.Promise(mcpToolPolicySchema),
+            ),
         ),
         listPrompts: Type.Function(
             [mcpContextSchema, mcpAgentIdSchema, mcpPromptPageQuerySchema],
@@ -97,6 +101,9 @@ export function assertMcpHost(value: unknown): asserts value is McpHost {
             ...candidate,
             callTool: candidate.callTool,
             getPrompt: candidate.getPrompt,
+            ...(candidate.getToolPolicy === undefined
+                ? {}
+                : { getToolPolicy: candidate.getToolPolicy }),
             listPrompts: candidate.listPrompts,
             listResourceTemplates: candidate.listResourceTemplates,
             listResources: candidate.listResources,

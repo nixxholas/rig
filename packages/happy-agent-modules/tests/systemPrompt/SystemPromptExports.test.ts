@@ -1,5 +1,6 @@
 import * as root from "../../sources/index.js";
 import {
+    agentsMdGlobalInstructionsReaderSchema,
     systemPromptModuleOptionsSchema,
     systemPromptIdentitySchema,
     systemPromptSelectionSchema,
@@ -9,11 +10,15 @@ import { describe, expect, it } from "vitest";
 
 describe("System Prompt package exports", () => {
     it("exposes the same runtime contracts from the package root", () => {
+        expect(root.agentsMdGlobalInstructionsReaderSchema).toBe(
+            agentsMdGlobalInstructionsReaderSchema,
+        );
         expect(root.systemPromptModuleOptionsSchema).toBe(systemPromptModuleOptionsSchema);
         expect(root.systemPromptIdentitySchema).toBe(systemPromptIdentitySchema);
         expect(root.systemPromptSelectionSchema).toBe(systemPromptSelectionSchema);
         expect(root.systemPromptProviderKindSchema).toBe(systemPromptProviderKindSchema);
         expect(root.SystemPromptModule).toBeDefined();
+        expect(root.AGENTS_MD_SPEC).toContain("# AGENTS.md");
         expect(root.systemPromptForModel).toBeDefined();
     });
 });

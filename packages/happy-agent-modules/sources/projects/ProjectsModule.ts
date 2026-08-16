@@ -15,10 +15,15 @@ import {
     type ProjectDetailQuery,
 } from "./ProjectDetailPage.js";
 import {
+    MAX_PROJECT_AVATAR_BYTES,
+    projectAvatarAssetSchema,
+    projectAvatarHashSchema,
+    projectClearAvatarInputSchema,
     projectAgentIdSchema,
     projectCreateInputSchema,
     projectEnsureInputSchema,
     projectIdSchema,
+    projectReorderInputSchema,
     projectRenameInputSchema,
     projectSchema,
     projectEventIdSchema,
@@ -27,11 +32,18 @@ import {
     projectSettingsSchema,
     projectSettingsUpdateInputSchema,
     projectTimestampSchema,
+    projectSetAvatarInputSchema,
+    projectUnarchiveInputSchema,
     type Project,
+    type ProjectAvatar,
+    type ProjectAvatarAsset,
     type ProjectCreateInput,
     type ProjectEnsureInput,
     type ProjectRenameInput,
     type ProjectRenameChanges,
+    type ProjectReorderInput,
+    type ProjectSetAvatarInput,
+    type ProjectClearAvatarInput,
     type ProjectSettings,
     type ProjectSettingsUpdateInput,
 } from "./Project.js";
@@ -60,18 +72,21 @@ import {
 import {
     assertProject,
     assertProjectArchiveResult,
+    assertProjectClearAvatarResult,
     assertProjectCreateResult,
     assertProjectEnsureResult,
     assertProjectPage,
+    assertProjectReorderResult,
     assertProjectRenameResult,
+    assertProjectSetAvatarResult,
     assertProjectSettingsUpdateResult,
     assertProjectStoreMutationResult,
+    assertProjectUnarchiveResult,
     createProjectStore,
     projectMigrations,
     projectAuthorizationSchema,
     projectEnsureResultSchema,
     projectSettingsUpdateResultSchema,
-    type ProjectArchiveResult,
     type ProjectAuthorization,
     type ProjectAuthorizationAction,
     type ProjectCreateResult,
@@ -83,17 +98,25 @@ import {
     type ProjectStoreCreateInput,
     type ProjectStoreEnsureInput,
     type ProjectStoreMutationResult,
+    type ProjectStoreClearAvatarInput,
+    type ProjectStoreReorderInput,
     type ProjectStoreRenameInput,
+    type ProjectStoreSetAvatarInput,
     type ProjectStoreSettingsUpdateInput,
+    type ProjectStoreUnarchiveInput,
 } from "./ProjectStore.js";
 import {
     archiveProjectTool,
+    clearProjectAvatarTool,
     createProjectTool,
     ensureProjectTool,
     getProjectSettingsTool,
     getProjectTool,
     listProjectsTool,
+    reorderProjectTool,
     renameProjectTool,
+    setProjectAvatarTool,
+    unarchiveProjectTool,
     updateProjectSettingsTool,
 } from "./tools/index.js";
 
@@ -119,6 +142,21 @@ export const projectPostCommitErrorSchema = Type.Function(
     [projectContextSchema, projectEventSchema, Type.Unknown()],
     Type.Union([Type.Void(), Type.Promise(Type.Void())]),
 );
+
+/**
+ * Optional host bridge for the bytes behind a catalog avatar. The catalog
+ * remains useful without it: project metadata is durable, while asset reads
+ * return undefined until a host supplies this bridge.
+ */
+export const projectAvatarAssetReaderSchema = Type.Object(
+    {
+        read: Type.Function(
+            [projectContextSchema, projectAgentIdSchema, projectAvatarHashSchema],
+            Type.Promise(Type.Union([projectAvatarAssetSchema, Type.Undefined()])),
+        ),
+    },
+    { additionalProperties: false },
+);
 const projectMaxPageSizeSchema = Type.Integer({
     minimum: 1,
     maximum: MAX_PROJECT_PAGE_SIZE,
@@ -131,6 +169,7 @@ const projectMaxOutputSchema = Type.Integer({
 export const projectModuleOptionsSchema = Type.Object(
     {
         authorization: Type.Optional(projectAuthorizationSchema),
+        avatarAssetReader: Type.Optional(projectAvatarAssetReaderSchema),
         idFactory: Type.Optional(projectIdFactorySchema),
         eventIdFactory: Type.Optional(projectEventIdFactorySchema),
         clock: Type.Optional(projectClockSchema),
@@ -143,6 +182,7 @@ export const projectModuleOptionsSchema = Type.Object(
 );
 
 export type ProjectModuleOptions = Static<typeof projectModuleOptionsSchema>;
+export type ProjectAvatarAssetReader = Static<typeof projectAvatarAssetReaderSchema>;
 
 type ProjectChange = {
     readonly result: ProjectStoreMutationResult;
@@ -155,6 +195,7 @@ export class ProjectsModule implements AgentModule {
 
     readonly #store: ProjectStore;
     readonly #authorization: ProjectAuthorization | undefined;
+    readonly #avatarAssetReader: ProjectModuleOptions["avatarAssetReader"];
     readonly #idFactory: NonNullable<ProjectModuleOptions["idFactory"]>;
     readonly #eventIdFactory: NonNullable<ProjectModuleOptions["eventIdFactory"]>;
     readonly #clock: NonNullable<ProjectModuleOptions["clock"]>;
@@ -167,6 +208,7 @@ export class ProjectsModule implements AgentModule {
         assertProjectModuleOptions(options);
         this.#store = createProjectStore();
         this.#authorization = options.authorization;
+        this.#avatarAssetReader = options.avatarAssetReader;
         this.#idFactory =
             options.idFactory ??
             ((_ctx: Context, _agentId: string) => globalThis.crypto.randomUUID());
@@ -189,16 +231,16 @@ export class ProjectsModule implements AgentModule {
             ensureProjectTool(this, scope.agent.id),
             renameProjectTool(this, scope.agent.id),
             archiveProjectTool(this, scope.agent.id),
+            unarchiveProjectTool(this, scope.agent.id),
+            reorderProjectTool(this, scope.agent.id),
+            setProjectAvatarTool(this, scope.agent.id),
+            clearProjectAvatarTool(this, scope.agent.id),
             getProjectSettingsTool(this, scope.agent.id),
             updateProjectSettingsTool(this, scope.agent.id),
         ];
     };
 
-    async create(
-        ctx: Context,
-        agentId: string,
-        input: ProjectCreateInput,
-    ): Promise<Project> {
+    async create(ctx: Context, agentId: string, input: ProjectCreateInput): Promise<Project> {
         this.#assertAgentId(agentId);
         this.#assertInput(projectCreateInputSchema, input, "project creation");
         const normalized = structuredClone(input);
@@ -306,7 +348,10 @@ export class ProjectsModule implements AgentModule {
                 throw new Error("Project ensure changed flag is not authoritative.");
             }
             if (!created && changed) {
-                throw new Error("Project ensure modified an existing project.");
+                if (before?.status !== "archived") {
+                    throw new Error("Project ensure modified an existing project.");
+                }
+                assertProjectUnarchiveTransition(before, after);
             }
             const result: ProjectEnsureResult = {
                 ...structuredClone(raw),
@@ -315,11 +360,21 @@ export class ProjectsModule implements AgentModule {
                 project: structuredClone(after),
             };
             const event = changed
-                ? await this.#newEvent(txCtx, agentId, {
-                      type: "project_created",
+                ? await this.#newEvent(
+                      txCtx,
                       agentId,
-                      project: after,
-                  })
+                      before?.status === "archived"
+                          ? {
+                                type: "project_unarchived",
+                                agentId,
+                                project: after,
+                            }
+                          : {
+                                type: "project_created",
+                                agentId,
+                                project: after,
+                            },
+                  )
                 : undefined;
             if (event !== undefined) await this.#observe(txCtx, event);
             return { result, ...(event === undefined ? {} : { event }) };
@@ -483,11 +538,7 @@ export class ProjectsModule implements AgentModule {
         return await this.#rename(ctx, agentId, input);
     }
 
-    async #rename(
-        ctx: Context,
-        agentId: string,
-        input: ProjectRenameInput,
-    ): Promise<Project> {
+    async #rename(ctx: Context, agentId: string, input: ProjectRenameInput): Promise<Project> {
         this.#assertAgentId(agentId);
         this.#assertInput(projectRenameInputSchema, input, "project rename");
         const normalized = structuredClone(input);
@@ -498,6 +549,9 @@ export class ProjectsModule implements AgentModule {
             const storeInput: ProjectStoreRenameInput = {
                 projectId: normalized.projectId,
                 name: normalized.name,
+                ...(normalized.expectedVersion === undefined
+                    ? {}
+                    : { expectedVersion: normalized.expectedVersion }),
             };
             const raw = await requirePromise(
                 this.#store.rename(txCtx, agentId, structuredClone(storeInput)),
@@ -532,11 +586,7 @@ export class ProjectsModule implements AgentModule {
         return structuredClone(requireProjectFromResult(change.result));
     }
 
-    async archive(
-        ctx: Context,
-        agentId: string,
-        projectId: string,
-    ): Promise<Project> {
+    async archive(ctx: Context, agentId: string, projectId: string): Promise<Project> {
         this.#assertAgentId(agentId);
         this.#assertId(projectId);
 
@@ -574,6 +624,266 @@ export class ProjectsModule implements AgentModule {
             return { result, ...(event === undefined ? {} : { event }) };
         });
         return structuredClone(requireProjectFromResult(change.result));
+    }
+
+    async unarchive(ctx: Context, agentId: string, projectId: string): Promise<Project> {
+        this.#assertAgentId(agentId);
+        this.#assertId(projectId);
+
+        const change = await this.#runTransaction(ctx, async (txCtx) => {
+            const before = await this.#getRequired(txCtx, agentId, projectId);
+            await this.#authorize(txCtx, agentId, before.ownerAgentId, "unarchive");
+            const raw = await requirePromise(
+                this.#store.unarchive(txCtx, agentId, { projectId }),
+                "Project store unarchive",
+            );
+            assertProjectUnarchiveResult(raw);
+            this.#assertMutationResult(raw, agentId, "unarchive");
+            if (raw.project.id !== projectId) {
+                throw new Error("Project unarchive result has a different project identity.");
+            }
+            const after = await this.#getRequired(txCtx, agentId, projectId);
+            if (!sameJson(after, raw.project)) {
+                throw new Error("Project unarchive result does not match authoritative state.");
+            }
+            assertProjectUnarchiveTransition(before, after);
+            const changed = !sameJson(before, after);
+            if (raw.changed !== changed) {
+                throw new Error("Project unarchive changed flag is not authoritative.");
+            }
+            const result = structuredClone(raw);
+            const event = changed
+                ? await this.#newEvent(txCtx, agentId, {
+                      type: "project_unarchived",
+                      agentId,
+                      project: after,
+                  })
+                : undefined;
+            if (event !== undefined) await this.#observe(txCtx, event);
+            return { result, ...(event === undefined ? {} : { event }) };
+        });
+        return structuredClone(requireProjectFromResult(change.result));
+    }
+
+    async reorder(ctx: Context, agentId: string, input: ProjectReorderInput): Promise<Project>;
+    async reorder(
+        ctx: Context,
+        agentId: string,
+        projectId: string,
+        afterId: string | null,
+        expectedVersion?: number,
+    ): Promise<Project>;
+    async reorder(
+        ctx: Context,
+        agentId: string,
+        inputOrProjectId: ProjectReorderInput | string,
+        afterId?: string | null,
+        expectedVersion?: number,
+    ): Promise<Project> {
+        this.#assertAgentId(agentId);
+        const input: ProjectReorderInput =
+            typeof inputOrProjectId === "string"
+                ? {
+                      afterId: afterId as string | null,
+                      projectId: inputOrProjectId,
+                      ...(expectedVersion === undefined ? {} : { expectedVersion }),
+                  }
+                : inputOrProjectId;
+        this.#assertInput(projectReorderInputSchema, input, "project reorder");
+        const normalized = structuredClone(input);
+
+        const change = await this.#runTransaction(ctx, async (txCtx) => {
+            const before = await this.#getRequired(txCtx, agentId, normalized.projectId);
+            await this.#authorize(txCtx, agentId, before.ownerAgentId, "reorder");
+            const storeInput: ProjectStoreReorderInput = normalized;
+            const raw = await requirePromise(
+                this.#store.reorder(txCtx, agentId, structuredClone(storeInput)),
+                "Project store reorder",
+            );
+            assertProjectReorderResult(raw);
+            this.#assertMutationResult(raw, agentId, "reorder");
+            if (
+                raw.project.id !== normalized.projectId ||
+                raw.previousOrderKey !== before.orderKey
+            ) {
+                throw new Error("Project reorder result does not match the requested project.");
+            }
+            const after = await this.#getRequired(txCtx, agentId, normalized.projectId);
+            if (!sameJson(after, raw.project)) {
+                throw new Error("Project reorder result does not match authoritative state.");
+            }
+            assertProjectReorderTransition(before, after);
+            const changed = !sameJson(before, after);
+            if (raw.changed !== changed) {
+                throw new Error("Project reorder changed flag is not authoritative.");
+            }
+            const result = structuredClone(raw);
+            const event = changed
+                ? await this.#newEvent(txCtx, agentId, {
+                      type: "project_reordered",
+                      agentId,
+                      previousOrderKey: before.orderKey,
+                      project: after,
+                  })
+                : undefined;
+            if (event !== undefined) await this.#observe(txCtx, event);
+            return { result, ...(event === undefined ? {} : { event }) };
+        });
+        return structuredClone(requireProjectFromResult(change.result));
+    }
+
+    async setAvatar(ctx: Context, agentId: string, input: ProjectSetAvatarInput): Promise<Project>;
+    async setAvatar(
+        ctx: Context,
+        agentId: string,
+        projectId: string,
+        avatar: ProjectAvatar,
+        expectedVersion?: number,
+    ): Promise<Project>;
+    async setAvatar(
+        ctx: Context,
+        agentId: string,
+        inputOrProjectId: ProjectSetAvatarInput | string,
+        avatar?: ProjectAvatar,
+        expectedVersion?: number,
+    ): Promise<Project> {
+        this.#assertAgentId(agentId);
+        const input: ProjectSetAvatarInput =
+            typeof inputOrProjectId === "string"
+                ? {
+                      avatar: avatar as ProjectAvatar,
+                      projectId: inputOrProjectId,
+                      ...(expectedVersion === undefined ? {} : { expectedVersion }),
+                  }
+                : inputOrProjectId;
+        this.#assertInput(projectSetAvatarInputSchema, input, "project avatar");
+        const normalized = structuredClone(input);
+        const change = await this.#runTransaction(ctx, async (txCtx) => {
+            const before = await this.#getRequired(txCtx, agentId, normalized.projectId);
+            await this.#authorize(txCtx, agentId, before.ownerAgentId, "avatar_update");
+            const storeInput: ProjectStoreSetAvatarInput = normalized;
+            const raw = await requirePromise(
+                this.#store.setAvatar(txCtx, agentId, structuredClone(storeInput)),
+                "Project store set avatar",
+            );
+            assertProjectSetAvatarResult(raw);
+            this.#assertMutationResult(raw, agentId, "set_avatar");
+            if (raw.project.id !== normalized.projectId) {
+                throw new Error("Project avatar result has a different project identity.");
+            }
+            const after = await this.#getRequired(txCtx, agentId, normalized.projectId);
+            if (!sameJson(after, raw.project)) {
+                throw new Error("Project avatar result does not match authoritative state.");
+            }
+            assertProjectAvatarTransition(before, after, normalized.avatar);
+            const changed = !sameJson(before, after);
+            if (raw.changed !== changed) {
+                throw new Error("Project avatar changed flag is not authoritative.");
+            }
+            const result = structuredClone(raw);
+            const event = changed
+                ? await this.#newEvent(txCtx, agentId, {
+                      type: "project_avatar_updated",
+                      agentId,
+                      project: after,
+                  })
+                : undefined;
+            if (event !== undefined) await this.#observe(txCtx, event);
+            return { result, ...(event === undefined ? {} : { event }) };
+        });
+        return structuredClone(requireProjectFromResult(change.result));
+    }
+
+    async clearAvatar(
+        ctx: Context,
+        agentId: string,
+        input: ProjectClearAvatarInput,
+    ): Promise<Project>;
+    async clearAvatar(
+        ctx: Context,
+        agentId: string,
+        projectId: string,
+        expectedVersion?: number,
+    ): Promise<Project>;
+    async clearAvatar(
+        ctx: Context,
+        agentId: string,
+        inputOrProjectId: ProjectClearAvatarInput | string,
+        expectedVersion?: number,
+    ): Promise<Project> {
+        this.#assertAgentId(agentId);
+        const input: ProjectClearAvatarInput =
+            typeof inputOrProjectId === "string"
+                ? {
+                      projectId: inputOrProjectId,
+                      ...(expectedVersion === undefined ? {} : { expectedVersion }),
+                  }
+                : inputOrProjectId;
+        this.#assertInput(projectClearAvatarInputSchema, input, "project avatar clear");
+        const normalized = structuredClone(input);
+        const change = await this.#runTransaction(ctx, async (txCtx) => {
+            const before = await this.#getRequired(txCtx, agentId, normalized.projectId);
+            await this.#authorize(txCtx, agentId, before.ownerAgentId, "avatar_update");
+            const storeInput: ProjectStoreClearAvatarInput = normalized;
+            const raw = await requirePromise(
+                this.#store.clearAvatar(txCtx, agentId, structuredClone(storeInput)),
+                "Project store clear avatar",
+            );
+            assertProjectClearAvatarResult(raw);
+            this.#assertMutationResult(raw, agentId, "clear_avatar");
+            if (raw.project.id !== normalized.projectId) {
+                throw new Error("Project clear-avatar result has a different project identity.");
+            }
+            const after = await this.#getRequired(txCtx, agentId, normalized.projectId);
+            if (!sameJson(after, raw.project)) {
+                throw new Error("Project clear-avatar result does not match authoritative state.");
+            }
+            assertProjectAvatarClearTransition(before, after);
+            const changed = !sameJson(before, after);
+            if (raw.changed !== changed) {
+                throw new Error("Project clear-avatar changed flag is not authoritative.");
+            }
+            const result = structuredClone(raw);
+            const event = changed
+                ? await this.#newEvent(txCtx, agentId, {
+                      type: "project_avatar_cleared",
+                      agentId,
+                      project: after,
+                  })
+                : undefined;
+            if (event !== undefined) await this.#observe(txCtx, event);
+            return { result, ...(event === undefined ? {} : { event }) };
+        });
+        return structuredClone(requireProjectFromResult(change.result));
+    }
+
+    async avatarAsset(
+        ctx: Context,
+        agentId: string,
+        hash: string,
+    ): Promise<ProjectAvatarAsset | undefined> {
+        this.#assertAgentId(agentId);
+        if (!Value.Check(projectAvatarHashSchema, hash)) {
+            throw new Error("Project avatar hash is invalid.");
+        }
+        const project = await this.#store.findByAvatarHash(ctx, agentId, hash);
+        if (project === undefined) return undefined;
+        assertProject(project);
+        assertProjectRecord(project);
+        await this.#authorize(ctx, agentId, project.ownerAgentId, "avatar_read");
+        const reader = this.#avatarAssetReader;
+        if (reader === undefined) return undefined;
+        const raw = await reader.read.call(reader, ctx, agentId, hash);
+        if (raw === undefined) return undefined;
+        assertProjectAvatarAsset(raw);
+        if (
+            raw.hash !== hash ||
+            raw.bytes.byteLength > MAX_PROJECT_AVATAR_BYTES ||
+            raw.mediaType !== "image/webp"
+        ) {
+            throw new Error("Project avatar asset reader returned an unrelated asset.");
+        }
+        return structuredClone(raw);
     }
 
     async updateSettings(
@@ -624,6 +934,9 @@ export class ProjectsModule implements AgentModule {
             const storeInput: ProjectStoreSettingsUpdateInput = {
                 projectId: normalized.projectId,
                 settings: structuredClone(normalized.settings),
+                ...(normalized.expectedVersion === undefined
+                    ? {}
+                    : { expectedVersion: normalized.expectedVersion }),
             };
             const raw = await requirePromise(
                 this.#store.updateSettings(txCtx, agentId, structuredClone(storeInput)),
@@ -646,6 +959,9 @@ export class ProjectsModule implements AgentModule {
             );
             if (!sameJson(afterSettings, raw.settings)) {
                 throw new Error("Project settings result does not match authoritative settings.");
+            }
+            if (raw.version !== afterProject.version) {
+                throw new Error("Project settings result has a stale project version.");
             }
             assertProjectSettingsTransition(beforeProject, afterProject);
             const changed = !sameJson(beforeSettings, afterSettings);
@@ -846,6 +1162,27 @@ export class ProjectsModule implements AgentModule {
                   readonly project: Project;
               }
             | {
+                  readonly type: "project_unarchived";
+                  readonly agentId: string;
+                  readonly project: Project;
+              }
+            | {
+                  readonly type: "project_reordered";
+                  readonly agentId: string;
+                  readonly previousOrderKey: string;
+                  readonly project: Project;
+              }
+            | {
+                  readonly type: "project_avatar_updated";
+                  readonly agentId: string;
+                  readonly project: Project;
+              }
+            | {
+                  readonly type: "project_avatar_cleared";
+                  readonly agentId: string;
+                  readonly project: Project;
+              }
+            | {
                   readonly type: "project_settings_updated";
                   readonly agentId: string;
                   readonly projectId: string;
@@ -1007,9 +1344,12 @@ export class ProjectsModule implements AgentModule {
         for (let index = 1; index < page.projects.length; index += 1) {
             const previous = page.projects[index - 1]!;
             const current = page.projects[index]!;
-            if (current.id <= previous.id) {
+            if (
+                current.orderKey < previous.orderKey ||
+                (current.orderKey === previous.orderKey && current.id <= previous.id)
+            ) {
                 throw new Error(
-                    "Project page identities must be unique and ordered by ascending ID.",
+                    "Project page identities must be unique and ordered by project order.",
                 );
             }
         }
@@ -1047,6 +1387,7 @@ export class ProjectsModule implements AgentModule {
             project.description !== request.description ||
             project.status !== "active" ||
             project.archivedAt !== undefined ||
+            project.version !== 1 ||
             project.createdAt !== project.updatedAt
         ) {
             throw new Error("Project create result does not match the requested created state.");
@@ -1062,7 +1403,10 @@ export class ProjectsModule implements AgentModule {
         if (project.repositoryRef !== request.repositoryRef) {
             throw new Error("Project ensure result does not match the requested repository.");
         }
-        if (!created) return;
+        if (!created) {
+            assertProjectRecord(project);
+            return;
+        }
         assertProjectRecord(project);
         if (
             project.ownerAgentId !== request.ownerAgentId ||
@@ -1071,17 +1415,23 @@ export class ProjectsModule implements AgentModule {
             project.description !== request.description ||
             project.status !== "active" ||
             project.archivedAt !== undefined ||
+            project.version !== 1 ||
             project.createdAt !== project.updatedAt
         ) {
             throw new Error("Project ensure result does not match the requested created state.");
         }
     }
-
 }
 
 export function assertProjectModuleOptions(value: unknown): asserts value is ProjectModuleOptions {
     if (!Value.Check(projectModuleOptionsSchema, value)) {
         throw new Error("Project module options are invalid.");
+    }
+}
+
+export function assertProjectAvatarAsset(value: unknown): asserts value is ProjectAvatarAsset {
+    if (!Value.Check(projectAvatarAssetSchema, value)) {
+        throw new Error("Project avatar asset is invalid.");
     }
 }
 
@@ -1138,6 +1488,9 @@ function assertProjectSettingsPage(value: unknown): asserts value is ProjectSett
 }
 
 function assertProjectRecord(project: Project): void {
+    if (project.version < 1) {
+        throw new Error("Project version is invalid.");
+    }
     if (project.updatedAt < project.createdAt) {
         throw new Error("Project timestamps are not ordered.");
     }
@@ -1179,6 +1532,8 @@ function assertProjectRenameTransition(
         after.createdAt !== before.createdAt ||
         after.archivedAt !== before.archivedAt ||
         after.description !== before.description ||
+        after.orderKey !== before.orderKey ||
+        !sameProjectAvatar(after.avatar, before.avatar) ||
         after.name !== requestedName
     ) {
         throw new Error("Project rename changed fields outside the requested transition.");
@@ -1187,8 +1542,10 @@ function assertProjectRenameTransition(
         if (!sameJson(before, after)) {
             throw new Error("Project rename changed an unchanged name.");
         }
-    } else if (after.updatedAt <= before.updatedAt) {
-        throw new Error("Project rename must advance updatedAt for a name change.");
+    } else {
+        if (after.updatedAt < before.updatedAt || after.version !== before.version + 1) {
+            throw new Error("Project rename must advance its version and timestamp.");
+        }
     }
 }
 
@@ -1207,12 +1564,123 @@ function assertProjectArchiveTransition(before: Project, after: Project): void {
         before.repositoryRef !== after.repositoryRef ||
         before.name !== after.name ||
         before.description !== after.description ||
+        before.orderKey !== after.orderKey ||
+        !sameProjectAvatar(before.avatar, after.avatar) ||
         before.createdAt !== after.createdAt
     ) {
         throw new Error("Project archive changed fields outside the archival transition.");
     }
     if (after.archivedAt === undefined || after.archivedAt < before.updatedAt) {
         throw new Error("Project archive archivedAt is inconsistent with the transition.");
+    }
+    if (after.version !== before.version + 1) {
+        throw new Error("Project archive must advance its version.");
+    }
+}
+
+function assertProjectUnarchiveTransition(before: Project, after: Project): void {
+    if (
+        before.id !== after.id ||
+        before.ownerAgentId !== after.ownerAgentId ||
+        before.repositoryRef !== after.repositoryRef ||
+        before.name !== after.name ||
+        before.description !== after.description ||
+        before.orderKey !== after.orderKey ||
+        !sameProjectAvatar(before.avatar, after.avatar) ||
+        before.createdAt !== after.createdAt
+    ) {
+        throw new Error("Project unarchive changed fields outside the restoration transition.");
+    }
+    if (before.status === "active") {
+        if (!sameJson(before, after)) {
+            throw new Error("Project unarchive changed an already active project.");
+        }
+        return;
+    }
+    if (
+        after.status !== "active" ||
+        after.archivedAt !== undefined ||
+        after.updatedAt < before.updatedAt ||
+        after.version !== before.version + 1
+    ) {
+        throw new Error("Project unarchive transition is inconsistent.");
+    }
+}
+
+function assertProjectReorderTransition(before: Project, after: Project): void {
+    if (
+        after.id !== before.id ||
+        after.ownerAgentId !== before.ownerAgentId ||
+        after.repositoryRef !== before.repositoryRef ||
+        after.name !== before.name ||
+        after.description !== before.description ||
+        after.status !== before.status ||
+        after.archivedAt !== before.archivedAt ||
+        after.createdAt !== before.createdAt ||
+        !sameProjectAvatar(before.avatar, after.avatar)
+    ) {
+        throw new Error("Project reorder changed fields outside ordering.");
+    }
+    if (after.orderKey === before.orderKey) {
+        if (!sameJson(before, after)) {
+            throw new Error("Project reorder changed an unchanged position.");
+        }
+        return;
+    }
+    if (after.updatedAt < before.updatedAt || after.version !== before.version + 1) {
+        throw new Error("Project reorder must advance its version and timestamp.");
+    }
+}
+
+function assertProjectAvatarTransition(
+    before: Project,
+    after: Project,
+    requestedAvatar: NonNullable<Project["avatar"]>,
+): void {
+    if (
+        after.id !== before.id ||
+        after.ownerAgentId !== before.ownerAgentId ||
+        after.repositoryRef !== before.repositoryRef ||
+        after.name !== before.name ||
+        after.description !== before.description ||
+        after.status !== before.status ||
+        after.orderKey !== before.orderKey ||
+        after.archivedAt !== before.archivedAt ||
+        after.createdAt !== before.createdAt ||
+        !sameProjectAvatar(after.avatar, requestedAvatar)
+    ) {
+        throw new Error("Project avatar changed fields outside the requested transition.");
+    }
+    if (sameProjectAvatar(before.avatar, requestedAvatar)) {
+        if (!sameJson(before, after)) {
+            throw new Error("Project avatar changed an unchanged avatar.");
+        }
+    } else if (after.updatedAt < before.updatedAt || after.version !== before.version + 1) {
+        throw new Error("Project avatar must advance its version and timestamp.");
+    }
+}
+
+function assertProjectAvatarClearTransition(before: Project, after: Project): void {
+    if (
+        after.id !== before.id ||
+        after.ownerAgentId !== before.ownerAgentId ||
+        after.repositoryRef !== before.repositoryRef ||
+        after.name !== before.name ||
+        after.description !== before.description ||
+        after.status !== before.status ||
+        after.orderKey !== before.orderKey ||
+        after.archivedAt !== before.archivedAt ||
+        after.createdAt !== before.createdAt ||
+        after.avatar !== undefined
+    ) {
+        throw new Error("Project clear-avatar changed fields outside the requested transition.");
+    }
+    if (before.avatar === undefined) {
+        if (!sameJson(before, after)) {
+            throw new Error("Project clear-avatar changed an empty avatar.");
+        }
+    } else if (after.updatedAt < before.updatedAt || after.version !== before.version + 1) {
+        throw new Error("Project clear-avatar must advance its version and timestamp.");
     }
 }
 
@@ -1224,6 +1692,8 @@ function assertProjectSettingsTransition(before: Project, after: Project): void 
         before.name !== after.name ||
         before.description !== after.description ||
         before.status !== after.status ||
+        before.orderKey !== after.orderKey ||
+        !sameProjectAvatar(before.avatar, after.avatar) ||
         before.createdAt !== after.createdAt ||
         before.archivedAt !== after.archivedAt
     ) {
@@ -1231,6 +1701,10 @@ function assertProjectSettingsTransition(before: Project, after: Project): void 
     }
     if (after.updatedAt < before.updatedAt) {
         throw new Error("Project settings moved updatedAt backwards.");
+    }
+    if (sameJson(before, after)) return;
+    if (after.version !== before.version + 1) {
+        throw new Error("Project settings must advance its version.");
     }
 }
 
@@ -1292,6 +1766,13 @@ function projectRow(project: Project): string {
         `Name: ${project.name}`,
         `Repository ref: ${project.repositoryRef}`,
         `Status: ${project.status}`,
+        `Order key: ${project.orderKey}`,
+        `Version: ${String(project.version)}`,
+        ...(project.avatar === undefined
+            ? []
+            : [
+                  `Avatar: ${project.avatar.hash} (${project.avatar.width}x${project.avatar.height})`,
+              ]),
         ...(project.description === undefined ? [] : [`Description: ${project.description}`]),
         `Created: ${String(project.createdAt)}`,
         `Updated: ${String(project.updatedAt)}`,
@@ -1310,6 +1791,14 @@ function projectDetailText(project: Project): string {
         `Repository ref: ${project.repositoryRef}`,
         `Status: ${project.status}`,
         `Owner agent: ${project.ownerAgentId}`,
+        `Order key: ${project.orderKey}`,
+        `Version: ${String(project.version)}`,
+        ...(project.avatar === undefined
+            ? []
+            : [
+                  `Avatar: ${project.avatar.hash} (${project.avatar.width}x${project.avatar.height})`,
+                  `Avatar URL: ${project.avatar.url}`,
+              ]),
         ...(project.description === undefined ? [] : [`Description: ${project.description}`]),
         `Created at: ${String(project.createdAt)}`,
         `Updated at: ${String(project.updatedAt)}`,
@@ -1498,6 +1987,11 @@ function sameJson(left: unknown, right: unknown): boolean {
     } catch {
         return false;
     }
+}
+
+function sameProjectAvatar(left: Project["avatar"], right: Project["avatar"]): boolean {
+    if (left === undefined || right === undefined) return left === right;
+    return sameJson(left, right);
 }
 
 function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {

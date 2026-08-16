@@ -1,18 +1,23 @@
 # Compute
 
 A machine to work on. An agent that can only talk cannot build anything, so this module gives it
-one: a filesystem to read and change, and a shell to run commands in. It offers ten common Rig
-tools — not any vendor's — over one `Compute`, so every model gets exactly these tools, under these
-names, with these arguments, regardless of which provider is serving it.
+one: a filesystem to read and change, and a shell to run commands in. It offers thirteen common
+Rig tools — not any vendor's — over one `Compute`, so every model gets exactly these tools, under
+these names, with these arguments, regardless of which provider is serving it.
 
 ```ts
 import { AgentSystemLocal } from "@slopus/happy-agent-base";
-import { createComputeModules } from "@slopus/happy-agent-modules";
+import { SystemPromptModule, createComputeModules } from "@slopus/happy-agent-modules";
 
 const created = createComputeModules();
+const systemPrompt = new SystemPromptModule({
+    compute: {
+        resolve: async (ctx, agentId) => await created.computeModule.resolve(ctx, agentId),
+    },
+});
 const system = await AgentSystemLocal.create(ctx, storage, {
     ...systemOptions,
-    modules: created.modules,
+    modules: [systemPrompt, ...created.modules],
 });
 const agent = await system.create(ctx, {
     modules: {
@@ -24,11 +29,11 @@ const agent = await system.create(ctx, {
 });
 ```
 
-`createComputeModules` creates one shared `ComputeModule`, `AgentsMdModule`, and `SkillsModule`
-set for the whole agent system. The compute module owns one global host provider. The first time a
-configured agent needs compute, it creates a separate host compute for that agent, caches it by
-agent ID, and gives that exact instance to the compute tools, AGENTS.md discovery, and skills
-discovery. This package depends on
+`createComputeModules` creates one shared `ComputeModule` and `SkillsModule` set for the whole
+agent system. The compute module owns one global host provider. The first time a configured agent
+needs compute, it creates a separate host compute for that agent, caches it by agent ID, and gives
+that exact instance to the compute tools and skills discovery. A host injects the same
+`ComputeModule` into `SystemPromptModule` for AGENTS.md discovery. This package depends on
 `@slopus/happy-agent-compute@0.1.6` and uses its `Compute`, `ComputeFileSystem`, and `ComputeShell`
 types directly; it does not maintain a second filesystem or process contract. Docker and
 just-bash compute creation remain owned by that package and are not selected by this module's host
@@ -49,9 +54,16 @@ Reads a text file, numbering its lines in the output (the numbers are not part o
 must never be echoed back into `edit_file`). `path` may be absolute or relative to the working
 directory; `offset` (1-based line) and `limit` page through a longer file. Up to 2,000 lines and
 60,000 characters come back at once; a truncated answer says so and tells the model to read on
-with `offset`. The read is recorded in the agent's `FileReadLog` under the file's `mtimeMs`, which
-is what later earns the right to change it. Marked `durable`: the read authorization and tool
-result commit together, so an interrupted call can be retried without leaving half of that state.
+with `offset`. PNG, JPEG, GIF, WebP, and BMP paths return an image block instead, bounded to
+3 MiB before base64 expansion; the module does not downscale images. Every read is recorded in the agent's
+`FileReadLog` under the file's `mtimeMs`, which is what later earns the right to change it.
+Marked `durable`: the read authorization and tool result commit together, so an interrupted call
+can be retried without leaving half of that state.
+
+### `view_image`
+
+Shows one supported local image as a provider-neutral image block. It accepts `path`, applies the
+same path review and 3 MiB bound as `read_file`, and records the read.
 
 ### `write_file`
 
@@ -68,11 +80,25 @@ appear exactly once unless `replace_all` is set, and it refuses a no-op replacem
 not durable: repeating an edit that already landed would either find nothing to replace or hit
 different text that happens to match.
 
+### `delete_file`
+
+Deletes one regular file after the agent has read it. It refuses directories, missing reads, and
+stale files, and is deliberately not durable because a filesystem delete cannot commit atomically
+with the tool result.
+
+### `move_file`
+
+Moves or renames one regular file after the agent has read it. The destination must not already
+exist; missing parent directories are created. Both source and destination are checked for path
+review, and the tool is deliberately not durable. The existence check and move are not atomic:
+concurrent writers can still race and require a future host atomic no-replace filesystem seam.
+
 ### `list_directory`
 
 Lists one directory's entries, sorted, with directory names carrying a trailing slash. `path`
-defaults to the working directory. Up to 1,000 entries are returned; a truncated answer says how
-many of the total are shown. `durable`.
+defaults to the working directory. Dot-files and dot-directories are hidden by default; set
+`show_hidden` to include them. Up to 1,000 visible entries are returned; a truncated answer says
+how many of the total are shown. `durable`.
 
 ### `find_files`
 
@@ -85,41 +111,53 @@ either cap reports `truncated` even if nothing beyond it happened to match. `dur
 ### `search_files`
 
 Searches file contents line by line with a regular expression (`pattern`), optionally narrowed by
-`file_pattern` (a glob) and `case_insensitive`. Each match is reported as `path:line: text`, with
-lines over 400 characters shortened and the whole answer bounded to 40,000 characters. Files over
-1,000,000 characters or containing a null byte are skipped as not text. `limit` defaults to 100
-matching lines. `durable`.
+`file_pattern`, `type`, and case-insensitive matching. The supported Git-ignore subset skips
+matching files and directories, along with `.git` and symbolic links; character classes,
+backslash escaping, and other unsupported Git pattern constructs are not fully interpreted (for
+example, `a**b` is treated as `.*`).
+`output_mode` supports `content` (with `-A`, `-B`, `-C`, and line-number options),
+`files_with_matches`, and `count`; `offset` and `limit`/`head_limit` page
+the output. Lines over 400 characters are shortened and the whole answer is bounded to 40,000
+characters. Files over 1,000,000 characters or containing a null byte are skipped as not text.
+`durable`.
 
 ### `run_command`
 
 Runs a shell command, starting fresh each call: nothing carries over between calls, including
-directory changes or environment variables. It waits up to `timeout_ms` (default 60s, capped at
-600s) for the command to finish; reaching the timeout does not kill it — the command keeps running
-and the tool answers with a `command_id` the model comes back to. `background: true` starts a
-command meant to outlive the call (a dev server, a watcher) and only waits a short grace period
-(3s) to see it did not immediately fail. `workdir` overrides the working directory for that one
-command; `tty` runs it under a pseudo-terminal. `escalate_sandbox` (with a short `justification`)
-asks Auto to review running the command with unrestricted filesystem and network access outside
-the workspace sandbox — every other command runs sandboxed and needs no review. A command the
-model is waiting on is stopped if its turn is cancelled; one already handed back as backgrounded
-is detached from the turn and left running. `exit_code !== 0` marks the result as an error to the
-model.
+directory changes or environment variables. `shell` chooses the shell binary inside the current
+sandbox, while `max_output_tokens` bounds the returned output (10,000 by default). It waits
+up to `timeout_ms` (default 60s, capped at 600s) for the command to finish; reaching the timeout
+does not kill the command — the command keeps running and the tool answers with a `command_id`
+the model comes back to. `background: true` starts a command meant to outlive the call (a dev
+server, a watcher) and only waits a short grace period (3s) to see it did not immediately fail.
+`workdir` overrides the working directory for that one command; `tty` runs it under a
+pseudo-terminal. `escalate_sandbox` (with a short `justification`) asks Auto to review running
+the command with unrestricted filesystem and network access outside the workspace sandbox —
+every other command runs sandboxed. A command the model is waiting on is stopped if its turn is
+cancelled; one already handed back as backgrounded is detached from the turn and left running.
+`exit_code !== 0` marks the result as an error to the model.
+
+Secret bundles are not exposed here yet. The host compute's secret option has no resolver and
+injection seam for this module; adding it needs a host/provider integration rather than treating
+secret identifiers as ordinary environment variables.
 
 ### `read_command_output`
 
 Reads what a background command has produced since the command was last read, waiting up to
 `wait_ms` (default 5s, capped at 300s) for something new to arrive. A command that has already
-ended keeps answering for a while so its last output is never lost. Deliberately not durable: a
-read consumes what it returns, so retrying after a restart would lose that output rather than
-repeat it. Needs no review — it only reads output of work Rig itself already started.
+ended keeps answering for a while so its last output is never lost. `max_output_tokens` can bound
+this answer. Deliberately not durable: a read consumes what it returns, so retrying after a
+restart would lose that output rather than repeat it. Needs no review — it only reads output of
+work Rig itself already started.
 
 ### `send_command_input`
 
 Types `input` into a running command and waits up to `wait_ms` (default 250ms, capped at 30s) for
 a response, useful for prompts and REPLs; a line needs its own trailing newline. Only output
-produced since the last read comes back. Reviewed whenever `input` is non-empty, since typing into
-a live program is the program acting rather than a lookup, but it never needs Full access — it
-reaches nothing the command could not already reach inside its own sandbox.
+produced since the last read comes back, bounded by optional `max_output_tokens`. Reviewed whenever
+`input` is non-empty, since typing into a live program is the program acting rather than a lookup,
+but it never needs Full access — it reaches nothing the command could not already reach inside its
+own sandbox.
 
 ### `stop_command`
 
@@ -144,10 +182,12 @@ tool descriptions alone cannot carry them:
 Permissions are decided per path or per command, not per tool. `shouldReviewComputePath` resolves
 the proposed path, checks it stays inside `compute.cwd`, and — following every symbolic link with
 `canonicalComputePath` — checks it still stays inside once resolved; anything unresolved or leaving
-the workspace is reviewed. The host compute receives the reviewed Agent Base mode on the actual
-operation and applies its own configured host policy. Shell commands take the opposite default —
-sandboxed unless the model explicitly asks to leave, via `escalate_sandbox` — since an ordinary
-command is the common case and a reviewer has nothing useful to weigh over it.
+the workspace is reviewed. Writes to `.git` control files and the root `rig.toml`, `happy.toml`,
+or `AGENTS_SECURITY.md` are reviewed even when they remain inside the workspace. The host compute
+receives the reviewed Agent Base mode on the actual operation and applies its own configured host
+policy. Shell commands take the opposite default — sandboxed unless the model explicitly asks to
+leave via `escalate_sandbox` — since an ordinary command is the common case and a reviewer has
+nothing useful to weigh over it.
 
 Every read tool returns paged, size-bounded results and states, in its own `truncated` and count
 fields, when more exists than was shown, rather than letting a short answer be read as a complete
@@ -191,7 +231,9 @@ a single key:
 only the most recent 512 entries (`MAX_REMEMBERED_READS`) — the log is a guard against a blind
 edit, not a transcript, so only recently-read files are worth remembering. `AgentKV.update` makes
 the read-decide-write operation durable, and the module's keyed lock serializes concurrent updates
-for the same agent before they reach that store.
+for the same agent before they reach that store. File mutations themselves are not serialized per
+path: frozen Agent Base exposes no tool lock, and this module does not add a module-level heap
+lock. Concurrent edits to one path remain future host-coordination debt.
 The log belongs to the agent's conversation rather than to a single run, so a write interrupted by
 a restart can simply be retried — the file it left behind is one this agent has already read.
 

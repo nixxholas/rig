@@ -1,5 +1,6 @@
 import {
     agentDatabaseRows,
+    withAgentPermissionMode,
     type AgentConfig,
     type AgentDatabase,
     type AgentToolCall,
@@ -11,20 +12,44 @@ import {
     CollaborationModule,
     collaborationAgentSchema,
     type CollaborationAgent,
+    type CollaborationAgentObservation,
     type CollaborationBroker,
+    type CollaborationAgentSelection,
+    type CollaborationModelCatalog,
     type CollaborationObligation,
+    type CollaborationSpawnCapacity,
 } from "../../sources/collaboration/index.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
 
 class Broker implements CollaborationBroker {
     readonly configs = new Map<string, AgentConfig>();
     readonly sent: Array<{ readonly target: string; readonly id: string }> = [];
+    readonly permissions: Array<{
+        readonly actor: string;
+        readonly target: string;
+        readonly readOnly: boolean;
+    }> = [];
+    readonly permissionModes: Array<Parameters<CollaborationBroker["setReadOnly"]>[4]> = [];
+    readonly interrupted: string[] = [];
+    readonly createOptions: Array<Parameters<CollaborationBroker["create"]>[2]> = [];
+    readonly selections = new Map<string, CollaborationAgentSelection>();
     sendAttempts = 0;
     waitResult: CollaborationObligation | undefined;
     database: AgentDatabase | undefined;
     createDepths: number[] = [];
+    createAdmission: (() => void) | undefined;
     sendDepths: number[] = [];
     waitDepths: number[] = [];
+    observations = new Map<string, CollaborationAgentObservation>();
+    interruptResult: CollaborationAgentObservation | undefined;
+    capacity: CollaborationSpawnCapacity = {
+        canSpawn: true,
+        depth: 0,
+        maxDepth: 3,
+        maxActive: 10,
+        active: 0,
+    };
+    readonly capacities = new Map<string, CollaborationSpawnCapacity>();
 
     async create(
         _ctx: Parameters<CollaborationBroker["create"]>[0],
@@ -32,6 +57,9 @@ class Broker implements CollaborationBroker {
         options: Parameters<CollaborationBroker["create"]>[2],
     ): Promise<{ readonly id: string }> {
         this.createDepths.push(this.#transactionDepth(_ctx));
+        this.createAdmission?.();
+        this.createOptions.push(structuredClone(options));
+        this.selections.set(options.id, structuredClone(options.selection));
         this.configs.set(options.id, structuredClone(config));
         return { id: options.id };
     }
@@ -42,6 +70,14 @@ class Broker implements CollaborationBroker {
     ): Promise<AgentConfig | undefined> {
         const config = this.configs.get(id);
         return config === undefined ? undefined : structuredClone(config);
+    }
+
+    async selection(
+        _ctx: Parameters<CollaborationBroker["selection"]>[0],
+        id: string,
+    ): Promise<CollaborationAgentSelection | undefined> {
+        const selection = this.selections.get(id);
+        return selection === undefined ? undefined : structuredClone(selection);
     }
 
     async send(
@@ -67,6 +103,67 @@ class Broker implements CollaborationBroker {
         return structuredClone(this.waitResult);
     }
 
+    async interrupt(
+        _ctx: Parameters<CollaborationBroker["interrupt"]>[0],
+        _actingAgentId: string,
+        targetAgentId: string,
+    ): Promise<CollaborationAgentObservation> {
+        this.interrupted.push(targetAgentId);
+        const observation = this.interruptResult ?? {
+            agentId: targetAgentId,
+            runId: "run-1",
+            version: 2,
+            status: "aborted" as const,
+            output: "The collaborator was interrupted.",
+            updatedAt: 2,
+        };
+        this.observations.set(targetAgentId, observation);
+        return structuredClone(observation);
+    }
+
+    async observe(
+        _ctx: Parameters<CollaborationBroker["observe"]>[0],
+        _actingAgentId: string,
+        targetAgentId: string,
+    ): Promise<CollaborationAgentObservation> {
+        return structuredClone(
+            this.observations.get(targetAgentId) ?? {
+                agentId: targetAgentId,
+                runId: "run-1",
+                version: 1,
+                status: "running",
+                updatedAt: 1,
+            },
+        );
+    }
+
+    async waitForAgent(
+        _ctx: Parameters<CollaborationBroker["waitForAgent"]>[0],
+        _actingAgentId: string,
+        targetAgentId: string,
+        _timeoutMs: number,
+    ): Promise<CollaborationAgentObservation> {
+        return await this.observe(_ctx, _actingAgentId, targetAgentId);
+    }
+
+    async setReadOnly(
+        _ctx: Parameters<CollaborationBroker["setReadOnly"]>[0],
+        actingAgentId: string,
+        targetAgentId: string,
+        readOnly: boolean,
+        permissionMode: Parameters<CollaborationBroker["setReadOnly"]>[4],
+    ): Promise<void> {
+        this.permissions.push({ actor: actingAgentId, target: targetAgentId, readOnly });
+        this.permissionModes.push(permissionMode);
+    }
+
+    async spawnCapacity(
+        _ctx: Parameters<CollaborationBroker["spawnCapacity"]>[0],
+        actingAgentId: string,
+    ) {
+        return this.capacities.get(actingAgentId) ?? this.capacity;
+    }
+
     #transactionDepth(ctx: Parameters<CollaborationBroker["wait"]>[0]): number {
         return this.database !== undefined && ctx.db !== this.database ? 1 : 0;
     }
@@ -75,13 +172,30 @@ class Broker implements CollaborationBroker {
 function setup(
     name: string,
     listener?: ConstructorParameters<typeof CollaborationModule>[0]["listener"],
+    modelCatalog: CollaborationModelCatalog | null = {
+        availableModels: [
+            {
+                defaultEffort: "medium",
+                effortLevels: ["low", "medium", "high"],
+                id: "model",
+                name: "Test model",
+                providerId: "provider",
+                serviceTiers: ["priority"],
+            },
+        ],
+        disabledProviders: [],
+    },
+    maxOutputCharacters = 8_000,
+    brokerOverride?: Broker,
 ) {
-    const broker = new Broker();
+    const broker = brokerOverride ?? new Broker();
     let eventSequence = 0;
     const collaboration = new CollaborationModule({
         broker,
+        ...(modelCatalog === null ? {} : { modelCatalog }),
         eventIdFactory: () => `event${++eventSequence}`,
         clock: () => 1_000 + eventSequence,
+        maxOutputCharacters,
         ...(listener === undefined ? {} : { listener }),
     });
     const database = moduleDatabase([], name);
@@ -121,11 +235,17 @@ async function createRoot(
     ctx: ReturnType<typeof moduleDatabase>["context"],
     id = "owner",
 ): Promise<CollaborationAgent> {
-    return await collaboration.createAgent(ctx, id, { id, config: {} });
+    return await collaboration.createAgent(ctx, id, {
+        id,
+        config: {},
+        model: "model",
+        effort: "medium",
+        provider: "provider",
+    });
 }
 
 describe("CollaborationModule", () => {
-    it("keeps only the forward migration that removes the obsolete receipt table", async () => {
+    it("keeps the immutable base schema and applies forward collaboration migrations", async () => {
         const { collaboration, database, ready } = setup("collaboration-migration-test");
         await ready;
         try {
@@ -143,6 +263,7 @@ describe("CollaborationModule", () => {
             expect(collaboration.migrations.map(([id]) => id)).toEqual([
                 "001-collaboration",
                 "002-drop-collaboration-receipts",
+                "003-collaboration-run-state",
             ]);
         } finally {
             database.close();
@@ -165,7 +286,13 @@ describe("CollaborationModule", () => {
 
             const child = await create.execute(
                 database.context,
-                { config: {}, role: "reviewer" },
+                {
+                    config: {},
+                    model: "model",
+                    effort: "medium",
+                    provider: "provider",
+                    role: "reviewer",
+                },
                 toolCall("childcallid", commitDepths, committed, broker),
             );
             expect(child.id).toBe("childcallid");
@@ -228,12 +355,18 @@ describe("CollaborationModule", () => {
                 id: "child",
                 parentId: "owner",
                 config: {},
+                model: "model",
+                effort: "medium",
+                provider: "provider",
             });
             await expect(
                 collaboration.createAgent(database.context, "owner", {
                     id: "child",
                     parentId: "owner",
                     config: {},
+                    model: "model",
+                    effort: "medium",
+                    provider: "provider",
                 }),
             ).rejects.toThrow('Collaborator "child" already exists.');
 
@@ -275,11 +408,92 @@ describe("CollaborationModule", () => {
             expect(byName.get("send_agent_message")?.durable).toBe(true);
             expect(byName.get("reply_to_agent_message")?.durable).toBe(true);
             expect(byName.get("wait_for_reply")?.durable).toBe(false);
+            const interrupt = byName.get("interrupt_agent")!;
+            expect(
+                interrupt.shouldReviewInAutoMode({ targetAgentId: "owner" }, database.context),
+            ).toBe(true);
+            expect(
+                interrupt.describeAutoPermissionAction?.(
+                    { targetAgentId: "owner" },
+                    database.context,
+                ),
+            ).toContain("interrupting collaborator");
             expect(byName.get("create_agent")?.transactional).not.toBe(true);
             expect(byName.get("send_agent_message")?.transactional).not.toBe(true);
             expect(byName.get("reply_to_agent_message")?.transactional).not.toBe(true);
             expect(byName.get("wait_for_reply")?.transactional).not.toBe(true);
             expect(collaborationAgentSchema).toBeDefined();
+        } finally {
+            database.close();
+        }
+    });
+
+    it("keeps collaboration available without a host model catalog", async () => {
+        const { broker, collaboration, database, ready } = setup(
+            "collaboration-no-catalog-test",
+            undefined,
+            null,
+        );
+        await ready;
+        try {
+            const tools = await collaboration.tools(database.context, {
+                agent: { id: "owner" },
+            } as never);
+            const create = tools.find(({ name }) => name === "create_agent")!;
+            expect(create.description).toContain("Model catalog unavailable");
+            const created = await create.execute(
+                database.context,
+                {
+                    config: {},
+                    model: "host-selected-model",
+                    effort: "medium",
+                    provider: "host-provider",
+                },
+                toolCall("owner", [], [], broker),
+            );
+            expect(created.id).toBe("owner");
+        } finally {
+            database.close();
+        }
+    });
+
+    it("truncates creation guidance and observations at the minimum output budget", async () => {
+        const { collaboration, database, ready } = setup(
+            "collaboration-output-budget-test",
+            undefined,
+            null,
+            256,
+        );
+        await ready;
+        try {
+            const tools = await collaboration.tools(database.context, {
+                agent: { id: "owner" },
+            } as never);
+            const create = tools.find(({ name }) => name === "create_agent")!;
+            expect(create.description!.length).toBeLessThanOrEqual(256);
+            expect(create.description).toContain("truncated");
+            const rendered = collaboration.formatAgentObservationForModel({
+                agentId: "owner",
+                runId: "run-1",
+                version: 1,
+                status: "completed",
+                path: "p".repeat(512),
+                updatedAt: 1,
+            });
+            expect(rendered.length).toBeLessThanOrEqual(256);
+            expect(rendered).toContain("truncated");
+        } finally {
+            database.close();
+        }
+    });
+
+    it("returns bounded validation errors for primitive wait inputs", async () => {
+        const { collaboration, database, ready } = setup("collaboration-wait-input-test");
+        await ready;
+        try {
+            await expect(
+                collaboration.waitForReply(database.context, "owner", null as never),
+            ).rejects.toThrow("Invalid collaboration wait");
         } finally {
             database.close();
         }
@@ -300,9 +514,9 @@ describe("CollaborationModule", () => {
         });
         await ready;
         try {
-            await expect(
-                createRoot(collaboration, database.context),
-            ).rejects.toThrow("reject agent finalization");
+            await expect(createRoot(collaboration, database.context)).rejects.toThrow(
+                "reject agent finalization",
+            );
             rejectCreate = false;
             await expect(createRoot(collaboration, database.context)).resolves.toMatchObject({
                 id: "owner",
@@ -312,6 +526,9 @@ describe("CollaborationModule", () => {
             await collaboration.createAgent(database.context, "owner", {
                 id: "child",
                 config: {},
+                model: "model",
+                effort: "medium",
+                provider: "provider",
             });
             rejectSend = true;
             const input = {
@@ -331,6 +548,635 @@ describe("CollaborationModule", () => {
             expect(broker.sendDepths).toEqual([0, 0]);
         } finally {
             database.close();
+        }
+    });
+
+    it("passes model selection, context forking, and read-only creation to the host broker", async () => {
+        const { broker, collaboration, database, ready } = setup(
+            "collaboration-selection-and-fork-test",
+        );
+        await ready;
+        try {
+            await createRoot(collaboration, database.context);
+            await collaboration.createAgent(database.context, "owner", {
+                id: "child",
+                config: {},
+                model: "model",
+                effort: "high",
+                provider: "provider",
+                serviceTier: "priority",
+                context: "parent",
+                forkTurns: "all",
+                readOnly: true,
+            });
+
+            expect(broker.createOptions.at(-1)).toMatchObject({
+                id: "child",
+                parent: "owner",
+                context: "parent",
+                forkTurns: "all",
+                readOnly: true,
+                selection: {
+                    model: "model",
+                    effort: "high",
+                    provider: "provider",
+                    serviceTier: "priority",
+                },
+            });
+        } finally {
+            database.close();
+        }
+    });
+
+    it("rejects unavailable model selection before invoking the broker", async () => {
+        const { broker, collaboration, database, ready } = setup(
+            "collaboration-model-validation-test",
+        );
+        await ready;
+        try {
+            await createRoot(collaboration, database.context);
+            await expect(
+                collaboration.createAgent(database.context, "owner", {
+                    id: "child",
+                    config: {},
+                    model: "missing-model",
+                    effort: "medium",
+                    provider: "provider",
+                }),
+            ).rejects.toThrow('Model "missing-model" is not available');
+            expect(broker.createOptions).toHaveLength(1);
+        } finally {
+            database.close();
+        }
+    });
+
+    it("requires a provider for ambiguous model IDs and ignores disabled routes", async () => {
+        const catalog: CollaborationModelCatalog = {
+            availableModels: [
+                {
+                    defaultEffort: "low",
+                    effortLevels: ["low"],
+                    id: "duplicate",
+                    name: "Provider A model",
+                    providerId: "provider-a",
+                },
+                {
+                    defaultEffort: "low",
+                    effortLevels: ["low"],
+                    id: "duplicate",
+                    name: "Provider B model",
+                    providerId: "provider-b",
+                },
+                {
+                    defaultEffort: "low",
+                    effortLevels: ["low"],
+                    id: "disabled-model",
+                    name: "Disabled model",
+                    providerId: "disabled-provider",
+                },
+                {
+                    defaultEffort: "low",
+                    effortLevels: ["low"],
+                    id: "disabled-model",
+                    name: "Active model",
+                    providerId: "provider-a",
+                },
+            ],
+            disabledProviders: [{ id: "disabled-provider", reason: "not_enabled" }],
+        };
+        const { collaboration, database, ready } = setup(
+            "collaboration-provider-selection-test",
+            undefined,
+            catalog,
+        );
+        await ready;
+        try {
+            await collaboration.createAgent(database.context, "owner", {
+                id: "owner",
+                config: {},
+                model: "duplicate",
+                effort: "low",
+                provider: "provider-a",
+            });
+            await expect(
+                collaboration.createAgent(database.context, "owner", {
+                    id: "ambiguouschild",
+                    config: {},
+                    model: "duplicate",
+                    effort: "low",
+                }),
+            ).rejects.toThrow("Provider is required");
+            await expect(
+                collaboration.createAgent(database.context, "owner", {
+                    id: "disabledchild",
+                    config: {},
+                    model: "disabled-model",
+                    effort: "low",
+                }),
+            ).rejects.toThrow("Provider is required");
+            await expect(
+                collaboration.createAgent(database.context, "owner", {
+                    id: "activechild",
+                    config: {},
+                    model: "disabled-model",
+                    effort: "low",
+                    provider: "provider-a",
+                }),
+            ).resolves.toMatchObject({ id: "activechild" });
+            await expect(
+                collaboration.createAgent(database.context, "owner", {
+                    id: "disabledproviderchild",
+                    config: {},
+                    model: "disabled-model",
+                    effort: "low",
+                    provider: "disabled-provider",
+                }),
+            ).rejects.toThrow("disabled");
+        } finally {
+            database.close();
+        }
+    });
+
+    it("switches permission mode for messages and stops a running collaborator", async () => {
+        const { broker, collaboration, database, ready } = setup(
+            "collaboration-interrupt-permission-test",
+        );
+        await ready;
+        try {
+            await createRoot(collaboration, database.context);
+            await collaboration.createAgent(database.context, "owner", {
+                id: "child",
+                config: {},
+                model: "model",
+                effort: "medium",
+                provider: "provider",
+            });
+            await collaboration.sendMessage(database.context, "owner", {
+                messageId: "permission-message",
+                toAgentId: "child",
+                text: "Inspect this.",
+                readOnly: true,
+            });
+            await collaboration.sendMessage(database.context, "owner", {
+                messageId: "restore-permission-message",
+                toAgentId: "child",
+                text: "Now make the change.",
+                readOnly: false,
+            });
+            expect(broker.permissions).toEqual([
+                { actor: "owner", target: "child", readOnly: true },
+                { actor: "owner", target: "child", readOnly: false },
+            ]);
+
+            broker.observations.set("child", {
+                agentId: "child",
+                runId: "run-1",
+                version: 1,
+                status: "running",
+                output: "Working.",
+                updatedAt: 1,
+            });
+            const tools = await collaboration.tools(database.context, {
+                agent: { id: "owner" },
+            } as never);
+            const interrupt = tools.find(({ name }) => name === "interrupt_agent")!;
+            const result = await interrupt.execute(
+                database.context,
+                { targetAgentId: "child" },
+                toolCall("interrupt-call", [], [], broker),
+            );
+            expect(result).toMatchObject({
+                agentId: "child",
+                status: "aborted",
+            });
+            expect(broker.interrupted).toEqual(["child"]);
+        } finally {
+            database.close();
+        }
+    });
+
+    it("cannot widen a collaborator from a read-only sender", async () => {
+        const { broker, collaboration, database, ready } = setup(
+            "collaboration-read-only-monotonic-test",
+        );
+        await ready;
+        try {
+            await createRoot(collaboration, database.context);
+            const readOnlyContext = withAgentPermissionMode(database.context, "read_only");
+            await collaboration.createAgent(readOnlyContext, "owner", {
+                id: "readonlychild",
+                config: {},
+                model: "model",
+                effort: "medium",
+                provider: "provider",
+                readOnly: false,
+            });
+            const request = await collaboration.sendMessage(readOnlyContext, "owner", {
+                messageId: "readonly-permission",
+                toAgentId: "readonlychild",
+                text: "Remain restricted.",
+                readOnly: false,
+                expectReply: true,
+            });
+            await collaboration.replyMessage(readOnlyContext, "readonlychild", {
+                toAgentId: "owner",
+                text: "Still restricted.",
+                replyTo: request.obligation!.id,
+                readOnly: false,
+            });
+            expect(broker.createOptions.at(-1)?.readOnly).toBe(true);
+            expect(broker.permissions.at(-1)?.readOnly).toBe(true);
+            expect(broker.permissionModes.at(-1)).toBe("read_only");
+        } finally {
+            database.close();
+        }
+    });
+
+    it("rejects stale and reordered collaborator observations", async () => {
+        const { broker, collaboration, database, ready } = setup(
+            "collaboration-stale-observation-test",
+        );
+        await ready;
+        try {
+            await createRoot(collaboration, database.context);
+            await collaboration.createAgent(database.context, "owner", {
+                id: "child",
+                config: {},
+                model: "model",
+                effort: "medium",
+                provider: "provider",
+            });
+            const tools = await collaboration.tools(database.context, {
+                agent: { id: "owner" },
+            } as never);
+            const wait = tools.find(({ name }) => name === "wait_for_reply")!;
+            broker.observations.set("child", {
+                agentId: "child",
+                runId: "run-2",
+                version: 2,
+                status: "completed",
+                updatedAt: 20,
+            });
+            await wait.execute(
+                database.context,
+                { agentId: "child" },
+                toolCall("wait-new", [], [], broker),
+            );
+            broker.observations.set("child", {
+                agentId: "child",
+                runId: "run-2",
+                version: 1,
+                status: "running",
+                updatedAt: 10,
+            });
+            await expect(
+                wait.execute(
+                    database.context,
+                    { agentId: "child" },
+                    toolCall("wait-old", [], [], broker),
+                ),
+            ).rejects.toThrow("observation for");
+            broker.observations.set("child", {
+                agentId: "child",
+                runId: "run-2",
+                version: 2,
+                status: "completed",
+                updatedAt: 19,
+            });
+            await expect(
+                wait.execute(
+                    database.context,
+                    { agentId: "child" },
+                    toolCall("wait-old-timestamp", [], [], broker),
+                ),
+            ).rejects.toThrow("observation for");
+            broker.observations.set("child", {
+                agentId: "child",
+                runId: "run-2",
+                version: 2,
+                status: "running",
+            });
+            await expect(
+                wait.execute(
+                    database.context,
+                    { agentId: "child" },
+                    toolCall("wait-same-version", [], [], broker),
+                ),
+            ).rejects.toThrow("observation for");
+            broker.observations.set("child", {
+                agentId: "child",
+                runId: "different-run",
+                version: 2,
+                status: "error",
+                updatedAt: 21,
+            });
+            await expect(
+                wait.execute(
+                    database.context,
+                    { agentId: "child" },
+                    toolCall("wait-reordered", [], [], broker),
+                ),
+            ).rejects.toThrow("observation for");
+        } finally {
+            database.close();
+        }
+    });
+
+    it("requires interruption authorization and a terminal newer result", async () => {
+        const { broker, collaboration, database, ready } = setup(
+            "collaboration-interrupt-postcondition-test",
+        );
+        await ready;
+        try {
+            await createRoot(collaboration, database.context);
+            await createRoot(collaboration, database.context, "other");
+            await collaboration.createAgent(database.context, "owner", {
+                id: "child",
+                config: {},
+                model: "model",
+                effort: "medium",
+                provider: "provider",
+            });
+            broker.observations.set("child", {
+                agentId: "child",
+                runId: "run-1",
+                version: 1,
+                status: "running",
+                updatedAt: 1,
+            });
+            await expect(
+                collaboration.interruptAgent(database.context, "other", "child"),
+            ).rejects.toThrow("not authorized");
+
+            broker.interruptResult = {
+                agentId: "child",
+                runId: "run-1",
+                version: 2,
+                status: "running",
+                updatedAt: 2,
+            };
+            await expect(
+                collaboration.interruptAgent(database.context, "owner", "child"),
+            ).rejects.toThrow("did not stop");
+            broker.interruptResult = {
+                agentId: "child",
+                runId: "run-1",
+                version: 1,
+                status: "aborted",
+                updatedAt: 1,
+            };
+            await expect(
+                collaboration.interruptAgent(database.context, "owner", "child"),
+            ).rejects.toThrow("stale interruption");
+        } finally {
+            database.close();
+        }
+    });
+
+    it("returns terminal status and bounded output when waiting on a collaborator run", async () => {
+        const { broker, collaboration, database, ready } = setup("collaboration-agent-wait-test");
+        await ready;
+        try {
+            await createRoot(collaboration, database.context);
+            await collaboration.createAgent(database.context, "owner", {
+                id: "child",
+                config: {},
+                model: "model",
+                effort: "medium",
+                provider: "provider",
+            });
+            broker.observations.set("child", {
+                agentId: "child",
+                runId: "run-1",
+                version: 2,
+                status: "completed",
+                output: "Review complete.",
+                updatedAt: 2,
+            });
+            const tools = await collaboration.tools(database.context, {
+                agent: { id: "owner" },
+            } as never);
+            const wait = tools.find(({ name }) => name === "wait_for_reply")!;
+            const result = await wait.execute(
+                database.context,
+                { agentId: "child", timeoutMs: 0 },
+                toolCall("agent-wait-call", [], [], broker),
+            );
+            expect(result).toEqual({
+                agentId: "child",
+                runId: "run-1",
+                version: 2,
+                status: "completed",
+                output: "Review complete.",
+                updatedAt: 2,
+            });
+            const rendered = collaboration.formatAgentObservationForModel({
+                agentId: "child",
+                runId: "run-1",
+                version: 2,
+                status: "completed",
+                output: "x".repeat(20_000),
+                updatedAt: 2,
+            });
+            expect(rendered.length).toBeLessThanOrEqual(8_000);
+            expect(rendered).toContain("[output truncated]");
+        } finally {
+            database.close();
+        }
+    });
+
+    it("surfaces spawn limits and refuses a spawn at the host-reported limit", async () => {
+        const { broker, collaboration, database, ready } = setup("collaboration-spawn-limit-test");
+        await ready;
+        try {
+            await createRoot(collaboration, database.context);
+            broker.capacity = {
+                canSpawn: false,
+                depth: 3,
+                maxDepth: 3,
+                maxActive: 10,
+                active: 3,
+            };
+            const tools = await collaboration.tools(database.context, {
+                agent: { id: "owner" },
+            } as never);
+            const create = tools.find(({ name }) => name === "create_agent")!;
+            expect(create.description).toContain("Spawning is currently unavailable");
+            await expect(
+                create.execute(
+                    database.context,
+                    {
+                        config: {},
+                        model: "model",
+                        effort: "medium",
+                        provider: "provider",
+                    },
+                    toolCall("blockedcreate", [], [], broker),
+                ),
+            ).rejects.toThrow("maximum subagent depth");
+        } finally {
+            database.close();
+        }
+    });
+
+    it("checks capacity for the requested parent and at the create boundary", async () => {
+        const { broker, collaboration, database, ready } = setup(
+            "collaboration-parent-capacity-test",
+        );
+        await ready;
+        try {
+            await createRoot(collaboration, database.context);
+            await collaboration.createAgent(database.context, "owner", {
+                id: "child",
+                config: {},
+                model: "model",
+                effort: "medium",
+                provider: "provider",
+            });
+            broker.capacities.set("child", {
+                canSpawn: false,
+                depth: 3,
+                maxDepth: 3,
+                maxActive: 10,
+                active: 3,
+            });
+            await expect(
+                collaboration.createAgent(database.context, "owner", {
+                    id: "grandchild",
+                    parentId: "child",
+                    config: {},
+                    model: "model",
+                    effort: "medium",
+                    provider: "provider",
+                }),
+            ).rejects.toThrow("maximum subagent depth");
+
+            broker.capacity = {
+                canSpawn: true,
+                depth: 0,
+                maxDepth: 3,
+                maxActive: 2,
+                active: 2,
+            };
+            await expect(
+                collaboration.createAgent(database.context, "owner", {
+                    id: "anotherchild",
+                    config: {},
+                    model: "model",
+                    effort: "medium",
+                    provider: "provider",
+                }),
+            ).rejects.toThrow("inconsistent active capacity");
+        } finally {
+            database.close();
+        }
+    });
+
+    it("lets the broker reject a second create after its capacity snapshot goes stale", async () => {
+        const { broker, collaboration, database, ready } = setup(
+            "collaboration-concurrent-capacity-test",
+        );
+        await ready;
+        try {
+            await createRoot(collaboration, database.context);
+            let admitted = 0;
+            broker.capacity = {
+                canSpawn: true,
+                depth: 0,
+                maxDepth: 3,
+                maxActive: 1,
+                active: 0,
+            };
+            broker.createAdmission = () => {
+                if (admitted >= 1) throw new Error("atomic create capacity exhausted");
+                admitted += 1;
+            };
+            await expect(
+                collaboration.createAgent(database.context, "owner", {
+                    id: "concurrentone",
+                    config: {},
+                    model: "model",
+                    effort: "medium",
+                    provider: "provider",
+                }),
+            ).resolves.toMatchObject({ id: "concurrentone" });
+            await expect(
+                collaboration.createAgent(database.context, "owner", {
+                    id: "concurrenttwo",
+                    config: {},
+                    model: "model",
+                    effort: "medium",
+                    provider: "provider",
+                }),
+            ).rejects.toThrow("atomic create capacity exhausted");
+            expect(admitted).toBe(1);
+        } finally {
+            database.close();
+        }
+    });
+
+    it("lets the broker enforce capacity across concurrent creates", async () => {
+        const broker = new Broker();
+        const left = setup(
+            "collaboration-concurrent-capacity-left",
+            undefined,
+            undefined,
+            8_000,
+            broker,
+        );
+        const right = setup(
+            "collaboration-concurrent-capacity-right",
+            undefined,
+            undefined,
+            8_000,
+            broker,
+        );
+        await Promise.all([left.ready, right.ready]);
+        try {
+            await createRoot(left.collaboration, left.database.context);
+            await createRoot(right.collaboration, right.database.context);
+            let admitted = 0;
+            broker.capacity = {
+                canSpawn: true,
+                depth: 0,
+                maxDepth: 3,
+                maxActive: 1,
+                active: 0,
+            };
+            broker.createAdmission = () => {
+                if (admitted >= 1) throw new Error("atomic concurrent capacity exhausted");
+                admitted += 1;
+            };
+            const results = await Promise.allSettled([
+                left.collaboration.createAgent(left.database.context, "owner", {
+                    id: "concurrentleft",
+                    config: {},
+                    model: "model",
+                    effort: "medium",
+                    provider: "provider",
+                }),
+                right.collaboration.createAgent(right.database.context, "owner", {
+                    id: "concurrentright",
+                    config: {},
+                    model: "model",
+                    effort: "medium",
+                    provider: "provider",
+                }),
+            ]);
+            expect(results.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
+            expect(results.filter(({ status }) => status === "rejected")).toHaveLength(1);
+            const rejected = results.find(({ status }) => status === "rejected");
+            expect(rejected?.status).toBe("rejected");
+            if (rejected?.status === "rejected") {
+                expect(rejected.reason).toHaveProperty(
+                    "message",
+                    "atomic concurrent capacity exhausted",
+                );
+            }
+            expect(admitted).toBe(1);
+        } finally {
+            left.database.close();
+            right.database.close();
         }
     });
 });

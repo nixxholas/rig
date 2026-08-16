@@ -17,15 +17,22 @@ import {
     MAX_SEARCH_RESULTS_PER_PAGE,
     searchAgentIdSchema,
     searchPageSchema,
+    searchProviderRequestSchema,
     searchQuerySchema,
     type FetchInput,
     type FetchResult,
     type SearchPage,
+    type SearchProviderRequest,
     type SearchQuery,
 } from "./Search.js";
 import { searchBackendSchema, type SearchBackend } from "./SearchBackend.js";
+import { bedrockWebSearchTool } from "./tools/bedrock_web_search.js";
+import { claudeWebSearchTool } from "./tools/claude_web_search.js";
+import { codexWebSearchTool } from "./tools/codex_web_search.js";
+import { geminiWebSearchTool } from "./tools/gemini_web_search.js";
+import { grokWebSearchTool } from "./tools/grok_web_search.js";
+import { grokXSearchTool } from "./tools/grok_x_search.js";
 import { webFetchTool } from "./tools/web_fetch.js";
-import { webSearchTool } from "./tools/web_search.js";
 
 const DEFAULT_MAX_RESULTS = 10;
 const DEFAULT_MAX_CHARACTERS = 40_000;
@@ -107,6 +114,57 @@ export class SearchModule implements AgentModule {
         return page;
     }
 
+    async providerSearch(
+        ctx: Context,
+        agentId: string,
+        request: SearchProviderRequest,
+    ): Promise<SearchPage> {
+        assertAgentId(agentId);
+        if (!Value.Check(searchProviderRequestSchema, request)) {
+            throw new Error("Invalid provider search request.");
+        }
+        if (
+            request.allowedDomains !== undefined &&
+            request.blockedDomains !== undefined &&
+            request.allowedDomains.length > 0 &&
+            request.blockedDomains.length > 0
+        ) {
+            throw new Error("A search cannot allow and block domains in the same request.");
+        }
+        const query = request.query.trim();
+        if (query.length === 0) throw new Error("Search query cannot be empty.");
+        const limit = Math.min(
+            request.limit ?? this.#maxResults,
+            this.#maxResults,
+            this.#maxModelVisibleResults(),
+        );
+        const normalized: SearchProviderRequest = {
+            provider: request.provider,
+            query,
+            limit,
+            ...(request.providerId === undefined ? {} : { providerId: request.providerId }),
+            ...(request.allowedDomains === undefined
+                ? {}
+                : { allowedDomains: [...request.allowedDomains] }),
+            ...(request.blockedDomains === undefined
+                ? {}
+                : { blockedDomains: [...request.blockedDomains] }),
+            ...(request.latest === undefined ? {} : { latest: request.latest }),
+            ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
+        };
+        const page =
+            this.#backend.searchProvider === undefined
+                ? await this.#backend.search(ctx, agentId, {
+                      query: normalized.query,
+                      limit,
+                      ...(normalized.cursor === undefined ? {} : { cursor: normalized.cursor }),
+                  })
+                : await this.#backend.searchProvider(ctx, agentId, normalized);
+        assertSearchPage(page, normalized);
+        this.formatSearchForModel(page);
+        return page;
+    }
+
     async fetch(ctx: Context, agentId: string, input: FetchInput): Promise<FetchResult> {
         assertAgentId(agentId);
         const normalizedInput = normalizeFetchInput(input);
@@ -134,8 +192,13 @@ export class SearchModule implements AgentModule {
     }
 
     readonly tools = (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => [
-        webSearchTool(this, scope.agent.id),
         webFetchTool(this, scope.agent.id),
+        geminiWebSearchTool(this, scope.agent.id),
+        claudeWebSearchTool(this, scope.agent.id),
+        codexWebSearchTool(this, scope.agent.id),
+        bedrockWebSearchTool(this, scope.agent.id),
+        grokWebSearchTool(this, scope.agent.id),
+        grokXSearchTool(this, scope.agent.id),
     ];
 
     formatSearchForModel(page: SearchPage): string {
@@ -253,6 +316,9 @@ function runtimeOptions(options: SearchModuleOptions): SearchModuleOptions {
             ...options.backend,
             search: options.backend.search,
             fetch: options.backend.fetch,
+            ...(options.backend.searchProvider === undefined
+                ? {}
+                : { searchProvider: options.backend.searchProvider }),
         },
     };
 }

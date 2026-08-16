@@ -30,15 +30,18 @@ import {
     historyMessageWithinPersistenceBounds,
     historyAgentIdSchema,
     MAX_HISTORY_BLOCKS_PER_PAGE,
+    MAX_HISTORY_CALL_ID_LENGTH,
     MAX_HISTORY_MESSAGES_PER_APPEND,
     MAX_HISTORY_PAGE_SIZE,
     MAX_HISTORY_PENDING_BLOCKS,
     MAX_HISTORY_POSITION,
     MAX_HISTORY_TOTAL_MESSAGES,
+    MAX_HISTORY_TOOL_NAME_LENGTH,
     historyToolArgumentsSchema,
     historyToolCallBlockSchema,
     historyToolResultBlockSchema,
     historyToolArgumentsWithinByteLimit,
+    MAX_HISTORY_TOOL_DISPLAY_LENGTH,
     MAX_HISTORY_TOOL_OUTPUT_LENGTH,
     type HistoryBlock,
     type HistoryMessage,
@@ -50,6 +53,11 @@ import {
     type HistoryPage,
     type HistoryQuery,
 } from "./HistoryPage.js";
+import {
+    historyAgentSummariesSchema,
+    historyAgentTargetSchema,
+    type HistoryAgentSummaries,
+} from "./HistoryAgent.js";
 import {
     historyContextSchema,
     historyRecordSchema,
@@ -89,18 +97,61 @@ const historyAppendListenerSchema = Type.Function(
     Type.Unknown(),
 );
 
+const historyToolDisplayTextSchema = Type.String({
+    minLength: 1,
+    maxLength: MAX_HISTORY_TOOL_DISPLAY_LENGTH,
+    pattern: "^[^\\u0000\\r\\n]+$",
+});
+
+/** The bounded information available to a host-provided tool-result summary formatter. */
+export const historyToolDisplayInputSchema = Type.Object(
+    {
+        callId: Type.String({
+            minLength: 1,
+            maxLength: MAX_HISTORY_CALL_ID_LENGTH,
+            pattern: "^[^\\u0000\\r\\n]+$",
+        }),
+        isError: Type.Optional(Type.Boolean()),
+        output: Type.String({ maxLength: MAX_HISTORY_TOOL_OUTPUT_LENGTH }),
+        toolName: Type.String({
+            minLength: 1,
+            maxLength: MAX_HISTORY_TOOL_NAME_LENGTH,
+            pattern: "^[^\\u0000\\r\\n]+$",
+        }),
+    },
+    { additionalProperties: false },
+);
+
+/** The TypeScript type inferred from {@link historyToolDisplayInputSchema}. */
+export type HistoryToolDisplayInput = Static<typeof historyToolDisplayInputSchema>;
+
+const historyToolDisplaySchema = Type.Function(
+    [historyContextSchema, historyToolDisplayInputSchema],
+    Type.Union([historyToolDisplayTextSchema, Type.Promise(historyToolDisplayTextSchema)]),
+);
+
 const historyModuleOptionsSchema = Type.Object(
     {
         resolveTarget: Type.Optional(
             Type.Function(
-                [historyContextSchema, Type.String(), Type.String()],
+                [historyContextSchema, historyAgentIdSchema, historyAgentTargetSchema],
                 Type.Union([
-                    Type.String({ maxLength: 256 }),
+                    historyAgentIdSchema,
                     Type.Undefined(),
-                    Type.Promise(Type.Union([Type.String({ maxLength: 256 }), Type.Undefined()])),
+                    Type.Promise(Type.Union([historyAgentIdSchema, Type.Undefined()])),
                 ]),
             ),
         ),
+        listAgents: Type.Optional(
+            Type.Function(
+                [historyContextSchema, historyAgentIdSchema],
+                Type.Union([
+                    historyAgentSummariesSchema,
+                    Type.Promise(historyAgentSummariesSchema),
+                ]),
+            ),
+        ),
+        toolDisplay: Type.Optional(historyToolDisplaySchema),
         toolOutputLimit: Type.Optional(nonNegativeIntegerSchema),
         failureMode: Type.Optional(
             Type.Union([Type.Literal("best-effort"), Type.Literal("propagate")]),
@@ -139,13 +190,9 @@ export type HistoryModuleOptions = Static<typeof historyModuleOptionsSchema>;
 export class HistoryModule implements AgentModule {
     readonly name = "history";
 
-    readonly #resolveTarget:
-        | ((
-              ctx: Context,
-              requesterAgentId: string,
-              requestedTarget: string,
-          ) => string | undefined | Promise<string | undefined>)
-        | undefined;
+    readonly #resolveTarget: HistoryModuleOptions["resolveTarget"];
+    readonly #listAgents: HistoryModuleOptions["listAgents"];
+    readonly #toolDisplay: HistoryModuleOptions["toolDisplay"];
     /** How much of a tool's output is worth recording. */
     readonly #toolOutputLimit: number;
     /** Whether archive failures are deliberately contained. */
@@ -187,6 +234,8 @@ export class HistoryModule implements AgentModule {
             throw new Error("History module options are invalid.");
         }
         this.#resolveTarget = options.resolveTarget;
+        this.#listAgents = options.listAgents;
+        this.#toolDisplay = options.toolDisplay;
         const toolOutputLimit = options.toolOutputLimit ?? DEFAULT_TOOL_OUTPUT_LIMIT;
         if (!Value.Check(nonNegativeIntegerSchema, toolOutputLimit)) {
             throw new Error("History tool output retention must be a non-negative integer.");
@@ -268,11 +317,70 @@ export class HistoryModule implements AgentModule {
         );
     }
 
+    /**
+     * Return the bounded session-tree roster supplied by the host. Without a roster adapter the
+     * module still describes the requesting agent, so the response contract remains useful for
+     * self-history reads while cross-agent composition is being wired.
+     */
+    async listAgents(
+        ctx: Context,
+        requesterAgentId: string,
+        targetAgentId = requesterAgentId,
+    ): Promise<HistoryAgentSummaries> {
+        if (
+            !Value.Check(historyAgentIdSchema, requesterAgentId) ||
+            !Value.Check(historyAgentIdSchema, targetAgentId)
+        ) {
+            throw new Error("The history roster identity is invalid.");
+        }
+        return await this.#direct(ctx, async (txCtx) => {
+            let summaries: HistoryAgentSummaries;
+            if (this.#listAgents !== undefined) {
+                summaries = await this.#listAgents(txCtx, requesterAgentId);
+            } else {
+                summaries = [];
+                for (const agentId of new Set([requesterAgentId, targetAgentId])) {
+                    const stats = await readHistoryStats(txCtx.db, sql`agent_id = ${agentId}`);
+                    summaries.push({
+                        agentId,
+                        messageCount: stats.messages,
+                        path: agentId,
+                        status: "unknown",
+                    });
+                }
+            }
+            if (!Value.Check(historyAgentSummariesSchema, summaries)) {
+                throw new Error("The history agent roster returned invalid summaries.");
+            }
+            const snapshot = structuredClone(summaries) as HistoryAgentSummaries;
+            const ids = new Set<string>();
+            for (const summary of snapshot) {
+                if (ids.has(summary.agentId)) {
+                    throw new Error("The history agent roster returned duplicate agent IDs.");
+                }
+                ids.add(summary.agentId);
+            }
+            if (!ids.has(requesterAgentId) || !ids.has(targetAgentId)) {
+                throw new Error("The history agent roster omitted a requested agent.");
+            }
+            snapshot.sort(
+                (left, right) =>
+                    left.path.localeCompare(right.path) ||
+                    left.agentId.localeCompare(right.agentId),
+            );
+            return snapshot;
+        });
+    }
+
     readonly tools = (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => [
         readAgentHistoryTool(this, scope.agent.id),
     ];
 
-    /** Resolve a tool target while keeping self-access available without host wiring. */
+    /**
+     * Resolve a tool target while keeping self-access available without host wiring. A host may
+     * resolve either an Agent ID or a canonical session-tree path and should raise its own
+     * not-found or ambiguous-path error before returning.
+     */
     async resolveTarget(
         ctx: Context,
         requesterAgentId: string,
@@ -280,7 +388,7 @@ export class HistoryModule implements AgentModule {
     ): Promise<string | undefined> {
         if (
             !Value.Check(historyAgentIdSchema, requesterAgentId) ||
-            !Value.Check(historyAgentIdSchema, requestedTarget)
+            !Value.Check(historyAgentTargetSchema, requestedTarget)
         ) {
             throw new Error("The history target identity is invalid.");
         }
@@ -288,6 +396,9 @@ export class HistoryModule implements AgentModule {
         const resolved = await this.#resolveTarget?.(ctx, requesterAgentId, requestedTarget);
         if (resolved !== undefined && !Value.Check(historyAgentIdSchema, resolved)) {
             throw new Error("The history target resolver returned an invalid agent ID.");
+        }
+        if (resolved === undefined && this.#resolveTarget !== undefined) {
+            throw new Error(`Agent '${requestedTarget}' was not found in the session tree.`);
         }
         return resolved;
     }
@@ -353,10 +464,28 @@ export class HistoryModule implements AgentModule {
     ): Promise<void> => {
         const storedName = await scope.runKV.read(ctx, TOOL_NAME_KEY);
         const toolName = typeof storedName === "string" ? storedName : "unknown tool";
+        const output = renderOutput(result.content, this.#toolOutputLimit);
+        const displayInput = {
+            callId: result.callId,
+            ...(result.isError === undefined ? {} : { isError: result.isError }),
+            output,
+            toolName,
+        };
+        if (!Value.Check(historyToolDisplayInputSchema, displayInput)) {
+            throw new Error("History module received an invalid tool-result display input.");
+        }
+        const display =
+            this.#toolDisplay === undefined
+                ? defaultToolDisplay(displayInput)
+                : await this.#toolDisplay(ctx, displayInput);
+        if (!Value.Check(historyToolDisplayTextSchema, display)) {
+            throw new Error("History module received an invalid tool-result display.");
+        }
         const toolResultBlock: HistoryBlock = {
             type: "tool_result",
             callId: result.callId,
-            output: renderOutput(result.content, this.#toolOutputLimit),
+            display,
+            output,
             toolName,
             ...(result.isError === true ? { isError: true } : {}),
         };
@@ -546,11 +675,7 @@ export class HistoryModule implements AgentModule {
         }
     }
 
-    async #readPage(
-        ctx: Context,
-        agentId: string,
-        query: HistoryStoreQuery,
-    ): Promise<HistoryPage> {
+    async #readPage(ctx: Context, agentId: string, query: HistoryStoreQuery): Promise<HistoryPage> {
         if (
             !Value.Check(historyAgentIdSchema, agentId) ||
             !Value.Check(historyStoreQuerySchema, query)
@@ -1002,6 +1127,12 @@ function renderOutput(blocks: readonly SessionOutputBlock[], limit: number): str
     const suffix = `\n...[truncated ${Math.max(0, text.length - limit)} chars]`;
     const retained = Math.max(0, Math.min(limit, MAX_HISTORY_TOOL_OUTPUT_LENGTH - suffix.length));
     return `${text.slice(0, retained)}${suffix}`;
+}
+
+function defaultToolDisplay(input: HistoryToolDisplayInput): string {
+    return input.isError === true
+        ? `Tool ${input.toolName} failed.`
+        : `Tool ${input.toolName} returned ${input.output.length} characters.`;
 }
 
 function boundedLimit(limit: number): number {

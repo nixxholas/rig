@@ -19,17 +19,37 @@ export function getPresenceTool(presence: PresenceModule) {
         toLLM: ({ presence }) => [
             {
                 type: "text",
-                text:
-                    presence === null
-                        ? "No presence is configured."
-                        : formatPresence(presence.status, presence.message),
+                text: presence === null ? "No presence is configured." : formatPresence(presence),
             },
         ],
     });
 }
 
-function formatPresence(status: string, message: string | undefined): string {
-    return message === undefined
-        ? `Current presence: ${status}.`
-        : `Current presence: ${status} — ${message}`;
+function formatPresence(presence: {
+    readonly title: string;
+    readonly emoji: string;
+    readonly message?: string;
+    readonly prompt: string;
+    readonly answerWaitMs: number | null;
+    readonly expiresAt?: number;
+}): string {
+    const wait =
+        presence.answerWaitMs === null
+            ? "wait indefinitely"
+            : presence.answerWaitMs === 0
+              ? "do not wait"
+              : `wait ${formatDuration(presence.answerWaitMs)}`;
+    const message = presence.message === undefined ? "" : ` Status message: ${presence.message}.`;
+    const expiry =
+        presence.expiresAt === undefined
+            ? ""
+            : ` This state expires at ${new Date(presence.expiresAt).toISOString()}.`;
+    return `Current presence: ${presence.title} ${presence.emoji}.${message} ${presence.prompt} (${wait}).${expiry}`;
+}
+
+function formatDuration(milliseconds: number): string {
+    if (milliseconds < 60_000) return `${Math.max(1, Math.round(milliseconds / 1_000))} seconds`;
+    if (milliseconds < 3_600_000) return `${Math.round(milliseconds / 60_000)} minutes`;
+    if (milliseconds < 86_400_000) return `${Math.round(milliseconds / 3_600_000)} hours`;
+    return `${Math.round(milliseconds / 86_400_000)} days`;
 }

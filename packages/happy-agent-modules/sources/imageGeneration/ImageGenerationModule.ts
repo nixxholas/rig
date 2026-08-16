@@ -101,6 +101,9 @@ type Operation = {
     readonly operationId: string;
     readonly prompt: string;
     readonly options?: ImageGenerationOptions;
+    readonly preferredProviderId?: string;
+    readonly recentImageCount?: number;
+    readonly referencedImagePaths?: readonly string[];
 };
 
 /** A completed status record, narrowed for the asset-keyed lookups `read`/`remove` need. */
@@ -145,13 +148,21 @@ export class ImageGenerationModule implements AgentModule {
     ): Promise<ImageGenerationStatus> {
         assertAgentId(agentId);
         const normalized = normalizeInput(input);
-        const operationId =
-            normalized.operationId ?? (await this.#newOperationId(ctx, agentId));
+        const operationId = normalized.operationId ?? (await this.#newOperationId(ctx, agentId));
         const operation: Operation = {
             agentId,
             operationId,
             prompt: normalized.prompt,
             ...(normalized.options === undefined ? {} : { options: normalized.options }),
+            ...(normalized.preferredProviderId === undefined
+                ? {}
+                : { preferredProviderId: normalized.preferredProviderId }),
+            ...(normalized.recentImageCount === undefined
+                ? {}
+                : { recentImageCount: normalized.recentImageCount }),
+            ...(normalized.referencedImagePaths === undefined
+                ? {}
+                : { referencedImagePaths: normalized.referencedImagePaths }),
         };
         const catalog = this.#catalog(agentId);
 
@@ -162,6 +173,15 @@ export class ImageGenerationModule implements AgentModule {
             ...(operation.options === undefined
                 ? {}
                 : { options: structuredClone(operation.options) }),
+            ...(operation.preferredProviderId === undefined
+                ? {}
+                : { preferredProviderId: operation.preferredProviderId }),
+            ...(operation.recentImageCount === undefined
+                ? {}
+                : { recentImageCount: operation.recentImageCount }),
+            ...(operation.referencedImagePaths === undefined
+                ? {}
+                : { referencedImagePaths: [...operation.referencedImagePaths] }),
         };
         if (!Value.Check(imageGeneratorRequestSchema, generatorRequest)) {
             throw new Error("Image generation request is invalid.");
@@ -290,10 +310,21 @@ export class ImageGenerationModule implements AgentModule {
         return true;
     }
 
-    /** The common provider-neutral image generation tool available to every agent. */
+    /** Provider-shaped ordinary tool names over the same provider-neutral host generator. */
     readonly tools = (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => {
         this.#catalogs.set(scope.agent.id, scope.kv.scoped("catalog"));
-        return [generateImageTool(this, scope.agent.id)];
+        const codexSurface =
+            scope.agent.providerKind === "codex" ||
+            (scope.agent.providerKind === "bedrock" &&
+                scope.agent.model?.startsWith("openai/") === true);
+        return [
+            generateImageTool(
+                this,
+                scope.agent.id,
+                codexSurface ? "codex_imagegen" : "imagegen",
+                scope.agent.provider,
+            ),
+        ];
     };
 
     /** Render bounded metadata the model can use without exposing image bytes. */
@@ -581,12 +612,29 @@ function normalizeInput(input: ImageGenerationInput): ImageGenerationInput {
         prompt,
         ...(input.options === undefined ? {} : { options: structuredClone(input.options) }),
         ...(input.operationId === undefined ? {} : { operationId: input.operationId }),
+        ...(input.preferredProviderId === undefined
+            ? {}
+            : { preferredProviderId: input.preferredProviderId }),
+        ...(input.recentImageCount === undefined
+            ? {}
+            : { recentImageCount: input.recentImageCount }),
+        ...(input.referencedImagePaths === undefined
+            ? {}
+            : { referencedImagePaths: [...input.referencedImagePaths] }),
     };
     if (!Value.Check(imageGenerationInputSchema, normalized)) {
         throw new Error("Image prompt must not be empty and must be within the character limit.");
     }
     if (encodedBytes(normalized.options) > MAX_IMAGE_OPTIONS_CHARACTERS) {
         throw new Error("Image generation options exceed the configured bound.");
+    }
+    if (
+        normalized.recentImageCount !== undefined &&
+        normalized.referencedImagePaths !== undefined
+    ) {
+        throw new Error(
+            "Provide only one of referenced image paths or recent conversation images.",
+        );
     }
     return normalized;
 }

@@ -1,8 +1,9 @@
 import { randomBytes } from "node:crypto";
 import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 
 import { Type } from "@sinclair/typebox";
+import type { HappyAgentConfigValues, HappyAgentConfiguration } from "@slopus/happy-agent-modules";
 
 import { readValidatedBody } from "./body.js";
 import { AgentHttpError, sendJson } from "./errors.js";
@@ -29,7 +30,7 @@ const daemonConfigSchema = Type.Object(
         settings: Type.Object(
             {
                 durableGlobalEventQueue: Type.Boolean(),
-                inferenceMaxRetries: Type.Integer({ minimum: 0, maximum: 20 }),
+                inferenceMaxRetries: Type.Integer({ minimum: 0, maximum: 100 }),
             },
             { additionalProperties: false },
         ),
@@ -60,8 +61,7 @@ export function createConfigRoutes(): AgentHttpRouteGroup {
             handle: async ({ dependencies, response }) => {
                 sendJson(response, 200, {
                     instructions: await readDocument(
-                        dependencies.configuration?.instructionsPath ??
-                            join(dependencies.agent.agentHome, "AGENTS.md"),
+                        dependencies.agent.configuration.paths.instructionsPath,
                         256 * 1024,
                     ),
                 });
@@ -72,9 +72,7 @@ export function createConfigRoutes(): AgentHttpRouteGroup {
             path: "/v0/config/instructions",
             handle: async ({ ctx, dependencies, request, response }) => {
                 const body = await readValidatedBody(request, textDocumentSchema);
-                const path =
-                    dependencies.configuration?.instructionsPath ??
-                    join(dependencies.agent.agentHome, "AGENTS.md");
+                const path = dependencies.agent.configuration.paths.instructionsPath;
                 await writeDocument(path, body.instructions, 256 * 1024);
                 sendJson(response, 200, {
                     instructions: await readDocument(path, 256 * 1024),
@@ -92,8 +90,7 @@ export function createConfigRoutes(): AgentHttpRouteGroup {
             handle: async ({ dependencies, response }) => {
                 sendJson(response, 200, {
                     policy: await readDocument(
-                        dependencies.configuration?.securityPath ??
-                            join(dependencies.agent.agentHome, "AGENTS_SECURITY.md"),
+                        dependencies.agent.configuration.paths.securityPath,
                         32 * 1024,
                     ),
                 });
@@ -104,9 +101,7 @@ export function createConfigRoutes(): AgentHttpRouteGroup {
             path: "/v0/config/security",
             handle: async ({ ctx, dependencies, request, response }) => {
                 const body = await readValidatedBody(request, securityDocumentSchema);
-                const path =
-                    dependencies.configuration?.securityPath ??
-                    join(dependencies.agent.agentHome, "AGENTS_SECURITY.md");
+                const path = dependencies.agent.configuration.paths.securityPath;
                 await writeDocument(path, body.policy, 32 * 1024);
                 sendJson(response, 200, {
                     policy: await readDocument(path, 32 * 1024),
@@ -122,28 +117,64 @@ export function createConfigRoutes(): AgentHttpRouteGroup {
 }
 
 function readConfig(dependencies: {
-    readonly agent: { readonly agentHome: string };
+    readonly agent: { readonly configuration: HappyAgentConfiguration };
     readonly configuration?: {
         readonly p2pName?: string;
         readonly inferenceMaxRetries?: number;
         readonly durableGlobalEventQueue?: boolean;
     };
-}): {
-    readonly p2p: { readonly name: string; readonly role: "primary" };
-    readonly settings: {
-        readonly durableGlobalEventQueue: boolean;
-        readonly inferenceMaxRetries: number;
-    };
-} {
+}): Record<string, unknown> {
+    const values = dependencies.agent.configuration.values;
     return {
+        defaults: values.defaults,
+        features: values.features,
+        mcpServers: Object.fromEntries(
+            Object.entries(values.mcpServers).map(([name, server]) => [
+                name,
+                {
+                    enabled: server.enabled ?? true,
+                    transport: server.transport,
+                },
+            ]),
+        ),
+        network: values.network,
         p2p: {
-            name: dependencies.configuration?.p2pName ?? "Happy Agent",
-            role: "primary",
+            ...values.p2p,
+            ...(dependencies.configuration?.p2pName === undefined
+                ? {}
+                : { name: dependencies.configuration.p2pName }),
         },
+        permissions: values.permissions,
+        presence: values.presence,
+        providers: Object.fromEntries(
+            Object.entries(values.providers).map(([id, provider]) => [id, safeProvider(provider)]),
+        ),
         settings: {
-            durableGlobalEventQueue: dependencies.configuration?.durableGlobalEventQueue ?? false,
-            inferenceMaxRetries: dependencies.configuration?.inferenceMaxRetries ?? 0,
+            ...values.settings,
+            ...(dependencies.configuration?.durableGlobalEventQueue === undefined
+                ? {}
+                : {
+                      durableGlobalEventQueue: dependencies.configuration.durableGlobalEventQueue,
+                  }),
+            ...(dependencies.configuration?.inferenceMaxRetries === undefined
+                ? {}
+                : { inferenceMaxRetries: dependencies.configuration.inferenceMaxRetries }),
         },
+        theme: values.theme,
+        workspace: values.workspace,
+    };
+}
+
+function safeProvider(
+    provider: HappyAgentConfigValues["providers"][string],
+): Record<string, unknown> {
+    return {
+        credentialIsolation: provider.credentialIsolation,
+        enabled: provider.enabled,
+        excludeModels: provider.excludeModels,
+        includeModels: provider.includeModels,
+        p2pShare: provider.p2pShare,
+        type: provider.type,
     };
 }
 

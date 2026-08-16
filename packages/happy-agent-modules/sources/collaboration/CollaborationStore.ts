@@ -1,14 +1,19 @@
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import { agentConfigSchema } from "@slopus/happy-agent-base";
+import { agentConfigSchema, agentPermissionModeSchema } from "@slopus/happy-agent-base";
 import type { Context } from "@steve.kite/stdlib";
 
 import {
     collaborationAgentIdSchema,
+    collaborationAgentObservationSchema,
     collaborationAgentPageQuerySchema,
     collaborationAgentPageSchema,
     collaborationAgentSchema,
+    collaborationAgentSelectionSchema,
+    collaborationContextModeSchema,
+    collaborationForkTurnsSchema,
     collaborationMetadataSchema,
+    collaborationSpawnCapacitySchema,
     type CollaborationAgentPage,
 } from "./CollaborationAgent.js";
 import {
@@ -37,6 +42,8 @@ export const collaborationAuthorizationActionSchema = Type.Union([
     Type.Literal("send"),
     Type.Literal("reply"),
     Type.Literal("wait"),
+    Type.Literal("interrupt"),
+    Type.Literal("permission"),
 ]);
 
 /**
@@ -88,6 +95,15 @@ export const collaborationBrokerCreateOptionsSchema = Type.Object(
     {
         id: collaborationAgentIdSchema,
         parent: Type.Union([collaborationAgentIdSchema, Type.Null()]),
+        selection: collaborationAgentSelectionSchema,
+        context: collaborationContextModeSchema,
+        /**
+         * The creating agent's mode. The broker must make an omitted/readOnly=false child inherit
+         * this mode and may only reduce it to read_only.
+         */
+        permissionMode: agentPermissionModeSchema,
+        forkTurns: Type.Optional(collaborationForkTurnsSchema),
+        readOnly: Type.Optional(Type.Boolean()),
     },
     { additionalProperties: false },
 );
@@ -100,6 +116,10 @@ export const collaborationBrokerAgentResultSchema = Type.Object(
 /** Structural Agent Base/host broker capability used by Collaboration. */
 export const collaborationBrokerSchema = Type.Object(
     {
+        /**
+         * Creation is the atomic capacity boundary. The host must re-check depth and active
+         * capacity for `parent` while admitting this request; spawnCapacity is only guidance.
+         */
         create: Type.Function(
             [collaborationContextSchema, agentConfigSchema, collaborationBrokerCreateOptionsSchema],
             Type.Promise(collaborationBrokerAgentResultSchema),
@@ -107,6 +127,10 @@ export const collaborationBrokerSchema = Type.Object(
         config: Type.Function(
             [collaborationContextSchema, collaborationAgentIdSchema],
             Type.Promise(Type.Union([agentConfigSchema, Type.Undefined()])),
+        ),
+        selection: Type.Function(
+            [collaborationContextSchema, collaborationAgentIdSchema],
+            Type.Promise(Type.Union([collaborationAgentSelectionSchema, Type.Undefined()])),
         ),
         send: Type.Function(
             [
@@ -124,6 +148,41 @@ export const collaborationBrokerSchema = Type.Object(
                 collaborationObligationIdSchema,
             ],
             Type.Promise(collaborationObligationSchema),
+        ),
+        interrupt: Type.Function(
+            [collaborationContextSchema, collaborationAgentIdSchema, collaborationAgentIdSchema],
+            Type.Promise(collaborationAgentObservationSchema),
+        ),
+        observe: Type.Function(
+            [collaborationContextSchema, collaborationAgentIdSchema, collaborationAgentIdSchema],
+            Type.Promise(collaborationAgentObservationSchema),
+        ),
+        waitForAgent: Type.Function(
+            [
+                collaborationContextSchema,
+                collaborationAgentIdSchema,
+                collaborationAgentIdSchema,
+                Type.Integer({ minimum: 0, maximum: 3_600_000 }),
+            ],
+            Type.Promise(collaborationAgentObservationSchema),
+        ),
+        /**
+         * `readOnly=false` means inherit the supplied sender mode. The host must reject any
+         * implementation that would widen the target beyond that mode.
+         */
+        setReadOnly: Type.Function(
+            [
+                collaborationContextSchema,
+                collaborationAgentIdSchema,
+                collaborationAgentIdSchema,
+                Type.Boolean(),
+                agentPermissionModeSchema,
+            ],
+            asyncVoidResultSchema,
+        ),
+        spawnCapacity: Type.Function(
+            [collaborationContextSchema, collaborationAgentIdSchema],
+            Type.Promise(collaborationSpawnCapacitySchema),
         ),
     },
     { additionalProperties: false },
@@ -218,6 +277,22 @@ export function assertCollaborationBrokerAgentResult(
 ): asserts value is Static<typeof collaborationBrokerAgentResultSchema> {
     if (!Value.Check(collaborationBrokerAgentResultSchema, value)) {
         throw new Error("Collaboration broker returned an invalid agent result.");
+    }
+}
+
+export function assertCollaborationAgentObservation(
+    value: unknown,
+): asserts value is Static<typeof collaborationAgentObservationSchema> {
+    if (!Value.Check(collaborationAgentObservationSchema, value)) {
+        throw new Error("Collaboration broker returned an invalid agent observation.");
+    }
+}
+
+export function assertCollaborationSpawnCapacity(
+    value: unknown,
+): asserts value is Static<typeof collaborationSpawnCapacitySchema> {
+    if (!Value.Check(collaborationSpawnCapacitySchema, value)) {
+        throw new Error("Collaboration broker returned invalid spawn capacity.");
     }
 }
 

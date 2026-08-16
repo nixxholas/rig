@@ -5,6 +5,11 @@ export {
 } from "./startAgentHttpServer.js";
 export { readOrCreateAgentToken, isAuthorizedAgentRequest } from "./auth.js";
 export { createAgentRoutes } from "./agentRoutes.js";
+export {
+    createCompatibilityRoutes,
+    createCompatibilitySnapshots,
+    type CompatibilitySnapshots,
+} from "./compatibilityRoutes.js";
 export { createConfigRoutes } from "./configRoutes.js";
 export { createCoreDaemonRoutes, type HappyModelCatalog } from "./coreDaemonRoutes.js";
 export { createEventRoutes } from "./eventRoutes.js";

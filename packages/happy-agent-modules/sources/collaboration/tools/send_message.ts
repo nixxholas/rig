@@ -12,7 +12,7 @@ export function sendMessageTool(collaboration: CollaborationModule, actingAgentI
     return defineAgentTool({
         name: "send_agent_message",
         description:
-            "Send a text message to another collaborator. Set expectReply when the recipient must answer; then use wait_for_reply.",
+            "Send a text message to another collaborator. Set expectReply when the recipient must answer; then use wait_for_reply. Set readOnly true to switch the recipient to Read only, or false to restore the sender's current permission mode.",
         parameters: collaborationSendToolInputSchema,
         returnType: collaborationSendResultSchema,
         durable: true,

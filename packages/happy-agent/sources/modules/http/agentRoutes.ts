@@ -1,4 +1,3 @@
-import type { AgentBaseMessageOptions } from "@slopus/happy-agent-base";
 import type { SessionInputBlock, SessionUserMessage } from "@slopus/happy-providers";
 
 import { readValidatedBody } from "./body.js";
@@ -9,6 +8,7 @@ import {
     metadataRequestSchema,
     type MessageRequest,
 } from "./HttpSchemas.js";
+import { mergeAgentMessageOptions } from "./agentMessageOptions.js";
 import { createRouteGroup, type AgentHttpRouteGroup } from "./router.js";
 
 export function createAgentRoutes(): AgentHttpRouteGroup {
@@ -36,7 +36,23 @@ export function createAgentRoutes(): AgentHttpRouteGroup {
                     ctx,
                     dependencies.agent.agent.id,
                     messageFromRequest(body),
-                    messageOptions(body),
+                    mergeAgentMessageOptions(
+                        dependencies.agent.effectiveSelection,
+                        dependencies.agent.system.models,
+                        {
+                            ...(body.await === undefined ? {} : { await: body.await }),
+                            ...(body.effort === undefined ? {} : { effort: body.effort }),
+                            ...(body.id === undefined ? {} : { id: body.id }),
+                            ...(body.model === undefined ? {} : { model: body.model }),
+                            ...(body.permissionMode === undefined
+                                ? {}
+                                : { permissionMode: body.permissionMode }),
+                            ...(body.provider === undefined ? {} : { provider: body.provider }),
+                            ...(body.serviceTier === undefined
+                                ? {}
+                                : { serviceTier: body.serviceTier }),
+                        },
+                    ),
                 );
                 sendJson(response, 202, acceptance);
             },
@@ -50,7 +66,23 @@ export function createAgentRoutes(): AgentHttpRouteGroup {
                     ctx,
                     dependencies.agent.agent.id,
                     messageFromRequest(body),
-                    messageOptions(body),
+                    mergeAgentMessageOptions(
+                        dependencies.agent.effectiveSelection,
+                        dependencies.agent.system.models,
+                        {
+                            ...(body.await === undefined ? {} : { await: body.await }),
+                            ...(body.effort === undefined ? {} : { effort: body.effort }),
+                            ...(body.id === undefined ? {} : { id: body.id }),
+                            ...(body.model === undefined ? {} : { model: body.model }),
+                            ...(body.permissionMode === undefined
+                                ? {}
+                                : { permissionMode: body.permissionMode }),
+                            ...(body.provider === undefined ? {} : { provider: body.provider }),
+                            ...(body.serviceTier === undefined
+                                ? {}
+                                : { serviceTier: body.serviceTier }),
+                        },
+                    ),
                 );
                 sendJson(response, 202, acceptance);
             },
@@ -101,16 +133,4 @@ function messageFromRequest(request: MessageRequest): SessionUserMessage {
             ? [{ text: request.content, type: "text" }]
             : request.content;
     return { content, role: "user" };
-}
-
-function messageOptions(request: MessageRequest): AgentBaseMessageOptions & { await?: boolean } {
-    return {
-        ...(request.await === undefined ? {} : { await: request.await }),
-        ...(request.effort === undefined ? {} : { effort: request.effort }),
-        ...(request.id === undefined ? {} : { id: request.id }),
-        ...(request.model === undefined ? {} : { model: request.model }),
-        ...(request.permissionMode === undefined ? {} : { permissionMode: request.permissionMode }),
-        ...(request.provider === undefined ? {} : { provider: request.provider }),
-        ...(request.serviceTier === undefined ? {} : { serviceTier: request.serviceTier }),
-    };
 }

@@ -38,7 +38,7 @@ export function requestUserInputTool(userInput: UserInputModule, agentId: string
     return defineAgentTool({
         name: "request_user_input",
         description:
-            "Ask the human a question with the Markdown context they need, then wait for an explicit answer, cancellation, away, or timeout outcome. This request is durable across daemon restarts. To read more detail from a completed request, call this tool with its requestId and an optional cursor.",
+            "Ask the human one to four related questions with short headers and the Markdown context they need, then wait for an explicit answer, cancellation, away, or timeout outcome. This request is durable across daemon restarts. Set autoResolutionMs from 60000 to 240000 only when continuing with your best judgement is acceptable if nobody answers. To read more detail from a completed request, call this tool with its requestId and an optional cursor.",
         parameters: requestUserInputToolInputSchema,
         returnType: requestUserInputToolResultSchema,
         durable: false,

@@ -9,6 +9,7 @@ import {
     appletSchema,
     appletSourcePathSchema,
     appletScopeRefSchema,
+    defaultAppletAllowedScopes,
     type AppletToolUpdateInput,
 } from "../Applet.js";
 import type { AppletModule } from "../AppletModule.js";
@@ -19,12 +20,15 @@ const updateAppletInputSchema = Type.Object(
         path: appletSourcePathSchema,
         changeDescription: appletChangeDescriptionSchema,
         allowedScopes: Type.Optional(
-            Type.Array(appletScopeRefSchema, { minItems: 1, maxItems: 32, uniqueItems: true }),
+            Type.Array(appletScopeRefSchema, {
+                minItems: 1,
+                maxItems: defaultAppletAllowedScopes.length,
+                uniqueItems: true,
+            }),
         ),
         description: Type.Optional(appletDescriptionSchema),
         purpose: Type.Optional(appletPurposeSchema),
         sourceDescription: Type.Optional(Type.String({ maxLength: 2_000 })),
-        iconPath: Type.Optional(appletSourcePathSchema),
     },
     { additionalProperties: false },
 );
@@ -38,7 +42,11 @@ export function updateAppletTool(applets: AppletModule, agentId: string) {
         parameters: updateAppletInputSchema,
         returnType: Type.Object({ applet: appletSchema }),
         durable: false,
-        shouldReviewInAutoMode: () => false,
+        requiresAutoOrFullAccess: true,
+        shouldReviewInAutoMode: () => true,
+        shouldRunInFullAccessInAutoMode: () => true,
+        describeAutoPermissionAction: ({ name, ...input }) =>
+            applets.describeUpdateAutoPermission(name, input),
         execute: async (
             ctx,
             { name, ...input }: { name: string } & AppletToolUpdateInput,

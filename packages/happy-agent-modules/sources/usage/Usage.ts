@@ -3,11 +3,15 @@ import { Type, type Static } from "@sinclair/typebox";
 /** Bounds applied at every UsageModule storage and presentation boundary. */
 export const MAX_USAGE_RECORDS = 500;
 export const MAX_USAGE_GROUPS = 500;
+export const MAX_USAGE_TREE_SESSIONS = 10_000;
 export const MAX_USAGE_PAGE_SIZE = 100;
 export const MAX_USAGE_OUTPUT_CHARACTERS = 20_000;
 export const MAX_USAGE_AGENT_ID_LENGTH = 256;
 export const MAX_USAGE_PROVIDER_LENGTH = 256;
 export const MAX_USAGE_MODEL_LENGTH = 512;
+export const MAX_USAGE_TREE_DESCRIPTION_LENGTH = 512;
+export const MAX_USAGE_TREE_PATH_LENGTH = 1_024;
+export const MAX_USAGE_TREE_STATUS_LENGTH = 128;
 export const MAX_USAGE_ID_LENGTH = 128;
 export const MAX_USAGE_TOKEN_COUNT = 1_000_000_000;
 export const MAX_USAGE_DURATION_MS = 31_536_000_000;
@@ -134,6 +138,21 @@ export type UsageInferenceRecord = Static<typeof usageInferenceRecordSchema>;
 export type UsageTurnRecord = Static<typeof usageTurnRecordSchema>;
 export type UsageRecord = Static<typeof usageRecordSchema>;
 
+/** The latest provider-measured context size for an agent or collection. */
+export const usageCurrentContextSchema = Type.Object(
+    {
+        approximate: Type.Boolean(),
+        contextTokens: usageTokenCountSchema,
+        provider: usageProviderSchema,
+        model: Type.Optional(usageModelSchema),
+        effort: Type.Optional(usageEffortSchema),
+        tier: Type.Optional(usageTierSchema),
+    },
+    { additionalProperties: false },
+);
+
+export type UsageCurrentContext = Static<typeof usageCurrentContextSchema>;
+
 /** A bounded page of raw records, used by host readers that need event detail. */
 export const usagePageQuerySchema = Type.Object(
     {
@@ -203,6 +222,64 @@ export const usageAggregateQuerySchema = Type.Object(
     { additionalProperties: false },
 );
 
+export const usageAgentTreeRelationSchema = Type.Union([
+    Type.Literal("root"),
+    Type.Literal("subagent"),
+    Type.Literal("delegated"),
+]);
+
+/**
+ * A bounded host-provided agent-tree row.  The host owns relationships and
+ * lifecycle status; Usage only validates and returns the snapshot.
+ */
+export const usageAgentTreeSessionSchema = Type.Object(
+    {
+        agentId: usageAgentIdSchema,
+        description: Type.Optional(
+            Type.String({
+                maxLength: MAX_USAGE_TREE_DESCRIPTION_LENGTH,
+            }),
+        ),
+        modelId: usageModelSchema,
+        parentAgentId: Type.Optional(usageAgentIdSchema),
+        path: Type.String({
+            minLength: 1,
+            maxLength: MAX_USAGE_TREE_PATH_LENGTH,
+            pattern: "^[^\\u0000\\r\\n]+$",
+        }),
+        providerId: usageProviderSchema,
+        relation: usageAgentTreeRelationSchema,
+        status: Type.String({
+            minLength: 1,
+            maxLength: MAX_USAGE_TREE_STATUS_LENGTH,
+            pattern: "^[^\\u0000\\r\\n]+$",
+        }),
+        totalTokens: Type.Integer({
+            minimum: 0,
+            maximum: MAX_USAGE_TOTAL_TOKENS,
+        }),
+    },
+    { additionalProperties: false },
+);
+
+/** A complete, bounded subtree rooted at the requesting agent. */
+export const usageAgentTreeSchema = Type.Object(
+    {
+        sessions: Type.Array(usageAgentTreeSessionSchema, {
+            maxItems: MAX_USAGE_TREE_SESSIONS,
+        }),
+        totalTokens: Type.Integer({
+            minimum: 0,
+            maximum: MAX_USAGE_TOTAL_TOKENS,
+        }),
+    },
+    { additionalProperties: false },
+);
+
+export type UsageAgentTreeRelation = Static<typeof usageAgentTreeRelationSchema>;
+export type UsageAgentTreeSession = Static<typeof usageAgentTreeSessionSchema>;
+export type UsageAgentTree = Static<typeof usageAgentTreeSchema>;
+
 /** Totals from a bounded host-side usage aggregation. */
 export const usageSummarySchema = Type.Object(
     {
@@ -238,6 +315,7 @@ export const usageSummarySchema = Type.Object(
             minimum: 0,
             maximum: MAX_USAGE_TOTAL_DURATION_MS,
         }),
+        currentContext: Type.Optional(usageCurrentContextSchema),
         groups: Type.Array(usageGroupSchema, { maxItems: MAX_USAGE_GROUPS }),
         nextCursor: Type.Optional(Type.Integer({ minimum: 0, maximum: MAX_USAGE_GROUPS })),
     },

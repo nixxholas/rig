@@ -9,6 +9,7 @@ export {
     type SqliteCollaborationStorage,
 } from "./SqliteCollaborationStorage.js";
 export * from "./tools/create_agent.js";
+export * from "./tools/interrupt_agent.js";
 export * from "./tools/list_agents.js";
 export * from "./tools/reply_to_message.js";
 export * from "./tools/send_message.js";

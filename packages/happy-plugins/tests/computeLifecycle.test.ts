@@ -1,4 +1,5 @@
 import { access, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -20,7 +21,7 @@ describe("Happy compute lifecycle", () => {
     it("drives the local-bash example through source copy, exec, files, and cleanup", async () => {
         const host = await createHappyPluginTestHost(
             { computeProvider: { name: "local-bash" } },
-            { temporaryDirectory: process.cwd() },
+            { temporaryDirectory: tmpdir() },
         );
         hosts.push(host);
         const source = join(host.rootDirectory, "source");
@@ -134,7 +135,7 @@ describe("Happy compute lifecycle", () => {
     });
 
     it("keeps the local-bash provider stop handler idempotent", async () => {
-        const host = await createHappyPluginTestHost({}, { temporaryDirectory: process.cwd() });
+        const host = await createHappyPluginTestHost({}, { temporaryDirectory: tmpdir() });
         hosts.push(host);
         const source = join(host.rootDirectory, "source");
         const instanceParent = join(host.environment.HAPPY_PLUGIN_DIRECTORY, "instances");
@@ -196,7 +197,7 @@ describe("Happy compute lifecycle", () => {
     it("publishes a terminal event when provisioning is stopped", async () => {
         const host = await createHappyPluginTestHost(
             { computeProvider: { name: "test-compute" } },
-            { temporaryDirectory: process.cwd() },
+            { temporaryDirectory: tmpdir() },
         );
         hosts.push(host);
         let releaseStart: () => void = () => undefined;
@@ -275,7 +276,7 @@ describe("Happy compute lifecycle", () => {
     it("matches daemon status and retryability for typed provider errors", async () => {
         const host = await createHappyPluginTestHost(
             { computeProvider: { name: "test-compute" } },
-            { temporaryDirectory: process.cwd() },
+            { temporaryDirectory: tmpdir() },
         );
         hosts.push(host);
         const registration = await host.client.compute.register({
@@ -373,7 +374,7 @@ describe("Happy compute lifecycle", () => {
     it("retains a failed instance tombstone after provider loss", async () => {
         const host = await createHappyPluginTestHost(
             { computeProvider: { name: "test-compute" } },
-            { temporaryDirectory: process.cwd() },
+            { temporaryDirectory: tmpdir() },
         );
         hosts.push(host);
         const registration = await host.client.compute.register({

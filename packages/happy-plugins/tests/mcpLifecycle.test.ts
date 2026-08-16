@@ -1,5 +1,6 @@
 import { createServer, type Server, type ServerResponse } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -14,7 +15,7 @@ afterEach(async () => {
 
 describe("Happy MCP server lifecycle", () => {
     it("unregisters a registration whose event stream fails to open", async () => {
-        const directory = await mkdtemp(join(process.cwd(), ".m-"));
+        const directory = await mkdtemp(join(tmpdir(), "happy-plugin-mcp-"));
         cleanup.push(() => rm(directory, { force: true, recursive: true }));
         const socketPath = join(directory, "s");
         const requests: string[] = [];
@@ -52,7 +53,7 @@ describe("Happy MCP server lifecycle", () => {
     });
 
     it("closes its event stream without retaining finite request connections", async () => {
-        const directory = await mkdtemp(join(process.cwd(), ".m-"));
+        const directory = await mkdtemp(join(tmpdir(), "happy-plugin-mcp-"));
         cleanup.push(() => rm(directory, { force: true, recursive: true }));
         const socketPath = join(directory, "s");
         const activeConnections = new Set<object>();
@@ -107,7 +108,7 @@ describe("Happy MCP server lifecycle", () => {
     });
 
     it("does not register a late replacement after its declared stream closes", async () => {
-        const directory = await mkdtemp(join(process.cwd(), ".m-"));
+        const directory = await mkdtemp(join(tmpdir(), "happy-plugin-mcp-"));
         cleanup.push(() => rm(directory, { force: true, recursive: true }));
         const socketPath = join(directory, "s");
         let firstStream: ServerResponse | undefined;
