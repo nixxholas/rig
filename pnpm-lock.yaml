@@ -174,6 +174,9 @@ importers:
         specifier: ^0.45.2
         version: 0.45.2(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@types/pg@8.15.6)(sql.js@1.14.1)
     devDependencies:
+      '@libsql/client':
+        specifier: ^0.17.4
+        version: 0.17.4
       '@types/node':
         specifier: ^24.0.10
         version: 24.13.2

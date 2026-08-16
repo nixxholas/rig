@@ -19,7 +19,7 @@ import {
     type AgentStorageLock,
     type AnyAgentTool,
 } from "../sources/index.js";
-import { inMemoryStorageLock, providersOf } from "./gym/fixtures.js";
+import { inMemoryStorageLock, providersOf, textTurn, user } from "./gym/fixtures.js";
 import { inMemoryDrizzle } from "./gym/InMemoryDrizzle.js";
 import { ScriptedProvider } from "./gym/ScriptedProvider.js";
 
@@ -374,7 +374,199 @@ describe("AgentStorage Drizzle persistence", () => {
         second.close();
     });
 
-    it("rejects live agent and system commands from an outer storage transaction", async () => {
+    it("queues live send and steer messages inside an outer transaction and starts after commit", async () => {
+        const { close, database } = inMemoryDrizzle();
+        const provider = new ScriptedProvider([textTurn("steered"), textTurn("committed")]);
+        const storage = new AgentStorage({ acquireLock: lock(), database });
+        const system = await AgentSystemLocal.create(ctx, storage, {
+            providers: providersOf(provider),
+            provider: "scripted",
+            models: [],
+        });
+        const agent = await system.create(ctx, {});
+        await agent.waitForIdle();
+        const rootCtx = withAgentDatabase(ctx, database);
+
+        const accepted = await rootCtx.inTx(async (txCtx) => {
+            const result = await system.send(txCtx, agent.id, user("inside transaction"), {
+                await: true,
+                id: "h12345678901234567890123",
+            });
+            expect(
+                await agent.steer(txCtx, user("transactional steering"), {
+                    id: "h12345678901234567890127",
+                }),
+            ).toEqual({
+                accepted: "created",
+                delivery: "steer",
+                id: "h12345678901234567890127",
+            });
+            expect(result.accepted).toBe("created");
+            expect(agent.active).toBe(false);
+            expect(provider.sessions).toEqual([]);
+            return result;
+        });
+
+        expect(accepted).toEqual({
+            accepted: "created",
+            delivery: "send",
+            id: "h12345678901234567890123",
+        });
+        await agent.waitForIdle();
+        expect(provider.sessions).toHaveLength(1);
+        expect(provider.sessions[0]?.requests).toHaveLength(2);
+        expect(provider.sessions[0]?.requests[0]?.context.messages.at(-1)).toEqual(
+            user("transactional steering"),
+        );
+        expect(provider.sessions[0]?.requests[1]?.context.messages.at(-1)).toEqual(
+            user("inside transaction"),
+        );
+        await system.close(ctx);
+        close();
+    });
+
+    it("claims a distinct queue key for every send inside one transaction", async () => {
+        const { close, database } = inMemoryDrizzle();
+        const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
+        const storage = new AgentStorage({ acquireLock: lock(), database });
+        const system = await AgentSystemLocal.create(ctx, storage, {
+            providers: providersOf(provider),
+            provider: "scripted",
+            models: [],
+        });
+        const agent = await system.create(ctx, {});
+        await agent.waitForIdle();
+
+        await withAgentDatabase(ctx, database).inTx(async (txCtx) => {
+            await agent.send(txCtx, user("first in transaction"), {
+                id: "h12345678901234567890131",
+            });
+            await agent.send(txCtx, user("second in transaction"), {
+                id: "h12345678901234567890132",
+            });
+        });
+        await agent.waitForIdle();
+
+        // Both sends landed under their own key and arrive in the order they were accepted.
+        const requests = provider.sessions[0]?.requests ?? [];
+        const seen = requests.at(-1)?.context.messages ?? [];
+        const first = seen.findIndex(
+            (message) => JSON.stringify(message) === JSON.stringify(user("first in transaction")),
+        );
+        const second = seen.findIndex(
+            (message) => JSON.stringify(message) === JSON.stringify(user("second in transaction")),
+        );
+        expect(first).toBeGreaterThanOrEqual(0);
+        expect(second).toBeGreaterThan(first);
+        await system.close(ctx);
+        close();
+    });
+
+    it("reloads a transactional message committed while the target is already running", async () => {
+        const { close, database } = inMemoryDrizzle();
+        const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
+        let releaseInference!: () => void;
+        const inferenceMayContinue = new Promise<void>((resolve) => {
+            releaseInference = resolve;
+        });
+        let inferenceEntered!: () => void;
+        const inInference = new Promise<void>((resolve) => {
+            inferenceEntered = resolve;
+        });
+        let blockFirstInference = true;
+        const gate: AgentModule = {
+            name: "transactional-message-gate",
+            beforeInference: async () => {
+                if (!blockFirstInference) return;
+                blockFirstInference = false;
+                inferenceEntered();
+                await inferenceMayContinue;
+            },
+        };
+        const storage = new AgentStorage({ acquireLock: lock(), database });
+        const system = await AgentSystemLocal.create(ctx, storage, {
+            modules: [gate],
+            providers: providersOf(provider),
+            provider: "scripted",
+            models: [],
+        });
+        const agent = await system.create(ctx, {});
+        await agent.send(ctx, user("already running"), { await: true });
+        await inInference;
+
+        await withAgentDatabase(ctx, database).inTx(async (txCtx) => {
+            await agent.send(txCtx, user("committed while running"), {
+                id: "h12345678901234567890125",
+            });
+            expect(provider.sessions[0]?.requests).toEqual([]);
+        });
+        releaseInference();
+        await agent.waitForIdle();
+
+        expect(provider.sessions[0]?.requests).toHaveLength(2);
+        expect(provider.sessions[0]?.requests[0]?.context.messages.at(-1)).toEqual(
+            user("already running"),
+        );
+        expect(provider.sessions[0]?.requests[1]?.context.messages.at(-1)).toEqual(
+            user("committed while running"),
+        );
+        await system.close(ctx);
+        close();
+    });
+
+    it("drops every live effect when an outer transactional send rolls back", async () => {
+        const { close, database } = inMemoryDrizzle();
+        const provider = new ScriptedProvider([textTurn("retried")]);
+        const storage = new AgentStorage({ acquireLock: lock(), database });
+        const system = await AgentSystemLocal.create(ctx, storage, {
+            providers: providersOf(provider),
+            provider: "scripted",
+            models: [],
+        });
+        const agent = await system.create(ctx, {});
+        await agent.waitForIdle();
+        const rootCtx = withAgentDatabase(ctx, database);
+        const messageId = "h12345678901234567890124";
+
+        await expect(
+            rootCtx.inTx(async (txCtx) => {
+                expect(
+                    await agent.send(txCtx, user("rolled back"), {
+                        await: false,
+                        id: messageId,
+                    }),
+                ).toEqual({
+                    accepted: "created",
+                    delivery: "send",
+                    id: messageId,
+                });
+                expect(agent.active).toBe(false);
+                expect(provider.sessions).toEqual([]);
+                throw new Error("roll back message");
+            }),
+        ).rejects.toThrow("roll back message");
+
+        expect(agent.active).toBe(false);
+        expect(provider.sessions).toEqual([]);
+        expect(
+            await agent.send(ctx, user("retry after rollback"), {
+                await: false,
+                id: messageId,
+            }),
+        ).toEqual({
+            accepted: "created",
+            delivery: "send",
+            id: messageId,
+        });
+        await agent.waitForIdle();
+        expect(provider.sessions[0]?.requests[0]?.context.messages).toEqual([
+            user("retry after rollback"),
+        ]);
+        await system.close(ctx);
+        close();
+    });
+
+    it("rejects other live agent and system commands from an outer storage transaction", async () => {
         const { close, database } = inMemoryDrizzle();
         const storage = new AgentStorage({ acquireLock: lock(), database });
         const system = await AgentSystemLocal.create(ctx, storage, {
@@ -392,9 +584,6 @@ describe("AgentStorage Drizzle persistence", () => {
             await expect(system.delete(txCtx, agent.id)).rejects.toThrow(
                 "outer storage transaction",
             );
-            await expect(agent.send(txCtx, { role: "user", content: [] })).rejects.toThrow(
-                "outer storage transaction",
-            );
             await expect(agent.updateMetadata(txCtx, { title: "not committed" })).rejects.toThrow(
                 "outer storage transaction",
             );
@@ -406,7 +595,11 @@ describe("AgentStorage Drizzle persistence", () => {
             await expect(system.close(txCtx)).rejects.toThrow("outer storage transaction");
         });
 
-        expect(await system.config(ctx, agent.id)).toEqual({});
+        // Nothing the refused calls attempted was written, so the agent still holds exactly the
+        // configuration it was created with: where it came from, and nothing else.
+        expect(await system.config(ctx, agent.id)).toEqual({
+            provenance: { createdAt: expect.any(Number) },
+        });
         await system.close(ctx);
         close();
     });

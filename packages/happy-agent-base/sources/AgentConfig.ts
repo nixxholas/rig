@@ -4,7 +4,12 @@ import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { createContextNamespace, type Context } from "@steve.kite/stdlib";
 
-import { agentMetadataSchema, ownAgentMetadata, type AgentMetadata } from "./AgentMetadata.js";
+import {
+    agentMetadataSchema,
+    cuid2Schema,
+    ownAgentMetadata,
+    type AgentMetadata,
+} from "./AgentMetadata.js";
 
 /** The operating systems Node reports, mirroring `NodeJS.Platform`. */
 export const agentPlatformSchema = Type.Union([
@@ -52,12 +57,32 @@ export const agentEnvironmentSchema = Type.Object({
 export type AgentEnvironment = Static<typeof agentEnvironmentSchema>;
 
 /**
- * What an agent was created with: the environment it works on, when it has one, one opaque
- * settings map per module, and descriptive metadata. Environment and module settings stay
- * fixed; metadata changes only through the agent metadata API, which shallow-merges updates and
- * persists the resulting complete configuration.
+ * Where an agent came from, written once when it is created and never again. An agent made by
+ * another agent — through a tool, most often — records that agent as its creator; one made by a
+ * person, a daemon, or a restart has no creator at all rather than a made-up one.
+ */
+export const agentProvenanceSchema = Type.Object({
+    /** When the agent was created, in milliseconds since the epoch. */
+    createdAt: Type.Number(),
+    /** The agent that created this one, absent when nothing did. */
+    createdBy: Type.Optional(cuid2Schema),
+});
+
+/** The TypeScript type inferred from {@link agentProvenanceSchema}. */
+export type AgentProvenance = Static<typeof agentProvenanceSchema>;
+
+/**
+ * What an agent was created with: where it came from, the environment it works on, when it has
+ * one, one opaque settings map per module, and descriptive metadata. Provenance, environment, and
+ * module settings stay fixed; metadata changes only through the agent metadata API, which
+ * shallow-merges updates and persists the resulting complete configuration.
  */
 export const agentConfigSchema = Type.Object({
+    /**
+     * When this agent was created and by whom. Absent only for an agent created before this was
+     * recorded, or one built directly rather than through an agent system.
+     */
+    provenance: Type.Optional(agentProvenanceSchema),
     /** The machine this agent was told it works on, when it was told anything at all. */
     environment: Type.Optional(agentEnvironmentSchema),
     /** Per-module settings, keyed by module name; each entry is opaque to the agent. */
@@ -116,6 +141,24 @@ export function agentConfig(ctx: Context): AgentConfig | undefined {
 /** The environment of the agent owning this context, when it was created with one. */
 export function agentEnvironment(ctx: Context): AgentEnvironment | undefined {
     return configNamespace.get(ctx)?.environment;
+}
+
+/** Where the agent owning this context came from, when its creation was recorded. */
+export function agentProvenance(ctx: Context): AgentProvenance | undefined {
+    return configNamespace.get(ctx)?.provenance;
+}
+
+/** When the agent owning this context was created, in milliseconds since the epoch. */
+export function agentCreatedAt(ctx: Context): number | undefined {
+    return configNamespace.get(ctx)?.provenance?.createdAt;
+}
+
+/**
+ * The agent that created the agent owning this context. Absent when nothing did — an agent a
+ * person or a daemon started has no creator, and is not attributed to one.
+ */
+export function agentCreatedBy(ctx: Context): string | undefined {
+    return configNamespace.get(ctx)?.provenance?.createdBy;
 }
 
 /** The immutable metadata describing the agent owning this context, when it has any. */

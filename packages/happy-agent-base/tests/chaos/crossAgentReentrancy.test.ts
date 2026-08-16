@@ -146,10 +146,7 @@ class RoutedSession extends BaseSession {
         })();
     }
 
-    compact(
-        _compactCtx: Context,
-        options: SessionCompactionOptions,
-    ): Promise<SessionCompaction> {
+    compact(_compactCtx: Context, options: SessionCompactionOptions): Promise<SessionCompaction> {
         this.compactions.push(options);
         const result = this.#compactionResults.shift();
         return result === undefined
@@ -718,8 +715,8 @@ describe("cross-agent tool re-entrancy", () => {
             settledWithoutIntervention: true,
             // Each close revokes the peer tool that was carrying the matching delete. The
             // conversations settle without a cycle, while both recoverable identities remain.
-            aConfig: {},
-            bConfig: {},
+            aConfig: { provenance: { createdAt: expect.any(Number) } },
+            bConfig: { provenance: { createdAt: expect.any(Number) } },
             aPending: [],
             bPending: [],
         });

@@ -490,6 +490,8 @@ export class AgentBase {
     #steering: QueueEntry[] = [];
     /** The durable send queue, in the order its keys sort. */
     #sends: QueueEntry[] = [];
+    /** A committed queue write that the next turn still has to reload from storage. */
+    #committedQueueDirty = false;
     /** Hook notices waiting to join history after tool settlement and compaction. */
     #injections: InjectionEntry[] = [];
     /** A consumed notice that still needs one provider response. */
@@ -983,7 +985,15 @@ export class AgentBase {
         message: SessionUserMessage,
         options: (AgentBaseMessageOptions & AgentBaseAwaitOptions) | undefined,
     ): Promise<AgentMessageAcceptance> {
-        this.#assertOutsideStorageTransaction(ctx, "message delivery");
+        const outerTransaction = agentStorageTransaction(ctx);
+        if (outerTransaction?.lifetime.aborted === true) {
+            throw new Error("The agent storage transaction carried by this context has ended.");
+        }
+        if (outerTransaction !== undefined && this.#insideOwnPersistenceLock()) {
+            throw new Error(
+                "Agent message delivery cannot reenter its own persistence operation inside a transaction.",
+            );
+        }
         const {
             await: requestedWait,
             id = createId(),
@@ -1004,7 +1014,9 @@ export class AgentBase {
         );
         if (this.#closed) throw new Error("The agent has been closed.");
         const knownInProcess = this.#offeredMessageIds.has(id);
-        this.#offeredMessageIds.add(id);
+        if (outerTransaction === undefined) {
+            this.#offeredMessageIds.add(id);
+        }
         const accepted = this.#enqueue(ctx, [
             {
                 kind,
@@ -1014,6 +1026,16 @@ export class AgentBase {
                 options: settings,
             },
         ]);
+        // Work using an outer transaction must finish its durable writes before that transaction
+        // body can return. The caller may still choose not to wait for an ordinary independent
+        // acceptance, but a carried transaction cannot safely outlive unfinished work using it.
+        if (outerTransaction !== undefined) {
+            const [result] = await accepted;
+            if (result === undefined) {
+                throw new Error("The message acceptance result was lost.");
+            }
+            return result;
+        }
         if (wait) {
             try {
                 const [result] = await accepted;
@@ -1102,7 +1124,24 @@ export class AgentBase {
         if (this.#closed) throw new Error("The agent has been closed.");
         // Admitted: from here on the messages are the agent's responsibility, and a close that
         // begins now waits for them rather than resolving over the top of them.
-        const admitted = this.#runInPersistenceLock(ctx, async (lockCtx) => {
+        const admitted =
+            agentStorageTransaction(ctx) === undefined
+                ? this.#enqueueIndependently(ctx, batch)
+                : this.#enqueueInTransaction(ctx, batch);
+        this.#admitted.add(admitted);
+        try {
+            return await admitted;
+        } finally {
+            this.#admitted.delete(admitted);
+        }
+    }
+
+    /** Accept a batch under the persistence lock, in a transaction of the acceptance's own. */
+    async #enqueueIndependently(
+        ctx: Context,
+        batch: readonly QueueRequest[],
+    ): Promise<readonly AgentMessageAcceptance[]> {
+        return await this.#runInPersistenceLock(ctx, async (lockCtx) => {
             const accepted: { readonly key: string; readonly request: QueueRequest }[] = [];
             const results: AgentMessageAcceptance[] = [];
             await this.#recordTransaction(lockCtx, async (txCtx) => {
@@ -1155,12 +1194,114 @@ export class AgentBase {
             }
             return results;
         });
-        this.#admitted.add(admitted);
-        try {
-            return await admitted;
-        } finally {
-            this.#admitted.delete(admitted);
+    }
+
+    /**
+     * Accept a batch inside the caller's own open transaction. This path must not take the
+     * agent's persistence lock: the caller holds the database writer for as long as its
+     * transaction stays open, while a running turn takes the lock first and the database second,
+     * so waiting for the lock here would close a cycle nothing could break. The outer transaction
+     * supplies the atomicity the lock otherwise guarantees, queue keys are claimed with
+     * absent-only writes so a racing independent enqueue cannot be overwritten, and no heap
+     * state changes until the commit publishes the batch.
+     */
+    async #enqueueInTransaction(
+        ctx: Context,
+        batch: readonly QueueRequest[],
+    ): Promise<readonly AgentMessageAcceptance[]> {
+        const results: AgentMessageAcceptance[] = [];
+        let acceptedAny = false;
+        for (const request of batch) {
+            const identityKey = `message.${request.id}`;
+            if (!(await this.#persistence.writeValueIfAbsent(ctx, identityKey, true))) {
+                results.push({
+                    id: request.id,
+                    delivery: request.kind === "steering" ? "steer" : "send",
+                    accepted: "existing",
+                });
+                continue;
+            }
+            await this.#claimQueueKey(ctx, `${request.kind}.`, {
+                id: request.id,
+                message: request.message,
+                ...(request.metadata === undefined ? {} : { metadata: request.metadata }),
+                options: request.options,
+            });
+            acceptedAny = true;
+            results.push({
+                id: request.id,
+                delivery: request.kind === "steering" ? "steer" : "send",
+                accepted: "created",
+            });
         }
+        // Accepting a message is what makes the work owed, so the same transaction that admits
+        // it records that the agent owes an answer; here that record is staged durably and made
+        // live only once the outermost commit publishes the whole batch.
+        const stagedPending = acceptedAny
+            ? await this.#stagePendingMessageWork(ctx)
+            : undefined;
+        const offeredIds = batch.map(({ id }) => id);
+        afterCommit(ctx, async () => {
+            await this.#activateCommittedMessages(offeredIds, stagedPending);
+        });
+        return results;
+    }
+
+    /**
+     * Persist the pending inference an outer transaction will make live after commit, without
+     * changing any heap state that would survive a rollback. Reading the transaction's current
+     * value also makes multiple sends in one outer transaction reuse the same lifecycle IDs.
+     */
+    async #stagePendingMessageWork(ctx: Context): Promise<AgentBasePendingState> {
+        const stored = await agentBasePendingStateOf(ctx, this.#persistence);
+        const pending: AgentBasePendingState =
+            stored === undefined
+                ? { stage: "inference", loopId: createId() }
+                : { ...stored, stage: "inference" };
+        await this.#persistence.writeValue(ctx, AGENT_BASE_PENDING_KEY, pending);
+        return pending;
+    }
+
+    /**
+     * Publish a transactionally accepted message only after the outermost commit. The next turn
+     * reloads the durable queue instead of copying staged entries into memory; the dirty marker
+     * prevents a turn already in flight from clearing the request before that reload happens.
+     */
+    async #activateCommittedMessages(
+        offeredIds: readonly string[],
+        stagedPending: AgentBasePendingState | undefined,
+    ): Promise<void> {
+        for (const id of offeredIds) this.#offeredMessageIds.add(id);
+        if (stagedPending === undefined) return;
+        await this.#runInPersistenceLock(this.#ctx, async (lockCtx) => {
+            let pending = stagedPending;
+            try {
+                pending =
+                    (await agentBasePendingStateOf(lockCtx, this.#persistence)) ?? stagedPending;
+            } catch {
+                // The committed staged value is enough to start; a turn reload retries storage.
+            }
+            // A run in flight holds its lifecycle IDs across many lock acquisitions, so adopting
+            // over it would tear the identities out from under a live turn. That run reaches the
+            // committed batch through the dirty marker instead; adoption is for an idle agent
+            // whose next run should continue exactly what the commit recorded.
+            if (this.#runPromise === undefined) {
+                this.#adoptPendingState(pending);
+            }
+            this.#committedQueueDirty = true;
+        });
+        this.#turnRequested = true;
+        this.#startRun();
+    }
+
+    /** Make one committed pending record the exact in-memory lifecycle state. */
+    #adoptPendingState(pending: AgentBasePendingState): void {
+        this.#pending = pending;
+        this.#pendingWritten = deterministicStringify(pending);
+        this.#loopId = pending.loopId;
+        this.#turnId = pending.turnId;
+        this.#inferenceId = pending.inferenceId;
+        this.#settlementId = pending.settlementId;
     }
 
     /** Durably queue hook notices until history reaches a safe append boundary. */
@@ -2516,6 +2657,7 @@ export class AgentBase {
         if (
             this.#steering.length === 0 &&
             this.#sends.length === 0 &&
+            !this.#committedQueueDirty &&
             this.#injections.length === 0 &&
             !this.#noticeAwaitingResponse &&
             this.#compaction === undefined
@@ -2906,6 +3048,7 @@ export class AgentBase {
                     this.#pendingToolsUndispatched = true;
                 }
             }
+            this.#committedQueueDirty = false;
         });
     }
 
@@ -3486,6 +3629,22 @@ export class AgentBase {
         // The queue already holds an entry from this millisecond, or from one still to come on
         // a clock that went backwards: continue the sequence rather than starting it again.
         return key(lastSlot, Number(lastSequence) + 1);
+    }
+
+    /**
+     * Write a queue entry under a key nothing else holds. An enqueue running outside the
+     * persistence lock can race an independent one for the tail position, so the key is claimed
+     * with an absent-only write and a taken key moves one sequence further rather than
+     * overwriting whatever claimed it first.
+     */
+    async #claimQueueKey(ctx: Context, prefix: string, envelope: unknown): Promise<string> {
+        let key = await this.#queueKey(ctx, prefix);
+        for (let attempt = 0; attempt < 1000; attempt += 1) {
+            if (await this.#persistence.writeValueIfAbsent(ctx, key, envelope)) return key;
+            const [slot, sequence] = key.slice(prefix.length).split(".");
+            key = `${prefix}${slot}.${String(Number(sequence) + 1).padStart(6, "0")}`;
+        }
+        throw new Error("A queue key could not be claimed after repeated collisions.");
     }
 
     /**

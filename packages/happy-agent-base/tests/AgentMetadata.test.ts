@@ -511,8 +511,13 @@ describe("agent metadata, custom identity, and parentage", () => {
 
         const persistence = stores.get(ROOT_ID);
         expect(persistence?.records).toEqual([]);
+        // The store holds only the recreated agent's own configuration, which records this as a
+        // new creation rather than carrying anything from the agent whose ID it reuses.
         expect([...persistence!.values.entries()]).toEqual([
-            ["agentConfig", { metadata: { title: "New" } }],
+            [
+                "agentConfig",
+                { metadata: { title: "New" }, provenance: { createdAt: expect.any(Number) } },
+            ],
         ]);
         expect((await system.config(ctx, ROOT_ID))?.metadata).toEqual({ title: "New" });
         await system.close(ctx);

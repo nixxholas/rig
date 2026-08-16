@@ -299,9 +299,19 @@ export class AgentSystemLocal<
             }
             const parent =
                 options?.parent === undefined ? (agentIdOf(ctx) ?? null) : options.parent;
+            // Who made this agent is read from the call that made it: creation reached here from
+            // inside some agent's work — a tool of its own, most often — and that agent is the
+            // creator. A call carrying no agent came from a person or the daemon itself, which is
+            // recorded as no creator rather than guessed at.
+            const creator = agentIdOf(ctx);
+            const provenance = {
+                createdAt: Date.now(),
+                ...(creator === undefined ? {} : { createdBy: creator }),
+            };
             // The caller keeps its own object, and may go on editing it. What was created is what
             // was passed at this moment, so storage and this agent's context both get a copy.
-            const owned = ownAgentConfig(config);
+            // Provenance is the system's to state, so a caller cannot claim a different one.
+            const owned = ownAgentConfig({ ...config, provenance });
             const lifecycle = lifecycleAgent(agentId, owned);
             return await this.#lockFor(agentId).runInLock(ctx, async (lockCtx) => {
                 if ((await this.#configs.read(lockCtx, agentId)) !== undefined) {
@@ -473,10 +483,10 @@ export class AgentSystemLocal<
     }
 
     /**
-     * Live Agent objects cannot be published or removed until an enclosing transaction commits,
-     * while waiting for stdlib afterCommit from inside that transaction would deadlock its
-     * callback. Keep those lifetime operations outside host-owned transactions; durable storage
-     * and module transactional hooks remain fully composable.
+     * Creating, resolving, or removing a live Agent object is a lifetime operation that cannot
+     * roll back with an enclosing transaction. Keep those operations outside host-owned
+     * transactions; durable storage, module hooks, and delivery to an already-live agent remain
+     * composable.
      */
     #assertOutsideStorageTransaction(ctx: Context, operation: string): void {
         if (agentStorageTransaction(ctx) !== undefined) {
@@ -699,7 +709,7 @@ export class AgentSystemLocal<
         options?: AgentBaseMessageOptions & AgentBaseAwaitOptions,
     ): Promise<AgentMessageAcceptance> {
         return await this.#admit(async () => {
-            const agent = await this.#resolve(ctx, agentId);
+            const agent = await this.#messageTarget(ctx, agentId);
             return await agent.steer(ctx, message, options);
         });
     }
@@ -712,9 +722,23 @@ export class AgentSystemLocal<
         options?: AgentBaseMessageOptions & AgentBaseAwaitOptions,
     ): Promise<AgentMessageAcceptance> {
         return await this.#admit(async () => {
-            const agent = await this.#resolve(ctx, agentId);
+            const agent = await this.#messageTarget(ctx, agentId);
             return await agent.send(ctx, message, options);
         });
+    }
+
+    /**
+     * A transactional message may use an agent that is already live, because delivery publishes
+     * only after commit. Instantiating a missing live object remains a lifetime operation and is
+     * still refused until the caller leaves its transaction.
+     */
+    async #messageTarget(ctx: Context, agentId: string): Promise<Agent<AnyAgentTool, Database>> {
+        if (agentStorageTransaction(ctx) === undefined) return await this.#resolve(ctx, agentId);
+        const existing = this.#agents.get(agentId);
+        if (existing !== undefined) return existing;
+        throw new Error(
+            `Agent "${agentId}" must already be live before it can receive a transactional message.`,
+        );
     }
 
     /** Cancel an agent's active turn, leaving its queued messages durable for the next one. */

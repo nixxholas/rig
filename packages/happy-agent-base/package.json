@@ -37,6 +37,7 @@
         "drizzle-orm": "^0.45.2"
     },
     "devDependencies": {
+        "@libsql/client": "^0.17.4",
         "@types/node": "^24.0.10",
         "typescript": "^7.0.2",
         "vitest": "^3.2.4"

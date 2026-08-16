@@ -13,18 +13,23 @@ export { agentSystem, withAgentSystem } from "./AgentSystemContext.js";
 export {
     agentConfig,
     agentConfigSchema,
+    agentCreatedAt,
+    agentCreatedBy,
     agentModuleConfig,
     agentMetadata,
     agentEnvironment,
     agentEnvironmentSchema,
     agentModuleConfigSchema,
     agentPlatformSchema,
+    agentProvenance,
+    agentProvenanceSchema,
     currentAgentEnvironment,
     withAgentConfig,
     type AgentConfig,
     type AgentEnvironment,
     type AgentModuleConfig,
     type AgentPlatform,
+    type AgentProvenance,
 } from "./AgentConfig.js";
 export {
     agentMessageMetadataSchema,

@@ -543,10 +543,13 @@ describe("AgentSystemLocal configuration", () => {
         const agent = await agentSystem.create(ctx, config);
         await agent.send(ctx, user("go"), { await: true });
         await agent.waitForIdle();
-        expect(seen).toEqual([config]);
+        // The collection states where the agent came from, so what a module sees is what was
+        // passed plus that. Nothing created this one, so it is recorded as having no creator.
+        const created = { ...config, provenance: { createdAt: expect.any(Number) } };
+        expect(seen).toEqual([created]);
         // A module sees only its own opaque entry, which the collection never interprets.
         expect(settings).toEqual([{ verbosity: "high" }]);
-        expect(await agentSystem.config(ctx, agent.id)).toEqual(config);
+        expect(await agentSystem.config(ctx, agent.id)).toEqual(created);
         await agent.close();
 
         // A fresh collection over the same storage resolves the very same agent.
@@ -559,7 +562,7 @@ describe("AgentSystemLocal configuration", () => {
         const resolved = await restarted.resolve(ctx, agent.id);
         await resolved.send(ctx, user("again"), { await: true });
         await resolved.waitForIdle();
-        expect(seen).toEqual([config, config]);
+        expect(seen).toEqual([created, created]);
         await resolved.close();
     });
 

@@ -25,10 +25,17 @@ active Drizzle facade as `ctx.db`; `ctx.inTx(work)` and the exported `inTx(ctx, 
 an outer transaction or reuse the one already carried by the context. Outside a transaction,
 stdlib starts post-commit callbacks on the next microtask.
 
-Storage, KV, migrations, and transactional module hooks compose with a context's outer transaction.
-Live `Agent` and `AgentSystem` commands do not: creating, resolving, messaging,
-mutating, archiving, or closing a live agent from inside an outer storage transaction is rejected
-because the corresponding in-memory lifetime cannot be published until that transaction commits.
+Storage, KV, migrations, transactional module hooks, and message delivery compose with a context's
+outer transaction. `send` and `steer` persist their queue entry and pending-work marker inside that
+transaction, then publish the in-memory queue and start the run only through `afterCommit`; rollback
+therefore leaves no live effect. Delivery inside a transaction never waits on the agent's internal
+persistence lock — the caller holds the database writer while its transaction stays open, and a
+running turn takes that lock before touching the database, so waiting here could deadlock against a
+live turn; the open transaction supplies the atomicity the lock otherwise guarantees.
+Transactional routing through `AgentSystem.send` or `steer`
+requires a target that is already live; loading an idle target remains a separate lifetime
+operation. Other live `Agent` and `AgentSystem` lifetime commands—creating, resolving, mutating,
+archiving, or closing—remain rejected inside an outer transaction.
 
 An agent runs in one of four permission modes — `read_only`, `workspace_write`, `auto`, and
 `full_access` — carried on every context it derives and read back with `agentPermissionMode`. A
@@ -75,9 +82,11 @@ Messages receive a generated cuid2 identity, or accept one through `{ id }` for 
 delivery. A repeated ID is an ignored persistence conflict while its message remains in the
 durable conversation; deliberate conversation replacement releases identities for the records it
 removes. `send` and `steer` return the effective ID, delivery mode, and whether durable acceptance
-created the identity or found it already present. Optional immutable metadata travels beside the
-provider message and reaches both message-accepted hooks; module-generated send and steer actions
-accept the same fields.
+created the identity or found it already present. Inside an outer transaction, even an operation
+requested with `await: false` completes its durable queue write before returning, because work may
+not retain a transaction context after the transaction body ends. Optional immutable metadata
+travels beside the provider message and reaches both message-accepted hooks; module-generated send
+and steer actions accept the same fields.
 
 Base allocates cuid2 identities for every settled-to-settled loop, turn, inference, and settlement.
 The IDs are persisted with outstanding work before their first lifecycle hook, survive restart,

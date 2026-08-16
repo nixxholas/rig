@@ -1,27 +1,29 @@
-import { DatabaseSync } from "node:sqlite";
-import { drizzle, type SqliteRemoteDatabase } from "drizzle-orm/sqlite-proxy";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-/** A package-local, real in-memory SQLite database exposed through Drizzle's async proxy. */
+import { createClient } from "@libsql/client";
+import { drizzle, type LibSQLDatabase } from "drizzle-orm/libsql";
+
+/**
+ * A package-local, throwaway libsql database on the same driver production uses, so tests see
+ * production's transaction semantics: an open write transaction holds the single writer and a
+ * concurrent transaction waits for it instead of failing fast. The database lives in a private
+ * temporary file because the local libsql client opens one connection per transaction, and every
+ * `:memory:` connection would be a separate empty database.
+ */
 export function inMemoryDrizzle(): {
-    readonly database: SqliteRemoteDatabase;
+    readonly database: LibSQLDatabase;
     readonly close: () => void;
 } {
-    const sqlite = new DatabaseSync(":memory:");
-    const database = drizzle(async (query, params, method) => {
-        const statement = sqlite.prepare(query);
-        if (method === "run") {
-            statement.run(...params);
-            return { rows: [] };
-        }
-        if (method === "get") {
-            const row = statement.get(...params);
-            return { rows: row === undefined ? [] : [row] };
-        }
-        if (method === "values") {
-            statement.setReturnArrays(true);
-            return { rows: statement.all(...params) };
-        }
-        return { rows: statement.all(...params) };
-    });
-    return { database, close: () => sqlite.close() };
+    const directory = mkdtempSync(join(tmpdir(), "happy-agent-base-test-"));
+    const client = createClient({ url: `file:${join(directory, "agent.db")}` });
+    const database = drizzle(client);
+    return {
+        database,
+        close: () => {
+            client.close();
+            rmSync(directory, { force: true, recursive: true });
+        },
+    };
 }
