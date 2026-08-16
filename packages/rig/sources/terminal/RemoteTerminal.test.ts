@@ -22,12 +22,8 @@ describe("RemoteTerminal", () => {
 
             process.emit("\x1b]10;?\x1b]11;?");
             await vi.waitFor(() => {
-                expect(process.writes.map(writeText)).toContain(
-                    "\x1b]10;rgb:0d0d/0d0d/0d0d\x1b\\",
-                );
-                expect(process.writes.map(writeText)).toContain(
-                    "\x1b]11;rgb:eeee/eeee/eeee\x1b\\",
-                );
+                expect(process.writes.map(writeText)).toContain("\x1b]10;rgb:0d0d/0d0d/0d0d\x1b\\");
+                expect(process.writes.map(writeText)).toContain("\x1b]11;rgb:eeee/eeee/eeee\x1b\\");
             });
         } finally {
             await terminal.dispose();

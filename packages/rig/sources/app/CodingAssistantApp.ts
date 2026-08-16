@@ -156,6 +156,11 @@ const INPUT_PLACEHOLDER = "Ask Rig to do anything";
 const INPUT_PROMPT = "› ";
 const INPUT_LINE_INDENT = "  ";
 const PENDING_TOOL_CALL_TITLE = "Working";
+/** Title of the notice that a turn was stopped by too many refused permission reviews. */
+// The stable machine code the daemon stamps on a permission turn-stop notice. Keying on this,
+// rather than on the human-facing title, is what lets the app suppress the generic interruption row
+// for the same run without breaking the moment the wording of the title changes.
+const PERMISSION_TURN_STOPPED_NOTICE_CODE = "permission_turn_stopped";
 const ACTIVITY_ANIMATION_MS = 120;
 const PLUGIN_STATUS_LABELS = {
     failed: "Failed",
@@ -430,6 +435,14 @@ export class CodingAssistantApp implements Component, Focusable {
 
     #abortController: AbortController | undefined;
     #abortNotified = false;
+    // The run id a permission turn-stop notice belongs to, so the aborted run that follows explains
+    // itself with that notice instead of the generic "Session interrupted" row. It is keyed to the
+    // run rather than a bare flag: only that run's abort may consume it, so a different run's stop —
+    // or a user-initiated interruption of an unrelated run — cannot swallow a legitimate row.
+    #pendingPermissionStopRunId: string | undefined;
+    // The ids of system notices already appended, so a notice replayed on reconnect or resume is
+    // rendered exactly once rather than duplicated into the transcript.
+    readonly #appendedSystemNoticeIds = new Set<string>();
     #activeLocalSessionRunId: string | undefined;
     #activeRun: Promise<void> | undefined;
     #activeUserInput: ActiveUserInput | undefined;
@@ -898,9 +911,16 @@ export class CodingAssistantApp implements Component, Focusable {
             return;
         }
 
+        if (event.type === "system_notice") {
+            this.#applySystemNotice(event);
+            return;
+        }
+
         if (event.type === "run_started") {
             this.#usageRequestVersion += 1;
             this.#abortNotified = false;
+            // A run that begins clears any turn-stop notice left unconsumed by the previous run.
+            this.#pendingPermissionStopRunId = undefined;
             // A new run must never adopt a streamed entry left behind by the previous one.
             this.#unreconciledStreamEntryIds = [];
             this.#activeSessionRunId = event.data.runId;
@@ -938,6 +958,14 @@ export class CodingAssistantApp implements Component, Focusable {
         }
 
         if (event.type === "agent_event") {
+            this.#applyAgentEvent(event.data.event, event.createdAt);
+            return;
+        }
+
+        if (event.type === "permission_review") {
+            // A reviewed or denied Auto action reaches the transcript as its own event because it
+            // has no run id to ride an `agent_event`. It is the same annotation, so it is applied
+            // through the same path that decorates the tool row by tool-call id.
             this.#applyAgentEvent(event.data.event, event.createdAt);
             return;
         }
@@ -1062,7 +1090,15 @@ export class CodingAssistantApp implements Component, Focusable {
                     ? this.#elapsedSinceLastUserInput(event.createdAt)
                     : undefined;
             if (event.data.stopReason === "aborted") {
-                this.#appendAbortNotice();
+                if (this.#pendingPermissionStopRunId === event.data.runId) {
+                    // A permission notice already explained why *this* run stopped, so do the normal
+                    // abort cleanup without adding a second, generic interruption row. Matching the
+                    // run id is what keeps this from swallowing an unrelated run's interruption.
+                    this.#pendingPermissionStopRunId = undefined;
+                    this.#clearAbortedRunState();
+                } else {
+                    this.#appendAbortNotice();
+                }
             } else if (event.data.stopReason !== "stop") {
                 this.#deferredTurnSeparator = false;
             }
@@ -3799,7 +3835,13 @@ export class CodingAssistantApp implements Component, Focusable {
         }
     }
 
-    #appendAbortNotice(): void {
+    /**
+     * The bookkeeping every stopped run needs: end the turn separator, mark in-flight tool calls
+     * stopped, and drop the transient call sets. Marking the run notified here means a later abort
+     * for the same stop, whatever raises it, adds no further interruption row. A turn stopped with
+     * its own explanation — a permission notice — uses this without the generic row.
+     */
+    #clearAbortedRunState(): void {
         this.#deferredTurnSeparator = false;
         this.#markActiveToolCallsStopped();
         this.#activeToolCallIds.clear();
@@ -3807,16 +3849,60 @@ export class CodingAssistantApp implements Component, Focusable {
         this.#reviewingPermissionToolCallIds.clear();
         this.#runningToolCallIds.clear();
         this.#toolStatusByCallId.clear();
-        if (this.#abortNotified) {
+        this.#abortNotified = true;
+    }
+
+    #appendAbortNotice(): void {
+        const alreadyNotified = this.#abortNotified;
+        this.#clearAbortedRunState();
+        if (alreadyNotified) {
             return;
         }
 
-        this.#abortNotified = true;
         this.#appendEntry({
             role: "error",
             title: "Session interrupted",
             text: "The active run was stopped.",
         });
+    }
+
+    /**
+     * Render one durable service notice. Permission outcomes that stopped or skipped work arrive
+     * this way: a titled row at a stated importance that never enters model context. A warning or
+     * error becomes an error row; anything else is a quieter event row.
+     *
+     * The row is deduplicated by the notice's stable message id, because reconnect and resume can
+     * replay the same notice and a durable service row must appear exactly once. A turn-stop notice
+     * also arms the per-run suppression so the aborted run it belongs to does not add a second,
+     * generic interruption row; that arming is keyed to the run currently active, which is the run
+     * whose settlement follows.
+     */
+    #applySystemNotice(event: Extract<SessionEvent, { type: "system_notice" }>): void {
+        const message = event.data.message;
+        const structured =
+            message.structured?.kind === "notice" ? message.structured : undefined;
+        const title = structured?.title ?? "Notice";
+        const details =
+            structured?.details ??
+            message.blocks
+                .map((block) => (block.type === "text" ? block.text : ""))
+                .join("")
+                .trim();
+        if (details.length === 0) return;
+        if (this.#appendedSystemNoticeIds.has(message.id)) return;
+        this.#appendedSystemNoticeIds.add(message.id);
+        if (structured?.code === PERMISSION_TURN_STOPPED_NOTICE_CODE) {
+            this.#pendingPermissionStopRunId = this.#activeSessionRunId;
+        }
+        const level = structured?.level ?? "info";
+        this.#deferredTurnSeparator = false;
+        this.#appendEntry({
+            id: message.id,
+            role: level === "info" ? "event" : "error",
+            title,
+            text: details,
+        });
+        this.#requestRender();
     }
 
     #handleAgentMessage(message: Message, runToken: number): void {

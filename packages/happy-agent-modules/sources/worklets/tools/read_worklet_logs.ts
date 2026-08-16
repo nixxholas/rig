@@ -28,10 +28,8 @@ export function readWorkletLogsTool(module: WorkletsModule, agentId: string) {
         returnType: workletLogPageSchema,
         durable: true,
         shouldReviewInAutoMode: () => false,
-        execute: async (
-            ctx,
-            { name, ...query }: ReadWorkletLogsInput,
-        ) => await module.readLogs(ctx, agentId, name, query as WorkletLogQuery),
+        execute: async (ctx, { name, ...query }: ReadWorkletLogsInput) =>
+            await module.readLogs(ctx, agentId, name, query as WorkletLogQuery),
         toLLM: (page) => [
             {
                 type: "text",

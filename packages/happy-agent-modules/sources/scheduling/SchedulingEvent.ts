@@ -67,9 +67,7 @@ export const schedulingEventSchema = Type.Union([
 
 export type SchedulingEvent = Static<typeof schedulingEventSchema>;
 
-const opaqueContextSchema = Type.Unsafe<Context>(
-    Type.Object({}, { additionalProperties: true }),
-);
+const opaqueContextSchema = Type.Unsafe<Context>(Type.Object({}, { additionalProperties: true }));
 const listenerReturnSchema = Type.Union([Type.Void(), Type.Promise(Type.Void())]);
 
 export const schedulingModuleListenerSchema = Type.Object(

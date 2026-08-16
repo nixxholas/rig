@@ -1,8 +1,5 @@
 import { sql } from "drizzle-orm";
-import {
-    agentDatabaseRows,
-    agentDatabaseRun,
-} from "@slopus/happy-agent-base";
+import { agentDatabaseRows, agentDatabaseRun } from "@slopus/happy-agent-base";
 import type { Context } from "@steve.kite/stdlib";
 import { Value } from "@sinclair/typebox/value";
 
@@ -33,8 +30,7 @@ export const WORKLET_TABLE = "happy_agent_module_worklets";
 export const WORKLET_RECEIPTS_TABLE = "happy_agent_module_worklet_receipts";
 export const WORKLET_PROOFS_TABLE = "happy_agent_module_worklet_proofs";
 export const WORKLETS_MIGRATION_KEY = "001-worklets-catalog";
-export const WORKLETS_DROP_REPLAY_EVIDENCE_MIGRATION_KEY =
-    "002-worklets-drop-replay-evidence";
+export const WORKLETS_DROP_REPLAY_EVIDENCE_MIGRATION_KEY = "002-worklets-drop-replay-evidence";
 
 type JsonRow = { readonly value_json: string };
 export type WorkletDatabase = WorkletCatalog;

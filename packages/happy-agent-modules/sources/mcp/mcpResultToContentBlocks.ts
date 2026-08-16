@@ -1,10 +1,6 @@
 import type { SessionOutputBlock } from "@slopus/happy-providers";
 
-import {
-    MAX_MCP_IMAGE_BASE64_BYTES,
-    MAX_MCP_TEXT_BYTES,
-    type McpToolResult,
-} from "./Mcp.js";
+import { MAX_MCP_IMAGE_BASE64_BYTES, MAX_MCP_TEXT_BYTES, type McpToolResult } from "./Mcp.js";
 
 const MAXIMUM_RESULT_BLOCKS = 128;
 const MAXIMUM_IMAGE_BLOCKS = 4;
@@ -21,7 +17,9 @@ interface ResultBudget {
  * Traversal is deliberately bounded before serialization: a server can return a huge/proxied
  * content array or cyclic structured data, and formatting must remain finite in either case.
  */
-export function mcpResultToContentBlocks(result: McpToolResult | unknown): readonly SessionOutputBlock[] {
+export function mcpResultToContentBlocks(
+    result: McpToolResult | unknown,
+): readonly SessionOutputBlock[] {
     if (!isRecord(result)) {
         return [
             {
@@ -263,7 +261,11 @@ function previewObject(value: object, state: PreviewState, depth: number): Recor
             const key = sourceKey.slice(0, state.remainingCharacters);
             state.remainingCharacters = Math.max(0, state.remainingCharacters - key.length);
             try {
-                result[key] = preview((value as Record<string, unknown>)[sourceKey], state, depth + 1);
+                result[key] = preview(
+                    (value as Record<string, unknown>)[sourceKey],
+                    state,
+                    depth + 1,
+                );
             } catch {
                 result[key] = "[unavailable]";
             }

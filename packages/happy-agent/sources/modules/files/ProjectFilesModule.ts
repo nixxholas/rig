@@ -161,31 +161,30 @@ export class ProjectFilesModule {
         if (workspace === undefined || workspace.projectRef !== projectId) {
             throw new ProjectFileError(404, "missing", "The workspace was not found.");
         }
-        if (workspace.status !== "ready" && workspace.status !== "active") {
+        if (workspace.status !== "ready") {
             throw new ProjectFileError(
                 409,
                 "conflict",
                 "Only ready, available workspaces can access files.",
             );
         }
-        const workspaceRoot = resolve(projectRoot, ".happy-workspaces", workspace.id);
-        if (!isWithin(projectRoot, workspaceRoot)) {
-            throw new ProjectFileError(
-                403,
-                "forbidden",
-                "The workspace path is outside the project.",
-            );
-        }
+        // The workspace record says where it lives. A managed worktree sits in the agent's
+        // workspaces directory, not inside the project, so deriving a path from the project would
+        // name a folder that does not exist and hide the one that does.
         try {
-            await this.#canonicalRoot(workspaceRoot);
-        } catch {
+            return {
+                projectId,
+                workspaceId,
+                root: await this.#canonicalRoot(workspace.path),
+            };
+        } catch (error) {
+            if (error instanceof ProjectFileError && error.status === 403) throw error;
             throw new ProjectFileError(
                 409,
                 "conflict",
                 "Only ready, available workspaces can access files.",
             );
         }
-        return { projectId, workspaceId, root: workspaceRoot };
     }
 
     async search(root: ProjectFileRoot, query: FileSearchQuery): Promise<FileSearchResult> {
@@ -337,9 +336,18 @@ export class ProjectFilesModule {
         return { hash: sha256(bytes) };
     }
 
+    /**
+     * Proves the recorded folder is still the folder, then hands back its canonical form.
+     *
+     * A recorded path that now resolves somewhere else is a replaced folder, not a moved one: if
+     * a project root or a workspace checkout were swapped for a link, following it would serve
+     * one tree's files under another tree's name. Refusing is the only answer that cannot be
+     * wrong; the record is corrected by re-probing the project, not by reading through the link.
+     */
     async #canonicalRoot(path: string): Promise<string> {
+        let canonical: string;
         try {
-            const canonical = await realpath(path);
+            canonical = await realpath(path);
             const information = await stat(canonical);
             if (!information.isDirectory()) {
                 throw new ProjectFileError(
@@ -348,11 +356,18 @@ export class ProjectFilesModule {
                     "The selected root is not a directory.",
                 );
             }
-            return canonical;
         } catch (error) {
             if (error instanceof ProjectFileError) throw error;
             throw new ProjectFileError(404, "missing", "The selected root does not exist.");
         }
+        if (canonical !== resolve(path)) {
+            throw new ProjectFileError(
+                403,
+                "forbidden",
+                "The recorded folder now points somewhere else.",
+            );
+        }
+        return canonical;
     }
 
     async #resolveExisting(root: string, path: string, directory: boolean): Promise<string> {

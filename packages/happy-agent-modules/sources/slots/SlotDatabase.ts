@@ -17,10 +17,7 @@ import {
     type SlotUpdateInput,
 } from "./Slot.js";
 import { slotPageSchema, type SlotPage, type SlotPageQuery } from "./SlotPage.js";
-import {
-    slotStoreCreateInputContractSchema,
-    type SlotStoreCreateInput,
-} from "./SlotStore.js";
+import { slotStoreCreateInputContractSchema, type SlotStoreCreateInput } from "./SlotStore.js";
 
 export const SLOTS_MIGRATION_KEY = "001-slots";
 export const SLOTS_IDEMPOTENCY_REMOVAL_MIGRATION_KEY = "002-remove-slot-idempotency";
@@ -103,11 +100,7 @@ export interface SlotDatabase {
         agentId: string,
         entryIds: readonly string[],
     ) => Promise<readonly SlotEntry[]>;
-    readonly remove: (
-        ctx: Context,
-        agentId: string,
-        id: string,
-    ) => Promise<SlotEntry | undefined>;
+    readonly remove: (ctx: Context, agentId: string, id: string) => Promise<SlotEntry | undefined>;
 }
 
 export function createSlotDatabase(): SlotDatabase {
@@ -271,10 +264,7 @@ export function createSlotDatabase(): SlotDatabase {
     ): Promise<SlotEntry | undefined> => {
         const entry = await get(ctx, agentId, id);
         if (entry === undefined) return undefined;
-        await agentDatabaseRun(
-            ctx.db,
-            sql`DELETE FROM ${sql.raw(SLOTS_TABLE)} WHERE id = ${id}`,
-        );
+        await agentDatabaseRun(ctx.db, sql`DELETE FROM ${sql.raw(SLOTS_TABLE)} WHERE id = ${id}`);
         await agentDatabaseRun(
             ctx.db,
             sql`UPDATE ${sql.raw(SLOTS_TABLE)}

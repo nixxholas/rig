@@ -85,7 +85,7 @@ Protections that did not survive the port:
    `#listAllServers`, then `#listAllTools` per connected server, then constructs a fresh
    `createMcpTool` for each — on each `tools()` invocation, i.e. each agent loop. Combined with
    finding 4 this means two full catalog walks per turn. The comment at `:193-196` argues the list
-   must be rebuilt from the host's current catalog, which is a good reason not to cache a *client*;
+   must be rebuilt from the host's current catalog, which is a good reason not to cache a _client_;
    it is not a reason to re-fetch an unchanged catalog rather than let the host answer from its own
    connection state.
 
@@ -98,7 +98,7 @@ Protections that did not survive the port:
 7. **`runtimeOptions` and `assertMcpHost` exist only to defeat TypeBox.**
    `McpModule.ts:675-703` rebuilds the options object, respreading each host method onto a fresh
    literal (`callTool: host.callTool, getPrompt: host.getPrompt, …`) and ends in an `as
-   McpModuleOptions` cast; `McpHost.ts:93-113` does the same for the host. The purpose is to move
+McpModuleOptions` cast; `McpHost.ts:93-113` does the same for the host. The purpose is to move
    prototype methods onto own properties so `Value.Check` will accept a class instance. Since
    `Type.Function` only verifies `typeof === "function"`, the entire construction buys a check that
    the host has eight properties that are functions — for an object the embedder constructed and

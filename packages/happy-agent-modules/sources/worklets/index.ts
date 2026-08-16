@@ -152,10 +152,7 @@ export {
 } from "./WorkletsModule.js";
 
 export { getWorkletsDirectory } from "./getWorkletsDirectory.js";
-export {
-    WorkletInstaller,
-    type WorkletInstallerOptions,
-} from "./WorkletInstaller.js";
+export { WorkletInstaller, type WorkletInstallerOptions } from "./WorkletInstaller.js";
 export {
     WorkletInstallError,
     copyWorkletTree,
@@ -173,8 +170,5 @@ export { listWorkletsTool } from "./tools/list_worklets.js";
 export { readWorkletLogsTool } from "./tools/read_worklet_logs.js";
 export { removeWorkletTool } from "./tools/remove_worklet.js";
 export { revertWorkletTool } from "./tools/revert_worklet.js";
-export {
-    getWorkletStatusTool,
-    statusWorkletTool,
-} from "./tools/get_worklet_status.js";
+export { getWorkletStatusTool, statusWorkletTool } from "./tools/get_worklet_status.js";
 export { updateWorkletTool } from "./tools/update_worklet.js";

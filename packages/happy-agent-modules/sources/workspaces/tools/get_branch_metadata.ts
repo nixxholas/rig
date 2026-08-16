@@ -19,7 +19,7 @@ export function getBranchMetadataTool(workspaces: WorkspacesModule, agentId: str
     return defineAgentTool({
         name: "get_workspace_branch_metadata",
         description:
-            "Read the current branch metadata reported by the host for one workspace. Follow the returned detail cursor to read complete branch, head, upstream, and ahead/behind values. Git, worktrees, and paths remain outside the module.",
+            "Read the current branch metadata reported by the host for one workspace. Follow the returned cursor to read complete branch, head, upstream, and ahead/behind values. Git, worktrees, and paths remain outside the module.",
         parameters: branchMetadataInputSchema,
         returnType: workspaceBranchMetadataPageSchema,
         durable: false,

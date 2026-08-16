@@ -5,23 +5,45 @@ import {
 } from "@slopus/happy-agent-base";
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import { afterCommit, type Context } from "@steve.kite/stdlib";
+import { type Context } from "@steve.kite/stdlib";
 
 import {
     workspaceAgentIdSchema,
+    workspaceApplyGitFactsInputSchema,
+    workspaceApplyProbeInputSchema,
     workspaceArchiveOptionsSchema,
-    workspaceCreateInputSchema,
     workspaceIdSchema,
+    workspaceInheritNameInputSchema,
+    workspaceMarkFailedInputSchema,
+    workspaceMarkReadyInputSchema,
     workspaceOperationIdSchema,
+    workspaceRecordInitializationInputSchema,
     workspaceRenameInputSchema,
+    workspaceReorderInputSchema,
+    workspaceReserveHooksSchema,
+    workspaceReserveInputSchema,
+    workspaceSetBranchInputSchema,
     workspaceTimestampSchema,
     workspaceSchema,
     type Workspace,
+    type WorkspaceApplyGitFactsInput,
+    type WorkspaceApplyProbeInput,
     type WorkspaceArchiveOptions,
-    type WorkspaceCreateInput,
-    type WorkspaceRenameInput,
+    type WorkspaceInheritNameInput,
+    type WorkspaceMarkFailedInput,
+    type WorkspaceMarkReadyInput,
     type WorkspaceMutationOperation,
+    type WorkspaceRecordInitializationInput,
+    type WorkspaceRenameInput,
+    type WorkspaceReorderInput,
+    type WorkspaceReserveHooks,
+    type WorkspaceReserveInput,
+    type WorkspaceSetBranchInput,
 } from "./Workspace.js";
+import {
+    authorizeWorkspaceAccess,
+    assertWorkspaceRecord,
+} from "./WorkspaceAccess.js";
 import {
     workspaceBranchMetadataSchema,
     type WorkspaceBranchMetadata,
@@ -38,9 +60,21 @@ import {
     workspaceEventIdSchema,
     workspaceEventSchema,
     workspaceModuleListenerSchema,
-    type WorkspaceEvent,
     type WorkspaceModuleListener,
 } from "./WorkspaceEvent.js";
+import {
+    firstBranchMetadataPage,
+    firstWorkspaceDetailPage,
+    fitPageForModel,
+    fitWorkspaceBranchMetadataPage,
+    fitWorkspaceDetailPage,
+    formatWorkspaceBranchMetadataPage,
+    formatWorkspaceDetailPage,
+    workspaceBranchMetadataDetailText,
+    workspaceDetailText,
+    workspaceRow,
+} from "./WorkspaceFormat.js";
+import { WorkspaceMutations, type WorkspaceEventPayload } from "./WorkspaceMutations.js";
 import {
     MAX_WORKSPACE_PAGE_SIZE,
     workspacePageQuerySchema,
@@ -53,6 +87,7 @@ import {
     workspaceDetailQuerySchema,
     type WorkspaceDetailPage,
     type WorkspaceDetailQuery,
+    type WorkspaceDetailResult,
 } from "./WorkspaceDetailPage.js";
 import {
     workspaceTransferInputSchema,
@@ -62,39 +97,31 @@ import {
     type WorkspaceSessionTransferInput,
     type WorkspaceTransferInput,
     type WorkspaceTransferResult,
-    type WorkspaceTransferWorkspace,
 } from "./WorkspaceTransfer.js";
 import {
     assertWorkspace,
-    assertWorkspaceArchiveResult,
     assertWorkspaceBranchMetadata,
-    assertWorkspaceCreateResult,
     assertWorkspaceList,
     assertWorkspacePage,
-    assertWorkspaceRenameResult,
-    assertWorkspaceTransactionChange,
     createWorkspaceStore,
     workspaceHostSchema,
     workspaceAuthorizationSchema,
-    workspaceMutationRequestSchema,
     workspaceMigrations,
-    type WorkspaceArchiveResult,
     type WorkspaceAuthorization,
     type WorkspaceAuthorizationAction,
-    type WorkspaceCreateResult,
+    type WorkspaceHost,
     type WorkspaceMutationRequest,
+    type WorkspaceMutationResult,
     type WorkspaceStore,
-    type WorkspaceStoreArchiveInput,
-    type WorkspaceStoreCreateInput,
-    type WorkspaceStoreMutationResult,
-    type WorkspaceStoreRenameInput,
     type WorkspaceTransactionChange,
 } from "./WorkspaceStore.js";
+import { isPromiseLike, requirePromise, safeError } from "./workspaceRuntime.js";
 import { archiveWorkspaceTool } from "./tools/archive_workspace.js";
 import { createWorkspaceTool } from "./tools/create_workspace.js";
 import { getBranchMetadataTool } from "./tools/get_branch_metadata.js";
 import { getWorkspaceTool } from "./tools/get_workspace.js";
 import { listWorkspacesTool } from "./tools/list_workspaces.js";
+import { renameWorkspaceTool } from "./tools/rename_workspace.js";
 import { transferWorkspaceTool } from "./tools/transfer_workspace.js";
 
 const DEFAULT_PAGE_SIZE = 50;
@@ -114,6 +141,20 @@ export const workspaceClockSchema = Type.Function(
 );
 export const workspacePostCommitErrorSchema = Type.Function(
     [workspaceContextSchema, workspaceEventSchema, Type.Unknown()],
+    Type.Union([Type.Void(), Type.Promise(Type.Void())]),
+);
+/**
+ * Told when the host's own Git or filesystem work failed after a durable decision had already been
+ * recorded. Archival is never rolled back because cleanup failed, so this is how that failure
+ * reaches a log instead of the caller.
+ */
+export const workspaceHostErrorSchema = Type.Function(
+    [
+        workspaceContextSchema,
+        workspaceIdSchema,
+        Type.Union([Type.Literal("archive"), Type.Literal("rename")]),
+        Type.String(),
+    ],
     Type.Union([Type.Void(), Type.Promise(Type.Void())]),
 );
 const workspaceMaxPageSizeSchema = Type.Integer({
@@ -137,35 +178,50 @@ export const workspaceModuleOptionsSchema = Type.Object(
         maxPageSize: Type.Optional(workspaceMaxPageSizeSchema),
         maxOutputCharacters: Type.Optional(workspaceMaxOutputSchema),
         onPostCommitError: Type.Optional(workspacePostCommitErrorSchema),
+        onHostError: Type.Optional(workspaceHostErrorSchema),
+        /**
+         * The lifetime folder removal runs on: a named context derived from the application root,
+         * carrying the agent database. Archival is a durable decision that must be answered at
+         * once, so the filesystem work it implies outlives the call that asked for it and cannot
+         * belong to that caller's context.
+         */
+        cleanupContext: Type.Optional(workspaceContextSchema),
     },
     { additionalProperties: false },
 );
 
 export type WorkspaceModuleOptions = Static<typeof workspaceModuleOptionsSchema>;
 
-type WorkspaceChange = WorkspaceTransactionChange;
-type WorkspaceOperation = {
-    readonly kind: WorkspaceMutationOperation;
-    readonly operationId: string;
-};
+/** What a reservation produced: the workspace, and whether this call is the one that made it. */
+export interface WorkspaceReservation {
+    readonly created: boolean;
+    readonly workspace: Workspace;
+}
 
 export class WorkspacesModule implements AgentModule {
     readonly name = "workspaces";
     readonly migrations = workspaceMigrations;
 
     readonly #store: WorkspaceStore;
+    readonly #mutations: WorkspaceMutations;
+    readonly #host: WorkspaceHost | undefined;
     readonly #enabled: boolean;
     readonly #authorization: WorkspaceAuthorization | undefined;
     readonly #idFactory: NonNullable<WorkspaceModuleOptions["idFactory"]>;
-    readonly #eventIdFactory: NonNullable<WorkspaceModuleOptions["eventIdFactory"]>;
-    readonly #clock: NonNullable<WorkspaceModuleOptions["clock"]>;
-    readonly #listener: WorkspaceModuleListener | undefined;
     readonly #maxPageSize: number;
     readonly #maxOutputCharacters: number;
-    readonly #onPostCommitError: WorkspaceModuleOptions["onPostCommitError"];
+    readonly #onHostError: WorkspaceModuleOptions["onHostError"];
+    readonly #cleanupContext: Context | undefined;
+    readonly #cleanupTasks = new Set<Promise<void>>();
 
     constructor(options: WorkspaceModuleOptions) {
         assertWorkspaceModuleOptions(options);
+        if (options.host?.archive !== undefined && options.cleanupContext === undefined) {
+            throw new Error(
+                "A workspace host that removes folders needs a cleanupContext to remove them on.",
+            );
+        }
+        this.#host = options.host;
         this.#store = createWorkspaceStore({
             ...(options.host === undefined ? {} : { host: options.host }),
         });
@@ -174,14 +230,19 @@ export class WorkspacesModule implements AgentModule {
         this.#idFactory =
             options.idFactory ??
             ((_ctx: Context, _agentId: string) => globalThis.crypto.randomUUID());
-        this.#eventIdFactory =
-            options.eventIdFactory ??
-            ((_ctx: Context, _agentId: string) => globalThis.crypto.randomUUID());
-        this.#clock = options.clock ?? ((_ctx: Context, _agentId: string) => Date.now());
-        this.#listener = options.listener;
         this.#maxPageSize = options.maxPageSize ?? DEFAULT_PAGE_SIZE;
         this.#maxOutputCharacters = options.maxOutputCharacters ?? DEFAULT_OUTPUT_CHARACTERS;
-        this.#onPostCommitError = options.onPostCommitError;
+        this.#onHostError = options.onHostError;
+        this.#cleanupContext = options.cleanupContext;
+        this.#mutations = new WorkspaceMutations({
+            store: this.#store,
+            eventIdFactory:
+                options.eventIdFactory ??
+                ((_ctx: Context, _agentId: string) => globalThis.crypto.randomUUID()),
+            clock: options.clock ?? ((_ctx: Context, _agentId: string) => Date.now()),
+            listener: options.listener,
+            onPostCommitError: options.onPostCommitError,
+        });
     }
 
     readonly tools = (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => {
@@ -191,156 +252,572 @@ export class WorkspacesModule implements AgentModule {
             createWorkspaceTool(this, scope.agent.id),
             listWorkspacesTool(this, scope.agent.id),
             getWorkspaceTool(this, scope.agent.id),
+            renameWorkspaceTool(this, scope.agent.id),
             transferWorkspaceTool(this, scope.agent.id),
             archiveWorkspaceTool(this, scope.agent.id),
             getBranchMetadataTool(this, scope.agent.id),
         ];
     };
 
-    async create(ctx: Context, agentId: string, input: WorkspaceCreateInput): Promise<Workspace> {
+    /**
+     * Reserves one workspace: a name, folder key, and branch nothing else has taken, recorded
+     * before any Git or filesystem work begins.
+     *
+     * A tool call that is retried after a crash arrives with the same `operationId`, and that ID
+     * is the workspace's identity when the caller did not choose one. Two attempts at one create
+     * therefore converge on one row rather than producing a second workspace that nobody asked for.
+     */
+    async reserve(
+        ctx: Context,
+        agentId: string,
+        input: WorkspaceReserveInput,
+        hooks: WorkspaceReserveHooks = {},
+    ): Promise<WorkspaceReservation> {
         this.#assertEnabled();
         this.#assertAgentId(agentId);
-        this.#assertInput(workspaceCreateInputSchema, input, "workspace creation");
+        this.#assertInput(workspaceReserveInputSchema, input, "workspace reservation");
+        if (!Value.Check(workspaceReserveHooksSchema, hooks)) {
+            throw new Error("Workspace reservation hooks are invalid.");
+        }
         const normalized = structuredClone(input);
         const workspaceId =
-            normalized.id ?? (await this.#newIdentity(ctx, agentId, workspaceIdSchema));
-        const operationId =
+            normalized.id ??
             normalized.operationId ??
-            (await this.#newIdentity(ctx, agentId, workspaceOperationIdSchema));
-        const operation = this.#operation("create", operationId);
-
-        const change = await this.#runTransaction(ctx, agentId, async (txCtx) => {
-            const request: WorkspaceStoreCreateInput = {
-                id: workspaceId,
-                ownerAgentId: agentId,
-                name: normalized.name,
-                ...(normalized.projectRef === undefined
-                    ? {}
-                    : { projectRef: normalized.projectRef }),
-                ...(normalized.path === undefined ? {} : { path: normalized.path }),
-                ...(normalized.baseRef === undefined ? {} : { baseRef: normalized.baseRef }),
-            };
-            const before = await this.#getRequiredOptional(txCtx, agentId, workspaceId);
-            if (before !== undefined) {
-                throw new Error(`Workspace "${workspaceId}" already exists.`);
-            }
-
-            const raw = await requirePromise(
-                this.#store.create(
+            (await this.#newIdentity(ctx, agentId, workspaceIdSchema));
+        const result = await this.#mutateResult(
+            ctx,
+            agentId,
+            "reserve",
+            normalized.operationId,
+            workspaceId,
+            async (txCtx, request) =>
+                await this.#store.reserve(
                     txCtx,
                     agentId,
-                    structuredClone(request),
-                    this.#request(operation),
+                    {
+                        id: workspaceId,
+                        ownerAgentId: agentId,
+                        projectRef: normalized.projectRef,
+                        name: normalized.name,
+                        nameConfigured: normalized.nameConfigured ?? false,
+                        kind: normalized.kind ?? "git_worktree",
+                        ...(normalized.baseRef === undefined
+                            ? {}
+                            : { baseRef: normalized.baseRef }),
+                        ...(normalized.baseCommit === undefined
+                            ? {}
+                            : { baseCommit: normalized.baseCommit }),
+                        ...(normalized.gitCommonDir === undefined
+                            ? {}
+                            : { gitCommonDir: normalized.gitCommonDir }),
+                        ...(normalized.creatorSessionId === undefined
+                            ? {}
+                            : { creatorSessionId: normalized.creatorSessionId }),
+                        ...(normalized.storageKeySeed === undefined
+                            ? {}
+                            : { storageKeySeed: normalized.storageKeySeed }),
+                    },
+                    hooks,
+                    request,
                 ),
-                "Workspace store create",
-            );
-            assertWorkspaceCreateResult(raw);
-            this.#assertResultIdentity(raw, operation, agentId, "create");
-            this.#assertCreatedWorkspace(raw.workspace, request);
-            const after = await this.#getRequired(txCtx, agentId, workspaceId);
-            if (!sameJson(after, raw.workspace)) {
-                throw new Error("Workspace create result does not match authoritative state.");
-            }
-            const changed = before === undefined && !sameJson(before, after);
-            if (raw.changed !== changed) {
-                throw new Error("Workspace create changed flag is not authoritative.");
-            }
-            const result = structuredClone(raw);
-            if (changed) {
-                const event = await this.#newEvent(txCtx, agentId, {
-                    type: "workspace_created",
-                    agentId,
-                    workspace: after,
-                });
-                await this.#observe(txCtx, event);
-                return { result, event };
-            }
-            return { result };
-        });
-        return structuredClone(requireWorkspaceFromResult(change.result));
+            (before, after) =>
+                before === undefined
+                    ? { type: "workspace_created", agentId, workspace: after }
+                    : undefined,
+        );
+        return { created: result.changed, workspace: result.workspace };
     }
 
-    async rename(ctx: Context, agentId: string, input: WorkspaceRenameInput): Promise<Workspace>;
-    async rename(
-        ctx: Context,
-        agentId: string,
-        workspaceId: string,
-        name: string,
-        expectedUpdatedAt?: number,
-    ): Promise<Workspace>;
-    async rename(
-        ctx: Context,
-        agentId: string,
-        inputOrWorkspaceId: WorkspaceRenameInput | string,
-        name?: string,
-        expectedUpdatedAt?: number,
-    ): Promise<Workspace> {
+    /** Renames a workspace on a person's behalf, and moves its branch with the name. */
+    async rename(ctx: Context, agentId: string, input: WorkspaceRenameInput): Promise<Workspace> {
         this.#assertEnabled();
         this.#assertAgentId(agentId);
-        const input: WorkspaceRenameInput =
-            typeof inputOrWorkspaceId === "string"
-                ? {
-                      workspaceId: inputOrWorkspaceId,
-                      name: name ?? "",
-                      ...(expectedUpdatedAt === undefined ? {} : { expectedUpdatedAt }),
-                  }
-                : structuredClone(inputOrWorkspaceId);
         this.#assertInput(workspaceRenameInputSchema, input, "workspace rename");
-        const operationId =
-            input.operationId ??
-            (await this.#newIdentity(ctx, agentId, workspaceOperationIdSchema));
-        const operation = this.#operation("rename", operationId);
-
-        const change = await this.#runTransaction(ctx, agentId, async (txCtx) => {
-            const before = await this.#getRequired(txCtx, agentId, input.workspaceId);
-            this.#assertOwner(agentId, before);
-            const storeInput: WorkspaceStoreRenameInput = {
-                workspaceId: input.workspaceId,
-                name: input.name,
-                ...(input.expectedUpdatedAt === undefined
-                    ? {}
-                    : { expectedUpdatedAt: input.expectedUpdatedAt }),
-            };
-            const raw = await requirePromise(
-                this.#store.rename(txCtx, agentId, storeInput, this.#request(operation)),
-                "Workspace store rename",
-            );
-            assertWorkspaceRenameResult(raw);
-            if (
-                raw.agentId !== agentId ||
-                raw.operation !== "rename" ||
-                raw.operationId !== operation.operationId
-            ) {
-                throw new Error("Workspace rename result identity does not match the request.");
-            }
-            if (raw.workspace.id !== input.workspaceId || raw.workspace.name !== input.name) {
-                throw new Error("Workspace rename result does not match the request.");
-            }
-            const after = await this.#getRequired(txCtx, agentId, input.workspaceId);
-            if (!sameJson(after, raw.workspace)) {
-                throw new Error("Workspace rename result does not match authoritative state.");
-            }
-            const changed = !sameJson(before, after);
-            assertWorkspaceRenameTransition(before, after, input.name, changed);
-            if (raw.changed !== changed) {
-                throw new Error("Workspace rename changed flag is not authoritative.");
-            }
-            const result = structuredClone(raw);
-            if (changed) {
-                const event = await this.#newEvent(txCtx, agentId, {
+        const normalized = structuredClone(input);
+        let previousBranch: string | undefined;
+        const renamed = await this.#mutate(
+            ctx,
+            agentId,
+            "rename",
+            normalized.operationId,
+            normalized.workspaceId,
+            async (txCtx, request) =>
+                await this.#store.rename(
+                    txCtx,
+                    agentId,
+                    {
+                        workspaceId: normalized.workspaceId,
+                        name: normalized.name,
+                        ...(normalized.expectedVersion === undefined
+                            ? {}
+                            : { expectedVersion: normalized.expectedVersion }),
+                    },
+                    request,
+                ),
+            (before, after) => {
+                if (before === undefined || before.name === after.name) return undefined;
+                previousBranch = before.branch;
+                return {
                     type: "workspace_renamed",
                     agentId,
                     workspace: after,
                     previousName: before.name,
-                });
-                await this.#observe(txCtx, event);
-                return { result, event };
-            }
-            return { result };
-        });
-        return structuredClone(requireWorkspaceFromResult(change.result));
+                };
+            },
+        );
+        if (previousBranch === undefined || previousBranch === renamed.branch) return renamed;
+        return await this.#moveHostBranch(ctx, agentId, renamed, previousBranch);
     }
 
+    /**
+     * Gives a workspace the name its first chat arrived at. A workspace someone has already named
+     * keeps that name: only a placeholder is replaced.
+     */
+    async inheritName(
+        ctx: Context,
+        agentId: string,
+        input: WorkspaceInheritNameInput,
+    ): Promise<Workspace> {
+        this.#assertEnabled();
+        this.#assertAgentId(agentId);
+        this.#assertInput(workspaceInheritNameInputSchema, input, "workspace name inheritance");
+        const normalized = structuredClone(input);
+        let previousBranch: string | undefined;
+        const named = await this.#mutate(
+            ctx,
+            agentId,
+            "inherit_name",
+            normalized.operationId,
+            normalized.workspaceId,
+            async (txCtx, request) =>
+                await this.#store.inheritName(
+                    txCtx,
+                    agentId,
+                    { workspaceId: normalized.workspaceId, name: normalized.name },
+                    request,
+                ),
+            (before, after) => {
+                if (before === undefined || before.name === after.name) return undefined;
+                previousBranch = before.branch;
+                return {
+                    type: "workspace_renamed",
+                    agentId,
+                    workspace: after,
+                    previousName: before.name,
+                };
+            },
+        );
+        if (previousBranch === undefined || previousBranch === named.branch) return named;
+        return await this.#moveHostBranch(ctx, agentId, named, previousBranch);
+    }
+
+    /** Records the branch a host actually created or renamed to. */
+    async setBranch(
+        ctx: Context,
+        agentId: string,
+        input: WorkspaceSetBranchInput,
+    ): Promise<Workspace> {
+        this.#assertEnabled();
+        this.#assertAgentId(agentId);
+        this.#assertInput(workspaceSetBranchInputSchema, input, "workspace branch");
+        const normalized = structuredClone(input);
+        return await this.#mutate(
+            ctx,
+            agentId,
+            "set_branch",
+            normalized.operationId,
+            normalized.workspaceId,
+            async (txCtx, request) =>
+                await this.#store.setBranch(
+                    txCtx,
+                    agentId,
+                    { workspaceId: normalized.workspaceId, branch: normalized.branch },
+                    request,
+                ),
+            (_before, after) => ({
+                type: "workspace_updated",
+                agentId,
+                change: "set_branch",
+                workspace: after,
+            }),
+        );
+    }
+
+    /** Records the base commit, base ref, and shared Git directory the host resolved. */
+    async recordInitialization(
+        ctx: Context,
+        agentId: string,
+        input: WorkspaceRecordInitializationInput,
+    ): Promise<Workspace> {
+        this.#assertEnabled();
+        this.#assertAgentId(agentId);
+        this.#assertInput(
+            workspaceRecordInitializationInputSchema,
+            input,
+            "workspace initialization",
+        );
+        const normalized = structuredClone(input);
+        return await this.#mutate(
+            ctx,
+            agentId,
+            "record_initialization",
+            normalized.operationId,
+            normalized.workspaceId,
+            async (txCtx, request) =>
+                await this.#store.recordInitialization(
+                    txCtx,
+                    agentId,
+                    { workspaceId: normalized.workspaceId, facts: normalized.facts },
+                    request,
+                ),
+            (_before, after) => ({
+                type: "workspace_updated",
+                agentId,
+                change: "record_initialization",
+                workspace: after,
+            }),
+        );
+    }
+
+    /** The workspace is checked out, set up, and ready for someone to work in. */
+    async markReady(
+        ctx: Context,
+        agentId: string,
+        input: WorkspaceMarkReadyInput,
+    ): Promise<Workspace> {
+        this.#assertEnabled();
+        this.#assertAgentId(agentId);
+        this.#assertInput(workspaceMarkReadyInputSchema, input, "workspace readiness");
+        const normalized = structuredClone(input);
+        return await this.#mutate(
+            ctx,
+            agentId,
+            "mark_ready",
+            normalized.operationId,
+            normalized.workspaceId,
+            async (txCtx, request) =>
+                await this.#store.markReady(
+                    txCtx,
+                    agentId,
+                    { workspaceId: normalized.workspaceId },
+                    request,
+                ),
+            (_before, after) => ({
+                type: "workspace_updated",
+                agentId,
+                change: "mark_ready",
+                workspace: after,
+            }),
+        );
+    }
+
+    /** A ready workspace stopped working, with a bounded explanation of why. */
+    async markFailed(
+        ctx: Context,
+        agentId: string,
+        input: WorkspaceMarkFailedInput,
+    ): Promise<Workspace> {
+        this.#assertEnabled();
+        this.#assertAgentId(agentId);
+        this.#assertInput(workspaceMarkFailedInputSchema, input, "workspace failure");
+        const normalized = structuredClone(input);
+        return await this.#mutate(
+            ctx,
+            agentId,
+            "mark_failed",
+            normalized.operationId,
+            normalized.workspaceId,
+            async (txCtx, request) =>
+                await this.#store.markFailed(
+                    txCtx,
+                    agentId,
+                    { workspaceId: normalized.workspaceId, error: normalized.error },
+                    request,
+                ),
+            (_before, after) => ({
+                type: "workspace_updated",
+                agentId,
+                change: "mark_failed",
+                workspace: after,
+            }),
+        );
+    }
+
+    /** Provisioning never finished. The attempt is counted so a retry can be decided later. */
+    async markInitializationFailed(
+        ctx: Context,
+        agentId: string,
+        input: WorkspaceMarkFailedInput,
+    ): Promise<Workspace> {
+        this.#assertEnabled();
+        this.#assertAgentId(agentId);
+        this.#assertInput(
+            workspaceMarkFailedInputSchema,
+            input,
+            "workspace initialization failure",
+        );
+        const normalized = structuredClone(input);
+        return await this.#mutate(
+            ctx,
+            agentId,
+            "mark_initialization_failed",
+            normalized.operationId,
+            normalized.workspaceId,
+            async (txCtx, request) =>
+                await this.#store.markInitializationFailed(
+                    txCtx,
+                    agentId,
+                    { workspaceId: normalized.workspaceId, error: normalized.error },
+                    request,
+                ),
+            (_before, after) => ({
+                type: "workspace_updated",
+                agentId,
+                change: "mark_initialization_failed",
+                workspace: after,
+            }),
+        );
+    }
+
+    /** Moves a workspace in the main list, placing it after another one or at the top. */
+    async reorder(
+        ctx: Context,
+        agentId: string,
+        input: WorkspaceReorderInput,
+    ): Promise<Workspace> {
+        this.#assertEnabled();
+        this.#assertAgentId(agentId);
+        this.#assertInput(workspaceReorderInputSchema, input, "workspace reorder");
+        const normalized = structuredClone(input);
+        return await this.#mutate(
+            ctx,
+            agentId,
+            "reorder",
+            normalized.operationId,
+            normalized.workspaceId,
+            async (txCtx, request) =>
+                await this.#store.reorder(
+                    txCtx,
+                    agentId,
+                    {
+                        workspaceId: normalized.workspaceId,
+                        afterId: normalized.afterId,
+                        ...(normalized.expectedVersion === undefined
+                            ? {}
+                            : { expectedVersion: normalized.expectedVersion }),
+                    },
+                    request,
+                ),
+            (before, after) =>
+                before === undefined
+                    ? undefined
+                    : {
+                          type: "workspace_reordered",
+                          agentId,
+                          workspace: after,
+                          previousOrderKey: before.orderKey,
+                      },
+        );
+    }
+
+    /**
+     * Archives a workspace: the immediate, irreversible logical decision. It leaves the active
+     * list at once and never comes back because cleanup went wrong.
+     */
+    async beginArchive(
+        ctx: Context,
+        agentId: string,
+        workspaceId: string,
+        options: WorkspaceArchiveOptions = {},
+    ): Promise<Workspace> {
+        this.#assertEnabled();
+        this.#assertAgentId(agentId);
+        this.#assertId(workspaceId, "workspace");
+        this.#assertInput(workspaceArchiveOptionsSchema, options, "workspace archive");
+        const normalized = structuredClone(options);
+        return await this.#mutate(
+            ctx,
+            agentId,
+            "begin_archive",
+            normalized.operationId,
+            workspaceId,
+            async (txCtx, request) =>
+                await this.#store.beginArchive(
+                    txCtx,
+                    agentId,
+                    {
+                        workspaceId,
+                        ...(normalized.expectedVersion === undefined
+                            ? {}
+                            : { expectedVersion: normalized.expectedVersion }),
+                    },
+                    request,
+                ),
+            (_before, after) => ({
+                type: "workspace_updated",
+                agentId,
+                change: "begin_archive",
+                workspace: after,
+            }),
+        );
+    }
+
+    /** Records that the host finished taking the workspace's folder or worktree away. */
+    async completeArchive(
+        ctx: Context,
+        agentId: string,
+        workspaceId: string,
+        options: WorkspaceArchiveOptions = {},
+    ): Promise<Workspace> {
+        this.#assertEnabled();
+        this.#assertAgentId(agentId);
+        this.#assertId(workspaceId, "workspace");
+        this.#assertInput(workspaceArchiveOptionsSchema, options, "workspace archive completion");
+        const normalized = structuredClone(options);
+        return await this.#mutate(
+            ctx,
+            agentId,
+            "complete_archive",
+            normalized.operationId,
+            workspaceId,
+            async (txCtx, request) =>
+                await this.#store.completeArchive(txCtx, agentId, { workspaceId }, request),
+            (_before, after) => ({ type: "workspace_archived", agentId, workspace: after }),
+        );
+    }
+
+    /**
+     * Archives a workspace and hands its folder to the host to remove.
+     *
+     * The archival is committed here and returned at once: the workspace has left the active list
+     * before this call answers. Removing a worktree can take minutes and can fail, so it runs on
+     * the module's cleanup lifetime instead of the caller's, and its outcome arrives later as the
+     * `workspace_archived` event or as a reported host error. Archival never fails because
+     * cleanup did.
+     */
+    async archive(
+        ctx: Context,
+        agentId: string,
+        workspaceId: string,
+        options: WorkspaceArchiveOptions = {},
+    ): Promise<Workspace> {
+        const begun = await this.beginArchive(ctx, agentId, workspaceId, options);
+        if (begun.status !== "archiving") return begun;
+        const cleanup = this.#host?.archive;
+        if (cleanup === undefined) return await this.completeArchive(ctx, agentId, workspaceId);
+        const lifetime = this.#cleanupContext;
+        if (lifetime === undefined) {
+            throw new Error(
+                "A workspace host that removes folders needs a cleanupContext to remove them on.",
+            );
+        }
+        const operationId =
+            options.operationId ??
+            (await this.#newIdentity(ctx, agentId, workspaceOperationIdSchema));
+        this.#runCleanup(lifetime, async (workerCtx) => {
+            try {
+                await cleanup(
+                    workerCtx,
+                    agentId,
+                    {
+                        workspaceId,
+                        path: begun.path,
+                        kind: begun.kind,
+                        ...(begun.gitCommonDir === undefined
+                            ? {}
+                            : { gitCommonDir: begun.gitCommonDir }),
+                    },
+                    { operation: "begin_archive", operationId },
+                );
+            } catch (error: unknown) {
+                await this.#reportHostError(workerCtx, workspaceId, "archive", error);
+                return;
+            }
+            await this.completeArchive(workerCtx, agentId, workspaceId);
+        });
+        return begun;
+    }
+
+    /** Waits for the folder removals this module started. Closing and tests both need it. */
+    async whenCleanupSettles(): Promise<void> {
+        while (this.#cleanupTasks.size > 0) {
+            await Promise.allSettled([...this.#cleanupTasks]);
+        }
+    }
+
+    /** Persists the Git state the host observed, writing only when something actually changed. */
+    async applyGitFacts(
+        ctx: Context,
+        agentId: string,
+        input: WorkspaceApplyGitFactsInput,
+    ): Promise<Workspace> {
+        this.#assertEnabled();
+        this.#assertAgentId(agentId);
+        this.#assertInput(workspaceApplyGitFactsInputSchema, input, "workspace Git facts");
+        const normalized = structuredClone(input);
+        return await this.#mutate(
+            ctx,
+            agentId,
+            "apply_git_facts",
+            normalized.operationId,
+            normalized.workspaceId,
+            async (txCtx, request) =>
+                await this.#store.applyGitFacts(
+                    txCtx,
+                    agentId,
+                    { workspaceId: normalized.workspaceId, facts: normalized.facts },
+                    request,
+                ),
+            (_before, after) => ({
+                type: "workspace_updated",
+                agentId,
+                change: "apply_git_facts",
+                workspace: after,
+            }),
+        );
+    }
+
+    /** The same, plus whether the folder was still there when the host looked. */
+    async applyProbe(
+        ctx: Context,
+        agentId: string,
+        input: WorkspaceApplyProbeInput,
+    ): Promise<Workspace> {
+        this.#assertEnabled();
+        this.#assertAgentId(agentId);
+        this.#assertInput(workspaceApplyProbeInputSchema, input, "workspace probe");
+        const normalized = structuredClone(input);
+        return await this.#mutate(
+            ctx,
+            agentId,
+            "apply_probe",
+            normalized.operationId,
+            normalized.workspaceId,
+            async (txCtx, request) =>
+                await this.#store.applyProbe(
+                    txCtx,
+                    agentId,
+                    {
+                        workspaceId: normalized.workspaceId,
+                        presence: normalized.presence,
+                        facts: normalized.facts,
+                    },
+                    request,
+                ),
+            (_before, after) => ({
+                type: "workspace_updated",
+                agentId,
+                change: "apply_probe",
+                workspace: after,
+            }),
+        );
+    }
+
+    /**
+     * The workspaces someone can still work in. Archived rows are history: they are only listed
+     * when a caller asks for them by name, so a list nobody qualified never shows a folder that
+     * is already gone.
+     */
     async listPage(
         ctx: Context,
         agentId: string,
@@ -353,10 +830,9 @@ export class WorkspacesModule implements AgentModule {
         if (limit > this.#maxPageSize) {
             throw new Error(`Workspace page limit cannot exceed ${String(this.#maxPageSize)}.`);
         }
-        if (query.cursor !== undefined) parseCursor(query.cursor);
         const normalized = {
             ...structuredClone(query),
-            includeArchived: query.includeArchived !== false,
+            includeArchived: query.includeArchived === true,
             limit,
         };
         const raw = await requirePromise(
@@ -364,7 +840,7 @@ export class WorkspacesModule implements AgentModule {
             "Workspace store list",
         );
         assertWorkspacePage(raw);
-        this.#assertPage(raw, normalized.cursor, limit);
+        this.#assertPage(raw, normalized.cursor ?? 0, limit);
         for (const workspace of raw.workspaces) {
             assertWorkspaceRecord(workspace);
             if (
@@ -374,14 +850,14 @@ export class WorkspacesModule implements AgentModule {
                 throw new Error("Workspace page returned a row outside the requested project.");
             }
             if (
-                normalized.includeArchived === false &&
+                !normalized.includeArchived &&
                 (workspace.status === "archived" || workspace.status === "archiving")
             ) {
                 throw new Error("Workspace page returned an archived row without includeArchived.");
             }
             await this.#authorize(ctx, agentId, workspace.ownerAgentId, "list");
         }
-        return structuredClone(fitPageForModel(raw, normalized.cursor, this.#maxOutputCharacters));
+        return structuredClone(fitPageForModel(raw, this.#maxOutputCharacters));
     }
 
     async list(
@@ -411,6 +887,27 @@ export class WorkspacesModule implements AgentModule {
         return structuredClone(raw);
     }
 
+    /** Resolves a folder to the workspace that lives in it, for a host resolving a cwd. */
+    async getByPath(ctx: Context, agentId: string, path: string): Promise<Workspace | undefined> {
+        this.#assertEnabled();
+        this.#assertAgentId(agentId);
+        if (typeof path !== "string" || path.length === 0) {
+            throw new Error("Workspace path is invalid.");
+        }
+        const raw = await requirePromise(
+            this.#store.getByPath(ctx, agentId, path),
+            "Workspace store get by path",
+        );
+        if (raw === undefined) return undefined;
+        assertWorkspace(raw);
+        assertWorkspaceRecord(raw);
+        if (raw.path !== path) {
+            throw new Error("Workspace store returned a workspace with a different path.");
+        }
+        await this.#authorize(ctx, agentId, raw.ownerAgentId, "get");
+        return structuredClone(raw);
+    }
+
     /** Read one workspace with a bounded, cursor-addressable detail stream. */
     async getPage(
         ctx: Context,
@@ -426,33 +923,22 @@ export class WorkspacesModule implements AgentModule {
         }
         const workspace = await this.get(ctx, agentId, workspaceId);
         if (workspace === undefined) return { workspace: null };
-
         const detail = workspaceDetailText(workspace);
-        if (
-            !Value.Check(workspaceDetailPageSchema, {
+        const cursor = query.cursor ?? 0;
+        const limit = query.limit ?? MAX_WORKSPACE_DETAIL_PAGE_SIZE;
+        if (cursor > detail.length) {
+            throw new Error("Workspace detail cursor is past the available detail.");
+        }
+        return fitWorkspaceDetailPage(
+            {
                 workspace,
-                detail: "",
-                detailOffset: 0,
-                detailTotal: detail.length,
-            })
-        ) {
-            throw new Error("Workspace detail exceeds its bounded traversal length.");
-        }
-        const detailOffset = query.detailOffset ?? 0;
-        const detailLimit = query.detailLimit ?? MAX_WORKSPACE_DETAIL_PAGE_SIZE;
-        if (detailOffset > detail.length) {
-            throw new Error("Workspace detail offset exceeds the available detail.");
-        }
-        const page: WorkspaceDetailPage = {
-            workspace,
-            detail: detail.slice(detailOffset, detailOffset + detailLimit),
-            detailOffset,
-            detailTotal: detail.length,
-            ...(detailOffset + detailLimit < detail.length
-                ? { nextDetailOffset: detailOffset + detailLimit }
-                : {}),
-        };
-        return fitWorkspaceDetailPage(page, this.#maxOutputCharacters);
+                detail: detail.slice(cursor, cursor + limit),
+                cursor,
+                total: detail.length,
+                ...(cursor + limit < detail.length ? { nextCursor: cursor + limit } : {}),
+            },
+            this.#maxOutputCharacters,
+        );
     }
 
     async transfer(
@@ -465,191 +951,53 @@ export class WorkspacesModule implements AgentModule {
         this.#assertInput(workspaceTransferInputSchema, input, "workspace transfer");
         const normalized = structuredClone(input);
         const request = stripOperationId(normalized);
-        const requestedOperationId = normalized.operationId;
         const operationId =
-            requestedOperationId ??
+            normalized.operationId ??
             (await this.#newIdentity(ctx, agentId, workspaceOperationIdSchema));
-        const operation = this.#operation("transfer", operationId);
+        const mutationRequest: WorkspaceMutationRequest = { operation: "transfer", operationId };
         const subjectId =
             "workspaceId" in request ? request.workspaceId : request.targetWorkspaceId;
 
-        const change = await this.#runTransaction(ctx, agentId, async (txCtx) => {
-            const before = await this.#getRequiredOptional(txCtx, agentId, subjectId);
-            if ("workspaceId" in request) {
-                if (before === undefined)
-                    throw new Error(`Workspace "${subjectId}" was not found.`);
-                this.#assertOwner(agentId, before);
-            } else {
-                if (before === undefined) {
-                    throw new Error(`Target workspace "${subjectId}" was not found.`);
-                }
-                await this.#authorize(txCtx, agentId, before.ownerAgentId, "transfer");
-            }
-            if (before === undefined) {
-                throw new Error("Workspace transfer has no authoritative before-state.");
-            }
+        const change = await this.#mutations.runTransaction(ctx, async (txCtx) => {
+            const before = await this.#mutations.getRequired(txCtx, agentId, subjectId);
+            if ("workspaceId" in request) this.#assertOwner(agentId, before);
+            else await this.#authorize(txCtx, agentId, before.ownerAgentId, "transfer");
 
             const raw = await requirePromise(
-                this.#store.transfer(
-                    txCtx,
-                    agentId,
-                    structuredClone(request),
-                    this.#request(operation),
-                ),
+                this.#store.transfer(txCtx, agentId, structuredClone(request), mutationRequest),
                 "Workspace store transfer",
             );
-            const result = normalizeTransferStoreResult(raw, agentId, operation);
-            this.#assertTransferResultIdentity(result, operation, agentId);
-            assertTransferRequestResult(result, request);
-            const requestedResult =
-                "targetWorkspaceId" in request &&
-                result.state === "transferred" &&
-                result.targetWorkspaceId === undefined
-                    ? { ...result, targetWorkspaceId: request.targetWorkspaceId }
-                    : result;
-
-            const after = await this.#getRequiredOptional(txCtx, agentId, subjectId);
-            if (after === undefined) {
-                throw new Error("Workspace transfer did not return authoritative state.");
+            const result = normalizeTransferStoreResult(raw, agentId, operationId);
+            if (result.agentId !== agentId || result.operationId !== operationId) {
+                throw new Error("Workspace transfer result identity does not match the request.");
             }
-            assertWorkspaceTransferTransition(before, after, request);
+            assertTransferRequestResult(result, request);
+            const after = await this.#mutations.getRequired(txCtx, agentId, subjectId);
             if ("workspaceId" in request && after.projectRef !== request.targetProjectRef) {
                 throw new Error(
                     "Workspace project transfer did not reach the requested project reference.",
                 );
             }
-            let reconciledResult =
-                requestedResult.state === "transferred" && requestedResult.workspace !== undefined
-                    ? await (async (): Promise<WorkspaceTransferResult> => {
-                          const targetId = requestedResult.workspace.id;
-                          const target = await this.#getRequired(txCtx, agentId, targetId);
-                          await this.#authorize(txCtx, agentId, target.ownerAgentId, "transfer");
-                          if (
-                              requestedResult.workspace.ownerAgentId !== undefined &&
-                              requestedResult.workspace.ownerAgentId !== target.ownerAgentId
-                          ) {
-                              throw new Error(
-                                  "Workspace transfer result changed durable workspace ownership.",
-                              );
-                          }
-                          if (
-                              requestedResult.targetWorkspaceId !== undefined &&
-                              requestedResult.targetWorkspaceId !== target.id
-                          ) {
-                              throw new Error(
-                                  "Workspace transfer target does not match its result.",
-                              );
-                          }
-                          if (
-                              requestedResult.workspace.id !== target.id ||
-                              requestedResult.workspace.projectRef !== target.projectRef ||
-                              requestedResult.workspace.path !== target.path ||
-                              (requestedResult.workspace.ownerAgentId !== undefined &&
-                                  requestedResult.workspace.ownerAgentId !== target.ownerAgentId)
-                          ) {
-                              throw new Error(
-                                  "Workspace transfer result does not match authoritative state.",
-                              );
-                          }
-                          if (
-                              "workspaceId" in request &&
-                              target.projectRef !== request.targetProjectRef
-                          ) {
-                              throw new Error(
-                                  "Workspace project transfer target does not match the requested project.",
-                              );
-                          }
-                          return {
-                              ...requestedResult,
-                              workspace: compactWorkspace(target),
-                          };
-                      })()
-                    : requestedResult;
-            const expectedChanged = !sameJson(before, after);
-            if (!Value.Check(workspaceTransferResultSchema, raw)) {
-                reconciledResult = { ...reconciledResult, changed: expectedChanged };
-            } else if (reconciledResult.changed !== expectedChanged) {
-                throw new Error("Workspace transfer changed flag is not authoritative.");
-            }
-            if (reconciledResult.changed) {
-                const event =
-                    reconciledResult.state === "scheduled"
-                        ? await this.#newEvent(txCtx, agentId, {
-                              type: "workspace_transfer_scheduled",
-                              agentId,
-                              targetWorkspaceId: reconciledResult.targetWorkspaceId ?? subjectId,
-                          })
-                        : await this.#newEvent(txCtx, agentId, {
-                              type: "workspace_transferred",
-                              agentId,
-                              workspace: after!,
-                              ...("workspaceId" in request && before !== undefined
-                                  ? { previousProjectRef: before.projectRef }
-                                  : {}),
-                          });
-                await this.#observe(txCtx, event);
-                return { result: reconciledResult, event };
-            }
-            return { result: reconciledResult };
+            if (!result.changed) return { result };
+            const event =
+                result.state === "scheduled"
+                    ? await this.#mutations.newEvent(txCtx, agentId, {
+                          type: "workspace_transfer_scheduled",
+                          agentId,
+                          targetWorkspaceId: result.targetWorkspaceId,
+                      })
+                    : await this.#mutations.newEvent(txCtx, agentId, {
+                          type: "workspace_transferred",
+                          agentId,
+                          workspace: after,
+                          ...("workspaceId" in request
+                              ? { previousProjectRef: before.projectRef }
+                              : {}),
+                      });
+            await this.#mutations.observe(txCtx, event);
+            return { result, event };
         });
         return structuredClone(requireTransferFromResult(change.result));
-    }
-
-    async archive(
-        ctx: Context,
-        agentId: string,
-        workspaceId: string,
-        options?: WorkspaceArchiveOptions,
-    ): Promise<Workspace> {
-        this.#assertEnabled();
-        this.#assertAgentId(agentId);
-        this.#assertId(workspaceId, "workspace");
-        if (options !== undefined) {
-            this.#assertInput(workspaceArchiveOptionsSchema, options, "workspace archive");
-        }
-        const normalizedOptions = options === undefined ? {} : structuredClone(options);
-        const operationId =
-            normalizedOptions.operationId ??
-            (await this.#newIdentity(ctx, agentId, workspaceOperationIdSchema));
-        const operation = this.#operation("archive", operationId);
-        const request: WorkspaceStoreArchiveInput = { workspaceId };
-
-        const change = await this.#runTransaction(ctx, agentId, async (txCtx) => {
-            const before = await this.#getRequired(txCtx, agentId, workspaceId);
-            this.#assertOwner(agentId, before);
-
-            const raw = await requirePromise(
-                this.#store.archive(txCtx, agentId, request, this.#request(operation)),
-                "Workspace store archive",
-            );
-            assertWorkspaceArchiveResult(raw);
-            this.#assertResultIdentity(raw, operation, agentId, "archive");
-            if (raw.workspace.id !== workspaceId) {
-                throw new Error("Workspace archive result has a different workspace identity.");
-            }
-            this.#assertOwner(agentId, raw.workspace);
-            const after = await this.#getRequired(txCtx, agentId, workspaceId);
-            if (!sameJson(after, raw.workspace)) {
-                throw new Error("Workspace archive result does not match authoritative state.");
-            }
-            const changed = !sameJson(before, after);
-            assertWorkspaceArchiveTransition(before, after, raw.workspace, changed);
-            if (raw.changed !== changed) {
-                throw new Error("Workspace archive changed flag is not authoritative.");
-            }
-            const result = structuredClone(raw);
-            if (changed) {
-                const event = await this.#newEvent(txCtx, agentId, {
-                    type: "workspace_archived",
-                    agentId,
-                    workspace: after,
-                });
-                await this.#observe(txCtx, event);
-                return { result, event };
-            }
-            return { result };
-        });
-        return structuredClone(requireWorkspaceFromResult(change.result));
     }
 
     async branchMetadata(
@@ -660,7 +1008,7 @@ export class WorkspacesModule implements AgentModule {
         this.#assertEnabled();
         this.#assertAgentId(agentId);
         this.#assertId(workspaceId, "workspace");
-        const workspace = await this.#getRequired(ctx, agentId, workspaceId);
+        const workspace = await this.#mutations.getRequired(ctx, agentId, workspaceId);
         await this.#authorize(ctx, agentId, workspace.ownerAgentId, "branch_metadata");
         const raw = await requirePromise(
             this.#store.branchMetadata(ctx, agentId, workspaceId),
@@ -671,15 +1019,6 @@ export class WorkspacesModule implements AgentModule {
             throw new Error("Workspace branch metadata belongs to another workspace.");
         }
         return structuredClone(raw);
-    }
-
-    async getBranchMetadata(
-        ctx: Context,
-        agentId: string,
-        workspaceId: string,
-    ): Promise<WorkspaceBranchMetadata> {
-        this.#assertEnabled();
-        return await this.branchMetadata(ctx, agentId, workspaceId);
     }
 
     /** Read branch metadata with a bounded, cursor-addressable detail stream. */
@@ -697,41 +1036,21 @@ export class WorkspacesModule implements AgentModule {
         }
         const metadata = await this.branchMetadata(ctx, agentId, workspaceId);
         const detail = workspaceBranchMetadataDetailText(metadata);
-        if (
-            !Value.Check(workspaceBranchMetadataPageSchema, {
+        const cursor = query.cursor ?? 0;
+        const limit = query.limit ?? MAX_WORKSPACE_BRANCH_METADATA_DETAIL_PAGE_SIZE;
+        if (cursor > detail.length) {
+            throw new Error("Workspace branch metadata cursor is past the available detail.");
+        }
+        return fitWorkspaceBranchMetadataPage(
+            {
                 ...metadata,
-                detail: "",
-                detailOffset: 0,
-                detailTotal: detail.length,
-            })
-        ) {
-            throw new Error("Workspace branch metadata exceeds its bounded traversal length.");
-        }
-        const detailOffset = query.detailOffset ?? 0;
-        const detailLimit = query.detailLimit ?? MAX_WORKSPACE_BRANCH_METADATA_DETAIL_PAGE_SIZE;
-        if (detailOffset > detail.length) {
-            throw new Error("Workspace branch metadata offset exceeds the available detail.");
-        }
-        const page: WorkspaceBranchMetadataPage = {
-            ...metadata,
-            detail: detail.slice(detailOffset, detailOffset + detailLimit),
-            detailOffset,
-            detailTotal: detail.length,
-            ...(detailOffset + detailLimit < detail.length
-                ? { nextDetailOffset: detailOffset + detailLimit }
-                : {}),
-        };
-        return fitWorkspaceBranchMetadataPage(page, this.#maxOutputCharacters);
-    }
-
-    async getBranchMetadataPage(
-        ctx: Context,
-        agentId: string,
-        workspaceId: string,
-        query: WorkspaceBranchMetadataDetailQuery = {},
-    ): Promise<WorkspaceBranchMetadataPage> {
-        this.#assertEnabled();
-        return await this.branchMetadataPage(ctx, agentId, workspaceId, query);
+                detail: detail.slice(cursor, cursor + limit),
+                cursor,
+                total: detail.length,
+                ...(cursor + limit < detail.length ? { nextCursor: cursor + limit } : {}),
+            },
+            this.#maxOutputCharacters,
+        );
     }
 
     /** Bounded rows are intentionally compact; get_workspace is the detail path. */
@@ -755,29 +1074,12 @@ export class WorkspacesModule implements AgentModule {
         return visible.join("\n");
     }
 
-    #assertEnabled(): void {
-        if (!this.#enabled) {
-            throw new Error("Workspaces are disabled by configuration.");
-        }
-    }
-
     /** Render one complete workspace detail page without silently dropping fields. */
     formatDetailPageForModel(page: WorkspaceDetailPage | Workspace): string {
         const detailPage = Value.Check(workspaceDetailPageSchema, page)
             ? page
             : Value.Check(workspaceSchema, page)
-              ? fitWorkspaceDetailPage(
-                    {
-                        workspace: structuredClone(page),
-                        detail: workspaceDetailText(page).slice(0, MAX_WORKSPACE_DETAIL_PAGE_SIZE),
-                        detailOffset: 0,
-                        detailTotal: workspaceDetailText(page).length,
-                        ...(workspaceDetailText(page).length > MAX_WORKSPACE_DETAIL_PAGE_SIZE
-                            ? { nextDetailOffset: MAX_WORKSPACE_DETAIL_PAGE_SIZE }
-                            : {}),
-                    },
-                    this.#maxOutputCharacters,
-                )
+              ? firstWorkspaceDetailPage(page, this.#maxOutputCharacters)
               : undefined;
         if (detailPage === undefined) {
             throw new Error("Cannot format an invalid workspace detail page.");
@@ -797,22 +1099,10 @@ export class WorkspacesModule implements AgentModule {
         if (prefix.length >= this.#maxOutputCharacters) {
             throw new Error("Workspace operation label exceeds the model-output bound.");
         }
-        const detail = workspaceDetailText(workspace);
-        const page = fitWorkspaceDetailPage(
-            {
-                workspace: structuredClone(workspace),
-                detail: detail.slice(0, Math.min(detail.length, MAX_WORKSPACE_DETAIL_PAGE_SIZE)),
-                detailOffset: 0,
-                detailTotal: detail.length,
-                ...(detail.length > MAX_WORKSPACE_DETAIL_PAGE_SIZE
-                    ? { nextDetailOffset: MAX_WORKSPACE_DETAIL_PAGE_SIZE }
-                    : {}),
-            },
-            this.#maxOutputCharacters - prefix.length,
-        );
+        const budget = this.#maxOutputCharacters - prefix.length;
         const output = `${prefix}${formatWorkspaceDetailPage(
-            page,
-            this.#maxOutputCharacters - prefix.length,
+            firstWorkspaceDetailPage(workspace, budget),
+            budget,
         )}`;
         if (output.length > this.#maxOutputCharacters) {
             throw new Error("Workspace operation output exceeds its model-output bound.");
@@ -832,21 +1122,7 @@ export class WorkspacesModule implements AgentModule {
             ? page
             : Value.Check(workspaceBranchMetadataSchema, page)
               ? fitWorkspaceBranchMetadataPage(
-                    {
-                        ...structuredClone(page),
-                        detail: workspaceBranchMetadataDetailText(page).slice(
-                            0,
-                            MAX_WORKSPACE_BRANCH_METADATA_DETAIL_PAGE_SIZE,
-                        ),
-                        detailOffset: 0,
-                        detailTotal: workspaceBranchMetadataDetailText(page).length,
-                        ...(workspaceBranchMetadataDetailText(page).length >
-                        MAX_WORKSPACE_BRANCH_METADATA_DETAIL_PAGE_SIZE
-                            ? {
-                                  nextDetailOffset: MAX_WORKSPACE_BRANCH_METADATA_DETAIL_PAGE_SIZE,
-                              }
-                            : {}),
-                    },
+                    firstBranchMetadataPage(page),
                     this.#maxOutputCharacters,
                 )
               : undefined;
@@ -868,16 +1144,12 @@ export class WorkspacesModule implements AgentModule {
 
     formatPageForModel(page: WorkspacePage): string {
         assertWorkspacePage(page);
-        const start =
-            page.nextCursor === undefined
-                ? undefined
-                : String(Math.max(0, parseCursor(page.nextCursor) - page.workspaces.length));
-        const visiblePage = fitPageForModel(page, start, this.#maxOutputCharacters);
+        const visiblePage = fitPageForModel(page, this.#maxOutputCharacters);
         const rows = visiblePage.workspaces.map(workspaceRow);
         const continuation =
             visiblePage.nextCursor === undefined
                 ? undefined
-                : `More workspaces at cursor ${visiblePage.nextCursor}.`;
+                : `More workspaces at cursor ${String(visiblePage.nextCursor)}.`;
         let output = rows.length === 0 ? "No workspaces." : rows.join("\n");
         if (continuation !== undefined) {
             const withContinuation = `${output}\n${continuation}`;
@@ -886,25 +1158,133 @@ export class WorkspacesModule implements AgentModule {
         return output;
     }
 
-    async #runTransaction(
+    /** `#mutateResult` for the callers that only care about the row it produced. */
+    async #mutate(
         ctx: Context,
         agentId: string,
-        work: (txCtx: Context) => Promise<WorkspaceChange>,
-    ): Promise<WorkspaceChange> {
-        let expected: WorkspaceChange | undefined;
-        const raw = await requirePromise(
-            ctx.inTx(async (txCtx) => {
-                const change = await work(txCtx);
-                expected = deepFreeze(structuredClone(change));
-                return structuredClone(expected);
-            }),
-            "Workspace store transaction",
+        operation: WorkspaceMutationOperation,
+        requestedOperationId: string | undefined,
+        workspaceId: string,
+        run: (
+            txCtx: Context,
+            request: WorkspaceMutationRequest,
+        ) => Promise<WorkspaceMutationResult>,
+        describe: (
+            before: Workspace | undefined,
+            after: Workspace,
+        ) => WorkspaceEventPayload | undefined,
+    ): Promise<Workspace> {
+        return (
+            await this.#mutateResult(
+                ctx,
+                agentId,
+                operation,
+                requestedOperationId,
+                workspaceId,
+                run,
+                describe,
+            )
+        ).workspace;
+    }
+
+    async #mutateResult(
+        ctx: Context,
+        agentId: string,
+        operation: WorkspaceMutationOperation,
+        requestedOperationId: string | undefined,
+        workspaceId: string,
+        run: (
+            txCtx: Context,
+            request: WorkspaceMutationRequest,
+        ) => Promise<WorkspaceMutationResult>,
+        describe: (
+            before: Workspace | undefined,
+            after: Workspace,
+        ) => WorkspaceEventPayload | undefined,
+    ): Promise<WorkspaceMutationResult> {
+        const operationId =
+            requestedOperationId ??
+            (await this.#newIdentity(ctx, agentId, workspaceOperationIdSchema));
+        return await this.#mutations.runResult(
+            ctx,
+            agentId,
+            operation,
+            operationId,
+            workspaceId,
+            run,
+            describe,
         );
-        assertWorkspaceTransactionChange(raw);
-        if (expected === undefined || !sameJson(raw, expected)) {
-            throw new Error("Workspace transaction returned a substituted change.");
+    }
+
+    /**
+     * Asks the host to move the Git branch after the name has already been recorded, then records
+     * whichever branch Git ended up on. A refusal leaves the previous branch on the record rather
+     * than claiming a branch that does not exist.
+     */
+    async #moveHostBranch(
+        ctx: Context,
+        agentId: string,
+        workspace: Workspace,
+        previousBranch: string,
+    ): Promise<Workspace> {
+        const move = this.#host?.renameBranch;
+        if (move === undefined) return workspace;
+        const operationId = await this.#newIdentity(ctx, agentId, workspaceOperationIdSchema);
+        let branch: string;
+        try {
+            branch =
+                (await move(
+                    ctx,
+                    agentId,
+                    {
+                        workspaceId: workspace.id,
+                        path: workspace.path,
+                        kind: workspace.kind,
+                        name: workspace.name,
+                        branch: workspace.branch,
+                        previousBranch,
+                    },
+                    { operation: "rename", operationId },
+                )) ?? workspace.branch;
+        } catch (error: unknown) {
+            await this.#reportHostError(ctx, workspace.id, "rename", error);
+            branch = previousBranch;
         }
-        return raw;
+        if (branch === workspace.branch) return workspace;
+        return await this.setBranch(ctx, agentId, { workspaceId: workspace.id, branch });
+    }
+
+    /**
+     * Starts folder removal on the module's own lifetime. The caller's context is deliberately not
+     * used: an archive that has already been committed must not be tied to the request that asked
+     * for it, and a failure here cannot reach that caller as an error.
+     */
+    #runCleanup(lifetime: Context, work: (ctx: Context) => Promise<void>): void {
+        const task = work(lifetime)
+            .catch(() => undefined)
+            .finally(() => {
+                this.#cleanupTasks.delete(task);
+            });
+        this.#cleanupTasks.add(task);
+    }
+
+    async #reportHostError(
+        ctx: Context,
+        workspaceId: string,
+        operation: "archive" | "rename",
+        error: unknown,
+    ): Promise<void> {
+        try {
+            await this.#onHostError?.(ctx, workspaceId, operation, safeError(error));
+        } catch {
+            // Reporting is advisory once the durable decision has already been recorded.
+        }
+    }
+
+    #assertEnabled(): void {
+        if (!this.#enabled) {
+            throw new Error("Workspaces are disabled by configuration.");
+        }
     }
 
     async #newIdentity(
@@ -920,149 +1300,19 @@ export class WorkspacesModule implements AgentModule {
         return value;
     }
 
-    #operation(kind: WorkspaceMutationOperation, operationId: string): WorkspaceOperation {
-        const operation = { kind, operationId };
-        if (!Value.Check(workspaceMutationRequestSchema, toMutationRequest(operation))) {
-            throw new Error("Workspace module created an invalid operation.");
-        }
-        return operation;
-    }
-
-    #request(operation: WorkspaceOperation): WorkspaceMutationRequest {
-        return toMutationRequest(operation);
-    }
-
-    async #newEvent(
-        ctx: Context,
-        agentId: string,
-        payload:
-            | {
-                  readonly type: "workspace_created";
-                  readonly agentId: string;
-                  readonly workspace: Workspace;
-              }
-            | {
-                  readonly type: "workspace_transferred";
-                  readonly agentId: string;
-                  readonly workspace: Workspace;
-                  readonly previousProjectRef?: string;
-              }
-            | {
-                  readonly type: "workspace_renamed";
-                  readonly agentId: string;
-                  readonly workspace: Workspace;
-                  readonly previousName: string;
-              }
-            | {
-                  readonly type: "workspace_archived";
-                  readonly agentId: string;
-                  readonly workspace: Workspace;
-              }
-            | {
-                  readonly type: "workspace_transfer_scheduled";
-                  readonly agentId: string;
-                  readonly targetWorkspaceId: string;
-              },
-    ): Promise<WorkspaceEvent> {
-        const rawId = this.#eventIdFactory(ctx, agentId);
-        const eventId = isPromiseLike(rawId) ? await rawId : rawId;
-        if (!Value.Check(workspaceEventIdSchema, eventId)) {
-            throw new Error("Workspace event ID factory returned an invalid ID.");
-        }
-        const at = this.#clock(ctx, agentId);
-        if (!Value.Check(workspaceTimestampSchema, at)) {
-            throw new Error("Workspace clock must return a non-negative integer.");
-        }
-        const event = { ...payload, eventId, at };
-        if (!Value.Check(workspaceEventSchema, event)) {
-            throw new Error("Workspace module created an invalid event.");
-        }
-        return deepFreeze(structuredClone(event)) as WorkspaceEvent;
-    }
-
-    async #observe(ctx: Context, event: WorkspaceEvent): Promise<void> {
-        if (!Value.Check(workspaceEventSchema, event) || !isDeepFrozen(event)) {
-            throw new Error("Workspace module created an invalid unfrozen event.");
-        }
-        const transactional = this.#listener?.onEventTransactional;
-        if (transactional !== undefined) {
-            await transactional.call(this.#listener, ctx, event);
-        }
-        afterCommit(ctx, (postCommitCtx) => this.#notifyPostCommit(postCommitCtx, event));
-    }
-
-    async #notifyPostCommit(ctx: Context, event: WorkspaceEvent): Promise<void> {
-        const listener = this.#listener?.onEvent;
-        if (listener !== undefined) {
-            await this.#notifyObserver(ctx, event, () => listener.call(this.#listener, ctx, event));
-        }
-    }
-
-    async #notifyObserver(
-        ctx: Context,
-        event: WorkspaceEvent,
-        observer: () => void | Promise<void>,
-    ): Promise<void> {
-        try {
-            await observer();
-        } catch (error: unknown) {
-            try {
-                await this.#onPostCommitError?.(ctx, event, safeError(error));
-            } catch {
-                // Observer reporting is advisory after durable state has settled.
-            }
-        }
-    }
-
-    async #getRequired(ctx: Context, agentId: string, workspaceId: string): Promise<Workspace> {
-        const workspace = await this.#getRequiredOptional(ctx, agentId, workspaceId);
-        if (workspace === undefined) {
-            throw new Error(`Workspace "${workspaceId}" was not found.`);
-        }
-        return workspace;
-    }
-
-    async #getRequiredOptional(
-        ctx: Context,
-        agentId: string,
-        workspaceId: string,
-    ): Promise<Workspace | undefined> {
-        const raw = await requirePromise(
-            this.#store.get(ctx, agentId, workspaceId),
-            "Workspace store get",
-        );
-        if (raw === undefined) return undefined;
-        assertWorkspace(raw);
-        assertWorkspaceRecord(raw);
-        if (raw.id !== workspaceId) {
-            throw new Error("Workspace store returned a different workspace identity.");
-        }
-        return structuredClone(raw);
-    }
-
     async #authorize(
         ctx: Context,
         actingAgentId: string,
         ownerAgentId: string,
         action: WorkspaceAuthorizationAction,
     ): Promise<void> {
-        if (actingAgentId === ownerAgentId) return;
-        const authorization = this.#authorization;
-        if (authorization === undefined) {
-            throw new Error(
-                `Agent "${actingAgentId}" is not authorized to ${action} workspace data owned by "${ownerAgentId}".`,
-            );
-        }
-        const raw = authorization(ctx, actingAgentId, ownerAgentId, action);
-        const allowed = isPromiseLike(raw) ? await raw : raw;
-        if (typeof allowed !== "boolean") {
-            throw new Error("Workspace authorization returned an invalid result.");
-        }
-        if (!allowed) {
-            throw new Error(
-                `Agent "${actingAgentId}" is not authorized to ${action} workspace data owned by "${ownerAgentId}".`,
-            );
-        }
+        await authorizeWorkspaceAccess(
+            ctx,
+            this.#authorization,
+            actingAgentId,
+            ownerAgentId,
+            action,
+        );
     }
 
     #assertOwner(agentId: string, workspace: Workspace): void {
@@ -1093,66 +1343,26 @@ export class WorkspacesModule implements AgentModule {
         }
     }
 
-    #assertPage(page: WorkspacePage, cursor: string | undefined, limit: number): void {
+    #assertPage(page: WorkspacePage, cursor: number, limit: number): void {
         if (page.workspaces.length > limit) {
             throw new Error("Workspace store returned more records than requested.");
         }
-        for (let index = 1; index < page.workspaces.length; index += 1) {
-            const previous = page.workspaces[index - 1]!;
-            const current = page.workspaces[index]!;
-            if (current.id <= previous.id) {
-                throw new Error(
-                    "Workspace page identities must be unique and ordered by ascending ID.",
-                );
+        if (page.cursor !== cursor) {
+            throw new Error("Workspace page did not answer the requested cursor.");
+        }
+        const seen = new Set<string>();
+        for (const workspace of page.workspaces) {
+            if (seen.has(workspace.id)) {
+                throw new Error("Workspace page repeated a workspace identity.");
             }
+            seen.add(workspace.id);
         }
         if (page.nextCursor === undefined) return;
         if (page.workspaces.length === 0) {
             throw new Error("Workspace page cannot advance an empty page.");
         }
-        const start = cursor === undefined ? 0 : parseCursor(cursor);
-        const next = parseCursor(page.nextCursor);
-        if (next !== start + page.workspaces.length) {
+        if (page.nextCursor !== cursor + page.workspaces.length) {
             throw new Error("Workspace page cursor must advance exactly by visible records.");
-        }
-    }
-
-    #assertResultIdentity(
-        result: WorkspaceCreateResult | WorkspaceArchiveResult,
-        operation: WorkspaceOperation,
-        agentId: string,
-        kind: "create" | "archive",
-    ): void {
-        if (
-            result.agentId !== agentId ||
-            result.operation !== kind ||
-            result.operationId !== operation.operationId
-        ) {
-            throw new Error("Workspace mutation result identity does not match the request.");
-        }
-    }
-
-    #assertTransferResultIdentity(
-        result: WorkspaceTransferResult,
-        operation: WorkspaceOperation,
-        agentId: string,
-    ): void {
-        if (result.agentId !== agentId || result.operationId !== operation.operationId) {
-            throw new Error("Workspace transfer result identity does not match the request.");
-        }
-    }
-
-    #assertCreatedWorkspace(workspace: Workspace, request: WorkspaceStoreCreateInput): void {
-        assertWorkspace(workspace);
-        if (
-            workspace.id !== request.id ||
-            workspace.ownerAgentId !== request.ownerAgentId ||
-            workspace.name !== request.name ||
-            (request.projectRef !== undefined && workspace.projectRef !== request.projectRef) ||
-            (request.path !== undefined && workspace.path !== request.path) ||
-            (request.baseRef !== undefined && workspace.baseRef !== request.baseRef)
-        ) {
-            throw new Error("Workspace create result does not match the requested identity.");
         }
     }
 }
@@ -1180,12 +1390,6 @@ function assertTransferRequestResult(
 ): void {
     if ("targetWorkspaceId" in request) {
         if (
-            result.targetWorkspaceId !== undefined &&
-            result.targetWorkspaceId !== request.targetWorkspaceId
-        ) {
-            throw new Error("Workspace session transfer target does not match the request.");
-        }
-        if (
             result.state === "scheduled" &&
             result.targetWorkspaceId !== request.targetWorkspaceId
         ) {
@@ -1198,7 +1402,6 @@ function assertTransferRequestResult(
         }
         return;
     }
-
     if (result.state !== "transferred") {
         throw new Error("Workspace project transfer must return a transferred result.");
     }
@@ -1212,473 +1415,34 @@ function assertTransferRequestResult(
     }
 }
 
-function assertWorkspaceTransferTransition(
-    before: Workspace,
-    after: Workspace,
-    request: WorkspaceSessionTransferInput | WorkspaceProjectTransferInput,
-): void {
-    if (before.id !== after.id || before.ownerAgentId !== after.ownerAgentId) {
-        throw new Error("Workspace transfer changed durable identity or ownership.");
-    }
-    if (
-        before.name !== after.name ||
-        before.path !== after.path ||
-        before.baseRef !== after.baseRef ||
-        before.status !== after.status ||
-        before.createdAt !== after.createdAt ||
-        before.archivedAt !== after.archivedAt
-    ) {
-        throw new Error("Workspace transfer changed fields outside the requested transition.");
-    }
-    if ("workspaceId" in request) {
-        if (after.projectRef !== request.targetProjectRef) {
-            throw new Error(
-                "Workspace project transfer did not reach the requested project reference.",
-            );
-        }
-        if (after.projectRef === before.projectRef) {
-            if (after.updatedAt !== before.updatedAt) {
-                throw new Error(
-                    "Workspace project transfer changed updatedAt without changing projectRef.",
-                );
-            }
-        } else if (after.updatedAt <= before.updatedAt) {
-            throw new Error(
-                "Workspace project transfer must advance updatedAt for a project change.",
-            );
-        }
-    } else if (before.projectRef !== after.projectRef) {
-        throw new Error("Workspace session transfer changed the project reference.");
-    }
-    if (after.updatedAt < before.updatedAt) {
-        throw new Error("Workspace transfer moved updatedAt backwards.");
-    }
-}
-
-function assertWorkspaceArchiveState(workspace: Workspace): void {
-    if (workspace.status !== "archived" && workspace.status !== "archiving") {
-        throw new Error("Workspace archive authoritative state is not archived or archiving.");
-    }
-    if (workspace.status === "archived" && workspace.archivedAt === undefined) {
-        throw new Error("Archived workspace is missing archivedAt.");
-    }
-    if (
-        workspace.archivedAt !== undefined &&
-        (workspace.archivedAt < workspace.createdAt || workspace.archivedAt > workspace.updatedAt)
-    ) {
-        throw new Error("Archived workspace archivedAt is inconsistent with its timestamps.");
-    }
-}
-
-function assertWorkspaceRenameTransition(
-    before: Workspace,
-    after: Workspace,
-    requestedName: string,
-    changed: boolean,
-): void {
-    if (
-        before.id !== after.id ||
-        before.ownerAgentId !== after.ownerAgentId ||
-        before.projectRef !== after.projectRef ||
-        before.path !== after.path ||
-        before.baseRef !== after.baseRef ||
-        before.status !== after.status ||
-        before.createdAt !== after.createdAt ||
-        before.archivedAt !== after.archivedAt ||
-        after.name !== requestedName
-    ) {
-        throw new Error("Workspace rename changed fields outside the requested transition.");
-    }
-    if (!changed) {
-        if (!sameJson(before, after) || before.name !== requestedName) {
-            throw new Error("Workspace rename reported an unchanged but different workspace.");
-        }
-        return;
-    }
-    if (before.name === requestedName || after.updatedAt <= before.updatedAt) {
-        throw new Error("Workspace rename must change its name and advance updatedAt.");
-    }
-}
-
-function assertWorkspaceRecord(workspace: Workspace): void {
-    if (workspace.updatedAt < workspace.createdAt) {
-        throw new Error("Workspace timestamps are not ordered.");
-    }
-    if (workspace.archivedAt === undefined) {
-        if (workspace.status === "archived") {
-            throw new Error("Archived workspace is missing archivedAt.");
-        }
-        return;
-    }
-    if (workspace.status !== "archived" && workspace.status !== "archiving") {
-        throw new Error("Non-archived workspace has archivedAt.");
-    }
-    if (workspace.archivedAt < workspace.createdAt || workspace.archivedAt > workspace.updatedAt) {
-        throw new Error("Workspace archivedAt is inconsistent with its timestamps.");
-    }
-}
-
-function assertWorkspaceArchiveTransition(
-    before: Workspace | null,
-    after: Workspace | null,
-    result: Workspace,
-    changed: boolean,
-): void {
-    if (after === null) {
-        throw new Error("Workspace archive has no authoritative after-state.");
-    }
-    if (!sameJson(after, result)) {
-        throw new Error("Workspace archive result does not match authoritative state.");
-    }
-    assertWorkspaceArchiveState(after);
-    assertWorkspaceArchiveState(result);
-    if (before === null) {
-        throw new Error("Workspace archive has no authoritative before-state.");
-    }
-    if (before.id !== after.id || before.ownerAgentId !== after.ownerAgentId) {
-        throw new Error("Workspace archive changed durable workspace identity.");
-    }
-    if (before.status === "archived") {
-        if (before.archivedAt === undefined || before.archivedAt !== after.archivedAt) {
-            throw new Error("Workspace archive changed an already archived timestamp.");
-        }
-        if (changed || !sameJson(before, after)) {
-            throw new Error("Workspace archive changed an already archived workspace.");
-        }
-        return;
-    }
-    if (before.status === "archiving" && after.status === "archiving" && !changed) {
-        if (!sameJson(before, after)) {
-            throw new Error("Workspace archive changed an already archiving workspace.");
-        }
-        return;
-    }
-    if (before.archivedAt !== undefined && before.status !== "archiving") {
-        throw new Error("Workspace archive before-state has an archivedAt before archival.");
-    }
-    if (!changed) {
-        throw new Error("Workspace archive reported an unchanged non-archived state.");
-    }
-    if (
-        before.projectRef !== after.projectRef ||
-        before.path !== after.path ||
-        before.baseRef !== after.baseRef ||
-        before.name !== after.name ||
-        before.createdAt !== after.createdAt
-    ) {
-        throw new Error("Workspace archive changed fields outside the archival transition.");
-    }
-    if (
-        after.status === "archived" &&
-        (after.archivedAt === undefined || after.archivedAt < before.updatedAt)
-    ) {
-        throw new Error("Workspace archive archivedAt is inconsistent with the transition.");
-    }
-    if (after.updatedAt < before.updatedAt) {
-        throw new Error("Workspace archive moved updatedAt backwards.");
-    }
-}
-
-function toMutationRequest(operation: WorkspaceOperation): WorkspaceMutationRequest {
-    return {
-        operation: operation.kind,
-        operationId: operation.operationId,
-    };
-}
-
 function normalizeTransferStoreResult(
     raw: Static<typeof workspaceTransferStoreResultSchema>,
     agentId: string,
-    operation: WorkspaceOperation,
+    operationId: string,
 ): WorkspaceTransferResult {
     if (Value.Check(workspaceTransferResultSchema, raw)) return structuredClone(raw);
     assertWorkspace(raw);
     assertWorkspaceRecord(raw);
     return {
         agentId,
-        operationId: operation.operationId,
+        operationId,
         changed: true,
         state: "transferred",
         targetWorkspaceId: raw.id,
-        workspace: compactWorkspace(raw),
+        workspace: {
+            id: raw.id,
+            projectRef: raw.projectRef,
+            ownerAgentId: raw.ownerAgentId,
+            path: raw.path,
+        },
     };
 }
 
-function compactWorkspace(workspace: Workspace): WorkspaceTransferWorkspace {
-    return {
-        id: workspace.id,
-        projectRef: workspace.projectRef,
-        ownerAgentId: workspace.ownerAgentId,
-        ...(workspace.path === undefined ? {} : { path: workspace.path }),
-    };
-}
-
-function requireWorkspaceFromResult(result: WorkspaceStoreMutationResult): Workspace {
-    if (!("workspace" in result) || result.workspace === undefined) {
-        throw new Error("Workspace mutation did not return a workspace.");
-    }
-    assertWorkspace(result.workspace);
-    return result.workspace;
-}
-
-function requireTransferFromResult(result: WorkspaceStoreMutationResult): WorkspaceTransferResult {
+function requireTransferFromResult(
+    result: WorkspaceTransactionChange["result"],
+): WorkspaceTransferResult {
     if (!Value.Check(workspaceTransferResultSchema, result)) {
         throw new Error("Workspace transfer did not return a valid transfer result.");
     }
     return result;
-}
-
-function fitPageForModel(
-    page: WorkspacePage,
-    cursor: string | undefined,
-    maxOutputCharacters: number,
-): WorkspacePage {
-    if (page.workspaces.length === 0) return page;
-    const start = cursor === undefined ? 0 : parseCursor(cursor);
-    const continuationLength = (next: number): number =>
-        `More workspaces at cursor ${String(next)}.`.length + 1;
-    const visible: Workspace[] = [];
-    let size = 0;
-    for (const workspace of page.workspaces) {
-        const row = workspaceRow(workspace);
-        const nextSize = size + row.length + (visible.length === 0 ? 0 : 1);
-        const candidateCount = visible.length + 1;
-        const needsContinuation =
-            page.nextCursor !== undefined || candidateCount < page.workspaces.length;
-        const continuation = needsContinuation ? continuationLength(start + candidateCount) : 0;
-        if (nextSize + continuation > maxOutputCharacters) break;
-        visible.push(workspace);
-        size = nextSize;
-    }
-    if (visible.length === 0) {
-        throw new Error(
-            "Workspace page cannot expose a complete identity within the output budget.",
-        );
-    }
-    const consumedAll = visible.length === page.workspaces.length;
-    const nextCursor =
-        consumedAll && page.nextCursor === undefined ? undefined : String(start + visible.length);
-    return {
-        workspaces: visible,
-        ...(nextCursor === undefined ? {} : { nextCursor }),
-    };
-}
-
-function workspaceRow(workspace: Workspace): string {
-    const prefix = `${workspace.id} [${workspace.status}]`;
-    const path = workspace.path ?? "(host did not report a path)";
-    const remaining = Math.max(0, 160 - prefix.length - path.length - 8);
-    return `${prefix} ${workspace.name.slice(0, remaining)}\nPath: ${path}`;
-}
-
-function workspaceDetailText(workspace: Workspace): string {
-    return [
-        `Workspace ID: ${workspace.id}`,
-        `Name: ${workspace.name}`,
-        `Status: ${workspace.status}`,
-        `Project ref: ${workspace.projectRef}`,
-        `Path: ${workspace.path ?? "(host did not report a path)"}`,
-        `Base ref: ${workspace.baseRef ?? "(none)"}`,
-        `Owner agent: ${workspace.ownerAgentId}`,
-        `Created at: ${String(workspace.createdAt)}`,
-        `Updated at: ${String(workspace.updatedAt)}`,
-        ...(workspace.archivedAt === undefined
-            ? []
-            : [`Archived at: ${String(workspace.archivedAt)}`]),
-    ].join("\n");
-}
-
-function workspaceBranchMetadataDetailText(metadata: WorkspaceBranchMetadata): string {
-    return [
-        `Workspace ID: ${metadata.workspaceId}`,
-        `Branch: ${metadata.branch ?? "(detached or unavailable)"}`,
-        `Head: ${metadata.head ?? "(unavailable)"}`,
-        `Upstream: ${metadata.upstream ?? "(none)"}`,
-        `Ahead: ${String(metadata.ahead)}`,
-        `Behind: ${String(metadata.behind)}`,
-        `Detached: ${String(metadata.detached)}`,
-    ].join("\n");
-}
-
-function fitWorkspaceDetailPage(
-    page: Extract<WorkspaceDetailPage, { readonly workspace: Workspace }>,
-    maxOutputCharacters: number,
-): Extract<WorkspaceDetailPage, { readonly workspace: Workspace }> {
-    let detail = page.detail;
-    for (;;) {
-        const candidate: Extract<WorkspaceDetailPage, { readonly workspace: Workspace }> = {
-            workspace: page.workspace,
-            detail,
-            detailOffset: page.detailOffset,
-            detailTotal: page.detailTotal,
-            ...(page.detailOffset + detail.length < page.detailTotal
-                ? { nextDetailOffset: page.detailOffset + detail.length }
-                : {}),
-        };
-        if (
-            formatWorkspaceDetailPage(candidate, maxOutputCharacters).length <= maxOutputCharacters
-        ) {
-            return candidate;
-        }
-        if (detail.length <= 1) {
-            throw new Error("Workspace detail cannot fit the configured model-output bound.");
-        }
-        const excess = Math.max(
-            1,
-            formatWorkspaceDetailPage(candidate, maxOutputCharacters).length - maxOutputCharacters,
-        );
-        detail = detail.slice(0, Math.max(1, detail.length - excess));
-    }
-}
-
-function formatWorkspaceDetailPage(
-    page: Extract<WorkspaceDetailPage, { readonly workspace: Workspace }>,
-    maxOutputCharacters: number,
-): string {
-    const header = `${page.workspace.id} [${page.workspace.status}]`;
-    const full = [
-        header,
-        `Detail [${page.detailOffset}/${page.detailTotal}]: ${page.detail}`,
-        ...(page.nextDetailOffset === undefined
-            ? []
-            : [`More detail starts at offset ${page.nextDetailOffset}.`]),
-    ].join("\n");
-    if (full.length <= maxOutputCharacters) return full;
-
-    const compact = [
-        page.workspace.id,
-        `Detail: ${page.detail}`,
-        ...(page.nextDetailOffset === undefined ? [] : [`More detail: ${page.nextDetailOffset}.`]),
-    ].join("\n");
-    if (compact.length <= maxOutputCharacters) return compact;
-
-    return [
-        `Detail: ${page.detail}`,
-        ...(page.nextDetailOffset === undefined ? [] : [`More detail: ${page.nextDetailOffset}.`]),
-    ].join("\n");
-}
-
-function fitWorkspaceBranchMetadataPage(
-    page: WorkspaceBranchMetadataPage,
-    maxOutputCharacters: number,
-): WorkspaceBranchMetadataPage {
-    let detail = page.detail;
-    for (;;) {
-        const candidate = {
-            ...page,
-            detail,
-        };
-        if (page.detailOffset + detail.length < page.detailTotal) {
-            candidate.nextDetailOffset = page.detailOffset + detail.length;
-        } else {
-            delete candidate.nextDetailOffset;
-        }
-        if (
-            formatWorkspaceBranchMetadataPage(candidate, maxOutputCharacters).length <=
-            maxOutputCharacters
-        ) {
-            return candidate;
-        }
-        if (detail.length <= 1) {
-            throw new Error(
-                "Workspace branch metadata cannot fit the configured model-output bound.",
-            );
-        }
-        const excess = Math.max(
-            1,
-            formatWorkspaceBranchMetadataPage(candidate, maxOutputCharacters).length -
-                maxOutputCharacters,
-        );
-        detail = detail.slice(0, Math.max(1, detail.length - excess));
-    }
-}
-
-function formatWorkspaceBranchMetadataPage(
-    page: WorkspaceBranchMetadataPage,
-    maxOutputCharacters: number,
-): string {
-    const full = [
-        `${page.workspaceId}${page.detached ? " [detached]" : ""}`,
-        `Detail [${page.detailOffset}/${page.detailTotal}]: ${page.detail}`,
-        ...(page.nextDetailOffset === undefined
-            ? []
-            : [`More detail starts at offset ${page.nextDetailOffset}.`]),
-    ].join("\n");
-    if (full.length <= maxOutputCharacters) return full;
-
-    const compact = [
-        page.workspaceId,
-        `Detail: ${page.detail}`,
-        ...(page.nextDetailOffset === undefined ? [] : [`More detail: ${page.nextDetailOffset}.`]),
-    ].join("\n");
-    if (compact.length <= maxOutputCharacters) return compact;
-
-    return [
-        `Detail: ${page.detail}`,
-        ...(page.nextDetailOffset === undefined ? [] : [`More detail: ${page.nextDetailOffset}.`]),
-    ].join("\n");
-}
-
-function parseCursor(cursor: string): number {
-    const value = Number(cursor);
-    if (!Number.isSafeInteger(value) || value < 0) {
-        throw new Error("Workspace cursor is not a bounded integer.");
-    }
-    return value;
-}
-
-function sameJson(left: unknown, right: unknown): boolean {
-    return JSON.stringify(left) === JSON.stringify(right);
-}
-
-function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
-    if (value !== null && typeof value === "object") {
-        if (seen.has(value)) return value;
-        seen.add(value);
-        for (const child of Object.values(value as Record<string, unknown>)) {
-            deepFreeze(child, seen);
-        }
-        Object.freeze(value);
-    }
-    return value;
-}
-
-function isDeepFrozen(value: unknown, seen = new WeakSet<object>()): boolean {
-    if (value === null || typeof value !== "object") return true;
-    if (!Object.isFrozen(value)) return false;
-    if (seen.has(value)) return true;
-    seen.add(value);
-    return Object.values(value as Record<string, unknown>).every((child) =>
-        isDeepFrozen(child, seen),
-    );
-}
-
-function isPromiseLike<T>(value: T | Promise<T>): value is Promise<T> {
-    return (
-        typeof value === "object" &&
-        value !== null &&
-        "then" in value &&
-        typeof (value as { then?: unknown }).then === "function"
-    );
-}
-
-function requirePromise<T>(value: T | Promise<T>, label: string): Promise<T> {
-    if (!isPromiseLike(value)) {
-        throw new Error(`${label} must return a promise.`);
-    }
-    return value;
-}
-
-function safeError(error: unknown): string {
-    try {
-        const message =
-            error instanceof Error
-                ? error.message
-                : typeof error === "string"
-                  ? error
-                  : String(error);
-        return message.slice(0, 512) || "Unknown workspace observer error.";
-    } catch {
-        return "Unknown workspace observer error.";
-    }
 }

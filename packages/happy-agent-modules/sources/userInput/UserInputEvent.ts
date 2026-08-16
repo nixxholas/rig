@@ -26,7 +26,10 @@ export const userInputEventSchema = Type.Union([
         {
             ...userInputEventEnvelope,
             type: Type.Literal("user_input_requested"),
-            request: Type.Extract(userInputRequestSchema, Type.Object({ status: Type.Literal("pending") })),
+            request: Type.Extract(
+                userInputRequestSchema,
+                Type.Object({ status: Type.Literal("pending") }),
+            ),
         },
         { additionalProperties: false },
     ),
@@ -34,7 +37,10 @@ export const userInputEventSchema = Type.Union([
         {
             ...userInputEventEnvelope,
             type: Type.Literal("user_input_answered"),
-            request: Type.Extract(userInputRequestSchema, Type.Object({ status: Type.Literal("answered") })),
+            request: Type.Extract(
+                userInputRequestSchema,
+                Type.Object({ status: Type.Literal("answered") }),
+            ),
         },
         { additionalProperties: false },
     ),

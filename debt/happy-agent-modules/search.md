@@ -18,10 +18,10 @@ collapsed six distinct vendor tools into one templated tool with six names.
 
 ## Changes from the Rig v1 implementation
 
-- **Regression — what a search *is*.** v1's `claude_web_search` (`ClaudeWebSearch.ts:72-110`) runs
+- **Regression — what a search _is_.** v1's `claude_web_search` (`ClaudeWebSearch.ts:72-110`) runs
   one bounded side inference against the vendor's native server tool (`{ name: "WebSearch", server:
-  { type: "WebSearch" } }`), verifies the server tool actually ran, and returns `{ query, response,
-  sources[], durationSeconds }` — an answer plus citations. v1's `grok_x_search`
+{ type: "WebSearch" } }`), verifies the server tool actually ran, and returns `{ query, response,
+sources[], durationSeconds }` — an answer plus citations. v1's `grok_x_search`
   (`GrokXSearch.ts:22-32`) returns `{ query, summary, posts[], durationSeconds }`, a genuinely
   different result shape with a different prompt and different link extraction. v2 returns the
   identical `searchPageSchema` (`Search.ts:111-120`) from all six tools and renders all six with the
@@ -74,7 +74,7 @@ collapsed six distinct vendor tools into one templated tool with six names.
 4. **Over-validation of the backend contract.** `assertSearchPage` (`SearchModule.ts:374-399`) makes
    the injected host backend prove it echoed the trimmed query verbatim, returned canonical
    `URL.href` strings, has no duplicate URLs or ids, has finite scores, and advanced `nextCursor` by
-   *exactly* `cursor + results.length` (`assertCursorAdvances`, 432-442). Any real search backend
+   _exactly_ `cursor + results.length` (`assertCursorAdvances`, 432-442). Any real search backend
    that de-duplicates, filters, or skips results across a page boundary now throws instead of
    returning results. `canonicalSearchResultUrl` (419-430) additionally rejects any URL the backend
    did not pre-normalize through `new URL().href`, which rejects ordinary well-formed URLs that
@@ -104,7 +104,7 @@ collapsed six distinct vendor tools into one templated tool with six names.
 ## What it gets right
 
 The permission posture is correct and preserves the v1 rule exactly: `requiresAutoOrFullAccess: true`
-plus `shouldReviewInAutoMode: () => true`, with review *not* implying Full-access elevation, and a
+plus `shouldReviewInAutoMode: () => true`, with review _not_ implying Full-access elevation, and a
 `describeAutoPermissionAction` on every tool that names the external boundary
 ("Access: external provider network"). `durable: false` is the right call for billed external work,
 and the reasoning is stated. TypeBox is used throughout with types derived via `Static`, per policy.

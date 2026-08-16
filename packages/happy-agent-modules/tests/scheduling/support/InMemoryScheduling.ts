@@ -24,10 +24,7 @@ export class InMemorySchedulingStore implements SchedulingStore {
     readonly waits = new Map<string, SchedulingWaitRecord>();
     readonly schedules = new Map<string, SchedulingScheduledMessage>();
     readonly waitOutcomes = new Map<string, SchedulingWaitResult>();
-    readonly waitSubscriptions = new Map<
-        string,
-        Set<(result: SchedulingWaitResult) => void>
-    >();
+    readonly waitSubscriptions = new Map<string, Set<(result: SchedulingWaitResult) => void>>();
     async readWait(
         _ctx: Context,
         agentId: string,
@@ -57,10 +54,7 @@ export class InMemorySchedulingStore implements SchedulingStore {
         return clone(value);
     }
 
-    async writeSchedule(
-        _ctx: Context,
-        schedule: SchedulingScheduledMessage,
-    ): Promise<void> {
+    async writeSchedule(_ctx: Context, schedule: SchedulingScheduledMessage): Promise<void> {
         this.schedules.set(schedule.id, clone(schedule));
     }
 
@@ -80,10 +74,7 @@ export class InMemorySchedulingStore implements SchedulingStore {
                         schedule.targetAgentId === query.targetAgentId) &&
                     (query.status === undefined || schedule.status === query.status),
             )
-            .sort(
-                (left, right) =>
-                    left.dueAt - right.dueAt || left.id.localeCompare(right.id),
-            );
+            .sort((left, right) => left.dueAt - right.dueAt || left.id.localeCompare(right.id));
         const schedules = values.slice(start, start + limit).map(clone);
         return {
             schedules,
@@ -125,11 +116,7 @@ export class InMemorySchedulingScheduler implements SchedulingScheduler {
         return wait;
     }
 
-    async wait(
-        _ctx: Context,
-        _agentId: string,
-        waitId: string,
-    ): Promise<SchedulingWaitResult> {
+    async wait(_ctx: Context, _agentId: string, waitId: string): Promise<SchedulingWaitResult> {
         this.calls.push("wait");
         this.#started.get(waitId)?.();
         this.#started.delete(waitId);

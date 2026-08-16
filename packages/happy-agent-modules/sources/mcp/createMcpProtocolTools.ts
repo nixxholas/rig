@@ -31,10 +31,7 @@ import { describeMcpAutoPermissionAction } from "./describeMcpAutoPermissionActi
 import { humanizeMcpName } from "./humanizeMcpName.js";
 import { isMcpErrorResult } from "./isMcpErrorResult.js";
 import type { McpModule } from "./McpModule.js";
-import {
-    boundedMcpJsonStringify,
-    mcpResultToContentBlocks,
-} from "./mcpResultToContentBlocks.js";
+import { boundedMcpJsonStringify, mcpResultToContentBlocks } from "./mcpResultToContentBlocks.js";
 import { quoteVisibleExact } from "./quoteVisibleExact.js";
 
 export function createMcpProtocolTools(
@@ -74,9 +71,7 @@ export function createMcpProtocolTools(
                     ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
                 });
             },
-            toLLM: (result) => [
-                { type: "text", text: module.formatToolPageForModel(result) },
-            ],
+            toLLM: (result) => [{ type: "text", text: module.formatToolPageForModel(result) }],
         }),
         defineAgentTool({
             name: "call_mcp_tool",
@@ -113,9 +108,7 @@ export function createMcpProtocolTools(
                     ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
                 });
             },
-            toLLM: (result) => [
-                { type: "text", text: module.formatResourcePageForModel(result) },
-            ],
+            toLLM: (result) => [{ type: "text", text: module.formatResourcePageForModel(result) }],
         }),
         defineAgentTool({
             name: "list_mcp_resource_templates",
@@ -124,7 +117,10 @@ export function createMcpProtocolTools(
             returnType: mcpResourceTemplatePageSchema,
             requiresAutoOrFullAccess: true,
             shouldReviewInAutoMode: () => false,
-            execute: async (ctx, input: McpListResourcesInput): Promise<McpResourceTemplatePage> => {
+            execute: async (
+                ctx,
+                input: McpListResourcesInput,
+            ): Promise<McpResourceTemplatePage> => {
                 assertServer(input.server);
                 return await module.listResourceTemplatePage(ctx, agentId, {
                     server: input.server,
@@ -159,9 +155,7 @@ export function createMcpProtocolTools(
                 assertServer(input.server);
                 return await module.listPromptPage(ctx, agentId, input);
             },
-            toLLM: (result) => [
-                { type: "text", text: module.formatPromptPageForModel(result) },
-            ],
+            toLLM: (result) => [{ type: "text", text: module.formatPromptPageForModel(result) }],
         }),
         defineAgentTool({
             name: "get_mcp_prompt",
@@ -176,36 +170,36 @@ export function createMcpProtocolTools(
                 assertServer(input.server);
                 return await module.getPrompt(ctx, agentId, input);
             },
-            toLLM: (result) => [{ type: "text", text: boundedMcpJsonStringify(result, 512 * 1024) }],
+            toLLM: (result) => [
+                { type: "text", text: boundedMcpJsonStringify(result, 512 * 1024) },
+            ],
         }),
     ] as readonly AnyAgentTool[];
 }
 
 function readResourceToContent(result: McpReadResourceResult) {
-    const content = result.contents
-        .slice(0, 128)
-        .map((entry) => {
-            if (isRecord(entry) && "text" in entry && typeof entry.text === "string") {
-                return { type: "text" as const, text: entry.text };
-            }
-            if (
-                isRecord(entry) &&
-                "blob" in entry &&
-                typeof entry.blob === "string" &&
-                typeof entry.mimeType === "string" &&
-                entry.mimeType.startsWith("image/")
-            ) {
-                return {
-                    type: "image" as const,
-                    data: entry.blob,
-                    mimeType: entry.mimeType,
-                };
-            }
+    const content = result.contents.slice(0, 128).map((entry) => {
+        if (isRecord(entry) && "text" in entry && typeof entry.text === "string") {
+            return { type: "text" as const, text: entry.text };
+        }
+        if (
+            isRecord(entry) &&
+            "blob" in entry &&
+            typeof entry.blob === "string" &&
+            typeof entry.mimeType === "string" &&
+            entry.mimeType.startsWith("image/")
+        ) {
             return {
-                type: "text" as const,
-                text: boundedMcpJsonStringify(entry, 4_096),
+                type: "image" as const,
+                data: entry.blob,
+                mimeType: entry.mimeType,
             };
-        });
+        }
+        return {
+            type: "text" as const,
+            text: boundedMcpJsonStringify(entry, 4_096),
+        };
+    });
     if (result.contents.length > 128) {
         content.push({ type: "text", text: "... [truncated]" });
     }

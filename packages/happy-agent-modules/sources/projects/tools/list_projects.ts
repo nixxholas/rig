@@ -11,13 +11,12 @@ export function listProjectsTool(projects: ProjectsModule, agentId: string) {
     return defineAgentTool({
         name: "list_projects",
         description:
-            "List a bounded page of registered projects. Each row includes an actionable project ID, name, opaque repository reference, status, and useful context. Use nextCursor to continue.",
+            "List a bounded page of projects in catalog order. Each row carries the project ID to act on, its name, its folder, and whether it is still being set up. Use nextCursor to continue.",
         parameters: projectPageQuerySchema,
         returnType: projectPageSchema,
         durable: true,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, query: ProjectPageQuery) =>
-            await projects.listPage(ctx, agentId, query),
+        execute: async (ctx, query: ProjectPageQuery) => await projects.list(ctx, agentId, query),
         toLLM: (page) => [{ type: "text", text: projects.formatPageForModel(page) }],
     });
 }

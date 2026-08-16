@@ -26,6 +26,7 @@ import {
     type GoalEvent,
     type GoalModuleListener,
 } from "./GoalEvent.js";
+import { AGENT_MESSAGE_ORIGIN_METADATA } from "../auto/messageOrigin.js";
 import { createGoalContinuationPrompt } from "./impl/createGoalContinuationPrompt.js";
 import { createGoalTitle } from "./impl/createGoalTitle.js";
 import {
@@ -353,6 +354,11 @@ export class GoalModule implements AgentModule {
                         },
                     ],
                 },
+                // A goal continuation is the agent driving itself, delivered in the user-role input
+                // shape only because that is the shape a provider accepts. It carries no human
+                // authority, so it is stamped agent-originated: without this an agent that set its
+                // own goal objective would manufacture its own trusted permission evidence.
+                metadata: { ...AGENT_MESSAGE_ORIGIN_METADATA },
             },
         ];
     };

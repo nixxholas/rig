@@ -114,13 +114,8 @@ import { revertWorkletTool } from "./tools/revert_worklet.js";
 import { statusWorkletTool } from "./tools/get_worklet_status.js";
 import { updateWorkletTool } from "./tools/update_worklet.js";
 
-const opaqueContextSchema = Type.Unsafe<Context>(
-    Type.Object({}, { additionalProperties: true }),
-);
-const asyncIdSchema = Type.Union([
-    workletAgentIdSchema,
-    Type.Promise(workletAgentIdSchema),
-]);
+const opaqueContextSchema = Type.Unsafe<Context>(Type.Object({}, { additionalProperties: true }));
+const asyncIdSchema = Type.Union([workletAgentIdSchema, Type.Promise(workletAgentIdSchema)]);
 const asyncVoidSchema = Type.Union([Type.Void(), Type.Promise(Type.Void())]);
 
 export const workletAuthorizationActionSchema = Type.Union([
@@ -135,9 +130,7 @@ export const workletAuthorizationActionSchema = Type.Union([
     Type.Literal("invoke"),
 ]);
 
-export type WorkletAuthorizationAction = Static<
-    typeof workletAuthorizationActionSchema
->;
+export type WorkletAuthorizationAction = Static<typeof workletAuthorizationActionSchema>;
 
 /**
  * Worklets are installation-global. The optional host policy can restrict
@@ -187,15 +180,11 @@ export const workletModuleOptionsSchema = Type.Object(
         ),
         clock: Type.Optional(Type.Function([], workletTimestampSchema)),
         listener: Type.Optional(workletModuleListenerSchema),
-        maxPageSize: Type.Optional(
-            Type.Integer({ minimum: 1, maximum: MAX_WORKLET_LIST_SIZE }),
-        ),
+        maxPageSize: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_WORKLET_LIST_SIZE })),
         maxOutputCharacters: Type.Optional(
             Type.Integer({ minimum: 256, maximum: MAX_WORKLET_OUTPUT_CHARACTERS }),
         ),
-        maxLogLines: Type.Optional(
-            Type.Integer({ minimum: 1, maximum: MAX_WORKLET_LOG_LINES }),
-        ),
+        maxLogLines: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_WORKLET_LOG_LINES })),
         maxLogLineCharacters: Type.Optional(
             Type.Integer({ minimum: 1, maximum: MAX_WORKLET_LOG_LINE_LENGTH }),
         ),
@@ -370,23 +359,17 @@ export class WorkletsModule implements AgentModule {
         this.#clock = options.clock ?? (() => Date.now());
         this.#listener = options.listener;
         this.#maxPageSize = options.maxPageSize ?? DEFAULT_PAGE_SIZE;
-        this.#maxOutputCharacters =
-            options.maxOutputCharacters ?? DEFAULT_OUTPUT_CHARACTERS;
+        this.#maxOutputCharacters = options.maxOutputCharacters ?? DEFAULT_OUTPUT_CHARACTERS;
         this.#maxLogLines = options.maxLogLines ?? DEFAULT_LOG_LINES;
-        this.#maxLogLineCharacters =
-            options.maxLogLineCharacters ?? DEFAULT_LOG_LINE_CHARACTERS;
+        this.#maxLogLineCharacters = options.maxLogLineCharacters ?? DEFAULT_LOG_LINE_CHARACTERS;
         this.#maxLogCharacters = options.maxLogCharacters ?? DEFAULT_LOG_CHARACTERS;
         this.#maxArgumentDepth = options.maxArgumentDepth ?? DEFAULT_ARGUMENT_DEPTH;
         this.#maxResultDepth = options.maxResultDepth ?? DEFAULT_RESULT_DEPTH;
-        this.#maxInvocationBytes =
-            options.maxInvocationBytes ?? DEFAULT_INVOCATION_BYTES;
+        this.#maxInvocationBytes = options.maxInvocationBytes ?? DEFAULT_INVOCATION_BYTES;
         this.#onPostCommitError = options.onPostCommitError;
     }
 
-    readonly tools = (
-        _ctx: Context,
-        scope: AgentModuleScope,
-    ): readonly AnyAgentTool[] => [
+    readonly tools = (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => [
         installWorkletTool(this, scope.agent.id),
         listWorkletsTool(this, scope.agent.id),
         getWorkletTool(this, scope.agent.id),
@@ -398,11 +381,7 @@ export class WorkletsModule implements AgentModule {
         invokeWorkletOperationTool(this, scope.agent.id),
     ];
 
-    async install(
-        ctx: Context,
-        agentId: string,
-        input: WorkletInstallInput,
-    ): Promise<Worklet> {
+    async install(ctx: Context, agentId: string, input: WorkletInstallInput): Promise<Worklet> {
         return await this.#install(ctx, agentId, input);
     }
 
@@ -420,11 +399,7 @@ export class WorkletsModule implements AgentModule {
         return { worklet };
     }
 
-    async #install(
-        ctx: Context,
-        agentId: string,
-        input: WorkletInstallInput,
-    ): Promise<Worklet> {
+    async #install(ctx: Context, agentId: string, input: WorkletInstallInput): Promise<Worklet> {
         this.#assertAgentId(agentId);
         this.#assertInput(workletInstallInputSchema, input, "worklet install");
         const operation = await this.#operation(
@@ -477,18 +452,12 @@ export class WorkletsModule implements AgentModule {
                     createdAt,
                     stage,
                 });
-                const event = await this.#newEvent(
-                    txCtx,
-                    agentId,
-                    { type: "worklet_installed", worklet: after },
-                );
+                const event = await this.#newEvent(txCtx, agentId, {
+                    type: "worklet_installed",
+                    worklet: after,
+                });
                 await this.#observeTransactional(txCtx, event);
-                await this.#registerStagePostCommit(
-                    txCtx,
-                    stage,
-                    event,
-                    stageRegistration,
-                );
+                await this.#registerStagePostCommit(txCtx, stage, event, stageRegistration);
                 return structuredClone(after);
             } catch (error: unknown) {
                 if (stage !== undefined) await this.#rollbackStage(txCtx, stage);
@@ -535,9 +504,7 @@ export class WorkletsModule implements AgentModule {
                 return structuredClone(page);
             }
             if (page.worklets.length <= 1) {
-                throw new Error(
-                    "Worklet list output cannot fit a complete identity and cursor.",
-                );
+                throw new Error("Worklet list output cannot fit a complete identity and cursor.");
             }
             limit = Math.max(1, Math.min(limit - 1, page.worklets.length - 1));
         }
@@ -552,11 +519,7 @@ export class WorkletsModule implements AgentModule {
         return (await this.listPage(ctx, agentId, query)).worklets;
     }
 
-    async get(
-        ctx: Context,
-        agentId: string,
-        name: string,
-    ): Promise<WorkletDetail | undefined> {
+    async get(ctx: Context, agentId: string, name: string): Promise<WorkletDetail | undefined> {
         this.#assertAgentId(agentId);
         this.#assertName(name);
         const worklet = await this.#getCatalog(ctx, name);
@@ -580,7 +543,8 @@ export class WorkletsModule implements AgentModule {
 
         const complete = this.#detailText(detail);
         const cursor = query.cursor ?? 0;
-        let limit = query.limit ?? Math.min(MAX_WORKLET_DETAIL_PAGE_SIZE, this.#maxOutputCharacters);
+        let limit =
+            query.limit ?? Math.min(MAX_WORKLET_DETAIL_PAGE_SIZE, this.#maxOutputCharacters);
         limit = Math.min(limit, MAX_WORKLET_DETAIL_PAGE_SIZE);
         for (;;) {
             const slice = complete.slice(cursor, cursor + limit);
@@ -592,10 +556,7 @@ export class WorkletsModule implements AgentModule {
                 total: complete.length,
                 ...(cursor > 0
                     ? {
-                          previousCursor: Math.min(
-                              complete.length,
-                              Math.max(0, cursor - limit),
-                          ),
+                          previousCursor: Math.min(complete.length, Math.max(0, cursor - limit)),
                       }
                     : {}),
                 ...(cursor + slice.length < complete.length
@@ -701,18 +662,12 @@ export class WorkletsModule implements AgentModule {
                     createdAt,
                     stage,
                 });
-                const event = await this.#newEvent(
-                    txCtx,
-                    agentId,
-                    { type: "worklet_updated", worklet: after },
-                );
+                const event = await this.#newEvent(txCtx, agentId, {
+                    type: "worklet_updated",
+                    worklet: after,
+                });
                 await this.#observeTransactional(txCtx, event);
-                await this.#registerStagePostCommit(
-                    txCtx,
-                    stage,
-                    event,
-                    stageRegistration,
-                );
+                await this.#registerStagePostCommit(txCtx, stage, event, stageRegistration);
                 return structuredClone(after);
             } catch (error: unknown) {
                 if (stage !== undefined) await this.#rollbackStage(txCtx, stage);
@@ -764,9 +719,7 @@ export class WorkletsModule implements AgentModule {
             const before = await this.#getCatalog(txCtx, name);
             if (before === undefined) throw new Error(`Worklet "${name}" was not found.`);
             await this.#authorize(txCtx, agentId, before.ownerAgentId, "revert");
-            const target = before.versions.find(
-                (version) => version.version === input.version,
-            );
+            const target = before.versions.find((version) => version.version === input.version);
             if (target === undefined) {
                 throw new Error(`Worklet version ${input.version} does not exist.`);
             }
@@ -797,30 +750,16 @@ export class WorkletsModule implements AgentModule {
                     stage,
                 });
                 if (!raw.changed) {
-                    await this.#registerStagePostCommit(
-                        txCtx,
-                        stage,
-                        undefined,
-                        stageRegistration,
-                    );
+                    await this.#registerStagePostCommit(txCtx, stage, undefined, stageRegistration);
                     return structuredClone(after);
                 }
-                const event = await this.#newEvent(
-                    txCtx,
-                    agentId,
-                    {
-                        type: "worklet_reverted",
-                        worklet: after,
-                        previousVersion: before.currentVersion,
-                    },
-                );
+                const event = await this.#newEvent(txCtx, agentId, {
+                    type: "worklet_reverted",
+                    worklet: after,
+                    previousVersion: before.currentVersion,
+                });
                 await this.#observeTransactional(txCtx, event);
-                await this.#registerStagePostCommit(
-                    txCtx,
-                    stage,
-                    event,
-                    stageRegistration,
-                );
+                await this.#registerStagePostCommit(txCtx, stage, event, stageRegistration);
                 return structuredClone(after);
             } catch (error: unknown) {
                 if (stage !== undefined) await this.#rollbackStage(txCtx, stage);
@@ -861,16 +800,12 @@ export class WorkletsModule implements AgentModule {
             if (before === undefined) {
                 throw new Error("Worklet remove changed an absent worklet.");
             }
-            const event = await this.#newEvent(
-                txCtx,
-                agentId,
-                {
-                    type: "worklet_removed",
-                    name,
-                    ownerAgentId: before.ownerAgentId,
-                    previousVersion: before.currentVersion,
-                },
-            );
+            const event = await this.#newEvent(txCtx, agentId, {
+                type: "worklet_removed",
+                name,
+                ownerAgentId: before.ownerAgentId,
+                previousVersion: before.currentVersion,
+            });
             await this.#observeTransactional(txCtx, event);
             await this.#registerRemovePostCommit(txCtx, name, event);
             return raw;
@@ -881,11 +816,7 @@ export class WorkletsModule implements AgentModule {
         return result.removed;
     }
 
-    async status(
-        ctx: Context,
-        agentId: string,
-        name: string,
-    ): Promise<WorkletStatus | undefined> {
+    async status(ctx: Context, agentId: string, name: string): Promise<WorkletStatus | undefined> {
         this.#assertAgentId(agentId);
         this.#assertName(name);
         const worklet = await this.#getCatalog(ctx, name);
@@ -933,12 +864,10 @@ export class WorkletsModule implements AgentModule {
                 page.name !== name ||
                 page.lines.length > requestedLimit ||
                 page.lines.some(
-                    (line: WorkletLogPage["lines"][number]) =>
-                        line.text.length > maxLineCharacters,
+                    (line: WorkletLogPage["lines"][number]) => line.text.length > maxLineCharacters,
                 ) ||
                 page.lines.reduce(
-                    (sum: number, line: WorkletLogPage["lines"][number]) =>
-                        sum + line.text.length,
+                    (sum: number, line: WorkletLogPage["lines"][number]) => sum + line.text.length,
                     0,
                 ) > maxCharacters
             ) {
@@ -1002,11 +931,7 @@ export class WorkletsModule implements AgentModule {
                       ...(args === undefined ? {} : { arguments: args }),
                   }
                 : inputOrName;
-        assertAcyclicWithinDepth(
-            input,
-            MAX_WORKLET_JSON_DEPTH + 2,
-            "Worklet operation invocation",
-        );
+        assertAcyclicWithinDepth(input, MAX_WORKLET_JSON_DEPTH + 2, "Worklet operation invocation");
         this.#assertInput(workletInvocationInputSchema, input, "worklet operation invocation");
         const worklet = await this.#getCatalog(ctx, input.name);
         if (worklet === undefined) {
@@ -1052,7 +977,9 @@ export class WorkletsModule implements AgentModule {
         const text =
             worklets.length === 0
                 ? "No worklets."
-                : worklets.map((worklet) => `${worklet.name} v${worklet.currentVersion}`).join("\n");
+                : worklets
+                      .map((worklet) => `${worklet.name} v${worklet.currentVersion}`)
+                      .join("\n");
         if (text.length > this.#maxOutputCharacters) {
             throw new Error("Worklet output exceeds the configured model budget.");
         }
@@ -1064,9 +991,7 @@ export class WorkletsModule implements AgentModule {
         const rows = this.formatForModel(page.worklets);
         const cursor = page.nextCursor === undefined ? "" : `\nNext cursor: ${page.nextCursor}`;
         const previous =
-            page.previousCursor === undefined
-                ? ""
-                : `\nPrevious cursor: ${page.previousCursor}`;
+            page.previousCursor === undefined ? "" : `\nPrevious cursor: ${page.previousCursor}`;
         const text = `${rows}${cursor}${previous}`;
         if (text.length > this.#maxOutputCharacters) {
             throw new Error(
@@ -1123,12 +1048,9 @@ export class WorkletsModule implements AgentModule {
         if (identity.length >= this.#maxOutputCharacters) {
             throw new Error("Worklet detail identity exceeds the model budget.");
         }
-        const next =
-            page.nextCursor === undefined ? "" : `\nNext cursor: ${page.nextCursor}`;
+        const next = page.nextCursor === undefined ? "" : `\nNext cursor: ${page.nextCursor}`;
         const previous =
-            page.previousCursor === undefined
-                ? ""
-                : `\nPrevious cursor: ${page.previousCursor}`;
+            page.previousCursor === undefined ? "" : `\nPrevious cursor: ${page.previousCursor}`;
         const text = `${identity}\n${page.detail}${next}${previous}`;
         if (text.length > this.#maxOutputCharacters) {
             throw new Error("Worklet detail exceeds the configured model budget.");
@@ -1154,12 +1076,9 @@ export class WorkletsModule implements AgentModule {
     formatLogsForModel(page: WorkletLogPage): string {
         assertWorkletLogPage(page);
         const header = `${page.name} logs @${page.cursor}`;
-        const suffix =
-            page.nextCursor === undefined ? "" : `\nNext cursor: ${page.nextCursor}`;
+        const suffix = page.nextCursor === undefined ? "" : `\nNext cursor: ${page.nextCursor}`;
         const previous =
-            page.previousCursor === undefined
-                ? ""
-                : `\nPrevious cursor: ${page.previousCursor}`;
+            page.previousCursor === undefined ? "" : `\nPrevious cursor: ${page.previousCursor}`;
         const fixedTailLength = suffix.length + previous.length;
         if (header.length + fixedTailLength > this.#maxOutputCharacters) {
             throw new Error("Worklet log identity exceeds the model budget.");
@@ -1188,11 +1107,7 @@ export class WorkletsModule implements AgentModule {
     }
 
     formatInvocationForModel(result: WorkletInvocationResult): string {
-        assertAcyclicWithinDepth(
-            result,
-            MAX_WORKLET_JSON_DEPTH + 2,
-            "Worklet operation result",
-        );
+        assertAcyclicWithinDepth(result, MAX_WORKLET_JSON_DEPTH + 2, "Worklet operation result");
         assertWorkletInvocationResult(result);
         assertBoundedJson(
             result.result,
@@ -1226,10 +1141,7 @@ export class WorkletsModule implements AgentModule {
         request: WorkletOperationRequest,
         requested: string | undefined,
     ): Promise<WorkletOperation> {
-        const operationId =
-            requested === undefined
-                ? await this.#newId(ctx, agentId)
-                : requested;
+        const operationId = requested === undefined ? await this.#newId(ctx, agentId) : requested;
         this.#assertOperationId(operationId);
         const operation = {
             ...request,
@@ -1364,10 +1276,7 @@ export class WorkletsModule implements AgentModule {
                 after.versions.length !== before.versions.length + 1 ||
                 after.currentVersion !== details.targetVersion ||
                 (details.createdAt !== undefined && after.updatedAt !== details.createdAt) ||
-                !sameValue(
-                    after.versions.slice(0, before.versions.length),
-                    before.versions,
-                ) ||
+                !sameValue(after.versions.slice(0, before.versions.length), before.versions) ||
                 after.versions.at(-1)?.operationId !== operation.operationId ||
                 after.versions.at(-1)?.sourceRef !== details.stage.sourceRef ||
                 after.versions.at(-1)?.changeDescription !== details.changeDescription ||
@@ -1396,7 +1305,10 @@ export class WorkletsModule implements AgentModule {
         }
     }
 
-    async #stage(ctx: Context, input: Static<typeof workletStageInputSchema>): Promise<WorkletStage> {
+    async #stage(
+        ctx: Context,
+        input: Static<typeof workletStageInputSchema>,
+    ): Promise<WorkletStage> {
         this.#assertInput(workletStageInputSchema, input, "worklet stage request");
         let raw: unknown;
         try {
@@ -1435,16 +1347,10 @@ export class WorkletsModule implements AgentModule {
     }
 
     async #commitStage(ctx: Context, stage: WorkletStage): Promise<void> {
-        await invokePromiseVoid(
-            this.#installer.commit(ctx, stage),
-            "Worklet installer commit",
-        );
+        await invokePromiseVoid(this.#installer.commit(ctx, stage), "Worklet installer commit");
     }
 
-    async #registerStageRollback(
-        ctx: Context,
-        stage: WorkletStage,
-    ): Promise<StageRegistration> {
+    async #registerStageRollback(ctx: Context, stage: WorkletStage): Promise<StageRegistration> {
         let settled = false;
         const rollbackNow = async (rollbackCtx: Context): Promise<void> => {
             if (settled) return;
@@ -1461,22 +1367,19 @@ export class WorkletsModule implements AgentModule {
         registration: StageRegistration,
     ): Promise<void> {
         try {
-            afterCommit(
-                ctx,
-                async (postCommitCtx) => {
-                    try {
-                        registration.markCommitted();
-                        await this.#installer.finalize(postCommitCtx, stage);
-                        if (event !== undefined) {
-                            await this.#notifyPostCommit(postCommitCtx, event);
-                        }
-                    } catch (error: unknown) {
-                        if (event !== undefined) {
-                            await this.#reportPostCommitError(postCommitCtx, event, error);
-                        }
+            afterCommit(ctx, async (postCommitCtx) => {
+                try {
+                    registration.markCommitted();
+                    await this.#installer.finalize(postCommitCtx, stage);
+                    if (event !== undefined) {
+                        await this.#notifyPostCommit(postCommitCtx, event);
                     }
-                },
-            );
+                } catch (error: unknown) {
+                    if (event !== undefined) {
+                        await this.#reportPostCommitError(postCommitCtx, event, error);
+                    }
+                }
+            });
         } catch (error: unknown) {
             await registration.rollbackNow(ctx);
             throw error;
@@ -1493,20 +1396,17 @@ export class WorkletsModule implements AgentModule {
         name: string,
         event: WorkletEvent,
     ): Promise<void> {
-        afterCommit(
-            ctx,
-            async (postCommitCtx) => {
-                try {
-                    await this.#reconcileFilesystem(postCommitCtx, name, undefined);
-                } catch (error: unknown) {
-                    // The durable removal already committed. Keep the failure
-                    // contained, but surface it through the explicit observer
-                    // error channel instead of silently discarding it.
-                    await this.#reportPostCommitError(postCommitCtx, event, error);
-                }
-                await this.#notifyPostCommit(postCommitCtx, event);
-            },
-        );
+        afterCommit(ctx, async (postCommitCtx) => {
+            try {
+                await this.#reconcileFilesystem(postCommitCtx, name, undefined);
+            } catch (error: unknown) {
+                // The durable removal already committed. Keep the failure
+                // contained, but surface it through the explicit observer
+                // error channel instead of silently discarding it.
+                await this.#reportPostCommitError(postCommitCtx, event, error);
+            }
+            await this.#notifyPostCommit(postCommitCtx, event);
+        });
     }
 
     async #rollbackStage(ctx: Context, stage: WorkletStage): Promise<void> {
@@ -1548,11 +1448,7 @@ export class WorkletsModule implements AgentModule {
         }
     }
 
-    async #reportPostCommitError(
-        ctx: Context,
-        event: WorkletEvent,
-        error: unknown,
-    ): Promise<void> {
+    async #reportPostCommitError(ctx: Context, event: WorkletEvent, error: unknown): Promise<void> {
         if (this.#onPostCommitError === undefined) return;
         try {
             await invokeVoidOrPromise(
@@ -1603,10 +1499,7 @@ export class WorkletsModule implements AgentModule {
         return structuredClone(raw);
     }
 
-    async #listCatalog(
-        ctx: Context,
-        query: WorkletListQuery,
-    ): Promise<WorkletListPage> {
+    async #listCatalog(ctx: Context, query: WorkletListQuery): Promise<WorkletListPage> {
         let limit = query.limit ?? this.#maxPageSize;
         for (;;) {
             const raw = await requirePromise(
@@ -1710,10 +1603,7 @@ export class WorkletsModule implements AgentModule {
         return structuredClone(raw);
     }
 
-    async #runtimeLogs(
-        ctx: Context,
-        query: WorkletRuntimeLogQuery,
-    ): Promise<WorkletLogPage> {
+    async #runtimeLogs(ctx: Context, query: WorkletRuntimeLogQuery): Promise<WorkletLogPage> {
         assertWorkletRuntimeLogQuery(query);
         const raw = await requirePromise(
             this.#runtime.readLogs.call(this.#runtime, ctx, query),
@@ -1731,11 +1621,7 @@ export class WorkletsModule implements AgentModule {
             this.#runtime.invokeOperation.call(this.#runtime, ctx, request),
             "Worklet runtime operation",
         );
-        assertAcyclicWithinDepth(
-            raw,
-            MAX_WORKLET_JSON_DEPTH + 2,
-            "Worklet operation result",
-        );
+        assertAcyclicWithinDepth(raw, MAX_WORKLET_JSON_DEPTH + 2, "Worklet operation result");
         assertWorkletInvocationResult(raw);
         return structuredClone(raw);
     }
@@ -1754,7 +1640,9 @@ export class WorkletsModule implements AgentModule {
             `Owner: ${detail.ownerAgentId}`,
             `Current version: ${detail.currentVersion}`,
             `Status: ${formatWorkletStatusState(detail.status.state)}`,
-            ...(detail.status.detail === undefined ? [] : [`Status detail: ${detail.status.detail}`]),
+            ...(detail.status.detail === undefined
+                ? []
+                : [`Status detail: ${detail.status.detail}`]),
             `Created at: ${detail.createdAt}`,
             `Updated at: ${detail.updatedAt}`,
             "Version history:",
@@ -1849,9 +1737,7 @@ export class WorkletsModule implements AgentModule {
     }
 }
 
-export function assertWorkletModuleOptions(
-    value: unknown,
-): asserts value is WorkletModuleOptions {
+export function assertWorkletModuleOptions(value: unknown): asserts value is WorkletModuleOptions {
     if (!Value.Check(workletModuleOptionsSchema, value)) {
         throw new Error("Worklet module options are invalid.");
     }
@@ -1952,11 +1838,7 @@ interface TraversalFrame {
     readonly leaving: boolean;
 }
 
-function assertAcyclicWithinDepth(
-    value: unknown,
-    maxDepth: number,
-    label: string,
-): void {
+function assertAcyclicWithinDepth(value: unknown, maxDepth: number, label: string): void {
     const stack: TraversalFrame[] = [{ value, depth: 0, leaving: false }];
     const active = new WeakSet<object>();
     while (stack.length > 0) {

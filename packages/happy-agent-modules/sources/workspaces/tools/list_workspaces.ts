@@ -12,7 +12,7 @@ export function listWorkspacesTool(workspaces: WorkspacesModule, agentId: string
     return defineAgentTool({
         name: "list_workspaces",
         description:
-            "List a bounded page of persistent workspaces. Use nextCursor to continue reading the host catalog.",
+            "List a bounded page of the persistent workspaces someone can still work in. Archived workspaces are history and are left out unless you pass includeArchived. Use nextCursor to continue reading the host catalog.",
         parameters: workspacePageQuerySchema,
         returnType: workspacePageSchema,
         durable: false,

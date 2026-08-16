@@ -6,10 +6,11 @@ import {
     projectEventIdSchema,
     projectIdSchema,
     projectNameSchema,
+    projectOrderKeySchema,
     projectSchema,
-    projectSettingsSchema,
     projectTimestampSchema,
 } from "./Project.js";
+import { projectSettingsSchema } from "./ProjectSettings.js";
 
 /** Context is host-owned and opaque to this module. */
 export const projectContextSchema = Type.Unsafe<Context>(
@@ -21,6 +22,23 @@ const projectEventEnvelope = {
     at: projectTimestampSchema,
     agentId: projectAgentIdSchema,
 } as const;
+
+/**
+ * Why a lifecycle write happened. Probe, Git and initialization updates all
+ * carry the whole project, so one event type with a stated reason keeps the
+ * listener contract small.
+ */
+export const projectStateChangeReasonSchema = Type.Union([
+    Type.Literal("probe"),
+    Type.Literal("git_facts"),
+    Type.Literal("default_branch"),
+    Type.Literal("remote_name"),
+    Type.Literal("clone_ready"),
+    Type.Literal("initialization_ready"),
+    Type.Literal("initialization_failed"),
+    Type.Literal("initialization_retried"),
+    Type.Literal("refresh"),
+]);
 
 export const projectEventSchema = Type.Union([
     Type.Object(
@@ -51,7 +69,7 @@ export const projectEventSchema = Type.Union([
     Type.Object(
         {
             ...projectEventEnvelope,
-            type: Type.Literal("project_unarchived"),
+            type: Type.Literal("project_restored"),
             project: projectSchema,
         },
         { additionalProperties: false },
@@ -60,7 +78,7 @@ export const projectEventSchema = Type.Union([
         {
             ...projectEventEnvelope,
             type: Type.Literal("project_reordered"),
-            previousOrderKey: projectSchema.properties.orderKey,
+            previousOrderKey: projectOrderKeySchema,
             project: projectSchema,
         },
         { additionalProperties: false },
@@ -90,6 +108,15 @@ export const projectEventSchema = Type.Union([
         },
         { additionalProperties: false },
     ),
+    Type.Object(
+        {
+            ...projectEventEnvelope,
+            type: Type.Literal("project_state_changed"),
+            reason: projectStateChangeReasonSchema,
+            project: projectSchema,
+        },
+        { additionalProperties: false },
+    ),
 ]);
 
 const projectListenerResultSchema = Type.Union([Type.Void(), Type.Promise(Type.Void())]);
@@ -106,5 +133,6 @@ export const projectModuleListenerSchema = Type.Object(
     { additionalProperties: false },
 );
 
+export type ProjectStateChangeReason = Static<typeof projectStateChangeReasonSchema>;
 export type ProjectEvent = Static<typeof projectEventSchema>;
 export type ProjectModuleListener = Static<typeof projectModuleListenerSchema>;

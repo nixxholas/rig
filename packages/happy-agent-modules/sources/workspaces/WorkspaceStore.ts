@@ -1,25 +1,40 @@
-import { sql } from "drizzle-orm";
-import { agentDatabaseRows, agentDatabaseRun, type AgentDatabase } from "@slopus/happy-agent-base";
-import { Type, type Static } from "@sinclair/typebox";
+import { Type, type Static, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type { Context } from "@steve.kite/stdlib";
+
 import {
     workspaceAgentIdSchema,
+    workspaceBranchSchema,
+    workspaceGitCommonDirSchema,
+    workspaceGitFactsSchema,
     workspaceIdSchema,
+    workspaceKindSchema,
     workspaceMutationOperationSchema,
-    workspaceOperationIdSchema,
     workspaceNameSchema,
+    workspaceOperationIdSchema,
     workspacePathSchema,
+    workspacePresenceSchema,
     workspaceProjectRefSchema,
+    workspaceReserveHooksSchema,
     workspaceSchema,
-    workspaceTimestampSchema,
+    workspaceSessionIdSchema,
+    workspaceStorageKeySchema,
+    workspaceBaseRefSchema,
+    workspaceCommitSchema,
+    workspaceErrorSchema,
+    workspaceInitializationFactsSchema,
+    workspaceVersionSchema,
     type Workspace,
+    type WorkspaceGitFacts,
+    type WorkspaceReserveHooks,
 } from "./Workspace.js";
+import { workspaceBranchName, workspaceNameKey } from "./WorkspaceIdentity.js";
 import {
     workspaceBranchMetadataSchema,
     type WorkspaceBranchMetadata,
 } from "./WorkspaceBranchMetadata.js";
 import { workspaceContextSchema, workspaceEventSchema } from "./WorkspaceEvent.js";
+import { workspaceMigrations } from "./WorkspaceMigrations.js";
 import {
     workspacePageQuerySchema,
     workspacePageSchema,
@@ -36,6 +51,18 @@ import {
     type WorkspaceTransferResult,
     type WorkspaceTransferStoreResult,
 } from "./WorkspaceTransfer.js";
+import { byOrder, lowestOrderKey, orderKeyBetween } from "./store/workspaceOrdering.js";
+import {
+    assertWorkspace,
+    readProjectWorkspaces,
+    readProjectWorkspacesFor,
+    readWorkspace,
+    readWorkspaceByPath,
+    readWorkspacePage,
+    sameJson,
+    writeWorkspace,
+} from "./store/workspaceRecords.js";
+import { reserveWorkspace } from "./store/workspaceReservation.js";
 
 export const workspaceMutationRequestSchema = Type.Object(
     {
@@ -46,24 +73,24 @@ export const workspaceMutationRequestSchema = Type.Object(
 );
 
 /**
- * The module adds `ownerAgentId` before crossing the host boundary. The
- * project reference remains optional because a host may resolve a default
- * project while creating the row.
+ * The reservation the module hands the store. The module has already resolved the acting agent,
+ * the project, the workspace kind, and whether the name was chosen deliberately; the store decides
+ * the name, storage key, branch, path, and order that do not collide with anything.
  */
-export const workspaceStoreCreateInputSchema = Type.Object(
+export const workspaceStoreReserveInputSchema = Type.Object(
     {
         id: workspaceIdSchema,
         ownerAgentId: workspaceAgentIdSchema,
-        projectRef: Type.Optional(workspaceProjectRefSchema),
-        path: Type.Optional(workspacePathSchema),
-        name: Type.String({ minLength: 1, maxLength: 500 }),
-        baseRef: Type.Optional(Type.String({ minLength: 1, maxLength: 1_024 })),
+        projectRef: workspaceProjectRefSchema,
+        name: workspaceNameSchema,
+        nameConfigured: Type.Boolean(),
+        kind: workspaceKindSchema,
+        baseRef: Type.Optional(workspaceBaseRefSchema),
+        baseCommit: Type.Optional(workspaceCommitSchema),
+        gitCommonDir: Type.Optional(workspaceGitCommonDirSchema),
+        creatorSessionId: Type.Optional(workspaceSessionIdSchema),
+        storageKeySeed: Type.Optional(workspaceStorageKeySchema),
     },
-    { additionalProperties: false },
-);
-
-export const workspaceStoreArchiveInputSchema = Type.Object(
-    { workspaceId: workspaceIdSchema },
     { additionalProperties: false },
 );
 
@@ -71,75 +98,82 @@ export const workspaceStoreRenameInputSchema = Type.Object(
     {
         workspaceId: workspaceIdSchema,
         name: workspaceNameSchema,
-        expectedUpdatedAt: Type.Optional(workspaceTimestampSchema),
+        expectedVersion: Type.Optional(workspaceVersionSchema),
     },
     { additionalProperties: false },
 );
 
-const workspaceMutationEnvelope = {
-    agentId: workspaceAgentIdSchema,
-    operationId: workspaceOperationIdSchema,
-    changed: Type.Boolean(),
-} as const;
+export const workspaceStoreInheritNameInputSchema = Type.Object(
+    { workspaceId: workspaceIdSchema, name: workspaceNameSchema },
+    { additionalProperties: false },
+);
 
-export const workspaceCreateResultSchema = Type.Object(
+export const workspaceStoreSetBranchInputSchema = Type.Object(
+    { workspaceId: workspaceIdSchema, branch: workspaceBranchSchema },
+    { additionalProperties: false },
+);
+
+export const workspaceStoreRecordInitializationInputSchema = Type.Object(
+    { workspaceId: workspaceIdSchema, facts: workspaceInitializationFactsSchema },
+    { additionalProperties: false },
+);
+
+export const workspaceStoreWorkspaceInputSchema = Type.Object(
+    { workspaceId: workspaceIdSchema },
+    { additionalProperties: false },
+);
+
+export const workspaceStoreFailInputSchema = Type.Object(
+    { workspaceId: workspaceIdSchema, error: workspaceErrorSchema },
+    { additionalProperties: false },
+);
+
+export const workspaceStoreReorderInputSchema = Type.Object(
     {
-        ...workspaceMutationEnvelope,
-        operation: Type.Literal("create"),
+        workspaceId: workspaceIdSchema,
+        afterId: Type.Union([workspaceIdSchema, Type.Null()]),
+        expectedVersion: Type.Optional(workspaceVersionSchema),
+    },
+    { additionalProperties: false },
+);
+
+export const workspaceStoreArchiveInputSchema = Type.Object(
+    {
+        workspaceId: workspaceIdSchema,
+        expectedVersion: Type.Optional(workspaceVersionSchema),
+    },
+    { additionalProperties: false },
+);
+
+export const workspaceStoreApplyGitFactsInputSchema = Type.Object(
+    { workspaceId: workspaceIdSchema, facts: workspaceGitFactsSchema },
+    { additionalProperties: false },
+);
+
+export const workspaceStoreApplyProbeInputSchema = Type.Object(
+    {
+        workspaceId: workspaceIdSchema,
+        presence: workspacePresenceSchema,
+        facts: workspaceGitFactsSchema,
+    },
+    { additionalProperties: false },
+);
+
+/** One shape for every durable workspace mutation: what was asked, and the row it produced. */
+export const workspaceMutationResultSchema = Type.Object(
+    {
+        agentId: workspaceAgentIdSchema,
+        operationId: workspaceOperationIdSchema,
+        operation: workspaceMutationOperationSchema,
+        changed: Type.Boolean(),
         workspace: workspaceSchema,
     },
     { additionalProperties: false },
 );
-
-export const workspaceArchiveResultSchema = Type.Object(
-    {
-        ...workspaceMutationEnvelope,
-        operation: Type.Literal("archive"),
-        workspace: workspaceSchema,
-    },
-    { additionalProperties: false },
-);
-
-export const workspaceRenameResultSchema = Type.Object(
-    {
-        ...workspaceMutationEnvelope,
-        operation: Type.Literal("rename"),
-        workspace: workspaceSchema,
-    },
-    { additionalProperties: false },
-);
-
-export const workspaceCreateStoreResultSchema = Type.Union([
-    workspaceCreateResultSchema,
-    workspaceSchema,
-    Type.Undefined(),
-    Type.Void(),
-]);
-
-export const workspaceArchiveStoreResultSchema = Type.Union([
-    workspaceArchiveResultSchema,
-    workspaceSchema,
-    Type.Undefined(),
-    Type.Void(),
-]);
-
-export const workspaceRenameStoreResultSchema = Type.Union([
-    workspaceRenameResultSchema,
-    workspaceSchema,
-    Type.Undefined(),
-    Type.Void(),
-]);
-
-export const workspaceStoreMutationResultSchema = Type.Union([
-    workspaceCreateResultSchema,
-    workspaceRenameResultSchema,
-    workspaceArchiveResultSchema,
-    workspaceTransferResultSchema,
-]);
 
 export const workspaceTransactionChangeSchema = Type.Object(
     {
-        result: workspaceStoreMutationResultSchema,
+        result: Type.Union([workspaceMutationResultSchema, workspaceTransferResultSchema]),
         event: Type.Optional(workspaceEventSchema),
     },
     { additionalProperties: false },
@@ -169,20 +203,28 @@ export const workspaceAuthorizationSchema = Type.Function(
 export type WorkspaceAuthorizationAction = Static<typeof workspaceAuthorizationActionSchema>;
 export type WorkspaceAuthorization = Static<typeof workspaceAuthorizationSchema>;
 
+/** Every durable mutation reads the same way: context, agent, what to change, and which call. */
+const mutation = <TInput extends TSchema>(input: TInput) =>
+    Type.Function(
+        [workspaceContextSchema, workspaceAgentIdSchema, input, workspaceMutationRequestSchema],
+        Type.Promise(workspaceMutationResultSchema),
+    );
+
 /**
  * This contract is private to the module-owned SQLite adapter. Callers
  * configure a narrow host operation service instead of injecting a store.
  */
 export const workspaceStoreSchema = Type.Object(
     {
-        create: Type.Function(
+        reserve: Type.Function(
             [
                 workspaceContextSchema,
                 workspaceAgentIdSchema,
-                workspaceStoreCreateInputSchema,
+                workspaceStoreReserveInputSchema,
+                workspaceReserveHooksSchema,
                 workspaceMutationRequestSchema,
             ],
-            Type.Promise(workspaceCreateResultSchema),
+            Type.Promise(workspaceMutationResultSchema),
         ),
         list: Type.Function(
             [workspaceContextSchema, workspaceAgentIdSchema, workspacePageQuerySchema],
@@ -192,6 +234,22 @@ export const workspaceStoreSchema = Type.Object(
             [workspaceContextSchema, workspaceAgentIdSchema, workspaceIdSchema],
             Type.Promise(Type.Union([workspaceSchema, Type.Undefined()])),
         ),
+        getByPath: Type.Function(
+            [workspaceContextSchema, workspaceAgentIdSchema, workspacePathSchema],
+            Type.Promise(Type.Union([workspaceSchema, Type.Undefined()])),
+        ),
+        rename: mutation(workspaceStoreRenameInputSchema),
+        inheritName: mutation(workspaceStoreInheritNameInputSchema),
+        setBranch: mutation(workspaceStoreSetBranchInputSchema),
+        recordInitialization: mutation(workspaceStoreRecordInitializationInputSchema),
+        markReady: mutation(workspaceStoreWorkspaceInputSchema),
+        markFailed: mutation(workspaceStoreFailInputSchema),
+        markInitializationFailed: mutation(workspaceStoreFailInputSchema),
+        reorder: mutation(workspaceStoreReorderInputSchema),
+        beginArchive: mutation(workspaceStoreArchiveInputSchema),
+        completeArchive: mutation(workspaceStoreWorkspaceInputSchema),
+        applyGitFacts: mutation(workspaceStoreApplyGitFactsInputSchema),
+        applyProbe: mutation(workspaceStoreApplyProbeInputSchema),
         transfer: Type.Function(
             [
                 workspaceContextSchema,
@@ -200,24 +258,6 @@ export const workspaceStoreSchema = Type.Object(
                 workspaceMutationRequestSchema,
             ],
             Type.Promise(workspaceTransferStoreResultSchema),
-        ),
-        archive: Type.Function(
-            [
-                workspaceContextSchema,
-                workspaceAgentIdSchema,
-                workspaceStoreArchiveInputSchema,
-                workspaceMutationRequestSchema,
-            ],
-            Type.Promise(workspaceArchiveResultSchema),
-        ),
-        rename: Type.Function(
-            [
-                workspaceContextSchema,
-                workspaceAgentIdSchema,
-                workspaceStoreRenameInputSchema,
-                workspaceMutationRequestSchema,
-            ],
-            Type.Promise(workspaceRenameResultSchema),
         ),
         branchMetadata: Type.Function(
             [workspaceContextSchema, workspaceAgentIdSchema, workspaceIdSchema],
@@ -228,17 +268,23 @@ export const workspaceStoreSchema = Type.Object(
 );
 
 export type WorkspaceStore = Static<typeof workspaceStoreSchema>;
-export type WorkspaceStoreCreateInput = Static<typeof workspaceStoreCreateInputSchema>;
-export type WorkspaceStoreArchiveInput = Static<typeof workspaceStoreArchiveInputSchema>;
+export type WorkspaceStoreReserveInput = Static<typeof workspaceStoreReserveInputSchema>;
 export type WorkspaceStoreRenameInput = Static<typeof workspaceStoreRenameInputSchema>;
+export type WorkspaceStoreInheritNameInput = Static<typeof workspaceStoreInheritNameInputSchema>;
+export type WorkspaceStoreSetBranchInput = Static<typeof workspaceStoreSetBranchInputSchema>;
+export type WorkspaceStoreRecordInitializationInput = Static<
+    typeof workspaceStoreRecordInitializationInputSchema
+>;
+export type WorkspaceStoreWorkspaceInput = Static<typeof workspaceStoreWorkspaceInputSchema>;
+export type WorkspaceStoreFailInput = Static<typeof workspaceStoreFailInputSchema>;
+export type WorkspaceStoreReorderInput = Static<typeof workspaceStoreReorderInputSchema>;
+export type WorkspaceStoreArchiveInput = Static<typeof workspaceStoreArchiveInputSchema>;
+export type WorkspaceStoreApplyGitFactsInput = Static<
+    typeof workspaceStoreApplyGitFactsInputSchema
+>;
+export type WorkspaceStoreApplyProbeInput = Static<typeof workspaceStoreApplyProbeInputSchema>;
 export type WorkspaceMutationRequest = Static<typeof workspaceMutationRequestSchema>;
-export type WorkspaceCreateResult = Static<typeof workspaceCreateResultSchema>;
-export type WorkspaceArchiveResult = Static<typeof workspaceArchiveResultSchema>;
-export type WorkspaceRenameResult = Static<typeof workspaceRenameResultSchema>;
-export type WorkspaceCreateStoreResult = Static<typeof workspaceCreateStoreResultSchema>;
-export type WorkspaceArchiveStoreResult = Static<typeof workspaceArchiveStoreResultSchema>;
-export type WorkspaceRenameStoreResult = Static<typeof workspaceRenameStoreResultSchema>;
-export type WorkspaceStoreMutationResult = Static<typeof workspaceStoreMutationResultSchema>;
+export type WorkspaceMutationResult = Static<typeof workspaceMutationResultSchema>;
 export type WorkspaceTransactionChange = Static<typeof workspaceTransactionChangeSchema>;
 
 export type {
@@ -251,16 +297,14 @@ export type {
     WorkspaceTransferStoreResult,
 };
 
+export { orderKeyBetween, sameJson, workspaceMigrations, assertWorkspace };
+
 export function assertWorkspaceStore(value: unknown): asserts value is WorkspaceStore {
     if (!Value.Check(workspaceStoreSchema, value)) {
         throw new Error("Workspace module received an invalid host store.");
     }
 }
-export function assertWorkspace(value: unknown): asserts value is Workspace {
-    if (!Value.Check(workspaceSchema, value)) {
-        throw new Error("Workspace store returned an invalid workspace.");
-    }
-}
+
 export function assertWorkspacePage(value: unknown): asserts value is WorkspacePage {
     if (!Value.Check(workspacePageSchema, value)) {
         throw new Error("Workspace store returned an invalid page.");
@@ -281,34 +325,10 @@ export function assertWorkspaceBranchMetadata(
     }
 }
 
-export function assertWorkspaceCreateResult(
+export function assertWorkspaceMutationResult(
     value: unknown,
-): asserts value is WorkspaceCreateResult {
-    if (!Value.Check(workspaceCreateResultSchema, value)) {
-        throw new Error("Workspace store returned an invalid create result.");
-    }
-}
-
-export function assertWorkspaceArchiveResult(
-    value: unknown,
-): asserts value is WorkspaceArchiveResult {
-    if (!Value.Check(workspaceArchiveResultSchema, value)) {
-        throw new Error("Workspace store returned an invalid archive result.");
-    }
-}
-
-export function assertWorkspaceRenameResult(
-    value: unknown,
-): asserts value is WorkspaceRenameResult {
-    if (!Value.Check(workspaceRenameResultSchema, value)) {
-        throw new Error("Workspace store returned an invalid rename result.");
-    }
-}
-
-export function assertWorkspaceStoreMutationResult(
-    value: unknown,
-): asserts value is WorkspaceStoreMutationResult {
-    if (!Value.Check(workspaceStoreMutationResultSchema, value)) {
+): asserts value is WorkspaceMutationResult {
+    if (!Value.Check(workspaceMutationResultSchema, value)) {
         throw new Error("Workspace store returned an invalid mutation result.");
     }
 }
@@ -329,17 +349,72 @@ export function assertWorkspaceTransactionChange(
     }
 }
 
+/** What a host is told before it moves a workspace's Git branch. */
+export const workspaceHostRenameBranchSchema = Type.Object(
+    {
+        workspaceId: workspaceIdSchema,
+        path: workspacePathSchema,
+        kind: workspaceKindSchema,
+        name: workspaceNameSchema,
+        branch: workspaceBranchSchema,
+        previousBranch: workspaceBranchSchema,
+    },
+    { additionalProperties: false },
+);
+
+/** What a host is told before it removes a workspace's worktree or copied folder. */
+export const workspaceHostArchiveSchema = Type.Object(
+    {
+        workspaceId: workspaceIdSchema,
+        path: workspacePathSchema,
+        kind: workspaceKindSchema,
+        gitCommonDir: Type.Optional(workspaceGitCommonDirSchema),
+    },
+    { additionalProperties: false },
+);
+
+const workspaceHostAvailabilitySchema = Type.Union([
+    Type.Boolean(),
+    Type.Promise(Type.Boolean()),
+]);
+
+/**
+ * The host's side of a workspace. Reservation stays inside the module — it is a durable decision
+ * about names — but the host says which folders and branches are already spoken for, where a
+ * workspace lives, and it performs the Git and filesystem work the durable record describes.
+ *
+ * The two availability answers are a real look at Git: a reservation refuses to invent a branch
+ * when nothing can tell it which refs, loose or packed, already exist.
+ */
 export const workspaceHostSchema = Type.Object(
     {
-        create: Type.Optional(
+        pathForStorageKey: Type.Optional(
+            Type.Function(
+                [workspaceProjectRefSchema, workspaceStorageKeySchema],
+                workspacePathSchema,
+            ),
+        ),
+        isBranchUnavailable: Type.Optional(
+            Type.Function(
+                [workspaceProjectRefSchema, workspaceBranchSchema],
+                workspaceHostAvailabilitySchema,
+            ),
+        ),
+        isStorageKeyUnavailable: Type.Optional(
+            Type.Function(
+                [workspaceProjectRefSchema, workspaceStorageKeySchema],
+                workspaceHostAvailabilitySchema,
+            ),
+        ),
+        renameBranch: Type.Optional(
             Type.Function(
                 [
                     workspaceContextSchema,
                     workspaceAgentIdSchema,
-                    workspaceStoreCreateInputSchema,
+                    workspaceHostRenameBranchSchema,
                     workspaceMutationRequestSchema,
                 ],
-                Type.Promise(workspaceCreateStoreResultSchema),
+                Type.Promise(Type.Union([workspaceBranchSchema, Type.Undefined()])),
             ),
         ),
         archive: Type.Optional(
@@ -347,21 +422,10 @@ export const workspaceHostSchema = Type.Object(
                 [
                     workspaceContextSchema,
                     workspaceAgentIdSchema,
-                    workspaceStoreArchiveInputSchema,
+                    workspaceHostArchiveSchema,
                     workspaceMutationRequestSchema,
                 ],
-                Type.Promise(workspaceArchiveStoreResultSchema),
-            ),
-        ),
-        rename: Type.Optional(
-            Type.Function(
-                [
-                    workspaceContextSchema,
-                    workspaceAgentIdSchema,
-                    workspaceStoreRenameInputSchema,
-                    workspaceMutationRequestSchema,
-                ],
-                Type.Promise(workspaceRenameStoreResultSchema),
+                Type.Promise(Type.Void()),
             ),
         ),
         branchMetadata: Type.Optional(
@@ -386,6 +450,8 @@ export const workspaceHostSchema = Type.Object(
 );
 
 export type WorkspaceHost = Static<typeof workspaceHostSchema>;
+export type WorkspaceHostRenameBranch = Static<typeof workspaceHostRenameBranchSchema>;
+export type WorkspaceHostArchive = Static<typeof workspaceHostArchiveSchema>;
 
 export const workspaceStoreOptionsSchema = Type.Object(
     { host: Type.Optional(workspaceHostSchema) },
@@ -394,193 +460,260 @@ export const workspaceStoreOptionsSchema = Type.Object(
 
 export type WorkspaceStoreOptions = Static<typeof workspaceStoreOptionsSchema>;
 
-type WorkspaceRow = {
-    readonly id: string;
-    readonly owner_agent_id: string;
-    readonly project_ref: string;
-    readonly base_ref: string | null;
-    readonly name: string;
-    readonly status: string;
-    readonly path: string | null;
-    readonly created_at: number | string;
-    readonly updated_at: number | string;
-    readonly archived_at: number | string | null;
-};
-
-const WORKSPACE_MIGRATION_KEY = "001-workspaces-catalog";
-const WORKSPACES_TABLE = "happy_agent_module_workspaces";
-const WORKSPACE_RECEIPTS_TABLE = "happy_agent_module_workspace_operation_receipts";
-const WORKSPACE_PROOFS_TABLE = "happy_agent_module_workspace_mutation_proofs";
-
-/** Durable workspace catalog owned by the workspaces module. */
-export const workspaceMigrations = [
-    [
-        WORKSPACE_MIGRATION_KEY,
-        async (_ctx: Context, database: AgentDatabase): Promise<void> => {
-            await agentDatabaseRun(
-                database,
-                sql`CREATE TABLE IF NOT EXISTS ${sql.raw(WORKSPACES_TABLE)} (
-                    id TEXT PRIMARY KEY,
-                    owner_agent_id TEXT NOT NULL,
-                    project_ref TEXT NOT NULL,
-                    base_ref TEXT,
-                    name TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    created_at BIGINT NOT NULL,
-                    updated_at BIGINT NOT NULL,
-                    archived_at BIGINT
-                )`,
-            );
-            await agentDatabaseRun(
-                database,
-                sql`CREATE INDEX IF NOT EXISTS ${sql.raw(`${WORKSPACES_TABLE}_project_id`)}
-                    ON ${sql.raw(WORKSPACES_TABLE)} (project_ref, id)`,
-            );
-            await agentDatabaseRun(
-                database,
-                sql`CREATE TABLE IF NOT EXISTS ${sql.raw(WORKSPACE_RECEIPTS_TABLE)} (
-                    agent_id TEXT NOT NULL,
-                    operation_id TEXT NOT NULL,
-                    result_json TEXT NOT NULL,
-                    PRIMARY KEY (agent_id, operation_id)
-                )`,
-            );
-            await agentDatabaseRun(
-                database,
-                sql`CREATE TABLE IF NOT EXISTS ${sql.raw(WORKSPACE_PROOFS_TABLE)} (
-                    agent_id TEXT NOT NULL,
-                    operation_id TEXT NOT NULL,
-                    proof_json TEXT NOT NULL,
-                    PRIMARY KEY (agent_id, operation_id)
-                )`,
-            );
-        },
-    ],
-    [
-        "002-drop-workspace-replay-state",
-        async (_ctx: Context, database: AgentDatabase): Promise<void> => {
-            await agentDatabaseRun(
-                database,
-                sql`DROP TABLE IF EXISTS ${sql.raw(WORKSPACE_RECEIPTS_TABLE)}`,
-            );
-            await agentDatabaseRun(
-                database,
-                sql`DROP TABLE IF EXISTS ${sql.raw(WORKSPACE_PROOFS_TABLE)}`,
-            );
-        },
-    ],
-    [
-        "003-workspace-path",
-        async (_ctx: Context, database: AgentDatabase): Promise<void> => {
-            await agentDatabaseRun(
-                database,
-                sql`ALTER TABLE ${sql.raw(WORKSPACES_TABLE)} ADD COLUMN path TEXT`,
-            );
-        },
-    ],
-] as const;
-
 export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): WorkspaceStore {
     if (!Value.Check(workspaceStoreOptionsSchema, options)) {
         throw new Error("Workspace store options are invalid.");
     }
-    return {
-        create: async (ctx, actingAgentId, input, operation) => {
-            const hostResult =
-                options.host?.create === undefined
-                    ? undefined
-                    : await options.host.create(ctx, actingAgentId, input, operation);
-            if (hostResult !== undefined) {
-                const result = normalizeCreateStoreResult(
-                    hostResult,
-                    actingAgentId,
-                    input,
-                    operation,
-                );
-                await insertWorkspace(ctx.db, result.workspace);
-                return result;
-            }
-            const at = Date.now();
-            const workspace: Workspace = {
-                id: input.id,
-                ownerAgentId: input.ownerAgentId,
-                projectRef: input.projectRef ?? "default",
-                ...(input.path === undefined ? {} : { path: input.path }),
-                ...(input.baseRef === undefined ? {} : { baseRef: input.baseRef }),
-                name: input.name,
-                status: "ready",
-                createdAt: at,
-                updatedAt: at,
-            };
-            assertWorkspace(workspace);
-            await insertWorkspace(ctx.db, workspace);
+    const host = options.host;
+
+    /**
+     * One durable write. The row the decision was read from is part of the update predicate, so a
+     * mutation either applies to exactly that row or is refused, and the version it produces is
+     * always the one after the version it read.
+     */
+    const update = async (
+        ctx: Context,
+        agentId: string,
+        workspaceId: string,
+        operation: WorkspaceMutationRequest,
+        decide: (before: Workspace) => Workspace | undefined | Promise<Workspace | undefined>,
+    ): Promise<WorkspaceMutationResult> => {
+        const database = ctx.db;
+        const before = await readWorkspace(database, workspaceId);
+        if (before === undefined) throw new Error(`Workspace "${workspaceId}" was not found.`);
+        const decided = await decide(before);
+        if (decided === undefined) {
             return {
-                operation: "create",
-                agentId: actingAgentId,
+                agentId,
                 operationId: operation.operationId,
-                changed: true,
-                workspace,
+                operation: operation.operation,
+                changed: false,
+                workspace: before,
             };
-        },
+        }
+        const workspace: Workspace = {
+            ...decided,
+            version: before.version + 1,
+            updatedAt: Math.max(Date.now(), before.updatedAt + 1),
+        };
+        assertWorkspace(workspace);
+        const stored = await writeWorkspace(database, workspace, before.version);
+        return {
+            agentId,
+            operationId: operation.operationId,
+            operation: operation.operation,
+            changed: true,
+            workspace: stored,
+        };
+    };
+
+    return {
+        reserve: async (ctx, actingAgentId, input, hooks, operation) =>
+            await reserveWorkspace(ctx.db, actingAgentId, input, hooks, host, operation),
+
         list: async (ctx, _agentId, query) => {
-            const offset = query.cursor === undefined ? 0 : Number(query.cursor);
+            const cursor = query.cursor ?? 0;
             const limit = query.limit ?? 50;
-            const database = ctx.db;
-            const rows = await agentDatabaseRows<WorkspaceRow>(
-                database,
-                query.projectRef === undefined
-                    ? query.includeArchived !== false
-                        ? sql`SELECT * FROM ${sql.raw(WORKSPACES_TABLE)} ORDER BY id LIMIT ${limit} OFFSET ${offset}`
-                        : sql`SELECT * FROM ${sql.raw(WORKSPACES_TABLE)}
-                               WHERE status NOT IN ('archived', 'archiving')
-                               ORDER BY id LIMIT ${limit} OFFSET ${offset}`
-                    : query.includeArchived !== false
-                      ? sql`SELECT * FROM ${sql.raw(WORKSPACES_TABLE)}
-                             WHERE project_ref = ${query.projectRef}
-                             ORDER BY id LIMIT ${limit} OFFSET ${offset}`
-                      : sql`SELECT * FROM ${sql.raw(WORKSPACES_TABLE)}
-                             WHERE project_ref = ${query.projectRef}
-                               AND status NOT IN ('archived', 'archiving')
-                             ORDER BY id LIMIT ${limit} OFFSET ${offset}`,
-            );
-            const workspaces = rows.map(workspaceFromRow);
+            const rows = await readWorkspacePage(ctx.db, {
+                projectRef: query.projectRef,
+                includeArchived: query.includeArchived === true,
+                cursor,
+                limit,
+            });
+            const workspaces = rows.slice(0, limit);
             return {
                 workspaces,
-                ...(workspaces.length === limit
-                    ? { nextCursor: String(offset + workspaces.length) }
-                    : {}),
+                cursor,
+                ...(rows.length > limit ? { nextCursor: cursor + workspaces.length } : {}),
             };
         },
-        get: async (ctx, _agentId, workspaceId) => {
-            const rows = await agentDatabaseRows<WorkspaceRow>(
-                ctx.db,
-                sql`SELECT * FROM ${sql.raw(WORKSPACES_TABLE)}
-                    WHERE id = ${workspaceId} LIMIT 1`,
-            );
-            const row = rows[0];
-            return row === undefined ? undefined : workspaceFromRow(row);
+
+        get: async (ctx, _agentId, workspaceId) => await readWorkspace(ctx.db, workspaceId),
+
+        getByPath: async (ctx, _agentId, path) => await readWorkspaceByPath(ctx.db, path),
+
+        rename: async (ctx, actingAgentId, input, operation) => {
+            const siblings = await readProjectWorkspacesFor(ctx.db, input.workspaceId);
+            return await update(ctx, actingAgentId, input.workspaceId, operation, async (before) => {
+                assertExpectedVersion(
+                    before,
+                    input.expectedVersion,
+                    "The workspace changed before it could be renamed.",
+                );
+                if (isSettled(before)) return undefined;
+                const named = await renameTo(before, input.name, siblings, host);
+                // A person naming a workspace settles the question: a first chat never renames it
+                // again, even when the name it chose happens to match.
+                return named === undefined && before.nameConfigured
+                    ? undefined
+                    : { ...(named ?? before), nameConfigured: true };
+            });
         },
+
+        inheritName: async (ctx, actingAgentId, input, operation) => {
+            const siblings = await readProjectWorkspacesFor(ctx.db, input.workspaceId);
+            return await update(ctx, actingAgentId, input.workspaceId, operation, async (before) =>
+                before.nameConfigured || isSettled(before)
+                    ? undefined
+                    : await renameTo(before, input.name, siblings, host),
+            );
+        },
+
+        setBranch: async (ctx, actingAgentId, input, operation) =>
+            await update(ctx, actingAgentId, input.workspaceId, operation, (before) =>
+                isSettled(before) || before.branch === input.branch
+                    ? undefined
+                    : { ...before, branch: input.branch },
+            ),
+
+        recordInitialization: async (ctx, actingAgentId, input, operation) =>
+            await update(ctx, actingAgentId, input.workspaceId, operation, (before) => {
+                // A workspace archived or failed while Git discovery was running keeps its
+                // terminal state and ignores the late result.
+                if (before.status !== "initializing") return undefined;
+                const next: Workspace = {
+                    ...before,
+                    baseCommit: input.facts.baseCommit,
+                    baseRef: input.facts.baseRef,
+                    gitCommonDir: input.facts.gitCommonDir,
+                };
+                return sameJson(next, before) ? undefined : next;
+            }),
+
+        markReady: async (ctx, actingAgentId, input, operation) =>
+            await update(ctx, actingAgentId, input.workspaceId, operation, (before) => {
+                if (before.status !== "initializing") return undefined;
+                const next = { ...before, presence: "present" as const, status: "ready" as const };
+                delete next.initializationError;
+                return next;
+            }),
+
+        markFailed: async (ctx, actingAgentId, input, operation) =>
+            await update(ctx, actingAgentId, input.workspaceId, operation, (before) =>
+                before.status === "ready"
+                    ? { ...before, status: "failed", initializationError: input.error }
+                    : undefined,
+            ),
+
+        markInitializationFailed: async (ctx, actingAgentId, input, operation) =>
+            await update(ctx, actingAgentId, input.workspaceId, operation, (before) =>
+                before.status === "initializing"
+                    ? {
+                          ...before,
+                          status: "failed",
+                          initializationError: input.error,
+                          initializationAttempt: Math.min(
+                              before.initializationAttempt + 1,
+                              1_000_000,
+                          ),
+                      }
+                    : undefined,
+            ),
+
+        reorder: async (ctx, actingAgentId, input, operation) => {
+            const database = ctx.db;
+            if (input.afterId === input.workspaceId) {
+                throw new Error("A workspace cannot be placed after itself.");
+            }
+            const target = await readWorkspace(database, input.workspaceId);
+            if (target === undefined) {
+                throw new Error(`Workspace "${input.workspaceId}" was not found.`);
+            }
+            const ordered = (await readProjectWorkspaces(database, target.projectRef))
+                .filter((row) => row.id !== input.workspaceId)
+                .sort(byOrder);
+            const afterIndex =
+                input.afterId === null
+                    ? -1
+                    : ordered.findIndex((row) => row.id === input.afterId);
+            if (input.afterId !== null && afterIndex === -1) {
+                throw new Error("The workspace to place after was not found in the project.");
+            }
+            const orderKey = orderKeyBetween(
+                afterIndex === -1 ? null : (ordered[afterIndex]?.orderKey ?? null),
+                ordered[afterIndex + 1]?.orderKey ?? null,
+            );
+            return await update(ctx, actingAgentId, input.workspaceId, operation, (before) => {
+                assertExpectedVersion(
+                    before,
+                    input.expectedVersion,
+                    "The workspace changed before it could be reordered.",
+                );
+                return before.orderKey === orderKey ? undefined : { ...before, orderKey };
+            });
+        },
+
+        beginArchive: async (ctx, actingAgentId, input, operation) =>
+            await update(ctx, actingAgentId, input.workspaceId, operation, (before) => {
+                assertExpectedVersion(
+                    before,
+                    input.expectedVersion,
+                    "The workspace changed before it could be archived.",
+                );
+                if (isSettled(before)) return undefined;
+                const next: Workspace = { ...before, status: "archiving" };
+                delete next.initializationError;
+                return next;
+            }),
+
+        completeArchive: async (ctx, actingAgentId, input, operation) =>
+            await update(ctx, actingAgentId, input.workspaceId, operation, (before) => {
+                if (before.status !== "archiving") return undefined;
+                const next: Workspace = {
+                    ...before,
+                    status: "archived",
+                    archivedAt: Math.max(Date.now(), before.updatedAt + 1),
+                };
+                delete next.initializationError;
+                return next;
+            }),
+
+        applyGitFacts: async (ctx, actingAgentId, input, operation) =>
+            await update(ctx, actingAgentId, input.workspaceId, operation, (before) =>
+                // Archival is the terminal decision. A scan that was already running when it was
+                // made describes a workspace nobody has any more.
+                isSettled(before) ? undefined : withGitFacts(before, input.facts),
+            ),
+
+        applyProbe: async (ctx, actingAgentId, input, operation) =>
+            await update(ctx, actingAgentId, input.workspaceId, operation, (before) => {
+                // A probe describes a workspace someone can use. Anything still being built or
+                // taken down is described by its own lifecycle transition instead.
+                if (before.status !== "ready") return undefined;
+                const next = withGitFacts(before, input.facts) ?? before;
+                const probed: Workspace = { ...next, presence: input.presence };
+                return sameJson(probed, before) ? undefined : probed;
+            }),
+
         transfer: async (ctx, actingAgentId, input, operation) => {
             const database = ctx.db;
             const hostResult =
-                options.host?.transfer === undefined
+                host?.transfer === undefined
                     ? undefined
-                    : await options.host.transfer(ctx, actingAgentId, input, operation);
+                    : await host.transfer(ctx, actingAgentId, input, operation);
             const result =
                 hostResult ??
-                (await defaultWorkspaceTransfer(database, actingAgentId, input, operation));
+                (await defaultWorkspaceTransfer(ctx, actingAgentId, input, operation));
             if (Value.Check(workspaceSchema, result)) {
-                await persistWorkspace(database, result);
+                const current = await readWorkspace(database, result.id);
+                if (current === undefined) {
+                    throw new Error("Workspace transfer host returned a missing workspace.");
+                }
+                const stored = await writeWorkspace(
+                    database,
+                    { ...result, version: current.version + 1 },
+                    current.version,
+                );
                 return {
                     agentId: actingAgentId,
                     operationId: operation.operationId,
                     changed: true,
                     state: "transferred",
                     workspace: {
-                        id: result.id,
-                        projectRef: result.projectRef,
-                        ownerAgentId: result.ownerAgentId,
-                        ...(result.path === undefined ? {} : { path: result.path }),
+                        id: stored.id,
+                        projectRef: stored.projectRef,
+                        ownerAgentId: stored.ownerAgentId,
+                        path: stored.path,
                     },
                 };
             }
@@ -590,198 +723,127 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
                     throw new Error("Workspace transfer host returned a missing workspace.");
                 }
                 if (current.projectRef !== result.workspace.projectRef) {
-                    await agentDatabaseRun(
+                    await writeWorkspace(
                         database,
-                        sql`UPDATE ${sql.raw(WORKSPACES_TABLE)}
-                            SET project_ref = ${result.workspace.projectRef},
-                                updated_at = ${Date.now()}
-                            WHERE id = ${result.workspace.id}`,
+                        {
+                            ...current,
+                            projectRef: result.workspace.projectRef,
+                            version: current.version + 1,
+                            updatedAt: Math.max(Date.now(), current.updatedAt + 1),
+                        },
+                        current.version,
                     );
                 }
-            } else {
-                await agentDatabaseRun(
-                    database,
-                    sql`UPDATE ${sql.raw(WORKSPACES_TABLE)} SET updated_at = ${Date.now()}
-                        WHERE id = ${result.targetWorkspaceId}`,
-                );
             }
             return result;
         },
-        rename: async (ctx, actingAgentId, input, operation) => {
-            const database = ctx.db;
-            const before = await readWorkspace(database, input.workspaceId);
-            if (before === undefined) {
-                throw new Error(`Workspace "${input.workspaceId}" was not found.`);
-            }
-            if (
-                input.expectedUpdatedAt !== undefined &&
-                input.expectedUpdatedAt !== before.updatedAt
-            ) {
-                throw new Error("Workspace changed before it could be renamed.");
-            }
-            const hostResult =
-                options.host?.rename === undefined
-                    ? undefined
-                    : await options.host.rename(ctx, actingAgentId, input, operation);
-            if (hostResult !== undefined) {
-                const result = normalizeRenameStoreResult(
-                    hostResult,
-                    actingAgentId,
-                    input,
-                    operation,
-                    before,
-                );
-                if (result.workspace.id !== input.workspaceId) {
-                    throw new Error("Workspace rename host returned a different workspace.");
-                }
-                await persistWorkspace(database, result.workspace);
-                return result;
-            }
-            const changed = before.name !== input.name;
-            const updatedAt = changed
-                ? Math.max(Date.now(), before.updatedAt + 1)
-                : before.updatedAt;
-            if (changed) {
-                await agentDatabaseRun(
-                    database,
-                    sql`UPDATE ${sql.raw(WORKSPACES_TABLE)}
-                        SET name = ${input.name}, updated_at = ${updatedAt}
-                        WHERE id = ${input.workspaceId}`,
-                );
-            }
-            return {
-                operation: "rename",
-                agentId: actingAgentId,
-                operationId: operation.operationId,
-                changed,
-                workspace: {
-                    ...before,
-                    name: input.name,
-                    updatedAt,
-                },
-            };
-        },
-        archive: async (ctx, actingAgentId, input, operation) => {
-            const database = ctx.db;
-            const before = await readWorkspace(database, input.workspaceId);
-            if (before === undefined)
-                throw new Error(`Workspace "${input.workspaceId}" was not found.`);
-            if (before.status === "archived") {
-                return {
-                    operation: "archive",
-                    agentId: actingAgentId,
-                    operationId: operation.operationId,
-                    changed: false,
-                    workspace: before,
-                };
-            }
-            const hostResult =
-                options.host?.archive === undefined
-                    ? undefined
-                    : await options.host.archive(ctx, actingAgentId, input, operation);
-            if (hostResult !== undefined) {
-                const result = normalizeArchiveStoreResult(
-                    hostResult,
-                    actingAgentId,
-                    input,
-                    operation,
-                );
-                if (result.workspace.id !== input.workspaceId) {
-                    throw new Error("Workspace archive host returned a different workspace.");
-                }
-                await persistWorkspace(database, result.workspace);
-                return result;
-            }
-            const updatedAt = Date.now();
-            await agentDatabaseRun(
-                database,
-                sql`UPDATE ${sql.raw(WORKSPACES_TABLE)}
-                    SET status = 'archived', archived_at = ${updatedAt}, updated_at = ${updatedAt}
-                    WHERE id = ${input.workspaceId}`,
-            );
-            const workspace = {
-                ...before,
-                status: "archived" as const,
-                archivedAt: updatedAt,
-                updatedAt,
-            };
-            return {
-                operation: "archive",
-                agentId: actingAgentId,
-                operationId: operation.operationId,
-                changed: true,
-                workspace,
-            };
-        },
+
         branchMetadata: async (ctx, actingAgentId, workspaceId) => {
-            if (options.host?.branchMetadata === undefined) {
+            if (host?.branchMetadata === undefined) {
                 throw new Error("Workspace branch metadata requires an injected host service.");
             }
-            return await options.host.branchMetadata(ctx, actingAgentId, workspaceId);
+            return await host.branchMetadata(ctx, actingAgentId, workspaceId);
         },
     };
 }
 
-async function readWorkspace(
-    database: AgentDatabase,
-    workspaceId: string,
+/** Archival is terminal: an observation that arrives afterwards changes nothing. */
+function isSettled(workspace: Workspace): boolean {
+    return workspace.status === "archiving" || workspace.status === "archived";
+}
+
+/**
+ * Moves a workspace onto a name nothing else in the project answers to, and moves its branch with
+ * it. Returns undefined when neither the name nor the branch would actually change.
+ */
+async function renameTo(
+    before: Workspace,
+    requested: string,
+    siblings: readonly Workspace[],
+    host: WorkspaceHost | undefined,
 ): Promise<Workspace | undefined> {
-    const rows = await agentDatabaseRows<WorkspaceRow>(
-        database,
-        sql`SELECT * FROM ${sql.raw(WORKSPACES_TABLE)}
-            WHERE id = ${workspaceId} LIMIT 1`,
+    const others = siblings.filter((row) => row.id !== before.id);
+    const name = uniqueName(requested, (candidate) =>
+        others.some((row) => workspaceNameKey(row.name) === workspaceNameKey(candidate)),
     );
-    const row = rows[0];
-    return row === undefined ? undefined : workspaceFromRow(row);
+    const branch = await uniqueBranch(workspaceBranchName(name), async (candidate) => {
+        // A workspace never collides with itself: Git already holds the branch it is on, so a
+        // name that slugs back to it must not be pushed onto a suffix for nothing.
+        if (candidate === before.branch) return false;
+        if (others.some((row) => row.branch === candidate)) return true;
+        return host?.isBranchUnavailable === undefined
+            ? false
+            : await host.isBranchUnavailable(before.projectRef, candidate);
+    });
+    return name === before.name && branch === before.branch
+        ? undefined
+        : { ...before, name, branch };
 }
 
-async function insertWorkspace(database: AgentDatabase, workspace: Workspace): Promise<void> {
-    await agentDatabaseRun(
-        database,
-        sql`INSERT INTO ${sql.raw(WORKSPACES_TABLE)} (
-            id, owner_agent_id, project_ref, path, base_ref, name, status,
-            created_at, updated_at, archived_at
-        ) VALUES (
-            ${workspace.id}, ${workspace.ownerAgentId}, ${workspace.projectRef},
-            ${workspace.path ?? null}, ${workspace.baseRef ?? null}, ${workspace.name},
-            ${workspace.status}, ${workspace.createdAt}, ${workspace.updatedAt},
-            ${workspace.archivedAt ?? null}
-        )`,
-    );
-}
-
-function workspaceFromRow(row: WorkspaceRow): Workspace {
-    const workspace: Workspace = {
-        id: row.id,
-        ownerAgentId: row.owner_agent_id,
-        projectRef: row.project_ref,
-        ...(row.path === null ? {} : { path: row.path }),
-        ...(row.base_ref === null ? {} : { baseRef: row.base_ref }),
-        name: row.name,
-        status: row.status as Workspace["status"],
-        createdAt: Number(row.created_at),
-        updatedAt: Number(row.updated_at),
-        ...(row.archived_at === null ? {} : { archivedAt: Number(row.archived_at) }),
+function withGitFacts(before: Workspace, facts: WorkspaceGitFacts): Workspace | undefined {
+    const next: Workspace = {
+        ...before,
+        ...(facts.branch === undefined ? {} : { branch: facts.branch }),
+        gitAhead: facts.ahead,
+        gitBehind: facts.behind,
+        gitDetached: facts.detached,
     };
-    assertWorkspace(workspace);
-    return workspace;
+    if (facts.head === undefined) delete next.gitHead;
+    else next.gitHead = facts.head;
+    if (facts.upstream === undefined) delete next.gitUpstream;
+    else next.gitUpstream = facts.upstream;
+    return sameJson(next, before) ? undefined : next;
+}
+
+function assertExpectedVersion(
+    workspace: Workspace,
+    expectedVersion: number | undefined,
+    message: string,
+): void {
+    if (expectedVersion !== undefined && workspace.version !== expectedVersion) {
+        throw new Error(message);
+    }
+}
+
+function uniqueName(base: string, taken: (candidate: string) => boolean): string {
+    if (!taken(base)) return base;
+    for (let suffix = 2; ; suffix += 1) {
+        const candidate = `${base} (${String(suffix)})`;
+        if (!taken(candidate)) return candidate;
+    }
+}
+
+async function uniqueBranch(
+    base: string,
+    taken: (candidate: string) => Promise<boolean>,
+): Promise<string> {
+    if (!(await taken(base))) return base;
+    for (let suffix = 2; ; suffix += 1) {
+        const candidate = `${base}-${String(suffix)}`;
+        if (!(await taken(candidate))) return candidate;
+    }
 }
 
 async function defaultWorkspaceTransfer(
-    database: AgentDatabase,
+    ctx: Context,
     agentId: string,
     input: WorkspaceTransferInput,
     operation: WorkspaceMutationRequest,
 ): Promise<WorkspaceTransferResult> {
+    const database = ctx.db;
     if ("targetWorkspaceId" in input) {
         const target = await readWorkspace(database, input.targetWorkspaceId);
         if (target === undefined) {
             throw new Error(`Workspace "${input.targetWorkspaceId}" was not found.`);
         }
-        await agentDatabaseRun(
+        await writeWorkspace(
             database,
-            sql`UPDATE ${sql.raw(WORKSPACES_TABLE)} SET updated_at = ${Date.now()}
-                WHERE id = ${input.targetWorkspaceId}`,
+            {
+                ...target,
+                version: target.version + 1,
+                updatedAt: Math.max(Date.now(), target.updatedAt + 1),
+            },
+            target.version,
         );
         return {
             agentId,
@@ -795,12 +857,15 @@ async function defaultWorkspaceTransfer(
     if (workspace === undefined) throw new Error(`Workspace "${input.workspaceId}" was not found.`);
     const changed = workspace.projectRef !== input.targetProjectRef;
     if (changed) {
-        const updatedAt = Math.max(Date.now(), workspace.updatedAt + 1);
-        await agentDatabaseRun(
+        await writeWorkspace(
             database,
-            sql`UPDATE ${sql.raw(WORKSPACES_TABLE)}
-                SET project_ref = ${input.targetProjectRef}, updated_at = ${updatedAt}
-                WHERE id = ${input.workspaceId}`,
+            {
+                ...workspace,
+                projectRef: input.targetProjectRef,
+                version: workspace.version + 1,
+                updatedAt: Math.max(Date.now(), workspace.updatedAt + 1),
+            },
+            workspace.version,
         );
     }
     return {
@@ -812,130 +877,9 @@ async function defaultWorkspaceTransfer(
             id: workspace.id,
             projectRef: input.targetProjectRef,
             ownerAgentId: workspace.ownerAgentId,
-            ...(workspace.path === undefined ? {} : { path: workspace.path }),
+            path: workspace.path,
         },
     };
 }
 
-async function persistWorkspace(database: AgentDatabase, workspace: Workspace): Promise<void> {
-    await agentDatabaseRun(
-        database,
-        sql`UPDATE ${sql.raw(WORKSPACES_TABLE)}
-            SET owner_agent_id = ${workspace.ownerAgentId},
-                project_ref = ${workspace.projectRef},
-                path = ${workspace.path ?? null},
-                base_ref = ${workspace.baseRef ?? null},
-                name = ${workspace.name},
-                status = ${workspace.status},
-                created_at = ${workspace.createdAt},
-                updated_at = ${workspace.updatedAt},
-                archived_at = ${workspace.archivedAt ?? null}
-            WHERE id = ${workspace.id}`,
-    );
-}
-
-function normalizeCreateStoreResult(
-    raw: WorkspaceCreateStoreResult,
-    agentId: string,
-    input: WorkspaceStoreCreateInput,
-    operation: WorkspaceMutationRequest,
-): WorkspaceCreateResult {
-    if (Value.Check(workspaceCreateResultSchema, raw)) {
-        assertWorkspaceCreateResult(raw);
-        assertMutationIdentity(raw, agentId, operation.operationId, "create");
-        assertCreatedInput(raw.workspace, input);
-        return structuredClone(raw);
-    }
-    assertWorkspace(raw);
-    assertCreatedInput(raw, input);
-    return {
-        operation: "create",
-        agentId,
-        operationId: operation.operationId,
-        changed: true,
-        workspace: structuredClone(raw),
-    };
-}
-
-function normalizeArchiveStoreResult(
-    raw: WorkspaceArchiveStoreResult,
-    agentId: string,
-    input: WorkspaceStoreArchiveInput,
-    operation: WorkspaceMutationRequest,
-): WorkspaceArchiveResult {
-    if (Value.Check(workspaceArchiveResultSchema, raw)) {
-        assertWorkspaceArchiveResult(raw);
-        assertMutationIdentity(raw, agentId, operation.operationId, "archive");
-        if (raw.workspace.id !== input.workspaceId) {
-            throw new Error("Workspace archive result has a different workspace identity.");
-        }
-        return structuredClone(raw);
-    }
-    assertWorkspace(raw);
-    if (raw.id !== input.workspaceId) {
-        throw new Error("Workspace archive result has a different workspace identity.");
-    }
-    return {
-        operation: "archive",
-        agentId,
-        operationId: operation.operationId,
-        changed: true,
-        workspace: structuredClone(raw),
-    };
-}
-
-function normalizeRenameStoreResult(
-    raw: WorkspaceRenameStoreResult,
-    agentId: string,
-    input: WorkspaceStoreRenameInput,
-    operation: WorkspaceMutationRequest,
-    before: Workspace,
-): WorkspaceRenameResult {
-    if (Value.Check(workspaceRenameResultSchema, raw)) {
-        assertWorkspaceRenameResult(raw);
-        assertMutationIdentity(raw, agentId, operation.operationId, "rename");
-        if (raw.workspace.id !== input.workspaceId || raw.workspace.name !== input.name) {
-            throw new Error("Workspace rename result does not match the requested workspace.");
-        }
-        return structuredClone(raw);
-    }
-    assertWorkspace(raw);
-    if (raw.id !== input.workspaceId || raw.name !== input.name) {
-        throw new Error("Workspace rename result does not match the requested workspace.");
-    }
-    return {
-        operation: "rename",
-        agentId,
-        operationId: operation.operationId,
-        changed: before.name !== raw.name,
-        workspace: structuredClone(raw),
-    };
-}
-
-function assertMutationIdentity(
-    result: WorkspaceCreateResult | WorkspaceArchiveResult | WorkspaceRenameResult,
-    agentId: string,
-    operationId: string,
-    operation: "create" | "archive" | "rename",
-): void {
-    if (
-        result.agentId !== agentId ||
-        result.operationId !== operationId ||
-        result.operation !== operation
-    ) {
-        throw new Error("Workspace host mutation result identity does not match the request.");
-    }
-}
-
-function assertCreatedInput(workspace: Workspace, input: WorkspaceStoreCreateInput): void {
-    if (
-        workspace.id !== input.id ||
-        workspace.ownerAgentId !== input.ownerAgentId ||
-        workspace.name !== input.name ||
-        (input.projectRef !== undefined && workspace.projectRef !== input.projectRef) ||
-        (input.path !== undefined && workspace.path !== input.path) ||
-        (input.baseRef !== undefined && workspace.baseRef !== input.baseRef)
-    ) {
-        throw new Error("Workspace host create result does not match the requested identity.");
-    }
-}
+export type { WorkspaceReserveHooks };

@@ -9822,7 +9822,298 @@ describe("CodingAssistantApp", () => {
         expect(rendered).toContain("Sent from another terminal");
         expect(rendered).not.toContain("Unsent from the last terminal");
     });
+
+    it("renders the exact permission-stop warning", () => {
+        const app = buildNoticeApp();
+        app.applySessionEvent(permissionStopNotice("notice-1"));
+
+        // A wide viewport keeps the whole sentence on one line so the exact text can be matched.
+        const rendered = stripAnsi(app.render(240).join("\n"));
+        expect(rendered).toContain("Automatic permission review stopped the turn");
+        expect(rendered).toContain(
+            "Automatic permission review refused too many actions in this turn (3 in a row, 3 of the last 3), so the turn was stopped.",
+        );
+    });
+
+    it("does not add a generic interruption after a permission stop", () => {
+        const app = buildNoticeApp();
+        app.applySessionEvent({
+            createdAt: 1,
+            data: { runId: "run-1" },
+            id: "started-1",
+            sessionId: "session-1",
+            type: "run_started",
+        });
+        app.applySessionEvent(permissionStopNotice("notice-1"));
+        app.applySessionEvent({
+            createdAt: 2,
+            data: { modelLocked: false, runId: "run-1", stopReason: "aborted" },
+            id: "finished-1",
+            sessionId: "session-1",
+            type: "run_finished",
+        });
+
+        const rendered = stripAnsi(app.render(100).join("\n"));
+        // The notice already explained the stop, so no second, generic interruption row appears.
+        expect(rendered).not.toContain("Session interrupted");
+        expect(rendered).toContain("Automatic permission review stopped the turn");
+    });
+
+    it("replays the permission stop once after a reload", () => {
+        const app = buildNoticeApp({
+            initialSessionEvents: [
+                {
+                    createdAt: 1,
+                    data: { runId: "run-1" },
+                    id: "started-1",
+                    sessionId: "session-1",
+                    type: "run_started",
+                },
+                permissionStopNotice("notice-1"),
+                {
+                    createdAt: 2,
+                    data: { modelLocked: false, runId: "run-1", stopReason: "aborted" },
+                    id: "finished-1",
+                    sessionId: "session-1",
+                    type: "run_finished",
+                },
+            ],
+        });
+
+        const rendered = stripAnsi(app.render(100).join("\n"));
+        expect(
+            rendered.split("Automatic permission review stopped the turn").length - 1,
+        ).toBe(1);
+        expect(rendered).not.toContain("Session interrupted");
+    });
+
+    it("renders a repeated permission-stop notice only once", () => {
+        // The same durable notice can be redelivered — a live push and then a reload replay of the
+        // identical record. It is deduplicated by its stable message id, not by any content match.
+        const app = buildNoticeApp();
+        app.applySessionEvent(permissionStopNotice("notice-1"));
+        app.applySessionEvent(permissionStopNotice("notice-1"));
+
+        const rendered = stripAnsi(app.render(240).join("\n"));
+        expect(
+            rendered.split("Automatic permission review stopped the turn").length - 1,
+        ).toBe(1);
+    });
+
+    it("still shows the generic interruption when a notice carries no turn-stop code", () => {
+        // Suppression keys on the machine code, never the human title. A warning that happens to
+        // share the title but omits the code must not suppress the run's interruption row.
+        const app = buildNoticeApp();
+        app.applySessionEvent({
+            createdAt: 1,
+            data: { runId: "run-1" },
+            id: "started-1",
+            sessionId: "session-1",
+            type: "run_started",
+        });
+        app.applySessionEvent(
+            serviceNotice("notice-1", {
+                title: "Automatic permission review stopped the turn",
+                details:
+                    "Automatic permission review refused too many actions in this turn (3 in a row, 3 of the last 3), so the turn was stopped.",
+                level: "warning",
+            }),
+        );
+        app.applySessionEvent({
+            createdAt: 2,
+            data: { modelLocked: false, runId: "run-1", stopReason: "aborted" },
+            id: "finished-1",
+            sessionId: "session-1",
+            type: "run_finished",
+        });
+
+        const rendered = stripAnsi(app.render(100).join("\n"));
+        expect(rendered).toContain("Session interrupted");
+    });
+
+    it("does not let a turn-stop notice suppress the abort of a later run", () => {
+        // The notice arms suppression for the run that was active when it arrived. A subsequent run
+        // that aborts for an unrelated reason must still show its own interruption row.
+        const app = buildNoticeApp();
+        app.applySessionEvent({
+            createdAt: 1,
+            data: { runId: "run-1" },
+            id: "started-1",
+            sessionId: "session-1",
+            type: "run_started",
+        });
+        app.applySessionEvent(permissionStopNotice("notice-1"));
+        app.applySessionEvent({
+            createdAt: 2,
+            data: { modelLocked: false, runId: "run-1", stopReason: "aborted" },
+            id: "finished-1",
+            sessionId: "session-1",
+            type: "run_finished",
+        });
+        // A brand-new run begins and is aborted by the user, unrelated to the earlier refusals.
+        app.applySessionEvent({
+            createdAt: 3,
+            data: { runId: "run-2" },
+            id: "started-2",
+            sessionId: "session-1",
+            type: "run_started",
+        });
+        app.applySessionEvent({
+            createdAt: 4,
+            data: { modelLocked: false, runId: "run-2", stopReason: "aborted" },
+            id: "finished-2",
+            sessionId: "session-1",
+            type: "run_finished",
+        });
+
+        const rendered = stripAnsi(app.render(100).join("\n"));
+        expect(rendered).toContain("Session interrupted");
+    });
+
+    it("still renders the generic interruption for an ordinary abort", () => {
+        const app = buildNoticeApp();
+        app.applySessionEvent({
+            createdAt: 1,
+            data: { runId: "run-1" },
+            id: "started-1",
+            sessionId: "session-1",
+            type: "run_started",
+        });
+        app.applySessionEvent({
+            createdAt: 2,
+            data: { modelLocked: false, runId: "run-1", stopReason: "aborted" },
+            id: "finished-1",
+            sessionId: "session-1",
+            type: "run_finished",
+        });
+
+        const rendered = stripAnsi(app.render(100).join("\n"));
+        expect(rendered).toContain("Session interrupted");
+        expect(rendered).toContain("The active run was stopped.");
+    });
+
+    it("renders unavailable, timeout, and cleanup notices in English", () => {
+        const app = buildNoticeApp();
+        app.applySessionEvent(
+            serviceNotice("notice-unavailable", {
+                title: "Automatic permission review unavailable",
+                details:
+                    "Automatic permission review is unavailable, so this action was refused.",
+                level: "warning",
+            }),
+        );
+        app.applySessionEvent(
+            serviceNotice("notice-timeout", {
+                title: "Automatic permission review timed out",
+                details:
+                    "Automatic permission review did not finish in time, so this action was refused.",
+                level: "warning",
+            }),
+        );
+        app.applySessionEvent(
+            serviceNotice("notice-cleanup", {
+                title: "Automatic permission review cleaned up",
+                details: "Automatic permission review released its pending actions.",
+                level: "info",
+            }),
+        );
+
+        // A wide viewport keeps each notice sentence on one line for exact matching.
+        const rendered = stripAnsi(app.render(240).join("\n"));
+        expect(rendered).toContain(
+            "Automatic permission review is unavailable, so this action was refused.",
+        );
+        expect(rendered).toContain(
+            "Automatic permission review did not finish in time, so this action was refused.",
+        );
+        expect(rendered).toContain(
+            "Automatic permission review released its pending actions.",
+        );
+    });
 });
+
+/** Builds an app wired only enough to accept session events and render its transcript. */
+function buildNoticeApp(options: { initialSessionEvents?: SessionEvent[] } = {}): CodingAssistantApp {
+    const model = defineModel({
+        id: "openai/gpt-test",
+        name: "GPT Test",
+        thinkingLevels: ["off"],
+        defaultThinkingLevel: "off",
+    });
+    const provider = defineProvider({
+        id: "codex",
+        models: [model],
+        stream() {
+            return streamText("unused");
+        },
+    });
+    const harness = createJustBashToolHarness();
+    return new CodingAssistantApp({
+        ctx: createTestRootContext().named("app"),
+        agent: new Agent({
+            provider,
+            modelId: model.id,
+            context: harness.context,
+            printToConsole: false,
+        }),
+        cwd: harness.context.fs.cwd,
+        now: () => 100,
+        ...(options.initialSessionEvents === undefined
+            ? {}
+            : { initialSessionEvents: options.initialSessionEvents }),
+        processManager: new NativeProcessManager(),
+        sessionBacked: true,
+        tui: fakeTui(),
+    });
+}
+
+/** A durable service notice carrying a structured title, details, importance level, and code. */
+function serviceNotice(
+    id: string,
+    notice: {
+        title: string;
+        details: string;
+        level: "info" | "warning" | "error";
+        code?: string;
+    },
+): SessionEvent {
+    return {
+        createdAt: 1,
+        data: {
+            message: {
+                role: "system",
+                id,
+                context: "excluded",
+                blocks: [{ type: "text", text: notice.details }],
+                structured: {
+                    kind: "notice",
+                    title: notice.title,
+                    details: notice.details,
+                    level: notice.level,
+                    ...(notice.code === undefined ? {} : { code: notice.code }),
+                },
+            },
+        },
+        id,
+        sessionId: "session-1",
+        type: "system_notice",
+    } as SessionEvent;
+}
+
+/**
+ * The turn-stop notice the daemon projects when the refusal breaker trips. It carries the stable
+ * `permission_turn_stopped` code — the client suppresses the generic interruption row for the
+ * aborted run by matching that code, never the title text.
+ */
+function permissionStopNotice(id: string): SessionEvent {
+    return serviceNotice(id, {
+        title: "Automatic permission review stopped the turn",
+        details:
+            "Automatic permission review refused too many actions in this turn (3 in a row, 3 of the last 3), so the turn was stopped.",
+        level: "warning",
+        code: "permission_turn_stopped",
+    });
+}
 
 function createDraftApp(options: {
     draft: string;

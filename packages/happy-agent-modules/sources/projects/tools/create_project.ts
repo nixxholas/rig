@@ -11,7 +11,7 @@ export function createProjectTool(projects: ProjectsModule, agentId: string) {
     return defineAgentTool({
         name: "create_project",
         description:
-            "Register a repository as a new project with a display name. The repository reference is opaque to the module and is supplied by the host or agent context. The result includes the complete project identity and detail.",
+            "Register a folder as a new project. The folder must be an absolute path no project uses yet; call ensure_project instead when it may already be registered. The new project starts out as still being set up.",
         parameters: projectCreateToolInputSchema,
         returnType: projectSchema,
         durable: true,
@@ -22,7 +22,7 @@ export function createProjectTool(projects: ProjectsModule, agentId: string) {
         toLLM: (project) => [
             {
                 type: "text",
-                text: projects.formatProjectOperationForModel("Project created:", project),
+                text: projects.formatProjectForModel("Project created:", project),
             },
         ],
     });

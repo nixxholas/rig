@@ -536,35 +536,6 @@ function createVanillaIntegrations(
         throw new Error("This integration is unavailable in the vanilla local host.");
     };
     return {
-        collaboration: {
-            create: async (_ctx: unknown, _config: unknown, options: { readonly id: string }) => ({
-                id: options.id,
-            }),
-            config: async () => undefined,
-            selection: async () => undefined,
-            interrupt: async (_ctx: unknown, _actingAgentId: string, targetAgentId: string) => ({
-                agentId: targetAgentId,
-                status: "idle",
-            }),
-            observe: async (_ctx: unknown, _actingAgentId: string, targetAgentId: string) => ({
-                agentId: targetAgentId,
-                status: "idle",
-            }),
-            send: async () => undefined,
-            setReadOnly: async () => undefined,
-            spawnCapacity: async () => ({
-                active: 0,
-                canSpawn: true,
-                depth: 0,
-                maxActive: 8,
-                maxDepth: 8,
-            }),
-            wait: unavailable,
-            waitForAgent: async (_ctx: unknown, _actingAgentId: string, targetAgentId: string) => ({
-                agentId: targetAgentId,
-                status: "idle",
-            }),
-        },
         happy: {
             notify: async () => ({ accepted: false }),
             setStatus: async () => ({ accepted: false }),

@@ -114,7 +114,11 @@ export class HappyModule implements AgentModule {
         this.#onPostCommitError = checked.onPostCommitError;
     }
 
-    async notify(ctx: Context, agentId: string, input: HappyNotificationInput): Promise<HappyNotification> {
+    async notify(
+        ctx: Context,
+        agentId: string,
+        input: HappyNotificationInput,
+    ): Promise<HappyNotification> {
         assertAgentId(agentId);
         assertInput(happyNotificationInputSchema, input, "Happy notification input");
         return await ctx.inTx(async (txCtx) => {
@@ -148,7 +152,11 @@ export class HappyModule implements AgentModule {
         });
     }
 
-    async setStatus(ctx: Context, agentId: string, input: HappyStatusInput): Promise<HappyStatusRecord> {
+    async setStatus(
+        ctx: Context,
+        agentId: string,
+        input: HappyStatusInput,
+    ): Promise<HappyStatusRecord> {
         assertAgentId(agentId);
         assertInput(happyStatusInputSchema, input, "Happy status input");
         return await ctx.inTx(async (txCtx) => {
@@ -236,8 +244,7 @@ export class HappyModule implements AgentModule {
             durable: true,
             transactional: true,
             shouldReviewInAutoMode: () => false,
-            execute: async (ctx, input) =>
-                await this.setStatus(ctx, scope.agent.id, input),
+            execute: async (ctx, input) => await this.setStatus(ctx, scope.agent.id, input),
             toLLM: (result) => [{ type: "text", text: formatStatus(result) }],
         }),
         defineAgentTool({
@@ -247,14 +254,13 @@ export class HappyModule implements AgentModule {
             returnType: Type.Union([happyStatusRecordSchema, Type.Null()]),
             shouldReviewInAutoMode: () => false,
             execute: async (ctx) => (await this.getStatus(ctx, scope.agent.id)) ?? null,
-            toLLM: (result) => [{ type: "text", text: result === null ? "No Happy status." : formatStatus(result) }],
+            toLLM: (result) => [
+                { type: "text", text: result === null ? "No Happy status." : formatStatus(result) },
+            ],
         }),
     ];
 
-    async #findStatus(
-        ctx: Context,
-        agentId: string,
-    ): Promise<HappyStatusRecord | undefined> {
+    async #findStatus(ctx: Context, agentId: string): Promise<HappyStatusRecord | undefined> {
         const rows = await agentDatabaseRows<StatusRow>(
             ctx.db,
             sql`SELECT agent_id, operation_id, status, message, updated_at

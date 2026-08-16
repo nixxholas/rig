@@ -172,6 +172,15 @@ export class SystemPromptModule implements AgentModule {
         return await this.#agentsMd.read(ctx, agentId);
     }
 
+    /**
+     * Read the current AGENTS.md context formatted as the same instruction text every model
+     * receives, or `undefined` when there is none. The automatic permission reviewer appends this
+     * after its guardian policy so a review sees the project's own intent, reread every time.
+     */
+    async readAgentsMdInstructions(ctx: Context, agentId: string): Promise<string | undefined> {
+        return await this.#agentsMd.readFormatted(ctx, agentId);
+    }
+
     readonly instructions = async (ctx: Context, scope: AgentModuleScope): Promise<string> => {
         const prompt = this.promptFor({
             model: scope.agent.model,

@@ -2,10 +2,7 @@ import { Value } from "@sinclair/typebox/value";
 
 import type { RemoteTerminalProcessFactory } from "./RemoteTerminalProcess.js";
 import { RemoteTerminal } from "./RemoteTerminal.js";
-import {
-    remoteTerminalColorSchemeSchema,
-    type CreateRemoteTerminalRequest,
-} from "./types.js";
+import { remoteTerminalColorSchemeSchema, type CreateRemoteTerminalRequest } from "./types.js";
 import type { RemoteTerminalSummary } from "./types.js";
 
 const DEFAULT_COLS = 80;

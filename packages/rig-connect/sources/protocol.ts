@@ -1155,6 +1155,14 @@ export type InterpretedSessionEvent =
       >
     | BaseSessionEvent<"agent_message", { message: Message; runId: string }>
     | BaseSessionEvent<"agent_event", { event: AgentLoopEvent; runId: string }>
+    // A reviewed or denied Auto action, projected as a tool-row annotation. It carries no run id:
+    // the permissions module that produces it runs inside a tool call and the agent core exposes no
+    // owning run id, so the annotation is addressed only by tool-call id. It applies like the same
+    // `permission_review` loop event delivered inside `agent_event`, without run-lifecycle effect.
+    | BaseSessionEvent<
+          "permission_review",
+          { event: Extract<AgentLoopEvent, { type: "permission_review" }> }
+      >
     | BaseSessionEvent<"provider_quota_observed", { providerId: string; quota: ProviderQuota }>
     | BaseSessionEvent<
           "run_finished",

@@ -9,7 +9,11 @@ import sharp from "sharp";
 import { createNodeFileSystemContext } from "../../agent/context/createNodeFileSystemContext.js";
 import type { FileSystemContext } from "../../agent/context/FileSystemContext.js";
 import type { LiveGlobalEventEntry } from "../../global-event/LiveGlobalEventQueue.js";
-import type { ComputePreparationEvent, PluginsChangedEvent } from "../../protocol/index.js";
+import type {
+    ComputePreparationEvent,
+    ComputePreparationNotice,
+    PluginsChangedEvent,
+} from "../../protocol/index.js";
 import { DaemonLog } from "../../server/DaemonLog.js";
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
 import { createTestRootContext } from "../../testing/createTestRootContext.js";
@@ -365,7 +369,11 @@ describe("plugin registration", () => {
         const rejectNotice = vi
             .spyOn(rejected, "recordSystemNotice")
             .mockImplementation((requestCtx, payload, options) => {
-                if (payload.structured?.phase === "waiting_for_sandbox" && !rejectedWaitingNotice) {
+                if (
+                    payload.structured?.kind === "compute_preparation" &&
+                    payload.structured.phase === "waiting_for_sandbox" &&
+                    !rejectedWaitingNotice
+                ) {
                     rejectedWaitingNotice = true;
                     throw new Error("The session is shutting down.");
                 }
@@ -461,11 +469,13 @@ describe("plugin registration", () => {
             session.events
                 .all()
                 .flatMap((event) =>
-                    event.type === "system_notice" &&
-                    event.data.message.role === "system" &&
-                    event.data.message.structured?.kind === "compute_preparation"
+                    event.type === "system_notice" && event.data.message.role === "system"
                         ? [event.data.message]
                         : [],
+                )
+                .filter(
+                    (message): message is typeof message & { structured: ComputePreparationNotice } =>
+                        message.structured?.kind === "compute_preparation",
                 );
         expect(notices(attributed).map((message) => message.structured?.phase)).toEqual([
             "preparing_compute",

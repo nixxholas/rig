@@ -6,7 +6,6 @@ import type { Context } from "@steve.kite/stdlib";
 import type { LoadedHappyAgent } from "../agent/loadHappyAgent.js";
 import type { ProjectFilesModule } from "../files/ProjectFilesModule.js";
 import type { GitModule } from "../git/GitModule.js";
-import type { ProjectWorkspaceHost } from "../projects/ProjectHost.js";
 import { AgentHttpError } from "./errors.js";
 
 export type AgentHttpMethod = "DELETE" | "GET" | "PATCH" | "POST" | "PUT";
@@ -20,7 +19,6 @@ export interface AgentHttpConfiguration {
     readonly git?: GitModule;
     readonly p2pName?: string;
     readonly projectFiles?: ProjectFilesModule;
-    readonly projectHost?: ProjectWorkspaceHost;
     readonly inferenceMaxRetries?: number;
     readonly durableGlobalEventQueue?: boolean;
     /** Receives unexpected request failures without exposing their details to HTTP clients. */

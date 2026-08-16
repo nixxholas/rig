@@ -16,8 +16,7 @@ export function listWorkletsTool(module: WorkletsModule, agentId: string) {
         returnType: workletListPageSchema,
         durable: true,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, query: WorkletListQuery) =>
-            await module.listPage(ctx, agentId, query),
+        execute: async (ctx, query: WorkletListQuery) => await module.listPage(ctx, agentId, query),
         toLLM: (page) => [
             {
                 type: "text",

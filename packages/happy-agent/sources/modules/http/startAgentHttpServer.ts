@@ -11,7 +11,6 @@ import type { HappyAgentConfiguration } from "@slopus/happy-agent-modules";
 import { HAPPY_AGENT_RIG_PROTOCOL_VERSION } from "./rigProtocol.js";
 import { ProjectFilesModule } from "../files/ProjectFilesModule.js";
 import { GitModule } from "../git/GitModule.js";
-import { createLocalProjectWorkspaceHost } from "../projects/ProjectHost.js";
 import { readOrCreateAgentToken, isAuthorizedAgentRequest } from "./auth.js";
 import { AgentHttpError, sendError, sendJson } from "./errors.js";
 import { createAgentRoutes } from "./agentRoutes.js";
@@ -122,13 +121,14 @@ function routeGroups(
     options: StartAgentHttpServerOptions,
     agent: LoadedHappyAgent,
 ): readonly AgentHttpRouteGroup[] {
-    const projectHost = options.configuration?.projectHost ?? createLocalProjectWorkspaceHost();
+    // The one host the loader composed. Every route reads and writes through it, so a folder a
+    // route reports and a folder the background work actually created are the same folder.
+    const projects = agent.projectWorkspaces;
     const protectedPaths = [
         ...new Set([
             ".git",
             "AGENTS.md",
             "AGENTS_SECURITY.md",
-            ...(projectHost.protectedPaths ?? []),
             ...agent.configuration.values.permissions.protectedPaths,
             ...agent.configuration.values.workspace.protectedSync,
         ]),
@@ -136,16 +136,12 @@ function routeGroups(
     const projectFiles =
         options.configuration?.projectFiles ??
         new ProjectFilesModule({
-            git: projectHost.git,
+            git: projects.git,
             protectedPaths,
             projects: agent.modules.projects,
             workspaces: agent.modules.workspaces,
         });
-    const git =
-        options.configuration?.git ??
-        new GitModule({
-            runner: projectHost.git,
-        });
+    const git = options.configuration?.git ?? new GitModule({ runner: projects.git });
     return [
         ...(options.routeGroups ?? []),
         createCoreDaemonRoutes(),
@@ -159,12 +155,12 @@ function routeGroups(
             agent,
             files: projectFiles,
             git,
-            host: projectHost,
+            projects,
         }),
         createWorkspaceRoutes({
             agent,
             git,
-            host: projectHost,
+            projects,
         }),
         createFileRoutes({
             agent,
@@ -174,6 +170,7 @@ function routeGroups(
             agent,
             files: projectFiles,
             git,
+            tracker: agent.gitTracker,
         }),
     ];
 }

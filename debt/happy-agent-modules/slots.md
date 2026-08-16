@@ -47,7 +47,7 @@ defensively re-validating the module's own store.
    change event plan 14 specifies, so the feature is write-only from the user's point of view. This is the
    highest-value item to close in this module.
 3. **Reorder cannot work on a shared catalog.** `#reorder` (`:324-368`) requires the id list to name every
-   current entry (`#assertCompleteOrder`, `:616-623`) *and* asserts the acting agent authored every entry
+   current entry (`#assertCompleteOrder`, `:616-623`) _and_ asserts the acting agent authored every entry
    (`:335`). One entry created by another agent makes reordering permanently impossible — not a partial
    failure, a total one. Ordering is also global rather than per slot and scope (`SlotDatabase.ts`), so
    entries in unrelated slots share one sequence.

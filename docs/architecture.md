@@ -407,20 +407,20 @@ transaction, advancing `PRAGMA user_version` after each one and stamping
 `packages/` in a pnpm TypeScript workspace. Source lives in `sources/`, with
 `sources/main.ts` for an executable and `sources/index.ts` for a library.
 
-| Package                       | What it is                                                                                                                                                                                     |
-| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `packages/rig`                | The published `@slopus/rig` CLI: terminal UI, headless `exec`, host services, protocols, persistence adapters, and the local daemon. Entry point `sources/main.ts`.                              |
-| `packages/happy-agent-base`   | `@slopus/happy-agent-base` — the minimal durable agent loop, provider routing, persistence, and feature hooks.                                                                                 |
-| `packages/happy-agent-modules` | `@slopus/happy-agent-modules` — reusable agent tools, hooks, and product capabilities composed by Rig.                                                                                      |
-| `packages/happy-providers`    | `@slopus/happy-providers` — the separately published, Node-only vendor library: stateful sessions, transports, retries, error parsing, credentials, and native compaction.                     |
-| `packages/rig-connect`        | `@slopus/rig-connect` — the client library any UI embeds to get live session, group, and plugin state from one subscription, with optimistic mutations. Web APIs only; no dependency on `rig`. |
-| `packages/ghostty-wasm`       | `@slopus/ghostty-wasm` — the Ghostty terminal emulator compiled to WebAssembly, usable from Node and the browser.                                                                              |
-| `packages/ghostty-web`        | `@slopus/ghostty-web` — the client/server protocol for remoting a Ghostty-backed terminal: snapshot, VT replay, semantic-grid recovery, flow control, paged scrollback.                        |
-| `packages/rig-codemode-codex` | `@slopus/rig-codemode-codex` — a standalone Node API for OpenAI Codex Code Mode, kept out of the main inference path.                                                                          |
-| `packages/happy-plugins`      | The typed API available to TypeScript plugins running inside Happy, plus the development runner.                                                                                               |
-| `packages/gym`                | Private host-side end-to-end harness: PTY integration, fixtures, and the Docker image definition.                                                                                              |
-| `packages/gym-tests`          | Private black-box terminal scenarios exercising the built Rig agent in fresh containers.                                                                                                       |
-| `packages/rig-dev`            | Private `rig-dev` launcher that runs live source with its own socket, token, logs, and database under `.rig-dev`.                                                                              |
+| Package                        | What it is                                                                                                                                                                                     |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/rig`                 | The published `@slopus/rig` CLI: terminal UI, headless `exec`, host services, protocols, persistence adapters, and the local daemon. Entry point `sources/main.ts`.                            |
+| `packages/happy-agent-base`    | `@slopus/happy-agent-base` — the minimal durable agent loop, provider routing, persistence, and feature hooks.                                                                                 |
+| `packages/happy-agent-modules` | `@slopus/happy-agent-modules` — reusable agent tools, hooks, and product capabilities composed by Rig.                                                                                         |
+| `packages/happy-providers`     | `@slopus/happy-providers` — the separately published, Node-only vendor library: stateful sessions, transports, retries, error parsing, credentials, and native compaction.                     |
+| `packages/rig-connect`         | `@slopus/rig-connect` — the client library any UI embeds to get live session, group, and plugin state from one subscription, with optimistic mutations. Web APIs only; no dependency on `rig`. |
+| `packages/ghostty-wasm`        | `@slopus/ghostty-wasm` — the Ghostty terminal emulator compiled to WebAssembly, usable from Node and the browser.                                                                              |
+| `packages/ghostty-web`         | `@slopus/ghostty-web` — the client/server protocol for remoting a Ghostty-backed terminal: snapshot, VT replay, semantic-grid recovery, flow control, paged scrollback.                        |
+| `packages/rig-codemode-codex`  | `@slopus/rig-codemode-codex` — a standalone Node API for OpenAI Codex Code Mode, kept out of the main inference path.                                                                          |
+| `packages/happy-plugins`       | The typed API available to TypeScript plugins running inside Happy, plus the development runner.                                                                                               |
+| `packages/gym`                 | Private host-side end-to-end harness: PTY integration, fixtures, and the Docker image definition.                                                                                              |
+| `packages/gym-tests`           | Private black-box terminal scenarios exercising the built Rig agent in fresh containers.                                                                                                       |
+| `packages/rig-dev`             | Private `rig-dev` launcher that runs live source with its own socket, token, logs, and database under `.rig-dev`.                                                                              |
 
 Inside a package, code is organized by domain module (`git`, `fs`, `sandbox`,
 `docker`, `secrets`, `session`, `server`, `persistence`, …). A module's top level

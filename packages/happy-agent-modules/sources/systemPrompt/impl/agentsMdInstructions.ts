@@ -249,6 +249,21 @@ export class AgentsMdInstructions {
         return structuredClone(snapshot);
     }
 
+    /**
+     * Read the current global/project AGENTS.md snapshot and format it into the same context-only
+     * instruction text the prompt hook produces, without touching any turn-delivery state.
+     *
+     * The automatic permission reviewer rereads project instructions before every review, so it
+     * needs the formatted body as a standalone string rather than through the `instructions` hook,
+     * which also records a per-turn delivery fingerprint that a review must not disturb. Returns
+     * `undefined` when there is no project instruction content to add.
+     */
+    async readFormatted(ctx: Context, agentId: string): Promise<string | undefined> {
+        const snapshot = await this.read(ctx, agentId);
+        const text = formatInstructions(snapshot);
+        return text.trim().length === 0 ? undefined : text;
+    }
+
     readonly instructions = async (ctx: Context, scope: AgentModuleScope): Promise<string> => {
         const loaded = await this.#loadInstructionsForPrompt(ctx, scope);
         // A hook scope supplied by Agent Base always has a KV. Keeping this guard makes the

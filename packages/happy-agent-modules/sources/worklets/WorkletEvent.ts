@@ -17,9 +17,7 @@ export const workletEventIdSchema = Type.String({
     pattern: "^[^\\u0000\\r\\n]+$",
 });
 
-const opaqueContextSchema = Type.Unsafe<Context>(
-    Type.Object({}, { additionalProperties: true }),
-);
+const opaqueContextSchema = Type.Unsafe<Context>(Type.Object({}, { additionalProperties: true }));
 
 const eventEnvelope = {
     eventId: workletEventIdSchema,

@@ -19,8 +19,6 @@ export function listScheduledMessagesTool(scheduling: SchedulingModule, agentId:
         shouldReviewInAutoMode: () => false,
         execute: async (ctx, input: SchedulingScheduleToolPageQuery) =>
             await scheduling.listSchedulePage(ctx, agentId, input),
-        toLLM: (page) => [
-            { type: "text", text: scheduling.formatSchedulePageForModel(page) },
-        ],
+        toLLM: (page) => [{ type: "text", text: scheduling.formatSchedulePageForModel(page) }],
     });
 }

@@ -1,0 +1,179 @@
+import { sql } from "drizzle-orm";
+import { agentDatabaseRun, type AgentDatabase } from "@slopus/happy-agent-base";
+import type { Context } from "@steve.kite/stdlib";
+
+export const PROJECTS_TABLE = "happy_agent_module_projects";
+export const PROJECT_SETTINGS_TABLE = "happy_agent_module_project_settings";
+const PROJECT_RECEIPTS_TABLE = "happy_agent_module_project_operation_receipts";
+const PROJECT_PROOFS_TABLE = "happy_agent_module_project_mutation_proofs";
+
+/**
+ * The projects module owns these tables. They deliberately use stable,
+ * human-readable names so a module upgrade can append migrations without
+ * borrowing Rig's application schema. An existing migration is never edited:
+ * a released Rig may already have applied it.
+ */
+export const projectMigrations = [
+    [
+        "001-projects-catalog",
+        async (_ctx: Context, database: AgentDatabase): Promise<void> => {
+            await agentDatabaseRun(
+                database,
+                sql`CREATE TABLE IF NOT EXISTS ${sql.raw(PROJECTS_TABLE)} (
+                    id TEXT PRIMARY KEY,
+                    owner_agent_id TEXT NOT NULL,
+                    repository_ref TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    description TEXT,
+                    created_at BIGINT NOT NULL,
+                    updated_at BIGINT NOT NULL,
+                    archived_at BIGINT
+                )`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`CREATE INDEX IF NOT EXISTS ${sql.raw(`${PROJECTS_TABLE}_status_id`)}
+                    ON ${sql.raw(PROJECTS_TABLE)} (status, id)`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`CREATE TABLE IF NOT EXISTS ${sql.raw(PROJECT_SETTINGS_TABLE)} (
+                    project_id TEXT PRIMARY KEY,
+                    settings_json TEXT NOT NULL
+                )`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`CREATE TABLE IF NOT EXISTS ${sql.raw(PROJECT_RECEIPTS_TABLE)} (
+                    agent_id TEXT NOT NULL,
+                    operation_id TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    PRIMARY KEY (agent_id, operation_id)
+                )`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`CREATE TABLE IF NOT EXISTS ${sql.raw(PROJECT_PROOFS_TABLE)} (
+                    agent_id TEXT NOT NULL,
+                    operation_id TEXT NOT NULL,
+                    proof_json TEXT NOT NULL,
+                    PRIMARY KEY (agent_id, operation_id)
+                )`,
+            );
+        },
+    ],
+    [
+        "002-drop-project-idempotency-tables",
+        async (_ctx: Context, database: AgentDatabase): Promise<void> => {
+            await agentDatabaseRun(
+                database,
+                sql`DROP TABLE IF EXISTS ${sql.raw(PROJECT_RECEIPTS_TABLE)}`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`DROP TABLE IF EXISTS ${sql.raw(PROJECT_PROOFS_TABLE)}`,
+            );
+        },
+    ],
+    [
+        "003-project-order-version-avatar",
+        async (_ctx: Context, database: AgentDatabase): Promise<void> => {
+            await agentDatabaseRun(
+                database,
+                sql`ALTER TABLE ${sql.raw(PROJECTS_TABLE)}
+                    ADD COLUMN order_key TEXT NOT NULL DEFAULT ''`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`ALTER TABLE ${sql.raw(PROJECTS_TABLE)}
+                    ADD COLUMN version BIGINT NOT NULL DEFAULT 1`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`ALTER TABLE ${sql.raw(PROJECTS_TABLE)}
+                    ADD COLUMN avatar_json TEXT`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`UPDATE ${sql.raw(PROJECTS_TABLE)}
+                    SET order_key = printf('%020d', rowid)
+                    WHERE order_key = ''`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`CREATE INDEX IF NOT EXISTS ${sql.raw(`${PROJECTS_TABLE}_order_id`)}
+                    ON ${sql.raw(PROJECTS_TABLE)} (order_key, id)`,
+            );
+        },
+    ],
+    [
+        "004-project-folder-record",
+        /**
+         * A project is now a real folder with a kind, a storage key, presence,
+         * initialization state and cached Git facts. Rig is early-stage, so the
+         * old rows are dropped rather than migrated column by column: an opaque
+         * repository reference cannot be turned into a canonical folder path
+         * here, and inventing one would put unusable rows in front of the user.
+         */
+        async (_ctx: Context, database: AgentDatabase): Promise<void> => {
+            await agentDatabaseRun(database, sql`DROP TABLE IF EXISTS ${sql.raw(PROJECTS_TABLE)}`);
+            await agentDatabaseRun(
+                database,
+                sql`DROP TABLE IF EXISTS ${sql.raw(PROJECT_SETTINGS_TABLE)}`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`CREATE TABLE ${sql.raw(PROJECTS_TABLE)} (
+                    id TEXT PRIMARY KEY,
+                    owner_agent_id TEXT NOT NULL,
+                    repository_ref TEXT NOT NULL UNIQUE,
+                    kind TEXT NOT NULL,
+                    storage_key TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    name_source TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    presence TEXT NOT NULL,
+                    initialization_status TEXT NOT NULL,
+                    initialization_attempt BIGINT NOT NULL DEFAULT 0,
+                    initialization_error TEXT,
+                    default_branch TEXT,
+                    worktree_support TEXT NOT NULL DEFAULT 'unknown',
+                    worktree_unsupported_reason TEXT,
+                    remote_source_json TEXT,
+                    required_secret_kind TEXT,
+                    git_ahead BIGINT NOT NULL DEFAULT 0,
+                    git_behind BIGINT NOT NULL DEFAULT 0,
+                    git_detached INTEGER NOT NULL DEFAULT 0,
+                    git_branch TEXT,
+                    git_head TEXT,
+                    git_upstream TEXT,
+                    order_key TEXT NOT NULL,
+                    version BIGINT NOT NULL DEFAULT 1,
+                    avatar_json TEXT,
+                    description TEXT,
+                    created_at BIGINT NOT NULL,
+                    updated_at BIGINT NOT NULL,
+                    archived_at BIGINT
+                )`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`CREATE INDEX IF NOT EXISTS ${sql.raw(`${PROJECTS_TABLE}_status_id`)}
+                    ON ${sql.raw(PROJECTS_TABLE)} (status, id)`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`CREATE INDEX IF NOT EXISTS ${sql.raw(`${PROJECTS_TABLE}_order_id`)}
+                    ON ${sql.raw(PROJECTS_TABLE)} (order_key, id)`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`CREATE TABLE ${sql.raw(PROJECT_SETTINGS_TABLE)} (
+                    project_id TEXT PRIMARY KEY,
+                    settings_json TEXT NOT NULL
+                )`,
+            );
+        },
+    ],
+] as const;

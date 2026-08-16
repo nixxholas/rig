@@ -1,14 +1,5 @@
 import { randomUUID } from "node:crypto";
-import {
-    lstat,
-    mkdir,
-    mkdtemp,
-    readFile,
-    readdir,
-    rm,
-    symlink,
-    writeFile,
-} from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -105,38 +96,24 @@ class MemoryRuntime {
     }
 
     async status(_ctx: Context, name: string): Promise<WorkletStatus> {
-        return structuredClone(
-            this.statuses.get(name) ?? { name, state: "asleep", at: 1 },
-        );
+        return structuredClone(this.statuses.get(name) ?? { name, state: "asleep", at: 1 });
     }
 
-    async readLogs(
-        _ctx: Context,
-        query: WorkletRuntimeLogQuery,
-    ): Promise<WorkletLogPage> {
+    async readLogs(_ctx: Context, query: WorkletRuntimeLogQuery): Promise<WorkletLogPage> {
         const all = this.logs.get(query.name) ?? [];
         const cursor =
-            query.from === "end"
-                ? Math.max(0, all.length - query.limit)
-                : (query.cursor ?? 0);
-        const lines = all
-            .slice(cursor, cursor + query.limit)
-            .map((text, index) => ({
-                position: cursor + index,
-                text: text.slice(0, query.maxLineCharacters),
-            }));
-        const nextCursor =
-            cursor + lines.length < all.length
-                ? cursor + lines.length
-                : undefined;
+            query.from === "end" ? Math.max(0, all.length - query.limit) : (query.cursor ?? 0);
+        const lines = all.slice(cursor, cursor + query.limit).map((text, index) => ({
+            position: cursor + index,
+            text: text.slice(0, query.maxLineCharacters),
+        }));
+        const nextCursor = cursor + lines.length < all.length ? cursor + lines.length : undefined;
         return {
             name: query.name,
             cursor,
             lines,
             totalLines: all.length,
-            ...(cursor > 0
-                ? { previousCursor: Math.max(0, cursor - query.limit) }
-                : {}),
+            ...(cursor > 0 ? { previousCursor: Math.max(0, cursor - query.limit) } : {}),
             ...(nextCursor === undefined ? {} : { nextCursor }),
         };
     }
@@ -193,12 +170,8 @@ async function setup(
         installRoot,
         module,
         runtime,
-        pingSource: await makeSource([
-            { name: "ping", description: "Return a ping." },
-        ]),
-        echoSource: await makeSource([
-            { name: "echo", description: "Echo arguments." },
-        ]),
+        pingSource: await makeSource([{ name: "ping", description: "Return a ping." }]),
+        echoSource: await makeSource([{ name: "echo", description: "Echo arguments." }]),
     };
 }
 
@@ -252,22 +225,15 @@ describe("WorkletsModule", () => {
             "update-operation",
         ]);
         expect(reverted.currentVersion).toBe(1);
-        expect(reverted.operations.map((operation) => operation.name)).toEqual([
-            "ping",
-        ]);
+        expect(reverted.operations.map((operation) => operation.name)).toEqual(["ping"]);
         expect(await exists(join(base, "v1"))).toBe(true);
         expect(await exists(join(base, "v2"))).toBe(true);
-        expect(await readFile(join(base, "Data", "state.json"), "utf8")).toBe(
-            '{"kept":true}',
-        );
+        expect(await readFile(join(base, "Data", "state.json"), "utf8")).toBe('{"kept":true}');
     });
 
     it("uses call.id while Agent Base owns transactional durable completion", async () => {
         const { ctx, echoSource, module, pingSource } = await setup();
-        const [installTool, , , updateTool, revertTool] = module.tools(
-            ctx,
-            scopeFor("agent-a"),
-        );
+        const [installTool, , , updateTool, revertTool] = module.tools(ctx, scopeFor("agent-a"));
 
         const installed = await installTool!.execute(
             ctx,
@@ -311,9 +277,7 @@ describe("WorkletsModule", () => {
             }),
         ).rejects.toThrow("outer transaction failed");
 
-        expect(
-            await createWorkletDatabase().get(ctx, "rollback-worker"),
-        ).toBeUndefined();
+        expect(await createWorkletDatabase().get(ctx, "rollback-worker")).toBeUndefined();
         await expect(
             module.install(ctx, "agent-a", {
                 name: "rollback-worker",
@@ -346,30 +310,14 @@ describe("WorkletsModule", () => {
     it("marks external removal and invocation boundaries non-durable", async () => {
         const { ctx, module } = await setup();
         const tools = module.tools(ctx, scopeFor("agent-a"));
-        expect(tools.find((tool) => tool.name === "install_worklet")?.durable).toBe(
-            true,
-        );
-        expect(
-            tools.find((tool) => tool.name === "install_worklet")?.transactional,
-        ).toBe(true);
-        expect(tools.find((tool) => tool.name === "update_worklet")?.durable).toBe(
-            true,
-        );
-        expect(
-            tools.find((tool) => tool.name === "update_worklet")?.transactional,
-        ).toBe(true);
-        expect(tools.find((tool) => tool.name === "revert_worklet")?.durable).toBe(
-            true,
-        );
-        expect(
-            tools.find((tool) => tool.name === "revert_worklet")?.transactional,
-        ).toBe(true);
-        expect(tools.find((tool) => tool.name === "remove_worklet")?.durable).toBe(
-            false,
-        );
-        expect(
-            tools.find((tool) => tool.name === "invoke_worklet_operation")?.durable,
-        ).toBe(false);
+        expect(tools.find((tool) => tool.name === "install_worklet")?.durable).toBe(true);
+        expect(tools.find((tool) => tool.name === "install_worklet")?.transactional).toBe(true);
+        expect(tools.find((tool) => tool.name === "update_worklet")?.durable).toBe(true);
+        expect(tools.find((tool) => tool.name === "update_worklet")?.transactional).toBe(true);
+        expect(tools.find((tool) => tool.name === "revert_worklet")?.durable).toBe(true);
+        expect(tools.find((tool) => tool.name === "revert_worklet")?.transactional).toBe(true);
+        expect(tools.find((tool) => tool.name === "remove_worklet")?.durable).toBe(false);
+        expect(tools.find((tool) => tool.name === "invoke_worklet_operation")?.durable).toBe(false);
     });
 
     it("keeps Data when removal deletes code and the icon", async () => {
@@ -387,9 +335,7 @@ describe("WorkletsModule", () => {
         ).resolves.toBe(true);
         expect(await exists(join(base, "v1"))).toBe(false);
         expect(await exists(join(base, "favicon.png"))).toBe(false);
-        expect(await readFile(join(base, "Data", "keep.txt"), "utf8")).toBe(
-            "keep",
-        );
+        expect(await readFile(join(base, "Data", "keep.txt"), "utf8")).toBe("keep");
     });
 
     it("rolls catalog and filesystem back when a transactional listener rejects", async () => {
@@ -407,9 +353,7 @@ describe("WorkletsModule", () => {
                 operationId: "listener-install",
             }),
         ).rejects.toThrow("listener rejected");
-        expect(
-            await createWorkletDatabase().get(ctx, "listener-worker"),
-        ).toBeUndefined();
+        expect(await createWorkletDatabase().get(ctx, "listener-worker")).toBeUndefined();
         expect(await exists(join(installRoot, "listener-worker"))).toBe(false);
     });
 
@@ -490,9 +434,7 @@ describe("WorkletsModule", () => {
         const entries = await readdir(base);
         expect(entries.some((entry) => entry.startsWith(".v"))).toBe(false);
         expect(entries.some((entry) => entry.startsWith(".favicon-"))).toBe(false);
-        expect(await readFile(join(base, "Data", "state.txt"), "utf8")).toBe(
-            "durable",
-        );
+        expect(await readFile(join(base, "Data", "state.txt"), "utf8")).toBe("durable");
         expect(await exists(join(base, "v1"))).toBe(true);
     });
 
@@ -514,15 +456,12 @@ describe("WorkletsModule", () => {
             }),
         ).rejects.toThrow("depth");
 
-        const largeSource = await makeSource(
-            [{ name: "ping" }],
-            async (directory) => {
-                await writeFile(
-                    join(directory, "large.bin"),
-                    Buffer.alloc(WORKLET_SOURCE_MAX_FILE_BYTES + 1),
-                );
-            },
-        );
+        const largeSource = await makeSource([{ name: "ping" }], async (directory) => {
+            await writeFile(
+                join(directory, "large.bin"),
+                Buffer.alloc(WORKLET_SOURCE_MAX_FILE_BYTES + 1),
+            );
+        });
         await expect(
             module.install(ctx, "agent-a", {
                 name: "large-worker",
@@ -564,11 +503,7 @@ describe("WorkletsModule", () => {
     });
 
     it("validates module options before dereferencing the runtime", () => {
-        expect(() => assertWorkletModuleOptions({})).toThrow(
-            "Worklet module options are invalid",
-        );
-        expect(() => new WorkletsModule({} as never)).toThrow(
-            "Worklet module options are invalid",
-        );
+        expect(() => assertWorkletModuleOptions({})).toThrow("Worklet module options are invalid");
+        expect(() => new WorkletsModule({} as never)).toThrow("Worklet module options are invalid");
     });
 });

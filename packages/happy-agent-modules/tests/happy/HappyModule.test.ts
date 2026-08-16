@@ -1,10 +1,7 @@
 import { createRootContext } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
-import {
-    HappyModule,
-    type HappyHost,
-} from "../../sources/happy/index.js";
+import { HappyModule, type HappyHost } from "../../sources/happy/index.js";
 
 const ctx = createRootContext().named("happy-module-test");
 
@@ -28,11 +25,7 @@ describe("HappyModule", () => {
             "set_happy_status",
             "get_happy_status",
         ]);
-        expect(tools.map((tool) => tool.transactional ?? false)).toEqual([
-            true,
-            true,
-            false,
-        ]);
+        expect(tools.map((tool) => tool.transactional ?? false)).toEqual([true, true, false]);
     });
 
     it("rejects a host that does not expose the complete transport boundary", () => {

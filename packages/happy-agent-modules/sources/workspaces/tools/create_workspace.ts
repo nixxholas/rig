@@ -7,19 +7,19 @@ import {
 } from "../Workspace.js";
 import type { WorkspacesModule } from "../WorkspacesModule.js";
 
-/** Create one host-managed workspace. */
+/** Reserve one host-managed workspace: a folder, and the branch that names the work in it. */
 export function createWorkspaceTool(workspaces: WorkspacesModule, agentId: string) {
     return defineAgentTool({
         name: "create_workspace",
         description:
-            "Create one persistent workspace for isolated work. The result includes complete project, base, owner, status, and timestamp detail; follow its detail cursor with get_workspace when the model-output budget requires another page. The host owns its worktree, Git, filesystem, and path policy.",
+            'Create one persistent workspace for isolated work. Give it a short title written the way a person would write it, such as "Retry policy rewrite": Rig builds the Git branch and the folder from that title, so write a title rather than a slug or a path. The workspace comes back while its checkout and setup may still be running; the result includes complete branch, path, base, status, and ownership detail, and you can follow its detail cursor with get_workspace when the model-output budget requires another page.',
         parameters: workspaceCreateToolInputSchema,
         returnType: workspaceSchema,
         durable: true,
         transactional: true,
         shouldReviewInAutoMode: () => false,
         execute: async (ctx, input: WorkspaceCreateToolInput, call) =>
-            await workspaces.create(ctx, agentId, { ...input, operationId: call.id }),
+            (await workspaces.reserve(ctx, agentId, { ...input, operationId: call.id })).workspace,
         toLLM: (workspace) => [
             {
                 type: "text",

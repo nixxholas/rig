@@ -2,7 +2,12 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { startHappyAgentDaemon } from "@slopus/happy-agent";
+import {
+    loadHappyAgentConfiguration,
+    resolveAgentDaemonPaths,
+    startHappyAgentDaemon,
+    stopAgentDaemon,
+} from "@slopus/happy-agent";
 import { createRootContext } from "@steve.kite/stdlib";
 
 import { parsePermissionMode } from "../../rig/sources/permissions/index.js";
@@ -27,6 +32,10 @@ async function main(): Promise<void> {
 
     const ctx = createRootContext();
     const happyHome = happyAgentHome(repositoryRoot, process.env.RIG_DEV2_GLOBAL === "1");
+    if (isDaemonStop(process.argv.slice(2))) {
+        await stopDaemon(happyHome);
+        return;
+    }
     const daemon = await startHappyAgentDaemon(ctx, {
         happyHome,
         version: "development",
@@ -45,6 +54,22 @@ async function main(): Promise<void> {
     } finally {
         await daemon.close(ctx.named("dev2-shutdown"));
     }
+}
+
+function isDaemonStop(args: readonly string[]): boolean {
+    return args[0] === "daemon" && args[1] === "stop";
+}
+
+async function stopDaemon(happyHome: string): Promise<void> {
+    const configuration = await loadHappyAgentConfiguration(happyHome);
+    const paths = resolveAgentDaemonPaths(configuration);
+    const result = await stopAgentDaemon(paths);
+    if (!result.stopped) {
+        process.stdout.write("No Happy agent is running for this development home.\n");
+        return;
+    }
+    const owner = result.pid === undefined ? "" : ` (process ${String(result.pid)})`;
+    process.stdout.write(`Stopped the Happy agent${owner}.\n`);
 }
 
 function happyAgentHome(repositoryRoot: string, global: boolean): string {

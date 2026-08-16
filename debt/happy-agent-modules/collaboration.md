@@ -75,7 +75,7 @@ assembly performs a broker round trip and rewrites a tool description every turn
    `CollaborationModule.ts:638-700`). Master plan 16 wants a model's surface to be fixed, explicitly
    written arrays; a tool whose description text changes between turns also defeats provider prompt
    caching and makes the model's view of its own capabilities non-reproducible. Capacity is dynamic
-   state and belongs in the tool's *result* or in an error, not in its description.
+   state and belongs in the tool's _result_ or in an error, not in its description.
 4. **`disabledProviders` is hardcoded empty at the only call site.** `loadHappyAgent.ts:397` passes
    `disabledProviders: []`, so the catalog rendering branch for disabled providers
    (`CollaborationModule.ts:657-661`) is dead in practice while the module validates and formats it.
@@ -141,3 +141,126 @@ assembly performs a broker round trip and rewrites a tool description every turn
   requested responder may answer this obligation.", "A reply must be sent to the requesting agent.",
   "The reply obligation is no longer pending." (`CollaborationModule.ts:747-757`).
 - The module ships a 703-line test file (`tests/collaboration/CollaborationModule.test.ts`).
+
+## Resolution — 2026-08-16
+
+Closed by rewriting the module rather than repairing it. The findings above are eleven symptoms of
+one cause: the module kept its own copy of state Agent Base already owns. A roster duplicated the
+agent collection, a message table duplicated the inbox, an obligation table duplicated the request
+that created it, and an injected broker duplicated `AgentSystemRef`. Agents are actors — each one
+already has an identity, a parent, and a durable queue — so once those facts are read from the
+runtime instead of stored beside it, most of the findings have nothing left to describe.
+
+3,327 source lines became 501. No store, no broker, no configuration, no events, no host
+integration. Three tools: `create_agent`, `send_agent_message`, `interrupt_agent`.
+
+The earlier resolution recorded in this file — obligations derived from the message log, retention
+rules, replay fingerprints, four rounds of release-gate findings — described repairs to the
+duplicate. It is gone with the thing it repaired, and is not summarized here because none of it
+survives in any form.
+
+### Decisions taken by the user during the work
+
+Each of these deleted a layer, and each was the user's, not the reviewer's:
+
+- **The broker goes.** It had exactly one implementation, in the vanilla host, which threw on all
+  ten methods. Every one of them maps onto `AgentSystemRef`, which the module is handed anyway.
+- **Configuration goes.** With the broker gone there was nothing left to configure; the module is
+  constructed with no arguments.
+- **A collaborator's model, effort, provider, and service tier are chosen once, when it is
+  created, and can never be changed afterwards.** Nor can its permission mode, by anyone.
+- **No roles, no group IDs, no module-owned metadata.** `create_agent` takes a `title` and writes
+  it to the agent's real `AgentMetadata`.
+- **No inboxes of the module's own.** "This is actor model — you are not maintaining inboxes."
+- **No waiting, no reply obligations, no `expectReply`.** Every message is asynchronous in both
+  directions. A reply is a message sent back.
+- **No status, no `createdAt`, no `updatedAt`.** Agent Base has them, or nobody reads them.
+- **A settled run reports to its creator on its own, verbatim, from the runtime.**
+
+### What the module is now
+
+`createAgent` creates the agent and delivers its opening task; `sendMessage` delivers one message;
+`interruptAgent` signals cancellation. Authorization is ancestry read from `parentOf`. The tool
+surface is fixed. Instructions restate the creator's and collaborators' IDs each turn, because the
+sender's name in a delivered message ages out on compaction while the relationship does not.
+
+Idempotency is Agent Base's, not the module's. `send` dedups on message ID and a durable tool call
+supplies `call.id`, so a retried call delivers the same message. This is also the only ordering
+available: `AgentBase.#offer` refuses to run inside a caller's storage transaction, and the tool
+result and the queue write live in two different agents' stores under two different locks, so they
+can never be one commit. That is why the ID has to carry the guarantee.
+
+The one piece of state the module keeps is a note in the **run store** holding the last thing the
+model said. It exists only while a run does, and the transaction that settles the run erases it —
+which is why the settle report is read inside that transaction and sent after it commits, under the
+settlement's own ID so a retry is the same message.
+
+### Finding by finding
+
+1. **Gone with the tool.** `list_agents` no longer exists. Listing an agent's collaborators is a
+   host call: `childOf` plus `config(id).metadata.title`, which is what
+   `packages/happy-agent/sources/modules/http/sessionRoutes.ts` now does.
+2. **Gone with the broker.** There is nothing to read back and nothing to deep-compare.
+3. **Closed.** `tools` is synchronous and its descriptions are built from `AgentSystemRef.models`,
+   which is fixed for a collection, so the text is identical every turn and prompt caching holds.
+   No capacity number appears in any description.
+4. **Gone.** There is no catalog configuration; the collection's own model list is the offer.
+5. **Gone.** There are no storage layers, so there is nothing validated twice.
+6. **Closed differently, and this is the one place the module still carries history.** The module
+   owns no schema, but a database that ran an earlier build still records
+   `001-collaboration`/`002-drop-collaboration-receipts`/`003-collaboration-run-state`, and Agent
+   Base requires the applied list to stay a prefix of the declared one — dropping the keys would
+   stop such an agent from starting at all, not merely break collaboration. So
+   `CollaborationMigrations.ts` keeps the three released keys as empty markers and adds
+   `004-collaboration-storage-removed`, which drops the tables. The earlier authorization to
+   rewrite the migration history into a single clean `001` is therefore not used. One deviation
+   from `AGENTS.md` remains and is deliberate: released migration *contents* are supposed to be
+   immutable, and these three bodies are now empty. It is safe here for a reason that can be
+   checked rather than merely hoped for — an applied migration never runs again, so an existing
+   database is untouched, and a fresh database that runs three empty bodies followed by `004` ends
+   in exactly the state an existing one does: no collaboration tables. Keeping the original bodies
+   would mean creating four tables in order to drop them one migration later.
+7. **Gone.** There is no message log to retain, prune, or bound. The only durable record of an
+   inter-agent message is the recipient's own inbox, which Agent Base already governs.
+8. **Gone by removal.**
+9. **Gone by removal.**
+10. **Still true, now for a smaller surface.** `send_agent_message` declares
+    `shouldReviewInAutoMode: () => false` and `interrupt_agent` declares `true` with no elevation.
+    What made this worth flagging — that a send could change the recipient's permission mode
+    without review — is no longer possible: no message carries a permission mode.
+11. **Not closed, and not closeable here.** `master-plans/16-tools.md` still places ready-made
+    capabilities in `@slopus/happy-agent-features`. Master plans change only on the user's
+    dictation.
+
+### The gap the rewrite opened, and how it was closed
+
+Removing `wait_for_reply` removed the only guarantee that a creator ever hears back: a collaborator
+that finished silently, errored, or was interrupted would leave whoever assigned the work waiting
+forever on a message the model simply chose not to send. Instructions cannot fix that, because a
+model that stops working is by definition no longer following them.
+
+So the report is the runtime's. `onEventTransact` keeps each `text_end` in the run store,
+`afterAgentSettledTransact` reads it before that store is erased, and `afterAgentSettled` sends the
+creator a message tagged `collaboration.kind = "subagent_report"`, quoting the collaborator
+verbatim and naming it. A collaborator that said nothing still produces one. This is now the normal
+way an answer travels; `send_agent_message` is for saying something before the work is done.
+
+### Verification
+
+- `packages/happy-agent-modules`: collaboration typechecks clean and lints clean; 27 tests pass.
+- `packages/happy-agent`: typechecks clean against the rebuilt module types, which is what proves
+  the host wiring matches the new signature.
+- Two pre-existing errors in `sources/permissions/PermissionsModule.ts` (646, 665) still fail the
+  package's `check` and `build` scripts. They belong to unrelated in-flight work and are untouched
+  here; `tsc` emits despite them, which is how the host typecheck above was obtained.
+- `packages/happy-agent`'s own suite has 24 failures, all in `tests/git/**` and
+  `tests/projects/**` and all pre-existing. Nothing collaboration-related remains in that package's
+  tests: `vanillaCollaboration.test.ts` covered the vanilla broker's refusals and went with it.
+
+### Consequence worth stating plainly
+
+`004-collaboration-storage-removed` deletes `happy_collaboration_agents`,
+`happy_collaboration_messages`, and `happy_collaboration_obligations` on first start after this
+change. Any collaborator roster or message history in an existing database is destroyed. That is
+the intent — the module no longer reads any of it — but it is irreversible and worth knowing before
+the change ships.

@@ -5,106 +5,90 @@ import {
 } from "@slopus/happy-agent-base";
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import { afterCommit, type Context } from "@steve.kite/stdlib";
+import { type Context } from "@steve.kite/stdlib";
 
 import {
-    MAX_PROJECT_DETAIL_PAGE_SIZE,
-    projectDetailPageSchema,
-    projectDetailQuerySchema,
-    type ProjectDetailPage,
-    type ProjectDetailQuery,
-} from "./ProjectDetailPage.js";
-import {
     MAX_PROJECT_AVATAR_BYTES,
+    MAX_PROJECT_INITIALIZATION_ATTEMPTS,
+    projectAdoptRemoteNameInputSchema,
+    projectAgentIdSchema,
     projectAvatarAssetSchema,
     projectAvatarHashSchema,
     projectClearAvatarInputSchema,
-    projectAgentIdSchema,
     projectCreateInputSchema,
     projectEnsureInputSchema,
-    projectIdSchema,
-    projectReorderInputSchema,
-    projectRenameInputSchema,
-    projectSchema,
     projectEventIdSchema,
-    MAX_PROJECT_SETTINGS_DEPTH,
-    MAX_PROJECT_SETTINGS_ENCODED_BYTES,
-    projectSettingsSchema,
-    projectSettingsUpdateInputSchema,
-    projectTimestampSchema,
+    projectGitFactsInputSchema,
+    projectIdSchema,
+    projectInitializationFailureInputSchema,
+    projectProbeInputSchema,
+    projectRenameInputSchema,
+    projectReorderInputSchema,
+    projectRepositoryRefSchema,
     projectSetAvatarInputSchema,
-    projectUnarchiveInputSchema,
+    projectSetDefaultBranchInputSchema,
+    projectTimestampSchema,
     type Project,
+    type ProjectAdoptRemoteNameInput,
     type ProjectAvatar,
     type ProjectAvatarAsset,
+    type ProjectClearAvatarInput,
     type ProjectCreateInput,
     type ProjectEnsureInput,
+    type ProjectGitFacts,
+    type ProjectGitFactsInput,
+    type ProjectInitializationFailureInput,
+    type ProjectProbeInput,
     type ProjectRenameInput,
-    type ProjectRenameChanges,
     type ProjectReorderInput,
     type ProjectSetAvatarInput,
-    type ProjectClearAvatarInput,
-    type ProjectSettings,
-    type ProjectSettingsUpdateInput,
+    type ProjectSetDefaultBranchInput,
 } from "./Project.js";
+import { ProjectMutations } from "./ProjectMutations.js";
+import {
+    fitProjectPage,
+    formatPageForModel,
+    formatProjectForModel,
+    formatSettingsForModel,
+} from "./ProjectFormat.js";
+import { isPromiseLike, parseCursor, requirePromise } from "./projectRuntime.js";
 import {
     projectContextSchema,
     projectEventSchema,
     projectModuleListenerSchema,
-    type ProjectEvent,
-    type ProjectModuleListener,
+    type ProjectStateChangeReason,
 } from "./ProjectEvent.js";
+import { projectMigrations } from "./ProjectMigrations.js";
 import {
     MAX_PROJECT_PAGE_SIZE,
-    projectListSchema,
     projectPageQuerySchema,
     type ProjectPage,
     type ProjectPageQuery,
 } from "./ProjectPage.js";
+import { assertProject } from "./ProjectRow.js";
 import {
-    MAX_PROJECT_SETTINGS_DETAIL_CHARACTERS,
-    MAX_PROJECT_SETTINGS_DETAIL_PAGE_SIZE,
-    projectSettingsDetailQuerySchema,
-    projectSettingsPageSchema,
-    type ProjectSettingsDetailQuery,
-    type ProjectSettingsPage,
-} from "./ProjectSettingsPage.js";
+    projectSettingsUpdateInputSchema,
+    type ProjectSettings,
+    type ProjectSettingsUpdateInput,
+} from "./ProjectSettings.js";
 import {
-    assertProject,
-    assertProjectArchiveResult,
-    assertProjectClearAvatarResult,
-    assertProjectCreateResult,
-    assertProjectEnsureResult,
     assertProjectPage,
-    assertProjectReorderResult,
-    assertProjectRenameResult,
-    assertProjectSetAvatarResult,
-    assertProjectSettingsUpdateResult,
     assertProjectStoreMutationResult,
-    assertProjectUnarchiveResult,
     createProjectStore,
-    projectMigrations,
     projectAuthorizationSchema,
-    projectEnsureResultSchema,
-    projectSettingsUpdateResultSchema,
-    type ProjectAuthorization,
-    type ProjectAuthorizationAction,
-    type ProjectCreateResult,
     type ProjectEnsureResult,
-    type ProjectRenameResult,
+    type ProjectStateChanges,
     type ProjectSettingsUpdateResult,
     type ProjectStore,
-    type ProjectStoreArchiveInput,
-    type ProjectStoreCreateInput,
-    type ProjectStoreEnsureInput,
     type ProjectStoreMutationResult,
-    type ProjectStoreClearAvatarInput,
-    type ProjectStoreReorderInput,
-    type ProjectStoreRenameInput,
-    type ProjectStoreSetAvatarInput,
-    type ProjectStoreSettingsUpdateInput,
-    type ProjectStoreUnarchiveInput,
 } from "./ProjectStore.js";
+import {
+    assertProjectRecord,
+    assertProjectSettings,
+    assertProjectTransition,
+    sameJson,
+} from "./ProjectTransition.js";
+import { folderProjectName, HOME_PROJECT_NAME } from "./projectIdentity.js";
 import {
     archiveProjectTool,
     clearProjectAvatarTool,
@@ -115,13 +99,32 @@ import {
     listProjectsTool,
     reorderProjectTool,
     renameProjectTool,
+    restoreProjectTool,
     setProjectAvatarTool,
-    unarchiveProjectTool,
     updateProjectSettingsTool,
 } from "./tools/index.js";
 
 const DEFAULT_PAGE_SIZE = 50;
 const DEFAULT_OUTPUT_CHARACTERS = 12_000;
+
+/** Fields one lifecycle write is allowed to move. */
+const PROJECT_STATE_FIELDS = [
+    "name",
+    "nameSource",
+    "presence",
+    "worktreeSupport",
+    "worktreeUnsupportedReason",
+    "defaultBranch",
+    "initializationStatus",
+    "initializationAttempt",
+    "initializationError",
+    "gitAhead",
+    "gitBehind",
+    "gitDetached",
+    "gitBranch",
+    "gitHead",
+    "gitUpstream",
+] as const satisfies readonly (keyof Project)[];
 
 export const projectIdFactorySchema = Type.Function(
     [projectContextSchema, projectAgentIdSchema],
@@ -157,6 +160,7 @@ export const projectAvatarAssetReaderSchema = Type.Object(
     },
     { additionalProperties: false },
 );
+
 const projectMaxPageSizeSchema = Type.Integer({
     minimum: 1,
     maximum: MAX_PROJECT_PAGE_SIZE,
@@ -184,30 +188,22 @@ export const projectModuleOptionsSchema = Type.Object(
 export type ProjectModuleOptions = Static<typeof projectModuleOptionsSchema>;
 export type ProjectAvatarAssetReader = Static<typeof projectAvatarAssetReaderSchema>;
 
-type ProjectChange = {
-    readonly result: ProjectStoreMutationResult;
-    readonly event?: ProjectEvent;
-};
-
 export class ProjectsModule implements AgentModule {
     readonly name = "projects";
     readonly migrations = projectMigrations;
 
     readonly #store: ProjectStore;
-    readonly #authorization: ProjectAuthorization | undefined;
+    readonly #mutations: ProjectMutations;
     readonly #avatarAssetReader: ProjectModuleOptions["avatarAssetReader"];
     readonly #idFactory: NonNullable<ProjectModuleOptions["idFactory"]>;
     readonly #eventIdFactory: NonNullable<ProjectModuleOptions["eventIdFactory"]>;
     readonly #clock: NonNullable<ProjectModuleOptions["clock"]>;
-    readonly #listener: ProjectModuleListener | undefined;
     readonly #maxPageSize: number;
     readonly #maxOutputCharacters: number;
-    readonly #onPostCommitError: ProjectModuleOptions["onPostCommitError"];
 
     constructor(options: ProjectModuleOptions) {
         assertProjectModuleOptions(options);
         this.#store = createProjectStore();
-        this.#authorization = options.authorization;
         this.#avatarAssetReader = options.avatarAssetReader;
         this.#idFactory =
             options.idFactory ??
@@ -216,10 +212,16 @@ export class ProjectsModule implements AgentModule {
             options.eventIdFactory ??
             ((_ctx: Context, _agentId: string) => globalThis.crypto.randomUUID());
         this.#clock = options.clock ?? ((_ctx: Context, _agentId: string) => Date.now());
-        this.#listener = options.listener;
         this.#maxPageSize = options.maxPageSize ?? DEFAULT_PAGE_SIZE;
         this.#maxOutputCharacters = options.maxOutputCharacters ?? DEFAULT_OUTPUT_CHARACTERS;
-        this.#onPostCommitError = options.onPostCommitError;
+        this.#mutations = new ProjectMutations({
+            store: this.#store,
+            authorization: options.authorization,
+            eventIdFactory: this.#eventIdFactory,
+            clock: this.#clock,
+            listener: options.listener,
+            onPostCommitError: options.onPostCommitError,
+        });
     }
 
     readonly tools = (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => {
@@ -231,7 +233,7 @@ export class ProjectsModule implements AgentModule {
             ensureProjectTool(this, scope.agent.id),
             renameProjectTool(this, scope.agent.id),
             archiveProjectTool(this, scope.agent.id),
-            unarchiveProjectTool(this, scope.agent.id),
+            restoreProjectTool(this, scope.agent.id),
             reorderProjectTool(this, scope.agent.id),
             setProjectAvatarTool(this, scope.agent.id),
             clearProjectAvatarTool(this, scope.agent.id),
@@ -240,161 +242,12 @@ export class ProjectsModule implements AgentModule {
         ];
     };
 
-    async create(ctx: Context, agentId: string, input: ProjectCreateInput): Promise<Project> {
+    async list(ctx: Context, agentId: string, query: ProjectPageQuery = {}): Promise<ProjectPage> {
         this.#assertAgentId(agentId);
-        this.#assertInput(projectCreateInputSchema, input, "project creation");
-        const normalized = structuredClone(input);
-        const projectId = normalized.id ?? (await this.#newIdentity(ctx, agentId));
-
-        const change = await this.#runTransaction(ctx, async (txCtx) => {
-            const storeInput: ProjectStoreCreateInput = {
-                id: projectId,
-                ownerAgentId: agentId,
-                repositoryRef: normalized.repositoryRef,
-                name: normalized.name,
-                ...(normalized.description === undefined
-                    ? {}
-                    : { description: normalized.description }),
-            };
-            const before = await this.#getOptional(txCtx, agentId, projectId);
-            if (before !== undefined) {
-                await this.#authorize(txCtx, agentId, before.ownerAgentId, "create");
-                if (!sameCreate(before, storeInput)) {
-                    throw new Error(`Project "${projectId}" already exists with different values.`);
-                }
-                const result: ProjectCreateResult = {
-                    operation: "create",
-                    agentId,
-                    changed: false,
-                    project: structuredClone(before),
-                };
-                return { result };
-            }
-
-            const raw = await requirePromise(
-                this.#store.create(txCtx, agentId, structuredClone(storeInput)),
-                "Project store create",
-            );
-            assertProjectCreateResult(raw);
-            this.#assertMutationResult(raw, agentId, "create");
-            this.#assertCreatedProject(raw.project, storeInput);
-            const after = await this.#getRequired(txCtx, agentId, projectId);
-            if (!sameJson(after, raw.project)) {
-                throw new Error("Project create result does not match authoritative state.");
-            }
-            const changed = before === undefined && !sameJson(before, after);
-            if (raw.changed !== changed) {
-                throw new Error("Project create changed flag is not authoritative.");
-            }
-            const result = structuredClone(raw);
-            const event = changed
-                ? await this.#newEvent(txCtx, agentId, {
-                      type: "project_created",
-                      agentId,
-                      project: after,
-                  })
-                : undefined;
-            if (event !== undefined) await this.#observe(txCtx, event);
-            return { result, ...(event === undefined ? {} : { event }) };
-        });
-        return structuredClone(requireProjectFromResult(change.result));
-    }
-
-    async ensure(
-        ctx: Context,
-        agentId: string,
-        input: ProjectEnsureInput,
-    ): Promise<ProjectEnsureResult> {
-        this.#assertAgentId(agentId);
-        this.#assertInput(projectEnsureInputSchema, input, "project ensure");
-        const normalized = structuredClone(input);
-        const candidateId = await this.#newIdentity(ctx, agentId);
-
-        const change = await this.#runTransaction(ctx, async (txCtx) => {
-            const storeInput: ProjectStoreEnsureInput = {
-                id: candidateId,
-                ownerAgentId: agentId,
-                repositoryRef: normalized.repositoryRef,
-                ...(normalized.name === undefined ? {} : { name: normalized.name }),
-                ...(normalized.description === undefined
-                    ? {}
-                    : { description: normalized.description }),
-            };
-            const before = await this.#findByRepositoryRef(
-                txCtx,
-                agentId,
-                normalized.repositoryRef,
-            );
-            if (before !== undefined) {
-                await this.#authorize(txCtx, agentId, before.ownerAgentId, "ensure");
-            }
-            const raw = await requirePromise(
-                this.#store.ensure(txCtx, agentId, structuredClone(storeInput)),
-                "Project store ensure",
-            );
-            assertProjectEnsureResult(raw);
-            this.#assertMutationResult(raw, agentId, "ensure");
-            this.#assertEnsureProject(raw.project, storeInput, before === undefined);
-            const after = await this.#getRequired(txCtx, agentId, raw.project.id);
-            if (!sameJson(after, raw.project)) {
-                throw new Error("Project ensure result does not match authoritative state.");
-            }
-            if (before !== undefined && after.id !== before.id) {
-                throw new Error("Project ensure changed the identity of an existing project.");
-            }
-            const created = before === undefined;
-            const changed = !sameJson(before, after);
-            if (raw.created !== created || raw.changed !== changed) {
-                throw new Error("Project ensure changed flag is not authoritative.");
-            }
-            if (!created && changed) {
-                if (before?.status !== "archived") {
-                    throw new Error("Project ensure modified an existing project.");
-                }
-                assertProjectUnarchiveTransition(before, after);
-            }
-            const result: ProjectEnsureResult = {
-                ...structuredClone(raw),
-                created,
-                changed,
-                project: structuredClone(after),
-            };
-            const event = changed
-                ? await this.#newEvent(
-                      txCtx,
-                      agentId,
-                      before?.status === "archived"
-                          ? {
-                                type: "project_unarchived",
-                                agentId,
-                                project: after,
-                            }
-                          : {
-                                type: "project_created",
-                                agentId,
-                                project: after,
-                            },
-                  )
-                : undefined;
-            if (event !== undefined) await this.#observe(txCtx, event);
-            return { result, ...(event === undefined ? {} : { event }) };
-        });
-        if (!Value.Check(projectEnsureResultSchema, change.result)) {
-            throw new Error("Project ensure did not return a valid result.");
-        }
-        return structuredClone(change.result);
-    }
-
-    async listPage(
-        ctx: Context,
-        agentId: string,
-        query: ProjectPageQuery = {},
-    ): Promise<ProjectPage> {
-        this.#assertAgentId(agentId);
-        this.#assertInput(projectPageQuerySchema, query, "project page query");
+        this.#assertInput(projectPageQuerySchema, query, "page query");
         const limit = query.limit ?? this.#maxPageSize;
         if (limit > this.#maxPageSize) {
-            throw new Error(`Project page limit cannot exceed ${String(this.#maxPageSize)}.`);
+            throw new Error(`A project page cannot exceed ${String(this.#maxPageSize)} rows.`);
         }
         if (query.cursor !== undefined) parseCursor(query.cursor);
         const normalized = { ...structuredClone(query), limit };
@@ -407,454 +260,296 @@ export class ProjectsModule implements AgentModule {
         for (const project of raw.projects) {
             assertProjectRecord(project);
             if (normalized.status !== undefined && project.status !== normalized.status) {
-                throw new Error("Project page returned a row outside the requested status.");
+                throw new Error("The project page returned a row outside the requested status.");
             }
             if (
                 normalized.status === undefined &&
                 normalized.includeArchived !== true &&
                 project.status === "archived"
             ) {
-                throw new Error("Project page returned an archived row without includeArchived.");
+                throw new Error("The project page returned an archived row that was not asked for.");
             }
-            await this.#authorize(ctx, agentId, project.ownerAgentId, "list");
+            await this.#mutations.authorize(ctx, agentId, project.ownerAgentId, "list");
         }
-        return structuredClone(fitPageForModel(raw, normalized.cursor, this.#maxOutputCharacters));
-    }
-
-    async list(ctx: Context, agentId: string, query: ProjectPageQuery = {}): Promise<Project[]> {
-        return (await this.listPage(ctx, agentId, query)).projects;
+        return structuredClone(fitProjectPage(raw, normalized.cursor, this.#maxOutputCharacters));
     }
 
     async get(ctx: Context, agentId: string, projectId: string): Promise<Project | undefined> {
         this.#assertAgentId(agentId);
         this.#assertId(projectId);
-        const project = await this.#getOptional(ctx, agentId, projectId);
+        const project = await this.#mutations.getOptional(ctx, agentId, projectId);
         if (project === undefined) return undefined;
-        await this.#authorize(ctx, agentId, project.ownerAgentId, "get");
+        await this.#mutations.authorize(ctx, agentId, project.ownerAgentId, "get");
         return structuredClone(project);
     }
 
-    async getPage(
+    /**
+     * Resolves a canonical folder path to its project. This is the catalog's
+     * path-keyed identity: a host that knows only a working directory finds the
+     * owning project here.
+     */
+    async getByPath(
         ctx: Context,
         agentId: string,
-        projectId: string,
-        query: ProjectDetailQuery = {},
-    ): Promise<ProjectDetailPage> {
+        repositoryRef: string,
+    ): Promise<Project | undefined> {
         this.#assertAgentId(agentId);
-        this.#assertId(projectId);
-        this.#assertInput(projectDetailQuerySchema, query, "project detail query");
-        const project = await this.get(ctx, agentId, projectId);
-        if (project === undefined) return { project: null };
-        const detail = projectDetailText(project);
-        const detailOffset = query.detailOffset ?? 0;
-        const detailLimit = query.detailLimit ?? MAX_PROJECT_DETAIL_PAGE_SIZE;
-        if (detailOffset > detail.length) {
-            throw new Error("Project detail offset exceeds the available detail.");
+        if (!Value.Check(projectRepositoryRefSchema, repositoryRef)) {
+            throw new Error("A project folder must be an absolute path.");
         }
-        const page: ProjectDetailPage = {
-            project,
-            detail: detail.slice(detailOffset, detailOffset + detailLimit),
-            detailOffset,
-            detailTotal: detail.length,
-            ...(detailOffset + detailLimit < detail.length
-                ? { nextDetailOffset: detailOffset + detailLimit }
-                : {}),
-        };
-        if (
-            !Value.Check(projectDetailPageSchema, {
-                project,
-                detail: "",
-                detailOffset: 0,
-                detailTotal: detail.length,
-            })
-        ) {
-            throw new Error("Project detail exceeds its bounded traversal length.");
-        }
-        return fitProjectDetailPage(page, this.#maxOutputCharacters);
+        const project = await this.#mutations.findByPath(ctx, agentId, repositoryRef);
+        if (project === undefined) return undefined;
+        await this.#mutations.authorize(ctx, agentId, project.ownerAgentId, "get");
+        return structuredClone(project);
     }
 
     async readSettings(ctx: Context, agentId: string, projectId: string): Promise<ProjectSettings> {
         this.#assertAgentId(agentId);
         this.#assertId(projectId);
-        const project = await this.#getRequired(ctx, agentId, projectId);
-        await this.#authorize(ctx, agentId, project.ownerAgentId, "settings_read");
-        const raw = await requirePromise(
-            this.#store.readSettings(ctx, agentId, projectId),
-            "Project store read settings",
-        );
-        assertProjectSettings(raw);
-        return structuredClone(raw);
+        const project = await this.#mutations.getRequired(ctx, agentId, projectId);
+        await this.#mutations.authorize(ctx, agentId, project.ownerAgentId, "settings_read");
+        return await this.#mutations.readSettings(ctx, agentId, projectId);
     }
 
-    async readSettingsPage(
-        ctx: Context,
-        agentId: string,
-        projectId: string,
-        query: ProjectSettingsDetailQuery = {},
-    ): Promise<ProjectSettingsPage> {
-        this.#assertInput(projectSettingsDetailQuerySchema, query, "project settings detail query");
-        const settings = await this.readSettings(ctx, agentId, projectId);
-        const detail = settingsDetailText(settings);
-        const detailOffset = query.detailOffset ?? 0;
-        const detailLimit = query.detailLimit ?? MAX_PROJECT_SETTINGS_DETAIL_PAGE_SIZE;
-        if (detailOffset > detail.length) {
-            throw new Error("Project settings detail offset exceeds the available detail.");
-        }
-        const page: ProjectSettingsPage = {
-            projectId,
-            settings,
-            detail: detail.slice(detailOffset, detailOffset + detailLimit),
-            detailOffset,
-            detailTotal: detail.length,
-            ...(detailOffset + detailLimit < detail.length
-                ? { nextDetailOffset: detailOffset + detailLimit }
-                : {}),
-        };
-        assertProjectSettingsPage(page);
-        return fitSettingsPage(page, this.#maxOutputCharacters);
-    }
-
-    async rename(ctx: Context, agentId: string, input: ProjectRenameInput): Promise<Project>;
-    async rename(
-        ctx: Context,
-        agentId: string,
-        projectId: string,
-        changes: ProjectRenameChanges,
-    ): Promise<Project>;
-    async rename(
-        ctx: Context,
-        agentId: string,
-        inputOrProjectId: ProjectRenameInput | string,
-        changes?: ProjectRenameChanges,
-    ): Promise<Project> {
+    async create(ctx: Context, agentId: string, input: ProjectCreateInput): Promise<Project> {
         this.#assertAgentId(agentId);
-        const input: ProjectRenameInput =
-            typeof inputOrProjectId === "string"
-                ? ({
-                      projectId: inputOrProjectId,
-                      ...(changes === undefined ? {} : changes),
-                  } as ProjectRenameInput)
-                : inputOrProjectId;
-        return await this.#rename(ctx, agentId, input);
-    }
-
-    async #rename(ctx: Context, agentId: string, input: ProjectRenameInput): Promise<Project> {
-        this.#assertAgentId(agentId);
-        this.#assertInput(projectRenameInputSchema, input, "project rename");
+        this.#assertInput(projectCreateInputSchema, input, "creation");
         const normalized = structuredClone(input);
-
-        const change = await this.#runTransaction(ctx, async (txCtx) => {
-            const before = await this.#getRequired(txCtx, agentId, normalized.projectId);
-            await this.#authorize(txCtx, agentId, before.ownerAgentId, "rename");
-            const storeInput: ProjectStoreRenameInput = {
-                projectId: normalized.projectId,
-                name: normalized.name,
-                ...(normalized.expectedVersion === undefined
-                    ? {}
-                    : { expectedVersion: normalized.expectedVersion }),
-            };
-            const raw = await requirePromise(
-                this.#store.rename(txCtx, agentId, structuredClone(storeInput)),
-                "Project store rename",
-            );
-            assertProjectRenameResult(raw);
-            this.#assertMutationResult(raw, agentId, "rename");
-            if (raw.project.id !== normalized.projectId || raw.project.name !== normalized.name) {
-                throw new Error("Project rename result does not match the requested project.");
-            }
-            const after = await this.#getRequired(txCtx, agentId, normalized.projectId);
-            if (!sameJson(after, raw.project)) {
-                throw new Error("Project rename result does not match authoritative state.");
-            }
-            assertProjectRenameTransition(before, after, normalized.name);
-            const changed = !sameJson(before, after);
-            if (raw.changed !== changed) {
-                throw new Error("Project rename changed flag is not authoritative.");
-            }
-            const result = structuredClone(raw);
-            const event = changed
-                ? await this.#newEvent(txCtx, agentId, {
-                      type: "project_renamed",
-                      agentId,
-                      project: after,
-                      previousName: before.name,
-                  })
-                : undefined;
-            if (event !== undefined) await this.#observe(txCtx, event);
-            return { result, ...(event === undefined ? {} : { event }) };
+        const projectId = normalized.id ?? (await this.#newIdentity(ctx, agentId));
+        const kind = normalized.kind ?? "regular";
+        const result = await this.#mutations.run(ctx, agentId, {
+            action: "create",
+            changeable: [],
+            event: (after) => ({ type: "project_created", agentId, project: after }),
+            run: async (txCtx) => {
+                if ((await this.#mutations.findByPath(txCtx, agentId, normalized.repositoryRef)) !== undefined) {
+                    throw new Error(
+                        `The folder "${normalized.repositoryRef}" is already a project. Use ensure_project instead.`,
+                    );
+                }
+                if ((await this.#mutations.getOptional(txCtx, agentId, projectId)) !== undefined) {
+                    throw new Error(`Project "${projectId}" already exists.`);
+                }
+                return await requirePromise(
+                    this.#store.create(txCtx, agentId, {
+                        id: projectId,
+                        ownerAgentId: agentId,
+                        repositoryRef: normalized.repositoryRef,
+                        kind,
+                        name: kind === "home" ? HOME_PROJECT_NAME : normalized.name,
+                        nameSource: normalized.nameSource ?? "folder",
+                        ...(normalized.description === undefined
+                            ? {}
+                            : { description: normalized.description }),
+                        ...(normalized.remoteSource === undefined
+                            ? {}
+                            : { remoteSource: normalized.remoteSource }),
+                        ...(normalized.requiredSecretKind === undefined
+                            ? {}
+                            : { requiredSecretKind: normalized.requiredSecretKind }),
+                    }),
+                    "Project store create",
+                );
+            },
         });
-        return structuredClone(requireProjectFromResult(change.result));
+        return requireProjectFromResult(result);
+    }
+
+    /**
+     * Converges on one project for a folder. A repeated call returns the
+     * existing project, and an archived project comes back to the active
+     * catalog rather than becoming a second row for the same folder.
+     */
+    async ensure(
+        ctx: Context,
+        agentId: string,
+        input: ProjectEnsureInput,
+    ): Promise<ProjectEnsureResult> {
+        this.#assertAgentId(agentId);
+        this.#assertInput(projectEnsureInputSchema, input, "ensure");
+        const normalized = structuredClone(input);
+        const candidateId = await this.#newIdentity(ctx, agentId);
+        const kind = normalized.kind ?? "regular";
+        const result = await this.#mutations.run(ctx, agentId, {
+            action: "ensure",
+            changeable: ["status", "archivedAt"],
+            event: (after, before) =>
+                before === undefined
+                    ? { type: "project_created", agentId, project: after }
+                    : { type: "project_restored", agentId, project: after },
+            run: async (txCtx) =>
+                await requirePromise(
+                    this.#store.ensure(txCtx, agentId, {
+                        id: candidateId,
+                        ownerAgentId: agentId,
+                        repositoryRef: normalized.repositoryRef,
+                        kind,
+                        name:
+                            kind === "home"
+                                ? HOME_PROJECT_NAME
+                                : (normalized.name ?? folderProjectName(normalized.repositoryRef)),
+                        nameSource: normalized.nameSource ?? "folder",
+                        ...(normalized.description === undefined
+                            ? {}
+                            : { description: normalized.description }),
+                        ...(normalized.remoteSource === undefined
+                            ? {}
+                            : { remoteSource: normalized.remoteSource }),
+                        ...(normalized.requiredSecretKind === undefined
+                            ? {}
+                            : { requiredSecretKind: normalized.requiredSecretKind }),
+                    }),
+                    "Project store ensure",
+                ),
+            beforeByPath: normalized.repositoryRef,
+        });
+        if (result.operation !== "ensure") {
+            throw new Error("Project ensure returned another operation.");
+        }
+        return structuredClone(result);
+    }
+
+    async rename(ctx: Context, agentId: string, input: ProjectRenameInput): Promise<Project> {
+        this.#assertAgentId(agentId);
+        this.#assertInput(projectRenameInputSchema, input, "rename");
+        const normalized = structuredClone(input);
+        const result = await this.#mutations.run(ctx, agentId, {
+            action: "rename",
+            changeable: ["name", "nameSource"],
+            projectId: normalized.projectId,
+            event: (after, before) => ({
+                type: "project_renamed",
+                agentId,
+                project: after,
+                previousName: before?.name ?? after.name,
+            }),
+            run: async (txCtx) =>
+                await requirePromise(
+                    this.#store.rename(txCtx, agentId, {
+                        projectId: normalized.projectId,
+                        name: normalized.name,
+                        ...(normalized.expectedVersion === undefined
+                            ? {}
+                            : { expectedVersion: normalized.expectedVersion }),
+                    }),
+                    "Project store rename",
+                ),
+        });
+        return requireProjectFromResult(result);
     }
 
     async archive(ctx: Context, agentId: string, projectId: string): Promise<Project> {
         this.#assertAgentId(agentId);
         this.#assertId(projectId);
-
-        const change = await this.#runTransaction(ctx, async (txCtx) => {
-            const before = await this.#getRequired(txCtx, agentId, projectId);
-            await this.#authorize(txCtx, agentId, before.ownerAgentId, "archive");
-            const storeInput: ProjectStoreArchiveInput = { projectId };
-            const raw = await requirePromise(
-                this.#store.archive(txCtx, agentId, storeInput),
-                "Project store archive",
-            );
-            assertProjectArchiveResult(raw);
-            this.#assertMutationResult(raw, agentId, "archive");
-            if (raw.project.id !== projectId) {
-                throw new Error("Project archive result has a different project identity.");
-            }
-            const after = await this.#getRequired(txCtx, agentId, projectId);
-            if (!sameJson(after, raw.project)) {
-                throw new Error("Project archive result does not match authoritative state.");
-            }
-            assertProjectArchiveTransition(before, after);
-            const changed = !sameJson(before, after);
-            if (raw.changed !== changed) {
-                throw new Error("Project archive changed flag is not authoritative.");
-            }
-            const result = structuredClone(raw);
-            const event = changed
-                ? await this.#newEvent(txCtx, agentId, {
-                      type: "project_archived",
-                      agentId,
-                      project: after,
-                  })
-                : undefined;
-            if (event !== undefined) await this.#observe(txCtx, event);
-            return { result, ...(event === undefined ? {} : { event }) };
+        const result = await this.#mutations.run(ctx, agentId, {
+            action: "archive",
+            changeable: ["status", "archivedAt"],
+            projectId,
+            event: (after) => ({ type: "project_archived", agentId, project: after }),
+            run: async (txCtx) =>
+                await requirePromise(
+                    this.#store.archive(txCtx, agentId, { projectId }),
+                    "Project store archive",
+                ),
         });
-        return structuredClone(requireProjectFromResult(change.result));
+        const project = requireProjectFromResult(result);
+        if (project.status !== "archived") {
+            throw new Error("Project archival did not leave the project archived.");
+        }
+        return project;
     }
 
-    async unarchive(ctx: Context, agentId: string, projectId: string): Promise<Project> {
+    /** Brings an archived project back. Restoring an active project changes nothing. */
+    async restore(ctx: Context, agentId: string, projectId: string): Promise<Project> {
         this.#assertAgentId(agentId);
         this.#assertId(projectId);
-
-        const change = await this.#runTransaction(ctx, async (txCtx) => {
-            const before = await this.#getRequired(txCtx, agentId, projectId);
-            await this.#authorize(txCtx, agentId, before.ownerAgentId, "unarchive");
-            const raw = await requirePromise(
-                this.#store.unarchive(txCtx, agentId, { projectId }),
-                "Project store unarchive",
-            );
-            assertProjectUnarchiveResult(raw);
-            this.#assertMutationResult(raw, agentId, "unarchive");
-            if (raw.project.id !== projectId) {
-                throw new Error("Project unarchive result has a different project identity.");
-            }
-            const after = await this.#getRequired(txCtx, agentId, projectId);
-            if (!sameJson(after, raw.project)) {
-                throw new Error("Project unarchive result does not match authoritative state.");
-            }
-            assertProjectUnarchiveTransition(before, after);
-            const changed = !sameJson(before, after);
-            if (raw.changed !== changed) {
-                throw new Error("Project unarchive changed flag is not authoritative.");
-            }
-            const result = structuredClone(raw);
-            const event = changed
-                ? await this.#newEvent(txCtx, agentId, {
-                      type: "project_unarchived",
-                      agentId,
-                      project: after,
-                  })
-                : undefined;
-            if (event !== undefined) await this.#observe(txCtx, event);
-            return { result, ...(event === undefined ? {} : { event }) };
+        const result = await this.#mutations.run(ctx, agentId, {
+            action: "restore",
+            changeable: ["status", "archivedAt"],
+            projectId,
+            event: (after) => ({ type: "project_restored", agentId, project: after }),
+            run: async (txCtx) =>
+                await requirePromise(
+                    this.#store.restore(txCtx, agentId, { projectId }),
+                    "Project store restore",
+                ),
         });
-        return structuredClone(requireProjectFromResult(change.result));
+        const project = requireProjectFromResult(result);
+        if (project.status !== "active") {
+            throw new Error("Project restoration did not leave the project active.");
+        }
+        return project;
     }
 
-    async reorder(ctx: Context, agentId: string, input: ProjectReorderInput): Promise<Project>;
-    async reorder(
-        ctx: Context,
-        agentId: string,
-        projectId: string,
-        afterId: string | null,
-        expectedVersion?: number,
-    ): Promise<Project>;
-    async reorder(
-        ctx: Context,
-        agentId: string,
-        inputOrProjectId: ProjectReorderInput | string,
-        afterId?: string | null,
-        expectedVersion?: number,
-    ): Promise<Project> {
+    async reorder(ctx: Context, agentId: string, input: ProjectReorderInput): Promise<Project> {
         this.#assertAgentId(agentId);
-        const input: ProjectReorderInput =
-            typeof inputOrProjectId === "string"
-                ? {
-                      afterId: afterId as string | null,
-                      projectId: inputOrProjectId,
-                      ...(expectedVersion === undefined ? {} : { expectedVersion }),
-                  }
-                : inputOrProjectId;
-        this.#assertInput(projectReorderInputSchema, input, "project reorder");
+        this.#assertInput(projectReorderInputSchema, input, "reorder");
         const normalized = structuredClone(input);
-
-        const change = await this.#runTransaction(ctx, async (txCtx) => {
-            const before = await this.#getRequired(txCtx, agentId, normalized.projectId);
-            await this.#authorize(txCtx, agentId, before.ownerAgentId, "reorder");
-            const storeInput: ProjectStoreReorderInput = normalized;
-            const raw = await requirePromise(
-                this.#store.reorder(txCtx, agentId, structuredClone(storeInput)),
-                "Project store reorder",
-            );
-            assertProjectReorderResult(raw);
-            this.#assertMutationResult(raw, agentId, "reorder");
-            if (
-                raw.project.id !== normalized.projectId ||
-                raw.previousOrderKey !== before.orderKey
-            ) {
-                throw new Error("Project reorder result does not match the requested project.");
-            }
-            const after = await this.#getRequired(txCtx, agentId, normalized.projectId);
-            if (!sameJson(after, raw.project)) {
-                throw new Error("Project reorder result does not match authoritative state.");
-            }
-            assertProjectReorderTransition(before, after);
-            const changed = !sameJson(before, after);
-            if (raw.changed !== changed) {
-                throw new Error("Project reorder changed flag is not authoritative.");
-            }
-            const result = structuredClone(raw);
-            const event = changed
-                ? await this.#newEvent(txCtx, agentId, {
-                      type: "project_reordered",
-                      agentId,
-                      previousOrderKey: before.orderKey,
-                      project: after,
-                  })
-                : undefined;
-            if (event !== undefined) await this.#observe(txCtx, event);
-            return { result, ...(event === undefined ? {} : { event }) };
+        const result = await this.#mutations.run(ctx, agentId, {
+            action: "reorder",
+            changeable: ["orderKey"],
+            projectId: normalized.projectId,
+            event: (after, before) => ({
+                type: "project_reordered",
+                agentId,
+                previousOrderKey: before?.orderKey ?? after.orderKey,
+                project: after,
+            }),
+            run: async (txCtx) =>
+                await requirePromise(
+                    this.#store.reorder(txCtx, agentId, normalized),
+                    "Project store reorder",
+                ),
         });
-        return structuredClone(requireProjectFromResult(change.result));
+        return requireProjectFromResult(result);
     }
 
-    async setAvatar(ctx: Context, agentId: string, input: ProjectSetAvatarInput): Promise<Project>;
-    async setAvatar(
-        ctx: Context,
-        agentId: string,
-        projectId: string,
-        avatar: ProjectAvatar,
-        expectedVersion?: number,
-    ): Promise<Project>;
-    async setAvatar(
-        ctx: Context,
-        agentId: string,
-        inputOrProjectId: ProjectSetAvatarInput | string,
-        avatar?: ProjectAvatar,
-        expectedVersion?: number,
-    ): Promise<Project> {
+    async setAvatar(ctx: Context, agentId: string, input: ProjectSetAvatarInput): Promise<Project> {
         this.#assertAgentId(agentId);
-        const input: ProjectSetAvatarInput =
-            typeof inputOrProjectId === "string"
-                ? {
-                      avatar: avatar as ProjectAvatar,
-                      projectId: inputOrProjectId,
-                      ...(expectedVersion === undefined ? {} : { expectedVersion }),
-                  }
-                : inputOrProjectId;
-        this.#assertInput(projectSetAvatarInputSchema, input, "project avatar");
+        this.#assertInput(projectSetAvatarInputSchema, input, "avatar");
         const normalized = structuredClone(input);
-        const change = await this.#runTransaction(ctx, async (txCtx) => {
-            const before = await this.#getRequired(txCtx, agentId, normalized.projectId);
-            await this.#authorize(txCtx, agentId, before.ownerAgentId, "avatar_update");
-            const storeInput: ProjectStoreSetAvatarInput = normalized;
-            const raw = await requirePromise(
-                this.#store.setAvatar(txCtx, agentId, structuredClone(storeInput)),
-                "Project store set avatar",
-            );
-            assertProjectSetAvatarResult(raw);
-            this.#assertMutationResult(raw, agentId, "set_avatar");
-            if (raw.project.id !== normalized.projectId) {
-                throw new Error("Project avatar result has a different project identity.");
-            }
-            const after = await this.#getRequired(txCtx, agentId, normalized.projectId);
-            if (!sameJson(after, raw.project)) {
-                throw new Error("Project avatar result does not match authoritative state.");
-            }
-            assertProjectAvatarTransition(before, after, normalized.avatar);
-            const changed = !sameJson(before, after);
-            if (raw.changed !== changed) {
-                throw new Error("Project avatar changed flag is not authoritative.");
-            }
-            const result = structuredClone(raw);
-            const event = changed
-                ? await this.#newEvent(txCtx, agentId, {
-                      type: "project_avatar_updated",
-                      agentId,
-                      project: after,
-                  })
-                : undefined;
-            if (event !== undefined) await this.#observe(txCtx, event);
-            return { result, ...(event === undefined ? {} : { event }) };
+        const result = await this.#mutations.run(ctx, agentId, {
+            action: "avatar_update",
+            changeable: ["avatar"],
+            projectId: normalized.projectId,
+            event: (after) => ({ type: "project_avatar_updated", agentId, project: after }),
+            run: async (txCtx) =>
+                await requirePromise(
+                    this.#store.setAvatar(txCtx, agentId, normalized),
+                    "Project store set avatar",
+                ),
         });
-        return structuredClone(requireProjectFromResult(change.result));
+        const project = requireProjectFromResult(result);
+        if (!sameJson(project.avatar, normalized.avatar)) {
+            throw new Error("The stored avatar does not match the one that was requested.");
+        }
+        return project;
     }
 
     async clearAvatar(
         ctx: Context,
         agentId: string,
         input: ProjectClearAvatarInput,
-    ): Promise<Project>;
-    async clearAvatar(
-        ctx: Context,
-        agentId: string,
-        projectId: string,
-        expectedVersion?: number,
-    ): Promise<Project>;
-    async clearAvatar(
-        ctx: Context,
-        agentId: string,
-        inputOrProjectId: ProjectClearAvatarInput | string,
-        expectedVersion?: number,
     ): Promise<Project> {
         this.#assertAgentId(agentId);
-        const input: ProjectClearAvatarInput =
-            typeof inputOrProjectId === "string"
-                ? {
-                      projectId: inputOrProjectId,
-                      ...(expectedVersion === undefined ? {} : { expectedVersion }),
-                  }
-                : inputOrProjectId;
-        this.#assertInput(projectClearAvatarInputSchema, input, "project avatar clear");
+        this.#assertInput(projectClearAvatarInputSchema, input, "avatar clear");
         const normalized = structuredClone(input);
-        const change = await this.#runTransaction(ctx, async (txCtx) => {
-            const before = await this.#getRequired(txCtx, agentId, normalized.projectId);
-            await this.#authorize(txCtx, agentId, before.ownerAgentId, "avatar_update");
-            const storeInput: ProjectStoreClearAvatarInput = normalized;
-            const raw = await requirePromise(
-                this.#store.clearAvatar(txCtx, agentId, structuredClone(storeInput)),
-                "Project store clear avatar",
-            );
-            assertProjectClearAvatarResult(raw);
-            this.#assertMutationResult(raw, agentId, "clear_avatar");
-            if (raw.project.id !== normalized.projectId) {
-                throw new Error("Project clear-avatar result has a different project identity.");
-            }
-            const after = await this.#getRequired(txCtx, agentId, normalized.projectId);
-            if (!sameJson(after, raw.project)) {
-                throw new Error("Project clear-avatar result does not match authoritative state.");
-            }
-            assertProjectAvatarClearTransition(before, after);
-            const changed = !sameJson(before, after);
-            if (raw.changed !== changed) {
-                throw new Error("Project clear-avatar changed flag is not authoritative.");
-            }
-            const result = structuredClone(raw);
-            const event = changed
-                ? await this.#newEvent(txCtx, agentId, {
-                      type: "project_avatar_cleared",
-                      agentId,
-                      project: after,
-                  })
-                : undefined;
-            if (event !== undefined) await this.#observe(txCtx, event);
-            return { result, ...(event === undefined ? {} : { event }) };
+        const result = await this.#mutations.run(ctx, agentId, {
+            action: "avatar_update",
+            changeable: ["avatar"],
+            projectId: normalized.projectId,
+            event: (after) => ({ type: "project_avatar_cleared", agentId, project: after }),
+            run: async (txCtx) =>
+                await requirePromise(
+                    this.#store.clearAvatar(txCtx, agentId, normalized),
+                    "Project store clear avatar",
+                ),
         });
-        return structuredClone(requireProjectFromResult(change.result));
+        const project = requireProjectFromResult(result);
+        if (project.avatar !== undefined) {
+            throw new Error("The project still has an avatar after it was cleared.");
+        }
+        return project;
     }
 
     async avatarAsset(
@@ -864,13 +559,13 @@ export class ProjectsModule implements AgentModule {
     ): Promise<ProjectAvatarAsset | undefined> {
         this.#assertAgentId(agentId);
         if (!Value.Check(projectAvatarHashSchema, hash)) {
-            throw new Error("Project avatar hash is invalid.");
+            throw new Error("The project avatar hash is invalid.");
         }
         const project = await this.#store.findByAvatarHash(ctx, agentId, hash);
         if (project === undefined) return undefined;
         assertProject(project);
         assertProjectRecord(project);
-        await this.#authorize(ctx, agentId, project.ownerAgentId, "avatar_read");
+        await this.#mutations.authorize(ctx, agentId, project.ownerAgentId, "avatar_read");
         const reader = this.#avatarAssetReader;
         if (reader === undefined) return undefined;
         const raw = await reader.read.call(reader, ctx, agentId, hash);
@@ -881,465 +576,301 @@ export class ProjectsModule implements AgentModule {
             raw.bytes.byteLength > MAX_PROJECT_AVATAR_BYTES ||
             raw.mediaType !== "image/webp"
         ) {
-            throw new Error("Project avatar asset reader returned an unrelated asset.");
+            throw new Error("The project avatar reader returned an unrelated asset.");
         }
         return structuredClone(raw);
     }
 
     async updateSettings(
-        ctx: Context,
-        agentId: string,
-        input: ProjectSettingsUpdateInput,
-    ): Promise<ProjectSettingsUpdateResult>;
-    async updateSettings(
-        ctx: Context,
-        agentId: string,
-        projectId: string,
-        settings: ProjectSettings,
-    ): Promise<ProjectSettingsUpdateResult>;
-    async updateSettings(
-        ctx: Context,
-        agentId: string,
-        inputOrProjectId: ProjectSettingsUpdateInput | string,
-        settings?: ProjectSettings,
-    ): Promise<ProjectSettingsUpdateResult> {
-        const input: ProjectSettingsUpdateInput =
-            typeof inputOrProjectId === "string"
-                ? {
-                      projectId: inputOrProjectId,
-                      settings: settings as ProjectSettings,
-                  }
-                : inputOrProjectId;
-        return await this.#updateSettings(ctx, agentId, input);
-    }
-
-    async #updateSettings(
         ctx: Context,
         agentId: string,
         input: ProjectSettingsUpdateInput,
     ): Promise<ProjectSettingsUpdateResult> {
         this.#assertAgentId(agentId);
-        this.#assertInput(projectSettingsUpdateInputSchema, input, "project settings update");
+        this.#assertInput(projectSettingsUpdateInputSchema, input, "settings update");
         assertProjectSettings(input.settings);
         const normalized = structuredClone(input);
-
-        const change = await this.#runTransaction(ctx, async (txCtx) => {
-            const beforeProject = await this.#getRequired(txCtx, agentId, normalized.projectId);
-            await this.#authorize(txCtx, agentId, beforeProject.ownerAgentId, "settings_update");
-            const beforeSettings = await this.#readSettingsInTransaction(
-                txCtx,
-                agentId,
-                normalized.projectId,
-            );
-            const storeInput: ProjectStoreSettingsUpdateInput = {
-                projectId: normalized.projectId,
-                settings: structuredClone(normalized.settings),
-                ...(normalized.expectedVersion === undefined
-                    ? {}
-                    : { expectedVersion: normalized.expectedVersion }),
-            };
+        return await ctx.inTx(async (txCtx) => {
+            const before = await this.#mutations.getRequired(txCtx, agentId, normalized.projectId);
+            await this.#mutations.authorize(txCtx, agentId, before.ownerAgentId, "settings_update");
+            const beforeSettings = await this.#mutations.readSettings(txCtx, agentId, normalized.projectId);
             const raw = await requirePromise(
-                this.#store.updateSettings(txCtx, agentId, structuredClone(storeInput)),
+                this.#store.updateSettings(txCtx, agentId, normalized),
                 "Project store update settings",
             );
-            assertProjectSettingsUpdateResult(raw);
-            this.#assertMutationResult(raw, agentId, "update_settings");
-            if (raw.projectId !== normalized.projectId) {
-                throw new Error("Project settings result has a different project identity.");
+            assertProjectStoreMutationResult(raw);
+            if (raw.operation !== "update_settings" || raw.projectId !== normalized.projectId) {
+                throw new Error("The settings result does not match the requested project.");
             }
             assertProjectSettings(raw.settings);
-            if (!sameJson(raw.settings, normalized.settings)) {
-                throw new Error("Project settings result does not match the requested settings.");
+            const after = await this.#mutations.getRequired(txCtx, agentId, normalized.projectId);
+            const afterSettings = await this.#mutations.readSettings(txCtx, agentId, normalized.projectId);
+            if (!sameJson(afterSettings, normalized.settings)) {
+                throw new Error("The stored settings do not match the ones that were requested.");
             }
-            const afterProject = await this.#getRequired(txCtx, agentId, normalized.projectId);
-            const afterSettings = await this.#readSettingsInTransaction(
-                txCtx,
-                agentId,
-                normalized.projectId,
-            );
-            if (!sameJson(afterSettings, raw.settings)) {
-                throw new Error("Project settings result does not match authoritative settings.");
+            if (raw.version !== after.version) {
+                throw new Error("The settings result carries a stale project version.");
             }
-            if (raw.version !== afterProject.version) {
-                throw new Error("Project settings result has a stale project version.");
-            }
-            assertProjectSettingsTransition(beforeProject, afterProject);
+            assertProjectTransition(before, after, []);
             const changed = !sameJson(beforeSettings, afterSettings);
             if (raw.changed !== changed) {
-                throw new Error("Project settings changed flag is not authoritative.");
+                throw new Error("The settings result reports the wrong change.");
             }
-            if (!changed && !sameJson(beforeProject, afterProject)) {
-                throw new Error("Unchanged project settings modified the project row.");
+            if (changed) {
+                await this.#mutations.observe(
+                    txCtx,
+                    await this.#mutations.newEvent(txCtx, agentId, {
+                        type: "project_settings_updated",
+                        agentId,
+                        projectId: normalized.projectId,
+                        settings: afterSettings,
+                    }),
+                );
             }
-            const result = structuredClone(raw);
-            const event = changed
-                ? await this.#newEvent(txCtx, agentId, {
-                      type: "project_settings_updated",
-                      agentId,
-                      projectId: normalized.projectId,
-                      settings: afterSettings,
-                  })
-                : undefined;
-            if (event !== undefined) await this.#observe(txCtx, event);
-            return { result, ...(event === undefined ? {} : { event }) };
+            return structuredClone(raw);
         });
-        if (!Value.Check(projectSettingsUpdateResultSchema, change.result)) {
-            throw new Error("Project settings update did not return a valid result.");
-        }
-        return structuredClone(change.result);
     }
 
-    formatForModel(projects: readonly Project[]): string {
-        if (!Value.Check(projectListSchema, projects)) {
-            throw new Error("Cannot format invalid projects.");
-        }
-        if (projects.length === 0) return "No projects.";
-        const rows = projects.map(projectRow);
-        const visible: string[] = [];
-        let size = 0;
-        for (const row of rows) {
-            const next = size + row.length + (visible.length === 0 ? 0 : 1);
-            if (next > this.#maxOutputCharacters) break;
-            visible.push(row);
-            size = next;
-        }
-        if (visible.length === 0) {
-            throw new Error("Project model output cannot fit a complete identity.");
-        }
-        return visible.join("\n");
+    /** Records what a host probe of the project folder observed. */
+    async applyProbe(ctx: Context, agentId: string, input: ProjectProbeInput): Promise<Project> {
+        this.#assertInput(projectProbeInputSchema, input, "probe");
+        const normalized = structuredClone(input);
+        return await this.#changeState(ctx, agentId, normalized.projectId, "probe", () => ({
+            presence: normalized.presence,
+            worktreeSupport: normalized.worktreeSupport,
+            worktreeUnsupportedReason: normalized.worktreeUnsupportedReason ?? null,
+            ...(normalized.git === undefined ? {} : gitChanges(normalized.git)),
+        }));
+    }
+
+    /** Records the branch, head, upstream and divergence a host read from Git. */
+    async applyGitFacts(
+        ctx: Context,
+        agentId: string,
+        input: ProjectGitFactsInput,
+    ): Promise<Project> {
+        this.#assertInput(projectGitFactsInputSchema, input, "Git facts");
+        const normalized = structuredClone(input);
+        return await this.#changeState(ctx, agentId, normalized.projectId, "git_facts", () =>
+            gitChanges(normalized.git),
+        );
+    }
+
+    /**
+     * Records the trunk this project's workspaces are cut from. It is decided
+     * once, so a project that later sits on another branch does not silently
+     * start forking from somewhere else.
+     */
+    async setDefaultBranch(
+        ctx: Context,
+        agentId: string,
+        input: ProjectSetDefaultBranchInput,
+    ): Promise<Project> {
+        this.#assertInput(projectSetDefaultBranchInputSchema, input, "default branch");
+        const normalized = structuredClone(input);
+        return await this.#changeState(
+            ctx,
+            agentId,
+            normalized.projectId,
+            "default_branch",
+            (project) =>
+                project.defaultBranch === undefined
+                    ? { defaultBranch: normalized.branch }
+                    : undefined,
+        );
+    }
+
+    /** Replaces a folder-derived name with the remote's. A name a person chose stays. */
+    async adoptRemoteName(
+        ctx: Context,
+        agentId: string,
+        input: ProjectAdoptRemoteNameInput,
+    ): Promise<Project> {
+        this.#assertInput(projectAdoptRemoteNameInputSchema, input, "remote name");
+        const normalized = structuredClone(input);
+        return await this.#changeState(
+            ctx,
+            agentId,
+            normalized.projectId,
+            "remote_name",
+            (project) =>
+                project.nameSource === "folder"
+                    ? { name: normalized.name, nameSource: "remote" }
+                    : undefined,
+        );
+    }
+
+    /** The clone has landed, so the folder now exists. */
+    async markCloneReady(ctx: Context, agentId: string, projectId: string): Promise<Project> {
+        return await this.#changeState(ctx, agentId, projectId, "clone_ready", (project) =>
+            project.initializationStatus === "initializing" ? { presence: "present" } : undefined,
+        );
+    }
+
+    async markInitializationReady(
+        ctx: Context,
+        agentId: string,
+        projectId: string,
+    ): Promise<Project> {
+        return await this.#changeState(
+            ctx,
+            agentId,
+            projectId,
+            "initialization_ready",
+            (project) =>
+                project.initializationStatus === "initializing"
+                    ? {
+                          initializationStatus: "ready",
+                          initializationAttempt: nextAttempt(project),
+                          initializationError: null,
+                      }
+                    : undefined,
+        );
+    }
+
+    async markInitializationFailed(
+        ctx: Context,
+        agentId: string,
+        input: ProjectInitializationFailureInput,
+    ): Promise<Project> {
+        this.#assertInput(projectInitializationFailureInputSchema, input, "initialization failure");
+        const normalized = structuredClone(input);
+        return await this.#changeState(
+            ctx,
+            agentId,
+            normalized.projectId,
+            "initialization_failed",
+            (project) =>
+                project.initializationStatus === "initializing"
+                    ? {
+                          initializationStatus: "failed",
+                          initializationAttempt: nextAttempt(project),
+                          initializationError: normalized.error,
+                      }
+                    : undefined,
+        );
+    }
+
+    /** Puts a failed project back in line for another initialization attempt. */
+    async retryInitialization(ctx: Context, agentId: string, projectId: string): Promise<Project> {
+        return await this.#changeState(
+            ctx,
+            agentId,
+            projectId,
+            "initialization_retried",
+            (project) =>
+                project.initializationStatus === "failed"
+                    ? { initializationStatus: "initializing", initializationError: null }
+                    : undefined,
+        );
+    }
+
+    /** Asks for the project to be set up again, whatever state it reached. */
+    async refresh(ctx: Context, agentId: string, projectId: string): Promise<Project> {
+        return await this.#changeState(ctx, agentId, projectId, "refresh", (project) =>
+            project.kind === "home"
+                ? undefined
+                : {
+                      initializationStatus: "initializing",
+                      initializationAttempt: nextAttempt(project),
+                      initializationError: null,
+                  },
+        );
+    }
+
+    formatProjectForModel(label: string, project: Project): string {
+        assertProject(project);
+        return formatProjectForModel(label, project, this.#maxOutputCharacters);
     }
 
     formatPageForModel(page: ProjectPage): string {
         assertProjectPage(page);
-        const start =
-            page.nextCursor === undefined
-                ? undefined
-                : String(Math.max(0, parseCursor(page.nextCursor) - page.projects.length));
-        const visiblePage = fitPageForModel(page, start, this.#maxOutputCharacters);
-        let output =
-            visiblePage.projects.length === 0
-                ? "No projects."
-                : visiblePage.projects.map(projectRow).join("\n");
-        if (visiblePage.nextCursor !== undefined) {
-            const continuation = `More projects at cursor ${visiblePage.nextCursor}.`;
-            if (`${output}\n${continuation}`.length <= this.#maxOutputCharacters) {
-                output = `${output}\n${continuation}`;
-            }
-        }
-        return output;
+        return formatPageForModel(page, this.#maxOutputCharacters);
     }
 
-    formatDetailPageForModel(page: ProjectDetailPage | Project): string {
-        const detailPage = Value.Check(projectDetailPageSchema, page)
-            ? page
-            : Value.Check(projectSchema, page)
-              ? fitProjectDetailPage(
-                    {
-                        project: structuredClone(page),
-                        detail: projectDetailText(page).slice(0, MAX_PROJECT_DETAIL_PAGE_SIZE),
-                        detailOffset: 0,
-                        detailTotal: projectDetailText(page).length,
-                        ...(projectDetailText(page).length > MAX_PROJECT_DETAIL_PAGE_SIZE
-                            ? { nextDetailOffset: MAX_PROJECT_DETAIL_PAGE_SIZE }
-                            : {}),
-                    },
-                    this.#maxOutputCharacters,
-                )
-              : undefined;
-        if (detailPage === undefined) {
-            throw new Error("Cannot format an invalid project detail page.");
-        }
-        if (detailPage.project === null) return "That project does not exist.";
-        const output = formatProjectDetailPage(detailPage, this.#maxOutputCharacters);
-        if (output.length > this.#maxOutputCharacters) {
-            throw new Error("Project detail page exceeds its model-output bound.");
-        }
-        return output;
-    }
-
-    formatProjectOperationForModel(label: string, project: Project): string {
-        assertProject(project);
-        const prefix = `${label}\n`;
-        if (prefix.length >= this.#maxOutputCharacters) {
-            throw new Error("Project operation label exceeds the model-output bound.");
-        }
-        const detail = projectDetailText(project);
-        const page = fitProjectDetailPage(
-            {
-                project: structuredClone(project),
-                detail: detail.slice(0, MAX_PROJECT_DETAIL_PAGE_SIZE),
-                detailOffset: 0,
-                detailTotal: detail.length,
-                ...(detail.length > MAX_PROJECT_DETAIL_PAGE_SIZE
-                    ? { nextDetailOffset: MAX_PROJECT_DETAIL_PAGE_SIZE }
-                    : {}),
-            },
-            this.#maxOutputCharacters - prefix.length,
-        );
-        const output = `${prefix}${formatProjectDetailPage(
-            page,
-            this.#maxOutputCharacters - prefix.length,
-        )}`;
-        if (output.length > this.#maxOutputCharacters) {
-            throw new Error("Project operation output exceeds its model-output bound.");
-        }
-        return output;
-    }
-
-    formatProjectForModel(project: Project): string {
-        return this.formatProjectOperationForModel("Project:", project);
-    }
-
-    formatSettingsPageForModel(page: ProjectSettingsPage): string {
-        assertProjectSettingsPage(page);
-        const output = formatSettingsPage(page, this.#maxOutputCharacters);
-        if (output.length > this.#maxOutputCharacters) {
-            throw new Error("Project settings output exceeds its model-output bound.");
-        }
-        return output;
-    }
-
-    formatSettingsForModel(
-        settings: ProjectSettings | ProjectSettingsPage,
-        projectId = "project",
-    ): string {
-        const isPageCandidate =
-            settings !== null &&
-            typeof settings === "object" &&
-            typeof (settings as { projectId?: unknown }).projectId === "string";
-        if (isPageCandidate && Value.Check(projectSettingsPageSchema, settings)) {
-            return this.formatSettingsPageForModel(settings);
-        }
+    formatSettingsForModel(projectId: string, settings: ProjectSettings): string {
         assertProjectSettings(settings);
-        const detail = settingsDetailText(settings);
-        const page: ProjectSettingsPage = {
-            projectId,
-            settings: structuredClone(settings),
-            detail: detail.slice(0, MAX_PROJECT_SETTINGS_DETAIL_PAGE_SIZE),
-            detailOffset: 0,
-            detailTotal: detail.length,
-            ...(detail.length > MAX_PROJECT_SETTINGS_DETAIL_PAGE_SIZE
-                ? { nextDetailOffset: MAX_PROJECT_SETTINGS_DETAIL_PAGE_SIZE }
-                : {}),
-        };
-        return this.formatSettingsPageForModel(fitSettingsPage(page, this.#maxOutputCharacters));
+        return formatSettingsForModel(projectId, settings, this.#maxOutputCharacters);
     }
 
-    async #runTransaction(
+    async #changeState(
         ctx: Context,
-        work: (txCtx: Context) => Promise<ProjectChange>,
-    ): Promise<ProjectChange> {
-        return await ctx.inTx(async (txCtx) => await work(txCtx));
+        agentId: string,
+        projectId: string,
+        reason: ProjectStateChangeReason,
+        compute: (project: Project) => ProjectStateChanges | undefined,
+    ): Promise<Project> {
+        this.#assertAgentId(agentId);
+        this.#assertId(projectId);
+        const result = await this.#mutations.run(ctx, agentId, {
+            action: "update_state",
+            changeable: PROJECT_STATE_FIELDS,
+            projectId,
+            event: (after) => ({
+                type: "project_state_changed",
+                agentId,
+                reason,
+                project: after,
+            }),
+            run: async (txCtx, before) => {
+                if (before === undefined) throw new Error(`Project "${projectId}" was not found.`);
+                // Archiving is the terminal decision about a project. A clone, a probe, a setup
+                // result, or a refresh that was already running when it was made describes a
+                // project nobody has any more, and changes nothing about it. Restoring is how a
+                // project comes back, and it does not go through here.
+                const changes = before.status === "archived" ? undefined : compute(before);
+                if (changes === undefined) {
+                    return {
+                        operation: "state_change" as const,
+                        agentId,
+                        changed: false,
+                        project: before,
+                    };
+                }
+                return await requirePromise(
+                    this.#store.applyState(txCtx, agentId, { projectId, changes }),
+                    "Project store state change",
+                );
+            },
+        });
+        return requireProjectFromResult(result);
     }
 
+    /**
+     * Runs one durable catalog write: it reads the project the operation names,
+     * authorizes the acting agent, checks the store's answer against the row
+     * that is actually stored, and emits one event when something changed.
+     */
     async #newIdentity(ctx: Context, agentId: string): Promise<string> {
         const raw = this.#idFactory(ctx, agentId);
         const value = isPromiseLike(raw) ? await raw : raw;
         if (!Value.Check(projectIdSchema, value)) {
-            throw new Error("Project identity factory returned an invalid identity.");
+            throw new Error("The project identity factory returned an invalid identity.");
         }
         return value;
     }
 
-    async #newEvent(
-        ctx: Context,
-        agentId: string,
-        payload:
-            | {
-                  readonly type: "project_created";
-                  readonly agentId: string;
-                  readonly project: Project;
-              }
-            | {
-                  readonly type: "project_renamed";
-                  readonly agentId: string;
-                  readonly project: Project;
-                  readonly previousName: string;
-              }
-            | {
-                  readonly type: "project_archived";
-                  readonly agentId: string;
-                  readonly project: Project;
-              }
-            | {
-                  readonly type: "project_unarchived";
-                  readonly agentId: string;
-                  readonly project: Project;
-              }
-            | {
-                  readonly type: "project_reordered";
-                  readonly agentId: string;
-                  readonly previousOrderKey: string;
-                  readonly project: Project;
-              }
-            | {
-                  readonly type: "project_avatar_updated";
-                  readonly agentId: string;
-                  readonly project: Project;
-              }
-            | {
-                  readonly type: "project_avatar_cleared";
-                  readonly agentId: string;
-                  readonly project: Project;
-              }
-            | {
-                  readonly type: "project_settings_updated";
-                  readonly agentId: string;
-                  readonly projectId: string;
-                  readonly settings: ProjectSettings;
-              },
-    ): Promise<ProjectEvent> {
-        const rawId = this.#eventIdFactory(ctx, agentId);
-        const eventId = isPromiseLike(rawId) ? await rawId : rawId;
-        if (!Value.Check(projectEventIdSchema, eventId)) {
-            throw new Error("Project event ID factory returned an invalid ID.");
-        }
-        const at = this.#clock(ctx, agentId);
-        if (!Value.Check(projectTimestampSchema, at)) {
-            throw new Error("Project clock must return a non-negative integer.");
-        }
-        const event = { ...payload, eventId, at };
-        if (!Value.Check(projectEventSchema, event)) {
-            throw new Error("Project module created an invalid event.");
-        }
-        return deepFreeze(structuredClone(event)) as ProjectEvent;
-    }
-
-    async #observe(ctx: Context, event: ProjectEvent): Promise<void> {
-        if (!Value.Check(projectEventSchema, event) || !isDeepFrozen(event)) {
-            throw new Error("Project module created an invalid unfrozen event.");
-        }
-        const transactional = this.#listener?.onEventTransactional;
-        if (transactional !== undefined) {
-            await transactional.call(this.#listener, ctx, event);
-        }
-        afterCommit(ctx, (postCommitCtx) => this.#notifyPostCommit(postCommitCtx, event));
-    }
-
-    async #notifyPostCommit(ctx: Context, event: ProjectEvent): Promise<void> {
-        const listener = this.#listener?.onEvent;
-        if (listener !== undefined) {
-            await this.#notifyObserver(ctx, event, () => listener.call(this.#listener, ctx, event));
-        }
-    }
-
-    async #notifyObserver(
-        ctx: Context,
-        event: ProjectEvent,
-        observer: () => void | Promise<void>,
-    ): Promise<void> {
-        try {
-            await observer();
-        } catch (error: unknown) {
-            try {
-                await this.#onPostCommitError?.(ctx, event, safeError(error));
-            } catch {
-                // Observer reporting is advisory after durable state has settled.
-            }
-        }
-    }
-
-    async #getOptional(
-        ctx: Context,
-        agentId: string,
-        projectId: string,
-    ): Promise<Project | undefined> {
-        const raw = await requirePromise(
-            this.#store.get(ctx, agentId, projectId),
-            "Project store get",
-        );
-        if (raw === undefined) return undefined;
-        assertProject(raw);
-        assertProjectRecord(raw);
-        if (raw.id !== projectId) {
-            throw new Error("Project store returned a different project identity.");
-        }
-        return structuredClone(raw);
-    }
-
-    async #getRequired(ctx: Context, agentId: string, projectId: string): Promise<Project> {
-        const project = await this.#getOptional(ctx, agentId, projectId);
-        if (project === undefined) throw new Error(`Project "${projectId}" was not found.`);
-        return project;
-    }
-
-    async #findByRepositoryRef(
-        ctx: Context,
-        agentId: string,
-        repositoryRef: string,
-    ): Promise<Project | undefined> {
-        const raw = await requirePromise(
-            this.#store.findByRepositoryRef(ctx, agentId, repositoryRef),
-            "Project store find by repository reference",
-        );
-        if (raw === undefined) return undefined;
-        assertProject(raw);
-        assertProjectRecord(raw);
-        if (raw.repositoryRef !== repositoryRef) {
-            throw new Error("Project store returned a different repository reference.");
-        }
-        return structuredClone(raw);
-    }
-
-    async #readSettingsInTransaction(
-        ctx: Context,
-        agentId: string,
-        projectId: string,
-    ): Promise<ProjectSettings> {
-        const raw = await requirePromise(
-            this.#store.readSettings(ctx, agentId, projectId),
-            "Project store read settings",
-        );
-        assertProjectSettings(raw);
-        return structuredClone(raw);
-    }
-
-    async #authorize(
-        ctx: Context,
-        actingAgentId: string,
-        ownerAgentId: string,
-        action: ProjectAuthorizationAction,
-    ): Promise<void> {
-        if (actingAgentId === ownerAgentId) return;
-        const authorization = this.#authorization;
-        if (authorization === undefined) {
-            throw new Error(
-                `Agent "${actingAgentId}" is not authorized to ${action} project data owned by "${ownerAgentId}".`,
-            );
-        }
-        const raw = authorization(ctx, actingAgentId, ownerAgentId, action);
-        const allowed = isPromiseLike(raw) ? await raw : raw;
-        if (typeof allowed !== "boolean") {
-            throw new Error("Project authorization returned an invalid result.");
-        }
-        if (!allowed) {
-            throw new Error(
-                `Agent "${actingAgentId}" is not authorized to ${action} project data owned by "${ownerAgentId}".`,
-            );
-        }
-    }
-
     #assertAgentId(agentId: string): void {
         if (!Value.Check(projectAgentIdSchema, agentId)) {
-            throw new Error("Project agent ID is invalid.");
+            throw new Error("The project agent ID is invalid.");
         }
     }
 
     #assertId(projectId: string): void {
         if (!Value.Check(projectIdSchema, projectId)) {
-            throw new Error("Project ID is invalid.");
+            throw new Error("The project ID is invalid.");
         }
     }
 
     #assertInput<T>(schema: TSchema, value: unknown, label: string): asserts value is T {
         if (!Value.Check(schema, value)) {
-            throw new Error(`Project ${label} input is invalid.`);
+            throw new Error(`The project ${label} input is invalid.`);
         }
     }
 
     #assertPage(page: ProjectPage, cursor: string | undefined, limit: number): void {
         if (page.projects.length > limit) {
-            throw new Error("Project store returned more records than requested.");
+            throw new Error("The project store returned more records than requested.");
         }
         for (let index = 1; index < page.projects.length; index += 1) {
             const previous = page.projects[index - 1]!;
@@ -1348,698 +879,53 @@ export class ProjectsModule implements AgentModule {
                 current.orderKey < previous.orderKey ||
                 (current.orderKey === previous.orderKey && current.id <= previous.id)
             ) {
-                throw new Error(
-                    "Project page identities must be unique and ordered by project order.",
-                );
+                throw new Error("Project page rows must be unique and in catalog order.");
             }
         }
         if (page.nextCursor === undefined) return;
         if (page.projects.length === 0) {
-            throw new Error("Project page cannot advance an empty page.");
+            throw new Error("An empty project page cannot advance its cursor.");
         }
         const start = cursor === undefined ? 0 : parseCursor(cursor);
         const next = parseCursor(page.nextCursor);
         if (next !== start + page.projects.length) {
-            throw new Error("Project page cursor must advance exactly by visible records.");
-        }
-    }
-
-    #assertMutationResult(
-        result: ProjectStoreMutationResult,
-        agentId: string,
-        kind: ProjectStoreMutationResult["operation"],
-    ): void {
-        assertProjectStoreMutationResult(result);
-        assertProjectMutationResultSemantics(result);
-        if (result.agentId !== agentId || result.operation !== kind) {
-            throw new Error("Project mutation result identity does not match the request.");
-        }
-    }
-
-    #assertCreatedProject(project: Project, request: ProjectStoreCreateInput): void {
-        assertProject(project);
-        assertProjectRecord(project);
-        if (
-            project.id !== request.id ||
-            project.ownerAgentId !== request.ownerAgentId ||
-            project.repositoryRef !== request.repositoryRef ||
-            project.name !== request.name ||
-            project.description !== request.description ||
-            project.status !== "active" ||
-            project.archivedAt !== undefined ||
-            project.version !== 1 ||
-            project.createdAt !== project.updatedAt
-        ) {
-            throw new Error("Project create result does not match the requested created state.");
-        }
-    }
-
-    #assertEnsureProject(
-        project: Project,
-        request: ProjectStoreEnsureInput,
-        created: boolean,
-    ): void {
-        assertProject(project);
-        if (project.repositoryRef !== request.repositoryRef) {
-            throw new Error("Project ensure result does not match the requested repository.");
-        }
-        if (!created) {
-            assertProjectRecord(project);
-            return;
-        }
-        assertProjectRecord(project);
-        if (
-            project.ownerAgentId !== request.ownerAgentId ||
-            project.id !== request.id ||
-            (request.name !== undefined && project.name !== request.name) ||
-            project.description !== request.description ||
-            project.status !== "active" ||
-            project.archivedAt !== undefined ||
-            project.version !== 1 ||
-            project.createdAt !== project.updatedAt
-        ) {
-            throw new Error("Project ensure result does not match the requested created state.");
+            throw new Error("A project page cursor must advance by exactly the visible rows.");
         }
     }
 }
 
 export function assertProjectModuleOptions(value: unknown): asserts value is ProjectModuleOptions {
     if (!Value.Check(projectModuleOptionsSchema, value)) {
-        throw new Error("Project module options are invalid.");
+        throw new Error("The project module options are invalid.");
     }
 }
 
 export function assertProjectAvatarAsset(value: unknown): asserts value is ProjectAvatarAsset {
     if (!Value.Check(projectAvatarAssetSchema, value)) {
-        throw new Error("Project avatar asset is invalid.");
+        throw new Error("The project avatar asset is invalid.");
     }
 }
 
-export function assertProjectSettings(value: unknown): asserts value is ProjectSettings {
-    if (!Value.Check(projectSettingsSchema, value) || !validProjectSettings(value)) {
-        throw new Error("Project settings are invalid or exceed their bounds.");
-    }
-    const encoded = canonicalJson(value);
-    if (Buffer.byteLength(encoded, "utf8") > MAX_PROJECT_SETTINGS_ENCODED_BYTES) {
-        throw new Error("Project settings exceed their encoded-byte bound.");
-    }
+function gitChanges(git: ProjectGitFacts): ProjectStateChanges {
+    return {
+        gitAhead: git.ahead,
+        gitBehind: git.behind,
+        gitBranch: git.branch ?? null,
+        gitDetached: git.detached,
+        gitHead: git.head ?? null,
+        gitUpstream: git.upstream ?? null,
+    };
 }
 
-function validProjectSettings(value: unknown, depth = 0): boolean {
-    if (depth > MAX_PROJECT_SETTINGS_DEPTH) return false;
-    if (value === null || typeof value === "boolean") return true;
-    if (typeof value === "number") {
-        return Number.isFinite(value) && Math.abs(value) <= Number.MAX_SAFE_INTEGER;
-    }
-    if (typeof value === "string") return value.length <= 4_096;
-    if (Array.isArray(value)) {
-        return value.length <= 64 && value.every((entry) => validProjectSettings(entry, depth + 1));
-    }
-    if (typeof value === "object") {
-        if (!isPlainJsonObject(value)) return false;
-        const entries = Object.entries(value as Record<string, unknown>);
-        return (
-            entries.length <= 64 &&
-            entries.every(
-                ([key, entry]) => key.length <= 128 && validProjectSettings(entry, depth + 1),
-            )
-        );
-    }
-    return false;
-}
-
-function assertProjectSettingsPage(value: unknown): asserts value is ProjectSettingsPage {
-    if (!Value.Check(projectSettingsPageSchema, value)) {
-        throw new Error("Project settings page is invalid.");
-    }
-    assertProjectSettings(value.settings);
-    if (value.detailTotal > MAX_PROJECT_SETTINGS_DETAIL_CHARACTERS) {
-        throw new Error("Project settings detail exceeds its bounded traversal length.");
-    }
-    if (value.detailOffset + value.detail.length > value.detailTotal) {
-        throw new Error("Project settings detail page exceeds its total.");
-    }
-    if (
-        value.nextDetailOffset !== undefined &&
-        value.nextDetailOffset !== value.detailOffset + value.detail.length
-    ) {
-        throw new Error("Project settings detail cursor does not advance by visible characters.");
-    }
-}
-
-function assertProjectRecord(project: Project): void {
-    if (project.version < 1) {
-        throw new Error("Project version is invalid.");
-    }
-    if (project.updatedAt < project.createdAt) {
-        throw new Error("Project timestamps are not ordered.");
-    }
-    if (project.status === "archived") {
-        if (project.archivedAt === undefined) {
-            throw new Error("Archived project is missing archivedAt.");
-        }
-        if (project.archivedAt < project.createdAt || project.archivedAt > project.updatedAt) {
-            throw new Error("Project archivedAt is inconsistent with its timestamps.");
-        }
-    } else if (project.archivedAt !== undefined) {
-        throw new Error("Active project has archivedAt.");
-    }
-}
-
-function assertProjectMutationResultSemantics(result: ProjectStoreMutationResult): void {
-    if ("project" in result) assertProjectRecord(result.project);
-    if ("settings" in result) assertProjectSettings(result.settings);
-}
-
-function assertProjectArchiveState(project: Project): void {
-    assertProjectRecord(project);
-    if (project.status !== "archived" || project.archivedAt === undefined) {
-        throw new Error("Project archive authoritative state is not archived.");
-    }
-}
-
-function assertProjectRenameTransition(
-    before: Project,
-    after: Project,
-    requestedName: string,
-): void {
-    if (after.id !== before.id || after.ownerAgentId !== before.ownerAgentId) {
-        throw new Error("Project rename changed durable identity or ownership.");
-    }
-    if (
-        after.repositoryRef !== before.repositoryRef ||
-        after.status !== before.status ||
-        after.createdAt !== before.createdAt ||
-        after.archivedAt !== before.archivedAt ||
-        after.description !== before.description ||
-        after.orderKey !== before.orderKey ||
-        !sameProjectAvatar(after.avatar, before.avatar) ||
-        after.name !== requestedName
-    ) {
-        throw new Error("Project rename changed fields outside the requested transition.");
-    }
-    if (after.name === before.name) {
-        if (!sameJson(before, after)) {
-            throw new Error("Project rename changed an unchanged name.");
-        }
-    } else {
-        if (after.updatedAt < before.updatedAt || after.version !== before.version + 1) {
-            throw new Error("Project rename must advance its version and timestamp.");
-        }
-    }
-}
-
-function assertProjectArchiveTransition(before: Project, after: Project): void {
-    assertProjectArchiveState(after);
-    if (before.id !== after.id || before.ownerAgentId !== after.ownerAgentId) {
-        throw new Error("Project archive changed durable identity or ownership.");
-    }
-    if (before.status === "archived") {
-        if (!sameJson(before, after)) {
-            throw new Error("Project archive changed an already archived project.");
-        }
-        return;
-    }
-    if (
-        before.repositoryRef !== after.repositoryRef ||
-        before.name !== after.name ||
-        before.description !== after.description ||
-        before.orderKey !== after.orderKey ||
-        !sameProjectAvatar(before.avatar, after.avatar) ||
-        before.createdAt !== after.createdAt
-    ) {
-        throw new Error("Project archive changed fields outside the archival transition.");
-    }
-    if (after.archivedAt === undefined || after.archivedAt < before.updatedAt) {
-        throw new Error("Project archive archivedAt is inconsistent with the transition.");
-    }
-    if (after.version !== before.version + 1) {
-        throw new Error("Project archive must advance its version.");
-    }
-}
-
-function assertProjectUnarchiveTransition(before: Project, after: Project): void {
-    if (
-        before.id !== after.id ||
-        before.ownerAgentId !== after.ownerAgentId ||
-        before.repositoryRef !== after.repositoryRef ||
-        before.name !== after.name ||
-        before.description !== after.description ||
-        before.orderKey !== after.orderKey ||
-        !sameProjectAvatar(before.avatar, after.avatar) ||
-        before.createdAt !== after.createdAt
-    ) {
-        throw new Error("Project unarchive changed fields outside the restoration transition.");
-    }
-    if (before.status === "active") {
-        if (!sameJson(before, after)) {
-            throw new Error("Project unarchive changed an already active project.");
-        }
-        return;
-    }
-    if (
-        after.status !== "active" ||
-        after.archivedAt !== undefined ||
-        after.updatedAt < before.updatedAt ||
-        after.version !== before.version + 1
-    ) {
-        throw new Error("Project unarchive transition is inconsistent.");
-    }
-}
-
-function assertProjectReorderTransition(before: Project, after: Project): void {
-    if (
-        after.id !== before.id ||
-        after.ownerAgentId !== before.ownerAgentId ||
-        after.repositoryRef !== before.repositoryRef ||
-        after.name !== before.name ||
-        after.description !== before.description ||
-        after.status !== before.status ||
-        after.archivedAt !== before.archivedAt ||
-        after.createdAt !== before.createdAt ||
-        !sameProjectAvatar(before.avatar, after.avatar)
-    ) {
-        throw new Error("Project reorder changed fields outside ordering.");
-    }
-    if (after.orderKey === before.orderKey) {
-        if (!sameJson(before, after)) {
-            throw new Error("Project reorder changed an unchanged position.");
-        }
-        return;
-    }
-    if (after.updatedAt < before.updatedAt || after.version !== before.version + 1) {
-        throw new Error("Project reorder must advance its version and timestamp.");
-    }
-}
-
-function assertProjectAvatarTransition(
-    before: Project,
-    after: Project,
-    requestedAvatar: NonNullable<Project["avatar"]>,
-): void {
-    if (
-        after.id !== before.id ||
-        after.ownerAgentId !== before.ownerAgentId ||
-        after.repositoryRef !== before.repositoryRef ||
-        after.name !== before.name ||
-        after.description !== before.description ||
-        after.status !== before.status ||
-        after.orderKey !== before.orderKey ||
-        after.archivedAt !== before.archivedAt ||
-        after.createdAt !== before.createdAt ||
-        !sameProjectAvatar(after.avatar, requestedAvatar)
-    ) {
-        throw new Error("Project avatar changed fields outside the requested transition.");
-    }
-    if (sameProjectAvatar(before.avatar, requestedAvatar)) {
-        if (!sameJson(before, after)) {
-            throw new Error("Project avatar changed an unchanged avatar.");
-        }
-    } else if (after.updatedAt < before.updatedAt || after.version !== before.version + 1) {
-        throw new Error("Project avatar must advance its version and timestamp.");
-    }
-}
-
-function assertProjectAvatarClearTransition(before: Project, after: Project): void {
-    if (
-        after.id !== before.id ||
-        after.ownerAgentId !== before.ownerAgentId ||
-        after.repositoryRef !== before.repositoryRef ||
-        after.name !== before.name ||
-        after.description !== before.description ||
-        after.status !== before.status ||
-        after.orderKey !== before.orderKey ||
-        after.archivedAt !== before.archivedAt ||
-        after.createdAt !== before.createdAt ||
-        after.avatar !== undefined
-    ) {
-        throw new Error("Project clear-avatar changed fields outside the requested transition.");
-    }
-    if (before.avatar === undefined) {
-        if (!sameJson(before, after)) {
-            throw new Error("Project clear-avatar changed an empty avatar.");
-        }
-    } else if (after.updatedAt < before.updatedAt || after.version !== before.version + 1) {
-        throw new Error("Project clear-avatar must advance its version and timestamp.");
-    }
-}
-
-function assertProjectSettingsTransition(before: Project, after: Project): void {
-    if (
-        before.id !== after.id ||
-        before.ownerAgentId !== after.ownerAgentId ||
-        before.repositoryRef !== after.repositoryRef ||
-        before.name !== after.name ||
-        before.description !== after.description ||
-        before.status !== after.status ||
-        before.orderKey !== after.orderKey ||
-        !sameProjectAvatar(before.avatar, after.avatar) ||
-        before.createdAt !== after.createdAt ||
-        before.archivedAt !== after.archivedAt
-    ) {
-        throw new Error("Project settings changed fields outside the settings transition.");
-    }
-    if (after.updatedAt < before.updatedAt) {
-        throw new Error("Project settings moved updatedAt backwards.");
-    }
-    if (sameJson(before, after)) return;
-    if (after.version !== before.version + 1) {
-        throw new Error("Project settings must advance its version.");
-    }
-}
-
-function sameCreate(project: Project, request: ProjectStoreCreateInput): boolean {
-    return (
-        project.id === request.id &&
-        project.ownerAgentId === request.ownerAgentId &&
-        project.repositoryRef === request.repositoryRef &&
-        project.name === request.name &&
-        (request.description === undefined || project.description === request.description)
-    );
+function nextAttempt(project: Project): number {
+    return Math.min(project.initializationAttempt + 1, MAX_PROJECT_INITIALIZATION_ATTEMPTS);
 }
 
 function requireProjectFromResult(result: ProjectStoreMutationResult): Project {
     if (!("project" in result)) {
-        throw new Error("Project mutation did not return a project.");
+        throw new Error("A project mutation did not return a project.");
     }
     assertProject(result.project);
-    return result.project;
+    return structuredClone(result.project);
 }
 
-function fitPageForModel(
-    page: ProjectPage,
-    cursor: string | undefined,
-    maxOutputCharacters: number,
-): ProjectPage {
-    if (page.projects.length === 0) return page;
-    const start = cursor === undefined ? 0 : parseCursor(cursor);
-    const visible: Project[] = [];
-    let size = 0;
-    for (const project of page.projects) {
-        const row = projectRow(project);
-        const nextSize = size + row.length + (visible.length === 0 ? 0 : 1);
-        const candidateCount = visible.length + 1;
-        const needsContinuation =
-            page.nextCursor !== undefined || candidateCount < page.projects.length;
-        const continuation = needsContinuation
-            ? `More projects at cursor ${String(start + candidateCount)}.`.length + 1
-            : 0;
-        if (nextSize + continuation > maxOutputCharacters) break;
-        visible.push(project);
-        size = nextSize;
-    }
-    if (visible.length === 0) {
-        throw new Error("Project page cannot expose a complete identity within the output budget.");
-    }
-    const consumedAll = visible.length === page.projects.length;
-    const nextCursor =
-        consumedAll && page.nextCursor === undefined ? undefined : String(start + visible.length);
-    return {
-        projects: visible,
-        ...(nextCursor === undefined ? {} : { nextCursor }),
-    };
-}
-
-function projectRow(project: Project): string {
-    const full = [
-        `Project ID: ${project.id}`,
-        `Name: ${project.name}`,
-        `Repository ref: ${project.repositoryRef}`,
-        `Status: ${project.status}`,
-        `Order key: ${project.orderKey}`,
-        `Version: ${String(project.version)}`,
-        ...(project.avatar === undefined
-            ? []
-            : [
-                  `Avatar: ${project.avatar.hash} (${project.avatar.width}x${project.avatar.height})`,
-              ]),
-        ...(project.description === undefined ? [] : [`Description: ${project.description}`]),
-        `Created: ${String(project.createdAt)}`,
-        `Updated: ${String(project.updatedAt)}`,
-        ...(project.archivedAt === undefined ? [] : [`Archived: ${String(project.archivedAt)}`]),
-    ].join(" | ");
-    if (full.length <= 360) return full;
-    const compact = `${project.id} [${project.status}] ${project.name}`;
-    if (compact.length <= 220) return compact;
-    return `${project.id} [${project.status}]`;
-}
-
-function projectDetailText(project: Project): string {
-    return [
-        `Project ID: ${project.id}`,
-        `Name: ${project.name}`,
-        `Repository ref: ${project.repositoryRef}`,
-        `Status: ${project.status}`,
-        `Owner agent: ${project.ownerAgentId}`,
-        `Order key: ${project.orderKey}`,
-        `Version: ${String(project.version)}`,
-        ...(project.avatar === undefined
-            ? []
-            : [
-                  `Avatar: ${project.avatar.hash} (${project.avatar.width}x${project.avatar.height})`,
-                  `Avatar URL: ${project.avatar.url}`,
-              ]),
-        ...(project.description === undefined ? [] : [`Description: ${project.description}`]),
-        `Created at: ${String(project.createdAt)}`,
-        `Updated at: ${String(project.updatedAt)}`,
-        ...(project.archivedAt === undefined ? [] : [`Archived at: ${String(project.archivedAt)}`]),
-    ].join("\n");
-}
-
-function fitProjectDetailPage(
-    page: Extract<ProjectDetailPage, { readonly project: Project }>,
-    maxOutputCharacters: number,
-): Extract<ProjectDetailPage, { readonly project: Project }> {
-    let detail = page.detail;
-    for (;;) {
-        const candidate: Extract<ProjectDetailPage, { readonly project: Project }> = {
-            project: page.project,
-            detail,
-            detailOffset: page.detailOffset,
-            detailTotal: page.detailTotal,
-            ...(page.detailOffset + detail.length < page.detailTotal
-                ? { nextDetailOffset: page.detailOffset + detail.length }
-                : {}),
-        };
-        if (formatProjectDetailPage(candidate, maxOutputCharacters).length <= maxOutputCharacters) {
-            return candidate;
-        }
-        if (detail.length <= 1) {
-            throw new Error("Project detail cannot fit the configured model-output bound.");
-        }
-        const excess = Math.max(
-            1,
-            formatProjectDetailPage(candidate, maxOutputCharacters).length - maxOutputCharacters,
-        );
-        detail = detail.slice(0, Math.max(1, detail.length - excess));
-    }
-}
-
-function formatProjectDetailPage(
-    page: Extract<ProjectDetailPage, { readonly project: Project }>,
-    maxOutputCharacters: number,
-): string {
-    const full = [
-        `${page.project.id} [${page.project.status}]`,
-        `Detail [${page.detailOffset}/${page.detailTotal}]: ${page.detail}`,
-        ...(page.nextDetailOffset === undefined
-            ? []
-            : [`More detail starts at offset ${page.nextDetailOffset}.`]),
-    ].join("\n");
-    if (full.length <= maxOutputCharacters) return full;
-    const compact = [
-        page.project.id,
-        `Detail: ${page.detail}`,
-        ...(page.nextDetailOffset === undefined ? [] : [`More detail: ${page.nextDetailOffset}.`]),
-    ].join("\n");
-    if (compact.length <= maxOutputCharacters) return compact;
-    const identityOnly = [
-        page.project.id,
-        `Detail: ${page.detail}`,
-        ...(page.nextDetailOffset === undefined ? [] : [`More detail: ${page.nextDetailOffset}.`]),
-    ].join("\n");
-    if (identityOnly.length <= maxOutputCharacters) return identityOnly;
-    return [
-        `Detail: ${page.detail}`,
-        ...(page.nextDetailOffset === undefined ? [] : [`More detail: ${page.nextDetailOffset}.`]),
-    ].join("\n");
-}
-
-function fitSettingsPage(
-    page: ProjectSettingsPage,
-    maxOutputCharacters: number,
-): ProjectSettingsPage {
-    let detail = page.detail;
-    for (;;) {
-        const candidate: ProjectSettingsPage = {
-            ...page,
-            detail,
-            ...(page.detailOffset + detail.length < page.detailTotal
-                ? { nextDetailOffset: page.detailOffset + detail.length }
-                : {}),
-        };
-        if (formatSettingsPage(candidate, maxOutputCharacters).length <= maxOutputCharacters) {
-            return candidate;
-        }
-        if (detail.length <= 1) {
-            throw new Error("Project settings cannot fit the configured model-output bound.");
-        }
-        const excess = Math.max(
-            1,
-            formatSettingsPage(candidate, maxOutputCharacters).length - maxOutputCharacters,
-        );
-        detail = detail.slice(0, Math.max(1, detail.length - excess));
-    }
-}
-
-function formatSettingsPage(page: ProjectSettingsPage, maxOutputCharacters: number): string {
-    const full = [
-        `Project ${page.projectId} settings`,
-        `Detail [${page.detailOffset}/${page.detailTotal}]: ${page.detail}`,
-        ...(page.nextDetailOffset === undefined
-            ? []
-            : [`More settings detail starts at offset ${page.nextDetailOffset}.`]),
-    ].join("\n");
-    if (full.length <= maxOutputCharacters) return full;
-    const compact = [
-        page.projectId,
-        `Settings: ${page.detail}`,
-        ...(page.nextDetailOffset === undefined
-            ? []
-            : [`More settings: ${page.nextDetailOffset}.`]),
-    ].join("\n");
-    if (compact.length <= maxOutputCharacters) return compact;
-    return [
-        `Settings: ${page.detail}`,
-        ...(page.nextDetailOffset === undefined
-            ? []
-            : [`More settings: ${page.nextDetailOffset}.`]),
-    ].join("\n");
-}
-
-function settingsDetailText(settings: ProjectSettings): string {
-    return canonicalJson(settings);
-}
-
-function parseCursor(cursor: string): number {
-    const value = Number(cursor);
-    if (!Number.isSafeInteger(value) || value < 0) {
-        throw new Error("Project cursor is not a bounded integer.");
-    }
-    return value;
-}
-
-function canonicalJson(value: unknown, depth = 0): string {
-    if (depth > MAX_PROJECT_SETTINGS_DEPTH) {
-        throw new Error("Project value is too deeply nested.");
-    }
-    let result: string;
-    if (value === null) result = "null";
-    else if (typeof value === "string") result = JSON.stringify(value);
-    else if (typeof value === "number") {
-        if (!Number.isFinite(value) || Math.abs(value) > Number.MAX_SAFE_INTEGER) {
-            throw new Error("Project value has an invalid number.");
-        }
-        result = JSON.stringify(value);
-    } else if (typeof value === "boolean") result = value ? "true" : "false";
-    else if (Array.isArray(value)) {
-        if (value.length > 64) throw new Error("Project array is too large.");
-        result = `[${value.map((entry) => canonicalJson(entry, depth + 1)).join(",")}]`;
-    } else if (typeof value === "object") {
-        if (!isPlainJsonObject(value)) {
-            throw new Error("Project value is not a plain JSON object.");
-        }
-        const entries = Object.entries(value as Record<string, unknown>).filter(
-            ([, entry]) => entry !== undefined,
-        );
-        if (entries.length > 64) throw new Error("Project object has too many properties.");
-        result = `{${entries
-            .sort(([left], [right]) => compareCodeUnitStrings(left, right))
-            .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry, depth + 1)}`)
-            .join(",")}}`;
-    } else {
-        throw new Error("Project value contains an unsupported type.");
-    }
-    return result;
-}
-
-function isPlainJsonObject(value: object): boolean {
-    try {
-        const prototype = Object.getPrototypeOf(value);
-        return prototype === Object.prototype || prototype === null;
-    } catch {
-        return false;
-    }
-}
-
-function compareCodeUnitStrings(left: string, right: string): number {
-    const length = Math.min(left.length, right.length);
-    for (let index = 0; index < length; index += 1) {
-        const difference = left.charCodeAt(index) - right.charCodeAt(index);
-        if (difference !== 0) return difference;
-    }
-    return left.length - right.length;
-}
-
-function sameJson(left: unknown, right: unknown): boolean {
-    try {
-        return canonicalJson(left) === canonicalJson(right);
-    } catch {
-        return false;
-    }
-}
-
-function sameProjectAvatar(left: Project["avatar"], right: Project["avatar"]): boolean {
-    if (left === undefined || right === undefined) return left === right;
-    return sameJson(left, right);
-}
-
-function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
-    if (value !== null && typeof value === "object") {
-        if (seen.has(value)) return value;
-        seen.add(value);
-        for (const child of Object.values(value as Record<string, unknown>)) {
-            deepFreeze(child, seen);
-        }
-        Object.freeze(value);
-    }
-    return value;
-}
-
-function isDeepFrozen(value: unknown, seen = new WeakSet<object>()): boolean {
-    if (value === null || typeof value !== "object") return true;
-    if (!Object.isFrozen(value)) return false;
-    if (seen.has(value)) return true;
-    seen.add(value);
-    return Object.values(value as Record<string, unknown>).every((child) =>
-        isDeepFrozen(child, seen),
-    );
-}
-
-function isPromiseLike<T>(value: T | Promise<T>): value is Promise<T> {
-    return (
-        typeof value === "object" &&
-        value !== null &&
-        "then" in value &&
-        typeof (value as { then?: unknown }).then === "function"
-    );
-}
-
-function requirePromise<T>(value: T | Promise<T>, label: string): Promise<T> {
-    if (!isPromiseLike(value)) throw new Error(`${label} must return a promise.`);
-    return value;
-}
-
-function safeError(error: unknown): string {
-    try {
-        const message =
-            error instanceof Error
-                ? error.message
-                : typeof error === "string"
-                  ? error
-                  : String(error);
-        return message.slice(0, 512) || "Unknown project observer error.";
-    } catch {
-        return "Unknown project observer error.";
-    }
-}

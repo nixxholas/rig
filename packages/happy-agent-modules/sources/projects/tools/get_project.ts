@@ -1,32 +1,28 @@
 import { Type } from "@sinclair/typebox";
 import { defineAgentTool } from "@slopus/happy-agent-base";
 
-import {
-    projectDetailPageSchema,
-    projectDetailQuerySchema,
-    type ProjectDetailQuery,
-} from "../ProjectDetailPage.js";
-import { projectIdSchema } from "../Project.js";
+import { projectByIdInputSchema, projectSchema } from "../Project.js";
 import type { ProjectsModule } from "../ProjectsModule.js";
-
-const getProjectInputSchema = Type.Object(
-    { projectId: projectIdSchema, ...projectDetailQuerySchema.properties },
-    { additionalProperties: false },
-);
 
 export function getProjectTool(projects: ProjectsModule, agentId: string) {
     return defineAgentTool({
         name: "get_project",
         description:
-            "Read one project by ID with complete name, opaque repository reference, status, ownership, description, and timestamps. Follow the returned detail cursor when the model-output budget requires another page.",
-        parameters: getProjectInputSchema,
-        returnType: projectDetailPageSchema,
+            "Read one project by ID: its folder, name, status, setup state, worktree support, default branch and cached Git facts.",
+        parameters: projectByIdInputSchema,
+        returnType: Type.Union([projectSchema, Type.Null()]),
         durable: true,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, { projectId, ...query }: { projectId: string } & ProjectDetailQuery) =>
-            await projects.getPage(ctx, agentId, projectId, query),
-        toLLM: (page) => [{ type: "text", text: projects.formatDetailPageForModel(page) }],
+        execute: async (ctx, { projectId }) =>
+            (await projects.get(ctx, agentId, projectId)) ?? null,
+        toLLM: (project) => [
+            {
+                type: "text",
+                text:
+                    project === null
+                        ? "That project does not exist."
+                        : projects.formatProjectForModel("Project:", project),
+            },
+        ],
     });
 }
-
-export { getProjectInputSchema };

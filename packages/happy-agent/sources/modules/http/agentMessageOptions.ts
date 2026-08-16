@@ -1,5 +1,6 @@
 import type { AgentBaseMessageOptions } from "@slopus/happy-agent-base";
 import type { AgentPermissionMode } from "@slopus/happy-agent-base";
+import { USER_MESSAGE_ORIGIN_METADATA } from "@slopus/happy-agent-modules";
 import {
     resolveAgentSelection,
     type AgentSelectionOverrides,
@@ -44,6 +45,12 @@ export function mergeAgentMessageOptions(
 ): AgentBaseMessageOptions & { readonly await?: boolean } {
     const selection = resolveAgentMessageSelection(defaults, models, overrides);
     return {
+        // Every message that reaches this helper is an end-user submission through the daemon's HTTP
+        // send/steer routes; agent-internal sends (goal continuations, collaboration) never pass
+        // through here. Stamping the human-origin marker is what lets the automatic permission
+        // reviewer trust these messages as authorization while treating everything unstamped as
+        // untrusted context.
+        metadata: { ...USER_MESSAGE_ORIGIN_METADATA },
         ...(overrides.await === undefined ? {} : { await: overrides.await }),
         ...(overrides.effort === undefined
             ? { effort: selection.effort as never }

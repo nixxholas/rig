@@ -1,14 +1,5 @@
-export {
-    HappyModule,
-    happyModuleOptionsSchema,
-    type HappyModuleOptions,
-} from "./HappyModule.js";
-export {
-    assertHappyHost,
-    checkedHappyHost,
-    happyHostSchema,
-    type HappyHost,
-} from "./HappyHost.js";
+export { HappyModule, happyModuleOptionsSchema, type HappyModuleOptions } from "./HappyModule.js";
+export { assertHappyHost, checkedHappyHost, happyHostSchema, type HappyHost } from "./HappyHost.js";
 export {
     happyAgentIdSchema,
     happyDeliveryResultSchema,

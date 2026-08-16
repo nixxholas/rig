@@ -11,6 +11,9 @@ export {
     MAX_PERMISSION_REASON,
     permissionReviewDecisionSchema,
     permissionReviewRequestSchema,
+    permissionReviewTranscriptEntrySchema,
+    permissionReviewTranscriptSchema,
+    permissionReviewUsageSchema,
     permissionReviewerSchema,
     permissionRiskSchema,
     permissionUserAuthorizationSchema,
@@ -18,6 +21,9 @@ export {
 export type {
     PermissionReviewDecision,
     PermissionReviewRequest,
+    PermissionReviewTranscript,
+    PermissionReviewTranscriptEntry,
+    PermissionReviewUsage,
     PermissionReviewer,
 } from "./PermissionReviewer.js";
 export {
@@ -57,6 +63,8 @@ export {
     outOfModeRefusal,
     deniedRefusal,
     permissionRequestRefusal,
+    permissionTurnStoppedNoticeText,
+    permissionTurnStoppedReason,
     turnStoppedNotice,
     unprovenRefusal,
     permissionUnprovenKindSchema,

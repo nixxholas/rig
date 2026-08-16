@@ -1,9 +1,6 @@
 import { Value } from "@sinclair/typebox/value";
 
-import {
-    mcpServerConfigEntryListSchema,
-    type McpServerConfigEntry,
-} from "./Mcp.js";
+import { mcpServerConfigEntryListSchema, type McpServerConfigEntry } from "./Mcp.js";
 
 export function createProjectMcpSecurityNotice(
     entries: readonly McpServerConfigEntry[],

@@ -1,1184 +1,497 @@
 import {
-    agentDatabaseRows,
-    withAgentPermissionMode,
+    withAgentConfig,
     type AgentConfig,
-    type AgentDatabase,
-    type AgentToolCall,
+    type AgentMessageAcceptance,
+    type AgentModel,
+    type AgentSystemRef,
 } from "@slopus/happy-agent-base";
-import { sql } from "drizzle-orm";
+import { createRootContext, type Context } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
-import {
-    CollaborationModule,
-    collaborationAgentSchema,
-    type CollaborationAgent,
-    type CollaborationAgentObservation,
-    type CollaborationBroker,
-    type CollaborationAgentSelection,
-    type CollaborationModelCatalog,
-    type CollaborationObligation,
-    type CollaborationSpawnCapacity,
-} from "../../sources/collaboration/index.js";
-import { moduleDatabase } from "../support/moduleDatabase.js";
+import { CollaborationModule } from "../../sources/collaboration/index.js";
 
-class Broker implements CollaborationBroker {
+const MODELS: readonly AgentModel[] = [
+    {
+        providerId: "codex",
+        id: "gpt-5.6-sol",
+        name: "GPT-5.6 Sol",
+        effortLevels: ["low", "medium", "high"],
+        defaultEffort: "medium",
+        serviceTiers: ["priority"],
+    },
+    {
+        providerId: "claude",
+        id: "opus-5",
+        name: "Opus 5",
+        effortLevels: ["medium", "high"],
+        defaultEffort: "medium",
+    },
+    {
+        providerId: "bedrock",
+        id: "opus-5",
+        name: "Opus 5",
+        effortLevels: ["medium"],
+        defaultEffort: "medium",
+    },
+];
+
+interface Delivery {
+    readonly toAgentId: string;
+    readonly text: string;
+    readonly options: Record<string, unknown>;
+}
+
+/**
+ * A stand-in for the agent collection. It records exactly what the module asked of it, which is
+ * the whole contract now that the module keeps no state of its own.
+ */
+class Collection {
     readonly configs = new Map<string, AgentConfig>();
-    readonly sent: Array<{ readonly target: string; readonly id: string }> = [];
-    readonly permissions: Array<{
-        readonly actor: string;
-        readonly target: string;
-        readonly readOnly: boolean;
-    }> = [];
-    readonly permissionModes: Array<Parameters<CollaborationBroker["setReadOnly"]>[4]> = [];
-    readonly interrupted: string[] = [];
-    readonly createOptions: Array<Parameters<CollaborationBroker["create"]>[2]> = [];
-    readonly selections = new Map<string, CollaborationAgentSelection>();
-    sendAttempts = 0;
-    waitResult: CollaborationObligation | undefined;
-    database: AgentDatabase | undefined;
-    createDepths: number[] = [];
-    createAdmission: (() => void) | undefined;
-    sendDepths: number[] = [];
-    waitDepths: number[] = [];
-    observations = new Map<string, CollaborationAgentObservation>();
-    interruptResult: CollaborationAgentObservation | undefined;
-    capacity: CollaborationSpawnCapacity = {
-        canSpawn: true,
-        depth: 0,
-        maxDepth: 3,
-        maxActive: 10,
-        active: 0,
-    };
-    readonly capacities = new Map<string, CollaborationSpawnCapacity>();
+    readonly parents = new Map<string, string | null>();
+    readonly created: Array<{ readonly id: string; readonly parent: string | null }> = [];
+    readonly delivered: Delivery[] = [];
+    readonly aborted: string[] = [];
+
+    readonly models = MODELS;
+
+    /** Register an agent that already exists, as the collection would after a restart. */
+    seed(id: string, parent: string | null): void {
+        this.configs.set(id, {});
+        this.parents.set(id, parent);
+    }
+
+    async config(_ctx: Context, agentId: string): Promise<AgentConfig | undefined> {
+        return this.configs.get(agentId);
+    }
+
+    async parentOf(_ctx: Context, agentId: string): Promise<string | null> {
+        return this.parents.get(agentId) ?? null;
+    }
+
+    async childOf(_ctx: Context, agentId: string): Promise<readonly string[]> {
+        return [...this.parents.entries()]
+            .filter(([, parent]) => parent === agentId)
+            .map(([id]) => id);
+    }
 
     async create(
-        _ctx: Parameters<CollaborationBroker["create"]>[0],
+        _ctx: Context,
         config: AgentConfig,
-        options: Parameters<CollaborationBroker["create"]>[2],
+        options: { readonly id?: string; readonly parent?: string | null },
     ): Promise<{ readonly id: string }> {
-        this.createDepths.push(this.#transactionDepth(_ctx));
-        this.createAdmission?.();
-        this.createOptions.push(structuredClone(options));
-        this.selections.set(options.id, structuredClone(options.selection));
-        this.configs.set(options.id, structuredClone(config));
-        return { id: options.id };
-    }
-
-    async config(
-        _ctx: Parameters<CollaborationBroker["config"]>[0],
-        id: string,
-    ): Promise<AgentConfig | undefined> {
-        const config = this.configs.get(id);
-        return config === undefined ? undefined : structuredClone(config);
-    }
-
-    async selection(
-        _ctx: Parameters<CollaborationBroker["selection"]>[0],
-        id: string,
-    ): Promise<CollaborationAgentSelection | undefined> {
-        const selection = this.selections.get(id);
-        return selection === undefined ? undefined : structuredClone(selection);
+        const id = options.id ?? "generated";
+        if (this.configs.has(id)) throw new Error(`Agent "${id}" already exists.`);
+        this.configs.set(id, config);
+        this.parents.set(id, options.parent ?? null);
+        this.created.push({ id, parent: options.parent ?? null });
+        return { id };
     }
 
     async send(
-        _ctx: Parameters<CollaborationBroker["send"]>[0],
-        target: string,
-        _message: Parameters<CollaborationBroker["send"]>[2],
-        options: Parameters<CollaborationBroker["send"]>[3],
-    ): Promise<void> {
-        this.sendDepths.push(this.#transactionDepth(_ctx));
-        this.sendAttempts += 1;
-        if (!this.sent.some((sent) => sent.target === target && sent.id === options.id)) {
-            this.sent.push({ target, id: options.id });
-        }
+        _ctx: Context,
+        agentId: string,
+        message: { readonly content: readonly { readonly text: string }[] },
+        options: Record<string, unknown>,
+    ): Promise<AgentMessageAcceptance> {
+        this.delivered.push({
+            toAgentId: agentId,
+            text: message.content[0]!.text,
+            options,
+        });
+        return { id: options.id as string, delivery: "send", accepted: "created" };
     }
 
-    async wait(
-        _ctx: Parameters<CollaborationBroker["wait"]>[0],
-        _actingAgentId: string,
-        obligationId: string,
-    ): Promise<CollaborationObligation> {
-        this.waitDepths.push(this.#transactionDepth(_ctx));
-        if (this.waitResult?.id !== obligationId) throw new Error("missing wait result");
-        return structuredClone(this.waitResult);
+    async abort(_ctx: Context, agentId: string): Promise<void> {
+        this.aborted.push(agentId);
     }
 
-    async interrupt(
-        _ctx: Parameters<CollaborationBroker["interrupt"]>[0],
-        _actingAgentId: string,
-        targetAgentId: string,
-    ): Promise<CollaborationAgentObservation> {
-        this.interrupted.push(targetAgentId);
-        const observation = this.interruptResult ?? {
-            agentId: targetAgentId,
-            runId: "run-1",
-            version: 2,
-            status: "aborted" as const,
-            output: "The collaborator was interrupted.",
-            updatedAt: 2,
-        };
-        this.observations.set(targetAgentId, observation);
-        return structuredClone(observation);
-    }
-
-    async observe(
-        _ctx: Parameters<CollaborationBroker["observe"]>[0],
-        _actingAgentId: string,
-        targetAgentId: string,
-    ): Promise<CollaborationAgentObservation> {
-        return structuredClone(
-            this.observations.get(targetAgentId) ?? {
-                agentId: targetAgentId,
-                runId: "run-1",
-                version: 1,
-                status: "running",
-                updatedAt: 1,
-            },
-        );
-    }
-
-    async waitForAgent(
-        _ctx: Parameters<CollaborationBroker["waitForAgent"]>[0],
-        _actingAgentId: string,
-        targetAgentId: string,
-        _timeoutMs: number,
-    ): Promise<CollaborationAgentObservation> {
-        return await this.observe(_ctx, _actingAgentId, targetAgentId);
-    }
-
-    async setReadOnly(
-        _ctx: Parameters<CollaborationBroker["setReadOnly"]>[0],
-        actingAgentId: string,
-        targetAgentId: string,
-        readOnly: boolean,
-        permissionMode: Parameters<CollaborationBroker["setReadOnly"]>[4],
-    ): Promise<void> {
-        this.permissions.push({ actor: actingAgentId, target: targetAgentId, readOnly });
-        this.permissionModes.push(permissionMode);
-    }
-
-    async spawnCapacity(
-        _ctx: Parameters<CollaborationBroker["spawnCapacity"]>[0],
-        actingAgentId: string,
-    ) {
-        return this.capacities.get(actingAgentId) ?? this.capacity;
-    }
-
-    #transactionDepth(ctx: Parameters<CollaborationBroker["wait"]>[0]): number {
-        return this.database !== undefined && ctx.db !== this.database ? 1 : 0;
+    /** The module holds an `AgentSystemRef`; this stub supplies only what it actually calls. */
+    asRef(): AgentSystemRef {
+        return this as unknown as AgentSystemRef;
     }
 }
 
-function setup(
-    name: string,
-    listener?: ConstructorParameters<typeof CollaborationModule>[0]["listener"],
-    modelCatalog: CollaborationModelCatalog | null = {
-        availableModels: [
-            {
-                defaultEffort: "medium",
-                effortLevels: ["low", "medium", "high"],
-                id: "model",
-                name: "Test model",
-                providerId: "provider",
-                serviceTiers: ["priority"],
-            },
-        ],
-        disabledProviders: [],
-    },
-    maxOutputCharacters = 8_000,
-    brokerOverride?: Broker,
-) {
-    const broker = brokerOverride ?? new Broker();
-    let eventSequence = 0;
-    const collaboration = new CollaborationModule({
-        broker,
-        ...(modelCatalog === null ? {} : { modelCatalog }),
-        eventIdFactory: () => `event${++eventSequence}`,
-        clock: () => 1_000 + eventSequence,
-        maxOutputCharacters,
-        ...(listener === undefined ? {} : { listener }),
-    });
-    const database = moduleDatabase([], name);
-    broker.database = database.database;
-    const ready = collaboration.migrations.reduce(async (previous, [, migrate]) => {
-        await previous;
-        await migrate(database.context, database.database);
-    }, Promise.resolve());
-    return {
-        broker,
-        collaboration,
-        database,
-        ready,
-    };
-}
-
-function toolCall<Result>(
-    id: string,
-    commitDepths: number[],
-    committed: unknown[],
-    broker: Broker,
-): AgentToolCall<any> {
-    return {
-        id,
-        providerCallId: `provider-${id}`,
-        kv: {} as never,
-        commit: async (_ctx, result: Result) => {
-            commitDepths.push(broker.database !== undefined && _ctx.db !== broker.database ? 1 : 0);
-            committed.push(structuredClone(result));
-            return result;
+function started(collection: Collection): { module: CollaborationModule; ctx: Context } {
+    const module = new CollaborationModule();
+    const ctx = withAgentConfig(createRootContext().named("collaboration-test"), {
+        environment: {
+            osVersion: "test",
+            platform: "darwin",
+            workingDirectory: "/work",
+            shell: "/bin/zsh",
         },
-    } as AgentToolCall<any>;
+        modules: { collaboration: {} },
+        metadata: { title: "Parent agent" },
+    });
+    module.beforeStart(ctx, collection.asRef());
+    return { module, ctx };
 }
 
-async function createRoot(
-    collaboration: CollaborationModule,
-    ctx: ReturnType<typeof moduleDatabase>["context"],
-    id = "owner",
-): Promise<CollaborationAgent> {
-    return await collaboration.createAgent(ctx, id, {
-        id,
-        config: {},
-        model: "model",
-        effort: "medium",
-        provider: "provider",
-    });
+/** A stand-in run store; the module only ever keeps one note in it. */
+function runScope(agentId: string) {
+    const values = new Map<string, unknown>();
+    return {
+        agent: { id: agentId },
+        runKV: {
+            read: async (_ctx: Context, key: string) => values.get(key),
+            write: async (_ctx: Context, key: string, value: unknown) => {
+                values.set(key, value);
+            },
+        },
+    } as never;
 }
 
-describe("CollaborationModule", () => {
-    it("keeps the immutable base schema and applies forward collaboration migrations", async () => {
-        const { collaboration, database, ready } = setup("collaboration-migration-test");
-        await ready;
-        try {
-            const tables = await agentDatabaseRows<{ readonly name: string }>(
-                database.database,
-                sql`SELECT name FROM sqlite_master
-                    WHERE type = 'table' AND name LIKE 'happy_collaboration_%'
-                    ORDER BY name`,
-            );
-            expect(tables.map(({ name }) => name)).toEqual([
-                "happy_collaboration_agents",
-                "happy_collaboration_messages",
-                "happy_collaboration_obligations",
-            ]);
-            expect(collaboration.migrations.map(([id]) => id)).toEqual([
-                "001-collaboration",
-                "002-drop-collaboration-receipts",
-                "003-collaboration-run-state",
-            ]);
-        } finally {
-            database.close();
-        }
+function textEnd(text: string) {
+    return { type: "text_end", block: { type: "text", text } } as never;
+}
+
+function settlement(settlementId: string) {
+    return { loopId: "loop", settlementId } as never;
+}
+
+const TASK = {
+    title: "Reviewer",
+    model: "gpt-5.6-sol",
+    effort: "high",
+    text: "Review the parser change.",
+} as const;
+
+describe("collaboration", () => {
+    it("creates a collaborator as a child of its creator", async () => {
+        const collection = new Collection();
+        const { module, ctx } = started(collection);
+
+        const result = await module.createAgent(ctx, "parent", TASK, "child");
+
+        expect(result).toEqual({ agentId: "child" });
+        expect(collection.created).toEqual([{ id: "child", parent: "parent" }]);
     });
 
-    it("uses framework transactions for mutations and settles waits outside the broker call", async () => {
-        const { broker, collaboration, database, ready } = setup("collaboration-tool-commit-test");
-        await ready;
-        try {
-            await createRoot(collaboration, database.context);
-            const commitDepths: number[] = [];
-            const committed: unknown[] = [];
-            const ownerTools = await collaboration.tools(database.context, {
-                agent: { id: "owner" },
-            } as never);
-            const create = ownerTools.find(({ name }) => name === "create_agent")!;
-            const send = ownerTools.find(({ name }) => name === "send_agent_message")!;
-            const wait = ownerTools.find(({ name }) => name === "wait_for_reply")!;
+    it("puts the collaborator's name in the agent's real metadata", async () => {
+        const collection = new Collection();
+        const { module, ctx } = started(collection);
 
-            const child = await create.execute(
-                database.context,
-                {
-                    config: {},
-                    model: "model",
-                    effort: "medium",
-                    provider: "provider",
-                    role: "reviewer",
-                },
-                toolCall("childcallid", commitDepths, committed, broker),
-            );
-            expect(child.id).toBe("childcallid");
+        await module.createAgent(ctx, "parent", TASK, "child");
 
-            const request = await send.execute(
-                database.context,
-                {
-                    input: {
-                        toAgentId: child.id,
-                        text: "Please review this.",
-                        expectReply: true,
-                    },
-                },
-                toolCall("messagecallid", commitDepths, committed, broker),
-            );
-            expect(request.message.id).toBe("messagecallid");
-            expect(broker.sent.at(-1)).toEqual({
-                target: child.id,
-                id: "messagecallid",
-            });
-
-            const childTools = await collaboration.tools(database.context, {
-                agent: { id: child.id },
-            } as never);
-            const reply = childTools.find(({ name }) => name === "reply_to_agent_message")!;
-            const answered = await reply.execute(
-                database.context,
-                {
-                    toAgentId: "owner",
-                    text: "Done.",
-                    replyTo: request.obligation!.id,
-                },
-                toolCall("replycallid", commitDepths, committed, broker),
-            );
-            expect(answered.message.id).toBe("replycallid");
-            expect(answered.obligation?.status).toBe("answered");
-
-            broker.waitResult = answered.obligation;
-            const waited = await wait.execute(
-                database.context,
-                { input: { obligationId: request.obligation!.id } },
-                toolCall("waitcallid", commitDepths, committed, broker),
-            );
-            expect(waited.status).toBe("answered");
-
-            expect(commitDepths).toEqual([]);
-            expect(committed).toEqual([]);
-            expect(broker.createDepths).toEqual([0, 0]);
-            expect(broker.sendDepths).toEqual([0, 0]);
-            expect(broker.waitDepths).toEqual([0]);
-        } finally {
-            database.close();
-        }
+        expect(collection.configs.get("child")?.metadata).toEqual({ title: "Reviewer" });
     });
 
-    it("treats reused public identities as conflicts instead of replaying old results", async () => {
-        const { broker, collaboration, database, ready } = setup("collaboration-conflict-test");
-        await ready;
-        try {
-            await createRoot(collaboration, database.context);
-            await collaboration.createAgent(database.context, "owner", {
-                id: "child",
-                parentId: "owner",
-                config: {},
-                model: "model",
-                effort: "medium",
-                provider: "provider",
-            });
-            await expect(
-                collaboration.createAgent(database.context, "owner", {
-                    id: "child",
-                    parentId: "owner",
-                    config: {},
-                    model: "model",
-                    effort: "medium",
-                    provider: "provider",
-                }),
-            ).rejects.toThrow('Collaborator "child" already exists.');
+    it("gives a collaborator the machine its creator works on", async () => {
+        const collection = new Collection();
+        const { module, ctx } = started(collection);
 
-            const input = {
-                messageId: "message",
-                toAgentId: "child",
-                text: "Once.",
-            } as const;
-            await collaboration.sendMessage(database.context, "owner", input);
-            await expect(
-                collaboration.sendMessage(database.context, "owner", input),
-            ).rejects.toThrow('Message "message" already exists.');
-            expect(broker.sent).toHaveLength(1);
-        } finally {
-            database.close();
-        }
+        await module.createAgent(ctx, "parent", TASK, "child");
+
+        expect(collection.configs.get("child")?.environment?.workingDirectory).toBe("/work");
+        expect(collection.configs.get("child")?.modules).toEqual({ collaboration: {} });
     });
 
-    it("keeps internal identities out of model inputs while marking tool durability explicitly", async () => {
-        const { collaboration, database, ready } = setup("collaboration-tool-schema-test");
-        await ready;
-        try {
-            const tools = await collaboration.tools(database.context, {
-                agent: { id: "owner" },
-            } as never);
-            const byName = new Map(tools.map((tool) => [tool.name, tool]));
-            const properties = (name: string): Record<string, unknown> => {
-                const parameters = byName.get(name)?.parameters as
-                    | { readonly properties?: Record<string, unknown> }
-                    | undefined;
-                return parameters?.properties ?? {};
-            };
+    it("chooses what a collaborator runs on with the message that starts it", async () => {
+        const collection = new Collection();
+        const { module, ctx } = started(collection);
 
-            expect(properties("create_agent")).not.toHaveProperty("id");
-            expect(properties("send_agent_message")).not.toHaveProperty("messageId");
-            expect(properties("reply_to_agent_message")).not.toHaveProperty("messageId");
-            expect(byName.get("create_agent")?.durable).toBe(true);
-            expect(byName.get("list_agents")?.durable).toBe(true);
-            expect(byName.get("send_agent_message")?.durable).toBe(true);
-            expect(byName.get("reply_to_agent_message")?.durable).toBe(true);
-            expect(byName.get("wait_for_reply")?.durable).toBe(false);
-            const interrupt = byName.get("interrupt_agent")!;
-            expect(
-                interrupt.shouldReviewInAutoMode({ targetAgentId: "owner" }, database.context),
-            ).toBe(true);
-            expect(
-                interrupt.describeAutoPermissionAction?.(
-                    { targetAgentId: "owner" },
-                    database.context,
-                ),
-            ).toContain("interrupting collaborator");
-            expect(byName.get("create_agent")?.transactional).not.toBe(true);
-            expect(byName.get("send_agent_message")?.transactional).not.toBe(true);
-            expect(byName.get("reply_to_agent_message")?.transactional).not.toBe(true);
-            expect(byName.get("wait_for_reply")?.transactional).not.toBe(true);
-            expect(collaborationAgentSchema).toBeDefined();
-        } finally {
-            database.close();
-        }
-    });
-
-    it("keeps collaboration available without a host model catalog", async () => {
-        const { broker, collaboration, database, ready } = setup(
-            "collaboration-no-catalog-test",
-            undefined,
-            null,
+        await module.createAgent(
+            ctx,
+            "parent",
+            { ...TASK, provider: "codex", serviceTier: "priority" },
+            "child",
         );
-        await ready;
-        try {
-            const tools = await collaboration.tools(database.context, {
-                agent: { id: "owner" },
-            } as never);
-            const create = tools.find(({ name }) => name === "create_agent")!;
-            expect(create.description).toContain("Model catalog unavailable");
-            const created = await create.execute(
-                database.context,
-                {
-                    config: {},
-                    model: "host-selected-model",
-                    effort: "medium",
-                    provider: "host-provider",
-                },
-                toolCall("owner", [], [], broker),
-            );
-            expect(created.id).toBe("owner");
-        } finally {
-            database.close();
-        }
+
+        expect(collection.delivered).toHaveLength(1);
+        expect(collection.delivered[0]!.options).toMatchObject({
+            model: "gpt-5.6-sol",
+            effort: "high",
+            provider: "codex",
+            serviceTier: "priority",
+        });
     });
 
-    it("truncates creation guidance and observations at the minimum output budget", async () => {
-        const { collaboration, database, ready } = setup(
-            "collaboration-output-budget-test",
-            undefined,
-            null,
-            256,
+    it("never lets a later message change what a collaborator runs on", async () => {
+        const collection = new Collection();
+        const { module, ctx } = started(collection);
+        await module.createAgent(ctx, "parent", TASK, "child");
+
+        await module.sendMessage(
+            ctx,
+            "parent",
+            { toAgentId: "child", text: "One more thing." },
+            "m1",
         );
-        await ready;
-        try {
-            const tools = await collaboration.tools(database.context, {
-                agent: { id: "owner" },
-            } as never);
-            const create = tools.find(({ name }) => name === "create_agent")!;
-            expect(create.description!.length).toBeLessThanOrEqual(256);
-            expect(create.description).toContain("truncated");
-            const rendered = collaboration.formatAgentObservationForModel({
-                agentId: "owner",
-                runId: "run-1",
-                version: 1,
-                status: "completed",
-                path: "p".repeat(512),
-                updatedAt: 1,
-            });
-            expect(rendered.length).toBeLessThanOrEqual(256);
-            expect(rendered).toContain("truncated");
-        } finally {
-            database.close();
-        }
+
+        const followUp = collection.delivered[1]!.options;
+        expect(followUp).not.toHaveProperty("model");
+        expect(followUp).not.toHaveProperty("effort");
+        expect(followUp).not.toHaveProperty("provider");
+        expect(followUp).not.toHaveProperty("serviceTier");
+        expect(followUp).not.toHaveProperty("permissionMode");
     });
 
-    it("returns bounded validation errors for primitive wait inputs", async () => {
-        const { collaboration, database, ready } = setup("collaboration-wait-input-test");
-        await ready;
-        try {
-            await expect(
-                collaboration.waitForReply(database.context, "owner", null as never),
-            ).rejects.toThrow("Invalid collaboration wait");
-        } finally {
-            database.close();
-        }
+    it("names the sender in the text, because that is the address a reply goes to", async () => {
+        const collection = new Collection();
+        const { module, ctx } = started(collection);
+        await module.createAgent(ctx, "parent", TASK, "child");
+
+        expect(collection.delivered[0]!.text).toBe(
+            "Message from agent parent:\n\nReview the parser change.",
+        );
     });
 
-    it("reconciles stable broker effects after catalog finalization rolls back", async () => {
-        let rejectCreate = true;
-        let rejectSend = false;
-        const { broker, collaboration, database, ready } = setup("collaboration-retry-contract", {
-            onEventTransactional: async (_ctx, event) => {
-                if (rejectCreate && event.type === "agent_created") {
-                    throw new Error("reject agent finalization");
-                }
-                if (rejectSend && event.type === "message_sent") {
-                    throw new Error("reject message finalization");
-                }
+    it("delivers under the durable tool call's own identity", async () => {
+        const collection = new Collection();
+        const { module, ctx } = started(collection);
+
+        await module.createAgent(ctx, "parent", TASK, "child");
+        await module.sendMessage(ctx, "parent", { toAgentId: "child", text: "Again." }, "call-2");
+
+        expect(collection.delivered.map(({ options }) => options.id)).toEqual([
+            "child",
+            "call-2",
+        ]);
+    });
+
+    it("does not create a collaborator twice when its durable call is retried", async () => {
+        const collection = new Collection();
+        const { module, ctx } = started(collection);
+
+        await module.createAgent(ctx, "parent", TASK, "child");
+        await module.createAgent(ctx, "parent", TASK, "child");
+
+        // Creating again would throw; the retry recognises the identity the collection already
+        // holds and only redoes delivery, which Agent Base settles by message ID.
+        expect(collection.created).toHaveLength(1);
+    });
+
+    it("refuses a model the collection does not offer", async () => {
+        const collection = new Collection();
+        const { module, ctx } = started(collection);
+
+        await expect(
+            module.createAgent(ctx, "parent", { ...TASK, model: "imaginary" }, "child"),
+        ).rejects.toThrow('Model "imaginary" is not available for collaborators.');
+        expect(collection.created).toHaveLength(0);
+    });
+
+    it("refuses an effort the chosen model does not support", async () => {
+        const collection = new Collection();
+        const { module, ctx } = started(collection);
+
+        await expect(
+            module.createAgent(ctx, "parent", { ...TASK, effort: "low", model: "opus-5", provider: "claude" }, "child"),
+        ).rejects.toThrow('Effort "low" is not available for collaborator model "opus-5".');
+    });
+
+    it("asks for a provider when a model name alone is ambiguous", async () => {
+        const collection = new Collection();
+        const { module, ctx } = started(collection);
+
+        await expect(
+            module.createAgent(ctx, "parent", { ...TASK, model: "opus-5" }, "child"),
+        ).rejects.toThrow("available from more than one provider");
+    });
+
+    it("refuses a service tier the chosen model does not offer", async () => {
+        const collection = new Collection();
+        const { module, ctx } = started(collection);
+
+        await expect(
+            module.createAgent(
+                ctx,
+                "parent",
+                { ...TASK, model: "opus-5", provider: "claude", serviceTier: "priority" },
+                "child",
+            ),
+        ).rejects.toThrow('Service tier "priority" is not available');
+    });
+
+    it("lets a collaborator answer the agent that created it", async () => {
+        const collection = new Collection();
+        const { module, ctx } = started(collection);
+        await module.createAgent(ctx, "parent", TASK, "child");
+
+        await module.sendMessage(ctx, "child", { toAgentId: "parent", text: "Done." }, "m1");
+
+        expect(collection.delivered[1]).toMatchObject({
+            toAgentId: "parent",
+            text: "Message from agent child:\n\nDone.",
+        });
+    });
+
+    it("refuses a message between agents with no relationship", async () => {
+        const collection = new Collection();
+        collection.seed("stranger", null);
+        const { module, ctx } = started(collection);
+        await module.createAgent(ctx, "parent", TASK, "child");
+
+        await expect(
+            module.sendMessage(ctx, "child", { toAgentId: "stranger", text: "Hello." }, "m1"),
+        ).rejects.toThrow('Agent "child" is not authorized to send to agent "stranger".');
+    });
+
+    it("interrupts a collaborator it created", async () => {
+        const collection = new Collection();
+        const { module, ctx } = started(collection);
+        await module.createAgent(ctx, "parent", TASK, "child");
+
+        await module.interruptAgent(ctx, "parent", "child");
+
+        expect(collection.aborted).toEqual(["child"]);
+    });
+
+    it("refuses to interrupt an agent it has no relationship with", async () => {
+        const collection = new Collection();
+        collection.seed("stranger", null);
+        const { module, ctx } = started(collection);
+
+        await expect(module.interruptAgent(ctx, "parent", "stranger")).rejects.toThrow(
+            "is not authorized to interrupt",
+        );
+        expect(collection.aborted).toEqual([]);
+    });
+
+    it("tells a collaborator the address to answer on", async () => {
+        const collection = new Collection();
+        const { module, ctx } = started(collection);
+        await module.createAgent(ctx, "parent", TASK, "child");
+
+        // The sender's name is in the delivered message too, but that line ages out of history on
+        // compaction while the relationship does not.
+        const instructions = await module.instructions(ctx, {
+            agent: { id: "child" },
+        } as never);
+
+        expect(instructions).toContain("created by agent parent");
+        expect(instructions).toContain("send_agent_message");
+    });
+
+    it("tells an agent which collaborators it created", async () => {
+        const collection = new Collection();
+        const { module, ctx } = started(collection);
+        await module.createAgent(ctx, "parent", TASK, "child");
+
+        const instructions = await module.instructions(ctx, {
+            agent: { id: "parent" },
+        } as never);
+
+        expect(instructions).toContain("Collaborators you created: child.");
+    });
+
+    it("says nothing to an agent with no collaborators at all", async () => {
+        const collection = new Collection();
+        const { module, ctx } = started(collection);
+
+        expect(await module.instructions(ctx, { agent: { id: "lonely" } } as never)).toBe("");
+    });
+
+    it("reports a collaborator's last words to its creator when it stops working", async () => {
+        const collection = new Collection();
+        const { module, ctx } = started(collection);
+        await module.createAgent(ctx, "parent", TASK, "child");
+        const scope = runScope("child");
+
+        await module.onEventTransact(ctx, scope, textEnd("The parser change looks correct."));
+        await module.afterAgentSettledTransact(ctx, scope, settlement("s1"));
+        await module.afterAgentSettled(ctx, scope);
+
+        expect(collection.delivered[1]).toMatchObject({
+            toAgentId: "parent",
+            text: "Collaborator child finished working. Its answer follows, verbatim.\n\nThe parser change looks correct.",
+        });
+    });
+
+    it("marks the report so it can be shown as a notice rather than as someone talking", async () => {
+        const collection = new Collection();
+        const { module, ctx } = started(collection);
+        await module.createAgent(ctx, "parent", TASK, "child");
+        const scope = runScope("child");
+
+        await module.onEventTransact(ctx, scope, textEnd("Done."));
+        await module.afterAgentSettledTransact(ctx, scope, settlement("s1"));
+        await module.afterAgentSettled(ctx, scope);
+
+        expect(collection.delivered[1]!.options.metadata).toEqual({
+            collaboration: {
+                kind: "subagent_report",
+                fromAgentId: "child",
+                toAgentId: "parent",
             },
         });
-        await ready;
-        try {
-            await expect(createRoot(collaboration, database.context)).rejects.toThrow(
-                "reject agent finalization",
-            );
-            rejectCreate = false;
-            await expect(createRoot(collaboration, database.context)).resolves.toMatchObject({
-                id: "owner",
-            });
-            expect(broker.createDepths).toEqual([0]);
-
-            await collaboration.createAgent(database.context, "owner", {
-                id: "child",
-                config: {},
-                model: "model",
-                effort: "medium",
-                provider: "provider",
-            });
-            rejectSend = true;
-            const input = {
-                toAgentId: "child",
-                text: "Retry this delivery",
-                messageId: "message-stable",
-            } as const;
-            await expect(
-                collaboration.sendMessage(database.context, "owner", input),
-            ).rejects.toThrow("reject message finalization");
-            rejectSend = false;
-            await expect(
-                collaboration.sendMessage(database.context, "owner", input),
-            ).resolves.toMatchObject({ message: { id: "message-stable" } });
-            expect(broker.sendAttempts).toBe(2);
-            expect(broker.sent).toEqual([{ target: "child", id: "message-stable" }]);
-            expect(broker.sendDepths).toEqual([0, 0]);
-        } finally {
-            database.close();
-        }
     });
 
-    it("passes model selection, context forking, and read-only creation to the host broker", async () => {
-        const { broker, collaboration, database, ready } = setup(
-            "collaboration-selection-and-fork-test",
+    it("reports even when the collaborator finished in silence", async () => {
+        const collection = new Collection();
+        const { module, ctx } = started(collection);
+        await module.createAgent(ctx, "parent", TASK, "child");
+        const scope = runScope("child");
+
+        // Nothing was said: no text_end ever arrived. The creator still has to learn it is over,
+        // because with nothing waiting this report is the only signal there is.
+        await module.afterAgentSettledTransact(ctx, scope, settlement("s1"));
+        await module.afterAgentSettled(ctx, scope);
+
+        expect(collection.delivered[1]!.text).toBe(
+            "Collaborator child finished working without saying anything.",
         );
-        await ready;
-        try {
-            await createRoot(collaboration, database.context);
-            await collaboration.createAgent(database.context, "owner", {
-                id: "child",
-                config: {},
-                model: "model",
-                effort: "high",
-                provider: "provider",
-                serviceTier: "priority",
-                context: "parent",
-                forkTurns: "all",
-                readOnly: true,
-            });
-
-            expect(broker.createOptions.at(-1)).toMatchObject({
-                id: "child",
-                parent: "owner",
-                context: "parent",
-                forkTurns: "all",
-                readOnly: true,
-                selection: {
-                    model: "model",
-                    effort: "high",
-                    provider: "provider",
-                    serviceTier: "priority",
-                },
-            });
-        } finally {
-            database.close();
-        }
     });
 
-    it("rejects unavailable model selection before invoking the broker", async () => {
-        const { broker, collaboration, database, ready } = setup(
-            "collaboration-model-validation-test",
+    it("reports under the settlement's identity, so a retry is not a second report", async () => {
+        const collection = new Collection();
+        const { module, ctx } = started(collection);
+        await module.createAgent(ctx, "parent", TASK, "child");
+        const scope = runScope("child");
+
+        await module.onEventTransact(ctx, scope, textEnd("Done."));
+        await module.afterAgentSettledTransact(ctx, scope, settlement("s1"));
+        await module.afterAgentSettled(ctx, scope);
+
+        expect(collection.delivered[1]!.options.id).toBe("s1");
+    });
+
+    it("says nothing upward when the agent that stopped has no creator", async () => {
+        const collection = new Collection();
+        const { module, ctx } = started(collection);
+        const scope = runScope("root");
+
+        await module.onEventTransact(ctx, scope, textEnd("All done."));
+        await module.afterAgentSettledTransact(ctx, scope, settlement("s1"));
+        await module.afterAgentSettled(ctx, scope);
+
+        expect(collection.delivered).toHaveLength(0);
+    });
+
+    it("keeps only the most recent thing the model said", async () => {
+        const collection = new Collection();
+        const { module, ctx } = started(collection);
+        await module.createAgent(ctx, "parent", TASK, "child");
+        const scope = runScope("child");
+
+        await module.onEventTransact(ctx, scope, textEnd("Thinking out loud."));
+        await module.onEventTransact(ctx, scope, textEnd("Final answer."));
+        await module.afterAgentSettledTransact(ctx, scope, settlement("s1"));
+        await module.afterAgentSettled(ctx, scope);
+
+        expect(collection.delivered[1]!.text).toContain("Final answer.");
+        expect(collection.delivered[1]!.text).not.toContain("Thinking out loud.");
+    });
+
+    it("declares only the retirement of the schema it used to keep", () => {
+        // Agents are actors: the inbox, the ancestry, and the identity all belong to Agent Base,
+        // so this module owns no table. The released keys stay because Agent Base requires the
+        // applied migrations to remain a prefix of the declared ones — drop one of these and
+        // every database that ran an earlier build refuses to open.
+        expect(new CollaborationModule().migrations.map(([key]) => key)).toEqual([
+            "001-collaboration",
+            "002-drop-collaboration-receipts",
+            "003-collaboration-run-state",
+            "004-collaboration-storage-removed",
+        ]);
+    });
+
+    it("refuses to work before the agent collection is available", async () => {
+        const module = new CollaborationModule();
+        const ctx = createRootContext().named("unstarted");
+
+        await expect(module.createAgent(ctx, "parent", TASK, "child")).rejects.toThrow(
+            "has not been started yet",
         );
-        await ready;
-        try {
-            await createRoot(collaboration, database.context);
-            await expect(
-                collaboration.createAgent(database.context, "owner", {
-                    id: "child",
-                    config: {},
-                    model: "missing-model",
-                    effort: "medium",
-                    provider: "provider",
-                }),
-            ).rejects.toThrow('Model "missing-model" is not available');
-            expect(broker.createOptions).toHaveLength(1);
-        } finally {
-            database.close();
-        }
-    });
-
-    it("requires a provider for ambiguous model IDs and ignores disabled routes", async () => {
-        const catalog: CollaborationModelCatalog = {
-            availableModels: [
-                {
-                    defaultEffort: "low",
-                    effortLevels: ["low"],
-                    id: "duplicate",
-                    name: "Provider A model",
-                    providerId: "provider-a",
-                },
-                {
-                    defaultEffort: "low",
-                    effortLevels: ["low"],
-                    id: "duplicate",
-                    name: "Provider B model",
-                    providerId: "provider-b",
-                },
-                {
-                    defaultEffort: "low",
-                    effortLevels: ["low"],
-                    id: "disabled-model",
-                    name: "Disabled model",
-                    providerId: "disabled-provider",
-                },
-                {
-                    defaultEffort: "low",
-                    effortLevels: ["low"],
-                    id: "disabled-model",
-                    name: "Active model",
-                    providerId: "provider-a",
-                },
-            ],
-            disabledProviders: [{ id: "disabled-provider", reason: "not_enabled" }],
-        };
-        const { collaboration, database, ready } = setup(
-            "collaboration-provider-selection-test",
-            undefined,
-            catalog,
-        );
-        await ready;
-        try {
-            await collaboration.createAgent(database.context, "owner", {
-                id: "owner",
-                config: {},
-                model: "duplicate",
-                effort: "low",
-                provider: "provider-a",
-            });
-            await expect(
-                collaboration.createAgent(database.context, "owner", {
-                    id: "ambiguouschild",
-                    config: {},
-                    model: "duplicate",
-                    effort: "low",
-                }),
-            ).rejects.toThrow("Provider is required");
-            await expect(
-                collaboration.createAgent(database.context, "owner", {
-                    id: "disabledchild",
-                    config: {},
-                    model: "disabled-model",
-                    effort: "low",
-                }),
-            ).rejects.toThrow("Provider is required");
-            await expect(
-                collaboration.createAgent(database.context, "owner", {
-                    id: "activechild",
-                    config: {},
-                    model: "disabled-model",
-                    effort: "low",
-                    provider: "provider-a",
-                }),
-            ).resolves.toMatchObject({ id: "activechild" });
-            await expect(
-                collaboration.createAgent(database.context, "owner", {
-                    id: "disabledproviderchild",
-                    config: {},
-                    model: "disabled-model",
-                    effort: "low",
-                    provider: "disabled-provider",
-                }),
-            ).rejects.toThrow("disabled");
-        } finally {
-            database.close();
-        }
-    });
-
-    it("switches permission mode for messages and stops a running collaborator", async () => {
-        const { broker, collaboration, database, ready } = setup(
-            "collaboration-interrupt-permission-test",
-        );
-        await ready;
-        try {
-            await createRoot(collaboration, database.context);
-            await collaboration.createAgent(database.context, "owner", {
-                id: "child",
-                config: {},
-                model: "model",
-                effort: "medium",
-                provider: "provider",
-            });
-            await collaboration.sendMessage(database.context, "owner", {
-                messageId: "permission-message",
-                toAgentId: "child",
-                text: "Inspect this.",
-                readOnly: true,
-            });
-            await collaboration.sendMessage(database.context, "owner", {
-                messageId: "restore-permission-message",
-                toAgentId: "child",
-                text: "Now make the change.",
-                readOnly: false,
-            });
-            expect(broker.permissions).toEqual([
-                { actor: "owner", target: "child", readOnly: true },
-                { actor: "owner", target: "child", readOnly: false },
-            ]);
-
-            broker.observations.set("child", {
-                agentId: "child",
-                runId: "run-1",
-                version: 1,
-                status: "running",
-                output: "Working.",
-                updatedAt: 1,
-            });
-            const tools = await collaboration.tools(database.context, {
-                agent: { id: "owner" },
-            } as never);
-            const interrupt = tools.find(({ name }) => name === "interrupt_agent")!;
-            const result = await interrupt.execute(
-                database.context,
-                { targetAgentId: "child" },
-                toolCall("interrupt-call", [], [], broker),
-            );
-            expect(result).toMatchObject({
-                agentId: "child",
-                status: "aborted",
-            });
-            expect(broker.interrupted).toEqual(["child"]);
-        } finally {
-            database.close();
-        }
-    });
-
-    it("cannot widen a collaborator from a read-only sender", async () => {
-        const { broker, collaboration, database, ready } = setup(
-            "collaboration-read-only-monotonic-test",
-        );
-        await ready;
-        try {
-            await createRoot(collaboration, database.context);
-            const readOnlyContext = withAgentPermissionMode(database.context, "read_only");
-            await collaboration.createAgent(readOnlyContext, "owner", {
-                id: "readonlychild",
-                config: {},
-                model: "model",
-                effort: "medium",
-                provider: "provider",
-                readOnly: false,
-            });
-            const request = await collaboration.sendMessage(readOnlyContext, "owner", {
-                messageId: "readonly-permission",
-                toAgentId: "readonlychild",
-                text: "Remain restricted.",
-                readOnly: false,
-                expectReply: true,
-            });
-            await collaboration.replyMessage(readOnlyContext, "readonlychild", {
-                toAgentId: "owner",
-                text: "Still restricted.",
-                replyTo: request.obligation!.id,
-                readOnly: false,
-            });
-            expect(broker.createOptions.at(-1)?.readOnly).toBe(true);
-            expect(broker.permissions.at(-1)?.readOnly).toBe(true);
-            expect(broker.permissionModes.at(-1)).toBe("read_only");
-        } finally {
-            database.close();
-        }
-    });
-
-    it("rejects stale and reordered collaborator observations", async () => {
-        const { broker, collaboration, database, ready } = setup(
-            "collaboration-stale-observation-test",
-        );
-        await ready;
-        try {
-            await createRoot(collaboration, database.context);
-            await collaboration.createAgent(database.context, "owner", {
-                id: "child",
-                config: {},
-                model: "model",
-                effort: "medium",
-                provider: "provider",
-            });
-            const tools = await collaboration.tools(database.context, {
-                agent: { id: "owner" },
-            } as never);
-            const wait = tools.find(({ name }) => name === "wait_for_reply")!;
-            broker.observations.set("child", {
-                agentId: "child",
-                runId: "run-2",
-                version: 2,
-                status: "completed",
-                updatedAt: 20,
-            });
-            await wait.execute(
-                database.context,
-                { input: { agentId: "child" } },
-                toolCall("wait-new", [], [], broker),
-            );
-            broker.observations.set("child", {
-                agentId: "child",
-                runId: "run-2",
-                version: 1,
-                status: "running",
-                updatedAt: 10,
-            });
-            await expect(
-                wait.execute(
-                    database.context,
-                    { input: { agentId: "child" } },
-                    toolCall("wait-old", [], [], broker),
-                ),
-            ).rejects.toThrow("observation for");
-            broker.observations.set("child", {
-                agentId: "child",
-                runId: "run-2",
-                version: 2,
-                status: "completed",
-                updatedAt: 19,
-            });
-            await expect(
-                wait.execute(
-                    database.context,
-                    { input: { agentId: "child" } },
-                    toolCall("wait-old-timestamp", [], [], broker),
-                ),
-            ).rejects.toThrow("observation for");
-            broker.observations.set("child", {
-                agentId: "child",
-                runId: "run-2",
-                version: 2,
-                status: "running",
-            });
-            await expect(
-                wait.execute(
-                    database.context,
-                    { input: { agentId: "child" } },
-                    toolCall("wait-same-version", [], [], broker),
-                ),
-            ).rejects.toThrow("observation for");
-            broker.observations.set("child", {
-                agentId: "child",
-                runId: "different-run",
-                version: 2,
-                status: "error",
-                updatedAt: 21,
-            });
-            await expect(
-                wait.execute(
-                    database.context,
-                    { input: { agentId: "child" } },
-                    toolCall("wait-reordered", [], [], broker),
-                ),
-            ).rejects.toThrow("observation for");
-        } finally {
-            database.close();
-        }
-    });
-
-    it("requires interruption authorization and a terminal newer result", async () => {
-        const { broker, collaboration, database, ready } = setup(
-            "collaboration-interrupt-postcondition-test",
-        );
-        await ready;
-        try {
-            await createRoot(collaboration, database.context);
-            await createRoot(collaboration, database.context, "other");
-            await collaboration.createAgent(database.context, "owner", {
-                id: "child",
-                config: {},
-                model: "model",
-                effort: "medium",
-                provider: "provider",
-            });
-            broker.observations.set("child", {
-                agentId: "child",
-                runId: "run-1",
-                version: 1,
-                status: "running",
-                updatedAt: 1,
-            });
-            await expect(
-                collaboration.interruptAgent(database.context, "other", "child"),
-            ).rejects.toThrow("not authorized");
-
-            broker.interruptResult = {
-                agentId: "child",
-                runId: "run-1",
-                version: 2,
-                status: "running",
-                updatedAt: 2,
-            };
-            await expect(
-                collaboration.interruptAgent(database.context, "owner", "child"),
-            ).rejects.toThrow("did not stop");
-            broker.interruptResult = {
-                agentId: "child",
-                runId: "run-1",
-                version: 1,
-                status: "aborted",
-                updatedAt: 1,
-            };
-            await expect(
-                collaboration.interruptAgent(database.context, "owner", "child"),
-            ).rejects.toThrow("stale interruption");
-        } finally {
-            database.close();
-        }
-    });
-
-    it("returns terminal status and bounded output when waiting on a collaborator run", async () => {
-        const { broker, collaboration, database, ready } = setup("collaboration-agent-wait-test");
-        await ready;
-        try {
-            await createRoot(collaboration, database.context);
-            await collaboration.createAgent(database.context, "owner", {
-                id: "child",
-                config: {},
-                model: "model",
-                effort: "medium",
-                provider: "provider",
-            });
-            broker.observations.set("child", {
-                agentId: "child",
-                runId: "run-1",
-                version: 2,
-                status: "completed",
-                output: "Review complete.",
-                updatedAt: 2,
-            });
-            const tools = await collaboration.tools(database.context, {
-                agent: { id: "owner" },
-            } as never);
-            const wait = tools.find(({ name }) => name === "wait_for_reply")!;
-            const result = await wait.execute(
-                database.context,
-                { input: { agentId: "child", timeoutMs: 0 } },
-                toolCall("agent-wait-call", [], [], broker),
-            );
-            expect(result).toEqual({
-                agentId: "child",
-                runId: "run-1",
-                version: 2,
-                status: "completed",
-                output: "Review complete.",
-                updatedAt: 2,
-            });
-            const rendered = collaboration.formatAgentObservationForModel({
-                agentId: "child",
-                runId: "run-1",
-                version: 2,
-                status: "completed",
-                output: "x".repeat(20_000),
-                updatedAt: 2,
-            });
-            expect(rendered.length).toBeLessThanOrEqual(8_000);
-            expect(rendered).toContain("[output truncated]");
-        } finally {
-            database.close();
-        }
-    });
-
-    it("surfaces spawn limits and refuses a spawn at the host-reported limit", async () => {
-        const { broker, collaboration, database, ready } = setup("collaboration-spawn-limit-test");
-        await ready;
-        try {
-            await createRoot(collaboration, database.context);
-            broker.capacity = {
-                canSpawn: false,
-                depth: 3,
-                maxDepth: 3,
-                maxActive: 10,
-                active: 3,
-            };
-            const tools = await collaboration.tools(database.context, {
-                agent: { id: "owner" },
-            } as never);
-            const create = tools.find(({ name }) => name === "create_agent")!;
-            expect(create.description).toContain("Spawning is currently unavailable");
-            await expect(
-                create.execute(
-                    database.context,
-                    {
-                        config: {},
-                        model: "model",
-                        effort: "medium",
-                        provider: "provider",
-                    },
-                    toolCall("blockedcreate", [], [], broker),
-                ),
-            ).rejects.toThrow("maximum subagent depth");
-        } finally {
-            database.close();
-        }
-    });
-
-    it("checks capacity for the requested parent and at the create boundary", async () => {
-        const { broker, collaboration, database, ready } = setup(
-            "collaboration-parent-capacity-test",
-        );
-        await ready;
-        try {
-            await createRoot(collaboration, database.context);
-            await collaboration.createAgent(database.context, "owner", {
-                id: "child",
-                config: {},
-                model: "model",
-                effort: "medium",
-                provider: "provider",
-            });
-            broker.capacities.set("child", {
-                canSpawn: false,
-                depth: 3,
-                maxDepth: 3,
-                maxActive: 10,
-                active: 3,
-            });
-            await expect(
-                collaboration.createAgent(database.context, "owner", {
-                    id: "grandchild",
-                    parentId: "child",
-                    config: {},
-                    model: "model",
-                    effort: "medium",
-                    provider: "provider",
-                }),
-            ).rejects.toThrow("maximum subagent depth");
-
-            broker.capacity = {
-                canSpawn: true,
-                depth: 0,
-                maxDepth: 3,
-                maxActive: 2,
-                active: 2,
-            };
-            await expect(
-                collaboration.createAgent(database.context, "owner", {
-                    id: "anotherchild",
-                    config: {},
-                    model: "model",
-                    effort: "medium",
-                    provider: "provider",
-                }),
-            ).rejects.toThrow("inconsistent active capacity");
-        } finally {
-            database.close();
-        }
-    });
-
-    it("lets the broker reject a second create after its capacity snapshot goes stale", async () => {
-        const { broker, collaboration, database, ready } = setup(
-            "collaboration-concurrent-capacity-test",
-        );
-        await ready;
-        try {
-            await createRoot(collaboration, database.context);
-            let admitted = 0;
-            broker.capacity = {
-                canSpawn: true,
-                depth: 0,
-                maxDepth: 3,
-                maxActive: 1,
-                active: 0,
-            };
-            broker.createAdmission = () => {
-                if (admitted >= 1) throw new Error("atomic create capacity exhausted");
-                admitted += 1;
-            };
-            await expect(
-                collaboration.createAgent(database.context, "owner", {
-                    id: "concurrentone",
-                    config: {},
-                    model: "model",
-                    effort: "medium",
-                    provider: "provider",
-                }),
-            ).resolves.toMatchObject({ id: "concurrentone" });
-            await expect(
-                collaboration.createAgent(database.context, "owner", {
-                    id: "concurrenttwo",
-                    config: {},
-                    model: "model",
-                    effort: "medium",
-                    provider: "provider",
-                }),
-            ).rejects.toThrow("atomic create capacity exhausted");
-            expect(admitted).toBe(1);
-        } finally {
-            database.close();
-        }
-    });
-
-    it("lets the broker enforce capacity across concurrent creates", async () => {
-        const broker = new Broker();
-        const left = setup(
-            "collaboration-concurrent-capacity-left",
-            undefined,
-            undefined,
-            8_000,
-            broker,
-        );
-        const right = setup(
-            "collaboration-concurrent-capacity-right",
-            undefined,
-            undefined,
-            8_000,
-            broker,
-        );
-        await Promise.all([left.ready, right.ready]);
-        try {
-            await createRoot(left.collaboration, left.database.context);
-            await createRoot(right.collaboration, right.database.context);
-            let admitted = 0;
-            broker.capacity = {
-                canSpawn: true,
-                depth: 0,
-                maxDepth: 3,
-                maxActive: 1,
-                active: 0,
-            };
-            broker.createAdmission = () => {
-                if (admitted >= 1) throw new Error("atomic concurrent capacity exhausted");
-                admitted += 1;
-            };
-            const results = await Promise.allSettled([
-                left.collaboration.createAgent(left.database.context, "owner", {
-                    id: "concurrentleft",
-                    config: {},
-                    model: "model",
-                    effort: "medium",
-                    provider: "provider",
-                }),
-                right.collaboration.createAgent(right.database.context, "owner", {
-                    id: "concurrentright",
-                    config: {},
-                    model: "model",
-                    effort: "medium",
-                    provider: "provider",
-                }),
-            ]);
-            expect(results.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
-            expect(results.filter(({ status }) => status === "rejected")).toHaveLength(1);
-            const rejected = results.find(({ status }) => status === "rejected");
-            expect(rejected?.status).toBe("rejected");
-            if (rejected?.status === "rejected") {
-                expect(rejected.reason).toHaveProperty(
-                    "message",
-                    "atomic concurrent capacity exhausted",
-                );
-            }
-            expect(admitted).toBe(1);
-        } finally {
-            left.database.close();
-            right.database.close();
-        }
     });
 });

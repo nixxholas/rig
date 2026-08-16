@@ -1,79 +1,135 @@
 # Collaboration
 
-Collaboration lets one agent create, message, and wait on durable collaborators. One
-`CollaborationModule` instance serves every agent in a collection. The module owns its roster,
-messages, and reply obligations in Agent Base's database; the host supplies an external
-`CollaborationBroker`.
+Lets one agent put another to work.
 
 ```ts
-const collaboration = new CollaborationModule({
-    broker,
-    authorization,
-    modelCatalog: {
-        availableModels,
-        disabledProviders,
-    },
-});
+new CollaborationModule()
 ```
 
-`modelCatalog` is optional when the host validates model and effort selections at broker creation
-time. When supplied, it is a curated snapshot: disabled providers are rejected and a provider is
-required whenever a model ID appears on more than one provider route.
+There is nothing to configure and nothing to inject. The module reaches the rest of the runtime
+through the `AgentSystemRef` it is handed at `beforeStart`.
 
-Direct methods take `ctx` and the acting agent ID. `createAgent`, `sendMessage`, `replyMessage`,
-each use one transaction for their database work. `waitForReply` uses short validation and
-settlement transactions around its broker wait. Public callers may supply explicit agent or
-message IDs; an existing ID is a conflict. Creation requires model and effort, optionally
-validated against the injected catalog, and accepts an optional provider and service tier. It
-carries `context`/`forkTurns` to the host broker for task or parent-context creation. `readOnly`
-can force a child into Read only or restore the sender's current permission mode; the broker
-receives that sender mode and must enforce monotonic reduction for both creation and messaging.
+## How it works
+
+Agents are actors. Each one already has a durable inbox, a stable identity, and a parent, and all
+three belong to Agent Base. So this module keeps almost nothing: no tables, no roster. Every
+question it answers is asked of the agent collection, and every message it sends goes into the
+recipient's real inbox. The single exception is one note in the run store, holding the last thing a
+running model said so it can be reported when that run ends.
+
+That is the whole design, and most of what this module used to contain was a second, worse copy of
+things the runtime already does.
+
+### How agents text each other
+
+`send_agent_message` calls `AgentSystemRef.send`, which appends to the recipient's durable queue.
+The message ID is the sender's own durable tool-call ID, so a retried tool call delivers the same
+message rather than a second one — Agent Base settles that, not this module.
+
+The recipient's model only ever sees text, so the delivered message names its sender:
+
+```
+Message from agent a3f2:
+
+Review the parser change.
+```
+
+That name is the address. Answering is not a separate operation: the recipient calls
+`send_agent_message` back to the agent the message came from.
+
+The address is also stated in the module's instructions, rebuilt every turn from `parentOf` and
+`childOf`:
+
+```
+You were created by agent a3f2. When you stop working, whatever you said last is reported to it
+automatically, so finish by stating your answer. Use send_agent_message only to tell it something
+before then.
+Collaborators you created: b7c1, b7c2. Each reports back on its own when it finishes; nothing waits
+for them.
+```
+
+That matters because the `Message from agent ...` line ages out of history on compaction, while the
+relationship does not — an agent that could not name its creator would have no way to answer it.
+Nothing is stored to make this work; the ancestry is read from the agent collection each turn.
+
+### A collaborator always reports when it stops
+
+Nothing waits, so a creator could otherwise never learn whether a collaborator finished, failed, or
+simply decided to say nothing. The runtime closes that gap rather than the model: when a
+collaborator's loop settles, the module sends its creator whatever the collaborator said last,
+verbatim.
+
+```
+Collaborator b7c1 finished working. Its answer follows, verbatim.
+
+The parser change looks correct, but it drops the trailing newline case.
+```
+
+A collaborator that finished in silence, errored, or was interrupted still produces a report, so
+handing out work always ends in learning it is over. The message is tagged
+`collaboration.kind = "subagent_report"` with the collaborator's `fromAgentId`, which is what a
+presentation layer keys on to render it as a notice rather than as an agent talking. It is sent
+under the settlement's own identity, so a retried report is the same message rather than a second
+one.
+
+The last thing the model said is kept in the **run store** while the run is in progress — the one
+piece of state this module keeps. That store exists only for the duration of a run and is erased by
+the very transaction that settles it, which is why the report is read there and sent afterwards.
+
+### Messages are asynchronous, always
+
+Nothing here waits. There is no `wait_for_reply`, no reply obligation, and no record that an answer
+is owed. A message is delivered and the sending agent carries on with its turn. Whatever comes back
+arrives in its inbox and is read as ordinary conversation on a later turn.
+
+This is what makes the module small. A synchronous request/response would need the answer to reach
+an agent that is parked inside its own tool call — which its own run loop cannot deliver, because
+that loop is busy running the tool that is waiting. Every mechanism that used to exist here
+(obligations, a doorbell, a message log, retention) existed to work around that one problem.
+
+### Who can reach whom
+
+Ancestry, read from `parentOf`. An agent may message the collaborators it created and the agent
+that created it, in both directions — which is what makes an answer an ordinary message. Anything else is refused. There is no roster, no role, no group, and no
+authorization callback.
+
+### What a collaborator runs on
+
+Chosen once, on the message that starts it working, and never again.
+
+`create_agent` creates the agent and sends its opening task in one call, because that first message
+is the only place a model, effort, provider, and service tier can be expressed — `AgentCreateOptions`
+carries no selection. Every later message carries none of them, so an agent that can talk to a
+collaborator cannot turn it into a different model, make it think harder, or widen its permissions.
+
+The requested selection is validated against `AgentSystemRef.models` before anything is created, so
+a model the collection does not offer is refused rather than reaching a provider.
+
+A collaborator inherits its creator's environment and module configuration, and the `title` the
+call gave it is written to the agent's **real** `AgentMetadata` — not to a record of this module's
+own — so whatever shows a person their agents names it the same way it names every other.
 
 ## Tools
 
-The module exposes:
+| Tool | Effect |
+| --- | --- |
+| `create_agent` | Creates a collaborator and delivers its opening task. |
+| `send_agent_message` | Delivers one message to a collaborator, or back to its creator. |
+| `interrupt_agent` | Signals cancellation of a collaborator's current turn. |
 
-- `create_agent`
-- `list_agents`
-- `send_agent_message`
-- `reply_to_agent_message`
-- `wait_for_reply`
-- `interrupt_agent`
+`interrupt_agent` is reviewed in Auto mode; the other two are not.
 
-The broker-backed mutation tools are durable but not transactional. `create_agent` uses the Agent
-Base `call.id` as the collaborator ID, and send/reply use it as the message ID. Broker calls run
-outside database transactions, followed by a short catalog-finalization transaction. The broker
-must reconcile repeated `create`/`send` calls carrying the same stable ID and identical input; this
-lets a retry finish catalog persistence after a prior finalization rollback without duplicating
-the external effect. A reply obligation uses its message ID as its own stable identity. The module
-does not maintain a replay ledger, fingerprint, or call-scoped KV state.
+## Host operations
 
-`wait_for_reply` is non-durable because it performs a potentially long external broker wait.
-With an `obligationId` it waits for a directed reply; with an `agentId` it returns the collaborator
-status (`running`, `completed`, `error`, `aborted`, or `suspended`, as applicable), run identity,
-and bounded current/final output. Observations carry a broker run ID, monotonic version, and
-optional update time; delayed or reordered observations are rejected. `interrupt_agent` aborts
-only the current turn, preserving the collaborator for later follow-up work, and requires a newer
-terminal observation from the broker.
+None. Listing an agent's collaborators is `AgentSystem.childOf` plus `config(id).metadata.title`,
+which callers do directly.
 
-The host broker also supplies the current `canSpawn`, `depth`, `maxDepth`, and optional
-`maxActive`/`active` capacity signal. The module validates the signal for the requested parent
-immediately before broker creation and includes it with the model-visible creation guidance. The
-broker's create operation is the atomic capacity boundary and must re-check depth and active
-capacity for that parent.
+## Migrations
 
-## Storage
-
-The current tables are:
-
-- `happy_collaboration_agents`
-- `happy_collaboration_messages`
-- `happy_collaboration_obligations`
-
-Migration `001-collaboration` is immutable and still reflects its released schema. The forward
-`002-drop-collaboration-receipts` migration removes its obsolete receipt table, and
-`003-collaboration-run-state` adds durable run identity and observation ordering fields. Runtime
-storage has no receipt APIs.
-
-Transactional event listeners run beside the state mutation. Post-commit listeners are registered
-with `afterCommit`, so observer failures cannot roll back an already committed mutation.
+The module declares four, and none of them creates anything. `001-collaboration`,
+`002-drop-collaboration-receipts`, and `003-collaboration-run-state` are the released keys, kept as
+markers with empty bodies, and `004-collaboration-storage-removed` drops the tables they used to
+install. They exist because Agent Base requires a database's applied migrations to remain a prefix
+of the module's declared list: removing a released key would stop every agent whose database
+remembers it from starting at all. The list can only shrink, and only once no such database is
+left.

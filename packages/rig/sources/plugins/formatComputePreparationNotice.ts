@@ -5,14 +5,24 @@ import {
     SERVICE_NOTICE_TEXT_MAX_LENGTH,
     systemNoticePayloadSchema,
     type ComputePreparationEvent,
+    type ComputePreparationNotice,
     type SystemNoticePayload,
 } from "../protocol/index.js";
 import { formatComputeDuration } from "./formatComputeDuration.js";
 
+/**
+ * A system-notice payload whose structured notice is specifically a compute-preparation notice.
+ * The generic-notice member of the service-notice union never reaches this formatter, so callers
+ * can read compute fields off `structured` without narrowing the wider union first.
+ */
+type ComputePreparationNoticePayload = Omit<SystemNoticePayload, "structured"> & {
+    structured: ComputePreparationNotice;
+};
+
 /** Builds the structured service notice and its required plain-text fallback together. */
 export function formatComputePreparationNotice(
     event: ComputePreparationEvent,
-): SystemNoticePayload {
+): ComputePreparationNoticePayload {
     const { data } = event;
     const elapsed =
         data.elapsedMs === undefined || data.elapsedMs < 1_000
@@ -76,9 +86,7 @@ export function formatComputePreparationNotice(
     });
 }
 
-function structuredNotice(
-    event: ComputePreparationEvent,
-): NonNullable<SystemNoticePayload["structured"]> {
+function structuredNotice(event: ComputePreparationEvent): ComputePreparationNotice {
     const { data } = event;
     return {
         computeInstanceId: event.computeInstanceId,
@@ -102,8 +110,10 @@ function structuredNotice(
     };
 }
 
-function validateNotice(payload: SystemNoticePayload): SystemNoticePayload {
-    return Value.Decode(systemNoticePayloadSchema, payload);
+function validateNotice(
+    payload: ComputePreparationNoticePayload,
+): ComputePreparationNoticePayload {
+    return Value.Decode(systemNoticePayloadSchema, payload) as ComputePreparationNoticePayload;
 }
 
 function truncate(value: string, maxLength: number): string {

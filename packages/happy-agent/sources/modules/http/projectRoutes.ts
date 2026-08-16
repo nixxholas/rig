@@ -1,20 +1,19 @@
-import { basename, join } from "node:path";
-import { stat } from "node:fs/promises";
+import type { IncomingMessage } from "node:http";
 
-import { Type, type Static } from "@sinclair/typebox";
+import { Type } from "@sinclair/typebox";
+import { projectRemoteSourceSchema, type Project } from "@slopus/happy-agent-modules";
+import type { Context } from "@steve.kite/stdlib";
 
 import type { LoadedHappyAgent } from "../agent/loadHappyAgent.js";
 import { readValidatedBody } from "./body.js";
 import { AgentHttpError, sendJson } from "./errors.js";
 import { createRouteGroup, type AgentHttpRouteGroup } from "./router.js";
-import {
-    assertGitTopLevel,
-    canonicalProjectDirectory,
-    createLocalProjectWorkspaceHost,
-    type ProjectWorkspaceHost,
-} from "../projects/ProjectHost.js";
+import { ProjectRegistrationError } from "../projects/ProjectRegistrationError.js";
+import type { ProjectWorkspaceService } from "../projects/ProjectWorkspaceService.js";
 import type { GitModule } from "../git/GitModule.js";
 import type { ProjectFilesModule } from "../files/ProjectFilesModule.js";
+
+const MAX_AVATAR_UPLOAD_BYTES = 8 * 1024 * 1024;
 
 const registerProjectSchema = Type.Object(
     {
@@ -31,19 +30,10 @@ const cloneProjectSchema = Type.Object(
         secret: Type.Optional(
             Type.Object({ kind: Type.Literal("github") }, { additionalProperties: false }),
         ),
-        source: Type.Union([
-            Type.Object(
-                {
-                    kind: Type.Literal("github"),
-                    repository: Type.String({ minLength: 1, maxLength: 512 }),
-                },
-                { additionalProperties: false },
-            ),
-            Type.Object(
-                { kind: Type.Literal("git"), url: Type.String({ minLength: 1, maxLength: 2_048 }) },
-                { additionalProperties: false },
-            ),
-        ]),
+        // The catalog only accepts an `owner/name` repository and a plain HTTPS remote with no
+        // credentials in it, and the clone boundary will only run that. Validating the same shape
+        // here turns a remote nobody can clone into a clear refusal instead of a failed project.
+        source: projectRemoteSourceSchema,
     },
     { additionalProperties: false },
 );
@@ -73,32 +63,33 @@ const settingsSchema = Type.Object(
     { additionalProperties: false },
 );
 const reorderSchema = Type.Object(
-    { afterId: Type.Union([Type.Null(), Type.String({ minLength: 1, maxLength: 128 })]) },
+    {
+        afterId: Type.Union([Type.Null(), Type.String({ minLength: 1, maxLength: 128 })]),
+        mutationId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+    },
     { additionalProperties: false },
 );
 const emptySchema = Type.Object({}, { additionalProperties: false });
-
-type RegisterProject = Static<typeof registerProjectSchema>;
 
 export interface ProjectRouteOptions {
     readonly agent: LoadedHappyAgent;
     readonly files?: ProjectFilesModule;
     readonly git?: GitModule;
-    readonly host?: ProjectWorkspaceHost;
+    readonly projects: ProjectWorkspaceService;
 }
 
 export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRouteGroup {
-    const host = options.host ?? createLocalProjectWorkspaceHost();
+    const projects = options.projects;
     const agentId = options.agent.agent.id;
-    const projects = options.agent.modules.projects;
+    const catalog = options.agent.modules.projects;
     return createRouteGroup("projects", [
         {
             method: "GET",
             path: "/v0/projects",
             handle: async ({ ctx, response }) => {
-                const rows = await projects.list(ctx, agentId, { includeArchived: true });
+                const rows = await projects.listProjects(ctx);
                 sendJson(response, 200, {
-                    projects: await Promise.all(rows.map((row) => toProject(row))),
+                    projects: await Promise.all(rows.map(async (row) => await toProject(ctx, row))),
                 });
             },
         },
@@ -107,8 +98,21 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
             path: "/v0/projects",
             handle: async ({ ctx, request, response }) => {
                 const body = await readValidatedBody(request, registerProjectSchema);
-                const project = await registerProject(ctx, body);
-                sendJson(response, 200, { project: await toProject(project) });
+                const project = await registration(async () => {
+                    const registered = await projects.registerProject(ctx, {
+                        path: body.path,
+                        ...(body.projectId === undefined ? {} : { projectId: body.projectId }),
+                    });
+                    await recordProjectEvent(
+                        ctx,
+                        options.agent,
+                        registered.id,
+                        "project.created",
+                        { project: await toProject(ctx, registered) },
+                    );
+                    return registered;
+                });
+                sendJson(response, 200, { project: await toProject(ctx, project) });
             },
         },
         {
@@ -119,337 +123,423 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
                 if (body.identity !== agentId) {
                     throw new AgentHttpError(403, "The clone identity does not match this agent.");
                 }
-                if (body.secret !== undefined && body.source.kind !== "github") {
-                    throw projectRegistrationError(
-                        "unsupported_git_source",
-                        "GitHub credentials require a GitHub source.",
-                    );
-                }
-                if (host.cloneRemote === undefined) {
-                    throw new AgentHttpError(503, "Remote project cloning is unavailable.");
-                }
-                const destination = join(
-                    options.agent.configuration.paths.publicHome,
-                    "Projects",
-                    body.name,
+                // The whole clone — staging folder, credentials, origin proof, the move into the
+                // managed folder — belongs to the host. The route's part is to hand over what the
+                // person asked for, including the credential kind, and to say where it landed.
+                const project = await registration(
+                    async () =>
+                        await projects.createRemoteProject(ctx, {
+                            name: body.name,
+                            ...(body.projectId === undefined ? {} : { projectId: body.projectId }),
+                            ...(body.secret === undefined ? {} : { secret: body.secret }),
+                            source:
+                                body.source.kind === "github"
+                                    ? { kind: "github", repository: body.source.repository }
+                                    : { kind: "git", url: body.source.url },
+                        }),
                 );
-                await host.cloneRemote(ctx, {
-                    destination,
-                    source:
-                        body.source.kind === "github"
-                            ? { kind: "github", repository: body.source.repository }
-                            : { kind: "git", url: body.source.url },
+                await recordProjectEvent(ctx, options.agent, project.id, "project.created", {
+                    project: await toProject(ctx, project),
                 });
-                const project = await registerProject(ctx, {
-                    path: destination,
-                    ...(body.projectId === undefined ? {} : { projectId: body.projectId }),
-                });
-                sendJson(response, 202, { project: await toProject(project) });
+                sendJson(response, 202, { project: await toProject(ctx, project) });
             },
         },
         {
             method: "GET",
             path: "/v0/projects/:projectId",
             handle: async ({ ctx, response, url }) => {
-                const projectId = requireParam(
-                    requireParams(url.pathname, "/v0/projects/:projectId"),
-                    "projectId",
-                );
-                const project = await projects.get(ctx, agentId, projectId);
-                if (project === undefined)
-                    throw new AgentHttpError(404, "The project was not found.");
-                sendJson(response, 200, { project: await toProject(project) });
+                const projectId = pathParam(url.pathname, "/v0/projects/:projectId", "projectId");
+                const project = await requireProject(ctx, projectId);
+                sendJson(response, 200, { project: await toProject(ctx, project) });
             },
         },
         {
             method: "PATCH",
             path: "/v0/projects/:projectId",
             handle: async ({ ctx, request, response, url }) => {
-                const projectId = requireParam(
-                    requireParams(url.pathname, "/v0/projects/:projectId"),
-                    "projectId",
-                );
-                const current = await requireProject(ctx, projectId);
-                assertVersion(request.headers["if-match"], current.updatedAt, "project");
+                const projectId = pathParam(url.pathname, "/v0/projects/:projectId", "projectId");
+                const expectedVersion = await expectVersion(ctx, request, projectId);
                 const body = await readValidatedBody(request, renameProjectSchema);
-                const project = await projects.rename(ctx, agentId, projectId, { name: body.name });
-                await emitProjectEvent(ctx, options.agent, projectId, "project.updated", {
-                    mutationId: body.mutationId,
-                    project: await toProject(project),
+                const project = await mutate(ctx, projectId, expectedVersion, async () => {
+                    return await projects.renameProject(
+                        ctx,
+                        projectId,
+                        body.name,
+                        expectedVersion,
+                    );
                 });
-                sendJson(response, 200, { project: await toProject(project) });
+                await recordProjectEvent(ctx, options.agent, projectId, "project.updated", {
+                    ...(body.mutationId === undefined ? {} : { mutationId: body.mutationId }),
+                    project: await toProject(ctx, project),
+                });
+                sendJson(response, 200, { project: await toProject(ctx, project) });
             },
         },
         {
             method: "PUT",
             path: "/v0/projects/:projectId/settings",
             handle: async ({ ctx, request, response, url }) => {
-                const projectId = requireParam(
-                    requireParams(url.pathname, "/v0/projects/:projectId/settings"),
+                const projectId = pathParam(
+                    url.pathname,
+                    "/v0/projects/:projectId/settings",
                     "projectId",
                 );
-                const current = await requireProject(ctx, projectId);
-                assertVersion(request.headers["if-match"], current.updatedAt, "project");
+                const expectedVersion = await expectVersion(ctx, request, projectId);
                 const body = await readValidatedBody(request, settingsSchema);
-                const settings =
-                    body.defaultWorkspaceCompute === undefined
-                        ? {}
-                        : { defaultWorkspaceCompute: body.defaultWorkspaceCompute };
-                const result = await projects.updateSettings(ctx, agentId, projectId, settings);
-                const project = await requireProject(ctx, projectId);
-                await emitProjectEvent(ctx, options.agent, projectId, "project.updated", {
-                    mutationId: body.mutationId,
-                    project: await toProject(project),
+                const project = await mutate(ctx, projectId, expectedVersion, async () => {
+                    return await projects.setProjectSettings(
+                        ctx,
+                        projectId,
+                        body.defaultWorkspaceCompute === undefined
+                            ? {}
+                            : { defaultWorkspaceCompute: body.defaultWorkspaceCompute },
+                        expectedVersion,
+                    );
                 });
-                sendJson(response, 200, {
-                    project: await toProject(project),
-                    settings: result.settings,
+                const settings = await catalog.readSettings(ctx, agentId, projectId);
+                await recordProjectEvent(ctx, options.agent, projectId, "project.updated", {
+                    ...(body.mutationId === undefined ? {} : { mutationId: body.mutationId }),
+                    project: await toProject(ctx, project),
                 });
+                sendJson(response, 200, { project: await toProject(ctx, project), settings });
             },
         },
         {
             method: "POST",
             path: "/v0/projects/:projectId/refresh",
             handle: async ({ ctx, response, url }) => {
-                const projectId = requireParam(
-                    requireParams(url.pathname, "/v0/projects/:projectId/refresh"),
+                const projectId = pathParam(
+                    url.pathname,
+                    "/v0/projects/:projectId/refresh",
                     "projectId",
                 );
-                const project = await requireProject(ctx, projectId);
-                sendJson(response, 202, { project: await toProject(project) });
+                // Refresh really re-runs setup: the row goes back to initializing and the host
+                // starts the work again. The answer is 202 because the work outlives the request.
+                const project = await registration(async () => {
+                    const refreshed = await projects.refreshProject(ctx, projectId);
+                    if (refreshed === undefined) {
+                        throw new AgentHttpError(404, "The project was not found.");
+                    }
+                    return refreshed;
+                });
+                await recordProjectEvent(ctx, options.agent, projectId, "project.updated", {
+                    project: await toProject(ctx, project),
+                });
+                sendJson(response, 202, { project: await toProject(ctx, project) });
             },
         },
         {
             method: "POST",
             path: "/v0/projects/:projectId/reorder",
-            handle: async ({ request }) => {
-                await readValidatedBody(request, reorderSchema);
-                throw new AgentHttpError(
-                    503,
-                    "Project ordering is not available in the Happy Agent host.",
+            handle: async ({ ctx, request, response, url }) => {
+                const projectId = pathParam(
+                    url.pathname,
+                    "/v0/projects/:projectId/reorder",
+                    "projectId",
                 );
+                const expectedVersion = await expectVersion(ctx, request, projectId);
+                const body = await readValidatedBody(request, reorderSchema);
+                const project = await mutate(ctx, projectId, expectedVersion, async () => {
+                    return await projects.reorderProject(
+                        ctx,
+                        projectId,
+                        body.afterId,
+                        expectedVersion,
+                    );
+                });
+                await recordProjectEvent(ctx, options.agent, projectId, "project.updated", {
+                    ...(body.mutationId === undefined ? {} : { mutationId: body.mutationId }),
+                    project: await toProject(ctx, project),
+                });
+                sendJson(response, 200, { project: await toProject(ctx, project) });
             },
         },
         {
             method: "POST",
             path: "/v0/projects/:projectId/archive",
             handle: async ({ ctx, request, response, url }) => {
-                const projectId = requireParam(
-                    requireParams(url.pathname, "/v0/projects/:projectId/archive"),
+                const projectId = pathParam(
+                    url.pathname,
+                    "/v0/projects/:projectId/archive",
                     "projectId",
                 );
-                const current = await requireProject(ctx, projectId);
-                assertVersion(request.headers["if-match"], current.updatedAt, "project");
+                await expectVersion(ctx, request, projectId);
                 await readValidatedBody(request, emptySchema);
-                const project = await projects.archive(ctx, agentId, projectId);
-                await emitProjectEvent(ctx, options.agent, projectId, "project.updated", {
-                    project: await toProject(project),
+                // Archival is the decision; removing the workspaces' folders is background work
+                // the host owns. The 202 says exactly that: the row is already archived.
+                const project = await projects.archiveProject(ctx, projectId);
+                if (project === undefined) {
+                    throw new AgentHttpError(404, "The project was not found.");
+                }
+                await recordProjectEvent(ctx, options.agent, projectId, "project.updated", {
+                    project: await toProject(ctx, project),
                 });
-                sendJson(response, 202, { project: await toProject(project) });
+                sendJson(response, 202, { project: await toProject(ctx, project) });
             },
         },
         {
             method: "PUT",
             path: "/v0/projects/:projectId/avatar",
-            handle: async ({ request }) => {
-                await drainRequest(request);
-                throw new AgentHttpError(
-                    503,
-                    "Project avatars are not available in the Happy Agent host.",
+            handle: async ({ ctx, request, response, url }) => {
+                const projectId = pathParam(
+                    url.pathname,
+                    "/v0/projects/:projectId/avatar",
+                    "projectId",
                 );
+                const expectedVersion = await expectVersion(ctx, request, projectId);
+                const bytes = await readImageBody(request);
+                const project = await mutate(ctx, projectId, expectedVersion, async () => {
+                    return await projects.setAvatar(
+                        ctx,
+                        projectId,
+                        "user",
+                        bytes,
+                        expectedVersion,
+                    );
+                });
+                await recordProjectEvent(ctx, options.agent, projectId, "project.updated", {
+                    project: await toProject(ctx, project),
+                });
+                sendJson(response, 200, { project: await toProject(ctx, project) });
             },
         },
         {
             method: "DELETE",
             path: "/v0/projects/:projectId/avatar",
-            handle: async () => {
-                throw new AgentHttpError(
-                    503,
-                    "Project avatars are not available in the Happy Agent host.",
+            handle: async ({ ctx, request, response, url }) => {
+                const projectId = pathParam(
+                    url.pathname,
+                    "/v0/projects/:projectId/avatar",
+                    "projectId",
                 );
+                const expectedVersion = await expectVersion(ctx, request, projectId);
+                const project = await mutate(ctx, projectId, expectedVersion, async () => {
+                    return await projects.clearAvatar(ctx, projectId);
+                });
+                await recordProjectEvent(ctx, options.agent, projectId, "project.updated", {
+                    project: await toProject(ctx, project),
+                });
+                sendJson(response, 200, { project: await toProject(ctx, project) });
             },
         },
         {
             method: "GET",
             path: "/v0/project-assets/:assetHash",
-            handle: async ({ response, url }) => {
-                const hash = url.pathname.split("/").at(-1) ?? "";
-                if (!/^[0-9a-f]{64}$/.test(hash) || host.asset === undefined) {
-                    throw new AgentHttpError(404, "The project asset was not found.");
-                }
-                const asset = await host.asset(hash);
-                if (asset === undefined)
-                    throw new AgentHttpError(404, "The project asset was not found.");
-                response.writeHead(200, {
-                    "cache-control": "public, max-age=31536000, immutable",
-                    "content-type": asset.mediaType,
-                    etag: `"${hash}"`,
-                });
-                response.end(asset.body);
+            handle: async ({ ctx, response, url }) => {
+                await sendAvatar(ctx, response, url.pathname.split("/").at(-1) ?? "");
+            },
+        },
+        {
+            method: "GET",
+            path: "/v0/projects/avatars/:assetHash",
+            handle: async ({ ctx, response, url }) => {
+                await sendAvatar(ctx, response, url.pathname.split("/").at(-1) ?? "");
             },
         },
     ]);
 
-    async function registerProject(
-        ctx: import("@steve.kite/stdlib").Context,
-        body: RegisterProject,
-    ) {
-        const canonical = await canonicalProjectDirectory(body.path).catch((error: unknown) => {
-            throw projectRegistrationError(
-                "path_missing",
-                error instanceof Error ? error.message : "The project folder does not exist.",
-            );
-        });
-        await assertGitTopLevel(host, canonical).catch((error: unknown) => {
-            throw projectRegistrationError(
-                "not_git_repository",
-                error instanceof Error
-                    ? error.message
-                    : "The project folder is not a Git repository.",
-            );
-        });
-        const name = basename(canonical);
-        try {
-            const existing = (await projects.list(ctx, agentId, { includeArchived: true })).find(
-                (candidate) => candidate.repositoryRef === canonical,
-            );
-            if (existing !== undefined) {
-                if (body.projectId !== undefined && existing.id !== body.projectId) {
-                    throw projectRegistrationError(
-                        "project_id_conflict",
-                        "The project ID is already in use.",
-                    );
-                }
-                return existing;
-            }
-            const project =
-                body.projectId === undefined
-                    ? (
-                          await projects.ensure(ctx, agentId, {
-                              name,
-                              repositoryRef: canonical,
-                          })
-                      ).project
-                    : await projects.create(ctx, agentId, {
-                          id: body.projectId,
-                          name,
-                          repositoryRef: canonical,
-                      });
-            await emitProjectEvent(ctx, options.agent, project.id, "project.created", {
-                project: await toProject(project),
-            });
-            return project;
-        } catch (error) {
-            if (error instanceof AgentHttpError) throw error;
-            throw projectRegistrationError("project_path_conflict", errorMessage(error));
+    async function sendAvatar(
+        ctx: Context,
+        response: import("node:http").ServerResponse,
+        hash: string,
+    ): Promise<void> {
+        if (!/^[0-9a-f]{64}$/.test(hash)) {
+            throw new AgentHttpError(404, "The project asset was not found.");
         }
+        const asset = await projects.avatarAsset(ctx, hash);
+        if (asset === undefined) {
+            throw new AgentHttpError(404, "The project asset was not found.");
+        }
+        response.writeHead(200, {
+            "cache-control": "public, max-age=31536000, immutable",
+            "content-type": asset.mediaType,
+            etag: `"${hash}"`,
+        });
+        response.end(Buffer.from(asset.bytes));
     }
 
-    async function requireProject(ctx: import("@steve.kite/stdlib").Context, projectId: string) {
-        const project = await projects.get(ctx, agentId, projectId);
+    async function requireProject(ctx: Context, projectId: string): Promise<Project> {
+        const project = await projects.getProject(ctx, projectId);
         if (project === undefined) throw new AgentHttpError(404, "The project was not found.");
         return project;
     }
 
-    async function toProject(
-        project: Awaited<ReturnType<typeof projects.get>> extends infer T
-            ? Exclude<T, undefined>
-            : never,
-    ) {
-        let present = false;
-        try {
-            present = (await stat(project.repositoryRef)).isDirectory();
-        } catch {
-            present = false;
+    /**
+     * Reads `If-Match` and answers before doing any work when it is already stale.
+     *
+     * The header is a version, not a timestamp, and the same number is handed to the mutation so
+     * the real check happens inside the module's transaction. This up-front read only turns the
+     * common case into a 409 that carries the row the client is missing.
+     */
+    async function expectVersion(
+        ctx: Context,
+        request: IncomingMessage,
+        projectId: string,
+    ): Promise<number> {
+        const current = await requireProject(ctx, projectId);
+        const header = request.headers["if-match"];
+        if (typeof header !== "string") {
+            throw new AgentHttpError(400, "The project version is invalid.");
         }
+        const parsed = Number.parseInt(header.trim().replace(/^W\/|"/g, ""), 10);
+        if (!Number.isSafeInteger(parsed) || parsed < 1) {
+            throw new AgentHttpError(400, "The project version is invalid.");
+        }
+        if (parsed !== current.version) {
+            throw new AgentHttpError(409, "The project has changed.", {
+                currentVersion: current.version,
+                project: await toProject(ctx, current),
+            });
+        }
+        return parsed;
+    }
+
+    /**
+     * Runs one guarded mutation and turns a lost race into the authoritative row.
+     *
+     * The module compares the expected version inside its own transaction, so a failure here can
+     * mean either a conflict or a real error. Re-reading the row is what tells them apart without
+     * matching on a message: a row that moved on is a 409 with what it says now.
+     */
+    async function mutate(
+        ctx: Context,
+        projectId: string,
+        expectedVersion: number,
+        run: () => Promise<Project | undefined>,
+    ): Promise<Project> {
+        let updated: Project | undefined;
+        try {
+            updated = await run();
+        } catch (error) {
+            if (error instanceof AgentHttpError) throw error;
+            const now = await projects.getProject(ctx, projectId);
+            if (now !== undefined && now.version !== expectedVersion) {
+                throw new AgentHttpError(409, "The project has changed.", {
+                    currentVersion: now.version,
+                    project: await toProject(ctx, now),
+                });
+            }
+            throw registrationError(error);
+        }
+        if (updated === undefined) throw new AgentHttpError(404, "The project was not found.");
+        return updated;
+    }
+
+    /**
+     * Records what a mutation did without letting the journal undo it.
+     *
+     * The row is already committed by the time this runs. A client that misses the notification
+     * re-reads and finds the truth; a client told the whole mutation failed would be wrong.
+     */
+    async function recordProjectEvent(
+        ctx: Context,
+        agent: LoadedHappyAgent,
+        projectId: string,
+        type: "project.created" | "project.updated",
+        payload: Record<string, unknown>,
+    ): Promise<void> {
+        try {
+            await agent.modules.events.record(ctx, {
+                agentId: agent.agent.id,
+                payload: { projectId, ...payload },
+                type,
+            });
+        } catch (error) {
+            ctx.log.warn(
+                "A committed project change was not announced to clients.",
+                { projectId, type },
+                error,
+            );
+        }
+    }
+
+    /** The wire form of one project. Every field comes from the record, none is invented. */
+    async function toProject(ctx: Context, project: Project): Promise<Record<string, unknown>> {
+        const settings = await catalog.readSettings(ctx, agentId, project.id).catch(() => ({}));
         return {
             archivedAt: project.archivedAt,
+            avatar: project.avatar,
             createdAt: project.createdAt,
-            defaultBranch: undefined,
-            git: undefined,
+            defaultBranch: project.defaultBranch,
+            description: project.description,
+            git: {
+                ahead: project.gitAhead,
+                behind: project.gitBehind,
+                branch: project.gitBranch,
+                detached: project.gitDetached,
+                head: project.gitHead,
+                upstream: project.gitUpstream,
+            },
             id: project.id,
-            initializationAttempt: 1,
-            initializationStatus: "ready" as const,
-            kind: "regular" as const,
+            initializationAttempt: project.initializationAttempt,
+            initializationError: project.initializationError,
+            initializationStatus: project.initializationStatus,
+            kind: project.kind,
             name: project.name,
-            nameSource: "user" as const,
-            orderKey: project.id,
+            nameSource: project.nameSource,
+            orderKey: project.orderKey,
             path: project.repositoryRef,
-            presence: present ? ("present" as const) : ("missing" as const),
-            settings: { defaultWorkspaceCompute: { type: "local" as const, generation: 0 } },
-            storageKey: project.repositoryRef,
+            presence: project.presence,
+            remoteSource: project.remoteSource,
+            requiredSecretKind: project.requiredSecretKind,
+            settings,
+            status: project.status,
+            storageKey: project.storageKey,
             updatedAt: project.updatedAt,
-            version: project.updatedAt,
-            worktreeSupport: "unknown" as const,
+            version: project.version,
+            worktreeSupport: project.worktreeSupport,
+            worktreeUnsupportedReason: project.worktreeUnsupportedReason,
         };
     }
 }
 
-function requireParams(pathname: string, template: string): Record<string, string> {
+/** Keeps the host's typed refusals as the codes v1 clients already show a person. */
+async function registration<T>(run: () => Promise<T>): Promise<T> {
+    try {
+        return await run();
+    } catch (error) {
+        throw registrationError(error);
+    }
+}
+
+function registrationError(error: unknown): unknown {
+    if (error instanceof AgentHttpError) return error;
+    if (error instanceof ProjectRegistrationError) {
+        return new AgentHttpError(400, error.message, { code: error.code });
+    }
+    return error;
+}
+
+function pathParam(pathname: string, template: string, name: string): string {
     const actual = pathname.split("/").filter(Boolean);
     const expected = template.split("/").filter(Boolean);
     if (actual.length !== expected.length) throw new AgentHttpError(404, "Route not found.");
-    const params: Record<string, string> = {};
+    let found: string | undefined;
     expected.forEach((value, index) => {
-        if (value.startsWith(":")) params[value.slice(1)] = decodeURIComponent(actual[index] ?? "");
-        else if (value !== actual[index]) throw new AgentHttpError(404, "Route not found.");
+        if (!value.startsWith(":")) {
+            if (value !== actual[index]) throw new AgentHttpError(404, "Route not found.");
+            return;
+        }
+        if (value.slice(1) === name) found = decodeURIComponent(actual[index] ?? "");
     });
-    return params;
-}
-
-function requireParam(params: Record<string, string>, name: string): string {
-    const value = params[name];
-    if (value === undefined || value.length === 0)
+    if (found === undefined || found.length === 0) {
         throw new AgentHttpError(404, "Route not found.");
-    return value;
-}
-
-function assertVersion(
-    value: string | string[] | undefined,
-    current: number,
-    entity: string,
-): void {
-    if (typeof value !== "string")
-        throw new AgentHttpError(400, `The ${entity} version is invalid.`);
-    let parsed: unknown;
-    try {
-        parsed = JSON.parse(value);
-    } catch {
-        throw new AgentHttpError(400, `The ${entity} version is invalid.`);
     }
-    if (!Number.isSafeInteger(parsed) || (parsed as number) < 0 || parsed !== current) {
-        if (parsed !== current)
-            throw new AgentHttpError(409, `The ${entity} has changed.`, {
-                currentVersion: current,
-            });
-        throw new AgentHttpError(400, `The ${entity} version is invalid.`);
+    return found;
+}
+
+/** Reads an avatar upload, refusing anything past the limit rather than buffering it. */
+async function readImageBody(request: IncomingMessage): Promise<Buffer> {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for await (const chunk of request) {
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
+        total += buffer.byteLength;
+        if (total > MAX_AVATAR_UPLOAD_BYTES) {
+            throw new AgentHttpError(413, "The project image is larger than the allowed limit.");
+        }
+        chunks.push(buffer);
     }
-}
-
-async function emitProjectEvent(
-    ctx: import("@steve.kite/stdlib").Context,
-    agent: LoadedHappyAgent,
-    projectId: string,
-    type: "project.created" | "project.updated",
-    payload: Record<string, unknown>,
-): Promise<void> {
-    await agent.modules.events.record(ctx, {
-        agentId: agent.agent.id,
-        payload: { projectId, ...payload },
-        type,
-    });
-}
-
-function projectRegistrationError(code: string, message: string): AgentHttpError {
-    return new AgentHttpError(400, message, { code });
-}
-
-function errorMessage(error: unknown): string {
-    return error instanceof Error ? error.message : "The project operation failed.";
-}
-
-async function drainRequest(request: import("node:http").IncomingMessage): Promise<void> {
-    for await (const _chunk of request) {
-        // Consume the body before returning the error so the keep-alive socket remains usable.
-    }
+    if (total === 0) throw new AgentHttpError(400, "The project image is empty.");
+    return Buffer.concat(chunks);
 }

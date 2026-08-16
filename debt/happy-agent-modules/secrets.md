@@ -9,7 +9,7 @@ the v1 reference implementation being replaced), read against root `AGENTS.md` a
 
 ## Summary
 
-The module holds a catalog of secret *references* — id, description, environment-variable names,
+The module holds a catalog of secret _references_ — id, description, environment-variable names,
 revision — and a set of `(scopeRef, secretId)` attachments, and gives the model four tools:
 `list_secrets`, `reference_secret`, `attach_secret`, `detach_secret`. Values never enter a schema,
 event, tool argument, or formatted string; that invariant is real and well enforced, and the
@@ -26,12 +26,12 @@ reviewed Full-access execution.
   making a credential reachable by a later command in a scope — into an unreviewed tool call
   (`tools/attach_secret.ts:36`). The README defends this on the grounds that the tools cannot "leak a
   value or touch anything outside the secret catalog" (README:44-46), which is true and beside the
-  point: the catalog *is* the authorization surface. An agent that can attach `deploy-credentials`
+  point: the catalog _is_ the authorization surface. An agent that can attach `deploy-credentials`
   to its own scope without review has changed what the next reviewed command will be handed. This is
   the most consequential protection lost in the rewrite.
 - **New capability — model-facing attach/detach.** v1's entire model-facing secrets surface is
   `request_secret` (`rig/sources/tools/secrets/requestSecret.ts:43-87`), which prepares a
-  metadata-only attachment asking the *human* to enter a value in the client. Which secrets exist is
+  metadata-only attachment asking the _human_ to enter a value in the client. Which secrets exist is
   told to the model in the system prompt (`createSecretInstructions.ts:6-13`), and which secrets a
   given command gets is chosen per command through the shell tool's `secrets` argument. Giving the
   model attach/detach is a real expansion of agent authority and should be an explicit product
@@ -62,7 +62,7 @@ reviewed Full-access execution.
 1. **`attach_secret` grants credential availability without review.**
    `tools/attach_secret.ts:36` — `shouldReviewInAutoMode: () => false`. Even accepting that the
    module's own boundary is metadata-only, AGENTS.md requires each tool to own its Auto behavior
-   against what the action *enables*, and requires an approval to disclose a specialized boundary via
+   against what the action _enables_, and requires an approval to disclose a specialized boundary via
    `describeAutoPermissionAction`. Neither `attach_secret` nor `detach_secret` sets one.
    `detach_secret` has the mirror problem in the other direction: silently removing a credential a
    running workflow depends on.
@@ -107,7 +107,7 @@ all, `resolveForHost` and `resolveForCommand` are deliberately not tools, and ev
 model-facing string is validated and deep-frozen before it leaves the module (README:152-155). The
 `resolveForCommand` contract is a genuine improvement over v1's environment merge: it returns
 `{ environment, hiddenEnvironmentVariables }` so the command host removes ambient names
-case-insensitively *before* adding resolved values, and it rejects a case-insensitive collision
+case-insensitively _before_ adding resolved values, and it rejects a case-insensitive collision
 between two selected secrets rather than applying last-write-wins (README:105-117) — real
 correctness gained instead of silently shadowing a variable. Reserving `github` and `project-git` as
 host-managed identities prevents an agent from shadowing a managed credential. The retry story is

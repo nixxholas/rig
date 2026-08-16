@@ -1146,6 +1146,7 @@ export type SessionEvent =
     | AgentStreamEvent
     | ProviderStreamEvent
     | AgentMessageEvent
+    | PermissionReviewEvent
     | SystemNoticeEvent
     | RunFinishedEvent
     | ProviderQuotaObservedEvent
@@ -1267,6 +1268,20 @@ export type AgentMessageEvent = BaseSessionEvent<
         message: Message;
         runId: string;
     }
+>;
+
+/**
+ * A reviewed or denied Auto action, projected as a tool-row annotation.
+ *
+ * It carries no run id, and deliberately so: the permissions module that produces it runs inside a
+ * tool call, and Rig's frozen agent core exposes no owning run id to a module. The annotation is
+ * addressed by tool-call id, which is all a client needs to attach it, so a run id would be
+ * invented rather than real. It applies exactly like the same `permission_review` loop event
+ * delivered inside an `agent_event`, but it never takes part in run-lifecycle bookkeeping.
+ */
+export type PermissionReviewEvent = BaseSessionEvent<
+    "permission_review",
+    { event: Extract<AgentLoopEvent, { type: "permission_review" }> }
 >;
 
 /** A visible service row that has no agent-run lifecycle or model-context effect. */

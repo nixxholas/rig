@@ -8,7 +8,7 @@ to `packages/rig/sources/tools/providerUsage/`, against root `AGENTS.md` and mas
 
 The smallest and best-proportioned module of the five: one indexed table of usage records, one tool
 (`get_usage`) returning an aggregate summary of an agent's token and cost usage, and a `reset`. It has one
-serious bug. Retention trims to the newest 500 records *across all agents*, so the figure the README calls
+serious bug. Retention trims to the newest 500 records _across all agents_, so the figure the README calls
 "how much has this agent cost so far" is actually a shared rolling window that a second busy agent can
 silently empty — and the code clamps the record count so the discrepancy never shows.
 
@@ -30,7 +30,7 @@ silently empty — and the code clamps the record count so the discrepancy never
 2. **The retention trim is global, not per agent.** `record()` (`impl/usageDatabase.ts:168-187`) inserts a
    row and then deletes everything past the newest `MAX_USAGE_RECORDS` rows with no agent predicate:
    `DELETE … WHERE record_id IN (SELECT record_id … ORDER BY finished_at DESC, record_id DESC LIMIT
-   9223372036854775807 OFFSET ${MAX_USAGE_RECORDS})`. A busy second agent evicts a quiet first agent's
+9223372036854775807 OFFSET ${MAX_USAGE_RECORDS})`. A busy second agent evicts a quiet first agent's
    history. (The `LIMIT 9223372036854775807` is the SQLite idiom for "offset without limit" and works, but it
    deserves the comment it does not have.)
 3. **"Totals" are a window, and the clamps hide it.** `aggregate()` (`impl/usageDatabase.ts:64-166`) sums at

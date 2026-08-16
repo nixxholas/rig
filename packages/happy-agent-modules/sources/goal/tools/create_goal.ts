@@ -30,11 +30,7 @@ Do not infer a goal from an ordinary task. A new goal cannot replace an unfinish
         execute: async (ctx, { objective }, call) =>
             await ctx.inTx(async (txCtx) => {
                 const activation = await goals.setGoal(txCtx, agentId, objective, call.id);
-                await observeActiveLifecycle(
-                    txCtx,
-                    activation.goal,
-                    activation.lifecycleId,
-                );
+                await observeActiveLifecycle(txCtx, activation.goal, activation.lifecycleId);
                 return { goal: activation.goal };
             }),
         toLLM: ({ goal }) => [

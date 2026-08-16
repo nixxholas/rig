@@ -15,20 +15,11 @@ import { Value } from "@sinclair/typebox/value";
 import { mapAsyncLock, type Context, type MapAsyncLock } from "@steve.kite/stdlib";
 
 import type { ComputeSessionActivity, ComputeSessionSnapshot } from "./Compute.js";
+import { computeToolVendor, type ComputeToolVendor } from "./ComputeToolVendor.js";
+import { computeInstructionsForVendor } from "./impl/computeInstructionsForVendor.js";
 import { FileReadLog } from "./impl/FileReadLog.js";
-import { editFileTool } from "./tools/edit_file.js";
-import { findFilesTool } from "./tools/find_files.js";
-import { listDirectoryTool } from "./tools/list_directory.js";
-import { deleteFileTool } from "./tools/delete_file.js";
-import { moveFileTool } from "./tools/move_file.js";
-import { readCommandOutputTool } from "./tools/read_command_output.js";
-import { readFileTool } from "./tools/read_file.js";
-import { runCommandTool } from "./tools/run_command.js";
-import { searchFilesTool } from "./tools/search_files.js";
-import { sendCommandInputTool } from "./tools/send_command_input.js";
-import { stopCommandTool } from "./tools/stop_command.js";
-import { viewImageTool } from "./tools/view_image.js";
-import { writeFileTool } from "./tools/write_file.js";
+import { assembleComputeTools } from "./tools/assembleComputeTools.js";
+import { assembleReviewerTools } from "./tools/assembleReviewerTools.js";
 
 const exact = { additionalProperties: false } as const;
 const callableSchema = Type.Function([], Type.Any());
@@ -146,6 +137,14 @@ export class ComputeModule implements AgentModule {
     readonly #computeLocks: MapAsyncLock<string> = mapAsyncLock<string>();
     readonly #activeOperations = new Set<Promise<unknown>>();
     readonly #readLocks: MapAsyncLock<string> = mapAsyncLock<string>();
+    /**
+     * Read locks for the automatic permission reviewer's tools. The reviewer runs over a compute the
+     * host owns for it — a different object entirely from the per-agent computes this module caches —
+     * so its file-read bookkeeping must not share the main agents' lock map. Keying reviewer reads
+     * here keeps a review's reads consistent among themselves without ever serializing against, or
+     * being serialized by, a reviewed agent's own reads.
+     */
+    readonly #reviewerReadLocks: MapAsyncLock<string> = mapAsyncLock<string>();
     #closed = false;
     #disposePromise: Promise<void> | undefined;
 
@@ -234,7 +233,7 @@ export class ComputeModule implements AgentModule {
 
     readonly instructions = async (ctx: Context, scope: AgentModuleScope): Promise<string> => {
         const compute = await this.resolve(ctx, scope.agent.id);
-        return compute === undefined ? "" : computeInstructions();
+        return compute === undefined ? "" : computeInstructionsForVendor(vendorFor(scope));
     };
 
     readonly tools = async (
@@ -244,8 +243,26 @@ export class ComputeModule implements AgentModule {
         const compute = await this.resolve(ctx, scope.agent.id);
         if (compute === undefined) return [];
         const reads = new FileReadLog(scope.kv, this.#readLocks, scope.agent.id);
-        return computeTools(compute, reads);
+        return assembleComputeTools(vendorFor(scope), compute, reads);
     };
+
+    /**
+     * Build the fixed, read-only tool array the automatic permission reviewer runs with, over a
+     * compute the host owns for the reviewer.
+     *
+     * This is the reviewer counterpart to {@link tools}, but it is a pure builder rather than a
+     * module hook: the reviewer lives in its own private agent system that this `ComputeModule`
+     * never serves, so the host owns the reviewer's compute and hands it in here. The vendor is the
+     * reviewer's own model route — a Claude review gets Claude's read-only tools, a Codex review
+     * Codex's — chosen from `scope.agent.model` exactly as an ordinary agent's tools are chosen from
+     * its model, so the reviewer sees the tool names it was trained on. Read bookkeeping uses the
+     * reviewer's own read-lock map, under the reviewer's own agent ID and store, so a reviewer's file
+     * reads stay consistent among themselves without touching any main agent's read log.
+     */
+    reviewerTools(scope: AgentModuleScope, compute: HostCompute): readonly AnyAgentTool[] {
+        const reads = new FileReadLog(scope.kv, this.#reviewerReadLocks, scope.agent.id);
+        return assembleReviewerTools(vendorFor(scope), compute, reads);
+    }
 
     readonly agentArchived = async (
         ctx: Context,
@@ -292,29 +309,14 @@ export class ComputeModule implements AgentModule {
     }
 }
 
-function computeInstructions(): string {
-    return [
-        "Read a file before changing it. write_file and edit_file refuse a file you have not read, and refuse one that changed on disk after you read it; read it again and reconsider the change.",
-        "A command that outlives its timeout is not killed. It keeps running and comes back with a command ID, and every later read of it returns only what is new.",
-    ].join("\n");
-}
-
-function computeTools(compute: HostCompute, reads: FileReadLog): readonly AnyAgentTool[] {
-    return [
-        readFileTool(compute, reads),
-        viewImageTool(compute, reads),
-        writeFileTool(compute, reads),
-        editFileTool(compute, reads),
-        deleteFileTool(compute, reads),
-        moveFileTool(compute, reads),
-        listDirectoryTool(compute),
-        findFilesTool(compute),
-        searchFilesTool(compute),
-        runCommandTool(compute),
-        readCommandOutputTool(compute),
-        sendCommandInputTool(compute),
-        stopCommandTool(compute),
-    ];
+/** Whose tools this agent's model was trained on, which is what it should be handed. */
+function vendorFor(scope: AgentModuleScope): ComputeToolVendor {
+    return computeToolVendor({
+        model: scope.agent.model,
+        ...(scope.agent.providerKind === undefined
+            ? {}
+            : { providerKind: scope.agent.providerKind }),
+    });
 }
 
 function runtimeCompute(compute: Compute): unknown {

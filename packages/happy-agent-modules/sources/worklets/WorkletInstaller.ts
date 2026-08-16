@@ -1,13 +1,5 @@
 import { randomUUID } from "node:crypto";
-import {
-    lstat,
-    mkdir,
-    opendir,
-    realpath,
-    rename,
-    rm,
-    writeFile,
-} from "node:fs/promises";
+import { lstat, mkdir, opendir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import { Type, type Static } from "@sinclair/typebox";
@@ -145,9 +137,7 @@ export class WorkletInstaller {
             await this.#removeCodeFromBase(base, root);
             return;
         }
-        const knownVersions = new Set(
-            worklet.versions.map((version) => version.version),
-        );
+        const knownVersions = new Set(worklet.versions.map((version) => version.version));
         await this.#reconcileKnownBase(base, root, knownVersions);
     }
 
@@ -198,11 +188,7 @@ export class WorkletInstaller {
                         `The worklet version ${String(input.version)} is not installed.`,
                     );
                 }
-                await this.#assertRealDirectory(
-                    targetVersionDir,
-                    root,
-                    "existing worklet version",
-                );
+                await this.#assertRealDirectory(targetVersionDir, root, "existing worklet version");
             } else {
                 if (existingVersion) {
                     throw new WorkletInstallError(
@@ -221,11 +207,7 @@ export class WorkletInstaller {
 
             const versionDirectory = existingVersion ? targetVersionDir : stagingVersion;
             if (existingVersion) {
-                await this.#assertVersionMetadata(
-                    targetVersionDir,
-                    input.version,
-                    input.sourceRef,
-                );
+                await this.#assertVersionMetadata(targetVersionDir, input.version, input.sourceRef);
             }
             const operations = await this.#readOperations(versionDirectory);
             if (!existingVersion && input.version === 1) {
@@ -291,10 +273,7 @@ export class WorkletInstaller {
             );
         }
         if (pending.icon !== undefined) {
-            await this.#assertStagedIcon(
-                pending.icon.staging,
-                await this.#prepareRoot(),
-            );
+            await this.#assertStagedIcon(pending.icon.staging, await this.#prepareRoot());
             const targetIconFacts = await maybeLstat(pending.icon.target);
             if (targetIconFacts?.isSymbolicLink()) {
                 throw new WorkletInstallError(
@@ -329,10 +308,7 @@ export class WorkletInstaller {
                         `The existing worklet icon ${JSON.stringify(pending.icon.target)} is invalid.`,
                     );
                 }
-                pending.icon.orphan = join(
-                    pending.base,
-                    `.favicon-orphan-${randomUUID()}.png`,
-                );
+                pending.icon.orphan = join(pending.base, `.favicon-orphan-${randomUUID()}.png`);
                 await this.#assertRealDirectory(pending.base, root, "worklet folder");
                 if ((await maybeLstat(pending.icon.orphan)) !== undefined) {
                     throw new WorkletInstallError(
@@ -360,10 +336,7 @@ export class WorkletInstaller {
             }
             await rename(pending.icon.staging, pending.icon.target);
             if (pending.icon.orphan !== undefined) {
-                await this.#removeContained(
-                    pending.icon.orphan,
-                    root,
-                );
+                await this.#removeContained(pending.icon.orphan, root);
             }
         }
     }
@@ -386,10 +359,7 @@ export class WorkletInstaller {
                         await this.#prepareRoot(),
                     );
                 } else {
-                    await this.#removeContained(
-                        pending.stagingVersion,
-                        await this.#prepareRoot(),
-                    );
+                    await this.#removeContained(pending.stagingVersion, await this.#prepareRoot());
                 }
                 if (pending.icon !== undefined) {
                     const root = await this.#prepareRoot();
@@ -409,15 +379,9 @@ export class WorkletInstaller {
                     }
                 }
                 if (pending.createdBase) {
-                    await this.#removeContained(
-                        pending.base,
-                        await this.#prepareRoot(),
-                    );
+                    await this.#removeContained(pending.base, await this.#prepareRoot());
                 } else if (pending.createdData) {
-                    await this.#removeContained(
-                        pending.dataDir,
-                        await this.#prepareRoot(),
-                    );
+                    await this.#removeContained(pending.dataDir, await this.#prepareRoot());
                 }
             }
         } finally {
@@ -510,11 +474,7 @@ export class WorkletInstaller {
                     await this.#removeContained(join(base, entry.name), root);
                     continue;
                 }
-                await this.#assertRealDirectory(
-                    join(base, entry.name),
-                    root,
-                    "worklet version",
-                );
+                await this.#assertRealDirectory(join(base, entry.name), root, "worklet version");
             }
         } finally {
             await directory.close().catch(() => undefined);
@@ -683,7 +643,9 @@ export class WorkletInstaller {
     async #assertStagedIcon(path: string, root: string): Promise<void> {
         const facts = await lstat(path);
         if (facts.isSymbolicLink() || !facts.isFile()) {
-            throw new WorkletInstallError(`The staged worklet icon ${JSON.stringify(path)} is invalid.`);
+            throw new WorkletInstallError(
+                `The staged worklet icon ${JSON.stringify(path)} is invalid.`,
+            );
         }
         const resolvedParent = await realpath(join(path, ".."));
         if (!isContained(root, resolvedParent)) {
@@ -734,11 +696,7 @@ export class WorkletInstaller {
         await rm(path, { force: false, recursive: finalFacts.isDirectory() });
     }
 
-    async #stageIcon(
-        base: string,
-        sourcePath: string,
-        root: string,
-    ): Promise<PendingIcon> {
+    async #stageIcon(base: string, sourcePath: string, root: string): Promise<PendingIcon> {
         const bytes = await this.#readIconBytes(sourcePath);
         const staging = join(base, `.favicon-${randomUUID()}.png`);
         try {

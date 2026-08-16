@@ -15,12 +15,12 @@ const getWorkspaceInputSchema = Type.Object(
 );
 const getWorkspaceResultSchema = workspaceDetailPageSchema;
 
-/** Read one complete workspace by opaque ID and page its actionable detail. */
+/** Read one complete workspace by ID and page its actionable detail. */
 export function getWorkspaceTool(workspaces: WorkspacesModule, agentId: string) {
     return defineAgentTool({
         name: "get_workspace",
         description:
-            "Read one persistent workspace by ID, including complete status, project, base, ownership, and timestamp detail. Follow the returned detail cursor when the workspace is too large for one response.",
+            "Read one persistent workspace by ID, including its branch, folder, base, Git state, status, ownership, and timestamps. Follow the returned cursor when the workspace is too large for one response.",
         parameters: getWorkspaceInputSchema,
         returnType: getWorkspaceResultSchema,
         durable: false,

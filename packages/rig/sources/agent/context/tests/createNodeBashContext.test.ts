@@ -447,11 +447,9 @@ describe("createNodeBashContext", () => {
             });
 
             await expect
-                .poll(
-                    async () =>
-                        (await context.readSession(sessionId, { peek: true }))?.stdout,
-                    { timeout: 10_000 },
-                )
+                .poll(async () => (await context.readSession(sessionId, { peek: true }))?.stdout, {
+                    timeout: 10_000,
+                })
                 .toBe("first");
             const early = await context.readSession(sessionId);
             expect(early?.stdoutDelta).toBe("first");

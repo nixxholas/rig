@@ -3,8 +3,7 @@
 Reviewed: 2026-08-15. Scope: `packages/happy-agent-modules/sources/projects/`, the v2 rewrite of
 Rig's project surface (`packages/rig/sources/project/` and
 `packages/rig/sources/tools/workspaces/workspaceTools.ts` are the v1 reference implementation being
-replaced), read against root `AGENTS.md` and master plans 00, 03 (workspaces and Git), 16, 18, 20,
-21. Note: the master plans still name `@slopus/happy-agent-features` and have not yet been updated
+replaced), read against root `AGENTS.md` and master plans 00, 03 (workspaces and Git), 16, 18, 20, 21. Note: the master plans still name `@slopus/happy-agent-features` and have not yet been updated
 for the rewrite into `happy-agent-modules`.
 
 ## Summary
@@ -45,7 +44,7 @@ repository is a row the agent can invent, and the new settings surface has no de
 - **New capability — `update_project_settings` is a general-purpose agent-writable key-value store.**
   `projectSettingsSchema` (`Project.ts:126`) is arbitrary recursive JSON up to depth 8, 64 properties
   and 64 items per level, 4 KiB strings, 16 KiB encoded. The tool replaces the whole blob
-  (`tools/update_project_settings.ts:17`). Nothing defines what a setting *is*, who reads it, or what
+  (`tools/update_project_settings.ts:17`). Nothing defines what a setting _is_, who reads it, or what
   effect writing one has. This is scratch storage handed to a model with a project-shaped name.
 - **Deliberate improvement — archival semantics.** Master plan 03 is clear that archiving is "an
   immediate, irreversible logical action" and that folder deletion is background cleanup that never

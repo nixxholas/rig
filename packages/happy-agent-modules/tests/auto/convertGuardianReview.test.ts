@@ -1,0 +1,91 @@
+import type { PermissionReviewTranscript } from "../../sources/permissions/PermissionReviewer.js";
+import { describe, expect, it } from "vitest";
+
+import { convertGuardianReview } from "../../sources/auto/impl/convertGuardianReview.js";
+
+function guardian(outcome: string, extra: Record<string, unknown> = {}): string {
+    return JSON.stringify({ outcome, ...extra });
+}
+
+describe("convertGuardianReview", () => {
+    it("maps a supported allow to an allowed decision carrying the guardian's own reason", () => {
+        const decision = convertGuardianReview({
+            text: guardian("allow", {
+                risk_level: "low",
+                user_authorization: "high",
+                rationale: "Routine local edit.",
+            }),
+            userEvidenceOmitted: false,
+        });
+        expect(decision).toEqual({
+            outcome: "allowed",
+            reason: "Routine local edit.",
+            risk: "low",
+            userAuthorization: "high",
+        });
+    });
+
+    it("maps an explicit deny to a denied decision", () => {
+        const decision = convertGuardianReview({
+            text: guardian("deny", { rationale: "Writes outside the workspace." }),
+            userEvidenceOmitted: false,
+        });
+        expect(decision.outcome).toBe("denied");
+        expect(decision.reason).toBe("Writes outside the workspace.");
+    });
+
+    it("denies an allow the independent policy rejects (high risk without medium authorization)", () => {
+        const decision = convertGuardianReview({
+            text: guardian("allow", {
+                risk_level: "high",
+                user_authorization: "low",
+                rationale: "Risky but requested.",
+            }),
+            userEvidenceOmitted: false,
+        });
+        expect(decision.outcome).toBe("denied");
+    });
+
+    it("denies a critical allow regardless of authorization", () => {
+        const decision = convertGuardianReview({
+            text: guardian("allow", {
+                risk_level: "critical",
+                user_authorization: "high",
+                rationale: "Destructive.",
+            }),
+            userEvidenceOmitted: false,
+        });
+        expect(decision.outcome).toBe("denied");
+    });
+
+    it("treats a completed but unreadable answer as a denial, not an error", () => {
+        const decision = convertGuardianReview({
+            text: "the reviewer rambled without a verdict",
+            userEvidenceOmitted: false,
+        });
+        expect(decision.outcome).toBe("denied");
+        expect(decision.reason).toBe(
+            "The automatic permission review returned an unreadable decision.",
+        );
+    });
+
+    it("carries the transcript and userEvidenceOmitted flag through", () => {
+        const transcript: PermissionReviewTranscript = {
+            entries: [{ type: "text", text: "checked" }],
+            modelId: "m",
+            providerId: "p",
+            usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 },
+        };
+        const decision = convertGuardianReview({
+            text: guardian("allow", {
+                risk_level: "low",
+                user_authorization: "high",
+                rationale: "Fine.",
+            }),
+            transcript,
+            userEvidenceOmitted: true,
+        });
+        expect(decision.transcript).toEqual(transcript);
+        expect(decision.userEvidenceOmitted).toBe(true);
+    });
+});

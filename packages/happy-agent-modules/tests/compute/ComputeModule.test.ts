@@ -13,6 +13,8 @@ import { computeToolset } from "./support/computeTools.js";
 
 const ctx = createRootContext().named("happy-agent-modules-compute");
 
+const CLAUDE_MODEL = "anthropic/opus-5";
+
 describe("ComputeModule", () => {
     it("creates and caches one distinct compute per agent for every module", async () => {
         const computes: FakeCompute[] = [];
@@ -86,26 +88,60 @@ describe("ComputeModule", () => {
         await expect(module.tools(ctx, { agent: { id: "agent-a" } } as never)).resolves.toEqual([]);
     });
 
-    it("offers every model the same common compute tools", async () => {
-        const { tools } = await computeToolset(ctx, new FakeCompute());
-        expect(tools.map((tool) => tool.name)).toEqual([
-            "read_file",
+    it("hands each model its own vendor's tools", async () => {
+        const claude = await computeToolset(ctx, new FakeCompute(), { model: CLAUDE_MODEL });
+        expect(claude.tools.map((tool) => tool.name)).toEqual([
+            "BashOutput",
+            "Bash",
+            "Read",
+            "Edit",
+            "Write",
+            "Glob",
+            "Grep",
+            "BashStop",
+            "BashInput",
+        ]);
+
+        const codex = await computeToolset(ctx, new FakeCompute(), {
+            model: "openai/gpt-5.6-sol",
+        });
+        expect(codex.tools.map((tool) => tool.name)).toEqual([
+            "exec_command",
+            "write_stdin",
+            "kill_session",
+            "apply_patch",
             "view_image",
-            "write_file",
-            "edit_file",
-            "delete_file",
-            "move_file",
-            "list_directory",
-            "find_files",
-            "search_files",
-            "run_command",
-            "read_command_output",
+        ]);
+
+        const grok = await computeToolset(ctx, new FakeCompute(), { model: "xai/grok-4.5" });
+        expect(grok.tools.map((tool) => tool.name)).toEqual([
+            "run_terminal_command",
+            "read_file",
+            "write",
+            "search_replace",
+            "list_dir",
+            "grep",
+            "get_command_or_subagent_output",
+            "kill_command_or_subagent",
             "send_command_input",
-            "stop_command",
         ]);
     });
 
-    it("tells each model its compute rules", async () => {
+    it("reads the vendor from the model rather than the provider serving it", async () => {
+        // A Claude model served through Bedrock is still a Claude model, and handing it Codex's
+        // tools would give it names it has never been trained on.
+        const bedrock = await computeToolset(ctx, new FakeCompute(), {
+            model: CLAUDE_MODEL,
+            providerKind: "bedrock",
+        });
+        expect(bedrock.tools.map((tool) => tool.name)).toContain("Read");
+
+        // With no model chosen yet, an agent still gets a working machine.
+        const unchosen = await computeToolset(ctx, new FakeCompute());
+        expect(unchosen.tools.map((tool) => tool.name)).toContain("exec_command");
+    });
+
+    it("tells each model its compute rules in its own tools' names", async () => {
         const compute = new FakeCompute("/srv/app");
         const provider: HostComputeProvider = {
             id: "host",
@@ -115,13 +151,19 @@ describe("ComputeModule", () => {
         const agentCtx = withAgentConfig(ctx, {
             modules: { compute: { cwd: "/srv/app" } },
         });
-        const instructions = await module.instructions(agentCtx, {
-            agent: { id: "agent-a" },
+        const claudeInstructions = await module.instructions(agentCtx, {
+            agent: { id: "agent-a", model: CLAUDE_MODEL },
         } as never);
 
-        expect(instructions).not.toContain("/srv/app");
-        expect(instructions).toContain("Read a file before changing it");
-        expect(instructions).toContain("comes back with a command ID");
+        expect(claudeInstructions).not.toContain("/srv/app");
+        expect(claudeInstructions).toContain("Read a file before changing it");
+        expect(claudeInstructions).toContain("Write and Edit refuse a file you have not read");
+        expect(claudeInstructions).toContain("comes back with a shell ID");
+
+        const grokInstructions = await module.instructions(agentCtx, {
+            agent: { id: "agent-b", model: "xai/grok-4.5" },
+        } as never);
+        expect(grokInstructions).toContain("write and search_replace refuse a file");
     });
 
     it("rejects invalid computes returned by the global provider", async () => {
@@ -149,15 +191,15 @@ describe("ComputeModule", () => {
         const compute = new FakeCompute();
         compute.write("/workspace/sources/main.ts", "export const main = 1;\n");
         compute.write("/etc/passwd", "root:x:0:0\n");
-        const { tool } = await computeToolset(ctx, compute);
+        const { tool } = await computeToolset(ctx, compute, { model: CLAUDE_MODEL });
 
         expect(
-            await tool("read_file").shouldReviewInAutoMode({ path: "sources/main.ts" }, ctx),
+            await tool("Read").shouldReviewInAutoMode({ file_path: "sources/main.ts" }, ctx),
         ).toBe(false);
-        expect(await tool("read_file").shouldReviewInAutoMode({ path: "/etc/passwd" }, ctx)).toBe(
+        expect(await tool("Read").shouldReviewInAutoMode({ file_path: "/etc/passwd" }, ctx)).toBe(
             true,
         );
-        expect(tool("read_file").describeAutoPermissionAction?.({ path: "/etc/passwd" }, ctx)).toBe(
+        expect(tool("Read").describeAutoPermissionAction?.({ file_path: "/etc/passwd" }, ctx)).toBe(
             'reading "/etc/passwd". Access: unrestricted filesystem access outside the workspace sandbox',
         );
     });
@@ -165,13 +207,13 @@ describe("ComputeModule", () => {
     it("reviews Git control writes so Auto can grant the Full access they require", async () => {
         const compute = new FakeCompute();
         compute.write("/workspace/.git/config", "[core]\n");
-        const { tool } = await computeToolset(ctx, compute);
+        const { tool } = await computeToolset(ctx, compute, { model: CLAUDE_MODEL });
 
-        expect(await tool("write_file").shouldReviewInAutoMode({ path: ".git/config" }, ctx)).toBe(
+        expect(await tool("Write").shouldReviewInAutoMode({ file_path: ".git/config" }, ctx)).toBe(
             true,
         );
         expect(
-            tool("write_file").describeAutoPermissionAction?.({ path: ".git/config" }, ctx),
+            tool("Write").describeAutoPermissionAction?.({ file_path: ".git/config" }, ctx),
         ).toBe(
             'writing "/workspace/.git/config". Access: protected Git control path requiring Full access',
         );
@@ -182,10 +224,10 @@ describe("ComputeModule", () => {
         async (name) => {
             const compute = new FakeCompute();
             compute.write(`/workspace/${name}`, "protected\n");
-            const { tool } = await computeToolset(ctx, compute);
+            const { tool } = await computeToolset(ctx, compute, { model: CLAUDE_MODEL });
 
-            expect(await tool("write_file").shouldReviewInAutoMode({ path: name }, ctx)).toBe(true);
-            expect(tool("write_file").describeAutoPermissionAction?.({ path: name }, ctx)).toBe(
+            expect(await tool("Write").shouldReviewInAutoMode({ file_path: name }, ctx)).toBe(true);
+            expect(tool("Write").describeAutoPermissionAction?.({ file_path: name }, ctx)).toBe(
                 `writing "/workspace/${name}". Access: protected project config requiring Full access`,
             );
         },
@@ -195,14 +237,14 @@ describe("ComputeModule", () => {
         const compute = new FakeCompute();
         compute.write("/workspace/rig.toml", "protected\n");
         compute.links.set("/workspace/config-alias.toml", "/workspace/rig.toml");
-        const { tool } = await computeToolset(ctx, compute);
+        const { tool } = await computeToolset(ctx, compute, { model: CLAUDE_MODEL });
 
         expect(
-            await tool("write_file").shouldReviewInAutoMode({ path: "config-alias.toml" }, ctx),
+            await tool("Write").shouldReviewInAutoMode({ file_path: "config-alias.toml" }, ctx),
         ).toBe(true);
         expect(
-            await tool("write_file").shouldRunInFullAccessInAutoMode?.(
-                { path: "config-alias.toml" },
+            await tool("Write").shouldRunInFullAccessInAutoMode?.(
+                { file_path: "config-alias.toml" },
                 ctx,
             ),
         ).toBe(true);
@@ -212,39 +254,39 @@ describe("ComputeModule", () => {
         const compute = new FakeCompute();
         compute.write("/workspace/escape.txt", "");
         compute.links.set("/workspace/escape.txt", "/etc/shadow");
-        const { tool } = await computeToolset(ctx, compute);
+        const { tool } = await computeToolset(ctx, compute, { model: CLAUDE_MODEL });
 
-        expect(await tool("read_file").shouldReviewInAutoMode({ path: "escape.txt" }, ctx)).toBe(
+        expect(await tool("Read").shouldReviewInAutoMode({ file_path: "escape.txt" }, ctx)).toBe(
             true,
         );
-        expect(tool("read_file").describeAutoPermissionAction?.({ path: "escape.txt" }, ctx)).toBe(
+        expect(tool("Read").describeAutoPermissionAction?.({ file_path: "escape.txt" }, ctx)).toBe(
             'reading "/workspace/escape.txt". Access: reviewed filesystem path requiring Full access after canonical path checks',
         );
     });
 
     it("leaves an ordinary command sandboxed and asks about one that wants out", async () => {
-        const { tool } = await computeToolset(ctx, new FakeCompute());
-        const run = tool("run_command");
+        const { tool } = await computeToolset(ctx, new FakeCompute(), { model: CLAUDE_MODEL });
+        const bash = tool("Bash");
 
-        expect(await run.shouldReviewInAutoMode({ command: "pnpm test" }, ctx)).toBe(false);
+        expect(await bash.shouldReviewInAutoMode({ command: "pnpm test" }, ctx)).toBe(false);
         expect(
-            await run.shouldReviewInAutoMode(
-                { command: "curl https://example.com", escalate_sandbox: true },
+            await bash.shouldReviewInAutoMode(
+                { command: "curl https://example.com", dangerouslyDisableSandbox: true },
                 ctx,
             ),
         ).toBe(true);
         expect(
-            await run.shouldRunInFullAccessInAutoMode?.(
-                { command: "curl https://example.com", escalate_sandbox: true },
+            await bash.shouldRunInFullAccessInAutoMode?.(
+                { command: "curl https://example.com", dangerouslyDisableSandbox: true },
                 ctx,
             ),
         ).toBe(true);
         expect(
-            run.describeAutoPermissionAction?.(
+            bash.describeAutoPermissionAction?.(
                 {
                     command: "curl https://example.com",
-                    escalate_sandbox: true,
-                    justification: "the release notes are online",
+                    dangerouslyDisableSandbox: true,
+                    description: "reading the release notes",
                 },
                 ctx,
             ),
@@ -252,23 +294,20 @@ describe("ComputeModule", () => {
     });
 
     it("asks about typing into a live command without letting it out of the sandbox", async () => {
-        const { tool } = await computeToolset(ctx, new FakeCompute());
-        const send = tool("send_command_input");
+        const { tool } = await computeToolset(ctx, new FakeCompute(), { model: CLAUDE_MODEL });
+        const bashInput = tool("BashInput");
 
-        expect(await send.shouldReviewInAutoMode({ command_id: 1, input: "yes\n" }, ctx)).toBe(
+        expect(await bashInput.shouldReviewInAutoMode({ bash_id: "1", input: "yes\n" }, ctx)).toBe(
             true,
         );
-        expect(send.shouldRunInFullAccessInAutoMode).toBeUndefined();
-        expect(
-            send.describeAutoPermissionAction?.({ command_id: 1, input: "yes\n" }, ctx),
-        ).toContain("inside the sandbox it was started in");
+        expect(bashInput.shouldRunInFullAccessInAutoMode).toBeUndefined();
     });
 
     it("shows what is still running and stops one by hand, without ever disposing the machine", async () => {
         const compute = new FakeCompute();
         compute.script("pnpm dev", { chunks: ["listening\n"], keepRunning: true });
-        const { module, tool, call } = await computeToolset(ctx, compute);
-        await tool("run_command").execute(ctx, { command: "pnpm dev", background: true }, call);
+        const { module, tool, call } = await computeToolset(ctx, compute, { model: CLAUDE_MODEL });
+        await tool("Bash").execute(ctx, { command: "pnpm dev", run_in_background: true }, call);
 
         expect(await module.runningCommands("compute-agent")).toEqual([
             { command: "pnpm dev", cwd: "/workspace", sessionId: 1, status: "running" },

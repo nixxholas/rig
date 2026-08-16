@@ -40,7 +40,7 @@ The master plans still name `@slopus/happy-agent-features` and have not been upd
   for Auto review. AGENTS.md requires that "trusted answers to interactive questions are
   authorization evidence." v2's tools define only `toLLM` (`tools/request_user_input.ts:54-62`,
   `tools/cancel_ask.ts:48`), so an answer collected through `request_user_input` reaches Auto review
-  as ordinary tool text — which the same rule says is *not* user authorization. The interruption
+  as ordinary tool text — which the same rule says is _not_ user authorization. The interruption
   boundary is carried over correctly; the evidence boundary is not yet.
 - **Regression — durability lost.** v1's ask tool is `execution: "durable"` with real durable
   persistence (`packages/rig/sources/persistence/session/durableUserInputSave.ts`,
@@ -76,8 +76,8 @@ The master plans still name `@slopus/happy-agent-features` and have not been upd
    of the ask tool entirely.
 4. **Two different schemas share the name `userInputContextSchema`.** `UserInputRequest.ts:59-62`
    defines it as the bounded Markdown context string; `UserInputEvent.ts:12-14` defines it as the
-   opaque `Context` object. `index.ts:46-47` re-exports the *string* one twice, once aliased as
-   `userInputMarkdownContextSchema`, while `UserInputModule.ts` imports the *Context* one from
+   opaque `Context` object. `index.ts:46-47` re-exports the _string_ one twice, once aliased as
+   `userInputMarkdownContextSchema`, while `UserInputModule.ts` imports the _Context_ one from
    `UserInputEvent.js`. A reader cannot tell which one a call site means.
 5. **Over-validation of trusted, locally constructed contracts.** `validateOptions`
    (`UserInputModule.ts:1417-1475`) builds a `methodView` reflection proxy so it can run
@@ -88,12 +88,12 @@ The master plans still name `@slopus/happy-agent-features` and have not been upd
    `assertUserInputPage`, `assertUserInputVoidResult`, cursor arithmetic, duplicate-ID checks, and
    filter checks (`listPage`, lines 376-426).
 6. **Duplicate parameter spellings inside one query.** `userInputDetailQuerySchema`
-   (`UserInputRequest.ts:464-481`) accepts `cursor`/`limit` *and* `detailOffset`/`detailLimit` for
+   (`UserInputRequest.ts:464-481`) accepts `cursor`/`limit` _and_ `detailOffset`/`detailLimit` for
    the same two values, then throws if both are supplied (`UserInputModule.ts:463-465,1340-1343`).
    The comment cites consistency with sibling modules; the cost is a model-facing schema with two
    ways to say one thing.
-7. **Duplicate presence accessors.** `UserInputStore.ts:28-75` declares `isAvailable` *and* `state`,
-   plus `subscribe` *and* `onChange` with identical signatures; the module picks whichever exists
+7. **Duplicate presence accessors.** `UserInputStore.ts:28-75` declares `isAvailable` _and_ `state`,
+   plus `subscribe` _and_ `onChange` with identical signatures; the module picks whichever exists
    (`UserInputModule.ts:724,987-995`). Four optional members for two capabilities.
 8. **Dead schema and function aliases.** `userInputToolInputSchema` = `userInputAskInputSchema`,
    `userInputWaitToolInputSchema` = `userInputWaitInputSchema`, `userInputAnswerInputUnionSchema` =

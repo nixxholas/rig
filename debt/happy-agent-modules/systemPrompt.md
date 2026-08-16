@@ -51,8 +51,8 @@ a hidden steering message.
    and prompts are evidence and product code must conform to them — a rewrite does not license editing them.
    Measured against `packages/happy-providers`: Grok's `"You are Grok 4.5 released by xAI."` becomes
    `{{identity}}`; Codex's `"You are Codex, an agent based on GPT-5."` becomes `"{{identity}}, an agent based
-   on GPT-5."` and `"As Codex,"` becomes `"As {{name}},"`; the Claude prompts lose their `"You are Rig, a
-   coding agent powered by Claude Sonnet 5…"` opening and their entire `# Environment` section (sonnet: 2080
+on GPT-5."` and `"As Codex,"` becomes `"As {{name}},"`; the Claude prompts lose their `"You are Rig, a
+coding agent powered by Claude Sonnet 5…"` opening and their entire `# Environment` section (sonnet: 2080
    words in vendor truth vs 2037 here; fable: 1242 vs 1137); Grok loses the provenance comment
    `// Captured from Grok CLI 0.2.111 for Grok 4.5.`. Separately, `claude_opus_5_system_prompt` has no
    counterpart in `happy-providers` at all — a prompt presented as vendor-shaped with no captured origin.

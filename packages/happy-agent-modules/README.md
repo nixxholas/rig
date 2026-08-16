@@ -98,13 +98,13 @@ its public methods, and its storage and event contracts.
 
 ### The machine
 
-| Module                                                | What it adds                                                                                                                                               |
-| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [Compute](sources/compute/README.md)                  | Ten provider-neutral filesystem and shell tools over one host machine, with read-before-write enforcement and background commands that outlive their wait. |
-| [Permissions](sources/permissions/README.md)          | The permission mode turned into behavior: per-call review, temporary elevation, refusal handling, and mode-change notices.                                 |
-| [MCP](sources/mcp/README.md)                          | MCP servers, tools, resources, and prompts through a host-owned protocol boundary, always reviewed in Auto.                                                |
-| [Search](sources/search/README.md)                    | A bounded common `web_fetch` plus explicit per-vendor search tool wrappers.                                                                                |
-| [Image generation](sources/imageGeneration/README.md) | Host-routed image generation returning opaque asset IDs and durable artifact evidence.                                                                     |
+| Module                                                | What it adds                                                                                                                                                  |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [Compute](sources/compute/README.md)                  | One host machine offered as each vendor's own filesystem and shell tools, with read-before-write enforcement and background commands that outlive their wait. |
+| [Permissions](sources/permissions/README.md)          | The permission mode turned into behavior: per-call review, temporary elevation, refusal handling, and mode-change notices.                                    |
+| [MCP](sources/mcp/README.md)                          | MCP servers, tools, resources, and prompts through a host-owned protocol boundary, always reviewed in Auto.                                                   |
+| [Search](sources/search/README.md)                    | A bounded common `web_fetch` plus explicit per-vendor search tool wrappers.                                                                                   |
+| [Image generation](sources/imageGeneration/README.md) | Host-routed image generation returning opaque asset IDs and durable artifact evidence.                                                                        |
 
 ### Work
 
@@ -121,7 +121,7 @@ its public methods, and its storage and event contracts.
 
 | Module                                           | What it adds                                                                                         |
 | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
-| [Collaboration](sources/collaboration/README.md) | Create collaborators, exchange durable messages, track reply obligations, and wait for answers.      |
+| [Collaboration](sources/collaboration/README.md) | Create collaborators and message them asynchronously, with a report to the creator when one stops.   |
 | [User input](sources/userInput/README.md)        | Questions an agent asks a person, and a durable wait for the answer that survives a restart.         |
 | [Presence](sources/presence/README.md)           | Configured versus effective availability, custom and temporary states, schedules, and status events. |
 | [Happy](sources/happy/README.md)                 | The narrow bridge to a connected Happy client: notifications and agent status.                       |
@@ -138,10 +138,11 @@ its public methods, and its storage and event contracts.
 
 ### Storage ownership
 
-Seventeen modules own tables through their own migrations: applets, collaboration, goal, happy,
-history, mcp, presence, projects, scheduling, secrets, slots, tasks, usage, user input, workflows,
-worklets, and workspaces. Seven own no tables: compute, image generation, model switch,
-permissions, search, skills, and system prompt. Compute and system prompt use Agent KV only.
+Sixteen modules own tables through their own migrations: applets, goal, happy, history, mcp,
+presence, projects, scheduling, secrets, slots, tasks, usage, user input, workflows, worklets, and
+workspaces. Eight own no tables: collaboration, compute, image generation, model switch,
+permissions, search, skills, and system prompt. Compute and system prompt use Agent KV only, and
+collaboration's migrations exist only to retire the tables it used to keep.
 
 Migrations are immutable once released. A schema change is a new keyed migration, never an edit to
 an existing one.
@@ -153,7 +154,6 @@ Modules that reach outside the database require the host to supply that reach. F
 
 | Module           | Required from the host                                                         |
 | ---------------- | ------------------------------------------------------------------------------ |
-| Collaboration    | `CollaborationBroker`                                                          |
 | Happy            | `HappyHost`                                                                    |
 | Image generation | `ImageGenerator`, output directory                                             |
 | MCP              | `McpHost`                                                                      |
@@ -218,13 +218,17 @@ system-prompt text.
 
 ### Machine
 
-**Compute** — two gaps. `run_command` has no `secrets` argument: the host compute's secret option
-has no resolver or injection seam here, and wiring one is a host and provider integration rather
-than something this module can do by treating secret identifiers as ordinary environment variables.
-And there is no per-path locking during concurrent edits — legacy write tools declared a lock key
-per path, which Agent Base's tool contract cannot express. Everything else has parity: delete, move,
-and multi-file patch exist, `search_files` honors `.gitignore`, `run_command` takes a shell
-selection, protected project-config paths are enforced, and images are viewable.
+**Compute** — three gaps. No shell tool on any vendor surface has a `secrets` argument: the host
+compute's secret option has no resolver or injection seam here, and wiring one is a host and
+provider integration rather than something this module can do by treating secret identifiers as
+ordinary environment variables. Codex's `apply_patch` takes its patch inside a JSON `{ patch }`
+envelope instead of as a freeform argument string, because Agent Base parses every call's arguments
+as JSON before a tool sees them and offers no parse hook. And there is no per-path locking during
+concurrent edits — legacy write tools declared a lock key per path, which Agent Base's tool contract
+cannot express. Everything else has parity: the tools are vendor-shaped and selected from the
+agent's model, delete, move, and multi-file patch exist, content search honors `.gitignore`, the
+shell tools take a shell selection and a per-vendor sandbox escalation, protected project-config
+paths are enforced, and images are viewable.
 
 **Permissions** — none. Sandbox-limit prose and per-tool guidance are back in the Auto instructions
 through an injected guidance provider, risk mechanically overrides an "allow" verdict, reducing the
@@ -283,11 +287,15 @@ and `get_usage` can report the whole collection to a host-neutral caller.
 
 ### People and other agents
 
-**Collaboration** — one deliberate difference: legacy's "inspect before message" gate is not
-reproduced, and `list_agents` allows enumeration within the collection. Cross-agent access is denied
-by default until an injected authorization policy grants it, which is judged the better control.
-Interruption, model and effort selection, read-only collaborators, completion and output observation,
-context forking, and spawn capacity and depth signals are all present.
+**Collaboration** — deliberately narrower than legacy. Like legacy there is no discovery tool, and
+access is ancestry: an agent reaches the collaborators it created and the agent that created it.
+Beyond legacy, a collaborator survives its task and accepts follow-up work, and the runtime reports
+to its creator when it stops, quoting what it said last. Several legacy affordances are gone rather
+than pending: read-only collaborators and any later change of model, effort, or permission mode
+(selection is settled on the message that creates the agent and never revisited); completion and
+output observation and blocking waits (every message is asynchronous, and the settle report replaces
+what waiting was for); context forking; and spawn capacity and depth signals. `interrupt_agent`
+remains, and stops a turn without ending the collaborator.
 
 **User input** — no Inbox reordering. `master-plans/06-inbox.md` calls for reordering pending
 requests by fractional index, and neither the request record nor the store has an order field.
@@ -328,7 +336,7 @@ than legacy's open model with no override. Combined scope-context list filtering
 `remove_slot` no longer returns the removed entry.
 
 **Secrets** — no path from an attached secret into a running command, which is legacy's whole point.
-The catalog, attachment, and host-only resolution all work, but compute's `run_command` has no
+The catalog, attachment, and host-only resolution all work, but no compute shell tool has a
 `secrets` argument to consume them (see Compute above), so an attached secret currently reaches
 nothing. Closing this needs a host and provider integration, not a module change.
 

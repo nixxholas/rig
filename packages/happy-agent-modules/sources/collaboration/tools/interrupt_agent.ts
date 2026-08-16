@@ -1,12 +1,8 @@
-import { defineAgentTool } from "@slopus/happy-agent-base";
 import { Type, type Static } from "@sinclair/typebox";
+import { defineAgentTool } from "@slopus/happy-agent-base";
 
 import type { CollaborationModule } from "../CollaborationModule.js";
-import {
-    collaborationAgentObservationSchema,
-    collaborationAgentIdSchema,
-    type CollaborationAgentObservation,
-} from "../CollaborationAgent.js";
+import { collaborationAgentIdSchema } from "../CollaborationAgent.js";
 
 const interruptAgentInputSchema = Type.Object(
     {
@@ -23,17 +19,18 @@ export function interruptAgentTool(collaboration: CollaborationModule, actingAge
         description:
             "Interrupt a collaborator's current turn. The collaborator remains available and can receive follow-up work later.",
         parameters: interruptAgentInputSchema,
-        returnType: collaborationAgentObservationSchema,
+        returnType: Type.Void(),
         durable: false,
         shouldReviewInAutoMode: () => true,
         describeAutoPermissionAction: ({ targetAgentId }) =>
             `interrupting collaborator "${targetAgentId}" and stopping its current turn; the collaborator remains available for follow-up work`,
-        execute: async (ctx, input: InterruptAgentInput): Promise<CollaborationAgentObservation> =>
-            await collaboration.interruptAgent(ctx, actingAgentId, input.targetAgentId),
-        toLLM: (observation) => [
+        execute: async (ctx, input: InterruptAgentInput) => {
+            await collaboration.interruptAgent(ctx, actingAgentId, input.targetAgentId);
+        },
+        toLLM: () => [
             {
                 type: "text",
-                text: collaboration.formatAgentObservationForModel(observation),
+                text: "Asked the collaborator to stop its current turn. It stops when it notices, and remains available for follow-up work.",
             },
         ],
     });

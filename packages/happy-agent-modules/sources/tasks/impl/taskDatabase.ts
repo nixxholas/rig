@@ -1,8 +1,5 @@
 import { sql } from "drizzle-orm";
-import {
-    agentDatabaseRows,
-    agentDatabaseRun,
-} from "@slopus/happy-agent-base";
+import { agentDatabaseRows, agentDatabaseRun } from "@slopus/happy-agent-base";
 import type { Context } from "@steve.kite/stdlib";
 
 const TASK_STATE_TABLE = "happy_agent_task_state";
@@ -46,5 +43,4 @@ export class TaskDatabase {
                 WHERE agent_id = ${this.#agentId}`,
         );
     }
-
 }

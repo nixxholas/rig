@@ -12,10 +12,7 @@ import {
  * independent of a live SDK client or transport, so changing the process connection cache cannot
  * silently change a user's saved trust decision.
  */
-export function fingerprintMcpServer(
-    entry: McpServerConfigEntry,
-    workspaceCwd?: string,
-): string {
+export function fingerprintMcpServer(entry: McpServerConfigEntry, workspaceCwd?: string): string {
     if (!Value.Check(mcpServerConfigEntrySchema, entry)) {
         throw new Error("MCP server configuration entry is invalid.");
     }

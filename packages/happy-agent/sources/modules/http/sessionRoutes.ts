@@ -1,16 +1,21 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
+import { createId } from "@paralleldrive/cuid2";
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import {
     agentPermissionModeSchema,
     type AgentBaseMessageOptions,
+    type AgentConfig,
     type AgentModel,
 } from "@slopus/happy-agent-base";
 import {
     eventIdSchema,
+    permissionEventSchema,
     userInputAnswerSchema,
     type AgentEvent,
+    type PermissionEvent,
+    type PermissionReviewTranscript,
     type UsageSummary,
 } from "@slopus/happy-agent-modules";
 import type { SessionInputBlock, SessionUserMessage } from "@slopus/happy-providers";
@@ -22,6 +27,8 @@ import {
     type ConversationScope,
 } from "../conversations/ConversationModule.js";
 import type { LoadedHappyAgent } from "../agent/loadHappyAgent.js";
+import { ProjectRegistrationError } from "../projects/ProjectRegistrationError.js";
+import type { ResolvedProjectOwnership } from "../projects/ProjectWorkspaceService.js";
 import type { EffectiveAgentSelection } from "../../vanillaHappyAgentConfiguration.js";
 import { readValidatedBody } from "./body.js";
 import { AgentHttpError, sendJson, serializeJson } from "./errors.js";
@@ -232,6 +239,13 @@ const workflowStopSchema = Type.Object(
     { mutationId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })) },
     { additionalProperties: false },
 );
+const transferSessionSchema = Type.Object(
+    {
+        mutationId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+        workspaceId: Type.String({ minLength: 1, maxLength: 128 }),
+    },
+    { additionalProperties: false },
+);
 const unsupportedSchema = Type.Object({}, { additionalProperties: false });
 
 type SubmitMessage = Static<typeof submitMessageSchema>;
@@ -281,19 +295,28 @@ export function createSessionRoutes(): AgentHttpRouteGroup {
                 const rootConfig =
                     (await dependencies.agent.system.config(ctx, dependencies.agent.agent.id)) ??
                     {};
-                const agent = await dependencies.agent.system.create(ctx, rootConfig, {});
-                const scope = body.scope ?? scopeFromCreate(body);
+                const owner = await resolveSessionOwner(ctx, dependencies, body);
+                // Creating an agent writes the conversation that belongs to it, from defaults that
+                // know nothing about this request. The row has to exist with the resolved folder
+                // and scope before then, or the session would be recorded in the wrong place with
+                // no way to move it afterwards.
+                const agentId = createId();
                 const session = await conversation.ensure(ctx, {
-                    agentId: agent.id,
-                    cwd: body.cwd,
+                    agentId,
+                    cwd: owner.cwd,
                     ...(body.id === undefined ? {} : { id: body.id }),
                     ...(body.modelId === undefined ? {} : { modelId: body.modelId }),
                     ...(body.permissionMode === undefined
                         ? {}
                         : { permissionMode: body.permissionMode }),
                     ...(body.providerId === undefined ? {} : { providerId: body.providerId }),
-                    scope,
+                    scope: owner.scope,
                 });
+                const agent = await dependencies.agent.system.create(
+                    ctx,
+                    sessionAgentConfig(rootConfig, owner.cwd),
+                    { id: agentId },
+                );
                 const summary = await sessionSummary(ctx, dependencies, session);
                 await dependencies.agent.modules.events.record(ctx, {
                     agentId: agent.id,
@@ -450,28 +473,26 @@ function createReadRoutes(): AgentHttpRouteGroup["routes"] {
             path: "/v0/sessions/:sessionId/subagents",
             handle: async ({ ctx, dependencies, url, response }) => {
                 const session = await requireSession(ctx, dependencies, sessionId(url));
-                const page = await dependencies.agent.modules.collaboration.listAgents(
-                    ctx,
-                    session.agentId,
-                    { ownerAgentId: session.agentId },
-                );
+                // An agent's collaborators are its children, which the agent collection already
+                // knows. Their names live in each child's own metadata.
+                const children = await dependencies.agent.system.childOf(ctx, session.agentId);
                 const catalog = createRigModelCatalog(dependencies.agent.system.models);
-                sendJson(response, 200, {
-                    subagents: page.agents
-                        .filter((agent) => agent.id !== session.agentId)
-                        .map((agent) => ({
-                            agentId: agent.id,
-                            createdAt: agent.createdAt,
-                            depth: agent.parentId === null ? 0 : 1,
-                            description: agent.title ?? agent.role ?? "Collaborating agent",
-                            id: agent.id,
+                const subagents = await Promise.all(
+                    children.map(async (agentId) => {
+                        const config = await dependencies.agent.system.config(ctx, agentId);
+                        const title = config?.metadata?.title;
+                        return {
+                            agentId,
+                            depth: 1,
+                            description: title ?? "Collaborating agent",
+                            id: agentId,
                             modelId: catalog.defaultModelId,
                             parentSessionId: session.id,
-                            status: agent.status === "active" ? "running" : "idle",
-                            ...(agent.title === undefined ? {} : { taskName: agent.title }),
-                            updatedAt: agent.updatedAt,
-                        })),
-                });
+                            ...(title === undefined ? {} : { taskName: title }),
+                        };
+                    }),
+                );
+                sendJson(response, 200, { subagents });
             },
         },
         {
@@ -500,7 +521,7 @@ function createReadRoutes(): AgentHttpRouteGroup["routes"] {
                 sendJson(response, 200, {
                     events:
                         requestedAfter === null
-                            ? projected.slice(Math.max(0, projected.length - limit))
+                            ? initialEventWindow(projected, limit)
                             : projected.slice(0, limit),
                 });
             },
@@ -886,13 +907,102 @@ function createMutationRoutes(): AgentHttpRouteGroup["routes"] {
                 sendJson(response, 200, { scheduledMessage: result });
             },
         },
+        {
+            method: "POST",
+            path: "/v0/sessions/:sessionId/transfer",
+            handle: async ({ ctx, dependencies, request, response, url }) => {
+                const body = await readValidatedBody(request, transferSessionSchema);
+                const session = await requireSession(ctx, dependencies, sessionId(url));
+                if (session.scope.kind !== "workspace") {
+                    throw new AgentHttpError(
+                        409,
+                        "Only a session that is already in a workspace can be moved.",
+                    );
+                }
+                const projects = dependencies.agent.projectWorkspaces;
+                const projectId = session.scope.projectId;
+                // The transfer is the host's state machine: it stages the source workspace's
+                // uncommitted work, restores the target when anything goes wrong, and marks a
+                // target it could not put back as failed so nothing is offered a broken checkout.
+                const { prepared, target } = await transferFailure(
+                    async () =>
+                        await projects.prepareSessionTransfer(
+                            ctx,
+                            projectId,
+                            session.scope.kind === "workspace"
+                                ? session.scope.workspaceId
+                                : "",
+                            body.workspaceId,
+                            // Stopping the agent is the last thing before the working tree moves
+                            // under it, so a run cannot write into the folder being replaced.
+                            async () => {
+                                await dependencies.agent.system.abort(ctx, session.agentId, {
+                                    await: true,
+                                });
+                            },
+                        ),
+                );
+                try {
+                    await prepared.commitTransfer();
+                } catch (error) {
+                    await prepared.rollback(error);
+                    throw new AgentHttpError(
+                        409,
+                        "The session could not be moved into that workspace.",
+                    );
+                }
+                // The recorded working directory is part of the conversation row the module owns
+                // and cannot yet be changed, so the durable scope moves and the cwd is reported
+                // from the workspace it now belongs to.
+                const moved = await dependencies.agent.modules.conversations.update(
+                    ctx,
+                    session.id,
+                    {
+                        scope: {
+                            kind: "workspace",
+                            projectId,
+                            workspaceId: target.id,
+                        },
+                    },
+                );
+                await dependencies.agent.modules.conversations.appendEvent(ctx, session.id, {
+                    payload: {
+                        commit: prepared.commit,
+                        projectId,
+                        workspaceId: target.id,
+                        ...(body.mutationId === undefined ? {} : { mutationId: body.mutationId }),
+                    },
+                    type: "session_transferred",
+                });
+                sendJson(response, 200, {
+                    session: await sessionResponse(ctx, dependencies, moved),
+                    transfer: {
+                        commit: prepared.commit,
+                        state: prepared.state,
+                        workspace: { id: target.id, name: target.name, path: target.path },
+                    },
+                });
+            },
+        },
         ...unsupportedMutations(),
     ];
 }
 
+/** Turns the host's transfer refusals into a sentence a person can act on. */
+async function transferFailure<T>(run: () => Promise<T>): Promise<T> {
+    try {
+        return await run();
+    } catch (error) {
+        if (error instanceof AgentHttpError) throw error;
+        throw new AgentHttpError(
+            409,
+            error instanceof Error ? error.message : "The session could not be moved.",
+        );
+    }
+}
+
 function unsupportedMutations(): AgentHttpRouteGroup["routes"] {
     const paths = [
-        "/v0/sessions/:sessionId/transfer",
         "/v0/sessions/:sessionId/fork",
         "/v0/sessions/:sessionId/reset",
         "/v0/sessions/:sessionId/rewind",
@@ -1107,8 +1217,16 @@ async function rigTranscript(
             messageIds: string[];
         }
     >();
+    const notices: { readonly createdAt: number; readonly eventId: string; readonly message: unknown }[] =
+        [];
     for (const { event, value } of projected) {
         const data = recordValue(value.data);
+        if (value.type === "system_notice" && data !== undefined) {
+            // Notices have no run of their own, so they are collected on their own rather than
+            // forced into a conversational turn. They stay in event-ID order for a stable replay.
+            notices.push({ createdAt: event.occurredAt, eventId: event.id, message: data.message });
+            continue;
+        }
         const runId = typeof data?.runId === "string" ? data.runId : undefined;
         if (data === undefined || runId === undefined) continue;
         const turn = turns.get(runId) ?? {
@@ -1149,6 +1267,12 @@ async function rigTranscript(
     const visibleMessages = messages.filter(
         (message) => typeof message.id === "string" && visibleMessageIds.has(message.id),
     );
+    // Notices are bounded independently of the turn window; keep the newest and say so when an
+    // older one was dropped, so a reader knows the notice history is not complete.
+    const noticesTruncated = notices.length > MAX_TRANSCRIPT_NOTICES;
+    const visibleNotices = noticesTruncated
+        ? notices.slice(notices.length - MAX_TRANSCRIPT_NOTICES)
+        : notices;
     return {
         complete: visibleTurns.length === orderedTurns.length,
         messageCreatedAt: Object.fromEntries(
@@ -1158,9 +1282,14 @@ async function rigTranscript(
             Object.entries(messageEventId).filter(([id]) => visibleMessageIds.has(id)),
         ),
         messages: visibleMessages,
+        notices: visibleNotices,
+        noticesTruncated,
         turns: visibleTurns,
     };
 }
+
+/** How many recent service notices a single transcript response carries. */
+const MAX_TRANSCRIPT_NOTICES = 100;
 
 function activityFor(
     session: ConversationRecord,
@@ -1221,6 +1350,7 @@ async function sendMessage(
     session: ConversationRecord,
     body: SubmitMessage,
 ): Promise<Record<string, unknown>> {
+    await nameFromFirstMessage(ctx, dependencies, session, body.displayText ?? body.text);
     const resumeCursor = dependencies.agent.modules.events.cursor();
     let acceptance;
     try {
@@ -1248,6 +1378,58 @@ async function sendMessage(
         runId: acceptance.id,
         sessionId: session.id,
     };
+}
+
+/**
+ * Names a workspace, its branch and the chat from the first thing a person said.
+ *
+ * A workspace someone opened from a client is called something like "Workspace 3" until there is
+ * anything to name it after; the first message is that. Naming happens before the agent's own work
+ * so a person is not looking at a placeholder while the answer arrives, and it is skipped entirely
+ * once either the workspace or the chat has a name a person chose — settling a name is a decision,
+ * not a default. Failing to think of a name never fails the message.
+ */
+async function nameFromFirstMessage(
+    ctx: import("@steve.kite/stdlib").Context,
+    dependencies: LoadedSessionDependencies,
+    session: ConversationRecord,
+    firstMessage: string,
+): Promise<void> {
+    if (session.scope.kind !== "workspace" || firstMessage.trim().length === 0) return;
+    const config = await dependencies.agent.system.config(ctx, session.agentId);
+    const sessionNamed = config?.metadata?.title !== undefined;
+    try {
+        const named = await dependencies.agent.projectWorkspaces.nameFromFirstMessage(ctx, {
+            firstMessage,
+            projectId: session.scope.projectId,
+            ...(session.providerId === undefined ? {} : { providerId: session.providerId }),
+            sessionNamed,
+            workspaceId: session.scope.workspaceId,
+        });
+        if (named.chat !== undefined && !sessionNamed) {
+            await dependencies.agent.system.updateMetadata(ctx, session.agentId, {
+                title: named.chat,
+            });
+        }
+        if (named.workspace !== undefined) {
+            await dependencies.agent.modules.events.record(ctx, {
+                agentId: session.agentId,
+                payload: {
+                    ...(named.branch === undefined ? {} : { branch: named.branch }),
+                    projectId: session.scope.projectId,
+                    workspaceId: named.workspace.id,
+                    workspace: {
+                        branch: named.workspace.branch,
+                        id: named.workspace.id,
+                        name: named.workspace.name,
+                    },
+                },
+                type: "workspace.updated",
+            });
+        }
+    } catch (error) {
+        ctx.log.debug("Naming a workspace from its first message did not happen.", {}, error);
+    }
 }
 
 async function steerMessage(
@@ -1360,12 +1542,81 @@ function parseLimit(value: string | null, fallback: number, maximum: number): nu
     return parsed;
 }
 
-function scopeFromCreate(body: CreateSession): ConversationScope {
-    if (body.workspaceId !== undefined && body.projectId !== undefined) {
-        return { kind: "workspace", projectId: body.projectId, workspaceId: body.workspaceId };
+/**
+ * Decides what a new session belongs to, from the folder it starts in.
+ *
+ * The working directory is the whole answer. A folder inside a managed workspace resolves to that
+ * workspace and its project; a folder Rig already knows as a project resolves to it, and starting
+ * work there brings it back if it was archived; anything else becomes a project now — the person's
+ * home directory as `Home`, any other folder named after itself and set up in the background. A
+ * client that names a workspace is asserting a reservation that may not exist on disk yet, so that
+ * case takes the stricter path that accepts a folder Git has not created.
+ *
+ * The result is durable: the scope handed to the conversation is a project or workspace identity a
+ * later run can still resolve, not an echo of what the request happened to send.
+ */
+async function resolveSessionOwner(
+    ctx: import("@steve.kite/stdlib").Context,
+    dependencies: LoadedSessionDependencies,
+    body: CreateSession,
+): Promise<{ readonly cwd: string; readonly scope: ConversationScope }> {
+    const projects = dependencies.agent.projectWorkspaces;
+    let owner: ResolvedProjectOwnership;
+    try {
+        owner =
+            body.workspaceId === undefined
+                ? await projects.resolve(ctx, body.cwd, undefined, body.projectId)
+                : await projects.resolveSessionOwnership(
+                      ctx,
+                      body.cwd,
+                      body.workspaceId,
+                      body.projectId,
+                  );
+    } catch (error) {
+        if (error instanceof ProjectRegistrationError) {
+            throw new AgentHttpError(409, error.message, { code: error.code });
+        }
+        throw new AgentHttpError(
+            400,
+            error instanceof Error ? error.message : "The session directory could not be resolved.",
+        );
     }
-    if (body.projectId !== undefined) return { kind: "project", projectId: body.projectId };
-    return { kind: "unsorted" };
+    return {
+        cwd: owner.workspace?.path ?? owner.project.repositoryRef,
+        scope:
+            owner.workspace === undefined
+                ? { kind: "project", projectId: owner.project.id }
+                : {
+                      kind: "workspace",
+                      projectId: owner.project.id,
+                      workspaceId: owner.workspace.id,
+                  },
+    };
+}
+
+/**
+ * The root agent's configuration, moved to the folder this session works in.
+ *
+ * Everything else is inherited: the models, the modules, the environment the daemon reported. Only
+ * the working directory differs, because a session belongs to a project or a workspace and its
+ * shell, its file reads and the paths it prints all have to be that folder rather than the
+ * daemon's own home.
+ */
+function sessionAgentConfig(root: AgentConfig, cwd: string): AgentConfig {
+    const compute = root.modules?.compute;
+    return {
+        ...root,
+        ...(root.environment === undefined
+            ? {}
+            : { environment: { ...root.environment, workingDirectory: cwd } }),
+        modules: {
+            ...root.modules,
+            compute: {
+                ...(typeof compute === "object" && compute !== null ? compute : {}),
+                cwd,
+            },
+        },
+    };
 }
 
 function sessionId(url: URL): string {
@@ -1478,6 +1729,37 @@ async function streamSessionEvents(
     }
 }
 
+/** How many recent system notices survive the initial event window regardless of the turn tail. */
+const MAX_INITIAL_WINDOW_NOTICES = 100;
+
+/**
+ * The initial slice of projected events a resuming client receives.
+ *
+ * The tail is the newest `limit` events, which is what a client normally wants. But a system notice
+ * — the row that explains why a turn stopped — has no run of its own and is bounded independently
+ * of the turn tail, exactly as the transcript's notice list is. A busy turn (three refused tool
+ * calls and their reviews) can push its turn-stop notice out of the tail while its aborted
+ * `run_finished` stays in it, which would hand the client the abort with no explanation. So any
+ * notice the tail dropped is carried back in — keeping the newest `MAX_INITIAL_WINDOW_NOTICES` —
+ * ahead of the window it precedes, since a dropped event is always older than the tail. This is
+ * what makes the initial history reliably carry the explanation, not just the abort.
+ */
+export function initialEventWindow(
+    projected: readonly Record<string, unknown>[],
+    limit: number,
+): Record<string, unknown>[] {
+    const windowed = projected.slice(Math.max(0, projected.length - limit));
+    const windowedIds = new Set(windowed.map((event) => event.id));
+    const droppedNotices = projected.filter(
+        (event) => event.type === "system_notice" && !windowedIds.has(event.id),
+    );
+    if (droppedNotices.length === 0) return [...windowed];
+    const restoredNotices = droppedNotices.slice(
+        Math.max(0, droppedNotices.length - MAX_INITIAL_WINDOW_NOTICES),
+    );
+    return [...restoredNotices, ...windowed];
+}
+
 export function projectSessionEvent(
     event: AgentEvent,
     sessionIdValue: string,
@@ -1579,7 +1861,163 @@ export function projectSessionEvent(
             type: "run_finished",
         };
     }
+    if (event.type === "permission.event") {
+        return projectPermissionEvent(payload, base);
+    }
     return undefined;
+}
+
+/**
+ * Turn one recorded permission event into the row a client shows.
+ *
+ * The stored payload is arbitrary JSON, so it is decoded against the real `permissionEventSchema`
+ * before any field is read. A record that is not a known permission event is dropped rather than
+ * rendered from half-present fields — that is what let a corrupt event surface as "-1 of the last
+ * -1". Everything below narrows from the decoded value instead of poking at untyped fields.
+ *
+ * A reviewed or denied action becomes a permission-review annotation that decorates the tool row
+ * and carries the review's own token usage. It is projected as a dedicated `permission_review`
+ * event, not an `agent_event`: an `agent_event` must name the run it belongs to, and this one has
+ * none. The permissions module that produced it runs inside a tool call, and Rig's frozen agent
+ * core exposes no owning run id to a module, so the annotation is addressed only by tool-call id.
+ * Inventing a run id here would be a lie a consumer could act on; omitting it is the truth.
+ *
+ * Everything that has no run of its own and nothing to annotate — an action that could not be
+ * reviewed, a turn stopped by too many refusals, or a failed elevated-session cleanup — becomes a
+ * standalone system notice: a visible, durable row that never enters model context and is not
+ * folded into any conversational turn. Mode changes and out-of-mode refusals are already visible
+ * through the tool result, so they project to nothing here.
+ */
+function projectPermissionEvent(
+    payload: UnknownRecord,
+    base: {
+        readonly createdAt: number;
+        readonly id: string;
+        readonly sessionId: string;
+        readonly worktreeSupport: string;
+    },
+): Record<string, unknown> | undefined {
+    if (!Value.Check(permissionEventSchema, payload)) return undefined;
+    const permissionEvent: PermissionEvent = payload;
+    if (
+        permissionEvent.type === "permission_action_reviewed" ||
+        permissionEvent.type === "permission_action_denied"
+    ) {
+        return {
+            ...base,
+            data: {
+                event: {
+                    type: "permission_review",
+                    action: permissionEvent.action,
+                    decision:
+                        permissionEvent.type === "permission_action_reviewed" ? "allow" : "deny",
+                    reason: permissionEvent.reason,
+                    risk: permissionEvent.risk,
+                    toolCallId: permissionEvent.callId,
+                    userAuthorization: permissionEvent.userAuthorization,
+                    ...(permissionEvent.transcript === undefined
+                        ? {}
+                        : {
+                              transcript: permissionReviewTranscriptForProtocol(
+                                  permissionEvent.transcript,
+                              ),
+                          }),
+                },
+            },
+            type: "permission_review",
+        };
+    }
+    if (permissionEvent.type === "permission_action_unproven") {
+        const timedOut = permissionEvent.kind === "timed_out";
+        return systemNotice(
+            base,
+            timedOut ? "Automatic permission review did not finish" : "Automatic permission review could not run",
+            timedOut
+                ? "The action was not performed because its automatic permission review did not finish in time. No judgment was made that the action was unsafe."
+                : "The action was not performed because no reliable automatic permission decision was available. No judgment was made about the action itself.",
+        );
+    }
+    if (permissionEvent.type === "permission_mode_cleanup_failed") {
+        return systemNotice(
+            base,
+            "Permission cleanup failed",
+            `Rig could not stop every elevated process after permissions were reduced. ${permissionEvent.reason}`.trimEnd(),
+        );
+    }
+    if (permissionEvent.type === "permission_turn_stopped") {
+        const { consecutiveRefusals, recentRefusals, recentWindowLength } = permissionEvent;
+        // The user-visible sentence drops the agent-facing directive the event's reason carries.
+        // The stable `code` lets the client suppress the generic interruption row for this run
+        // without matching the title text.
+        return systemNotice(
+            base,
+            "Automatic permission review stopped the turn",
+            `Automatic permission review refused too many actions in this turn (${consecutiveRefusals} in a ` +
+                `row, ${recentRefusals} of the last ${recentWindowLength}), so the turn was stopped.`,
+            PERMISSION_TURN_STOPPED_NOTICE_CODE,
+        );
+    }
+    return undefined;
+}
+
+/**
+ * The stable machine code carried on the turn-stop notice. A client suppresses the generic
+ * interruption row for the aborted run that follows by keying on this, not on the title text.
+ */
+const PERMISSION_TURN_STOPPED_NOTICE_CODE = "permission_turn_stopped";
+
+/** Build the visible system-notice row for one permission event. */
+function systemNotice(
+    base: {
+        readonly createdAt: number;
+        readonly id: string;
+        readonly sessionId: string;
+        readonly worktreeSupport: string;
+    },
+    title: string,
+    details: string,
+    code?: string,
+): Record<string, unknown> {
+    return {
+        ...base,
+        data: {
+            message: {
+                role: "system",
+                id: base.id,
+                context: "excluded",
+                blocks: [{ type: "text", text: details }],
+                structured: {
+                    kind: "notice",
+                    title,
+                    details,
+                    level: "warning",
+                    ...(code === undefined ? {} : { code }),
+                },
+            },
+        },
+        type: "system_notice",
+    };
+}
+
+/** Widen the module's bounded review usage into the protocol usage shape a client renders. */
+function permissionReviewTranscriptForProtocol(
+    transcript: PermissionReviewTranscript,
+): Record<string, unknown> {
+    const usage = transcript.usage;
+    return {
+        entries: transcript.entries,
+        modelId: transcript.modelId,
+        providerId: transcript.providerId,
+        usage: {
+            input: usage.input,
+            output: usage.output,
+            cacheRead: usage.cacheRead,
+            cacheWrite: usage.cacheWrite,
+            totalTokens: usage.totalTokens,
+            ...(usage.reasoning === undefined ? {} : { reasoning: usage.reasoning }),
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+    };
 }
 
 function agentBlocks(value: unknown): readonly Record<string, unknown>[] {

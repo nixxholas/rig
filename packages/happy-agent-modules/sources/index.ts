@@ -256,22 +256,17 @@ export {
     type ComputeSessionStatus,
     type ComputeShell,
 } from "./compute/Compute.js";
-export { readFileTool } from "./compute/tools/read_file.js";
-export { writeFileTool } from "./compute/tools/write_file.js";
-export { editFileTool } from "./compute/tools/edit_file.js";
-export { listDirectoryTool } from "./compute/tools/list_directory.js";
-export { findFilesTool } from "./compute/tools/find_files.js";
-export { searchFilesTool } from "./compute/tools/search_files.js";
-export { runCommandTool } from "./compute/tools/run_command.js";
-export { readCommandOutputTool } from "./compute/tools/read_command_output.js";
-export { sendCommandInputTool } from "./compute/tools/send_command_input.js";
-export { stopCommandTool } from "./compute/tools/stop_command.js";
 export {
-    commandResultSchema,
-    createCommandResult,
-    formatCommandResult,
-    type CommandResult,
-} from "./compute/impl/commandResult.js";
+    computeToolVendor,
+    computeToolSelectionSchema,
+    computeToolVendorSchema,
+    type ComputeToolSelection,
+    type ComputeToolVendor,
+} from "./compute/ComputeToolVendor.js";
+export { assembleComputeTools } from "./compute/tools/assembleComputeTools.js";
+export { assembleClaudeComputeTools } from "./compute/tools/claude/assembleClaudeComputeTools.js";
+export { assembleCodexComputeTools } from "./compute/tools/codex/assembleCodexComputeTools.js";
+export { assembleGrokComputeTools } from "./compute/tools/grok/assembleGrokComputeTools.js";
 export { FileReadLog } from "./compute/impl/FileReadLog.js";
 
 // Model switch: the notice a model gets when it inherits a conversation it cannot see.
@@ -285,12 +280,16 @@ export {
     type ModelSwitchNotice,
 } from "./modelSwitch/impl/createModelSwitchNotice.js";
 
+// Auto: the automatic permission reviewer and its private, unaddressable review system.
+export * from "./auto/index.js";
+
 // Permissions: the mode an agent runs in, enforced call by call.
 export {
     PermissionsModule,
     type PermissionsModuleOptions,
 } from "./permissions/PermissionsModule.js";
 export {
+    permissionEventSchema,
     type PermissionEvent,
     type PermissionModuleListener,
 } from "./permissions/PermissionEvent.js";
@@ -298,6 +297,7 @@ export {
     type PermissionReviewDecision,
     type PermissionReviewer,
     type PermissionReviewRequest,
+    type PermissionReviewTranscript,
 } from "./permissions/PermissionReviewer.js";
 export {
     permissionModeChangeNotice,

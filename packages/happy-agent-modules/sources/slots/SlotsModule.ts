@@ -222,11 +222,7 @@ export class SlotsModule implements AgentModule {
         return await this.#create(ctx, agentId, input);
     }
 
-    async #create(
-        ctx: Context,
-        agentId: string,
-        input: SlotCreateInput,
-    ): Promise<SlotEntry> {
+    async #create(ctx: Context, agentId: string, input: SlotCreateInput): Promise<SlotEntry> {
         this.#assertAgentId(agentId);
         this.#assertInput(slotCreateInputSchema, input, "creation");
         return await ctx.inTx(async (txCtx) => {
@@ -371,11 +367,7 @@ export class SlotsModule implements AgentModule {
         return await this.#remove(ctx, agentId, id);
     }
 
-    async #remove(
-        ctx: Context,
-        agentId: string,
-        id: string,
-    ): Promise<boolean> {
+    async #remove(ctx: Context, agentId: string, id: string): Promise<boolean> {
         this.#assertAgentId(agentId);
         this.#assertId(id);
         return await ctx.inTx(async (txCtx) => {
@@ -794,12 +786,7 @@ export class SlotsModule implements AgentModule {
                 limit: visible,
                 ...(visible < entries.length ? { nextCursor: visible } : {}),
             };
-            if (
-                this.#pageFits(
-                    page,
-                    this.#maxOutputCharacters - REORDER_RESULT_PREFIX.length,
-                )
-            ) {
+            if (this.#pageFits(page, this.#maxOutputCharacters - REORDER_RESULT_PREFIX.length)) {
                 return page;
             }
         }

@@ -11,7 +11,7 @@ export function setProjectAvatarTool(projects: ProjectsModule, agentId: string) 
     return defineAgentTool({
         name: "set_project_avatar",
         description:
-            "Set normalized project avatar metadata. The host may use the returned hash with its avatar asset service to serve the image bytes.",
+            "Set normalized project avatar metadata. The host serves the image bytes for the returned hash.",
         parameters: projectSetAvatarInputSchema,
         returnType: projectSchema,
         durable: true,
@@ -22,7 +22,7 @@ export function setProjectAvatarTool(projects: ProjectsModule, agentId: string) 
         toLLM: (project) => [
             {
                 type: "text",
-                text: projects.formatProjectOperationForModel("Project avatar updated:", project),
+                text: projects.formatProjectForModel("Project avatar updated:", project),
             },
         ],
     });

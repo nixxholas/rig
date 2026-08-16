@@ -40,7 +40,7 @@ with no boundary check at all, and the model never gets to see the image it gene
   (`createImageGenerationTool.ts:239-270`). v2 accepts whatever the generator returns,
   validating only that `mediaType` matches `^image/[A-Za-z0-9.+-]+$` and the byte length is within
   bounds (`ImageGenerator.ts:33-45`, `ImageGenerationModule.ts:196-197`).
-- **Regression — what the model receives.** v1's `toLLM` returns a text line *and* an image block
+- **Regression — what the model receives.** v1's `toLLM` returns a text line _and_ an image block
   (`createImageGenerationTool.ts:172-183`). v2's returns text only
   (`tools/generate_image.ts:56-61`).
 - **Open rewrite debt — concurrency.** v1 declares `locks: ["image_generation"]`
@@ -51,18 +51,19 @@ with no boundary check at all, and the model never gets to see the image it gene
 
 1. **The tool name is chosen by branching on the provider.** `ImageGenerationModule.ts:314-328`:
 
-   ```ts
-   const codexSurface =
-       scope.agent.providerKind === "codex" ||
-       (scope.agent.providerKind === "bedrock" &&
-        scope.agent.model?.startsWith("openai/") === true);
-   ```
+    ```ts
+    const codexSurface =
+        scope.agent.providerKind === "codex" ||
+        (scope.agent.providerKind === "bedrock" &&
+            scope.agent.model?.startsWith("openai/") === true);
+    ```
 
-   `AGENTS.md` states: "Never assemble a model's tools by branching on a provider key or a tool-name
-   list", and master plan 16 requires that "no model or provider capability classification decides
-   which tools exist". A model-ID prefix test (`startsWith("openai/")`) is the classification the
-   plan names. Two separate tool definitions merged from fixed arrays is the shape the plan asks
-   for; the module has one definition parameterized by a runtime provider check.
+    `AGENTS.md` states: "Never assemble a model's tools by branching on a provider key or a tool-name
+    list", and master plan 16 requires that "no model or provider capability classification decides
+    which tools exist". A model-ID prefix test (`startsWith("openai/")`) is the classification the
+    plan names. Two separate tool definitions merged from fixed arrays is the shape the plan asks
+    for; the module has one definition parameterized by a runtime provider check.
+
 2. **The model's prompt is interpolated unescaped into the approval text.**
    `tools/generate_image.ts:35`: `` `sending "${prompt}"…` ``. A prompt containing quotes, newlines,
    or text shaped like the rest of the sentence ("… to image generation. Access: none") is rendered
@@ -75,13 +76,13 @@ with no boundary check at all, and the model never gets to see the image it gene
    generator request (`ImageGenerationModule.ts:182-184`), and the host reads them. Nothing resolves
    them, stats them, or compares them against the workspace. v1 resolves each path, rejects
    non-files and oversized files, and enforces a 32 MiB aggregate
-   (`createImageGenerationTool.ts:199-230`) *and* asks `shouldReviewPathInAutoMode` about each one.
+   (`createImageGenerationTool.ts:199-230`) _and_ asks `shouldReviewPathInAutoMode` about each one.
    Here `/etc/…` or `~/.ssh/…` reaches an external image provider with only the generic
    "conversation data, local filesystem read/write" phrase in the approval text to describe it.
 4. **The model never sees the generated image.** `formatForModel`
    (`ImageGenerationModule.ts:330-374`) returns text, and `toLLM` wraps only that text
    (`tools/generate_image.ts:56-61`). The comment on line 330 states the intent — "without exposing
-   image bytes" — but for an *editing* workflow the model has to be able to look at what it made to
+   image bytes" — but for an _editing_ workflow the model has to be able to look at what it made to
    decide whether to iterate. The `codex_imagegen` guidance v1 ships even tells the model the image
    "is… returned to you."
 5. **The durable catalog is only reachable after `tools()` has run.** `#catalogs` is populated inside
@@ -133,14 +134,14 @@ replayed, and the README states the reasoning. Writes go to a temp name and are 
 `rename` (`ImageGenerationModule.ts:579-595`), so a reader never sees a partial image. Success and
 failure each take exactly one catalog transaction, both reject a reused operation ID rather than
 silently replaying (`ImageGenerationModule.ts:208-210`, `424-426`), and a generator failure is
-*recorded* as a durable `failed` status instead of vanishing
+_recorded_ as a durable `failed` status instead of vanishing
 (`ImageGenerationModule.ts:198-200`). `onEventTransactional` runs inside the committing transaction
 and `onEvent` strictly after it, with post-commit listener failures reported rather than allowed to
 undo committed state (`ImageGenerationModule.ts:507-537`). Every value crossing a boundary is
 `structuredClone`d, so a listener cannot mutate the module's records.
 
 On permissions the tool is declared correctly: `requiresAutoOrFullAccess: true` with
-`shouldReviewInAutoMode: () => true` and *no* `shouldRunInFullAccessInAutoMode`
+`shouldReviewInAutoMode: () => true` and _no_ `shouldRunInFullAccessInAutoMode`
 (`tools/generate_image.ts:28-29`), which is exactly the separation `AGENTS.md` demands — review
 without automatic elevation. The approval text names the real boundaries being crossed
 ("conversation data, local filesystem read/write, and external image provider APIs"), and the

@@ -167,7 +167,7 @@ protocol path.
 - Inject a bounded `HistoryStore`.
 - Expose bounded page, search, excerpt, and statistics APIs.
 - Give the model a common `read_agent_history` tool.
-- Deny cross-agent reads by default; Collaboration may inject authorization.
+- Deny cross-agent reads by default; the host may inject authorization.
 - Use module-owned stable record IDs.
 - Keep pending assistant assembly in transactional `runKV`.
 - Support strict and explicitly configured best-effort persistence modes.
@@ -220,21 +220,23 @@ Status: complete, reviewed, committed, and integrated with Agent Base 0.0.7.
 Status: complete, reviewed, committed, and available from the package root;
 Rig host integration remains.
 
-- Create agents with caller-supplied IDs and Agent Base metadata.
-- Keep an injected host roster containing agents, roles, groups, parentage,
-  ownership, status, and display metadata.
-- List and resolve agents through the module rather than Agent Base deletion
-  or a Rig-specific session manager.
+- Create agents with caller-supplied IDs and Agent Base metadata, through the
+  `AgentSystemRef` handed to the module at `beforeStart`.
+- Store nothing. The identity, the parentage, the title, and the inbox all
+  belong to Agent Base; a roster here would be a second copy of them.
 - Never delete agents.
-- Track directed reply obligations: who is waiting for an answer from whom.
-- Own send-message, request-reply, wait, scheduling, and coordination tools.
-- Treat waiting as an ordinary durable tool call.
-- Create the Agent Base identity and roster row in one shared transaction.
-- Use metadata change hooks to keep host projection current.
-- Supply structural authorization to History and other modules that may read
-  related agents.
+- Settle a collaborator's model, effort, provider, and service tier on the
+  message that creates it, and never on a later one.
+- Own three tools: create, send one message, interrupt one turn. No waiting, no
+  reply obligations, no model-facing listing.
+- Treat every message as asynchronous in both directions. A reply is a message
+  sent back, and idempotency is Agent Base's dedup on the durable tool call ID.
+- Report to an agent's creator from the runtime when its run settles, quoting
+  what it said last, so that nothing has to wait to learn the work is over.
+- Authorize by ancestry read from the agent collection: an agent reaches the
+  collaborators it created and the agent that created it.
 
-Scheduling is part of Collaboration, not a separate durable queue module.
+Scheduling is a separate module rather than part of Collaboration.
 
 ### 7. User input / inbox
 
@@ -457,7 +459,8 @@ Delete obsolete runtime code only after its callers use Agent Base/modules.
 - Delete the legacy durable run queue.
 - Remove Murmur, P2P, Happy sync, and Happy Cloud runtime integrations from the
   v2 path.
-- Keep module-hosted scheduling state only through Collaboration.
+- Keep module-hosted scheduling state in the scheduling module; Collaboration
+  hosts no state.
 
 ## Implementation order
 
@@ -523,7 +526,7 @@ A module is finished when:
 - outer rollback publishes nothing;
 - post-commit delivery uses a stable non-transaction context;
 - persisted state is fully validated;
-- cross-agent access is denied unless Collaboration authorizes it;
+- cross-agent access is denied unless an injected host policy authorizes it;
 - the package exports the module and its public schemas/contracts;
 - focused tests cover restart, malformed state, rollback, replay, bounds, and
   listener behavior;

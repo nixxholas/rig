@@ -3,4 +3,4 @@ export * from "./conversations/index.js";
 export * from "./files/ProjectFilesModule.js";
 export * from "./git/GitModule.js";
 export * from "./http/index.js";
-export * from "./projects/ProjectHost.js";
+export * from "./projects/index.js";

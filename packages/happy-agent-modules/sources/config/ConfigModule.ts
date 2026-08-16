@@ -395,6 +395,8 @@ const partialValuesSchema = Type.Object(
         workspace: Type.Optional(
             Type.Object(
                 {
+                    keep_copies_on_archive: Type.Optional(Type.Boolean()),
+                    keep_worktrees_on_archive: Type.Optional(Type.Boolean()),
                     protected_sync: Type.Optional(projectRelativePathsSchema),
                     setup_commands: Type.Optional(boundedStringArraySchema),
                     sync: Type.Optional(projectRelativePathsSchema),
@@ -713,6 +715,13 @@ const resolvedValuesSchema = Type.Object(
         ),
         workspace: Type.Object(
             {
+                /**
+                 * A workspace copied from a project without Git is the person's own folder rather
+                 * than a checkout Git can rebuild, so archiving leaves it behind by default. A
+                 * worktree is rebuildable, so archiving removes it by default.
+                 */
+                keepCopiesOnArchive: Type.Boolean(),
+                keepWorktreesOnArchive: Type.Boolean(),
                 protectedSync: projectRelativePathsSchema,
                 setupCommands: boundedStringArraySchema,
                 sync: projectRelativePathsSchema,
@@ -728,6 +737,8 @@ const pathSchemaSet = Type.Object(
         agentHome: pathSchema,
         agentLockPath: pathSchema,
         appletsPath: pathSchema,
+        autoAgentLockPath: pathSchema,
+        autoDatabasePath: pathSchema,
         configHome: pathSchema,
         databasePath: pathSchema,
         generatedPath: pathSchema,
@@ -867,6 +878,8 @@ const DEFAULT_VALUES: HappyAgentConfigValues = {
         warning: "yellow",
     },
     workspace: {
+        keepCopiesOnArchive: true,
+        keepWorktreesOnArchive: false,
         protectedSync: [],
         setupCommands: [],
         sync: [],
@@ -1111,6 +1124,11 @@ function derivePaths(input: HappyAgentConfigurationInput): HappyAgentConfigurati
         agentHome,
         agentLockPath: join(agentHome, "agent.lock"),
         appletsPath: join(publicHome, "Applets"),
+        // The automatic permission reviewer keeps its own review-only agent system in a separate
+        // database and single-owner lock beside, never on top of, the main agent's own files, so
+        // the reviewer's state shares nothing with the agent it reviews.
+        autoAgentLockPath: join(agentHome, "auto-agent.lock"),
+        autoDatabasePath: join(agentHome, "auto-agent.sqlite"),
         configHome,
         databasePath: join(agentHome, "agent.sqlite"),
         generatedPath: join(publicHome, "Generated"),
@@ -1263,6 +1281,12 @@ function normalizeWorkspace(
     value: NonNullable<PartialValues["workspace"]>,
 ): Record<string, unknown> {
     return {
+        ...(value.keep_copies_on_archive === undefined
+            ? {}
+            : { keepCopiesOnArchive: value.keep_copies_on_archive }),
+        ...(value.keep_worktrees_on_archive === undefined
+            ? {}
+            : { keepWorktreesOnArchive: value.keep_worktrees_on_archive }),
         ...(value.protected_sync === undefined ? {} : { protectedSync: value.protected_sync }),
         ...(value.setup_commands === undefined ? {} : { setupCommands: value.setup_commands }),
         ...(value.sync === undefined ? {} : { sync: value.sync }),
@@ -1667,6 +1691,8 @@ function calculateProvenance(...sources: readonly PartialValues[]): Record<strin
             tool_result_retention_days: "toolResultRetentionDays",
         },
         workspace: {
+            keep_copies_on_archive: "keepCopiesOnArchive",
+            keep_worktrees_on_archive: "keepWorktreesOnArchive",
             protected_sync: "protectedSync",
             setup_commands: "setupCommands",
             sync: "sync",
@@ -1759,9 +1785,17 @@ function readWorkspace(
         value,
         "workspace",
         unknown,
-        ["protected_sync", "setup_commands", "sync"],
+        [
+            "keep_copies_on_archive",
+            "keep_worktrees_on_archive",
+            "protected_sync",
+            "setup_commands",
+            "sync",
+        ],
         Type.Object(
             {
+                keep_copies_on_archive: Type.Optional(Type.Boolean()),
+                keep_worktrees_on_archive: Type.Optional(Type.Boolean()),
                 protected_sync: Type.Optional(projectRelativePathsSchema),
                 setup_commands: Type.Optional(boundedStringArraySchema),
                 sync: Type.Optional(projectRelativePathsSchema),

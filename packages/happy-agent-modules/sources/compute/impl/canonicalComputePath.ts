@@ -24,10 +24,7 @@ export async function canonicalComputePath(
     const parent = parentComputePath(path);
     if (parent === path) return path;
     try {
-        return joinComputePath(
-            await fs.realpath(permissions, parent),
-            basenameComputePath(path),
-        );
+        return joinComputePath(await fs.realpath(permissions, parent), basenameComputePath(path));
     } catch {
         return path;
     }

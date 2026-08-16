@@ -1,0 +1,115 @@
+import { sql } from "drizzle-orm";
+import { agentDatabaseRun } from "@slopus/happy-agent-base";
+
+import type { Project } from "../Project.js";
+import { PROJECTS_TABLE } from "../ProjectMigrations.js";
+import {
+    HOME_PROJECT_STORAGE_KEY,
+    projectStorageKey,
+    uniqueProjectStorageKey,
+} from "../projectIdentity.js";
+import type { ProjectStore, ProjectStoreCreateInput } from "../ProjectStore.js";
+import {
+    databaseFor,
+    insertProjectRow,
+    nextProjectOrderKey,
+    readProject,
+    readProjectByPath,
+    takenStorageKeys,
+} from "./projectRecords.js";
+
+/** Registering a folder, once. Ensure converges on the row the folder already has. */
+export function createProjectRegistration(): Pick<ProjectStore, "create" | "ensure"> {
+    return {
+        create: async (ctx, actingAgentId, input) => {
+            const database = databaseFor(ctx);
+            const project = await newProjectRow(ctx, input);
+            await insertProjectRow(database, project);
+            return { operation: "create", agentId: actingAgentId, changed: true, project };
+        },
+        ensure: async (ctx, actingAgentId, input) => {
+            const database = databaseFor(ctx);
+            const existing = await readProjectByPath(database, input.repositoryRef);
+            if (existing === undefined) {
+                const project = await newProjectRow(ctx, input);
+                await insertProjectRow(database, project);
+                return {
+                    operation: "ensure",
+                    agentId: actingAgentId,
+                    changed: true,
+                    created: true,
+                    project,
+                };
+            }
+            if (existing.status !== "archived") {
+                return {
+                    operation: "ensure",
+                    agentId: actingAgentId,
+                    changed: false,
+                    created: false,
+                    project: existing,
+                };
+            }
+            const updatedAt = Date.now();
+            await agentDatabaseRun(
+                database,
+                sql`UPDATE ${sql.raw(PROJECTS_TABLE)}
+                    SET status = 'active', archived_at = ${null},
+                        updated_at = ${updatedAt}, version = version + 1
+                    WHERE id = ${existing.id} AND status = 'archived'`,
+            );
+            const restored = await readProject(database, existing.id);
+            if (restored === undefined || restored.status !== "active") {
+                throw new Error("Project ensure could not restore the archived project.");
+            }
+            return {
+                operation: "ensure",
+                agentId: actingAgentId,
+                changed: true,
+                created: false,
+                project: restored,
+            };
+        },
+    };
+}
+
+async function newProjectRow(
+    ctx: Parameters<ProjectStore["create"]>[0],
+    input: ProjectStoreCreateInput,
+): Promise<Project> {
+    const database = databaseFor(ctx);
+    const taken = await takenStorageKeys(database);
+    const storageKey = uniqueProjectStorageKey(
+        input.kind === "home" ? HOME_PROJECT_STORAGE_KEY : projectStorageKey(input.name),
+        (candidate) => taken.has(candidate.toLocaleLowerCase("en-US")),
+    );
+    const at = Date.now();
+    return {
+        id: input.id,
+        ownerAgentId: input.ownerAgentId,
+        repositoryRef: input.repositoryRef,
+        kind: input.kind,
+        storageKey,
+        name: input.name,
+        nameSource: input.nameSource,
+        status: "active",
+        // A project whose folder still has to be cloned is not on disk yet.
+        presence: input.remoteSource === undefined ? "present" : "missing",
+        // The home directory is always there; nothing initializes it.
+        initializationStatus: input.kind === "home" ? "ready" : "initializing",
+        initializationAttempt: 0,
+        worktreeSupport: "unknown",
+        ...(input.remoteSource === undefined ? {} : { remoteSource: input.remoteSource }),
+        ...(input.requiredSecretKind === undefined
+            ? {}
+            : { requiredSecretKind: input.requiredSecretKind }),
+        gitAhead: 0,
+        gitBehind: 0,
+        gitDetached: false,
+        orderKey: await nextProjectOrderKey(database),
+        version: 1,
+        ...(input.description === undefined ? {} : { description: input.description }),
+        createdAt: at,
+        updatedAt: at,
+    };
+}

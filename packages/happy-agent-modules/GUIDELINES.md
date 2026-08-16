@@ -20,11 +20,16 @@ while building and reviewing the first Rig v2 modules.
   transaction context. Inject only genuinely external files, processes,
   network clients, clocks, policies, and schedulers.
 - Do not import Rig or another module. Cross-module behavior uses a structural
-  callback or service supplied by the host. Default cross-agent access is
-  denied until an injected Collaboration policy authorizes it.
+  callback or service supplied by the host. Cross-agent access is denied by
+  default, and a module that wants to widen it takes an injected policy from
+  the host rather than reaching for another module's.
 - Do not change `happy-agent-base` to make a module easier to implement.
-- Tools use one common provider-neutral surface. Do not add vendor-specific
-  wrappers, compute, permission review, or autoreview behavior here.
+- A module that gives the model a capability every vendor already ships tools
+  for — a filesystem, a shell — offers it as each vendor's own tools, chosen
+  from the agent's model, not as one provider-neutral surface. Keep the
+  behavior in one shared helper per operation and make each vendor tool a thin
+  skin over it, so surfaces cannot drift. A capability no vendor ships tools
+  for stays a single common tool.
 
 ## Runtime types and configuration
 
@@ -280,12 +285,19 @@ while building and reviewing the first Rig v2 modules.
 - A durable queue may contain several messages for the same run. Recovery and
   projection must select by persisted message identity and metadata, not by the
   first or last in-memory registration.
-- Collaboration owns agent creation, listing, directed reply obligations,
-  scheduling, and waits through an injected host store. Waiting is an ordinary
-  durable tool call.
+- Collaboration owns agent creation and agent-to-agent messages, and owns no
+  tables: agents are actors, so the identity, the ancestry, and the inbox are
+  read from and written through `AgentSystemRef`. Nothing waits for a reply,
+  and listing an agent's collaborators is a host call on the agent collection
+  rather than a model-facing tool.
 - For creation or message submission that must update host metadata atomically,
   start the shared host transaction, pass its transaction context to Agent
   Base, and write the host repeat-key or roster row in that same transaction.
+  This applies when the other side can join the transaction. When it cannot —
+  an injected broker that may live in another process — do the external call
+  outside any transaction and finalize durable state in a short transaction
+  afterwards, writing the durable row only once the external effect succeeded
+  so that row is the evidence a retry replays.
 
 ## Required tests
 

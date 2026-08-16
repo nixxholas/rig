@@ -7,7 +7,7 @@ export function reorderProjectTool(projects: ProjectsModule, agentId: string) {
     return defineAgentTool({
         name: "reorder_project",
         description:
-            "Move one project in the main project list. Set afterId to null for the beginning or to another project ID to place this project immediately after it.",
+            "Move one project in the main project list. Set afterId to null for the beginning, or to another project ID to place this project immediately after it.",
         parameters: projectReorderInputSchema,
         returnType: projectSchema,
         durable: true,
@@ -18,7 +18,7 @@ export function reorderProjectTool(projects: ProjectsModule, agentId: string) {
         toLLM: (project) => [
             {
                 type: "text",
-                text: projects.formatProjectOperationForModel("Project reordered:", project),
+                text: projects.formatProjectForModel("Project reordered:", project),
             },
         ],
     });

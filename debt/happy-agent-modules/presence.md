@@ -8,11 +8,11 @@ rewrite into `happy-agent-modules`.
 
 ## Summary
 
-The module stores a presence *label* — one of `online`, `away`, `offline`, `dnd`, `custom` — plus an
+The module stores a presence _label_ — one of `online`, `away`, `offline`, `dnd`, `custom` — plus an
 optional 240-character message, an optional expiry with fallback, and a set of weekly recurring
 windows. It contributes one sentence to the system prompt and exposes `get_presence` (always) and
 `set_presence` (opt-in). What the rewrite has not carried over is the thing master plan 11 says
-presence is *for*: how long an agent may wait for a human answer. The transactional machinery around
+presence is _for_: how long an agent may wait for a human answer. The transactional machinery around
 the state is better than v1's; the state itself is poorer.
 
 ## Changes from the Rig v1 implementation

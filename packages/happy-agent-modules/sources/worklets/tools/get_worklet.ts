@@ -28,10 +28,8 @@ export function getWorkletTool(module: WorkletsModule, agentId: string) {
         returnType: workletDetailPageSchema,
         durable: true,
         shouldReviewInAutoMode: () => false,
-        execute: async (
-            ctx,
-            { name, ...query }: GetWorkletInput,
-        ) => await module.getPage(ctx, agentId, name, query as WorkletDetailQuery),
+        execute: async (ctx, { name, ...query }: GetWorkletInput) =>
+            await module.getPage(ctx, agentId, name, query as WorkletDetailQuery),
         toLLM: (page) => [
             {
                 type: "text",

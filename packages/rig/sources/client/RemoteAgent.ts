@@ -561,6 +561,21 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
 
         this.#session = { ...this.#session, lastEventId: event.id };
 
+        if (event.type === "system_notice") {
+            // A system notice is a visible service row with no run lifecycle and no model context.
+            // It advances the cursor like any other event, but the snapshot's messages and context
+            // are left untouched. Replay boundaries by event ID already keep it from applying twice.
+            return;
+        }
+
+        if (event.type === "permission_review") {
+            // A permission-review annotation decorates a tool row by tool-call id; it has no run of
+            // its own and no effect on this snapshot's messages, context, or run bookkeeping. Like a
+            // system notice, it only advances the cursor here — the app that renders the transcript
+            // is what attaches it to the tool row.
+            return;
+        }
+
         if (event.type === "session_activity_changed") {
             this.#session = { ...this.#session, activity: event.data.activity };
             return;

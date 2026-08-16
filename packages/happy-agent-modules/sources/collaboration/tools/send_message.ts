@@ -1,44 +1,32 @@
-import { Type, type Static } from "@sinclair/typebox";
+import { Type } from "@sinclair/typebox";
 import { defineAgentTool } from "@slopus/happy-agent-base";
 
 import type { CollaborationModule } from "../CollaborationModule.js";
 import {
-    collaborationSendToolInputSchema,
-    collaborationSendResultSchema,
-} from "../CollaborationMessage.js";
+    collaborationSendInputSchema,
+    type CollaborationSendInput,
+} from "../CollaborationAgent.js";
 
-/**
- * Providers require an object at the root of a tool's parameters, so the message variants stay a
- * closed union and travel as one argument.
- */
-const sendMessageToolParametersSchema = Type.Object(
-    { input: collaborationSendToolInputSchema },
-    { additionalProperties: false },
-);
-
-type SendMessageToolParameters = Static<typeof sendMessageToolParametersSchema>;
-
-/** Queue one durable message and, optionally, a durable reply obligation. */
+/** Put one message in a collaborator's inbox. */
 export function sendMessageTool(collaboration: CollaborationModule, actingAgentId: string) {
     return defineAgentTool({
         name: "send_agent_message",
-        description:
-            "Send a text message to another collaborator. Set expectReply when the recipient must answer; then use wait_for_reply. Set readOnly true to switch the recipient to Read only, or false to restore the sender's current permission mode.",
-        parameters: sendMessageToolParametersSchema,
-        returnType: collaborationSendResultSchema,
+        description: [
+            "Send a message to a collaborator you created, or back to the agent that created you.",
+            "",
+            "Messages are one-way. This returns as soon as the message is delivered, and the recipient answers whenever it is ready by sending one back — there is nothing to wait on. To answer a message you received, send one to the agent it came from.",
+        ].join("\n"),
+        parameters: collaborationSendInputSchema,
+        returnType: Type.Void(),
         durable: true,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, { input }: SendMessageToolParameters, call) =>
-            await collaboration.sendMessage(ctx, actingAgentId, {
-                ...input,
-                messageId: call.id,
-            }),
-        toLLM: ({ message, obligation }) => [
+        execute: async (ctx, input: CollaborationSendInput, call) => {
+            await collaboration.sendMessage(ctx, actingAgentId, input, call.id);
+        },
+        toLLM: () => [
             {
                 type: "text",
-                text: `Message ${message.id} sent to ${message.toAgentId}.${
-                    obligation === undefined ? "" : ` Reply obligation: ${obligation.id}.`
-                }`,
+                text: "Message delivered. Any answer arrives as a message; carry on with other work in the meantime.",
             },
         ],
     });

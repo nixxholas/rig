@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir } from "node:fs/promises";
-import { resolve } from "node:path";
+import { chmod, mkdir, readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 
 import { createId } from "@paralleldrive/cuid2";
 import { Type } from "@sinclair/typebox";
@@ -11,17 +12,23 @@ import {
     agentDatabaseRows,
     agentDatabaseRun,
     currentAgentEnvironment,
+    withAgentDatabase,
     type Agent,
     type AgentConfig,
     type AgentDatabase,
     type AgentModel,
     type AgentModule,
+    type AgentModuleScope,
     type AgentProviders,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
 import { hostComputeProvider } from "@slopus/happy-agent-compute";
 import {
     AppletModule,
+    AUTO_PERMISSION_REVIEW_BUDGET_MS,
+    AutoModule,
+    boundSecurityFileText,
+    isMissingSecurityFileError,
     ConfigModule,
     CollaborationModule,
     ComputeModule,
@@ -34,6 +41,7 @@ import {
     ModelSwitchModule,
     ObservationModule,
     PermissionsModule,
+    permissionEventSchema,
     PresenceModule,
     ProjectsModule,
     SchedulingModule,
@@ -51,9 +59,9 @@ import {
     agentComputeConfigSchema,
     createComputeModules,
     happyAgentConfigurationSchema,
-    type CollaborationBroker,
     type EventsModuleOptions,
     type HappyHost,
+    type HostCompute,
     type ImageGenerator,
     type McpHost,
     type PermissionReviewer,
@@ -65,19 +73,23 @@ import {
     type UserInputBroker,
     type WorkflowRuntime,
     type WorkletRuntime,
-    type WorkspaceHost,
     type PresenceModuleOptions,
 } from "@slopus/happy-agent-modules";
 import { sql } from "drizzle-orm";
 import type { LibSQLDatabase } from "drizzle-orm/libsql";
-import type { Context } from "@steve.kite/stdlib";
+import { detach, type Context } from "@steve.kite/stdlib";
 
 import { checkModuleToolParameters } from "./checkModuleToolParameters.js";
-import { openHappyAgentDatabase } from "./HappyAgentDatabase.js";
+import { openHappyAgentDatabase, type HappyAgentDatabase } from "./HappyAgentDatabase.js";
 import { acquireHappyAgentStorageLock } from "./HappyAgentStorageLock.js";
 import { readGlobalInstructions } from "./readGlobalInstructions.js";
 import type { HappyAgentConfiguration } from "@slopus/happy-agent-modules";
 import { ConversationModule } from "../conversations/ConversationModule.js";
+import { GitStateTracker } from "../git/GitStateTracker.js";
+import { directGitCommandRunner } from "../git/runGitCommand.js";
+import type { WorkspaceNameGenerator } from "../projects/generateWorkspaceNames.js";
+import type { ProjectCreatorProfile } from "../projects/ProjectHost.js";
+import { ProjectWorkspaceService } from "../projects/ProjectWorkspaceService.js";
 import type { EffectiveAgentSelection } from "../../vanillaHappyAgentConfiguration.js";
 
 const providerSchema = Type.String({ minLength: 1, maxLength: 256 });
@@ -136,7 +148,6 @@ const effectiveSelectionSchema = Type.Object(
     { additionalProperties: false },
 );
 export interface HappyAgentIntegrations {
-    readonly collaboration: CollaborationBroker;
     readonly happy: HappyHost;
     readonly imageGeneration: ImageGenerator;
     readonly mcp: McpHost;
@@ -151,7 +162,11 @@ export interface HappyAgentIntegrations {
     readonly worklets: WorkletRuntime;
     readonly permissionReviewer?: PermissionReviewer;
     readonly secretResolver?: SecretResolver;
-    readonly workspaceHost?: WorkspaceHost;
+    /**
+     * Names a workspace, its branch and its chat from the first thing a person said. Choosing a
+     * cheap model of the session's own provider is inference wiring, so the host supplies it.
+     */
+    readonly workspaceNames?: WorkspaceNameGenerator;
 }
 
 export interface LoadHappyAgentOptions {
@@ -208,6 +223,15 @@ export interface LoadedHappyAgent {
     readonly compute: ComputeModule;
     readonly database: LibSQLDatabase;
     readonly modules: HappyAgentModuleCollection;
+    /** The one live Git watcher every route shares instead of scanning once per request. */
+    readonly gitTracker: GitStateTracker;
+    /** Git, managed folders, worktrees, clones and setup behind the project and workspace catalogs. */
+    readonly projectWorkspaces: ProjectWorkspaceService;
+    /**
+     * Starts work a request must not wait for, on its own named lifetime with the database
+     * attached. Closing the agent waits for whatever is still running and starts nothing new.
+     */
+    readonly background: (name: string, work: (ctx: Context) => Promise<void>) => void;
     readonly installation: {
         readonly epoch: string;
         readonly schemaVersion: number;
@@ -239,6 +263,13 @@ export async function loadHappyAgent(
     const opened = await openHappyAgentDatabase(databasePath);
     let modules: HappyAgentModuleCollection | undefined;
     let system: AgentSystemLocal<LibSQLDatabase> | undefined;
+    // The automatic permission reviewer's own resources, owned by the loader and cleaned up in the
+    // same reverse order as the main system's whether startup succeeds or fails.
+    let auto: AutoModule | undefined;
+    let autoOpened: HappyAgentDatabase | undefined;
+    let reviewerCompute: HostCompute | undefined;
+    let projectWorkspaces: ProjectWorkspaceService | undefined;
+    let gitTracker: GitStateTracker | undefined;
     let loaderIdentity:
         | {
               readonly epoch: string;
@@ -253,13 +284,62 @@ export async function loadHappyAgent(
                 await acquireHappyAgentStorageLock(configuration.paths.agentLockPath),
             database: opened.database,
         });
-        modules = createModules(
+
+        // The review system is owned by the loader's lifetime, not by any turn, permission hook, or
+        // tool call, so it takes the loader context directly — the same lifetime the main system
+        // uses, closed by the loader in the same reverse order. It opens its own SQLite connection
+        // and single-owner lock beside, never on top of, the main agent's files, so a reviewer
+        // shares no state with the agent it reviews. A lock already held by another process is a
+        // clean, explained refusal to start Auto mode rather than an opaque crash.
+        const autoLifetime = ctx;
+        const autoDatabasePath = configuration.paths.autoDatabasePath;
+        autoOpened = await openHappyAgentDatabase(autoDatabasePath);
+        await chmod(autoDatabasePath, 0o600);
+        const autoStorage = new AgentStorage({
+            acquireLock: async () => {
+                try {
+                    return await acquireHappyAgentStorageLock(
+                        configuration.paths.autoAgentLockPath,
+                    );
+                } catch (error: unknown) {
+                    throw new Error(
+                        "Auto mode cannot start because the automatic permission reviewer store " +
+                            "is already in use by another process.",
+                        { cause: error },
+                    );
+                }
+            },
+            database: autoOpened.database,
+        });
+
+        // Everything a project or a workspace record describes but cannot do is composed on this
+        // root. `detach` is what gives the background work a root: the loader's own context ends
+        // with a request or a turn, while a clone, a setup command or a worktree removal has to
+        // outlive whatever asked for it, and a detached root still carries the logger and the
+        // tracer. The database is not on that root, so every background lifetime gets it attached —
+        // without that, a catalog write from a background job would find no database and fail
+        // silently.
+        const hostRoot = detach(ctx);
+        const backgroundDatabase = (backgroundCtx: Context): Context =>
+            withAgentDatabase(backgroundCtx, opened.database);
+        const built = await createModules(
+            autoLifetime,
+            backgroundDatabase(hostRoot.named("workspace-folder-cleanup")),
             options.configModule,
             options.observation,
             options.integrations,
             options.models,
             options.events,
+            {
+                storage: autoStorage,
+                providers: options.providers,
+                provider: options.provider,
+                lifetimeContext: autoLifetime,
+            },
         );
+        modules = built.modules;
+        auto = built.auto;
+        reviewerCompute = built.reviewerCompute;
         const loaderStateModule = createLoaderStateModule((identity) => {
             loaderIdentity = identity;
         });
@@ -271,6 +351,11 @@ export async function loadHappyAgent(
             modules.history,
             modules.modelSwitch,
             modules.permissions,
+            // The reviewer's evidence archive lives in the main database and observes the same base
+            // hooks the reviewed agents emit, so it is a main-system module ordered right after
+            // permissions. Its private review system is not part of the module collection and is
+            // never returned, listed, or otherwise made addressable.
+            auto,
             modules.presence,
             modules.goal,
             modules.tasks,
@@ -318,9 +403,85 @@ export async function loadHappyAgent(
                   })
                 : await system.resolve(ctx, agentId);
 
+        projectWorkspaces = new ProjectWorkspaceService({
+            agentId,
+            extendBackgroundContext: backgroundDatabase,
+            // One machine, one person: the daemon is the instance, and the only profile it can
+            // resolve is whoever this copy of Git commits as.
+            localCreator: { instanceId: agentId, profileId: LOCAL_PROJECT_PROFILE_ID },
+            localInstanceId: agentId,
+            ...(options.integrations.workspaceNames === undefined
+                ? {}
+                : { nameGenerator: options.integrations.workspaceNames }),
+            onWorkspaceBranchError: (error, projectId, workspaceId) => {
+                ctx.log.warn(
+                    "Renaming a workspace branch failed; the record and Git now disagree.",
+                    { projectId, workspaceId },
+                    error,
+                );
+            },
+            onWorkspaceCleanupError: (error, projectId, workspaceId) => {
+                ctx.log.warn(
+                    "Removing an archived workspace folder failed; it stays archived and on disk.",
+                    { projectId, workspaceId },
+                    error,
+                );
+            },
+            projects: modules.projects,
+            resolveGitSecret: (kind) =>
+                kind === "github" ? localGithubToken(process.env) : undefined,
+            resolveProfile: async (profileId) =>
+                profileId === LOCAL_PROJECT_PROFILE_ID
+                    ? await localGitProfile(agentId)
+                    : undefined,
+            rootContext: hostRoot,
+            settings: configuration.values.workspace,
+            // Avatar bytes are content a person chose and expects to survive a restart, so they
+            // live beside the agent's own database rather than in a temporary folder.
+            stateDirectory: join(configuration.paths.agentHome, "projects"),
+            workspaces: modules.workspaces,
+        });
+        built.attachProjectWorkspaces(projectWorkspaces);
+        // One watcher for the whole daemon. Every route that wants Git state registers here and
+        // reads what the watcher already knows, instead of each request scanning repositories
+        // itself. What a scan learns is written back through the catalogs, so a snapshot taken for
+        // one reader becomes a durable fact for every later one.
+        gitTracker = new GitStateTracker({
+            onObserverError: (_observerCtx, error, entity) => {
+                ctx.log.debug("A Git watcher could not be armed.", { path: entity.path }, error);
+            },
+            onSnapshot: async (snapshotCtx, entity, snapshot) => {
+                await projectWorkspaces!.gitSnapshotObserver(
+                    backgroundDatabase(snapshotCtx),
+                    entity,
+                    snapshot,
+                );
+            },
+            rootContext: hostRoot,
+        });
+        await projectWorkspaces.open(withAgentDatabase(ctx, opened.database));
+
         let closed = false;
+        // A route that answers "this is under way" still owes the work. It runs off the same
+        // detached root the host uses, so it survives the request, and the close below waits for
+        // it rather than pulling the database out from under it.
+        const backgroundTasks = new Set<Promise<void>>();
+        const background = (name: string, work: (workerCtx: Context) => Promise<void>): void => {
+            if (closed) return;
+            const task = work(backgroundDatabase(hostRoot.named(name)))
+                .catch((error: unknown) => {
+                    ctx.log.warn(`Background work "${name}" failed.`, {}, error);
+                })
+                .finally(() => {
+                    backgroundTasks.delete(task);
+                });
+            backgroundTasks.add(task);
+        };
         return {
             agent,
+            background,
+            gitTracker,
+            projectWorkspaces,
             configuration,
             configModule: options.configModule,
             effectiveSelection: options.effectiveSelection,
@@ -337,7 +498,32 @@ export async function loadHappyAgent(
                 if (closed) return;
                 closed = true;
                 const failures: unknown[] = [];
+                while (backgroundTasks.size > 0) {
+                    await Promise.allSettled([...backgroundTasks]);
+                }
+                // The Git watcher and the project host stop before the systems that own their
+                // database: both write through the catalogs from background lifetimes, and a write
+                // arriving after the database closed is the one failure nobody would see.
+                gitTracker?.dispose();
+                await projectWorkspaces
+                    ?.close(withAgentDatabase(closeCtx, opened.database))
+                    .catch((error: unknown) => failures.push(error));
+                // The main system closes first so it drains in-flight permission hooks, and only
+                // then the review system, its reviewer compute, and its database. The reviewer's
+                // own lock is released as its private system closes; the main compute and database
+                // close last, exactly as they opened first.
                 await system!.close(closeCtx).catch((error: unknown) => failures.push(error));
+                await auto?.close(closeCtx).catch((error: unknown) => failures.push(error));
+                if (reviewerCompute !== undefined) {
+                    await reviewerCompute
+                        .dispose(closeCtx)
+                        .catch((error: unknown) => failures.push(error));
+                }
+                try {
+                    autoOpened?.close();
+                } catch (error) {
+                    failures.push(error);
+                }
                 await modules!.compute
                     .dispose(closeCtx)
                     .catch((error: unknown) => failures.push(error));
@@ -353,8 +539,27 @@ export async function loadHappyAgent(
         };
     } catch (error) {
         const failures: unknown[] = [error];
+        gitTracker?.dispose();
+        if (projectWorkspaces !== undefined) {
+            await projectWorkspaces
+                .close(withAgentDatabase(ctx, opened.database))
+                .catch((closeError: unknown) => failures.push(closeError));
+        }
         if (system !== undefined) {
             await system.close(ctx).catch((closeError: unknown) => failures.push(closeError));
+        }
+        if (auto !== undefined) {
+            await auto.close(ctx).catch((closeError: unknown) => failures.push(closeError));
+        }
+        if (reviewerCompute !== undefined) {
+            await reviewerCompute
+                .dispose(ctx)
+                .catch((closeError: unknown) => failures.push(closeError));
+        }
+        try {
+            autoOpened?.close();
+        } catch (closeError) {
+            failures.push(closeError);
         }
         if (modules !== undefined) {
             await modules.compute
@@ -371,14 +576,53 @@ export async function loadHappyAgent(
     }
 }
 
-function createModules(
+interface CreatedHappyAgentModules {
+    readonly modules: HappyAgentModuleCollection;
+    /** The automatic permission reviewer, a main-system module kept out of the public collection. */
+    readonly auto: AutoModule;
+    /** The host-owned, read-only compute the reviewer's tools run over, disposed by the loader. */
+    readonly reviewerCompute: HostCompute;
+    /**
+     * Hands the catalogs their host once it exists. The projects and workspaces modules have to be
+     * built before the root agent is known, and the host service needs both modules and that agent
+     * id, so the modules receive callbacks that stay inert until this is called.
+     */
+    readonly attachProjectWorkspaces: (service: ProjectWorkspaceService) => void;
+}
+
+async function createModules(
+    autoLifetime: Context,
+    workspaceCleanupLifetime: Context,
     configModule: ConfigModule,
     observation: ObservationModule,
     integrations: HappyAgentIntegrations,
     models: readonly AgentModel[],
     events: EventsModuleOptions | undefined,
-): HappyAgentModuleCollection {
+    autoOptions: {
+        readonly storage: AgentStorage;
+        readonly providers: AgentProviders;
+        readonly provider: string;
+        readonly lifetimeContext: Context;
+    },
+): Promise<CreatedHappyAgentModules> {
     const { configuration } = configModule;
+    // The catalogs and their host need each other: a workspace reservation asks Git which branches
+    // are taken, and the host reads and writes through the very modules built here. The host is
+    // also keyed by the root agent, which does not exist until after these modules are assembled.
+    // Holding it in a box the catalogs read through breaks the knot. Attaching happens a few lines
+    // after the root agent resolves and before anything can serve a request, so a callback that
+    // runs before then is a composition bug rather than a configuration a caller can be in; saying
+    // so plainly beats inventing a folder or a branch answer nothing stands behind.
+    const projectWorkspaces: { service: ProjectWorkspaceService | undefined } = {
+        service: undefined,
+    };
+    const hostService = (): ProjectWorkspaceService => {
+        const service = projectWorkspaces.service;
+        if (service === undefined) {
+            throw new Error("Projects and workspaces were used before their host was composed.");
+        }
+        return service;
+    };
     // The dump listens to the committed archive rather than recording alongside it, so what a
     // person reads in the file is exactly what the agent durably remembers.
     const history = new HistoryModule({ onAppend: observation.recordHistory });
@@ -409,42 +653,142 @@ function createModules(
         ...(initialPresence === undefined ? {} : { initialState: initialPresence }),
     } as unknown as ConstructorParameters<typeof PresenceModule>[0];
     const presence = new PresenceModule(presenceOptions);
-    return {
+    // Conversation and Events are built before Permissions so the permission listener can record
+    // into both the moment a decision is made. The Events journal is the bounded protocol source
+    // that carries a permission event to the transcript, SSE, and the TUI; the conversation journal
+    // is a secondary record whose failure is observed rather than allowed to break a decision.
+    const conversations = new ConversationModule({ defaultCwd: configuration.paths.publicHome });
+    const eventsModule = new EventsModule(events);
+
+    // The system prompt module reads the project's AGENTS.md through each agent's own compute, so
+    // it is built here and shared: the reviewer rereads the same project instructions the reviewed
+    // agent sees, resolved against that agent's working directory.
+    const systemPrompt = new SystemPromptModule({
+        availableModels: models.map((model) => ({
+            id: model.id,
+            name: model.name,
+            providerId: model.providerId,
+        })),
+        compute: {
+            resolve: async (ctx, agentId) => await compute.computeModule.resolve(ctx, agentId),
+        },
+        globalInstructions: {
+            path: configuration.paths.instructionsPath,
+            read: readGlobalInstructions,
+        },
+    });
+
+    // The reviewer investigates local state through a read-only compute the loader owns, at the
+    // public working directory and behind the same sandbox policy as the main agent. Its private
+    // review database is treated as a private directory so a review can never read the reviewer's
+    // own state. The reviewer's tools are the vendor-specific read-only slice, chosen per review
+    // from the reviewer's own model route.
+    const reviewerCompute = (await hostComputeProvider.create(autoLifetime, {
+        cwd: configuration.paths.publicHome,
+        hostPolicy: {
+            privateDirectories: [configuration.paths.agentHome],
+            protectedProjectFiles,
+        },
+    })) as HostCompute;
+
+    let auto: AutoModule;
+    try {
+        const readBoundedSecurity = async (path: string): Promise<string | undefined> => {
+            try {
+                return boundSecurityFileText(await readFile(path));
+            } catch (error: unknown) {
+                if (isMissingSecurityFileError(error)) return undefined;
+                throw error;
+            }
+        };
+        auto = new AutoModule({
+            storage: autoOptions.storage,
+            providers: autoOptions.providers,
+            provider: autoOptions.provider,
+            models: [...models],
+            workingDirectory: configuration.paths.publicHome,
+            lifetimeContext: autoOptions.lifetimeContext,
+            reviewerTools: (scope: AgentModuleScope) =>
+                compute.computeModule.reviewerTools(scope, reviewerCompute),
+            readGlobalSecurity: async () =>
+                await readBoundedSecurity(configuration.paths.securityPath),
+            readProjectSecurity: async () =>
+                await readBoundedSecurity(
+                    join(configuration.paths.publicHome, "AGENTS_SECURITY.md"),
+                ),
+            readAgentsMd: async (reviewCtx, agentId) =>
+                await systemPrompt.readAgentsMdInstructions(reviewCtx, agentId),
+        });
+    } catch (error) {
+        await reviewerCompute.dispose(autoLifetime).catch(() => undefined);
+        throw error;
+    }
+
+    const permissions = new PermissionsModule({
+        // The automatic permission reviewer replaces the old "no reviewer configured" state that
+        // left every reviewable Auto action unproven. A host may still inject an explicit reviewer.
+        reviewer: integrations.permissionReviewer ?? auto.reviewer,
+        // One review may take exactly the Rig v1 budget before an unanswered review is treated as
+        // unproven rather than left to hang the turn.
+        reviewTimeoutMs: AUTO_PERMISSION_REVIEW_BUDGET_MS,
+        listener: {
+            onEvent: async (listenerCtx, event) => {
+                // Validate at the persistence boundary. The module hands us a typed event, but the
+                // journals store it as opaque JSON and the projection later narrows it from the
+                // decoded value; persisting anything that would not decode back to a permission
+                // event would put a row on the wire that the projector must silently drop. Guarding
+                // here keeps a malformed event out of the durable record and makes the loss visible.
+                // Validate a value typed as `unknown` rather than `event` itself: the event is
+                // already typed as a permission event, so letting the type guard narrow the failing
+                // branch would collapse `event` to `never`. Guarding the alias keeps `event` usable
+                // for the log while the runtime check does its real job.
+                const candidate: unknown = event;
+                if (!Value.Check(permissionEventSchema, candidate)) {
+                    listenerCtx.log.warn(
+                        "Refusing to record a permission event that does not match its schema.",
+                        { agentId: event.agentId, type: event.type },
+                    );
+                    return;
+                }
+                try {
+                    await conversations.recordAgentEvent(
+                        listenerCtx,
+                        event.agentId,
+                        "permission_event",
+                        event,
+                    );
+                } catch (error: unknown) {
+                    // The conversation journal is a secondary record; the Events journal below is
+                    // the source of truth a client actually reads a permission event from. The
+                    // failure is not fatal, but it must be visible: an operator has to be able to
+                    // learn that this agent's permission history is now incomplete.
+                    listenerCtx.log.warn(
+                        "Failed to record a permission event in the conversation journal.",
+                        { agentId: event.agentId, type: event.type },
+                        error,
+                    );
+                }
+                await eventsModule.record(listenerCtx, {
+                    agentId: event.agentId,
+                    type: "permission.event",
+                    payload: event,
+                });
+            },
+        },
+        killAllSessions: async (_ctx, agentId) => {
+            for (const session of compute.computeModule.runningCommands(agentId)) {
+                await compute.computeModule.stopCommand(agentId, session.sessionId);
+            }
+        },
+    });
+    const modules: HappyAgentModuleCollection = {
         config: configModule,
         observation,
         applets: new AppletModule({ rootDirectory: configuration.paths.appletsPath }),
-        collaboration: new CollaborationModule({
-            broker: integrations.collaboration,
-            modelCatalog: {
-                availableModels: models.map((model) => ({
-                    defaultEffort: model.defaultEffort,
-                    effortLevels: [...model.effortLevels],
-                    id: model.id,
-                    name: model.name,
-                    providerId: model.providerId,
-                    ...(model.serviceTiers === undefined
-                        ? {}
-                        : { serviceTiers: [...model.serviceTiers] }),
-                })),
-                disabledProviders: Object.entries(configuration.values.providers).flatMap(
-                    ([providerId, provider]): {
-                        id: string;
-                        reason: "not_enabled" | "no_models";
-                    }[] => {
-                        if (provider.enabled === false) {
-                            return [{ id: providerId, reason: "not_enabled" as const }];
-                        }
-                        if (!models.some((model) => model.providerId === providerId)) {
-                            return [{ id: providerId, reason: "no_models" as const }];
-                        }
-                        return [];
-                    },
-                ),
-            },
-        }),
-        conversations: new ConversationModule({ defaultCwd: configuration.paths.publicHome }),
+        collaboration: new CollaborationModule(),
+        conversations,
         compute: compute.computeModule,
-        events: new EventsModule(events),
+        events: eventsModule,
         goal: new GoalModule({}),
         happy: new HappyModule({ host: integrations.happy }),
         history,
@@ -454,18 +798,14 @@ function createModules(
         }),
         mcp: new McpModule({ host: integrations.mcp }),
         modelSwitch: new ModelSwitchModule({ history }),
-        permissions: new PermissionsModule({
-            ...(integrations.permissionReviewer === undefined
-                ? {}
-                : { reviewer: integrations.permissionReviewer }),
-            killAllSessions: async (_ctx, agentId) => {
-                for (const session of compute.computeModule.runningCommands(agentId)) {
-                    await compute.computeModule.stopCommand(agentId, session.sessionId);
-                }
+        permissions,
+        presence,
+        projects: new ProjectsModule({
+            avatarAssetReader: {
+                read: async (avatarCtx, agentId, hash) =>
+                    await hostService().avatarAssetReader.read(avatarCtx, agentId, hash),
             },
         }),
-        presence,
-        projects: new ProjectsModule({}),
         scheduling: new SchedulingModule({ scheduler: integrations.scheduling }),
         search: new SearchModule({ backend: integrations.search }),
         secrets: new SecretsModule(
@@ -478,25 +818,42 @@ function createModules(
             publisher: integrations.slots.publisher,
             scopeResolver: integrations.slots.scopeResolver,
         }),
-        systemPrompt: new SystemPromptModule({
-            availableModels: models.map((model) => ({
-                id: model.id,
-                name: model.name,
-                providerId: model.providerId,
-            })),
-            compute: {
-                resolve: async (ctx, agentId) => await compute.computeModule.resolve(ctx, agentId),
-            },
-            globalInstructions: {
-                path: configuration.paths.instructionsPath,
-                read: readGlobalInstructions,
-            },
-        }),
+        systemPrompt,
         tasks: new TasksModule({}),
         usage: new UsageModule({}),
         userInput: new UserInputModule({
             broker: integrations.userInput,
             presence: presence.userInputPolicy,
+            // Only a genuine human answer to an interactive request becomes trusted evidence for a
+            // later permission review. Provenance is decided by the actor: a human answers through
+            // the client on behalf of the asking agent's own request, so the acting agent equals the
+            // asking agent; an agent answering another agent's request (a collaboration hand-off) has
+            // a different acting agent and is not human authorization. Trusting the answer without
+            // this check would let a non-human answerer manufacture human evidence, so an answer from
+            // any other actor is skipped and stays untrusted context. The request ID is the provider
+            // call ID, which is the same call ID the tool result carries, so the reviewer can match
+            // the recorded answer to the action it authorizes. Recording transactionally commits the
+            // evidence atomically with the answer; a failure here degrades to untrusted context
+            // rather than rolling back the user's answer.
+            listener: {
+                onEventTransactional: async (listenerCtx, event) => {
+                    if (event.type !== "user_input_answered") return;
+                    if (event.actingAgentId !== event.request.askingAgentId) return;
+                    try {
+                        await auto.recordUserInputEventTransactional(listenerCtx, {
+                            type: "user_input_answered",
+                            agentId: event.request.askingAgentId,
+                            requestId: event.requestId,
+                            answer: JSON.stringify(
+                                event.request.answers ?? event.request.answer,
+                            ),
+                        });
+                    } catch {
+                        // Fail-safe: an unrecorded answer stays untrusted, which under-authorizes
+                        // rather than over-authorizes. Never let it break saving the human's answer.
+                    }
+                },
+            },
         }),
         workflows: new WorkflowsModule({
             enabled: configuration.values.features.workflows,
@@ -507,12 +864,71 @@ function createModules(
             runtime: integrations.worklets,
         }),
         workspaces: new WorkspacesModule({
+            // Removing a workspace's folder is the consequence of an archive that has already been
+            // recorded, so it runs on the daemon's own lifetime rather than on the request that
+            // asked for it and would be gone before the folder is.
+            cleanupContext: workspaceCleanupLifetime,
             enabled: configuration.values.features.workspaces,
-            ...(integrations.workspaceHost === undefined
-                ? {}
-                : { host: integrations.workspaceHost }),
+            host: {
+                pathForStorageKey: (projectRef, storageKey) =>
+                    hostService().workspaceCatalogHost.pathForStorageKey(projectRef, storageKey),
+                isBranchUnavailable: (projectRef, branch) =>
+                    hostService().workspaceCatalogHost.isBranchUnavailable(projectRef, branch),
+                isStorageKeyUnavailable: (projectRef, storageKey) =>
+                    hostService().workspaceCatalogHost.isStorageKeyUnavailable(
+                        projectRef,
+                        storageKey,
+                    ),
+            },
         }),
     };
+    return {
+        modules,
+        auto,
+        reviewerCompute,
+        attachProjectWorkspaces: (service) => {
+            projectWorkspaces.service = service;
+        },
+    };
+}
+
+/**
+ * The only profile a single-machine daemon can resolve.
+ *
+ * Profiles are a multi-instance idea: a project created on one machine records who created it so
+ * another machine can refuse to clone with the wrong person's credentials. A local daemon has
+ * exactly one person behind it, so it names that profile once and answers for it below.
+ */
+const LOCAL_PROJECT_PROFILE_ID = "local";
+
+/** A GitHub token from the environment, under either of the two names the tooling uses. */
+function localGithubToken(environment: NodeJS.ProcessEnv): string | undefined {
+    for (const name of ["GITHUB_TOKEN", "GH_TOKEN"] as const) {
+        const value = environment[name]?.trim();
+        if (value !== undefined && value.length > 0) return value;
+    }
+    return undefined;
+}
+
+/**
+ * Who this machine commits as, read from Git's own configuration.
+ *
+ * A clone made on someone's behalf writes commits, and commits need a name and an address. Asking
+ * Git is the honest answer: it is the same identity the person's own commits already carry. When
+ * Git has nothing configured the clone is refused rather than attributed to an invented person.
+ */
+async function localGitProfile(instanceId: string): Promise<ProjectCreatorProfile | undefined> {
+    const read = async (key: string): Promise<string | undefined> => {
+        const result = await directGitCommandRunner.run(homedir(), ["config", "--get", key], {
+            maxOutputBytes: 4096,
+        });
+        if (result.code !== 0) return undefined;
+        const value = result.stdout.trim();
+        return value.length > 0 ? value : undefined;
+    };
+    const [email, name] = await Promise.all([read("user.email"), read("user.name")]);
+    if (email === undefined || name === undefined) return undefined;
+    return { email, name, parentInstanceId: instanceId };
 }
 
 function rootAgentConfig(config: AgentConfig | undefined, publicHome: string): AgentConfig {

@@ -24,12 +24,12 @@ matching executable lives.
 
 ## Where it runs
 
-| Platform | Architecture | Rust target                  | Enforcement                                             |
-| -------- | ------------ | ---------------------------- | ------------------------------------------------------- |
-| macOS    | arm64        | `aarch64-apple-darwin`       | Seatbelt profile installed in-process                   |
-| macOS    | x64          | `x86_64-apple-darwin`        | Seatbelt profile installed in-process                   |
-| Linux    | arm64        | `aarch64-unknown-linux-musl` | namespaces, mount policy, seccomp, capability removal   |
-| Linux    | x64          | `x86_64-unknown-linux-musl`  | namespaces, mount policy, seccomp, capability removal   |
+| Platform | Architecture | Rust target                  | Enforcement                                           |
+| -------- | ------------ | ---------------------------- | ----------------------------------------------------- |
+| macOS    | arm64        | `aarch64-apple-darwin`       | Seatbelt profile installed in-process                 |
+| macOS    | x64          | `x86_64-apple-darwin`        | Seatbelt profile installed in-process                 |
+| Linux    | arm64        | `aarch64-unknown-linux-musl` | namespaces, mount policy, seccomp, capability removal |
+| Linux    | x64          | `x86_64-unknown-linux-musl`  | namespaces, mount policy, seccomp, capability removal |
 
 The Linux binaries are static musl builds, so they run on any distribution and
 can be mounted read-only into a container that has no toolchain of its own.
@@ -50,12 +50,12 @@ matches the machine and silently skips the other three.
 
 The binaries are published as versions of the same npm name, one per target:
 
-| Optional dependency                             | Resolves to                                   |
-| ----------------------------------------------- | --------------------------------------------- |
-| `@slopus/happy-agent-supervisor-darwin-arm64`    | `@slopus/happy-agent-supervisor@<version>-darwin-arm64` |
-| `@slopus/happy-agent-supervisor-darwin-x64`      | `@slopus/happy-agent-supervisor@<version>-darwin-x64`   |
-| `@slopus/happy-agent-supervisor-linux-arm64`     | `@slopus/happy-agent-supervisor@<version>-linux-arm64`  |
-| `@slopus/happy-agent-supervisor-linux-x64`       | `@slopus/happy-agent-supervisor@<version>-linux-x64`    |
+| Optional dependency                           | Resolves to                                             |
+| --------------------------------------------- | ------------------------------------------------------- |
+| `@slopus/happy-agent-supervisor-darwin-arm64` | `@slopus/happy-agent-supervisor@<version>-darwin-arm64` |
+| `@slopus/happy-agent-supervisor-darwin-x64`   | `@slopus/happy-agent-supervisor@<version>-darwin-x64`   |
+| `@slopus/happy-agent-supervisor-linux-arm64`  | `@slopus/happy-agent-supervisor@<version>-linux-arm64`  |
+| `@slopus/happy-agent-supervisor-linux-x64`    | `@slopus/happy-agent-supervisor@<version>-linux-x64`    |
 
 Each of those packages contains one executable at
 `vendor/<rust-target>/bin/happy-agent-supervisor` plus a `SHA256SUMS` file for it.
@@ -94,10 +94,7 @@ const hostPath = resolveLinuxSupervisorBinary("amd64");
 
 ```ts
 import { spawn } from "node:child_process";
-import {
-    parseSupervisorPolicy,
-    resolveSupervisorBinary,
-} from "@slopus/happy-agent-supervisor";
+import { parseSupervisorPolicy, resolveSupervisorBinary } from "@slopus/happy-agent-supervisor";
 
 const policy = parseSupervisorPolicy({
     mode: "workspace_write",

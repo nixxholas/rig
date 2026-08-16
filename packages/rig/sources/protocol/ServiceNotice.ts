@@ -32,7 +32,35 @@ export const computePreparationNoticeSchema = Type.Object(
 );
 export type ComputePreparationNotice = Static<typeof computePreparationNoticeSchema>;
 
-export const serviceNoticeSchema = Type.Union([computePreparationNoticeSchema]);
+/**
+ * A plain visible notice a client can render more richly than its fallback text: a titled service
+ * row at a stated importance. Permission outcomes that stopped or skipped work — a turn ended by
+ * repeated refusals, an action left unproven, a failed elevated-session cleanup — arrive this way.
+ */
+export const genericNoticeSchema = Type.Object(
+    {
+        kind: Type.Literal("notice"),
+        title: Type.String({ maxLength: SERVICE_NOTICE_MESSAGE_MAX_LENGTH, minLength: 1 }),
+        details: Type.String({ maxLength: SERVICE_NOTICE_TEXT_MAX_LENGTH, minLength: 1 }),
+        level: Type.Union([
+            Type.Literal("info"),
+            Type.Literal("warning"),
+            Type.Literal("error"),
+        ]),
+        /**
+         * A stable machine code for notices a client must react to beyond rendering. It exists so a
+         * client keys that behavior to a durable identifier rather than to the human-facing title,
+         * which is display text and free to change. The turn-stop notice carries
+         * `"permission_turn_stopped"` so the app can suppress the generic interruption row for the
+         * same run without matching the title.
+         */
+        code: Type.Optional(Type.String({ maxLength: 128 })),
+    },
+    exact,
+);
+export type GenericNotice = Static<typeof genericNoticeSchema>;
+
+export const serviceNoticeSchema = Type.Union([computePreparationNoticeSchema, genericNoticeSchema]);
 export type ServiceNotice = Static<typeof serviceNoticeSchema>;
 
 /**

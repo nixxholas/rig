@@ -9,9 +9,7 @@ import {
     happyStatusRecordSchema,
 } from "./Happy.js";
 
-const contextSchema = Type.Unsafe<Context>(
-    Type.Object({}, { additionalProperties: false }),
-);
+const contextSchema = Type.Unsafe<Context>(Type.Object({}, { additionalProperties: false }));
 
 export const happyHostSchema = Type.Object(
     {

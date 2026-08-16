@@ -34,19 +34,14 @@ interface CopyState {
  * the daemon are refused. The destination is created; its parent must already
  * exist.
  */
-export async function copyWorkletTree(
-    sourcePath: string,
-    destinationPath: string,
-): Promise<void> {
+export async function copyWorkletTree(sourcePath: string, destinationPath: string): Promise<void> {
     if (!isAbsolute(sourcePath)) {
         throw new WorkletInstallError(
             "The worklet source path must be an absolute folder path on this machine.",
         );
     }
     if (!isAbsolute(destinationPath)) {
-        throw new WorkletInstallError(
-            "The worklet destination path must be absolute.",
-        );
+        throw new WorkletInstallError("The worklet destination path must be absolute.");
     }
     let sourceFacts;
     try {

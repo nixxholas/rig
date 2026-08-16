@@ -1125,6 +1125,14 @@ export class ChatStore {
                     (event.data as { runId: string }).runId,
                 );
                 break;
+            case "permission_review": {
+                // A projected permission review has no run id: it annotates a tool row by tool-call
+                // id, produced by a module that runs inside a tool call with no owning run to name.
+                // The shared handler ignores the run id for this event, so nothing depends on it.
+                const data = event.data as { event: AgentLoopEvent };
+                this.#applyAgentEvent(data.event, event.createdAt, deltas, "");
+                break;
+            }
             case "run_finished": {
                 const data = event.data as {
                     attachmentMessageId?: string;

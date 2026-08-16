@@ -39,6 +39,7 @@ export {
     secureAgentSocket,
     type AgentDaemonPaths,
 } from "./paths.js";
+export { stopAgentDaemon, type StopAgentDaemonResult } from "./stopAgentDaemon.js";
 export {
     awaitRequestSchema,
     messageRequestSchema,

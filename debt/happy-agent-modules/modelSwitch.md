@@ -60,7 +60,7 @@ implements, and that the rewrite lost some of v1's budget accounting and overvie
    caller, not a real threat model, and `HistoryModule.#readPage` already enforces every one of
    these invariants.
 4. **Two nested layers of blanket `catch`.** `#excerpt` wraps everything in `try { ... } catch {
-   return {}; }` (`ModelSwitchModule.ts:126-163`) with a second inner `catch` around `stats` (lines
+return {}; }` (`ModelSwitchModule.ts:126-163`) with a second inner `catch` around `stats` (lines
    146-157). The outer rationale is right — rejecting `modelChanged` would leave the agent stuck on
    the old model. But the same `catch` also swallows the validation errors that finding 3 exists to
    raise, so the elaborate checking can only ever degrade silently to "no excerpt", never surface a

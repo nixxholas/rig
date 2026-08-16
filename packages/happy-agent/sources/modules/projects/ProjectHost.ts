@@ -1,92 +1,37 @@
-import { execFile as execFileCallback } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { access, mkdir, realpath, stat } from "node:fs/promises";
-import { promisify } from "node:util";
+import { access, realpath, stat } from "node:fs/promises";
 
-import type { Context } from "@steve.kite/stdlib";
+import { Type, type Static } from "@sinclair/typebox";
 
-const execFile = promisify(execFileCallback);
+import type { GitCommandRunner } from "../git/GitCommandRunner.js";
 
-export interface GitCommandResult {
-    readonly code: number;
-    readonly stderr: string;
-    readonly stdout: string;
-}
+export type { GitCommandResult, GitCommandRunner } from "../git/GitCommandRunner.js";
 
-export interface GitCommandRunner {
-    run(
-        cwd: string,
-        args: readonly string[],
-        options?: { readonly signal?: AbortSignal; readonly maxOutputBytes?: number },
-    ): Promise<GitCommandResult>;
-}
+/**
+ * Who a person is when Git records their work.
+ *
+ * Cloning a remote repository on someone's behalf needs their name and address for the commits
+ * that follow, and `parentInstanceId` to confirm the profile still belongs to the machine that
+ * asked. The agent does not own profiles, so the service asks for one by identifier and refuses
+ * to clone when the answer does not come back.
+ */
+export const projectCreatorProfileSchema = Type.Object(
+    {
+        email: Type.String({ minLength: 1, maxLength: 320 }),
+        name: Type.String({ minLength: 1, maxLength: 256 }),
+        parentInstanceId: Type.String({ minLength: 1, maxLength: 128 }),
+    },
+    { additionalProperties: false },
+);
 
-export interface ProjectWorkspaceHost {
-    readonly git: GitCommandRunner;
-    readonly protectedPaths?: readonly string[];
-    readonly createWorkspace?: (
-        ctx: Context,
-        input: {
-            readonly branch: string;
-            readonly path: string;
-            readonly projectPath: string;
-            readonly baseRef?: string;
-        },
-    ) => Promise<void>;
-    readonly cloneRemote?: (
-        ctx: Context,
-        input: {
-            readonly destination: string;
-            readonly source: {
-                readonly kind: "github" | "git";
-                readonly repository?: string;
-                readonly url?: string;
-            };
-        },
-    ) => Promise<void>;
-    readonly removeWorkspace?: (ctx: Context, path: string) => Promise<void>;
-    readonly resolveGitSecret?: (kind: "github") => string | undefined;
-    readonly asset?: (
-        hash: string,
-    ) => Promise<{ readonly body: Buffer; readonly mediaType: string } | undefined>;
-}
+export type ProjectCreatorProfile = Static<typeof projectCreatorProfileSchema>;
 
-export function createLocalProjectWorkspaceHost(): ProjectWorkspaceHost {
-    return {
-        git: {
-            async run(cwd, args, options = {}) {
-                const maxBuffer = options.maxOutputBytes ?? 4 * 1024 * 1024;
-                try {
-                    const result = await execFile("git", [...args], {
-                        cwd,
-                        maxBuffer,
-                        signal: options.signal,
-                    });
-                    return {
-                        code: 0,
-                        stderr: result.stderr,
-                        stdout: result.stdout,
-                    };
-                } catch (error) {
-                    const candidate = error as {
-                        readonly code?: number | string;
-                        readonly stderr?: string;
-                        readonly stdout?: string;
-                    };
-                    return {
-                        code: typeof candidate.code === "number" ? candidate.code : 1,
-                        stderr: candidate.stderr ?? (error instanceof Error ? error.message : ""),
-                        stdout: candidate.stdout ?? "",
-                    };
-                }
-            },
-        },
-        async createWorkspace(_ctx, input) {
-            await mkdir(input.path, { recursive: true, mode: 0o755 });
-        },
-    };
-}
-
+/**
+ * Resolves a path a person typed to the real folder behind it.
+ *
+ * Symbolic links are followed here rather than later so two names for one folder cannot become
+ * two projects, and a path that is not a directory is refused with a sentence rather than an
+ * `ENOTDIR`.
+ */
 export async function canonicalProjectDirectory(path: string): Promise<string> {
     const canonical = await realpath(path);
     const information = await stat(canonical);
@@ -97,8 +42,15 @@ export async function canonicalProjectDirectory(path: string): Promise<string> {
     return canonical;
 }
 
-export async function assertGitTopLevel(host: ProjectWorkspaceHost, path: string): Promise<string> {
-    const result = await host.git.run(path, ["rev-parse", "--show-toplevel"], {
+/**
+ * Confirms a folder is the root of a working tree, not a subfolder of one.
+ *
+ * A project registered at `packages/thing` inside a repository would put its workspaces on
+ * branches of a repository it does not own, so the check is up front and the answer is the
+ * canonical top level.
+ */
+export async function assertGitTopLevel(git: GitCommandRunner, path: string): Promise<string> {
+    const result = await git.run(path, ["rev-parse", "--show-toplevel"], {
         maxOutputBytes: 16 * 1024,
     });
     if (result.code !== 0) {
@@ -109,8 +61,4 @@ export async function assertGitTopLevel(host: ProjectWorkspaceHost, path: string
         throw new Error("The project path must be the top level of a Git repository.");
     }
     return topLevel;
-}
-
-export function createContentToken(): string {
-    return randomUUID();
 }

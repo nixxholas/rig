@@ -54,12 +54,12 @@ The master plans still name `@slopus/happy-agent-features` and have not been upd
   `favicon.png`, `favicon.ico`, `worklet.log`, `Data/`, and `vN/` into `<root>/<name>/`. v2's
   `#removeCodeFromBase` accepts only `Data`, `favicon.png`, `vN`, and its own staging names, and
   throws `"The worklet folder contains an unexpected entry"` on anything else
-  (`WorkletInstaller.ts:454-478`) — *after* deleting the entries it did recognize. Running
+  (`WorkletInstaller.ts:454-478`) — _after_ deleting the entries it did recognize. Running
   `remove_worklet` against a v1-installed worklet destroys its icon and versions and then fails on
   `favicon.ico`, leaving the folder in neither state.
 - **Regression — reconciliation deletes v1's version folders.** `#ensureReconciled` runs before
   every operation and walks the whole install root (`WorkletInstaller.ts:524-556`). For a worklet
-  present in the v2 catalog, any `vN` folder not in *its* version set is removed
+  present in the v2 catalog, any `vN` folder not in _its_ version set is removed
   (`#reconcileKnownBase`, lines 506-512); for a worklet with no catalog row, "all code is orphaned
   and is removed" (lines 128-151). v1-installed worklets have no v2 catalog row. The rewrite needs
   either a takeover path or a distinct root; it currently has neither.

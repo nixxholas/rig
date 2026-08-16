@@ -83,8 +83,13 @@ class ComputeTestPersistence implements AgentPersistence {
 export async function computeToolset(
     ctx: Context,
     compute: HostCompute,
-    agentId = "compute-agent",
+    options: {
+        readonly agentId?: string;
+        readonly model?: string;
+        readonly providerKind?: "bedrock" | "claude" | "codex" | "grok" | "gym";
+    } = {},
 ): Promise<ComputeToolset> {
+    const agentId = options.agentId ?? "compute-agent";
     const provider: HostComputeProvider = {
         id: "host",
         create: async () => compute,
@@ -97,7 +102,14 @@ export async function computeToolset(
         "module",
         "compute",
     );
-    const scope = { agent: { id: agentId }, kv } as AgentModuleScope;
+    const scope = {
+        agent: {
+            id: agentId,
+            ...(options.model === undefined ? {} : { model: options.model }),
+            ...(options.providerKind === undefined ? {} : { providerKind: options.providerKind }),
+        },
+        kv,
+    } as AgentModuleScope;
     const tools = await module.tools(agentCtx, scope);
     const call: AgentToolCall = {
         id: "compute-test-call",
@@ -114,11 +126,8 @@ export async function computeToolset(
             if (found === undefined) throw new Error(`The module offers no tool called ${name}.`);
             return {
                 ...found,
-                execute: async (
-                    executeCtx: Context,
-                    input: any,
-                    providedCall?: AgentToolCall,
-                ) => await found.execute(executeCtx, input, providedCall ?? call),
+                execute: async (executeCtx: Context, input: any, providedCall?: AgentToolCall) =>
+                    await found.execute(executeCtx, input, providedCall ?? call),
             };
         },
     };

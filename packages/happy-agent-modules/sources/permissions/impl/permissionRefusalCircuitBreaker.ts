@@ -4,6 +4,8 @@ export const PERMISSION_REFUSAL_WINDOW = 50;
 export interface PermissionRefusalCircuitStatus {
     readonly consecutive: number;
     readonly recent: number;
+    /** How many decisions the recent-refusal count was measured over, up to the window size. */
+    readonly window: number;
     readonly stopped: boolean;
     readonly newlyStopped: boolean;
 }
@@ -31,6 +33,7 @@ export class PermissionRefusalCircuitBreaker {
         return {
             consecutive: this.#consecutive,
             recent: this.#recent.filter(Boolean).length,
+            window: this.#recent.length,
             stopped: this.#stopped,
             newlyStopped: false,
         };
@@ -40,10 +43,12 @@ export class PermissionRefusalCircuitBreaker {
         this.#consecutive += 1;
         this.#record(true);
         const recent = this.#recent.filter(Boolean).length;
+        const window = this.#recent.length;
         if (this.#stopped) {
             return {
                 consecutive: this.#consecutive,
                 recent,
+                window,
                 stopped: true,
                 newlyStopped: false,
             };
@@ -52,6 +57,7 @@ export class PermissionRefusalCircuitBreaker {
             return {
                 consecutive: this.#consecutive,
                 recent,
+                window,
                 stopped: false,
                 newlyStopped: false,
             };
@@ -60,6 +66,7 @@ export class PermissionRefusalCircuitBreaker {
         return {
             consecutive: this.#consecutive,
             recent,
+            window,
             stopped: true,
             newlyStopped: true,
         };

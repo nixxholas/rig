@@ -270,9 +270,7 @@ export const workletListSchema = Type.Array(workletSchema, {
 export const workletDetailQuerySchema = Type.Object(
     {
         cursor: Type.Optional(workletCursorSchema),
-        limit: Type.Optional(
-            Type.Integer({ minimum: 1, maximum: MAX_WORKLET_DETAIL_PAGE_SIZE }),
-        ),
+        limit: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_WORKLET_DETAIL_PAGE_SIZE })),
     },
     { additionalProperties: false },
 );

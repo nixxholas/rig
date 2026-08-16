@@ -1,33 +1,28 @@
 import { defineAgentTool } from "@slopus/happy-agent-base";
 
-import { projectIdSchema, projectSchema } from "../Project.js";
+import { projectByIdInputSchema, projectSchema } from "../Project.js";
 import type { ProjectsModule } from "../ProjectsModule.js";
-import { Type } from "@sinclair/typebox";
-
-const archiveProjectInputSchema = Type.Object(
-    { projectId: projectIdSchema },
-    { additionalProperties: false },
-);
 
 export function archiveProjectTool(projects: ProjectsModule, agentId: string) {
     return defineAgentTool({
         name: "archive_project",
         description:
-            "Logically archive one project. Archival is the durable decision; any host folder or Git cleanup is an independent asynchronous concern and cannot undo the archived state.",
-        parameters: archiveProjectInputSchema,
+            "Archive one project. Archival is the durable decision and is never rolled back: the host then deletes the project's managed folder and every worktree cut from it.",
+        parameters: projectByIdInputSchema,
         returnType: projectSchema,
         durable: true,
         transactional: true,
-        shouldReviewInAutoMode: () => false,
-        execute: async (ctx, { projectId }) =>
-            await projects.archive(ctx, agentId, projectId),
+        // Archival is what sets host cleanup in motion, so the call is reviewed
+        // even though the catalog write itself never leaves the database.
+        shouldReviewInAutoMode: () => true,
+        describeAutoPermissionAction: ({ projectId }) =>
+            `Archive project ${projectId}. The host then deletes that project's managed folder and every workspace worktree belonging to it. Archival stands even if the cleanup fails.`,
+        execute: async (ctx, { projectId }) => await projects.archive(ctx, agentId, projectId),
         toLLM: (project) => [
             {
                 type: "text",
-                text: projects.formatProjectOperationForModel("Project archived:", project),
+                text: projects.formatProjectForModel("Project archived:", project),
             },
         ],
     });
 }
-
-export { archiveProjectInputSchema };

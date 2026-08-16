@@ -75,30 +75,30 @@ improvements, judged against the root `AGENTS.md` and the master plans.
 
 ## Per-module verdicts
 
-| Module | Verdict |
-|---|---|
-| applets | Better staging/transaction design; primary tools dead as wired; review coupled to elevation. |
-| collaboration | Restores plan-7 follow-ups; roster exposure and unwired authorization break `list_agents`. |
-| compute | Strong shell lifecycle; neutral surface conflicts with plans as written; invented file tools; search regressed from ripgrep. |
-| config | Correct layering, security filter preserved; one 1,971-line file, duplicated rules, ambient cwd. |
-| goal | Closest to plan; right permission judgement; state in private SQL not `AgentKV`; can wedge an agent pre-inference. |
-| happy | Net-new surface needing a placement decision vs slots/notifications; unbounded never-read table; unconsulted config switch. |
-| history | Better transcript model; unwired store layer; default limit bricks the agent; promised pruning absent. |
-| imageGeneration | Good storage; tool selection branches on provider key (forbidden); lost path boundary and validation. |
-| mcp | Clearest architectural gain; lost locks/timeouts/`toUI`; unwired trust helpers documented as live. |
-| modelSwitch | Small and well-reasoned; notice exceeds its own budget; README describes a former design. |
-| permissions | Most faithful to the permission contract; must restore the user transcript in the reviewer before v2 ships. |
-| presence | Better event machinery; dropped `answerWaitMs`, the capability plan 11 defines presence by. |
-| projects | `ensure_project` is a real advance; archive unreviewed despite host deletion; undefined settings scratch. |
-| scheduling | Strongest lifecycle work; dropped cross-agent targeting, plan 10's defining capability. |
-| search | One templated tool with six names — plan 16 forbids exactly this; lost citations and required `provider_id`. |
-| secrets | Structural confinement improved; credential attach/detach lost v1's forced review — must be restored. |
-| skills | Solid discovery rewrite; `read_skill` lost review+elevation; traversal safety and frontmatter guardrail dropped. |
-| slots | Cleaner model; write-only to users (no global stream); mutations lost Auto review. |
-| systemPrompt | Vendor prompts drifted from captured truth (not licensed by the rewrite); AGENTS.md delivered twice. |
-| tasks | Real upgrade over ephemeral plans; state outside `AgentKV`; no delete/reorder; README example throws. |
-| usage | Persistence is right; global retention trim makes per-agent cost cross-agent — one-line fix, real bug. |
-| userInput | Better outcomes model; lost trusted-evidence path and ask durability. |
-| workflows | Durable run catalog is good; compute-starting tool lost review; `workflow_logs` permanently empty. |
-| worklets | Best installer design; incompatible with v1's on-disk state; all mutations lost review+elevation. |
-| workspaces | Clean bookkeeping; archive/transfer lost review and disclosure; mandatory branch field absent. |
+| Module          | Verdict                                                                                                                      |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| applets         | Better staging/transaction design; primary tools dead as wired; review coupled to elevation.                                 |
+| collaboration   | Restores plan-7 follow-ups; roster exposure and unwired authorization break `list_agents`.                                   |
+| compute         | Strong shell lifecycle; neutral surface conflicts with plans as written; invented file tools; search regressed from ripgrep. |
+| config          | Correct layering, security filter preserved; one 1,971-line file, duplicated rules, ambient cwd.                             |
+| goal            | Closest to plan; right permission judgement; state in private SQL not `AgentKV`; can wedge an agent pre-inference.           |
+| happy           | Net-new surface needing a placement decision vs slots/notifications; unbounded never-read table; unconsulted config switch.  |
+| history         | Better transcript model; unwired store layer; default limit bricks the agent; promised pruning absent.                       |
+| imageGeneration | Good storage; tool selection branches on provider key (forbidden); lost path boundary and validation.                        |
+| mcp             | Clearest architectural gain; lost locks/timeouts/`toUI`; unwired trust helpers documented as live.                           |
+| modelSwitch     | Small and well-reasoned; notice exceeds its own budget; README describes a former design.                                    |
+| permissions     | Most faithful to the permission contract; must restore the user transcript in the reviewer before v2 ships.                  |
+| presence        | Better event machinery; dropped `answerWaitMs`, the capability plan 11 defines presence by.                                  |
+| projects        | `ensure_project` is a real advance; archive unreviewed despite host deletion; undefined settings scratch.                    |
+| scheduling      | Strongest lifecycle work; dropped cross-agent targeting, plan 10's defining capability.                                      |
+| search          | One templated tool with six names — plan 16 forbids exactly this; lost citations and required `provider_id`.                 |
+| secrets         | Structural confinement improved; credential attach/detach lost v1's forced review — must be restored.                        |
+| skills          | Solid discovery rewrite; `read_skill` lost review+elevation; traversal safety and frontmatter guardrail dropped.             |
+| slots           | Cleaner model; write-only to users (no global stream); mutations lost Auto review.                                           |
+| systemPrompt    | Vendor prompts drifted from captured truth (not licensed by the rewrite); AGENTS.md delivered twice.                         |
+| tasks           | Real upgrade over ephemeral plans; state outside `AgentKV`; no delete/reorder; README example throws.                        |
+| usage           | Persistence is right; global retention trim makes per-agent cost cross-agent — one-line fix, real bug.                       |
+| userInput       | Better outcomes model; lost trusted-evidence path and ask durability.                                                        |
+| workflows       | Durable run catalog is good; compute-starting tool lost review; `workflow_logs` permanently empty.                           |
+| worklets        | Best installer design; incompatible with v1's on-disk state; all mutations lost review+elevation.                            |
+| workspaces      | Clean bookkeeping; archive/transfer lost review and disclosure; mandatory branch field absent.                               |

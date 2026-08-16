@@ -42,9 +42,7 @@ import {
     type WorkletStatus,
 } from "./Worklet.js";
 
-const opaqueContextSchema = Type.Unsafe<Context>(
-    Type.Object({}, { additionalProperties: true }),
-);
+const opaqueContextSchema = Type.Unsafe<Context>(Type.Object({}, { additionalProperties: true }));
 export const workletStageInputSchema = Type.Object(
     {
         name: workletNameSchema,
@@ -255,20 +253,12 @@ export const workletRuntimeSchema = Type.Object(
 );
 
 export type WorkletCatalog = Static<typeof workletCatalogSchema>;
-export type WorkletCatalogInstallInput = Static<
-    typeof workletCatalogInstallInputSchema
->;
-export type WorkletCatalogUpdateInput = Static<
-    typeof workletCatalogUpdateInputSchema
->;
-export type WorkletCatalogRevertInput = Static<
-    typeof workletCatalogRevertInputSchema
->;
+export type WorkletCatalogInstallInput = Static<typeof workletCatalogInstallInputSchema>;
+export type WorkletCatalogUpdateInput = Static<typeof workletCatalogUpdateInputSchema>;
+export type WorkletCatalogRevertInput = Static<typeof workletCatalogRevertInputSchema>;
 export type WorkletStageInput = Static<typeof workletStageInputSchema>;
 export type WorkletStage = Static<typeof workletStageSchema>;
-export type WorkletCatalogMutationResult = Static<
-    typeof workletCatalogMutationResultSchema
->;
+export type WorkletCatalogMutationResult = Static<typeof workletCatalogMutationResultSchema>;
 export type WorkletCatalogInstallResult = Extract<
     WorkletCatalogMutationResult,
     { operation: "install" }
@@ -285,12 +275,8 @@ export type WorkletCatalogRemoveResult = Extract<
     WorkletCatalogMutationResult,
     { operation: "remove" }
 >;
-export type WorkletRuntimeLogQuery = Static<
-    typeof workletRuntimeLogQuerySchema
->;
-export type WorkletRuntimeInvocationRequest = Static<
-    typeof workletRuntimeInvocationRequestSchema
->;
+export type WorkletRuntimeLogQuery = Static<typeof workletRuntimeLogQuerySchema>;
+export type WorkletRuntimeInvocationRequest = Static<typeof workletRuntimeInvocationRequestSchema>;
 export type WorkletRuntime = Static<typeof workletRuntimeSchema>;
 
 export function assertWorkletOperationList(value: unknown): asserts value is Worklet["operations"] {
@@ -341,9 +327,7 @@ export function assertWorklet(value: unknown): asserts value is Worklet {
         }
         previousCreatedAt = version.createdAt;
     }
-    const current = value.versions.find(
-        (version) => version.version === value.currentVersion,
-    );
+    const current = value.versions.find((version) => version.version === value.currentVersion);
     if (current === undefined) {
         throw new Error("Worklet currentVersion is missing from its version history.");
     }
@@ -377,9 +361,7 @@ export function assertWorkletListPage(value: unknown): asserts value is WorkletL
     }
 }
 
-export function assertWorkletListPageShape(
-    value: unknown,
-): asserts value is WorkletListPage {
+export function assertWorkletListPageShape(value: unknown): asserts value is WorkletListPage {
     if (!Value.Check(workletListPageSchema, value)) {
         throw new Error("Worklet catalog returned an invalid list page.");
     }
@@ -400,9 +382,7 @@ export function assertWorkletListPageShape(
     }
 }
 
-export function assertWorkletDetailPage(
-    value: unknown,
-): asserts value is WorkletDetailPage {
+export function assertWorkletDetailPage(value: unknown): asserts value is WorkletDetailPage {
     if (!Value.Check(workletDetailPageSchema, value)) {
         throw new Error("Worklet detail page is invalid.");
     }
@@ -416,10 +396,7 @@ export function assertWorkletDetailPage(
         if (value.worklet.status.name !== value.worklet.name) {
             throw new Error("Worklet detail status names do not match.");
         }
-        if (
-            value.detail.length > 0 &&
-            value.cursor + value.detail.length > value.total
-        ) {
+        if (value.detail.length > 0 && value.cursor + value.detail.length > value.total) {
             throw new Error("Worklet detail page exceeds its total.");
         }
         if (value.detail.length > value.limit) {
@@ -434,8 +411,7 @@ export function assertWorkletDetailPage(
         }
         if (
             value.previousCursor !== undefined &&
-            (value.previousCursor >= value.cursor ||
-                value.previousCursor > value.total)
+            (value.previousCursor >= value.cursor || value.previousCursor > value.total)
         ) {
             throw new Error("Worklet detail page previous cursor did not move backward.");
         }
@@ -470,8 +446,7 @@ export function assertWorkletLogPage(value: unknown): asserts value is WorkletLo
         page.lines.some(
             (line: WorkletLogPage["lines"][number], index: number) =>
                 line.position >= page.totalLines ||
-                (index > 0 &&
-                    line.position !== page.lines[index - 1]!.position + 1),
+                (index > 0 && line.position !== page.lines[index - 1]!.position + 1),
         )
     ) {
         throw new Error("Worklet log positions must be ordered.");
@@ -491,10 +466,7 @@ export function assertWorkletLogPage(value: unknown): asserts value is WorkletLo
     if (page.cursor > 0 && page.previousCursor === undefined) {
         throw new Error("Worklet log page must expose a previous cursor beyond the start.");
     }
-    if (
-        page.previousCursor !== undefined &&
-        page.previousCursor >= page.cursor
-    ) {
+    if (page.previousCursor !== undefined && page.previousCursor >= page.cursor) {
         throw new Error("Worklet log page previous cursor did not move backward.");
     }
 }
@@ -518,9 +490,7 @@ export function assertWorkletMutation(
         if (
             value.worklet.name !== value.name ||
             value.worklet.currentVersion !== value.currentVersion ||
-            !value.worklet.versions.some(
-                (version) => version.version === value.targetVersion,
-            )
+            !value.worklet.versions.some((version) => version.version === value.targetVersion)
         ) {
             throw new Error("Worklet mutation result identity is inconsistent.");
         }

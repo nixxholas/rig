@@ -82,7 +82,7 @@ survives as public API with no production consumer after the module moved to its
     host calling `record` directly can create one; the tool advertises a filter that normally matches
     nothing.
 11. **Tool results are recorded as `role: "assistant"`.** `HistoryModule.ts:366-371`. A reader
-    filtering `roles: ["assistant"]` to find what the model *said* gets every tool result too, and
+    filtering `roles: ["assistant"]` to find what the model _said_ gets every tool result too, and
     `stats.assistantMessages` counts one per tool call, so the overview numbers do not mean what
     their names suggest.
 12. **`HistoryReader` validates a typed dependency structurally.** `HistoryReader.ts:18-62` builds a

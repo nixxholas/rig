@@ -19,10 +19,7 @@ import {
 export const mcpUserInputServiceSchema = Type.Object(
     {
         request: Type.Union([
-            Type.Function(
-                [mcpUserInputRequestSchema],
-                Type.Promise(mcpUserInputResponseSchema),
-            ),
+            Type.Function([mcpUserInputRequestSchema], Type.Promise(mcpUserInputResponseSchema)),
             Type.Function(
                 [mcpContextSchema, mcpUserInputRequestSchema],
                 Type.Promise(mcpUserInputResponseSchema),
@@ -55,9 +52,7 @@ export async function handleMcpElicitation(
     const request = Value.Check(mcpElicitationRequestSchema, first)
         ? first
         : (second as McpElicitationRequest);
-    const ctx = Value.Check(mcpElicitationRequestSchema, first)
-        ? undefined
-        : first;
+    const ctx = Value.Check(mcpElicitationRequestSchema, first) ? undefined : first;
     const userInput = Value.Check(mcpElicitationRequestSchema, first)
         ? (second as McpUserInputService | undefined)
         : third;
@@ -67,38 +62,36 @@ export async function handleMcpElicitation(
     const { message, requestedSchema } = request.params;
     const entries = Object.entries(requestedSchema.properties);
     const valuesByLabel = new Map<string, Map<string, string | number | boolean>>();
-    const questions: McpUserInputRequest["questions"][number][] = entries.map(
-        ([id, property]) => {
-            const record = asRecord(property);
-            const enumValues = enumValuesFor(record);
-            const enumNames = enumNamesFor(record, enumValues);
-            valuesByLabel.set(
-                id,
-                new Map(enumValues.map((value, index) => [String(enumNames[index] ?? value), value])),
-            );
-            const required = requestedSchema.required?.includes(id) === true;
-            const rawTitle = typeof record?.title === "string" ? record.title.trim() : id;
-            const header = rawTitle.length > 12 ? `${rawTitle.slice(0, 11).trimEnd()}…` : rawTitle;
-            const propertyDescription =
-                typeof record?.description === "string" ? record.description : undefined;
-            const propertyType = typeof record?.type === "string" ? record.type : undefined;
-            return {
-                header: header.length === 0 ? "MCP request" : header,
-                id,
-                multiSelect: propertyType === "array",
-                options: enumValues.map((value, index) => ({
-                    label: String(enumNames[index] ?? value),
-                    description:
-                        propertyDescription ??
-                        (propertyType === "boolean"
-                            ? `Answer ${String(enumNames[index] ?? value)}.`
-                            : `Use ${String(value)}.`),
-                })),
-                question: propertyDescription ?? message,
-                ...(required ? { required: true } : {}),
-            };
-        },
-    );
+    const questions: McpUserInputRequest["questions"][number][] = entries.map(([id, property]) => {
+        const record = asRecord(property);
+        const enumValues = enumValuesFor(record);
+        const enumNames = enumNamesFor(record, enumValues);
+        valuesByLabel.set(
+            id,
+            new Map(enumValues.map((value, index) => [String(enumNames[index] ?? value), value])),
+        );
+        const required = requestedSchema.required?.includes(id) === true;
+        const rawTitle = typeof record?.title === "string" ? record.title.trim() : id;
+        const header = rawTitle.length > 12 ? `${rawTitle.slice(0, 11).trimEnd()}…` : rawTitle;
+        const propertyDescription =
+            typeof record?.description === "string" ? record.description : undefined;
+        const propertyType = typeof record?.type === "string" ? record.type : undefined;
+        return {
+            header: header.length === 0 ? "MCP request" : header,
+            id,
+            multiSelect: propertyType === "array",
+            options: enumValues.map((value, index) => ({
+                label: String(enumNames[index] ?? value),
+                description:
+                    propertyDescription ??
+                    (propertyType === "boolean"
+                        ? `Answer ${String(enumNames[index] ?? value)}.`
+                        : `Use ${String(value)}.`),
+            })),
+            question: propertyDescription ?? message,
+            ...(required ? { required: true } : {}),
+        };
+    });
 
     let response: McpUserInputResponse;
     if (questions.length === 0) {
@@ -199,7 +192,9 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
         : undefined;
 }
 
-function enumValuesFor(record: Record<string, unknown> | undefined): Array<string | number | boolean> {
+function enumValuesFor(
+    record: Record<string, unknown> | undefined,
+): Array<string | number | boolean> {
     if (Array.isArray(record?.enum)) return record.enum.filter(isPrimitive);
     if (Array.isArray(record?.oneOf)) {
         return record.oneOf

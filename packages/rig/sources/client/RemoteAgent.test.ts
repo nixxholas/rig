@@ -848,7 +848,162 @@ describe("RemoteAgent", () => {
             text: "Go.",
         });
     });
+
+    it("accepts a system notice without mutating snapshot messages or context", () => {
+        const model = defineModel({
+            id: "openai/test",
+            name: "Test model",
+            thinkingLevels: ["off"],
+            defaultThinkingLevel: "off",
+        });
+        const session = protocolSession(model);
+        const message = {
+            blocks: [{ text: "Already loaded.", type: "text" as const }],
+            id: "agent-message-1",
+            role: "agent" as const,
+        };
+        const context = {
+            blocks: [{ text: "Prior context.", type: "text" as const }],
+            id: "context-1",
+            role: "system" as const,
+        };
+        const agent = new RemoteAgent({
+            client: {} as ProtocolHttpClient,
+            context: createJustBashToolHarness().context,
+            session: {
+                ...session,
+                snapshot: { ...session.snapshot, messages: [message], contextMessages: [context] },
+            },
+        });
+
+        agent.applySessionEvent(
+            systemNotice(session.id, "01900000-0000-7001-8000-000000000009"),
+        );
+
+        expect(agent.snapshot().messages).toEqual([message]);
+        expect(agent.snapshot().contextMessages).toEqual([context]);
+    });
+
+    it("advances the event cursor once for a permission notice", () => {
+        const model = defineModel({
+            id: "openai/test",
+            name: "Test model",
+            thinkingLevels: ["off"],
+            defaultThinkingLevel: "off",
+        });
+        const session = protocolSession(model);
+        const agent = new RemoteAgent({
+            client: {} as ProtocolHttpClient,
+            context: createJustBashToolHarness().context,
+            session,
+        });
+
+        agent.applySessionEvent(
+            systemNotice(session.id, "01900000-0000-7001-8000-000000000009"),
+        );
+
+        // A session update older than the notice must be ignored, which is only true when the
+        // notice already moved the cursor past it.
+        agent.applySessionEvent({
+            createdAt: 2,
+            data: { session: { ...session, permissionMode: "read_only" } },
+            id: "01900000-0000-7001-8000-000000000005",
+            sessionId: session.id,
+            type: "session_updated",
+        });
+
+        expect(agent.permissionMode).toBe("workspace_write");
+    });
+
+    it("accepts a permission-review event without mutating snapshot and advances the cursor", () => {
+        const model = defineModel({
+            id: "openai/test",
+            name: "Test model",
+            thinkingLevels: ["off"],
+            defaultThinkingLevel: "off",
+        });
+        const session = protocolSession(model);
+        const message = {
+            blocks: [{ text: "Already loaded.", type: "text" as const }],
+            id: "agent-message-1",
+            role: "agent" as const,
+        };
+        const agent = new RemoteAgent({
+            client: {} as ProtocolHttpClient,
+            context: createJustBashToolHarness().context,
+            session: {
+                ...session,
+                snapshot: { ...session.snapshot, messages: [message] },
+            },
+        });
+
+        // A permission-review event decorates a tool row this transcript does not hold, so it
+        // leaves the snapshot untouched. It must still advance the cursor, or a stale session
+        // update ordered before it would be replayed over newer state.
+        agent.applySessionEvent(
+            permissionReviewEvent(session.id, "01900000-0000-7001-8000-00000000000a"),
+        );
+        expect(agent.snapshot().messages).toEqual([message]);
+
+        agent.applySessionEvent({
+            createdAt: 2,
+            data: { session: { ...session, permissionMode: "read_only" } },
+            id: "01900000-0000-7001-8000-000000000005",
+            sessionId: session.id,
+            type: "session_updated",
+        });
+        expect(agent.permissionMode).toBe("workspace_write");
+    });
 });
+
+function permissionReviewEvent(sessionId: string, id: string): SessionEvent {
+    return {
+        createdAt: 1,
+        data: {
+            event: {
+                type: "permission_review",
+                action: "Publish to /tmp/out, outside the workspace.",
+                decision: "allow",
+                reason: "The user asked for exactly this.",
+                risk: "medium",
+                toolCallId: "call-1",
+                userAuthorization: "high",
+            },
+        },
+        id,
+        sessionId,
+        type: "permission_review",
+    };
+}
+
+function systemNotice(sessionId: string, id: string): SessionEvent {
+    return {
+        createdAt: 1,
+        data: {
+            message: {
+                role: "system",
+                id,
+                context: "excluded",
+                blocks: [
+                    {
+                        type: "text",
+                        text: "Automatic permission review refused too many actions in this turn (3 in a row, 3 of the last 3), so the turn was stopped.",
+                    },
+                ],
+                structured: {
+                    kind: "notice",
+                    title: "Automatic permission review stopped the turn",
+                    details:
+                        "Automatic permission review refused too many actions in this turn (3 in a row, 3 of the last 3), so the turn was stopped.",
+                    level: "warning",
+                },
+            },
+        },
+        id,
+        sessionId,
+        type: "system_notice",
+    };
+}
 
 function protocolSession(model: ReturnType<typeof defineModel>): ProtocolSession {
     return {

@@ -3,12 +3,15 @@ import { readValidatedBody } from "./body.js";
 import { AgentHttpError, sendJson } from "./errors.js";
 import { createRouteGroup, type AgentHttpRouteGroup } from "./router.js";
 import { ProjectFileError, type ProjectFilesModule } from "../files/ProjectFilesModule.js";
-import { GitModule, gitWatchSchema, type GitEntity } from "../git/GitModule.js";
+import { GitModule, gitWatchSchema } from "../git/GitModule.js";
+import type { GitStateTracker, GitTrackedEntity } from "../git/GitStateTracker.js";
 
 export interface GitRouteOptions {
     readonly agent: LoadedHappyAgent;
     readonly files: ProjectFilesModule;
     readonly git: GitModule;
+    /** The daemon's one live watcher. Watching registers with it instead of scanning here. */
+    readonly tracker?: GitStateTracker;
 }
 
 export function createGitRoutes(options: GitRouteOptions): AgentHttpRouteGroup {
@@ -19,7 +22,7 @@ export function createGitRoutes(options: GitRouteOptions): AgentHttpRouteGroup {
             path: "/v0/git/watch",
             handle: async ({ ctx, request, response }) => {
                 const body = await readValidatedBody(request, gitWatchSchema);
-                const entities: (GitEntity & { readonly root: string })[] = [];
+                const tracked: { readonly path: string; readonly entity: GitTrackedEntity }[] = [];
                 for (const entity of body.entities) {
                     try {
                         const root = await options.files.resolveRoot(
@@ -28,14 +31,51 @@ export function createGitRoutes(options: GitRouteOptions): AgentHttpRouteGroup {
                             entity.projectId,
                             entity.workspaceId,
                         );
-                        entities.push({ ...entity, root: root.root });
+                        tracked.push({
+                            path: root.root,
+                            entity: {
+                                path: root.root,
+                                projectId: entity.projectId,
+                                ...(entity.workspaceId === undefined
+                                    ? {}
+                                    : { workspaceId: entity.workspaceId }),
+                            },
+                        });
                     } catch (error) {
                         if (error instanceof ProjectFileError && error.status === 404) continue;
                         throw error;
                     }
                 }
-                const snapshots = await options.git.watch(entities);
-                sendJson(response, 200, { snapshots });
+                const tracker = options.tracker;
+                if (tracker === undefined) {
+                    // Only a caller that constructed these routes without the daemon's watcher
+                    // gets here; it still deserves an answer rather than a failure.
+                    sendJson(response, 200, {
+                        snapshots: await options.git.watch(
+                            body.entities.map((entity, index) => ({
+                                ...entity,
+                                root: tracked[index]?.path ?? "",
+                            })),
+                        ),
+                    });
+                    return;
+                }
+                // Watching is a subscription, not a scan. Each entity is registered with the one
+                // live watcher, which keeps its own bounded set of repositories, debounces file
+                // events and persists what it learns; the reply is whatever it already knows.
+                // A repository it has not scanned yet simply has no snapshot to report, and the
+                // next poll finds one, instead of this request walking 256 repositories in turn.
+                for (const { entity } of tracked) tracker.watch(ctx, entity);
+                const wanted = new Set(
+                    tracked.map(({ entity }) => `${entity.projectId}:${entity.workspaceId ?? ""}`),
+                );
+                sendJson(response, 200, {
+                    snapshots: tracker
+                        .liveSnapshots()
+                        .filter((snapshot) =>
+                            wanted.has(`${snapshot.projectId}:${snapshot.workspaceId ?? ""}`),
+                        ),
+                });
             },
         },
         {

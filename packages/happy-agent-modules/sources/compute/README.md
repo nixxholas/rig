@@ -1,9 +1,10 @@
 # Compute
 
 A machine to work on. An agent that can only talk cannot build anything, so this module gives it
-one: a filesystem to read and change, and a shell to run commands in. It offers thirteen common
-Rig tools — not any vendor's — over one `Compute`, so every model gets exactly these tools, under
-these names, with these arguments, regardless of which provider is serving it.
+one: a filesystem to read and change, and a shell to run commands in. It offers that machine as
+**each vendor's own tools** — Claude's `Read`/`Write`/`Edit`/`Bash`, Codex's `exec_command` and
+`apply_patch`, Grok's `read_file`/`write`/`run_terminal_command` — rather than one provider-neutral
+surface, so a model sees the tool names, argument names, and escalation syntax it was trained on.
 
 ```ts
 import { AgentSystemLocal } from "@slopus/happy-agent-base";
@@ -46,138 +47,83 @@ Every filesystem and shell operation receives the Agent Base permission mode fro
 context as an immutable `ComputePermissions` value. The published compute backend remains
 responsible for host policy, symlink checks, and native sandbox enforcement.
 
-## Tools
+## Which surface an agent gets
 
-### `read_file`
+`computeToolVendor` (`ComputeToolVendor.ts`) answers that from the agent itself. It reads
+`scope.agent.model` through `providerModelFamily` from `@slopus/happy-providers`, so
+`anthropic/opus-5` is Claude, `openai/gpt-5.6-sol` is Codex, and `xai/grok-4.5` is Grok — whichever
+provider happens to be serving that model. A Claude model served over Bedrock still gets Claude's
+tools. Only when the model says nothing does it fall back to `scope.agent.providerKind`, and only
+when that says nothing either does it default to Codex.
 
-Reads a text file, numbering its lines in the output (the numbers are not part of the file and
-must never be echoed back into `edit_file`). `path` may be absolute or relative to the working
-directory; `offset` (1-based line) and `limit` page through a longer file. Up to 2,000 lines and
-60,000 characters come back at once; a truncated answer says so and tells the model to read on
-with `offset`. PNG, JPEG, GIF, WebP, and BMP paths return an image block instead, bounded to
-3 MiB before base64 expansion; the module does not downscale images. Every read is recorded in the agent's
-`FileReadLog` under the file's `mtimeMs`, which is what later earns the right to change it.
-Marked `durable`: the read authorization and tool result commit together, so an interrupted call
-can be retried without leaving half of that state.
+`assembleComputeTools` (`tools/assembleComputeTools.ts`) then switches exhaustively over the vendor
+and builds that vendor's array. `instructions()` picks its text the same way: each vendor's rules
+are written in terms of that vendor's own tool names, since instructions that name `write_file` to
+a model holding `Write` are worse than no instructions at all.
 
-### `view_image`
+## The vendor surfaces
 
-Shows one supported local image as a provider-neutral image block. It accepts `path`, applies the
-same path review and 3 MiB bound as `read_file`, and records the read.
+Each directory under `tools/` has its own README describing every tool it ships.
 
-### `write_file`
+| Vendor | Tools                                                                                                                                                                  | Details                                              |
+| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| Claude | `BashOutput`, `Bash`, `Read`, `Edit`, `Write`, `Glob`, `Grep`, `BashStop`, `BashInput`                                                                                 | [`tools/claude/README.md`](./tools/claude/README.md) |
+| Codex  | `exec_command`, `write_stdin`, `kill_session`, `apply_patch`, `view_image`                                                                                             | [`tools/codex/README.md`](./tools/codex/README.md)   |
+| Grok   | `run_terminal_command`, `read_file`, `write`, `search_replace`, `list_dir`, `grep`, `get_command_or_subagent_output`, `kill_command_or_subagent`, `send_command_input` | [`tools/grok/README.md`](./tools/grok/README.md)     |
 
-Creates a file or replaces one whole, creating missing parent directories. An existing file must
-have been read first and must not have changed on disk since (`FileReadLog.assertRead`); a file
-that does not exist yet needs no prior read, since there is nothing to lose. A successful write
-records itself as a read, so a following edit is not refused as stale. Deliberately not durable:
-the filesystem write cannot commit atomically with the tool result.
+The vendor descriptors under `packages/happy-providers/sources/vendors/*/tools/` are the truth these
+surfaces are matched against — names, argument names, defaults, and the wording models were trained
+on. Three departures from that truth are deliberate:
 
-### `edit_file`
+- **Claude's `Task*` tools are `Bash*` here.** The descriptors define one `TaskOutput`/`TaskInput`/
+  `TaskStop` family covering "a background shell task, agent, or workflow" — one handle for three
+  unrelated kinds of work. This module owns only the shell, so it ships that half under its own
+  names, taking `bash_id`, describing only shells. Agents and workflows are other modules' work and
+  name their own handles.
+- **No `secrets` argument.** The host compute's secret option has no resolver and injection seam
+  for this module, so no vendor's shell tool advertises secret bundles. Adding it needs a
+  host/provider integration rather than treating secret identifiers as ordinary environment
+  variables.
+- **`apply_patch` takes JSON.** Codex's real `apply_patch` is a freeform tool whose whole argument
+  string is the patch. Agent Base parses every tool call's arguments as JSON before a tool sees
+  them (`AgentBase.ts`) and exposes no argument-parse hook, and `happy-agent-base` is frozen, so
+  this `apply_patch` is an ordinary JSON tool taking `{ patch, workdir? }`. Its description says so
+  plainly instead of repeating the vendor's "do not wrap in JSON" sentence.
 
-Replaces exact text (`old_text` → `new_text`) inside a file the agent has read. `old_text` must
-appear exactly once unless `replace_all` is set, and it refuses a no-op replacement. Deliberately
-not durable: repeating an edit that already landed would either find nothing to replace or hit
-different text that happens to match.
+## What every surface shares
 
-### `delete_file`
+The vendors differ in names and shapes, not in what the machine does. Every tool is a thin
+vendor-shaped skin over one shared helper in `impl/`, so behavior cannot drift between surfaces:
 
-Deletes one regular file after the agent has read it. It refuses directories, missing reads, and
-stale files, and is deliberately not durable because a filesystem delete cannot commit atomically
-with the tool result.
+- `readComputeTextFile`, `listComputeDirectory`, `findComputeFiles`, `searchComputeFileContents` —
+  paged, size-bounded reads that report their own truncation.
+- `writeComputeTextFile`, `editComputeText`, `deleteComputeFile`, `moveComputeFile` — the write
+  path, each enforcing the read requirement unless a caller proves the file's contents another way.
+- `startComputeCommand`, `readComputeCommand`, `writeComputeCommandInput`, `stopComputeCommand` —
+  the command lifecycle, including the background grace period and delta-only reads.
+- `shouldReviewComputePath`, `canonicalComputePath`, `boundOutputText`, `FileReadLog` — permission,
+  bounding, and read-tracking mechanics.
 
-### `move_file`
-
-Moves or renames one regular file after the agent has read it. The destination must not already
-exist; missing parent directories are created. Both source and destination are checked for path
-review, and the tool is deliberately not durable. The existence check and move are not atomic:
-concurrent writers can still race and require a future host atomic no-replace filesystem seam.
-
-### `list_directory`
-
-Lists one directory's entries, sorted, with directory names carrying a trailing slash. `path`
-defaults to the working directory. Dot-files and dot-directories are hidden by default; set
-`show_hidden` to include them. Up to 1,000 visible entries are returned; a truncated answer says
-how many of the total are shown. `durable`.
-
-### `find_files`
-
-Finds files by glob (`**`, `*`, `?`, `{a,b}`) under a directory, matched against the whole path
-relative to where the search started. Results are ordered by most recent modification time first.
-`limit` defaults to 100. Git's own directory is skipped and symbolic links are not followed
-(`walkComputeFiles`, capped at 20,000 visited entries and 10,000 collected files); a walk that hit
-either cap reports `truncated` even if nothing beyond it happened to match. `durable`.
-
-### `search_files`
-
-Searches file contents line by line with a regular expression (`pattern`), optionally narrowed by
-`file_pattern`, `type`, and case-insensitive matching. The supported Git-ignore subset skips
-matching files and directories, along with `.git` and symbolic links; character classes,
-backslash escaping, and other unsupported Git pattern constructs are not fully interpreted (for
-example, `a**b` is treated as `.*`).
-`output_mode` supports `content` (with `-A`, `-B`, `-C`, and line-number options),
-`files_with_matches`, and `count`; `offset` and `limit`/`head_limit` page
-the output. Lines over 400 characters are shortened and the whole answer is bounded to 40,000
-characters. Files over 1,000,000 characters or containing a null byte are skipped as not text.
-`durable`.
-
-### `run_command`
-
-Runs a shell command, starting fresh each call: nothing carries over between calls, including
-directory changes or environment variables. `shell` chooses the shell binary inside the current
-sandbox, while `max_output_tokens` bounds the returned output (10,000 by default). It waits
-up to `timeout_ms` (default 60s, capped at 600s) for the command to finish; reaching the timeout
-does not kill the command — the command keeps running and the tool answers with a `command_id`
-the model comes back to. `background: true` starts a command meant to outlive the call (a dev
-server, a watcher) and only waits a short grace period (3s) to see it did not immediately fail.
-`workdir` overrides the working directory for that one command; `tty` runs it under a
-pseudo-terminal. `escalate_sandbox` (with a short `justification`) asks Auto to review running
-the command with unrestricted filesystem and network access outside the workspace sandbox —
-every other command runs sandboxed. A command the model is waiting on is stopped if its turn is
-cancelled; one already handed back as backgrounded is detached from the turn and left running.
-`exit_code !== 0` marks the result as an error to the model.
-
-Secret bundles are not exposed here yet. The host compute's secret option has no resolver and
-injection seam for this module; adding it needs a host/provider integration rather than treating
-secret identifiers as ordinary environment variables.
-
-### `read_command_output`
-
-Reads what a background command has produced since the command was last read, waiting up to
-`wait_ms` (default 5s, capped at 300s) for something new to arrive. A command that has already
-ended keeps answering for a while so its last output is never lost. `max_output_tokens` can bound
-this answer. Deliberately not durable: a read consumes what it returns, so retrying after a
-restart would lose that output rather than repeat it. Needs no review — it only reads output of
-work Rig itself already started.
-
-### `send_command_input`
-
-Types `input` into a running command and waits up to `wait_ms` (default 250ms, capped at 30s) for
-a response, useful for prompts and REPLs; a line needs its own trailing newline. Only output
-produced since the last read comes back, bounded by optional `max_output_tokens`. Reviewed whenever
-`input` is non-empty, since typing into a live program is the program acting rather than a lookup,
-but it never needs Full access — it reaches nothing the command could not already reach inside its
-own sandbox.
-
-### `stop_command`
-
-Stops a running command and everything it started, asking first and forcing a moment later.
-Stopping one that already ended is not an error — the answer simply says `stopped: false`.
-Deliberately not durable: process state cannot commit atomically with the tool result. Needs no
-review, for the same reason as `read_command_output`: it only ends work Rig itself started.
+A vendor tool's own `impl/` directory holds only what is genuinely that vendor's: parsing Claude's
+shell IDs, Codex's patch format, Grok's task IDs. Nothing there is shared across vendors.
 
 ## Principles
 
-Two rules govern every file tool and are stated to the model directly in `instructions()`, since
-tool descriptions alone cannot carry them:
+Two rules govern every file tool and are stated to the model directly in `instructions()`, in that
+vendor's vocabulary, since tool descriptions alone cannot carry them:
 
 - **Reading earns the right to change.** `FileReadLog` remembers, per agent, which files it has
-  read and at what `mtimeMs`. `write_file` and `edit_file` refuse a file this agent has not read,
-  and refuse one that changed on disk since it was read, rather than silently discarding whoever
-  changed it.
-- **A command that outlives its wait is not killed.** It keeps running under a `command_id`, and
-  every later read of it — `read_command_output`, `send_command_input`, or the next `run_command`
-  wait — returns only what is new since the last read.
+  read and at what `mtimeMs`. A write refuses a file this agent has not read, and refuses one that
+  changed on disk since it was read, rather than silently discarding whoever changed it.
+- **A command that outlives its wait is not killed.** It keeps running under an ID, and every later
+  read of it returns only what is new since the last read.
+
+Codex is the one place the first rule bends, because Codex's surface has no file-read tool at all —
+`apply_patch` is the only way in. A patch hunk that quotes context or removed lines proves the same
+thing a logged read proves: the model knows what is there now. So an update or move whose every
+hunk carries a non-added line applies without a prior read; an append-only hunk, which proves
+nothing, and every delete still require one. That is what the helpers' `requireRead` option exists
+for, and no other vendor passes it.
 
 Permissions are decided per path or per command, not per tool. `shouldReviewComputePath` resolves
 the proposed path, checks it stays inside `compute.cwd`, and — following every symbolic link with
@@ -186,8 +132,9 @@ the workspace is reviewed. Writes to `.git` control files and the root `rig.toml
 or `AGENTS_SECURITY.md` are reviewed even when they remain inside the workspace. The host compute
 receives the reviewed Agent Base mode on the actual operation and applies its own configured host
 policy. Shell commands take the opposite default — sandboxed unless the model explicitly asks to
-leave via `escalate_sandbox` — since an ordinary command is the common case and a reviewer has
-nothing useful to weigh over it.
+leave, in that vendor's own syntax (`dangerouslyDisableSandbox` for Claude,
+`sandbox_permissions: "require_escalated"` for Codex and Grok) — since an ordinary command is the
+common case and a reviewer has nothing useful to weigh over it.
 
 Every read tool returns paged, size-bounded results and states, in its own `truncated` and count
 fields, when more exists than was shown, rather than letting a short answer be read as a complete
@@ -205,7 +152,7 @@ top) and the tail for a command (whose newest lines say how it went).
 - `resolve(ctx, agentId)` — validates `AgentConfig.modules.compute`, creates once, and returns the
   exact cached compute for that agent.
 - `instructions(ctx, scope)` and `tools(ctx, scope)` — return nothing when the agent has no
-  compute configuration; otherwise they use its cached compute.
+  compute configuration; otherwise they use its cached compute and the vendor its model selects.
 - `runningCommands(agentId)` — lists commands on one agent's already-resolved compute.
 - `readCommand(agentId, commandId)` — reads a
   command's state and output without consuming it (`peek: true`), so a person watching does not
@@ -213,6 +160,11 @@ top) and the tail for a command (whose newest lines say how it went).
 - `stopCommand(agentId, commandId)` — stops a command by hand; answers whether
   there was one still running to stop.
 - `dispose(ctx)` — disposes every cached compute at host shutdown.
+
+Also exported from the package: `computeToolVendor`, `computeToolSelectionSchema`,
+`computeToolVendorSchema`, `assembleComputeTools`, and the three per-vendor assemblers
+(`assembleClaudeComputeTools`, `assembleCodexComputeTools`, `assembleGrokComputeTools`) for a host
+that needs one vendor's array directly.
 
 Archiving one agent disposes only that agent's cached compute. A cancelled turn or idle agent does
 not dispose it.

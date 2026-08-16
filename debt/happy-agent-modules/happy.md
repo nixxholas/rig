@@ -31,7 +31,7 @@ notifications table and a config switch the host never consults.
   rewrite now own the same user-visible surface; one of them should become the other's caller.
 - **Permission posture matches v1's read-only tools.** Every tool declares
   `shouldReviewInAutoMode: () => false` and none requests elevation (`HappyModule.ts:227`, `238`,
-  `248`). For a notification that is defensible, and notably the module does *not* couple review to
+  `248`). For a notification that is defensible, and notably the module does _not_ couple review to
   Full access, which is more than several of its siblings manage. See finding 6 for the caveat.
 
 ## Findings

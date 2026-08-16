@@ -25,6 +25,8 @@ import {
     missingPermissionActionRefusal,
     outOfModeRefusal,
     permissionRequestRefusal,
+    permissionTurnStoppedReason,
+    predicateFailedRefusal,
     turnStoppedNotice,
     unprovenRefusal,
     type PermissionUnprovenKind,
@@ -74,6 +76,7 @@ export const permissionsModuleOptionsSchema = Type.Object(
         killAllSessions: killAllSessionsSchema,
         reviewTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: 600_000 })),
         refusalsBeforeStopping: Type.Optional(Type.Integer({ minimum: 1 })),
+        announceTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: 600_000 })),
     },
     { additionalProperties: false },
 );
@@ -89,9 +92,27 @@ type ReviewOutcome =
           readonly kind: PermissionUnprovenKind;
           readonly reason: string;
       };
-/** Long enough for a real reviewer to think, short enough that a turn is never left hanging. */
-const DEFAULT_REVIEW_TIMEOUT_MS = 120_000;
+/**
+ * The wall-clock budget for one review, matching Rig v1 exactly (90 seconds). The reviewer may make
+ * as many read-only tool calls as it wants inside this window; when the window closes the action is
+ * treated as unproven rather than judged unsafe.
+ */
+const DEFAULT_REVIEW_TIMEOUT_MS = 90_000;
 const MAX_REVIEW_TIMEOUT_MS = 600_000;
+
+/**
+ * A review the caller's own lifetime cancelled. Rig v1 propagates this as "Permission review was
+ * stopped." rather than converting it into a denial or an unproven outcome: a cancelled turn made no
+ * judgement about the action, so it must not emit a permission event and must not move the refusal
+ * circuit. It is a distinct type so the decision path can tell cancellation apart from a reviewer
+ * that genuinely failed or timed out.
+ */
+class PermissionReviewCancelledError extends Error {
+    constructor() {
+        super("Permission review was stopped.");
+        this.name = "PermissionReviewCancelledError";
+    }
+}
 
 /**
  * How many refused actions in a row end a turn. Nothing outside the agent breaks a refusal loop
@@ -99,6 +120,22 @@ const MAX_REVIEW_TIMEOUT_MS = 600_000;
  */
 const DEFAULT_REFUSALS_BEFORE_STOPPING = 3;
 const REVIEW_TIMEOUT = Symbol("permission-review-timeout");
+
+/**
+ * How long, by default, a decision waits for its listener before giving up on it.
+ *
+ * The listener's job is to make the event durable — writing it to the conversation and events
+ * journals — which is local SQLite work that settles in milliseconds. Awaiting it is what gives a
+ * healthy host the guarantee that a turn-stop reaches the transcript before the abort it triggers
+ * emits its settlement. But "await it" cannot mean "await it forever": a journal call that never
+ * settles would leave the refusal path stuck, so the abort that ends a runaway turn would never
+ * run. Five seconds is orders of magnitude more than any healthy durable write needs, even on a
+ * loaded host whose fsync stalls, so a healthy host always records first; yet it is a hard ceiling,
+ * so a wedged observer delays the decision by at most this long and can never hold it hostage. A
+ * host may override it, and a test uses a tiny value to prove the ceiling without waiting on it.
+ */
+const ANNOUNCE_TIMEOUT_MS = 5_000;
+const ANNOUNCE_TIMEOUT = Symbol("permission-announce-timeout");
 
 /**
  * Permission modes, enforced.
@@ -145,6 +182,8 @@ export class PermissionsModule implements AgentModule {
     readonly #killAllSessions: (ctx: Context, agentId: string) => Promise<void> | void;
     /** How long a review may take before the action counts as unreviewed. */
     readonly #reviewTimeoutMs: number;
+    /** How long a decision waits for its listener before giving up on it. */
+    readonly #announceTimeoutMs: number;
     /** How many refusals in a row end the turn. */
     readonly #refusalsBeforeStopping: number;
     /** The collection this module belongs to, kept from the moment it starts. */
@@ -184,6 +223,7 @@ export class PermissionsModule implements AgentModule {
         this.#toolGuidanceProvider = options.toolGuidanceProvider;
         this.#killAllSessions = options.killAllSessions;
         this.#reviewTimeoutMs = options.reviewTimeoutMs ?? DEFAULT_REVIEW_TIMEOUT_MS;
+        this.#announceTimeoutMs = options.announceTimeoutMs ?? ANNOUNCE_TIMEOUT_MS;
         this.#refusalsBeforeStopping =
             options.refusalsBeforeStopping ?? DEFAULT_REFUSALS_BEFORE_STOPPING;
         if (
@@ -192,6 +232,13 @@ export class PermissionsModule implements AgentModule {
             this.#reviewTimeoutMs > MAX_REVIEW_TIMEOUT_MS
         ) {
             throw new Error("Permissions module review timeout is invalid.");
+        }
+        if (
+            !Number.isInteger(this.#announceTimeoutMs) ||
+            this.#announceTimeoutMs < 1 ||
+            this.#announceTimeoutMs > MAX_REVIEW_TIMEOUT_MS
+        ) {
+            throw new Error("Permissions module announce timeout is invalid.");
         }
         if (!Number.isInteger(this.#refusalsBeforeStopping) || this.#refusalsBeforeStopping < 1) {
             throw new Error("Permissions module refusal limit is invalid.");
@@ -239,7 +286,7 @@ export class PermissionsModule implements AgentModule {
             try {
                 await this.#killAllSessions(ctx, scope.agent.id);
             } catch (error: unknown) {
-                this.#announce(ctx, {
+                await this.#announce(ctx, {
                     type: "permission_mode_cleanup_failed",
                     agentId: scope.agent.id,
                     previousMode: change.previousMode,
@@ -248,7 +295,7 @@ export class PermissionsModule implements AgentModule {
                 });
             }
         }
-        this.#announce(ctx, {
+        await this.#announce(ctx, {
             type: "permission_mode_changed",
             agentId: scope.agent.id,
             previousMode: change.previousMode,
@@ -308,31 +355,40 @@ export class PermissionsModule implements AgentModule {
         const name = toolName(tool);
         const stopped = this.#terminalRefusal(agentId);
         if (stopped !== undefined) return stopped;
+        // A tool that cannot be contained by the mode is unavailable, not reviewed. This is a mode
+        // constraint, not a review outcome, so — like every non-review path below — it never moves
+        // the refusal circuit. Rig v1's circuit advances only on prepared review decisions.
         if (
             tool.requiresAutoOrFullAccess === true &&
             (mode === "read_only" || mode === "workspace_write")
         ) {
-            this.#announce(ctx, {
+            await this.#announce(ctx, {
                 type: "permission_action_out_of_mode",
                 agentId,
                 callId: call.callId,
                 tool: name,
                 mode,
             });
-            return await this.#refuse(ctx, agentId, outOfModeRefusal(name, mode));
+            return this.#toolError(outOfModeRefusal(name, mode));
         }
-        if (mode !== "auto") return this.#allow(agentId);
-        if (!(await this.#needsReview(ctx, tool, call.arguments))) {
-            return this.#allow(agentId);
+        if (mode !== "auto") return undefined;
+        // A throwing predicate has not said the action is safe. v1 turns it into a tool error and
+        // never runs the action; treating it as "no review needed" or "not elevated" would let a
+        // broken predicate quietly widen what an agent may do. This fails closed and, being a
+        // tool-definition error rather than a review outcome, leaves the circuit untouched.
+        let needsReview: boolean;
+        try {
+            needsReview = (await tool.shouldReviewInAutoMode(call.arguments, ctx)) === true;
+        } catch {
+            return this.#toolError(predicateFailedRefusal(name));
         }
+        if (!needsReview) return undefined;
         const action = describePermissionAction(tool, call.arguments, ctx);
         if (action === undefined) {
-            return await this.#refuse(ctx, agentId, missingPermissionActionRefusal(name));
+            return this.#toolError(missingPermissionActionRefusal(name));
         }
         if (action.length > MAX_PERMISSION_ACTION) {
-            return await this.#refuse(
-                ctx,
-                agentId,
+            return this.#toolError(
                 permissionRequestRefusal(
                     name,
                     `Its action description exceeds the ${MAX_PERMISSION_ACTION}-character limit.`,
@@ -342,82 +398,112 @@ export class PermissionsModule implements AgentModule {
         let reviewArguments: unknown;
         try {
             reviewArguments = snapshotPermissionArguments(call.arguments);
-        } catch (error: unknown) {
-            return await this.#refuse(
-                ctx,
-                agentId,
-                permissionRequestRefusal(name, safeErrorMessage(error)),
+        } catch {
+            // A tool-definition error, and never a place to interpolate the raw failure into
+            // model-facing text.
+            return this.#toolError(
+                permissionRequestRefusal(
+                    name,
+                    "Its arguments could not be prepared for review within the bounded contract.",
+                ),
             );
         }
-        const elevates = await this.#elevates(ctx, tool, call.arguments);
+        let elevates: boolean;
+        try {
+            elevates = (await tool.shouldRunInFullAccessInAutoMode?.(call.arguments, ctx)) === true;
+        } catch {
+            return this.#toolError(predicateFailedRefusal(name));
+        }
         const reviewAbortController = new AbortController();
-        const decision = await this.#review(
-            ctx,
-            {
-                agentId,
-                callId: call.callId,
-                tool,
-                arguments: reviewArguments,
-                action,
-                mode: "auto",
-                elevates,
-                signal: reviewAbortController.signal,
-            },
-            reviewAbortController,
-        );
+        let decision: ReviewOutcome;
+        try {
+            decision = await this.#review(
+                ctx,
+                {
+                    agentId,
+                    callId: call.callId,
+                    tool,
+                    arguments: reviewArguments,
+                    action,
+                    mode: "auto",
+                    elevates,
+                    signal: reviewAbortController.signal,
+                },
+                reviewAbortController,
+            );
+        } catch (error: unknown) {
+            // The caller's own lifetime cancelled the review. This is not a verdict: no permission
+            // event is emitted and the circuit is not touched. The call is refused so the action
+            // never runs, but the turn is already winding down.
+            if (error instanceof PermissionReviewCancelledError) {
+                return refusal(error.message);
+            }
+            throw error;
+        }
         if (decision.outcome === "denied") {
-            this.#announce(ctx, {
+            await this.#announce(ctx, {
                 type: "permission_action_denied",
                 agentId,
                 callId: call.callId,
                 tool: name,
                 action,
                 reason: decision.reason,
+                risk: decision.risk ?? "high",
+                userAuthorization: decision.userAuthorization ?? "unknown",
+                ...(decision.transcript === undefined ? {} : { transcript: decision.transcript }),
             });
-            return await this.#refuse(ctx, agentId, deniedRefusal(action, decision.reason));
+            return await this.#refuseReview(ctx, agentId, deniedRefusal(action, decision.reason));
         }
         if (decision.outcome === "unproven") {
-            this.#announce(ctx, {
+            await this.#announce(ctx, {
                 type: "permission_action_unproven",
                 agentId,
                 callId: call.callId,
                 tool: name,
                 action,
+                kind: decision.kind,
                 reason: decision.reason,
             });
-            return await this.#refuse(
-                ctx,
-                agentId,
-                unprovenRefusal(action, decision.reason, decision.kind),
-            );
+            return await this.#refuseReview(ctx, agentId, unprovenRefusal(action, decision.kind));
         }
         if (!shouldAllowAutoPermissionReview(decision)) {
             const reason = autoPermissionPolicyDenialReason(decision);
-            this.#announce(ctx, {
+            await this.#announce(ctx, {
                 type: "permission_action_denied",
                 agentId,
                 callId: call.callId,
                 tool: name,
                 action,
                 reason,
+                risk: decision.risk,
+                userAuthorization: decision.userAuthorization,
+                ...(decision.transcript === undefined ? {} : { transcript: decision.transcript }),
             });
-            return await this.#refuse(ctx, agentId, deniedRefusal(action, reason));
+            return await this.#refuseReview(ctx, agentId, deniedRefusal(action, reason));
         }
-        this.#announce(ctx, {
+        await this.#announce(ctx, {
             type: "permission_action_reviewed",
             agentId,
             callId: call.callId,
             tool: name,
             action,
             elevated: elevates,
+            reason: decision.reason ?? "The reviewer allowed this action.",
+            risk: decision.risk,
+            userAuthorization: decision.userAuthorization,
+            ...(decision.transcript === undefined ? {} : { transcript: decision.transcript }),
         });
         // The elevation is the call's, not the agent's: it applies to this one execution, so the
         // mode the agent runs in is untouched and the next call is decided again.
-        return this.#allow(agentId, elevates);
+        return this.#allowReview(agentId, elevates);
     };
 
-    /** Let the call through, clearing only the consecutive streak while the circuit is live. */
-    #allow(agentId: string, elevated = false): AgentBaseToolCallDecision | undefined {
+    /**
+     * Let a reviewed call through, clearing only the consecutive streak while the circuit is live.
+     * Only a real review outcome reaches here, so only a real review outcome moves the circuit — Rig
+     * v1 records an allowed review with `recordAllowed`, and non-review allows never touch it at all.
+     */
+    #allowReview(agentId: string, elevated = false): AgentBaseToolCallDecision | undefined {
         let circuit = this.#refusals.get(agentId);
         const stopped = this.#terminalRefusal(agentId);
         if (stopped !== undefined) return stopped;
@@ -429,21 +515,31 @@ export class PermissionsModule implements AgentModule {
         return elevated ? { type: "run", permissionMode: "full_access" } : undefined;
     }
 
+    /**
+     * A refused call that is not a review outcome: a tool-definition error, an out-of-mode tool, a
+     * throwing predicate. Rig v1's refusal circuit advances only on prepared review decisions, so
+     * these never move it — they are simply the error result the model is told this call produced.
+     */
+    #toolError(message: string): AgentBaseToolCallDecision {
+        return refusal(message);
+    }
+
     /** A tripped circuit stays closed until the agent settles. */
     #terminalRefusal(agentId: string): AgentBaseToolCallDecision | undefined {
         const circuit = this.#refusals.get(agentId);
         if (circuit === undefined || !circuit.stopped) return undefined;
         const status = circuit.status();
-        return refusal(turnStoppedNotice(status.consecutive, status.recent));
+        return refusal(turnStoppedNotice(status.consecutive, status.recent, status.window));
     }
 
     /**
-     * Refuse the call, and end the turn when refusals have piled up. A refusal is what the model
-     * is told this call produced, in place of anything the tool would have done; a turn that keeps
-     * collecting them is going nowhere, and nothing outside the agent is left to stop it, so it
-     * stops itself.
+     * Refuse a reviewed call, and end the turn when review refusals have piled up. This is reached
+     * only for real review outcomes — a denial, a policy rejection, or an unproven review — so it is
+     * the only path that moves the refusal circuit, exactly as Rig v1's circuit advances only on
+     * prepared review decisions. A turn that keeps collecting review refusals is going nowhere, and
+     * nothing outside the agent is left to stop it, so it stops itself.
      */
-    async #refuse(
+    async #refuseReview(
         ctx: Context,
         agentId: string,
         message: string,
@@ -457,46 +553,26 @@ export class PermissionsModule implements AgentModule {
         if (!status.newlyStopped) {
             return refusal(
                 status.stopped
-                    ? `${message}\n\n${turnStoppedNotice(status.consecutive, status.recent)}`
+                    ? `${message}\n\n${turnStoppedNotice(status.consecutive, status.recent, status.window)}`
                     : message,
             );
         }
-        this.#announce(ctx, {
+        await this.#announce(ctx, {
             type: "permission_turn_stopped",
             agentId,
-            refusals: Math.max(status.consecutive, status.recent),
+            consecutiveRefusals: status.consecutive,
+            recentRefusals: status.recent,
+            recentWindowLength: status.window,
+            reason: permissionTurnStoppedReason(status.consecutive, status.recent, status.window),
         });
         try {
             await this.#agents?.abort(ctx, agentId);
         } catch {
             // The refusal stands whether or not the turn could be cancelled.
         }
-        return refusal(`${message}\n\n${turnStoppedNotice(status.consecutive, status.recent)}`);
-    }
-
-    /**
-     * Whether this invocation has to be reviewed. A tool owns the decision; one whose predicate
-     * fails has not said no, and an unanswered question is reviewed rather than waved through.
-     */
-    async #needsReview(ctx: Context, tool: AnyAgentTool, args: unknown): Promise<boolean> {
-        try {
-            return (await tool.shouldReviewInAutoMode(args, ctx)) === true;
-        } catch {
-            return true;
-        }
-    }
-
-    /**
-     * Whether an approval also has to lift the sandbox for the length of this call. Review and
-     * elevation are separate decisions: an action is elevated only because the tool says this
-     * invocation cannot be carried out inside the sandbox, never because it was reviewed.
-     */
-    async #elevates(ctx: Context, tool: AnyAgentTool, args: unknown): Promise<boolean> {
-        try {
-            return (await tool.shouldRunInFullAccessInAutoMode?.(args, ctx)) === true;
-        } catch {
-            return false;
-        }
+        return refusal(
+            `${message}\n\n${turnStoppedNotice(status.consecutive, status.recent, status.window)}`,
+        );
     }
 
     async #resolveToolGuidance(ctx: Context, agentId: string): Promise<PermissionToolGuidances> {
@@ -508,15 +584,28 @@ export class PermissionsModule implements AgentModule {
     }
 
     /**
-     * Put one action to the reviewer, within a bounded time. A reviewer that is absent, throws, or
-     * takes too long has refused nothing: the outcome is unproven, and the model is told as much
-     * rather than being told the action was judged unsafe.
+     * Put one action to the reviewer, within a bounded time and under the caller's own lifetime. A
+     * reviewer that is absent, throws, or takes too long has refused nothing: the outcome is
+     * unproven, and the model is told as much rather than being told the action was judged unsafe.
+     *
+     * Cancellation is different from every other non-answer. The review runs on the caller's
+     * lifetime: the abort controller passed to the reviewer is linked to `ctx.lifetime`, so a turn
+     * that is stopped cancels the in-flight review. That is not a verdict — Rig v1 propagates it as
+     * "Permission review was stopped." — so a cancelled review throws {@link
+     * PermissionReviewCancelledError} rather than becoming a denial or an unproven outcome, and the
+     * caller neither emits an event nor moves the refusal circuit for it. Cancellation is checked
+     * before the reviewer is ever consulted and again before any decision is returned, so a turn
+     * stopped mid-review is never charged as a refusal.
      */
     async #review(
         ctx: Context,
         request: PermissionReviewRequest,
         abortController: AbortController,
     ): Promise<ReviewOutcome> {
+        const owner = ctx.lifetime;
+        // Register cancellation before any evidence is prepared or the reviewer is consulted, and
+        // fail out immediately if the turn was already stopped.
+        if (hasStopped(owner)) throw new PermissionReviewCancelledError();
         const reviewer = this.#reviewer;
         if (reviewer === undefined) {
             return {
@@ -533,10 +622,20 @@ export class PermissionsModule implements AgentModule {
                 reason: "The automatic permission reviewer request was invalid.",
             };
         }
+        let timedOut = false;
         let timer: ReturnType<typeof setTimeout> | undefined;
+        // Link the review's cancellation to the caller's lifetime, so a stopped turn stops the
+        // review. The listener is removed in the `finally` so a completed review leaves nothing
+        // attached to the turn.
+        const onOwnerAbort = (): void => abortController.abort();
+        owner?.addEventListener("abort", onOwnerAbort, { once: true });
         try {
             const timeout = new Promise<typeof REVIEW_TIMEOUT>((resolve) => {
-                timer = setTimeout(() => resolve(REVIEW_TIMEOUT), this.#reviewTimeoutMs);
+                timer = setTimeout(() => {
+                    timedOut = true;
+                    abortController.abort();
+                    resolve(REVIEW_TIMEOUT);
+                }, this.#reviewTimeoutMs);
                 timer.unref?.();
             });
             const reviewPromise = reviewer.review(ctx, reviewRequest);
@@ -544,8 +643,8 @@ export class PermissionsModule implements AgentModule {
             // unhandled rejection while the turn has already moved on.
             void reviewPromise.catch(() => undefined);
             const candidate = await Promise.race([reviewPromise, timeout]);
+            if (hasStopped(owner) && !timedOut) throw new PermissionReviewCancelledError();
             if (candidate === REVIEW_TIMEOUT) {
-                abortController.abort();
                 return {
                     outcome: "unproven",
                     kind: "timed_out",
@@ -561,6 +660,9 @@ export class PermissionsModule implements AgentModule {
             }
             return candidate;
         } catch (error: unknown) {
+            if (error instanceof PermissionReviewCancelledError) throw error;
+            // A turn stopped while the reviewer was rejecting is cancellation, not a failed review.
+            if (hasStopped(owner) && !timedOut) throw new PermissionReviewCancelledError();
             return {
                 outcome: "unproven",
                 kind: "unavailable",
@@ -568,15 +670,49 @@ export class PermissionsModule implements AgentModule {
             };
         } finally {
             if (timer !== undefined) clearTimeout(timer);
+            owner?.removeEventListener("abort", onOwnerAbort);
         }
     }
 
-    /** Tell the listener, if there is one, without letting it affect the run. */
-    #announce(ctx: Context, event: PermissionEvent): void {
+    /**
+     * Tell the listener, if there is one, without letting it affect the run. The call is awaited so
+     * a healthy host has durably recorded the event before the run settles — a turn-stop must reach
+     * the transcript before the abort it triggers emits its settlement — but the wait is bounded so
+     * a listener that hangs cannot hold the decision hostage: a stuck observer stops being awaited
+     * after `ANNOUNCE_TIMEOUT_MS` and the decision continues. A listener that throws is contained
+     * the same way. Either failure is logged, because an event the client never sees is the
+     * difference between a transcript that explains why a turn stopped and one that only shows the
+     * generic interruption row; an operator has to be able to find out that the explanation was
+     * lost. It observes permissions; it never decides them.
+     */
+    async #announce(ctx: Context, event: PermissionEvent): Promise<void> {
+        const onEvent = this.#listener?.onEvent;
+        if (onEvent === undefined) return;
+        let timer: ReturnType<typeof setTimeout> | undefined;
         try {
-            this.#listener?.onEvent?.(ctx, event);
-        } catch {
-            // A listener observes permissions; it never decides them.
+            const settled = Promise.resolve(onEvent(ctx, event));
+            // A listener that settles after the timeout must not become an unhandled rejection once
+            // the decision has already moved on without it.
+            void settled.catch(() => undefined);
+            const timeout = new Promise<typeof ANNOUNCE_TIMEOUT>((resolve) => {
+                timer = setTimeout(() => resolve(ANNOUNCE_TIMEOUT), this.#announceTimeoutMs);
+                timer.unref?.();
+            });
+            const outcome = await Promise.race([settled.then(() => undefined), timeout]);
+            if (outcome === ANNOUNCE_TIMEOUT) {
+                ctx.log.warn(
+                    "A permission event was not durably recorded before the decision continued: its listener did not settle in time. The client may fall back to the generic interruption row.",
+                    { agentId: event.agentId, type: event.type, timeoutMs: this.#announceTimeoutMs },
+                );
+            }
+        } catch (error: unknown) {
+            ctx.log.warn(
+                "A permission event listener failed, so the event may not have been durably recorded. The client may fall back to the generic interruption row.",
+                { agentId: event.agentId, type: event.type },
+                error,
+            );
+        } finally {
+            if (timer !== undefined) clearTimeout(timer);
         }
     }
 }
@@ -584,6 +720,17 @@ export class PermissionsModule implements AgentModule {
 /** A refused call, as the error result the model is told the call produced. */
 function refusal(message: string): AgentBaseToolCallDecision {
     return { type: "answer", content: [{ type: "text", text: message }], isError: true };
+}
+
+/**
+ * Whether the turn owning this review has stopped.
+ *
+ * The signal is read through a parameter rather than inline, because an early `aborted === true`
+ * guard narrows the property to `false` for the rest of the function while the real signal can
+ * still abort at any moment afterwards.
+ */
+function hasStopped(signal: AbortSignal | undefined): boolean {
+    return signal?.aborted === true;
 }
 
 /** How a tool is named in something a person or a model reads. */

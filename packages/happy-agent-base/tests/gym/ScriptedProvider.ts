@@ -43,10 +43,7 @@ export class ScriptedSession extends BaseSession {
         })();
     }
 
-    compact(
-        _ctx: Context,
-        options: SessionCompactionOptions,
-    ): Promise<SessionCompaction> {
+    compact(_ctx: Context, options: SessionCompactionOptions): Promise<SessionCompaction> {
         this.compactions.push(options);
         const result = this.compactionResults.shift();
         if (result === undefined) {

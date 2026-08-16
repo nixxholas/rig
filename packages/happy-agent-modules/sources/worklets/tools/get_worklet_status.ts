@@ -1,10 +1,7 @@
 import { Type, type Static } from "@sinclair/typebox";
 import { defineAgentTool } from "@slopus/happy-agent-base";
 
-import {
-    workletNameSchema,
-    workletStatusSchema,
-} from "../Worklet.js";
+import { workletNameSchema, workletStatusSchema } from "../Worklet.js";
 import type { WorkletsModule } from "../WorkletsModule.js";
 
 const statusWorkletInputSchema = Type.Object(

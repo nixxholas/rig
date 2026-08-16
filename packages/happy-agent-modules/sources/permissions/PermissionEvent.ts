@@ -2,6 +2,13 @@ import { agentPermissionModeSchema } from "@slopus/happy-agent-base";
 import { Type, type Static } from "@sinclair/typebox";
 import type { Context } from "@steve.kite/stdlib";
 
+import { permissionUnprovenKindSchema } from "./impl/permissionRefusalMessage.js";
+import {
+    permissionReviewTranscriptSchema,
+    permissionRiskSchema,
+    permissionUserAuthorizationSchema,
+} from "./PermissionReviewer.js";
+
 const permissionContextSchema = Type.Unsafe<Context>(
     Type.Object({}, { additionalProperties: false }),
 );
@@ -40,6 +47,10 @@ export const permissionEventSchema = Type.Union([
             tool: permissionToolSchema,
             action: permissionActionSchema,
             elevated: Type.Boolean(),
+            reason: permissionReasonSchema,
+            risk: permissionRiskSchema,
+            userAuthorization: permissionUserAuthorizationSchema,
+            transcript: Type.Optional(permissionReviewTranscriptSchema),
         },
         { additionalProperties: false },
     ),
@@ -51,6 +62,9 @@ export const permissionEventSchema = Type.Union([
             tool: permissionToolSchema,
             action: permissionActionSchema,
             reason: permissionReasonSchema,
+            risk: permissionRiskSchema,
+            userAuthorization: permissionUserAuthorizationSchema,
+            transcript: Type.Optional(permissionReviewTranscriptSchema),
         },
         { additionalProperties: false },
     ),
@@ -61,6 +75,7 @@ export const permissionEventSchema = Type.Union([
             callId: permissionCallIdSchema,
             tool: permissionToolSchema,
             action: permissionActionSchema,
+            kind: permissionUnprovenKindSchema,
             reason: permissionReasonSchema,
         },
         { additionalProperties: false },
@@ -79,7 +94,10 @@ export const permissionEventSchema = Type.Union([
         {
             type: Type.Literal("permission_turn_stopped"),
             agentId: permissionAgentIdSchema,
-            refusals: Type.Integer({ minimum: 1 }),
+            consecutiveRefusals: Type.Integer({ minimum: 1 }),
+            recentRefusals: Type.Integer({ minimum: 1 }),
+            recentWindowLength: Type.Integer({ minimum: 1 }),
+            reason: permissionReasonSchema,
         },
         { additionalProperties: false },
     ),
@@ -97,7 +115,10 @@ export const permissionModuleListenerSchema = Type.Object(
             ),
         ),
         onEvent: Type.Optional(
-            Type.Function([permissionContextSchema, permissionEventSchema], Type.Void()),
+            Type.Function(
+                [permissionContextSchema, permissionEventSchema],
+                Type.Union([Type.Void(), Type.Promise(Type.Void())]),
+            ),
         ),
     },
     { additionalProperties: false },
@@ -110,6 +131,8 @@ export const permissionModuleListenerSchema = Type.Object(
  * `onEventTransactional` runs inside the transaction that commits the change it describes, which
  * only a mode change has: a listener writing a record of its own commits it with the change, and
  * its failure rolls both back. `onEvent` runs once the change is durable, and every decision about
- * a single tool call — which commits nothing — is reported only there.
+ * a single tool call — which commits nothing — is reported only there. It may be asynchronous, and
+ * the module awaits it so that a healthy host has durably recorded what happened before the run
+ * settles; a listener that throws is contained and never changes the permission decision.
  */
 export type PermissionModuleListener = Static<typeof permissionModuleListenerSchema>;

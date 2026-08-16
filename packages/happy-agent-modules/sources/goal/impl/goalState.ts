@@ -118,11 +118,7 @@ export async function readGoalState(
     return structuredClone(stored);
 }
 
-export async function writeGoal(
-    ctx: Context,
-    kv: GoalDatabase,
-    goal: SessionGoal,
-): Promise<void> {
+export async function writeGoal(ctx: Context, kv: GoalDatabase, goal: SessionGoal): Promise<void> {
     assertSessionGoalSemantics(goal);
     await kv.write(ctx, GOAL_KEY, structuredClone(goal));
 }

@@ -11,7 +11,7 @@ export function clearProjectAvatarTool(projects: ProjectsModule, agentId: string
     return defineAgentTool({
         name: "clear_project_avatar",
         description:
-            "Remove the avatar metadata from one project. Host-owned avatar bytes are not deleted by this catalog operation.",
+            "Remove the avatar metadata from one project. The host keeps its stored image bytes; this only clears what the catalog points at.",
         parameters: projectClearAvatarInputSchema,
         returnType: projectSchema,
         durable: true,
@@ -22,7 +22,7 @@ export function clearProjectAvatarTool(projects: ProjectsModule, agentId: string
         toLLM: (project) => [
             {
                 type: "text",
-                text: projects.formatProjectOperationForModel("Project avatar cleared:", project),
+                text: projects.formatProjectForModel("Project avatar cleared:", project),
             },
         ],
     });
