@@ -1,7 +1,7 @@
 # Module report: permissions
 
-Reviewed: 2026-08-15. Scope: `packages/happy-agent-modules/sources/permissions/` compared against
-`packages/rig/sources/permissions/`, the root `AGENTS.md` "Permissions and security" section, and
+Reviewed: 2026-08-15. Scope: `packages/happy-agent-modules/sources/permissions/` as the v2 successor
+to `packages/rig/sources/permissions/`, the root `AGENTS.md` "Permissions and security" section, and
 master plans 00, 16, 20, 21.
 
 ## Summary
@@ -16,32 +16,31 @@ unproven semantics are all modelled explicitly. The gap is not in the mechanics 
 messages preserved as authorization evidence, and this module's reviewer contract carries no
 transcript at all.
 
-## How it differs from Rig's equivalents
+## Changes from the Rig v1 implementation
 
-- **The reviewer gets no conversation.** Rig's `reviewAutoPermission`
+- **Regression — the reviewer lost the conversation.** v1's `reviewAutoPermission`
   (`packages/rig/sources/permissions/reviewAutoPermission.ts:17-28`) takes
   `messages: readonly Message[]` and hands them to the review agent alongside the action, which is
-  how the "user evidence" rule in `AGENTS.md` is actually satisfied. The module's
+  how the "user evidence" rule in `AGENTS.md` is actually satisfied. v2's
   `permissionReviewRequestSchema` (`PermissionReviewer.ts:75-87`) carries only `agentId`, `callId`,
-  `tool`, `arguments`, `action`, `mode`, `elevates`, and `signal`. Nothing in the module's contract
+  `tool`, `arguments`, `action`, `mode`, `elevates`, and `signal`. Nothing in the v2 contract
   requires or even permits the reviewer to see user authorization evidence; the module accepts
   `userAuthorization` as a self-reported field on the decision and re-checks it
   (`impl/shouldAllowAutoPermissionReview.ts:7-12`) without ever supplying what it should be derived
-  from.
-- **Policy re-derivation is identical.** `impl/shouldAllowAutoPermissionReview.ts` is a line-for-line
-  match of `packages/rig/sources/permissions/shouldAllowAutoPermissionReview.ts` — critical never
-  passes, high needs at least medium authorization. Correct, and duplicated.
-- **Circuit breaker.** `impl/permissionRefusalCircuitBreaker.ts` reimplements
+  from. This is the one v1 protection the rewrite must restore before it can replace v1.
+- **Policy carried over faithfully.** `impl/shouldAllowAutoPermissionReview.ts` preserves v1's
+  policy exactly — critical never passes, high needs at least medium authorization.
+- **Circuit breaker, restructured.** `impl/permissionRefusalCircuitBreaker.ts` carries over
   `packages/rig/sources/permissions/AutoPermissionDenialCircuitBreaker.ts` with the same three
   constants (3 consecutive, 10 of the last 50) and the same "only the first trip stops the turn"
   rule, restructured to return a status object.
-- **Timeout.** Rig uses `AUTO_PERMISSION_REVIEW_TIMEOUT_MS = 90_000` and documents it as "matching
-  Codex" (`reviewAutoPermission.ts:11-15`). The module defaults to 120,000
-  (`PermissionsModule.ts:95`) with no stated reason for the divergence.
-- **Prompt text.** `impl/permissionModeGuidance.ts:77-91` is a second copy of the sandbox-limits
-  paragraph Rig already ships in its system prompt (unix socket rule, macOS TCP binding, proxy,
-  keychain, and so on), verbatim down to punctuation. Two copies of the sentences that tell every
-  model what the sandbox does will drift.
+- **Unexplained change — timeout.** v1 uses `AUTO_PERMISSION_REVIEW_TIMEOUT_MS = 90_000` and
+  documents it as "matching Codex" (`reviewAutoPermission.ts:11-15`). v2 defaults to 120,000
+  (`PermissionsModule.ts:95`) with no stated reason for moving off the Codex-aligned value.
+- **Prompt text was copied, not moved.** `impl/permissionModeGuidance.ts:77-91` restates the
+  sandbox-limits paragraph v1 still ships in its system prompt (unix socket rule, macOS TCP binding,
+  proxy, keychain, and so on) verbatim down to punctuation. Until v1's copy is retired, the two will
+  drift and models on the two paths will be told different things about the same sandbox.
 
 ## Findings
 
@@ -52,7 +51,8 @@ transcript at all.
    fail closed when required user evidence… is incomplete." The module's review request cannot carry
    a transcript, so a host implementing `PermissionReviewer` against this contract has no
    module-supplied path to that evidence, and the module has no way to fail closed when it is
-   missing. This is the most consequential divergence in the module.
+   missing. v1 supplied it; the rewrite dropped it. This is the most consequential regression in
+   the module.
 2. **A failed session kill after a permission reduction is only announced.**
    `PermissionsModule.ts:238-250`. When the mode is reduced, `killAllSessions` runs; if it throws,
    the module emits `permission_mode_cleanup_failed` and continues. Sessions started under the
@@ -89,8 +89,9 @@ transcript at all.
    (`PermissionsModule.ts:260-262`) or when a tail matches. An agent that never settles keeps its
    entry for the process lifetime. Bounded by live agent count, so minor, but there is no other
    eviction path.
-9. **Package placement contradicts the plans.** Master plans 16 and 21 place ready-made agent
-   capabilities in `@slopus/happy-agent-features`; no master plan mentions `happy-agent-modules`.
+9. **The master plans have not been updated for the rewrite.** Plans 16 and 21 still name
+   `@slopus/happy-agent-features` as the home for ready-made agent capabilities and never mention
+   `happy-agent-modules`.
 
 ## What it gets right
 

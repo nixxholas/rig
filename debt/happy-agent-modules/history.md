@@ -1,7 +1,7 @@
 # Module report: history
 
-Reviewed: 2026-08-15. Scope: `packages/happy-agent-modules/sources/history/` compared against Rig's
-own transcript stack (`packages/rig/sources/tools/read_agent_history.ts`,
+Reviewed: 2026-08-15. Scope: `packages/happy-agent-modules/sources/history/` as the v2 successor to
+Rig's v1 transcript stack (`packages/rig/sources/tools/read_agent_history.ts`,
 `packages/rig/sources/agent/impl/selectChatHistoryPage.ts`, `summarizeChatHistory.ts`,
 `messageMatchesChatHistoryFilters.ts`), root `AGENTS.md`, and master plans 00, 16, 20, 21.
 
@@ -10,25 +10,24 @@ own transcript stack (`packages/rig/sources/tools/read_agent_history.ts`,
 A durable, append-only agent transcript with one read tool (`read_agent_history`), written from
 inside the Agent Base transactions that commit the work being recorded. The design intent — history
 is not context, so an incompatible model switch loses context and keeps history — is stated clearly
-in `README.md:3-7` and is genuinely carried through the code. The implementation is sound but heavy:
+in `README.md:3-7` and is genuinely carried through the code. The rewrite is sound but heavy:
 roughly a third of `HistoryModule.ts` is the module checking its own SQL results, and a whole
 injected-store abstraction (`HistoryStore`, `selectHistoryPage`, `messageMatchesHistoryFilters`)
-survives as public API with no production consumer after the module moved to its own migrated table.
+survives as public API with no production consumer after the module moved to its own migrated table
+— an intermediate step of the rewrite that was never cleaned up.
 
-## How it differs from Rig's equivalents
+## Changes from the Rig v1 implementation
 
-- **Same tool, different home.** Rig already ships `read_agent_history`
-  (`packages/rig/sources/tools/read_agent_history.ts`) over its own `Message[]` transcript, with
-  `selectChatHistoryPage` / `summarizeChatHistory` / `messageMatchesChatHistoryFilters` as its
-  paging, stats, and filter helpers. The module reimplements each of those as
-  `selectHistoryPage.ts`, `summarizeHistory.ts`, `messageMatchesHistoryFilters.ts` over a
-  provider-neutral `HistoryMessage`. Two parallel transcripts and two parallel `read_agent_history`
-  tools now exist in one repository.
-- **Storage.** Rig's transcript lives in its session persistence; the module owns
+- **The transcript model changed, and for the better.** v1's `read_agent_history`
+  (`packages/rig/sources/tools/read_agent_history.ts`) reads a provider-shaped `Message[]` through
+  `selectChatHistoryPage` / `summarizeChatHistory` / `messageMatchesChatHistoryFilters`. v2 restates
+  the same capability over a provider-neutral `HistoryMessage`, which is what makes the
+  "history survives an incompatible model switch" guarantee expressible at all.
+- **Storage.** v1's transcript lived in session persistence; v2 owns
   `happy_agent_module_history` through an `AgentModuleMigration` (`HistoryModule.ts:156-183`) and
   keeps in-flight blocks in `scope.runKV`. Keeping pending blocks in run KV rather than a heap map
-  is the better of the two designs.
-- **Search.** Rig filters in memory. The module pushes filtering into SQL with a pre-folded
+  is a clear improvement over the v1 arrangement.
+- **Search.** v1 filters in memory. v2 pushes filtering into SQL with a pre-folded
   `search_text` column and `LIKE ... ESCAPE '!'` (`HistoryModule.ts:782-798`) — a real improvement,
   though there is no index on `search_text`, so every query is a full scan of the agent's rows.
 
@@ -91,8 +90,9 @@ survives as public API with no production consumer after the module moved to its
     `HistoryModule` has `messages` and `stats`. TypeBox's `Type.Function` check only confirms
     `typeof === "function"`, so this proves nothing the compiler has not already proved, at the cost
     of a cross-module runtime contract.
-13. **Package placement contradicts the plans.** Master plans 16 and 21 place ready-made agent
-    capabilities in `@slopus/happy-agent-features`; no master plan mentions `happy-agent-modules`.
+13. **The master plans have not been updated for the rewrite.** Plans 16 and 21 still name
+    `@slopus/happy-agent-features` as the home for ready-made agent capabilities and never mention
+    `happy-agent-modules`.
 
 ## What it gets right
 

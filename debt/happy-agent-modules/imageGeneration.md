@@ -1,7 +1,7 @@
 # Module report: imageGeneration
 
-Reviewed: 2026-08-15. Scope: `packages/happy-agent-modules/sources/imageGeneration/` compared
-against `packages/rig/sources/tools/imageGeneration/` (`createImageGenerationTool.ts`,
+Reviewed: 2026-08-15. Scope: `packages/happy-agent-modules/sources/imageGeneration/` as the v2
+successor to `packages/rig/sources/tools/imageGeneration/` (`createImageGenerationTool.ts`,
 `imageGenerationSurfaces.ts`), `packages/rig/sources/images/`,
 `packages/happy-providers/sources/vendors/codex/tools/imagegen.ts`, root `AGENTS.md`, and master
 plans 00, 05, 16, 20, 21.
@@ -16,34 +16,35 @@ thrown away. The tool half is weaker: the tool name is chosen by branching on th
 approval text interpolates the model's own prompt unescaped, referenced file paths cross the module
 with no boundary check at all, and the model never gets to see the image it generated.
 
-## How it differs from Rig's equivalents
+## Changes from the Rig v1 implementation
 
-- **Tool surface fidelity.** Rig keeps the two surfaces as data
+- **Regression — tool surface fidelity.** v1 keeps the two surfaces as data
   (`imageGenerationSurfaces.ts`): `imagegen` with a short description, and `codex_imagegen` carrying
   the full vendor guidance Codex models are trained on — the `image_gen` namespace explanation, the
   selector rules, the `view_image` hint, "always use this tool for image editing unless the user
-  explicitly requests otherwise", 17 lines in all. The module replaces both with two hand-written
-  sentences chosen by a ternary on the tool name (`tools/generate_image.ts:21-24`), discarding the
+  explicitly requests otherwise", 17 lines in all. v2 replaces both with two hand-written
+  sentences chosen by a ternary on the tool name (`tools/generate_image.ts:21-24`), dropping the
   vendor-shaped guidance that was the entire reason the Codex surface exists.
-- **Approval text.** Rig escapes the model-supplied prompt with `quoteVisibleExact`
-  (`createImageGenerationTool.ts:79`). The module interpolates it raw
-  (`tools/generate_image.ts:35`) — even though this same package vendors `quoteVisibleExact` for its
-  MCP module (`sources/mcp/quoteVisibleExact.ts`).
-- **Elevation.** Rig declares `shouldRunInFullAccessInAutoMode` that returns true only when a
-  referenced path is outside the boundary (`createImageGenerationTool.ts:86-91`). The module
-  declares none at all (`tools/generate_image.ts:28-29`), which is the correct reading of "review
-  alone must not imply elevation" — but it also means referenced paths are never checked against a
-  boundary by anyone (see finding 3).
-- **Output validation.** Rig decodes the base64, checks the PNG signature, and runs the bytes
-  through `sharp` with `failOn: "error"` and a pixel limit before writing
-  (`createImageGenerationTool.ts:239-270`). The module accepts whatever the generator returns,
+- **Regression — approval text.** v1 escapes the model-supplied prompt with `quoteVisibleExact`
+  (`createImageGenerationTool.ts:79`). v2 interpolates it raw
+  (`tools/generate_image.ts:35`) — even though this same package already vendors `quoteVisibleExact`
+  for its MCP module (`sources/mcp/quoteVisibleExact.ts`).
+- **Improvement, with a hole underneath it.** v1 declares a `shouldRunInFullAccessInAutoMode` that
+  returns true only when a referenced path is outside the boundary
+  (`createImageGenerationTool.ts:86-91`). v2 declares none at all
+  (`tools/generate_image.ts:28-29`), which is the correct reading of "review alone must not imply
+  elevation" — but the rewrite dropped the boundary check along with the elevation, so referenced
+  paths are now checked by nobody (see finding 3).
+- **Regression — output validation.** v1 decodes the base64, checks the PNG signature, and runs the
+  bytes through `sharp` with `failOn: "error"` and a pixel limit before writing
+  (`createImageGenerationTool.ts:239-270`). v2 accepts whatever the generator returns,
   validating only that `mediaType` matches `^image/[A-Za-z0-9.+-]+$` and the byte length is within
   bounds (`ImageGenerator.ts:33-45`, `ImageGenerationModule.ts:196-197`).
-- **What the model receives.** Rig's `toLLM` returns a text line *and* an image block
-  (`createImageGenerationTool.ts:172-183`). The module's returns text only
+- **Regression — what the model receives.** v1's `toLLM` returns a text line *and* an image block
+  (`createImageGenerationTool.ts:172-183`). v2's returns text only
   (`tools/generate_image.ts:56-61`).
-- **Concurrency.** Rig declares `locks: ["image_generation"]`
-  (`createImageGenerationTool.ts:185`). The module declares no lock, so concurrent generations race
+- **Open rewrite debt — concurrency.** v1 declares `locks: ["image_generation"]`
+  (`createImageGenerationTool.ts:185`). v2 declares no lock, so concurrent generations race
   freely.
 
 ## Findings
@@ -72,7 +73,7 @@ with no boundary check at all, and the model never gets to see the image it gene
 3. **Referenced image paths cross the module with no filesystem boundary check.** The tool accepts up
    to five `referenced_image_paths` (`ImageGeneration.ts:143-154`), the module copies them into the
    generator request (`ImageGenerationModule.ts:182-184`), and the host reads them. Nothing resolves
-   them, stats them, or compares them against the workspace. Rig resolves each path, rejects
+   them, stats them, or compares them against the workspace. v1 resolves each path, rejects
    non-files and oversized files, and enforces a 32 MiB aggregate
    (`createImageGenerationTool.ts:199-230`) *and* asks `shouldReviewPathInAutoMode` about each one.
    Here `/etc/…` or `~/.ssh/…` reaches an external image provider with only the generic
@@ -81,7 +82,7 @@ with no boundary check at all, and the model never gets to see the image it gene
    (`ImageGenerationModule.ts:330-374`) returns text, and `toLLM` wraps only that text
    (`tools/generate_image.ts:56-61`). The comment on line 330 states the intent — "without exposing
    image bytes" — but for an *editing* workflow the model has to be able to look at what it made to
-   decide whether to iterate. The `codex_imagegen` guidance Rig ships even tells the model the image
+   decide whether to iterate. The `codex_imagegen` guidance v1 ships even tells the model the image
    "is… returned to you."
 5. **The durable catalog is only reachable after `tools()` has run.** `#catalogs` is populated inside
    the `tools` hook (`ImageGenerationModule.ts:315`) and `#catalog` throws otherwise
@@ -120,8 +121,9 @@ with no boundary check at all, and the model never gets to see the image it gene
     stripping non-alphanumerics out of an arbitrary subtype, or `"bin"`. Since `mediaType` is
     generator-supplied and only pattern-checked, a hostile or buggy generator picks the extension of
     a file the module publishes to a shared user folder.
-12. **Package placement contradicts the plans.** Master plans 16 and 21 place ready-made agent
-    capabilities in `@slopus/happy-agent-features`; no master plan mentions `happy-agent-modules`.
+12. **The master plans have not been updated for the rewrite.** Plans 16 and 21 still name
+    `@slopus/happy-agent-features` as the home for ready-made agent capabilities and never mention
+    `happy-agent-modules`.
 
 ## What it gets right
 

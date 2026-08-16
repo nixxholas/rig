@@ -1,7 +1,7 @@
 # Module report: modelSwitch
 
-Reviewed: 2026-08-15. Scope: `packages/happy-agent-modules/sources/modelSwitch/` compared against
-`packages/rig/sources/agent/impl/createModelSwitchHistoryMessage.ts`, root `AGENTS.md`, and master
+Reviewed: 2026-08-15. Scope: `packages/happy-agent-modules/sources/modelSwitch/` as the v2 successor
+to `packages/rig/sources/agent/impl/createModelSwitchHistoryMessage.ts`, root `AGENTS.md`, and master
 plans 00, 04 (inference and compaction), 05, 16, 20, 21.
 
 ## Summary
@@ -12,28 +12,29 @@ of the new context saying what changed, that an invisible conversation came befo
 history is available — quote both ends of it and name the tool that can read the rest. No tools, no
 storage, one hook. The reasoning in `ModelSwitchModule.ts:60-76` is correct and worth keeping. What
 undermines it is that the module's README describes a different design from the one the code
-implements, and the notice text is a second copy of Rig's.
+implements, and that the rewrite lost some of v1's budget accounting and overview content.
 
-## How it differs from Rig's equivalents
+## Changes from the Rig v1 implementation
 
-- **Same message, two implementations.** `packages/rig/sources/agent/impl/createModelSwitchHistoryMessage.ts`
-  produces the same `<model-switch-history-context>` block with the same wording, the same
-  4-earliest / 8-latest split, the same 32,000-character budget, and the same 1,500-character
-  per-message limit. `impl/createModelSwitchNotice.ts` and `impl/createHistoryExcerpt.ts` are a
-  port of it onto `HistoryRecord`. `createModelSwitchNotice.ts:25` even says "The wording follows
-  Rig's own switch notice", which is an accurate description of a duplicate.
-- **Budget accounting.** Rig subtracts the prefix, headers, and closing tag from the 32,000-character
-  budget before splitting it (`createModelSwitchHistoryMessage.ts:38-47`). The module passes the
-  full `MAX_EXCERPT_CHARACTERS` to `createHistoryExcerpt` (`ModelSwitchModule.ts:159`) and then
+- **Same message, restated over the v2 history model.**
+  `packages/rig/sources/agent/impl/createModelSwitchHistoryMessage.ts` produces the same
+  `<model-switch-history-context>` block with the same wording, the same 4-earliest / 8-latest
+  split, the same 32,000-character budget, and the same 1,500-character per-message limit.
+  `impl/createModelSwitchNotice.ts` and `impl/createHistoryExcerpt.ts` restate it on `HistoryRecord`,
+  which is the right target for v2; `createModelSwitchNotice.ts:25` records the wording lineage
+  deliberately.
+- **Regression — budget accounting.** v1 subtracts the prefix, headers, and closing tag from the
+  32,000-character budget before splitting it (`createModelSwitchHistoryMessage.ts:38-47`). v2 passes
+  the full `MAX_EXCERPT_CHARACTERS` to `createHistoryExcerpt` (`ModelSwitchModule.ts:159`) and then
   prepends the prefix and headers afterwards (`createModelSwitchNotice.ts:33-50`), so the finished
   notice always exceeds its own stated bound by the length of the framing.
-- **What is dropped.** Rig's overview reports `subagentCount`
-  (`createModelSwitchHistoryMessage.ts:33`); the module's has no equivalent
+- **Open rewrite debt — subagent count.** v1's overview reports `subagentCount`
+  (`createModelSwitchHistoryMessage.ts:33`); v2 has no equivalent
   (`createModelSwitchNotice.ts:58`), so a model inheriting work that spawned subagents is not told
   they exist.
-- **What is gained.** The module distinguishes an exact archive aggregate from a bounded sample and
+- **Improvement.** v2 distinguishes an exact archive aggregate from a bounded sample and
   labels the difference in the prompt (`ModelSwitchModule.ts:144-160`,
-  `createModelSwitchNotice.ts:53-58`). Rig's version has no such distinction. This is the module's
+  `createModelSwitchNotice.ts:53-58`). v1 has no such distinction. This is the rewrite's
   best original idea.
 
 ## Findings
@@ -72,8 +73,9 @@ implements, and the notice text is a second copy of Rig's.
    `ModelSwitchModule.ts:83`, `94-97`. It is only used to look up a model's display label
    (`#label`, lines 167-173), and the fallback when no collection is present is already correct.
    Holding `AgentSystemRef` for a label lookup is more coupling than the feature needs.
-7. **Package placement contradicts the plans.** Master plans 16 and 21 place ready-made agent
-   capabilities in `@slopus/happy-agent-features`; no master plan mentions `happy-agent-modules`.
+7. **The master plans have not been updated for the rewrite.** Plans 16 and 21 still name
+   `@slopus/happy-agent-features` as the home for ready-made agent capabilities and never mention
+   `happy-agent-modules`.
 
 ## What it gets right
 

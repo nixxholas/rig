@@ -6,8 +6,8 @@ Reviewed: `packages/happy-agent-modules/sources/mcp/` — `README.md`, `Mcp.ts`,
 `mcpPageAssertions.ts`, `handleMcpElicitation.ts`, `normalizeMcpName.ts`, `humanizeMcpName.ts`,
 `quoteVisibleExact.ts`, `isMcpErrorResult.ts`, `mergeMcpTools.ts`, `fingerprintMcpServer.ts`,
 `createMcpTrustUserInputRequest.ts`, `createProjectMcpSecurityNotice.ts`, `index.ts`).
-Scope: read-only review; compared against `packages/rig/sources/mcp/` and the root `AGENTS.md`
-sections on MCP and on permissions.
+Scope: read-only review of the v2 successor to `packages/rig/sources/mcp/`, against that v1 baseline
+and the root `AGENTS.md` sections on MCP and on permissions.
 
 ## Summary
 
@@ -19,48 +19,47 @@ server with model-chosen arguments (`call_mcp_tool`, `get_mcp_prompt`, and each 
 explicitly rejected as trust input at `createMcpTool.ts:47-49`; and nothing in the module declares
 `shouldRunInFullAccessInAutoMode`, so review is never used as a back door to sandbox elevation. The
 Auto-permission description at `describeMcpAutoPermissionAction.ts:19` discloses the external
-boundary and escapes model-supplied text — it is better on that point than Rig's own
+boundary and escapes model-supplied text — it is better on that point than v1's own
 `get_mcp_prompt`.
 
-The problems are architectural rather than security-related. The module is a near-complete
-line-for-line fork of `packages/rig/sources/mcp/`: 13 of its files have names identical to files
-there. Four of the forked files (`mergeMcpTools`, `fingerprintMcpServer`,
-`createMcpTrustUserInputRequest`, `createProjectMcpSecurityNotice`) are never called by anything in
-the module, yet are documented in `README.md` as if they were part of its contract. On top of that
-sit a set of self-inflicted bounds and defensive constructs — a 128-character cap on resource URIs, a
-qualified tool name with no length bound, a write-only durable index table, a formatter that throws
-rather than degrade, and a `runtimeOptions`/`assertMcpHost` pair whose only purpose is to make a
-class instance pass a TypeBox check.
+The problems are two kinds of rewrite debt. Three protections v1 had did not survive the port
+(per-server locks, per-call timeouts, `toUI`), and four helpers were carried across but left
+unwired (`mergeMcpTools`, `fingerprintMcpServer`, `createMcpTrustUserInputRequest`,
+`createProjectMcpSecurityNotice`) while `README.md` describes them as part of the module's
+contract. On top of that sit a set of self-inflicted bounds and defensive constructs new to v2 — a
+128-character cap on resource URIs, a qualified tool name with no length bound, a write-only durable
+index table, a formatter that throws rather than degrade, and a `runtimeOptions`/`assertMcpHost`
+pair whose only purpose is to make a class instance pass a TypeBox check.
 
-## How it differs from Rig's equivalents
+## Changes from the Rig v1 implementation
 
-`packages/rig/sources/mcp/` contains `createMcpTool.ts`, `createMcpProtocolTools.ts`,
-`describeMcpAutoPermissionAction.ts`, `mcpResultToContentBlocks.ts`, `handleMcpElicitation.ts`,
-`humanizeMcpName.ts`, `normalizeMcpName.ts`, `isMcpErrorResult.ts`, `mergeMcpTools.ts`,
-`fingerprintMcpServer.ts`, `createMcpTrustUserInputRequest.ts`, `createProjectMcpSecurityNotice.ts`,
-and `mcpResultMaximumTextBytes.ts` — all of which exist again, under the same names, in this module.
-The stated justification (`Mcp.ts:4-8`) is real and defensible: the module deliberately avoids
-importing the MCP SDK and receives protocol values through an injected `McpHost`, leaving
-transports, credentials, configuration, and the trust store in Rig. That accounts for the *shape* of
-the split, not for the duplication of the pure helpers, which have no SDK dependency at all.
+The v2 boundary is the headline change and it is a good one. `Mcp.ts:4-8` states it: the module
+deliberately avoids importing the MCP SDK and receives protocol values through an injected
+`McpHost`, leaving transports, credentials, configuration, and the trust store on the Rig side.
+That makes the protocol surface testable and provider-neutral in a way v1's SDK-coupled
+`packages/rig/sources/mcp/` is not. The pure helpers (`normalizeMcpName`, `humanizeMcpName`,
+`isMcpErrorResult`, `mcpResultToContentBlocks`, and the rest) were carried over unchanged, which is
+the low-risk way to port them; the open question is when v1's copies get retired so the two cannot
+drift.
 
-Concrete behavioural regressions against Rig's version:
+Protections that did not survive the port:
 
-- Rig's `createMcpTool.ts` sets `locks: [\`mcp:${options.serverName}\`]`; the module's does not, so
-  concurrent calls to the same server are not serialized.
-- Rig's version sets a per-call `timeoutMs`; the module's has none, so a hung server hangs the turn.
-- Rig's version supplies `toUI`; the module's tool renders only `toLLM`.
+- v1's `createMcpTool.ts` sets `locks: [\`mcp:${options.serverName}\`]`; v2's does not, so
+  concurrent calls to the same server are no longer serialized.
+- v1 sets a per-call `timeoutMs`; v2 has none, so a hung server now hangs the turn.
+- v1 supplies `toUI`; v2's tool renders only `toLLM`, so the user-facing rendering is lost.
 
 ## Findings
 
-1. **Four forked files are dead within the module but documented as if live.**
+1. **Four ported files are unwired but documented as if live.**
    `mergeMcpTools.ts:16`, `fingerprintMcpServer.ts:15`, `createMcpTrustUserInputRequest.ts:11`, and
    `createProjectMcpSecurityNotice.ts:8` define functions that no other file in
    `sources/mcp/` calls; they are only re-exported from `sources/mcp/index.ts` (`:158-178`).
    `README.md:65-68` nonetheless describes `fingerprintMcpServer`,
    `createMcpTrustUserInputRequest`, and `createProjectMcpSecurityNotice` as part of the module's
-   behaviour. A reader auditing MCP trust wording will find it here and reasonably conclude this
-   copy is the one in force; it is not.
+   behaviour. Either the rewrite has not finished wiring the trust path yet, or these should not
+   have come across; as it stands, someone auditing MCP trust wording will find it here and
+   reasonably conclude this copy is the one in force.
 
 2. **`MAX_MCP_URI_LENGTH = 128` (`Mcp.ts:14`) is too small for real MCP resource URIs.** Resource
    URIs routinely carry paths, query strings, or encoded identifiers well past 128 characters. The
@@ -122,9 +121,9 @@ Concrete behavioural regressions against Rig's version:
    Note this interacts with finding 2: the 128-character URI cap is the only reason this path is
    currently hard to hit.
 
-10. **Package placement.** As with the other modules, master plans 16 and 21 place ready-made
-    capabilities in `@slopus/happy-agent-features` and never mention `happy-agent-modules`; that
-    contradiction should be resolved at the plan level rather than assumed away.
+10. **The master plans have not been updated for the rewrite.** Plans 16 and 21 still name
+    `@slopus/happy-agent-features` as the home for ready-made capabilities and never mention
+    `happy-agent-modules`.
 
 ## What it gets right
 
@@ -150,16 +149,16 @@ Concrete behavioural regressions against Rig's version:
   are intrinsically read-only protocol operations against an already-trusted, already-connected
   server, which `AGENTS.md` permits, and the module did not blanket-review everything to look safe.
 
-- **The Auto-permission description is better than Rig's.**
+- **The Auto-permission description improves on v1.**
   `describeMcpAutoPermissionAction.ts:19` names the server, discloses that the action leaves the
-  local boundary, and routes model-supplied text through `quoteVisibleExact` — where Rig's
-  `get_mcp_prompt` (`packages/rig/sources/mcp/createMcpProtocolTools.ts:256`) does not. This is the
-  one place where the fork is an improvement on its origin rather than a copy of it.
+  local boundary, and routes model-supplied text through `quoteVisibleExact` — where v1's
+  `get_mcp_prompt` (`packages/rig/sources/mcp/createMcpProtocolTools.ts:256`) does not.
 
 - **The SDK boundary is real and well-stated.** `Mcp.ts:4-8` explains why the package models the
   protocol as plain values behind an injected `McpHost` instead of importing the SDK, and the code
   honours it: the module never caches a client, never owns a transport, and never makes a trust
-  decision — `McpModule.ts:193-196` says so explicitly and the code matches.
+  decision — `McpModule.ts:193-196` says so explicitly and the code matches. This is the clearest
+  architectural gain of the rewrite.
 
 - **Page responses from the host are validated before use.** `mcpPageAssertions.ts` checks page
   identity, requested limit, duplicate records, and non-advancing cursors. Unlike the TypeBox checks
