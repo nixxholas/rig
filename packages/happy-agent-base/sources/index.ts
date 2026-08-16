@@ -64,6 +64,7 @@ export {
 export {
     agentDatabase,
     agentEffort,
+    agentHistoryKV,
     agentId,
     agentKV,
     agentModel,
@@ -73,6 +74,7 @@ export {
     agentServiceTier,
     withAgentContext,
     withAgentDatabase,
+    withAgentHistoryKV,
     withAgentKV,
     withAgentPermissionMode,
     withAgentRunKV,
@@ -93,6 +95,9 @@ export { inTx, type AgentTransactionWork } from "./inTx.js";
 export { AgentKV } from "./AgentKV.js";
 export {
     type AgentBaseAcceptedMessage,
+    type AgentBaseCompaction,
+    type AgentBaseCompactionStart,
+    type AgentBaseCompletedCompaction,
     type AgentBaseHooks,
     type AgentBaseInference,
     type AgentBaseInferenceStart,

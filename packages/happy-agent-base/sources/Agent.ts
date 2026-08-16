@@ -11,6 +11,7 @@ import {
 import {
     agentDatabase,
     agentEffort,
+    agentHistoryKV,
     agentKV,
     agentModel,
     agentPermissionMode,
@@ -18,6 +19,7 @@ import {
     agentRunKV,
     agentServiceTier,
     withAgentKV,
+    withAgentHistoryKV,
     withAgentRunKV,
 } from "./AgentContexts.js";
 import type { AgentBaseHooks, MaybePromise } from "./AgentBaseHooks.js";
@@ -382,6 +384,18 @@ function mergeModules<Tool extends AnyAgentTool, Database extends AgentDatabase>
                   },
               }),
         ...spread(
+            "beforeCompaction",
+            fanOut((module) => module.beforeCompaction),
+        ),
+        ...spread(
+            "historyErasedTransact",
+            chain((module) => module.historyErasedTransact),
+        ),
+        ...spread(
+            "afterCompaction",
+            fanOut((module) => module.afterCompaction),
+        ),
+        ...spread(
             "beforeToolCallTransact",
             chain((module) => module.beforeToolCallTransact),
         ),
@@ -552,22 +566,27 @@ function mergeModules<Tool extends AnyAgentTool, Database extends AgentDatabase>
 }
 
 /**
- * The context a module's hooks run on: the agent's context with both key-value stores narrowed
+ * The context a module's hooks run on: the agent's context with its key-value stores narrowed
  * to the module's own name, so modules never see each other's persisted entries — and neither
  * does a tool one of them runs.
  */
 function moduleCtx(ctx: Context, module: { readonly name: string }): Context {
     const kv = agentKV(ctx);
+    const historyKV = agentHistoryKV(ctx);
     const runKV = agentRunKV(ctx);
     const scoped = kv === undefined ? ctx : withAgentKV(ctx, kv.scoped("module", module.name));
+    const withHistory =
+        historyKV === undefined
+            ? scoped
+            : withAgentHistoryKV(scoped, historyKV.scoped("module", module.name));
     return runKV === undefined
-        ? scoped
-        : withAgentRunKV(scoped, runKV.scoped("module", module.name));
+        ? withHistory
+        : withAgentRunKV(withHistory, runKV.scoped("module", module.name));
 }
 
 /**
  * What a module's hook is handed alongside the context: the agent it is serving, and its own
- * scope of each of the three stores. The selection comes from the context the agent derived for
+ * scope of each store. The selection comes from the context the agent derived for
  * this call, so a hook always sees the model, effort, and tier the work is actually running on
  * rather than the ones the agent was built with.
  */
@@ -578,8 +597,14 @@ function moduleScope<Tool extends AnyAgentTool, Database extends AgentDatabase>(
     sharedKV: AgentKV,
 ): AgentModuleScope<Database> {
     const kv = agentKV(ctx);
+    const historyKV = agentHistoryKV(ctx);
     const runKV = agentRunKV(ctx);
-    if (kv === undefined || runKV === undefined || agentDatabase(ctx) === undefined) {
+    if (
+        kv === undefined ||
+        historyKV === undefined ||
+        runKV === undefined ||
+        agentDatabase(ctx) === undefined
+    ) {
         throw new Error(
             `The module "${module.name}" was called without its agent storage context.`,
         );
@@ -599,6 +624,7 @@ function moduleScope<Tool extends AnyAgentTool, Database extends AgentDatabase>(
         kv: kv.scoped("module", module.name),
         sharedKV: sharedKV.scoped(module.name),
         runKV: runKV.scoped("module", module.name),
+        historyKV: historyKV.scoped("module", module.name),
     };
 }
 

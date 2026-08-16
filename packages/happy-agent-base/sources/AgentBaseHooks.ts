@@ -1,4 +1,6 @@
 import type {
+    CompletedSessionCompaction,
+    SessionCompaction,
     SessionDoneState,
     SessionEvent,
     SessionOutputBlock,
@@ -128,6 +130,21 @@ export interface AgentBaseTurn extends AgentBaseTurnStart {
     readonly aborted: boolean;
 }
 
+/** Stable identity and pre-replacement state of one compaction attempt. */
+export interface AgentBaseCompactionStart extends AgentBaseTurnStart {
+    readonly compactionId: string;
+}
+
+/** A provider compaction outcome paired with the attempt that produced it. */
+export interface AgentBaseCompaction extends AgentBaseCompactionStart {
+    readonly result: SessionCompaction;
+}
+
+/** A completed outcome whose replacement history is being committed. */
+export interface AgentBaseCompletedCompaction extends AgentBaseCompactionStart {
+    readonly result: CompletedSessionCompaction;
+}
+
 /** Stable identity of the transaction that settles one loop. */
 export interface AgentBaseSettlement extends AgentBaseLoop {
     readonly settlementId: string;
@@ -228,6 +245,28 @@ export interface AgentBaseHooks {
      * recreated so the model sees the current tools.
      */
     readonly tools?: (ctx: Context) => MaybePromise<readonly AnyAgentTool[]>;
+    /** Called immediately before the provider is asked to compact the current history. */
+    readonly beforeCompaction?: (
+        ctx: Context,
+        compaction: AgentBaseCompactionStart,
+    ) => MaybePromise<void>;
+    /**
+     * Runs inside a successful compaction's replacement transaction, after superseded history and
+     * history KV have been cleared and before the replacement record is appended. A failure rolls
+     * the entire replacement back.
+     */
+    readonly historyErasedTransact?: (
+        ctx: Context,
+        compaction: AgentBaseCompletedCompaction,
+    ) => MaybePromise<void>;
+    /**
+     * Observes the provider outcome. Completed outcomes arrive only after replacement history has
+     * committed; failed and cancelled outcomes arrive after the provider returns them.
+     */
+    readonly afterCompaction?: (
+        ctx: Context,
+        compaction: AgentBaseCompaction,
+    ) => MaybePromise<void>;
     /**
      * Runs inside the transaction that makes a dispatched batch durable, once per call in it,
      * before anything runs. That transaction is what records that these calls are owed results, so
@@ -353,10 +392,10 @@ export interface AgentBaseHooks {
     /** Runs inside the transaction committing the inference stage for the turn being opened. */
     readonly beforeTurnTransact?: (ctx: Context, turn: AgentBaseTurnStart) => MaybePromise<void>;
     /**
-     * Called at the start of each turn, before its queues drain, with the conversation's
-     * measured size. Returned actions are applied before the turn runs, so a `compact` action
-     * here compacts the conversation the turn is about to send — never a context left
-     * mid-tool-call by the previous turn.
+     * Called at the start of each turn, before its queues drain, with the conversation's measured
+     * size. Returned actions are applied before the turn runs. An `inject` action is durably
+     * queued until pending tools and compaction settle, then its system notice joins history
+     * immediately before inference.
      */
     readonly beforeTurn?: (
         ctx: Context,
@@ -390,7 +429,8 @@ export interface AgentBaseHooks {
     /**
      * Called when a turn ends, with the conversation's measured size and whether the turn was
      * cancelled. Returned actions are all applied together before the loop continues; any of
-     * them drives the loop into another turn.
+     * them drives the loop into another turn. An injected notice is appended after any
+     * compaction requested by the same action batch.
      */
     readonly afterTurn?: (
         ctx: Context,

@@ -13,7 +13,6 @@ import {
     agentDatabase,
     agentDatabaseRows,
     agentDatabaseRun,
-    isAgentSQLiteDatabase,
     withAgentDatabase,
     type AgentDatabase,
     type AgentModule,
@@ -246,41 +245,11 @@ describe("AgentStorage Drizzle persistence", () => {
         close();
     });
 
-    it("serializes concurrent transactions sharing one root database", async () => {
-        const { close, database } = inMemoryDrizzle();
-        const rootCtx = withAgentDatabase(ctx, database);
-        let releaseFirst!: () => void;
-        const firstGate = new Promise<void>((resolve) => {
-            releaseFirst = resolve;
-        });
-        let firstEntered!: () => void;
-        const entered = new Promise<void>((resolve) => {
-            firstEntered = resolve;
-        });
-        let firstActive = false;
-
-        const first = rootCtx.inTx(async () => {
-            firstActive = true;
-            firstEntered();
-            await firstGate;
-            firstActive = false;
-        });
-        await entered;
-
-        const second = rootCtx.inTx(async () => {
-            expect(firstActive).toBe(false);
-        });
-        releaseFirst();
-        await Promise.all([first, second]);
-        close();
-    });
-
-    it("does not serialize concurrent non-SQLite transactions", async () => {
+    it("leaves independent transaction scheduling to the database driver", async () => {
         type TransactionWork = (transaction: AgentDatabase) => Promise<unknown>;
         const database = {
             transaction: async (work: TransactionWork) => await work(database as AgentDatabase),
         } as unknown as AgentDatabase;
-        expect(isAgentSQLiteDatabase(database)).toBe(false);
         const rootCtx = withAgentDatabase(ctx, database);
         let releaseFirst!: () => void;
         const firstGate = new Promise<void>((resolve) => {
@@ -294,7 +263,6 @@ describe("AgentStorage Drizzle persistence", () => {
         const overlapping = new Promise<void>((resolve) => {
             secondEntered = resolve;
         });
-
         const first = rootCtx.inTx(async () => {
             firstEntered();
             await firstGate;

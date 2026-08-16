@@ -33,6 +33,7 @@ import {
     agentStorageTransaction,
     withAgentContext,
     withAgentDatabase,
+    withAgentHistoryKV,
     withAgentKV,
     withAgentPermissionMode,
     withAgentRunKV,
@@ -49,6 +50,8 @@ import {
 } from "./AgentBasePending.js";
 import type {
     AgentBaseAcceptedMessage,
+    AgentBaseCompactionStart,
+    AgentBaseCompletedCompaction,
     AgentBaseHooks,
     AgentBaseInferenceStart,
     AgentBaseLoop,
@@ -167,6 +170,12 @@ interface QueueEntry {
     readonly metadata?: AgentMessageMetadata;
     /** The settings this message makes effective when it is consumed. */
     readonly options: AgentBaseMessageOptions;
+}
+
+/** One hook-provided system notice waiting for a safe append boundary. */
+interface InjectionEntry {
+    readonly key: string;
+    readonly message: SessionSystemMessage;
 }
 
 /** One call in a dispatched batch. */
@@ -450,6 +459,10 @@ export class AgentBase {
 
     /** The session-scoped key-value store carried on every context the agent derives. */
     readonly #kv: AgentKV;
+    /** Durable state tied to the current history and invalidated when that history is replaced. */
+    #historyKV: AgentKV;
+    /** Ends handles from the previous history epoch after its replacement commits. */
+    #historyKVLifetime = new AbortController();
     /**
      * The store belonging to the run rather than to the conversation, erased in the transaction
      * that settles the agent. What a run concludes about itself is worth nothing to the next one,
@@ -472,6 +485,10 @@ export class AgentBase {
     #steering: QueueEntry[] = [];
     /** The durable send queue, in the order its keys sort. */
     #sends: QueueEntry[] = [];
+    /** Hook notices waiting to join history after tool settlement and compaction. */
+    #injections: InjectionEntry[] = [];
+    /** A consumed notice that still needs one provider response. */
+    #noticeAwaitingResponse = false;
     /** A dispatched tool batch whose results have not all landed yet, and so has to be resumed. */
     #pendingTools: ToolBatchEntry[] = [];
     /**
@@ -679,6 +696,7 @@ export class AgentBase {
         this.#serviceTier = options.serviceTier;
         this.#permissionMode = options.permissionMode ?? DEFAULT_AGENT_PERMISSION_MODE;
         this.#kv = new AgentKV(this.#persistence, `kv.${options.id}.`);
+        this.#historyKV = this.#newHistoryKV();
         this.#runKV = this.#kv.scoped("run");
         // Everything the agent does — hooks and tool executions included — runs on a context
         // carrying its provider and the currently effective model, effort, and service tier.
@@ -701,9 +719,25 @@ export class AgentBase {
         const selected = withAgentContext(ctx, this.#selection());
         const database = agentDatabase(ctx) ?? this.#persistence.database;
         return withAgentRunKV(
-            withAgentKV(withAgentDatabase(selected, database), this.#kv),
+            withAgentHistoryKV(
+                withAgentKV(withAgentDatabase(selected, database), this.#kv),
+                this.#historyKV,
+            ),
             this.#runKV,
         );
+    }
+
+    /** Create the handle for one history epoch under the stable history storage prefix. */
+    #newHistoryKV(): AgentKV {
+        return this.#kv.scoped("history").until(this.#historyKVLifetime.signal);
+    }
+
+    /** Expire every retained old handle and install a fresh handle for replacement history. */
+    #rotateHistoryKV(): void {
+        this.#historyKVLifetime.abort();
+        this.#historyKVLifetime = new AbortController();
+        this.#historyKV = this.#newHistoryKV();
+        this.#ctx = this.#deriveCtx();
     }
 
     /** Load a directly owned configuration written by `updateMetadata`, when one exists. */
@@ -1107,6 +1141,28 @@ export class AgentBase {
         }
     }
 
+    /** Durably queue hook notices until history reaches a safe append boundary. */
+    async #enqueueInjections(ctx: Context, batch: readonly SessionSystemMessage[]): Promise<void> {
+        if (batch.length === 0) return;
+        if (this.#closed) throw new Error("The agent has been closed.");
+        await this.#runInPersistenceLock(ctx, async (lockCtx) => {
+            const accepted: InjectionEntry[] = [];
+            await this.#recordTransaction(lockCtx, async (txCtx) => {
+                for (const message of batch) {
+                    const key = await this.#queueKey(txCtx, "inject.");
+                    await this.#persistence.writeValue(txCtx, key, message);
+                    accepted.push({ key, message });
+                }
+                if (accepted.length > 0) await this.#recordPending(txCtx, "inference");
+            });
+            this.#injections.push(...accepted);
+            if (accepted.length > 0) {
+                this.#turnRequested = true;
+                this.#startRun();
+            }
+        });
+    }
+
     /**
      * Start the loop without a new message: load the durable state and, if a turn was cut off —
      * queued messages, a dispatched tool batch without results, or an unanswered user or tool
@@ -1303,7 +1359,9 @@ export class AgentBase {
     #signalAbort(): Promise<void> | undefined {
         const run = this.#runPromise;
         if (run === undefined) return undefined;
-        this.#turnRequested = false;
+        // An abort drops ordinary requested continuation, but a notice already appended to
+        // history remains owed one provider request and must reopen under a fresh abort scope.
+        this.#turnRequested = this.#hasNoticeWorkToFinish();
         this.#abortController?.abort();
         return run;
     }
@@ -1520,7 +1578,9 @@ export class AgentBase {
                     throw error;
                 }
                 await this.#applyActions(this.#hooks.afterTurn, abort.signal, turn);
-                if (!this.#turnRequested || this.#closed) break;
+                if (!this.#turnRequested || (this.#closed && !this.#hasNoticeWorkToFinish())) {
+                    break;
+                }
                 // Each turn cancels on its own scope. Reopening it here rather than at the top
                 // keeps the run's first turn under the scope its opening hook already ran in.
                 abort = this.#openAbortScope();
@@ -1532,7 +1592,7 @@ export class AgentBase {
                     : (hookCtx) => this.#hooks.afterAgentLoopTransact?.(hookCtx, loop),
             );
             await this.#applyActions(this.#hooks.afterAgentLoop, abort.signal, loop);
-        } while (this.#turnRequested && !this.#closed);
+        } while (this.#turnRequested && (!this.#closed || this.#hasNoticeWorkToFinish()));
         // Nothing is asked for any more, so the outstanding work is erased. That erasure is what
         // makes the agent idle, and it commits together with whatever the settling hooks write,
         // so no owner can ever see the agent finished without their conclusions or their
@@ -1671,7 +1731,7 @@ export class AgentBase {
         const lifetime = new AbortController();
         try {
             const liveCtx = withLifetime(txCtx, lifetime.signal);
-            const hookCtx = withAgentKV(liveCtx, this.#kv);
+            const hookCtx = withAgentHistoryKV(withAgentKV(liveCtx, this.#kv), this.#historyKV);
             return await work(withAgentRunKV(hookCtx, this.#runKV));
         } finally {
             lifetime.abort();
@@ -1707,9 +1767,9 @@ export class AgentBase {
     }
 
     /**
-     * Ask a lifecycle hook what to do next and carry its actions out: queue steering or sent
-     * messages through the ordinary durable path, or trigger a compaction. Every returned
-     * action is applied before the loop continues, so they all take effect at the same point.
+     * Ask a lifecycle hook what to do next and carry its actions out: queue steering, sent
+     * messages, or system notices through their durable paths, or trigger compaction. Every
+     * returned action is applied before the loop continues.
      * Neither a throwing hook nor a failing action ever fails the run. Unlike `#applyActions`
      * this belongs to no turn's scope, so nothing can cancel the answer out from under it.
      */
@@ -1733,16 +1793,18 @@ export class AgentBase {
     }
 
     /**
-     * Carry out what a hook asked for. The messages came from one decision, so they are accepted
-     * as one batch: a caller arriving while they are being written lands after all of them
-     * rather than between two halves of the same thought.
+     * Carry out what a hook asked for. User messages keep their ordinary queues; system notices
+     * enter a separate durable queue consumed only at a safe history boundary.
      */
     async #carryOutActions(actions: readonly AgentModuleAction[] | undefined): Promise<void> {
         const batch: QueueRequest[] = [];
+        const injections: SessionSystemMessage[] = [];
         const flush = async (): Promise<void> => {
             const pending = batch.splice(0, batch.length);
+            const pendingInjections = injections.splice(0, injections.length);
             try {
                 await this.#enqueue(this.#ctx, pending);
+                await this.#enqueueInjections(this.#ctx, pendingInjections);
             } catch {
                 // A hook-driven action must not fail the run.
             }
@@ -1751,6 +1813,10 @@ export class AgentBase {
             if (action.type === "compact") {
                 await flush();
                 this.#ensureCompaction().catch(() => undefined);
+                continue;
+            }
+            if (action.type === "inject") {
+                injections.push(structuredClone(action.message));
                 continue;
             }
             const id = action.id ?? createId();
@@ -1803,6 +1869,7 @@ export class AgentBase {
                     return;
                 }
             }
+            let needsInference = resumed.length > 0;
             // A requested compaction runs before this turn's first inference, so the model
             // always receives a settled conversation — never one still owing tool results.
             await this.#runCompaction(abort.signal);
@@ -1810,7 +1877,6 @@ export class AgentBase {
             // end the context, or — checked once, against the freshly loaded durable state —
             // when a cut-off run left its trailing user or tool message unanswered. Afterwards
             // a trailing user message can be legitimate: a response may have zero blocks.
-            let needsInference = resumed.length > 0;
             if (!this.#recoveryChecked) {
                 this.#recoveryChecked = true;
                 if (await this.#resumesInterruptedRun()) needsInference = true;
@@ -1831,7 +1897,11 @@ export class AgentBase {
                 // would contradict it for the same response.
                 if (abort.signal.aborted) {
                     const hasPendingWork =
-                        needsInference || this.#steering.length > 0 || this.#sends.length > 0;
+                        needsInference ||
+                        this.#steering.length > 0 ||
+                        this.#sends.length > 0 ||
+                        this.#injections.length > 0 ||
+                        this.#noticeAwaitingResponse;
                     if (hasPendingWork) await this.#emit({ type: "done", state: "cancelled" });
                     break;
                 }
@@ -1843,8 +1913,11 @@ export class AgentBase {
                 if (!injected && !needsInference) {
                     injected = await this.#consumeQueue(this.#sends, this.#sendMode, "send");
                 }
+                // Notices follow queue consumption so a model-switching message can replace
+                // history first. Tool settlement and compaction already finished above.
+                await this.#consumeInjections();
                 // Nothing to answer — a start() on an idle history, or the queues ran dry.
-                if (!injected && !needsInference) break;
+                if (!this.#noticeAwaitingResponse && !injected && !needsInference) break;
                 const instructions = await this.#instructions();
                 const tools = await this.#tools();
                 const session = await this.#ensureSession(instructions, tools);
@@ -1883,6 +1956,18 @@ export class AgentBase {
                     stream,
                     abortPromise,
                 );
+                // A cancellation or a stream ending without a done event did not answer an
+                // appended notice. Keep that obligation and reopen it under a fresh turn scope.
+                // Every terminal provider outcome counts as the response, including an error.
+                if (
+                    this.#noticeAwaitingResponse &&
+                    (state === "cancelled" || state === undefined)
+                ) {
+                    this.#turnRequested = true;
+                } else {
+                    this.#noticeAwaitingResponse = false;
+                    this.#clearTurnRequestIfNoPendingInput();
+                }
                 // A cancelled or failed response measures nothing, so the conversation keeps
                 // the last real measurement instead of forgetting how large it had become.
                 const inference = {
@@ -1978,6 +2063,8 @@ export class AgentBase {
             ) {
                 await this.#appendFailure(error instanceof Error ? error.message : String(error));
             }
+            this.#noticeAwaitingResponse = false;
+            this.#clearTurnRequestIfNoPendingInput();
         }
         this.#turnAborted = abort.signal.aborted;
     }
@@ -2064,6 +2151,15 @@ export class AgentBase {
             const session = await this.#ensureSession(instructions, await this.#tools());
             const snapshot = [...this.#messages];
             await this.#settled();
+            const compactionStart: AgentBaseCompactionStart = {
+                loopId: this.#loopId ?? createId(),
+                turnId: this.#turnId ?? createId(),
+                compactionId: createId(),
+                contextTokens: this.#contextTokens,
+            };
+            this.#loopId = compactionStart.loopId;
+            this.#turnId = compactionStart.turnId;
+            await this.#invokeHook(this.#hooks.beforeCompaction, compactionStart);
             // Provider compaction is this turn's work, so it runs on this turn's lifetime: an
             // abort reaches the provider operation itself rather than waiting for it to finish
             // work nobody wants any more.
@@ -2072,23 +2168,35 @@ export class AgentBase {
                 ...(this.#model === undefined ? {} : { model: this.#model }),
             });
             if (result.status === "failed") {
+                await this.#invokeHook(this.#hooks.afterCompaction, {
+                    ...compactionStart,
+                    result,
+                });
                 throw new Error(result.message);
             }
             if (result.status === "completed") {
+                const completed: AgentBaseCompletedCompaction = { ...compactionStart, result };
                 await this.#runInPersistenceLock(this.#ctx, async (lockCtx) => {
                     // Physically delete the superseded records and write the replacement —
                     // which keeps the messages that stay — in one atomic step.
                     await this.#recordTransaction(lockCtx, async (txCtx) => {
-                        await this.#deleteMessageIdentities(
+                        await this.#deleteRecordIdentities(
                             txCtx,
                             await this.#persistence.load(txCtx),
                         );
+                        await this.#historyKV.clear(txCtx);
                         await this.#persistence.clearRecords(txCtx);
+                        if (this.#hooks.historyErasedTransact !== undefined) {
+                            await this.#withTransactionalContext(txCtx, (hookCtx) =>
+                                this.#hooks.historyErasedTransact?.(hookCtx, completed),
+                            );
+                        }
                         await this.#persistence.append(txCtx, {
                             type: "compaction",
                             messages: result.context.messages,
                         });
                     });
+                    this.#rotateHistoryKV();
                     this.#messages = [...result.context.messages];
                     this.#lastRecordType = "compaction";
                 });
@@ -2096,6 +2204,10 @@ export class AgentBase {
                 // again until the next response measures the replacement.
                 await this.#recordContextTokens(undefined);
             }
+            await this.#invokeHook(this.#hooks.afterCompaction, {
+                ...compactionStart,
+                result,
+            });
             this.#compaction = undefined;
             pending.resolve();
         } catch (error: unknown) {
@@ -2194,7 +2306,7 @@ export class AgentBase {
     }
 
     /** Remove deduplication identities for user records a history replacement is deleting. */
-    async #deleteMessageIdentities(ctx: Context, records: readonly AgentRecord[]): Promise<void> {
+    async #deleteRecordIdentities(ctx: Context, records: readonly AgentRecord[]): Promise<void> {
         for (const record of records) {
             if (record.type === "user") {
                 await this.#persistence.deleteValue(ctx, `message.${record.id}`);
@@ -2253,6 +2365,56 @@ export class AgentBase {
         } catch {
             // The turn already failed; a failing write must not escalate it.
         }
+    }
+
+    /** Move every pending hook notice into history as one atomic, ordered append batch. */
+    async #consumeInjections(): Promise<boolean> {
+        return await this.#runInPersistenceLock(this.#ctx, async (lockCtx) => {
+            if (this.#injections.length === 0) return false;
+            const durable = new Set(
+                (await this.#persistence.readValues(lockCtx, "inject.")).map(({ key }) => key),
+            );
+            const remaining = this.#injections.filter((entry) => durable.has(entry.key));
+            if (remaining.length !== this.#injections.length) {
+                this.#injections.splice(0, this.#injections.length, ...remaining);
+            }
+            if (this.#injections.length === 0) return false;
+            const batch = [...this.#injections];
+            await this.#recordTransaction(lockCtx, async (txCtx) => {
+                for (const entry of batch) {
+                    await this.#persistence.deleteValue(txCtx, entry.key);
+                    await this.#appendRecord(txCtx, {
+                        type: "system",
+                        message: entry.message,
+                    });
+                }
+                await this.#recordPending(txCtx, "inference");
+            });
+            this.#injections.splice(0, batch.length);
+            this.#messages.push(...batch.map(({ message }) => message));
+            this.#lastRecordType = "system";
+            this.#noticeAwaitingResponse = true;
+            this.#turnRequested = true;
+            return true;
+        });
+    }
+
+    /** Drop a redundant requested turn only when no accepted input still needs one. */
+    #clearTurnRequestIfNoPendingInput(): void {
+        if (
+            this.#steering.length === 0 &&
+            this.#sends.length === 0 &&
+            this.#injections.length === 0 &&
+            !this.#noticeAwaitingResponse &&
+            this.#compaction === undefined
+        ) {
+            this.#turnRequested = false;
+        }
+    }
+
+    /** Accepted notice work is drained even when close has already raised its admission barrier. */
+    #hasNoticeWorkToFinish(): boolean {
+        return this.#injections.length > 0 || this.#noticeAwaitingResponse;
     }
 
     /**
@@ -2379,7 +2541,10 @@ export class AgentBase {
                             committed.signal,
                         );
                         const changeCtx = withAgentRunKV(
-                            withAgentKV(changeLifetime, this.#kv),
+                            withAgentHistoryKV(
+                                withAgentKV(changeLifetime, this.#kv),
+                                this.#historyKV,
+                            ),
                             this.#runKV,
                         );
                         try {
@@ -2415,7 +2580,8 @@ export class AgentBase {
                     await this.#persistence.deleteValue(txCtx, entry.key);
                 }
                 if (reset) {
-                    await this.#deleteMessageIdentities(txCtx, await this.#persistence.load(txCtx));
+                    await this.#deleteRecordIdentities(txCtx, await this.#persistence.load(txCtx));
+                    await this.#historyKV.clear(txCtx);
                     await this.#persistence.clearRecords(txCtx);
                     // The erased conversation is what the measurement described.
                     await this.#persistence.deleteValue(txCtx, "context");
@@ -2473,6 +2639,7 @@ export class AgentBase {
                     );
                 }
             });
+            if (reset) this.#rotateHistoryKV();
             // Committed: from here the messages are part of the conversation, so what has to be
             // announced about them is decided now and reported once the lock is released.
             permissionChange = modeChange;
@@ -2493,13 +2660,7 @@ export class AgentBase {
             // This turn is answering the request that these messages raised. A send accepted
             // while the turn was already running raised it again, and letting that stand would
             // buy an extra turn with an empty queue and a full set of lifecycle hooks.
-            if (
-                this.#steering.length === 0 &&
-                this.#sends.length === 0 &&
-                this.#compaction === undefined
-            ) {
-                this.#turnRequested = false;
-            }
+            this.#clearTurnRequestIfNoPendingInput();
             if (changed) {
                 this.#providerId = provider;
                 this.#model = model;
@@ -2557,6 +2718,7 @@ export class AgentBase {
             let restored = messagesFromRecords(records);
             const steering = await this.#persistence.readValues(lockCtx, "steering.");
             const sends = await this.#persistence.readValues(lockCtx, "send.");
+            const injections = await this.#persistence.readValues(lockCtx, "inject.");
             const pendingTools = await this.#persistence.readValues(lockCtx, "tool.");
             const settings = await this.#persistence.readValues(lockCtx, "settings");
             const context = await this.#persistence.readValues(lockCtx, "context");
@@ -2586,6 +2748,10 @@ export class AgentBase {
             };
             this.#steering = steering.map(({ key, value }) => entry(key, value));
             this.#sends = sends.map(({ key, value }) => entry(key, value));
+            this.#injections = injections.map(({ key, value }) => ({
+                key,
+                message: structuredClone(value as SessionSystemMessage),
+            }));
             // The persisted settings are the complete effective triple from the last change; an
             // absent field means that setting was effectively unset when it was written.
             const persisted = settings[0]?.value as AgentBaseMessageOptions | undefined;
@@ -2955,7 +3121,7 @@ export class AgentBase {
         if (tool.parameters !== undefined && !Value.Check(tool.parameters, args)) {
             return failure(`The arguments for "${call.name}" did not match its schema.`);
         }
-        const callKV = this.#kv.scoped("call", entry.id).serialized();
+        const callKV = this.#kv.scoped("call", entry.id);
         const callLifetime = new AbortController();
         let committing = false;
         const boundedCallKV = callKV.until(callLifetime.signal, () => !committing);

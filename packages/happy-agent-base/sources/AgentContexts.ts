@@ -30,6 +30,8 @@ const permissionModeNamespace = createContextNamespace<AgentPermissionMode>(
 const kvNamespace = createContextNamespace<AgentKV | undefined>("agentKV", undefined);
 /** Backing storage for `agentRunKV`: the run's own store, erased when the agent settles. */
 const runKVNamespace = createContextNamespace<AgentKV | undefined>("agentRunKV", undefined);
+/** Backing storage for `agentHistoryKV`: state belonging to the current history epoch. */
+const historyKVNamespace = createContextNamespace<AgentKV | undefined>("agentHistoryKV", undefined);
 /** Storage-owned identity and lifetime of an active transaction facade. */
 export interface AgentStorageTransactionContext {
     readonly database: AgentDatabase;
@@ -183,6 +185,19 @@ export function withAgentRunKV(ctx: Context, kv: AgentKV): Context {
 /** The run's own store carried on this context, when the agent attached one. */
 export function agentRunKV(ctx: Context): AgentKV | undefined {
     return runKVNamespace.get(ctx);
+}
+
+/**
+ * Carry the store belonging to the current conversation history. Agent Base clears it and
+ * invalidates its old handle when compaction or an incompatible model change replaces history.
+ */
+export function withAgentHistoryKV(ctx: Context, kv: AgentKV): Context {
+    return historyKVNamespace.set(ctx, kv);
+}
+
+/** State scoped to the current conversation history, when the agent attached that store. */
+export function agentHistoryKV(ctx: Context): AgentKV | undefined {
+    return historyKVNamespace.get(ctx);
 }
 
 /** Carry the active Drizzle database or transaction facade on a derived context. */

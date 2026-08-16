@@ -1,4 +1,4 @@
-import type { SessionEvent } from "@slopus/happy-providers";
+import type { SessionEvent, SessionMessage } from "@slopus/happy-providers";
 import { Type } from "@sinclair/typebox";
 import { createRootContext } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
@@ -20,7 +20,7 @@ import {
     user,
 } from "./gym/fixtures.js";
 import { InMemoryPersistence } from "./gym/InMemoryPersistence.js";
-import { ScriptedProvider } from "./gym/ScriptedProvider.js";
+import { ScriptedProvider, ScriptedSession } from "./gym/ScriptedProvider.js";
 
 const ctx = withAgentDatabase(createRootContext().named("happy-agent-test"), testAgentDatabase());
 
@@ -697,6 +697,105 @@ describe("Agent", () => {
         expect(acrossRuns).toEqual([undefined, undefined]);
         // Nothing the runs wrote about themselves outlives them.
         expect([...persistence.values.keys()].filter((key) => key.includes(".run."))).toEqual([]);
+        await agent.close();
+    });
+
+    it("scopes the history-lifetime store independently for each module", async () => {
+        const provider = new ScriptedProvider([textTurn("answer")]);
+        const persistence = new InMemoryPersistence();
+        const observed: unknown[] = [];
+        const first = module({
+            name: "first",
+            beforeTurn: async (hookCtx, scope) => {
+                observed.push(await scope.historyKV.read(hookCtx, "marker"));
+                await scope.historyKV.write(hookCtx, "marker", "first");
+                return undefined;
+            },
+        });
+        const second = module({
+            name: "second",
+            beforeTurn: async (hookCtx, scope) => {
+                observed.push(await scope.historyKV.read(hookCtx, "marker"));
+                await scope.historyKV.write(hookCtx, "marker", "second");
+                return undefined;
+            },
+        });
+        const agent = await Agent.create(ctx, {
+            id: "compaction-store-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+            sharedKV: sharedKV(),
+            modules: [first, second],
+        });
+
+        await agent.send(ctx, user("go"), { await: true });
+        await agent.waitForIdle();
+
+        expect(observed).toEqual([undefined, undefined]);
+        expect(
+            [...persistence.values.entries()].filter(([key]) => key.includes(".history.")),
+        ).toEqual([
+            ["kv.compaction-store-agent.history.module.first.marker", "first"],
+            ["kv.compaction-store-agent.history.module.second.marker", "second"],
+        ]);
+        await agent.close();
+    });
+
+    it("merges compaction lifecycle hooks across modules in order", async () => {
+        const replacement: SessionMessage = {
+            role: "compaction",
+            content: "summary",
+            encryptedContent: null,
+        };
+        const provider = new ScriptedProvider([]);
+        const session = provider.session.bind(provider);
+        provider.session = async (id, options) => {
+            const created = await session(id, options);
+            (created as ScriptedSession).compactionResults = [
+                {
+                    status: "completed",
+                    preservedMessages: [],
+                    usage: {
+                        input: 10,
+                        output: 5,
+                        cacheRead: 0,
+                        cacheWrite: 0,
+                        totalTokens: 15,
+                    },
+                    context: { instructions: "", messages: [replacement] },
+                },
+            ];
+            return created;
+        };
+        const order: string[] = [];
+        const lifecycle = (name: string) =>
+            module({
+                name,
+                beforeCompaction: () => void order.push(`${name}:before`),
+                historyErasedTransact: () => void order.push(`${name}:erased`),
+                afterCompaction: () => void order.push(`${name}:after`),
+            });
+        const agent = await Agent.create(ctx, {
+            id: "compaction-hooks-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence: new InMemoryPersistence(),
+            sharedKV: sharedKV(),
+            modules: [lifecycle("first"), lifecycle("second")],
+        });
+
+        await agent.compact(ctx, { await: true });
+        await agent.waitForIdle();
+
+        expect(order).toEqual([
+            "first:before",
+            "second:before",
+            "first:erased",
+            "second:erased",
+            "first:after",
+            "second:after",
+        ]);
         await agent.close();
     });
 });

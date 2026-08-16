@@ -97,6 +97,17 @@ the default parent, while creation options may override the parent or explicitly
 tool's call-bound KV, it supplies retry-stable operation identities without heap state or provider
 call IDs.
 
+Agent hooks also receive `agentHistoryKV(ctx)`, exposed to modules as `scope.historyKV`. It is
+durable across turns and restarts but belongs only to the current conversation history: successful
+compaction and incompatible model resets clear it atomically with the replaced history and expire
+retained old handles. Lifecycle action hooks may return `{ type: "inject", message }` to queue a
+system notice. Notices are durable and append only after pending tool results and compaction have
+settled, immediately before the inference that should see them.
+Compaction exposes `beforeCompaction`, transactional `historyErasedTransact`, and
+`afterCompaction` hooks. The middle hook runs after the old records and history KV are cleared but
+before replacement history is appended, so its writes and the replacement commit or roll back
+together.
+
 This package contains no ready-made product modules. Reusable tools, hooks, permissions,
 workspaces, search, workflows, and other capabilities belong in
 [`@slopus/happy-agent-features`](../happy-agent-features). Provider protocols and vendor

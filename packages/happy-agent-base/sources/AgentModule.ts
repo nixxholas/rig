@@ -12,6 +12,9 @@ import type { Context } from "@steve.kite/stdlib";
 import type { AgentDatabase, AgentModuleMigration } from "./AgentDatabase.js";
 import type {
     AgentBaseAcceptedMessage,
+    AgentBaseCompaction,
+    AgentBaseCompactionStart,
+    AgentBaseCompletedCompaction,
     AgentBaseInference,
     AgentBaseInferenceStart,
     AgentBaseLoop,
@@ -67,7 +70,7 @@ export interface AgentModuleAgent {
 
 /**
  * What every hook of a module is handed alongside the context: which agent it is running for,
- * and the three stores it may write to, each with its own lifetime.
+ * and the four stores it may write to, each with its own lifetime.
  * Database work uses the active root or transaction facade carried by `ctx.db`.
  *
  * They are passed rather than read off the context because a module's own dependencies are not
@@ -95,6 +98,12 @@ export interface AgentModuleScope<_Database extends AgentDatabase = AgentDatabas
      * crash mid-run leaves notes a resumed run can read, and a finished run leaves none at all.
      */
     readonly runKV: AgentKV;
+    /**
+     * Durable state belonging only to the current conversation history. It survives turns and
+     * restarts, then is cleared and its old handle expires when compaction or an incompatible
+     * model change replaces that history.
+     */
+    readonly historyKV: AgentKV;
 }
 
 /** Immutable agent identity and metadata observed at a system lifecycle boundary. */
@@ -195,6 +204,24 @@ export interface AgentModule<
         ctx: Context,
         scope: AgentModuleScope<Database>,
     ) => MaybePromise<readonly Tool[]>;
+    /** Observes the start of a provider compaction attempt. */
+    readonly beforeCompaction?: (
+        ctx: Context,
+        scope: AgentModuleScope<Database>,
+        compaction: AgentBaseCompactionStart,
+    ) => MaybePromise<void>;
+    /** Runs inside the transaction replacing history after a successful compaction. */
+    readonly historyErasedTransact?: (
+        ctx: Context,
+        scope: AgentModuleScope<Database>,
+        compaction: AgentBaseCompletedCompaction,
+    ) => MaybePromise<void>;
+    /** Observes the provider compaction outcome, after commit for a completed replacement. */
+    readonly afterCompaction?: (
+        ctx: Context,
+        scope: AgentModuleScope<Database>,
+        compaction: AgentBaseCompaction,
+    ) => MaybePromise<void>;
     /**
      * Runs inside the transaction that makes a dispatched batch durable, once per call in it.
      * Modules run in array order and a failure propagates, rolling the dispatch back.
@@ -294,7 +321,8 @@ export interface AgentModule<
     ) => MaybePromise<void>;
     /**
      * Receives the measured size of the context the turn is about to run on. Actions from every
-     * module are concatenated and applied before the turn's first inference.
+     * module are concatenated and applied before the turn's first inference. Injected notices
+     * wait for pending tool settlement and compaction before joining history.
      */
     readonly beforeTurn?: (
         ctx: Context,

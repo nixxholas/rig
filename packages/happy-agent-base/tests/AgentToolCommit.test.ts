@@ -190,42 +190,14 @@ describe("transactional tool commits", () => {
         await agent.close();
     });
 
-    it("lets an in-flight bounded write finish before commit cleanup erases its scope", async () => {
-        let releaseWrite!: () => void;
-        let writeStarted!: () => void;
-        const started = new Promise<void>((resolve) => {
-            writeStarted = resolve;
-        });
-        const released = new Promise<void>((resolve) => {
-            releaseWrite = resolve;
-        });
-        class PausingPersistence extends InMemoryPersistence {
-            override async writeValue(
-                writeCtx: Parameters<InMemoryPersistence["writeValue"]>[0],
-                key: string,
-                value: unknown,
-            ): Promise<void> {
-                if (key === "call.value") {
-                    writeStarted();
-                    await released;
-                }
-                await super.writeValue(writeCtx, key, value);
-            }
-        }
-        const persistence = new PausingPersistence();
-        const callKV = new AgentKV(persistence, "call.").serialized();
+    it("rejects writes after a bounded scope has ended", async () => {
+        const callKV = new AgentKV(new InMemoryPersistence(), "call.");
         const lifetime = new AbortController();
         const bounded = callKV.until(lifetime.signal);
-
-        const write = bounded.write(ctx, "value", true);
-        await started;
-        const clear = callKV.clear(ctx);
         lifetime.abort();
-        releaseWrite();
-        await write;
-        await clear;
-
-        expect(await callKV.read(ctx, "value")).toBeUndefined();
+        await expect(bounded.write(ctx, "value", true)).rejects.toThrow(
+            "the work its context belongs to has ended",
+        );
     });
 
     it("persists one internal identity for undispatched error settlement and clears its KV", async () => {

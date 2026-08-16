@@ -14,6 +14,7 @@ import {
     AGENT_BASE_PENDING_KEY,
     AgentBase,
     agentEffort,
+    agentHistoryKV,
     agentKV,
     agentModel,
     agentProvider,
@@ -951,13 +952,22 @@ describe("AgentBase persistence", () => {
         persistence.values.set("tool.000000.durablecall", storedTool("durablecall", durableCall));
         persistence.values.set("tool.000001.fragilecall", storedTool("fragilecall", fragileCall));
         const provider = new ScriptedProvider([textTurn("recovered")]);
+        const notice = system("Recovery finished before this notice was injected.");
         let durableRuns = 0;
         let fragileRuns = 0;
+        let injected = false;
         const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
             persistence,
+            hooks: {
+                beforeTurn: () => {
+                    if (injected) return undefined;
+                    injected = true;
+                    return [{ type: "inject", message: notice }];
+                },
+            },
             initialState: {
                 tools: [
                     defineAgentTool({
@@ -990,7 +1000,7 @@ describe("AgentBase persistence", () => {
 
         expect(durableRuns).toBe(1);
         expect(fragileRuns).toBe(0);
-        expect(persistence.records.slice(-3)).toEqual([
+        expect(persistence.records.slice(-4)).toEqual([
             {
                 type: "tool",
                 message: {
@@ -1013,6 +1023,7 @@ describe("AgentBase persistence", () => {
                     isError: true,
                 },
             },
+            expect.objectContaining({ type: "system", message: notice }),
             { type: "block", block: { type: "text", text: "recovered" } },
         ]);
         expect(persistence.pending.size).toBe(0);
@@ -1036,6 +1047,7 @@ describe("AgentBase persistence", () => {
                 ],
                 isError: true,
             },
+            notice,
         ]);
         await agent.close();
     });
@@ -1356,6 +1368,7 @@ describe("AgentBase per-message settings", () => {
         const provider = new ScriptedProvider([textTurn("claude says"), textTurn("gpt says")]);
         const providers = providersOf(provider);
         const changes: unknown[] = [];
+        let retainedHistoryKV: ReturnType<typeof agentHistoryKV>;
         const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers,
@@ -1363,6 +1376,13 @@ describe("AgentBase per-message settings", () => {
             persistence,
             model: "anthropic/claude",
             hooks: {
+                beforeTurn: async (hookCtx) => {
+                    const historyKV = agentHistoryKV(hookCtx);
+                    if (historyKV === undefined) throw new Error("History KV was not installed.");
+                    retainedHistoryKV ??= historyKV;
+                    await historyKV.write(hookCtx, "marker", true);
+                    return undefined;
+                },
                 modelChanged: (_hookCtx, change) => {
                     changes.push(change);
                     return system("Summary of the previous conversation.");
@@ -1399,6 +1419,13 @@ describe("AgentBase per-message settings", () => {
             recordedUser("switch"),
             { type: "block", block: { type: "text", text: "gpt says" } },
         ]);
+        expect([...persistence.values.keys()].filter((key) => key.includes(".history."))).toEqual(
+            [],
+        );
+        if (retainedHistoryKV === undefined) throw new Error("History KV was not observed.");
+        await expect(retainedHistoryKV.read(ctx, "marker")).rejects.toThrow(
+            "the work its context belongs to has ended",
+        );
         await agent.close();
     });
 
@@ -1418,6 +1445,38 @@ describe("AgentBase per-message settings", () => {
         await agent.waitForIdle();
 
         expect(provider.sessions[1]?.requests[0]?.context.messages).toEqual([user("switch")]);
+        await agent.close();
+    });
+
+    it("appends a queued hook notice after an incompatible model reset", async () => {
+        const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
+        const notice = system("This notice belongs to the new model context.");
+        let turns = 0;
+        const agent = await AgentBase.create(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence: new InMemoryPersistence(),
+            model: "anthropic/claude",
+            hooks: {
+                beforeTurn: () => {
+                    turns += 1;
+                    return turns === 2 ? [{ type: "inject", message: notice }] : undefined;
+                },
+                modelChanged: () => system("Summary for the new model."),
+            },
+        });
+
+        await agent.send(ctx, user("hello"), { await: true });
+        await agent.waitForIdle();
+        await agent.send(ctx, user("switch"), { await: true, model: "openai/gpt" });
+        await agent.waitForIdle();
+
+        expect(provider.sessions[1]?.requests[0]?.context.messages).toEqual([
+            system("Summary for the new model."),
+            user("switch"),
+            notice,
+        ]);
         await agent.close();
     });
 
@@ -2076,6 +2135,59 @@ describe("AgentBase compaction", () => {
         await agent.close();
     });
 
+    it("clears and expires hook history KV only when the compaction commits", async () => {
+        const persistence = new InMemoryPersistence();
+        const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
+        const observed: unknown[] = [];
+        let retained: ReturnType<typeof agentHistoryKV>;
+        const agent = await AgentBase.create(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+            hooks: {
+                beforeTurn: async (hookCtx) => {
+                    const historyKV = agentHistoryKV(hookCtx);
+                    if (historyKV === undefined) {
+                        throw new Error("The hook has no history-scoped store.");
+                    }
+                    retained ??= historyKV;
+                    const marker = await historyKV.read(hookCtx, "marker");
+                    observed.push(marker);
+                    if (marker === undefined) {
+                        await historyKV.write(hookCtx, "marker", "present");
+                    }
+                    return undefined;
+                },
+            },
+        });
+
+        await agent.send(ctx, user("first"), { await: true });
+        await agent.waitForIdle();
+        const session = provider.sessions[0];
+        if (session !== undefined) {
+            session.compactionResults = [completed([compactionMessage])];
+        }
+        if (retained === undefined) throw new Error("The hook did not expose history KV.");
+
+        await agent.compact(ctx, { await: true });
+        await agent.waitForIdle();
+        expect([...persistence.values.keys()].filter((key) => key.includes(".history."))).toEqual(
+            [],
+        );
+        await expect(retained.write(ctx, "late", true)).rejects.toThrow(
+            "the work its context belongs to has ended",
+        );
+
+        await agent.send(ctx, user("after compaction"), { await: true });
+        await agent.waitForIdle();
+
+        // The turn carrying out compaction still observes the old context. The first turn after
+        // the replacement receives a fresh store.
+        expect(observed).toEqual([undefined, "present", undefined]);
+        await agent.close();
+    });
+
     it("compacts an idle agent without running inference", async () => {
         const persistence = new InMemoryPersistence([
             userRecord("hi"),
@@ -2111,6 +2223,103 @@ describe("AgentBase compaction", () => {
             type: "compaction",
             messages: [compactionMessage],
         });
+        await agent.close();
+    });
+
+    it("runs compaction hooks around the transactional history replacement", async () => {
+        const persistence = new InMemoryPersistence([
+            userRecord("hi"),
+            { type: "block", block: { type: "text", text: "hello" } },
+        ]);
+        persistence.values.set("kv.test-agent.history.marker", "old");
+        const provider = new ScriptedProvider([]);
+        const order: string[] = [];
+        const compactions: unknown[] = [];
+        const original = provider.session.bind(provider);
+        provider.session = async (id, options) => {
+            const session = await original(id, options);
+            (session as ScriptedSession).compactionResults = [completed([compactionMessage])];
+            return session;
+        };
+        const agent = await AgentBase.create(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+            hooks: {
+                beforeCompaction: async (hookCtx, compaction) => {
+                    order.push("before");
+                    compactions.push(compaction);
+                    expect(await agentHistoryKV(hookCtx)?.read(hookCtx, "marker")).toBe("old");
+                },
+                historyErasedTransact: async (hookCtx, compaction) => {
+                    order.push("erased");
+                    compactions.push(compaction);
+                    const historyKV = agentHistoryKV(hookCtx);
+                    expect(await historyKV?.read(hookCtx, "marker")).toBeUndefined();
+                    await historyKV?.write(hookCtx, "marker", "new");
+                },
+                afterCompaction: async (hookCtx, compaction) => {
+                    order.push("after");
+                    compactions.push(compaction);
+                    expect(await agentHistoryKV(hookCtx)?.read(hookCtx, "marker")).toBe("new");
+                },
+            },
+        });
+
+        await agent.compact(ctx, { await: true });
+        await agent.waitForIdle();
+
+        expect(order).toEqual(["before", "erased", "after"]);
+        expect(
+            compactions.map((value) => (value as { compactionId: string }).compactionId),
+        ).toEqual([
+            expect.any(String),
+            (compactions[0] as { compactionId: string }).compactionId,
+            (compactions[0] as { compactionId: string }).compactionId,
+        ]);
+        expect((compactions[2] as { result: SessionCompaction }).result.status).toBe("completed");
+        expect(persistence.values.get("kv.test-agent.history.marker")).toBe("new");
+        await agent.close();
+    });
+
+    it("rolls history erasure back when its transactional hook fails", async () => {
+        const records = [
+            userRecord("hi"),
+            { type: "block" as const, block: { type: "text" as const, text: "hello" } },
+        ];
+        const persistence = new InMemoryPersistence([...records]);
+        persistence.values.set("kv.test-agent.history.marker", "keep");
+        const provider = new ScriptedProvider([]);
+        const original = provider.session.bind(provider);
+        provider.session = async (id, options) => {
+            const session = await original(id, options);
+            (session as ScriptedSession).compactionResults = [completed([compactionMessage])];
+            return session;
+        };
+        let observedAfter = false;
+        const agent = await AgentBase.create(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+            hooks: {
+                historyErasedTransact: () => {
+                    throw new Error("history observer failed");
+                },
+                afterCompaction: () => {
+                    observedAfter = true;
+                },
+            },
+        });
+
+        await expect(agent.compact(ctx, { await: true })).rejects.toThrow(
+            "history observer failed",
+        );
+
+        expect(persistence.records).toEqual(records);
+        expect(persistence.values.get("kv.test-agent.history.marker")).toBe("keep");
+        expect(observedAfter).toBe(false);
         await agent.close();
     });
 
@@ -2160,17 +2369,30 @@ describe("AgentBase compaction", () => {
             ];
             return session;
         };
+        const hooks: string[] = [];
         const agent = await AgentBase.create(ctx, {
             id: "test-agent",
             providers: providersOf(provider),
             provider: "scripted",
             persistence,
+            hooks: {
+                beforeCompaction: (_hookCtx, compaction) => {
+                    hooks.push(`before:${compaction.compactionId}`);
+                },
+                afterCompaction: (_hookCtx, compaction) => {
+                    hooks.push(`after:${compaction.compactionId}:${compaction.result.status}`);
+                },
+            },
         });
 
         const first = agent.compact(ctx, { await: true });
         const second = agent.compact(ctx, { await: true });
         await expect(first).rejects.toThrow("model unavailable");
         await expect(second).rejects.toThrow("model unavailable");
+        expect(hooks).toEqual([
+            expect.stringMatching(/^before:/u),
+            expect.stringMatching(/^after:.*:failed$/u),
+        ]);
 
         // The history is untouched and the agent keeps working.
         expect(persistence.records.filter((record) => record.type === "compaction")).toHaveLength(
@@ -2192,6 +2414,7 @@ describe("AgentBase compaction", () => {
             { type: "block" as const, block: { type: "text" as const, text: "hello" } },
         ];
         const persistence = new InMemoryPersistence([...records]);
+        persistence.values.set("kv.test-agent.history.marker", "keep");
         const originalAppend = persistence.append.bind(persistence);
         persistence.append = async (appendContext, record) => {
             if (record.type === "compaction") throw new Error("disk full");
@@ -2215,6 +2438,7 @@ describe("AgentBase compaction", () => {
 
         // The clear and the replacement write commit together or not at all.
         expect(persistence.records).toEqual(records);
+        expect(persistence.values.get("kv.test-agent.history.marker")).toBe("keep");
         await agent.close();
     });
 
@@ -2606,6 +2830,34 @@ describe("AgentBase lifecycle hooks", () => {
             "afterAgentLoopTransact",
             "afterAgentLoop",
         ]);
+        await agent.close();
+    });
+
+    it("lets beforeTurn queue a system notice before the next inference", async () => {
+        const provider = new ScriptedProvider([textTurn("answer")]);
+        const notice = system("Read this before answering.");
+        let injected = false;
+        let turns = 0;
+        const agent = await AgentBase.create(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence: new InMemoryPersistence(),
+            hooks: {
+                beforeTurn: () => {
+                    turns += 1;
+                    if (injected) return undefined;
+                    injected = true;
+                    return [{ type: "inject", message: notice }];
+                },
+            },
+        });
+
+        await agent.send(ctx, user("go"), { await: true });
+        await agent.waitForIdle();
+
+        expect(provider.sessions[0]?.requests[0]?.context.messages).toEqual([user("go"), notice]);
+        expect(turns).toBe(1);
         await agent.close();
     });
 
@@ -3144,6 +3396,195 @@ describe("AgentBase lifecycle hooks", () => {
         await agent.close();
     });
 
+    it("lets afterTurn inject a system notice directly into history", async () => {
+        const persistence = new InMemoryPersistence();
+        const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
+        const notice = system("The workspace changed.");
+        let injected = false;
+        const agent = await AgentBase.create(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+            hooks: {
+                afterTurn: () => {
+                    if (injected) return undefined;
+                    injected = true;
+                    return [{ type: "inject", message: notice }];
+                },
+            },
+        });
+
+        await agent.send(ctx, user("go"), { await: true });
+        await agent.waitForIdle();
+
+        expect(persistence.records).toContainEqual(
+            expect.objectContaining({ type: "system", message: notice }),
+        );
+        expect(provider.sessions[0]?.requests[1]?.context.messages.at(-1)).toEqual(notice);
+        await agent.close();
+    });
+
+    it("finishes an accepted notice when close races its queue commit", async () => {
+        let agent!: AgentBase;
+        let closing: Promise<void> | undefined;
+        class CloseRacingPersistence extends InMemoryPersistence {
+            override async writeValue(
+                writeCtx: Context,
+                key: string,
+                value: unknown,
+            ): Promise<void> {
+                await super.writeValue(writeCtx, key, value);
+                if (key.startsWith("inject.") && closing === undefined) {
+                    closing = agent.close();
+                }
+            }
+        }
+
+        const persistence = new CloseRacingPersistence();
+        const provider = new ScriptedProvider([textTurn("first"), textTurn("notice answered")]);
+        const notice = system("Finish this accepted work before closing.");
+        let injected = false;
+        agent = await AgentBase.create(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+            hooks: {
+                afterTurn: () => {
+                    if (injected) return undefined;
+                    injected = true;
+                    return [{ type: "inject", message: notice }];
+                },
+            },
+        });
+
+        await agent.send(ctx, user("go"), { await: true });
+        await until(() => closing !== undefined);
+        if (closing === undefined) throw new Error("Close did not race the notice commit.");
+        await closing;
+
+        expect(provider.sessions[0]?.requests).toHaveLength(2);
+        expect(provider.sessions[0]?.requests[1]?.context.messages.at(-1)).toEqual(notice);
+        expect(persistence.values.has(AGENT_BASE_PENDING_KEY)).toBe(false);
+        expect([...persistence.values.keys()].filter((key) => key.startsWith("inject."))).toEqual(
+            [],
+        );
+    });
+
+    it("keeps an accepted notice active when abort lands before consumption", async () => {
+        let secondLoadStarted!: () => void;
+        const secondLoading = new Promise<void>((resolve) => {
+            secondLoadStarted = resolve;
+        });
+        let releaseSecondLoad!: () => void;
+        const secondLoadReleased = new Promise<void>((resolve) => {
+            releaseSecondLoad = resolve;
+        });
+        class AbortRacingPersistence extends InMemoryPersistence {
+            override async load() {
+                const records = await super.load();
+                if (this.loads === 2) {
+                    secondLoadStarted();
+                    await secondLoadReleased;
+                }
+                return records;
+            }
+        }
+
+        const persistence = new AbortRacingPersistence();
+        const provider = new ScriptedProvider([textTurn("first"), textTurn("notice answered")]);
+        const notice = system("This accepted notice survives the cancelled turn.");
+        let injected = false;
+        const agent = await AgentBase.create(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+            hooks: {
+                afterTurn: () => {
+                    if (injected) return undefined;
+                    injected = true;
+                    return [{ type: "inject", message: notice }];
+                },
+            },
+        });
+
+        await agent.send(ctx, user("go"), { await: true });
+        await secondLoading;
+        const aborted = agent.abort(ctx, { await: true });
+        releaseSecondLoad();
+        await aborted;
+        await agent.waitForIdle();
+
+        expect(provider.sessions[0]?.requests).toHaveLength(2);
+        expect(provider.sessions[0]?.requests[1]?.context.messages.at(-1)).toEqual(notice);
+        expect(persistence.values.has(AGENT_BASE_PENDING_KEY)).toBe(false);
+        expect([...persistence.values.keys()].filter((key) => key.startsWith("inject."))).toEqual(
+            [],
+        );
+        await agent.close();
+    });
+
+    it("retries an appended notice when abort cancels the inference answering it", async () => {
+        let secondRequestStarted!: () => void;
+        const secondRequest = new Promise<void>((resolve) => {
+            secondRequestStarted = resolve;
+        });
+        let releaseSecondRequest!: () => void;
+        const secondRequestReleased = new Promise<void>((resolve) => {
+            releaseSecondRequest = resolve;
+        });
+        class NoticeAbortProvider extends ScriptedProvider {
+            override async session(id: string, options: never): Promise<BaseSession> {
+                const session = (await super.session(id, options)) as ScriptedSession;
+                const run = session.run.bind(session);
+                session.run = (runCtx, request): SessionStream => {
+                    const scripted = run(runCtx, request);
+                    if (session.requests.length !== 2) return scripted;
+                    return (async function* () {
+                        secondRequestStarted();
+                        await secondRequestReleased;
+                    })();
+                };
+                return session;
+            }
+        }
+
+        const notice = system("Answer this notice after the cancelled attempt.");
+        const provider = new NoticeAbortProvider([
+            textTurn("first"),
+            textTurn("cancelled before delivery"),
+            textTurn("notice answered"),
+        ]);
+        let injected = false;
+        const agent = await AgentBase.create(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence: new InMemoryPersistence(),
+            hooks: {
+                afterTurn: () => {
+                    if (injected) return undefined;
+                    injected = true;
+                    return [{ type: "inject", message: notice }];
+                },
+            },
+        });
+
+        const sending = agent.send(ctx, user("go"), { await: true });
+        await secondRequest;
+        const aborted = agent.abort(ctx, { await: true });
+        releaseSecondRequest();
+        await aborted;
+        await sending;
+        await agent.waitForIdle();
+
+        expect(provider.sessions[0]?.requests).toHaveLength(3);
+        expect(provider.sessions[0]?.requests[2]?.context.messages.at(-1)).toEqual(notice);
+        await agent.close();
+    });
+
     it("applies every returned action together", async () => {
         const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
         let injected = false;
@@ -3214,6 +3655,32 @@ describe("AgentBase lifecycle hooks", () => {
         await agent.close();
     });
 
+    it("reopens the loop when afterAgentLoop injects a system notice", async () => {
+        const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
+        const notice = system("Continue with the refreshed state.");
+        let injected = false;
+        const agent = await AgentBase.create(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence: new InMemoryPersistence(),
+            hooks: {
+                afterAgentLoop: () => {
+                    if (injected) return undefined;
+                    injected = true;
+                    return [{ type: "inject", message: notice }];
+                },
+            },
+        });
+
+        await agent.send(ctx, user("go"), { await: true });
+        await agent.waitForIdle();
+
+        expect(provider.sessions[0]?.requests).toHaveLength(2);
+        expect(provider.sessions[0]?.requests[1]?.context.messages.at(-1)).toEqual(notice);
+        await agent.close();
+    });
+
     it("triggers a compaction when afterTurn asks for one", async () => {
         const compactionMessage: SessionMessage = {
             role: "compaction",
@@ -3261,6 +3728,56 @@ describe("AgentBase lifecycle hooks", () => {
         expect(provider.sessions[0]?.compactions[0]?.context.messages).toEqual([
             user("go"),
             { role: "assistant", content: [{ type: "text", text: "answer" }] },
+        ]);
+        await agent.close();
+    });
+
+    it("injects a notice after a compaction requested by the same hook", async () => {
+        const compactionMessage: SessionMessage = {
+            role: "compaction",
+            content: "summary",
+            encryptedContent: null,
+        };
+        const notice = system("The compacted context has changed.");
+        const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
+        let requested = false;
+        const agent = await AgentBase.create(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence: new InMemoryPersistence(),
+            hooks: {
+                afterTurn: () => {
+                    if (requested) return undefined;
+                    requested = true;
+                    const session = provider.sessions[0];
+                    if (session !== undefined) {
+                        session.compactionResults = [
+                            {
+                                status: "completed",
+                                preservedMessages: [],
+                                usage: {
+                                    input: 10,
+                                    output: 5,
+                                    cacheRead: 0,
+                                    cacheWrite: 0,
+                                    totalTokens: 15,
+                                },
+                                context: { instructions: "", messages: [compactionMessage] },
+                            },
+                        ];
+                    }
+                    return [{ type: "compact" }, { type: "inject", message: notice }];
+                },
+            },
+        });
+
+        await agent.send(ctx, user("go"), { await: true });
+        await agent.waitForIdle();
+
+        expect(provider.sessions[0]?.requests[1]?.context.messages).toEqual([
+            compactionMessage,
+            notice,
         ]);
         await agent.close();
     });

@@ -1,4 +1,4 @@
-import { asyncLock, withLifetime, type AsyncLock, type Context } from "@steve.kite/stdlib";
+import { withLifetime, type Context } from "@steve.kite/stdlib";
 
 import type { AgentPersistence } from "./AgentPersistence.js";
 
@@ -20,36 +20,11 @@ export class AgentKV {
     readonly #persistence: AgentPersistence;
     /** An object-owned lifetime used by bounded stores such as one tool invocation's KV. */
     readonly #available: () => boolean;
-    /** Serializes this scope tree so disposal always follows every write that already started. */
-    readonly #lock: AsyncLock | undefined;
-
     /** Build a scope over `prefix` of `persistence`. */
-    constructor(
-        persistence: AgentPersistence,
-        prefix: string,
-        available = () => true,
-        lock?: AsyncLock,
-    ) {
+    constructor(persistence: AgentPersistence, prefix: string, available = () => true) {
         this.#persistence = persistence;
         this.prefix = prefix;
         this.#available = available;
-        this.#lock = lock;
-    }
-
-    /**
-     * A handle to this scope whose operations serialize with all descendants derived from it.
-     * Agent base uses this only for one tool call, so disposal can drain writes already in flight
-     * without serializing unrelated module and agent stores.
-     *
-     * @internal
-     */
-    serialized(): AgentKV {
-        return new AgentKV(
-            this.#persistence,
-            this.prefix,
-            this.#available,
-            asyncLock({ reentry: "block" }),
-        );
     }
 
     /**
@@ -66,7 +41,6 @@ export class AgentKV {
             this.#persistence,
             `${this.prefix}${escaped.join(".")}.`,
             this.#available,
-            this.#lock,
         );
     }
 
@@ -80,17 +54,15 @@ export class AgentKV {
             this.#persistence,
             this.prefix,
             () => this.#available() && !signal.aborted && available(),
-            this.#lock,
         );
     }
 
     /** The stored value, or undefined when the key is absent. */
     async read(ctx: Context, key: string): Promise<unknown> {
-        return await this.#locked(ctx, async (lockCtx) => {
-            const full = `${this.prefix}${key}`;
-            const entries = await this.#persistence.readValues(lockCtx, full);
-            return entries.find((entry) => entry.key === full)?.value;
-        });
+        this.#assertLive(ctx);
+        const full = `${this.prefix}${key}`;
+        const entries = await this.#persistence.readValues(ctx, full);
+        return entries.find((entry) => entry.key === full)?.value;
     }
 
     /** Every entry under the scope — or under `prefix` within it — with scope-relative keys. */
@@ -98,20 +70,18 @@ export class AgentKV {
         ctx: Context,
         prefix = "",
     ): Promise<readonly { readonly key: string; readonly value: unknown }[]> {
-        return await this.#locked(ctx, async (lockCtx) => {
-            const entries = await this.#persistence.readValues(lockCtx, `${this.prefix}${prefix}`);
-            return entries.map(({ key, value }) => ({
-                key: key.slice(this.prefix.length),
-                value,
-            }));
-        });
+        this.#assertLive(ctx);
+        const entries = await this.#persistence.readValues(ctx, `${this.prefix}${prefix}`);
+        return entries.map(({ key, value }) => ({
+            key: key.slice(this.prefix.length),
+            value,
+        }));
     }
 
     /** Store the value under `key`, replacing whatever was there before. */
     async write(ctx: Context, key: string, value: unknown): Promise<void> {
-        await this.#locked(ctx, async (lockCtx) => {
-            await this.#persistence.writeValue(lockCtx, `${this.prefix}${key}`, value);
-        });
+        this.#assertLive(ctx);
+        await this.#persistence.writeValue(ctx, `${this.prefix}${key}`, value);
     }
 
     /**
@@ -124,14 +94,13 @@ export class AgentKV {
         key: string,
         updater: (current: unknown) => Value | Promise<Value>,
     ): Promise<Value> {
-        return await this.#locked(ctx, async (lockCtx) => {
-            const full = `${this.prefix}${key}`;
-            const entries = await this.#persistence.readValues(lockCtx, full);
-            const current = entries.find((entry) => entry.key === full)?.value;
-            const next = await updater(current);
-            await this.#persistence.writeValue(lockCtx, full, next);
-            return next;
-        });
+        this.#assertLive(ctx);
+        const full = `${this.prefix}${key}`;
+        const entries = await this.#persistence.readValues(ctx, full);
+        const current = entries.find((entry) => entry.key === full)?.value;
+        const next = await updater(current);
+        await this.#persistence.writeValue(ctx, full, next);
+        return next;
     }
 
     /**
@@ -145,24 +114,21 @@ export class AgentKV {
         key: string,
         create: () => Value | Promise<Value>,
     ): Promise<Value> {
-        return await this.#locked(ctx, async (lockCtx) => {
-            return await this.#persistence.transaction(lockCtx, async (txCtx) => {
-                const full = `${this.prefix}${key}`;
-                const entries = await this.#persistence.readValues(txCtx, full);
-                const existing = entries.find((entry) => entry.key === full);
-                if (existing !== undefined) return existing.value as Value;
-                const value = await create();
-                if (await this.#persistence.writeValueIfAbsent(txCtx, full, value)) return value;
-                const winner = (await this.#persistence.readValues(txCtx, full)).find(
-                    (entry) => entry.key === full,
-                );
-                if (winner === undefined) {
-                    throw new Error(
-                        "The durable get-or-create value disappeared before it was read.",
-                    );
-                }
-                return winner.value as Value;
-            });
+        this.#assertLive(ctx);
+        return await this.#persistence.transaction(ctx, async (txCtx) => {
+            const full = `${this.prefix}${key}`;
+            const entries = await this.#persistence.readValues(txCtx, full);
+            const existing = entries.find((entry) => entry.key === full);
+            if (existing !== undefined) return existing.value as Value;
+            const value = await create();
+            if (await this.#persistence.writeValueIfAbsent(txCtx, full, value)) return value;
+            const winner = (await this.#persistence.readValues(txCtx, full)).find(
+                (entry) => entry.key === full,
+            );
+            if (winner === undefined) {
+                throw new Error("The durable get-or-create value disappeared before it was read.");
+            }
+            return winner.value as Value;
         });
     }
 
@@ -195,31 +161,17 @@ export class AgentKV {
      * write.
      */
     async clear(ctx: Context): Promise<void> {
-        await this.#locked(ctx, async (lockCtx) => {
-            const entries = await this.#persistence.readValues(lockCtx, this.prefix);
-            for (const entry of entries) {
-                await this.#persistence.deleteValue(lockCtx, entry.key);
-            }
-        });
+        this.#assertLive(ctx);
+        const entries = await this.#persistence.readValues(ctx, this.prefix);
+        for (const entry of entries) {
+            await this.#persistence.deleteValue(ctx, entry.key);
+        }
     }
 
     /** Remove the entry stored under `key`, if any. */
     async delete(ctx: Context, key: string): Promise<void> {
-        await this.#locked(ctx, async (lockCtx) => {
-            await this.#persistence.deleteValue(lockCtx, `${this.prefix}${key}`);
-        });
-    }
-
-    /** Re-check availability only after every earlier operation in this scope tree has finished. */
-    async #locked<Result>(ctx: Context, work: (ctx: Context) => Promise<Result>): Promise<Result> {
-        if (this.#lock === undefined) {
-            this.#assertLive(ctx);
-            return await work(ctx);
-        }
-        return await this.#lock.runInLock(ctx, async (lockCtx) => {
-            this.#assertLive(lockCtx);
-            return await work(lockCtx);
-        });
+        this.#assertLive(ctx);
+        await this.#persistence.deleteValue(ctx, `${this.prefix}${key}`);
     }
 
     /**

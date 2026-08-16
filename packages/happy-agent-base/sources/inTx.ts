@@ -1,18 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
-import {
-    asyncLock,
-    registerContextExtension,
-    withAfterCommit,
-    type AsyncLock,
-    type Context,
-} from "@steve.kite/stdlib";
+import { registerContextExtension, withAfterCommit, type Context } from "@steve.kite/stdlib";
 
-import {
-    isAgentSQLiteDatabase,
-    type AgentDatabase,
-    type AgentSQLiteDatabase,
-} from "./AgentDatabase.js";
 import {
     agentDatabase,
     agentStorageTransaction,
@@ -25,7 +14,6 @@ export type AgentTransactionWork<Result> = (ctx: Context) => Result | PromiseLik
 
 interface AgentTransactionContextState {
     readonly activeTransactions: AsyncLocalStorage<AgentStorageTransactionContext>;
-    readonly sqliteLocks: WeakMap<AgentSQLiteDatabase, AsyncLock>;
 }
 
 declare global {
@@ -36,8 +24,8 @@ declare global {
     }
 }
 
-// Keep the extension, ambient transaction identity, and per-SQLite-database locks stable when a
-// development loader or Vitest evaluates this module again in the same process.
+// Keep the extension and ambient transaction identity stable when a development loader or Vitest
+// evaluates this module again in the same process.
 const transactionContextRegistryKey = Symbol.for(
     "@slopus/happy-agent-base/transaction-context-registry/v1",
 );
@@ -55,7 +43,6 @@ let transactionContextState = transactionContextRegistry.get(stdlibRegistryIdent
 if (transactionContextState === undefined) {
     transactionContextState = {
         activeTransactions: new AsyncLocalStorage<AgentStorageTransactionContext>(),
-        sqliteLocks: new WeakMap(),
     };
     registerContextExtension(
         "inTx",
@@ -65,12 +52,12 @@ if (transactionContextState === undefined) {
     );
     transactionContextRegistry.set(stdlibRegistryIdentity, transactionContextState);
 }
-const { activeTransactions, sqliteLocks } = transactionContextState;
+const { activeTransactions } = transactionContextState;
 
 /**
  * Run work inside the database transaction carried by `ctx`, or open the one outer transaction
- * for its root database. Nested calls reuse the current transaction. Independent SQLite work is
- * serialized per root facade; PostgreSQL concurrency remains owned by its driver.
+ * for its root database. Nested calls reuse the current transaction. Independent transaction
+ * scheduling belongs to the database driver.
  */
 export async function inTx<Result>(
     ctx: Context,
@@ -97,49 +84,26 @@ export async function inTx<Result>(
     }
 
     let runAfterCommit!: () => Promise<void>;
-    const commit = async (transactionCtx: Context): Promise<Awaited<Result>> =>
-        await runDrizzleTransaction(root, async (database) => {
-            const [afterCommitCtx, drain] = withAfterCommit(transactionCtx);
-            runAfterCommit = drain;
-            const lifetime = new AbortController();
-            const state: AgentStorageTransactionContext = {
-                database,
-                root,
-                lifetime: lifetime.signal,
-            };
-            const txCtx = withAgentStorageTransaction(afterCommitCtx, state);
-            try {
-                return await activeTransactions.run(state, async () => await work(txCtx));
-            } finally {
-                lifetime.abort();
-            }
-        });
-
-    let result: Awaited<Result>;
-    if (isAgentSQLiteDatabase(root)) {
-        let lock = sqliteLocks.get(root);
-        if (lock === undefined) {
-            lock = asyncLock({ reentry: "block" });
-            sqliteLocks.set(root, lock);
+    const result = await root.transaction(async (database) => {
+        const [afterCommitCtx, drain] = withAfterCommit(ctx);
+        runAfterCommit = drain;
+        const lifetime = new AbortController();
+        const state: AgentStorageTransactionContext = {
+            database,
+            root,
+            lifetime: lifetime.signal,
+        };
+        const txCtx = withAgentStorageTransaction(afterCommitCtx, state);
+        try {
+            return await activeTransactions.run(state, async () => await work(txCtx));
+        } finally {
+            lifetime.abort();
         }
-        result = await lock.runInLock(ctx, commit);
-    } else {
-        result = await commit(ctx);
-    }
+    });
     try {
         await runAfterCommit();
     } catch (error: unknown) {
         ctx.log.warn("Agent storage committed, but post-commit work failed.", error);
     }
     return result;
-}
-
-async function runDrizzleTransaction<Result>(
-    database: AgentDatabase,
-    work: (database: AgentDatabase) => Promise<Result>,
-): Promise<Result> {
-    if (isAgentSQLiteDatabase(database)) {
-        return await database.transaction(async (transaction) => await work(transaction));
-    }
-    return await database.transaction(async (transaction) => await work(transaction));
 }
