@@ -32,6 +32,7 @@ import {
     ImageGenerationModule,
     McpModule,
     ModelSwitchModule,
+    ObservationModule,
     PermissionsModule,
     PresenceModule,
     ProjectsModule,
@@ -156,6 +157,8 @@ export interface LoadHappyAgentOptions {
     /** The resolved, shared Happy Agent filesystem layout. */
     readonly configuration: HappyAgentConfiguration;
     readonly configModule: ConfigModule;
+    /** What the host already started observing with, so the agent records into the same files. */
+    readonly observation: ObservationModule;
     readonly integrations: HappyAgentIntegrations;
     readonly providers: AgentProviders;
     readonly provider: string;
@@ -178,6 +181,7 @@ export interface HappyAgentModuleCollection {
     readonly imageGeneration: ImageGenerationModule;
     readonly mcp: McpModule;
     readonly modelSwitch: ModelSwitchModule;
+    readonly observation: ObservationModule;
     readonly permissions: PermissionsModule;
     readonly presence: PresenceModule;
     readonly projects: ProjectsModule;
@@ -250,6 +254,7 @@ export async function loadHappyAgent(
         });
         modules = createModules(
             options.configModule,
+            options.observation,
             options.integrations,
             options.models,
             options.events,
@@ -259,6 +264,7 @@ export async function loadHappyAgent(
         });
         const orderedModules: AgentModule<AnyAgentTool, LibSQLDatabase>[] = [
             modules.config,
+            modules.observation,
             modules.systemPrompt,
             modules.conversations,
             modules.history,
@@ -366,12 +372,15 @@ export async function loadHappyAgent(
 
 function createModules(
     configModule: ConfigModule,
+    observation: ObservationModule,
     integrations: HappyAgentIntegrations,
     models: readonly AgentModel[],
     events: EventsModuleOptions | undefined,
 ): HappyAgentModuleCollection {
     const { configuration } = configModule;
-    const history = new HistoryModule();
+    // The dump listens to the committed archive rather than recording alongside it, so what a
+    // person reads in the file is exactly what the agent durably remembers.
+    const history = new HistoryModule({ onAppend: observation.recordHistory });
     const protectedProjectFiles = [
         ...new Set([
             "AGENTS.md",
@@ -401,6 +410,7 @@ function createModules(
     const presence = new PresenceModule(presenceOptions);
     return {
         config: configModule,
+        observation,
         applets: new AppletModule({ rootDirectory: configuration.paths.appletsPath }),
         collaboration: new CollaborationModule({
             broker: integrations.collaboration,

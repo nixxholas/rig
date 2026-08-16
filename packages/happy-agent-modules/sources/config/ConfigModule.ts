@@ -66,6 +66,19 @@ const p2pInstanceIdSchema = Type.String({
     maxLength: 32,
     pattern: "^[a-z][a-z0-9]*$",
 });
+const logLevelSchema = Type.Union([
+    Type.Literal("trace"),
+    Type.Literal("debug"),
+    Type.Literal("info"),
+    Type.Literal("warn"),
+    Type.Literal("error"),
+    Type.Literal("fatal"),
+]);
+const traceEndpointSchema = Type.String({
+    minLength: 1,
+    maxLength: 2_048,
+    pattern: "^https?://[^\\s]+$",
+});
 
 const defaultsInputSchema = Type.Object(
     {
@@ -279,6 +292,18 @@ const partialValuesSchema = Type.Object(
                         }),
                     ),
                     denied_domains: Type.Optional(boundedStringArraySchema),
+                },
+                { additionalProperties: false },
+            ),
+        ),
+        observation: Type.Optional(
+            Type.Object(
+                {
+                    history_dump: Type.Optional(Type.Boolean()),
+                    log_level: Type.Optional(logLevelSchema),
+                    logs: Type.Optional(Type.Boolean()),
+                    traces: Type.Optional(Type.Boolean()),
+                    traces_endpoint: Type.Optional(traceEndpointSchema),
                 },
                 { additionalProperties: false },
             ),
@@ -589,6 +614,16 @@ const resolvedValuesSchema = Type.Object(
                 { additionalProperties: false },
             ),
         ),
+        observation: Type.Object(
+            {
+                historyDump: Type.Boolean(),
+                logLevel: logLevelSchema,
+                logs: Type.Boolean(),
+                traces: Type.Boolean(),
+                tracesEndpoint: traceEndpointSchema,
+            },
+            { additionalProperties: false },
+        ),
         p2p: Type.Object(
             {
                 direct: Type.Object(
@@ -698,8 +733,11 @@ const pathSchemaSet = Type.Object(
         generatedPath: pathSchema,
         globalConfigPath: pathSchema,
         happyHome: pathSchema,
+        historyDumpHome: pathSchema,
         instructionsPath: pathSchema,
         localConfigPath: pathSchema,
+        logPath: pathSchema,
+        observationHome: pathSchema,
         publicHome: pathSchema,
         runtimeConfigPath: pathSchema,
         securityPath: pathSchema,
@@ -782,6 +820,13 @@ const DEFAULT_VALUES: HappyAgentConfigValues = {
         workspaces: true,
     },
     mcpServers: {},
+    observation: {
+        historyDump: false,
+        logLevel: "info",
+        logs: true,
+        traces: false,
+        tracesEndpoint: "http://127.0.0.1:4318/v1/traces",
+    },
     p2p: {
         direct: {},
         enableDirect: false,
@@ -907,6 +952,7 @@ export function parseHappyAgentConfigToml(source: string): {
         "features",
         "mcp_servers",
         "network",
+        "observation",
         "p2p",
         "permissions",
         "presence",
@@ -926,6 +972,7 @@ export function parseHappyAgentConfigToml(source: string): {
     const docker = readDocker(table.docker, recordUnknown);
     const mcpServers = readMcpServers(table.mcp_servers, recordUnknown);
     const network = readNetwork(table.network, recordUnknown);
+    const observation = readObservation(table.observation, recordUnknown);
     const p2p = readP2p(table.p2p, recordUnknown);
     const permissions = readPermissions(table.permissions, recordUnknown);
     const presence = readPresence(table.presence, recordUnknown);
@@ -940,6 +987,7 @@ export function parseHappyAgentConfigToml(source: string): {
         ...(docker === undefined ? {} : { docker }),
         ...(mcpServers === undefined ? {} : { mcp_servers: mcpServers }),
         ...(network === undefined ? {} : { network }),
+        ...(observation === undefined ? {} : { observation }),
         ...(p2p === undefined ? {} : { p2p }),
         ...(permissions === undefined ? {} : { permissions }),
         ...(presence === undefined ? {} : { presence }),
@@ -1056,6 +1104,9 @@ function derivePaths(input: HappyAgentConfigurationInput): HappyAgentConfigurati
     const publicHome = join(dirname(happyHome), "Happy");
     const agentHome = join(happyHome, "agent");
     const configHome = join(publicHome, "Config");
+    // What the agent records about itself stays in the private root beside its database, because
+    // logs and a verbatim history dump say everything the conversation said.
+    const observationHome = join(agentHome, "observation");
     const paths = {
         agentHome,
         agentLockPath: join(agentHome, "agent.lock"),
@@ -1065,8 +1116,11 @@ function derivePaths(input: HappyAgentConfigurationInput): HappyAgentConfigurati
         generatedPath: join(publicHome, "Generated"),
         globalConfigPath: join(configHome, "happy.toml"),
         happyHome,
+        historyDumpHome: join(observationHome, "history"),
         instructionsPath: join(configHome, "AGENTS.md"),
         localConfigPath: join(process.cwd(), "rig.toml"),
+        logPath: join(observationHome, "agent.log"),
+        observationHome,
         publicHome,
         runtimeConfigPath: join(agentHome, "runtime.toml"),
         securityPath: join(configHome, "SECURITY.md"),
@@ -1103,6 +1157,8 @@ function mergeValues(...partials: readonly PartialValues[]): HappyAgentConfigVal
             Object.assign(merged.mcpServers, normalizeMcpServers(partial.mcp_servers));
         }
         if (partial.network !== undefined) merged.network = normalizeNetwork(partial.network);
+        if (partial.observation !== undefined)
+            Object.assign(merged.observation, normalizeObservation(partial.observation));
         if (partial.permissions?.protected_paths !== undefined) {
             merged.permissions.protectedPaths = [
                 ...new Set([
@@ -1252,6 +1308,18 @@ function normalizeNetwork(value: NonNullable<PartialValues["network"]>): Record<
             : { allowedLoopbackPorts: value.allowed_loopback_ports }),
         ...(value.allowed_ports === undefined ? {} : { allowedPorts: value.allowed_ports }),
         ...(value.denied_domains === undefined ? {} : { deniedDomains: value.denied_domains }),
+    };
+}
+
+function normalizeObservation(
+    value: NonNullable<PartialValues["observation"]>,
+): Record<string, unknown> {
+    return {
+        ...(value.history_dump === undefined ? {} : { historyDump: value.history_dump }),
+        ...(value.log_level === undefined ? {} : { logLevel: value.log_level }),
+        ...(value.logs === undefined ? {} : { logs: value.logs }),
+        ...(value.traces === undefined ? {} : { traces: value.traces }),
+        ...(value.traces_endpoint === undefined ? {} : { tracesEndpoint: value.traces_endpoint }),
     };
 }
 
@@ -1532,6 +1600,10 @@ function inferProviderType(id: string, type: unknown): "bedrock" | "claude" | "c
 function withoutProjectMachineSettings(values: PartialValues): PartialValues {
     const {
         docker: _docker,
+        // Observation is dropped along with the other machine settings, and for a sharper reason:
+        // a checked-in project file that turns tracing on and names its own endpoint would send
+        // this machine's traces wherever the repository asked.
+        observation: _observation,
         p2p: _p2p,
         provider_default_enable: _providerDefaultEnable,
         providers: _providers,
@@ -1576,6 +1648,13 @@ function calculateProvenance(...sources: readonly PartialValues[]): Record<strin
             workflows: "workflows",
             workspaces: "workspaces",
         },
+        observation: {
+            history_dump: "historyDump",
+            log_level: "logLevel",
+            logs: "logs",
+            traces: "traces",
+            traces_endpoint: "tracesEndpoint",
+        },
         settings: {
             compact_completed_turns: "compactCompletedTurns",
             completion_chime: "completionChime",
@@ -1604,6 +1683,7 @@ function calculateProvenance(...sources: readonly PartialValues[]): Record<strin
                 section === "defaults" ||
                 section === "settings" ||
                 section === "features" ||
+                section === "observation" ||
                 section === "workspace"
             ) {
                 for (const key of Object.keys(source[section] ?? {})) {
@@ -1786,6 +1866,19 @@ function readNetwork(
         ],
         partialValuesSchema.properties.network!,
     ) as PartialValues["network"];
+}
+
+function readObservation(
+    value: TomlValue | undefined,
+    unknown: (path: string) => void,
+): PartialValues["observation"] {
+    return readTableValues(
+        value,
+        "observation",
+        unknown,
+        ["history_dump", "log_level", "logs", "traces", "traces_endpoint"],
+        partialValuesSchema.properties.observation!,
+    ) as PartialValues["observation"];
 }
 
 function readP2p(

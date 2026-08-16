@@ -67,7 +67,8 @@ export type ModelSwitchModuleOptions = Static<typeof modelSwitchModuleOptionsSch
  * changed and that a conversation it cannot see came before, so the model orients itself instead
  * of starting over.
  *
- * A compatible switch keeps the history and needs no notice, and none is produced.
+ * A compatible switch keeps the history and needs no notice, and none is produced. Neither does a
+ * new agent's first message, which settles a model rather than replacing one.
  *
  * Model switching itself never requires a history: the notice degrades to saying plainly that an
  * invisible conversation came before, which is honest and sufficient on its own. A `HistoryModule`
@@ -103,6 +104,11 @@ export class ModelSwitchModule implements AgentModule {
     ): Promise<SessionSystemMessage | undefined> => {
         // A compatible change carries the history across, so there is nothing to explain.
         if (!change.wasReset) return undefined;
+        // An agent that never had a model never held a conversation either: its first message
+        // settles the selection rather than replacing one. The base still reports that as a
+        // reset because the empty context is discarded, but there is no erased work to inherit,
+        // so a notice would only tell a new agent to go looking for a past it never had.
+        if (change.previousModel === undefined) return undefined;
         const text = createModelSwitchNotice({
             previousModel: this.#label(change.previousModel, change.previousProvider),
             previousProvider: change.previousProvider,

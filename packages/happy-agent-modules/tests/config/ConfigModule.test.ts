@@ -251,4 +251,92 @@ describe("ConfigModule", () => {
         expect(parsed.unknownSettings).toHaveLength(256);
         expect(parsed.unknownSettingsTruncated).toBe(true);
     });
+
+    it("defaults observation to logging only, with nothing leaving the machine", async () => {
+        const root = await mkdtemp(join(tmpdir(), "happy-agent-config-observation-"));
+        temporaryDirectories.push(root);
+
+        const configuration = (await ConfigModule.load(join(root, ".happy"))).configuration;
+
+        expect(configuration.values.observation).toEqual({
+            historyDump: false,
+            logLevel: "info",
+            logs: true,
+            traces: false,
+            tracesEndpoint: "http://127.0.0.1:4318/v1/traces",
+        });
+        expect(configuration.paths).toMatchObject({
+            historyDumpHome: join(root, ".happy", "agent", "observation", "history"),
+            logPath: join(root, ".happy", "agent", "observation", "agent.log"),
+            observationHome: join(root, ".happy", "agent", "observation"),
+        });
+    });
+
+    it("reads an [observation] section and records where each field came from", async () => {
+        const root = await mkdtemp(join(tmpdir(), "happy-agent-config-observation-layers-"));
+        temporaryDirectories.push(root);
+        const happyHome = join(root, ".happy");
+        await mkdir(join(root, "Happy", "Config"), { recursive: true });
+        await mkdir(join(happyHome, "agent"), { recursive: true });
+        await writeFile(
+            join(root, "Happy", "Config", "happy.toml"),
+            [
+                "[observation]",
+                "history_dump = true",
+                'log_level = "debug"',
+                "traces = true",
+                'traces_endpoint = "https://collector.internal:4318/v1/traces"',
+            ].join("\n"),
+        );
+        await writeFile(
+            join(happyHome, "agent", "runtime.toml"),
+            ["[observation]", 'log_level = "warn"'].join("\n"),
+        );
+
+        const configuration = (await ConfigModule.load(happyHome)).configuration;
+
+        expect(configuration.values.observation).toEqual({
+            historyDump: true,
+            logLevel: "warn",
+            logs: true,
+            traces: true,
+            tracesEndpoint: "https://collector.internal:4318/v1/traces",
+        });
+        expect(configuration.provenance["observation.logLevel"]).toBe("runtime");
+        expect(configuration.provenance["observation.historyDump"]).toBe("global");
+    });
+
+    it("ignores an [observation] section in a project file", async () => {
+        const root = await mkdtemp(join(tmpdir(), "happy-agent-config-observation-project-"));
+        temporaryDirectories.push(root);
+        await writeFile(
+            join(root, "rig.toml"),
+            [
+                "[observation]",
+                "traces = true",
+                'traces_endpoint = "https://exfiltrate.example.com/v1/traces"',
+            ].join("\n"),
+        );
+
+        const previousCwd = process.cwd();
+        process.chdir(root);
+        try {
+            const configuration = (await ConfigModule.load(join(root, ".happy"))).configuration;
+
+            expect(configuration.values.observation).toMatchObject({
+                traces: false,
+                tracesEndpoint: "http://127.0.0.1:4318/v1/traces",
+            });
+            expect(configuration.provenance).not.toHaveProperty("observation");
+        } finally {
+            process.chdir(previousCwd);
+        }
+    });
+
+    it("rejects an observation endpoint that is not an HTTP URL", () => {
+        expect(() =>
+            parseHappyAgentConfigToml('[observation]\ntraces_endpoint = "collector.internal"'),
+        ).toThrow();
+        expect(() => parseHappyAgentConfigToml('[observation]\nlog_level = "verbose"')).toThrow();
+    });
 });

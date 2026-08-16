@@ -17,7 +17,11 @@ import {
     type AgentHttpRouteGroup,
     type AgentHttpServer,
 } from "./modules/http/index.js";
-import { ConfigModule, type HappyAgentConfiguration } from "@slopus/happy-agent-modules";
+import {
+    ConfigModule,
+    ObservationModule,
+    type HappyAgentConfiguration,
+} from "@slopus/happy-agent-modules";
 
 export interface StartHappyAgentDaemonOptions extends Omit<
     LoadHappyAgentOptions,
@@ -26,6 +30,7 @@ export interface StartHappyAgentDaemonOptions extends Omit<
     | "effectiveSelection"
     | "integrations"
     | "models"
+    | "observation"
     | "provider"
     | "providers"
 > {
@@ -64,13 +69,21 @@ export interface HappyAgentDaemon {
 
 /** Starts the complete local Happy agent and its private `/v0` Unix-socket API. */
 export async function startHappyAgentDaemon(
-    ctx: RootContext,
+    rootCtx: RootContext,
     options: StartHappyAgentDaemonOptions = {},
 ): Promise<HappyAgentDaemon> {
     // Resolve the layout before opening the socket, creating homes, or
     // constructing the Agent System. Runtime injections remain independent.
     const configModule = await ConfigModule.load(options.happyHome);
     const configuration = configModule.configuration;
+    // Observation is started before anything it should be able to watch, and the root it installs
+    // its logger and tracer on becomes the root every lifetime below is derived from. Contexts are
+    // immutable, so a module that starts on the old root would log nowhere for ever.
+    const observation = await ObservationModule.start({
+        configuration,
+        ...(options.version === undefined ? {} : { version: options.version }),
+    });
+    const ctx = observation.install(rootCtx);
     if (
         Object.keys(configuration.values.mcpServers).length > 0 &&
         options.integrations?.mcp === undefined
@@ -116,6 +129,7 @@ export async function startHappyAgentDaemon(
         effectiveSelection,
         integrations: options.integrations ?? vanilla.integrations,
         models: effectiveModels,
+        observation,
         provider: resolvedProvider,
         providers: resolvedProviders,
         ...(options.config === undefined ? {} : { config: options.config }),
@@ -145,13 +159,14 @@ export async function startHappyAgentDaemon(
     } catch (error) {
         await agent?.close(ctx.named("happy-agent-startup-cleanup")).catch(() => undefined);
         await http.close().catch(() => undefined);
+        await observation.close(rootCtx).catch(() => undefined);
         throw error;
     }
     if (agent === undefined) throw new Error("The Happy agent did not finish loading.");
 
     let closing: Promise<void> | undefined;
     closeDaemon = (closeCtx = ctx.named("happy-agent-shutdown")) => {
-        closing ??= closeHappyAgentDaemon(closeCtx, agent, http);
+        closing ??= closeHappyAgentDaemon(closeCtx, agent, http, observation);
         return closing;
     };
     return {
@@ -168,6 +183,7 @@ async function closeHappyAgentDaemon(
     ctx: Context,
     agent: LoadedHappyAgent,
     http: AgentHttpServer,
+    observation: ObservationModule,
 ): Promise<void> {
     const agentCtx = withAgentDatabase(ctx, agent.database);
     await agent.modules.events.record(agentCtx, {
@@ -178,6 +194,9 @@ async function closeHappyAgentDaemon(
     const failures: unknown[] = [];
     await http.close().catch((error: unknown) => failures.push(error));
     await agent.close(agentCtx).catch((error: unknown) => failures.push(error));
+    // Observation closes after everything it was watching, so the last thing the daemon did is
+    // still in the file a person reads to find out why it stopped.
+    await observation.close(ctx).catch((error: unknown) => failures.push(error));
     if (failures.length > 0) {
         throw new AggregateError(failures, "The Happy agent daemon did not close cleanly.");
     }

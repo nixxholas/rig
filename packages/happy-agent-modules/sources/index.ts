@@ -821,6 +821,9 @@ export * from "./projects/index.js";
 // User input: questions the agent asks a person, and the answers it waits for.
 export * from "./userInput/index.js";
 
+// Observation: what the agent records about itself — logs, traces, and a readable history dump.
+export * from "./observation/index.js";
+
 // Integration modules: Happy clients, MCP servers, and skills.
 export * from "./happy/index.js";
 export * from "./mcp/index.js";

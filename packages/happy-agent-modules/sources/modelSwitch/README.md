@@ -8,6 +8,9 @@ one system message at the head of that fresh context saying what changed and tha
 it cannot see came before, so the model orients itself instead.
 
 A compatible switch — one that keeps the history intact — needs no notice, and none is produced.
+Neither does a new agent's first message. An agent that never had a model never held a conversation
+either, so its opening selection settles the model rather than replacing one; the base still reports
+that as a reset because it discards the empty context, but there is no erased work to inherit.
 
 ```ts
 import { Agent } from "@slopus/happy-agent-base";
@@ -54,7 +57,8 @@ and passing it into `Agent.create`'s `modules` array. Its hooks:
   collection, which is where a model's picker label comes from when naming it in the notice.
 - `modelChanged(ctx, scope: AgentModuleScope, change: AgentBaseModelChange): Promise<SessionSystemMessage | undefined>` —
   called by the agent base whenever a consumed message changes the effective model. Returns
-  `undefined` when `change.wasReset` is false (a compatible switch). Otherwise it builds and
+  `undefined` when `change.wasReset` is false (a compatible switch) and when `change.previousModel`
+  is `undefined` (a new agent settling its first selection). Otherwise it builds and
   returns one `{ role: "system", content: [{ type: "text", text }] }` message. `change` carries
   `previousModel`, `model`, `previousProvider`, `provider`, `providers` (the `AgentProviders`
   registry), and `wasReset`.
