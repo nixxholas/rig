@@ -185,17 +185,21 @@ describe("SchedulingModule", () => {
             expect(tool).toBeDefined();
             expect(
                 Value.Check(tool!.parameters, {
-                    agent_id: "agent-b",
-                    message: "Review the release",
-                    in: { seconds: 1 },
+                    input: {
+                        agent_id: "agent-b",
+                        message: "Review the release",
+                        in: { seconds: 1 },
+                    },
                 }),
             ).toBe(true);
             const result = await tool!.execute(
                 created.database.context,
                 {
-                    agent_id: "agent-b",
-                    message: "Review the release",
-                    in: { seconds: 1 },
+                    input: {
+                        agent_id: "agent-b",
+                        message: "Review the release",
+                        in: { seconds: 1 },
+                    },
                 },
                 { id: "schedule1", providerCallId: "provider-schedule1", kv: {} } as never,
             );
@@ -304,8 +308,7 @@ describe("SchedulingModule", () => {
             );
             expect(
                 Value.Check(waitTool!.parameters, {
-                    seconds: 30,
-                    minutes: 1,
+                    input: { seconds: 30, minutes: 1 },
                 }),
             ).toBe(true);
             await created.scheduler.waitStartedFor("wait1");

@@ -72,6 +72,7 @@ import { sql } from "drizzle-orm";
 import type { LibSQLDatabase } from "drizzle-orm/libsql";
 import type { Context } from "@steve.kite/stdlib";
 
+import { checkModuleToolParameters } from "./checkModuleToolParameters.js";
 import { openHappyAgentDatabase } from "./HappyAgentDatabase.js";
 import { acquireHappyAgentStorageLock } from "./HappyAgentStorageLock.js";
 import { readGlobalInstructions } from "./readGlobalInstructions.js";
@@ -292,7 +293,7 @@ export async function loadHappyAgent(
             modules.compute,
             modules.events,
             loaderStateModule,
-        ];
+        ].map(checkModuleToolParameters);
         system = await AgentSystemLocal.create(ctx, storage, {
             models: options.models,
             modules: orderedModules,

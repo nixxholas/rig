@@ -229,7 +229,7 @@ describe("WorkflowsModule", () => {
             expect(tool).toBeDefined();
             const result = await tool!.execute(
                 test.database.context,
-                { workflow: "demo", input: "one\r\ntwo" },
+                { input: { workflow: "demo", input: "one\r\ntwo" } },
                 toolCall("call-cuid2"),
             );
 
@@ -257,11 +257,13 @@ describe("WorkflowsModule", () => {
             await tool!.execute(
                 test.database.context,
                 {
-                    script: "print('review')\r\n",
-                    args: { files: ["a.ts", "b.ts"] },
-                    name: "review",
-                    description: "Review changed files",
-                    resumeFromRunId: "prior-run",
+                    input: {
+                        script: "print('review')\r\n",
+                        args: { files: ["a.ts", "b.ts"] },
+                        name: "review",
+                        description: "Review changed files",
+                        resumeFromRunId: "prior-run",
+                    },
                 },
                 toolCall("script-call"),
             );

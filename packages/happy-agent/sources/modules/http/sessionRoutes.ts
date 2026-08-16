@@ -1126,14 +1126,15 @@ async function rigTranscript(
                 messageEventId[message.id] = event.id;
             }
         }
+        if (value.type === "run_error") {
+            turn.endedAt = event.occurredAt;
+            turn.outcome = "error";
+            if (typeof data.errorMessage === "string") turn.errorMessage = data.errorMessage;
+        }
         if (value.type === "run_finished") {
             turn.endedAt = event.occurredAt;
             const stopReason = data.stopReason;
-            turn.outcome =
-                stopReason === "error" ? "error" : stopReason === "aborted" ? "stopped" : "success";
-            if (stopReason === "error" && typeof data.message === "string") {
-                turn.errorMessage = data.message;
-            }
+            turn.outcome = stopReason === "aborted" ? "stopped" : "success";
         }
         turns.set(runId, turn);
     }
@@ -1549,18 +1550,32 @@ export function projectSessionEvent(
         };
     }
     if (event.type === "loop.settled" && runId !== undefined) {
+        const stopReason =
+            payload.stopReason === "aborted" ||
+            payload.stopReason === "error" ||
+            payload.stopReason === "length"
+                ? payload.stopReason
+                : "stop";
+        // A failed run ends as `run_error` rather than `run_finished`, because that is the only
+        // terminal event that carries the failure text into the transcript. Emitting exactly one
+        // terminal event per run keeps the client's run bookkeeping unambiguous.
+        if (stopReason === "error") {
+            return {
+                ...base,
+                data: {
+                    errorMessage:
+                        typeof payload.errorMessage === "string" && payload.errorMessage.length > 0
+                            ? payload.errorMessage
+                            : "The agent run failed before it produced an answer.",
+                    modelLocked: false,
+                    runId,
+                },
+                type: "run_error",
+            };
+        }
         return {
             ...base,
-            data: {
-                modelLocked: false,
-                runId,
-                stopReason:
-                    payload.stopReason === "aborted" ||
-                    payload.stopReason === "error" ||
-                    payload.stopReason === "length"
-                        ? payload.stopReason
-                        : "stop",
-            },
+            data: { modelLocked: false, runId, stopReason },
             type: "run_finished",
         };
     }

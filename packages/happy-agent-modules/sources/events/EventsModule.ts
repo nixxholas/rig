@@ -61,6 +61,12 @@ const activeRunSchema = Type.Object(
         argumentBuffers: Type.Record(Type.String(), Type.String()),
         blocks: Type.Array(Type.Unknown()),
         callIndexes: Type.Record(Type.String(), Type.Integer({ minimum: 0 })),
+        /**
+         * What the provider said when it ended the run badly. It is kept on the run so the
+         * settlement event can describe the failure, rather than leaving a client to reconstruct
+         * it from the raw provider event it may not understand.
+         */
+        errorMessage: Type.Optional(Type.String({ maxLength: 8_192 })),
         runId: Type.String({ minLength: 1, maxLength: 256 }),
         stopReason: Type.Union([
             Type.Literal("aborted"),
@@ -415,6 +421,7 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
             agentId: scope.agent.id,
             payload: {
                 ...settlement,
+                ...(run?.errorMessage === undefined ? {} : { errorMessage: run.errorMessage }),
                 runId: run?.runId ?? settlement.loopId,
                 stopReason: run?.stopReason ?? "stop",
             },
@@ -667,6 +674,9 @@ function projectProviderEvent(
                   : event.state === "length"
                     ? "length"
                     : "stop";
+        if (event.state === "error") {
+            run.errorMessage = event.message;
+        }
     }
     return { ...(rigEvent === undefined ? {} : { rigEvent }), run };
 }

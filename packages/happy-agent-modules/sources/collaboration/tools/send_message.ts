@@ -1,11 +1,22 @@
+import { Type, type Static } from "@sinclair/typebox";
 import { defineAgentTool } from "@slopus/happy-agent-base";
 
 import type { CollaborationModule } from "../CollaborationModule.js";
 import {
     collaborationSendToolInputSchema,
     collaborationSendResultSchema,
-    type CollaborationSendToolInput,
 } from "../CollaborationMessage.js";
+
+/**
+ * Providers require an object at the root of a tool's parameters, so the message variants stay a
+ * closed union and travel as one argument.
+ */
+const sendMessageToolParametersSchema = Type.Object(
+    { input: collaborationSendToolInputSchema },
+    { additionalProperties: false },
+);
+
+type SendMessageToolParameters = Static<typeof sendMessageToolParametersSchema>;
 
 /** Queue one durable message and, optionally, a durable reply obligation. */
 export function sendMessageTool(collaboration: CollaborationModule, actingAgentId: string) {
@@ -13,11 +24,11 @@ export function sendMessageTool(collaboration: CollaborationModule, actingAgentI
         name: "send_agent_message",
         description:
             "Send a text message to another collaborator. Set expectReply when the recipient must answer; then use wait_for_reply. Set readOnly true to switch the recipient to Read only, or false to restore the sender's current permission mode.",
-        parameters: collaborationSendToolInputSchema,
+        parameters: sendMessageToolParametersSchema,
         returnType: collaborationSendResultSchema,
         durable: true,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, input: CollaborationSendToolInput, call) =>
+        execute: async (ctx, { input }: SendMessageToolParameters, call) =>
             await collaboration.sendMessage(ctx, actingAgentId, {
                 ...input,
                 messageId: call.id,

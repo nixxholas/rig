@@ -46,6 +46,22 @@ export interface RemoteAgentOptions {
     session: ProtocolSession;
 }
 
+/**
+ * A model, reasoning effort, or fast-mode choice the user has made here and that no run has
+ * carried to the daemon yet.
+ *
+ * The protocol applies these fields when the next message's run starts, so choosing a model is a
+ * local decision rather than a separate session mutation that a busy or restrictive daemon could
+ * reject. The choice is re-asserted over any authoritative session that still predates it.
+ */
+interface RemoteAgentSelection {
+    readonly effort?: string;
+    readonly modelId?: string;
+    readonly providerId?: string;
+    /** Null turns fast mode off; absent leaves it untouched. */
+    readonly serviceTier?: ServiceTier | null;
+}
+
 export class RemoteAgent implements CodingAssistantAgentBackend {
     readonly context: AgentContext;
     readonly id: string;
@@ -58,16 +74,7 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
     #providerId: string;
     #pendingSteeringMessages = new Map<string, { message: UserMessage; runId: string }>();
     #session: ProtocolSession;
-    #configurationChangeQueue: Promise<void> = Promise.resolve();
-    #modelChangeVersion = 0;
-    #confirmedEffort: string | undefined;
-    #confirmedModelId: string;
-    #confirmedModels: readonly Model[];
-    #confirmedProviderId: string;
-    #confirmedServiceTier: ServiceTier | undefined;
-    #serviceTierChangeCount = 0;
-    #serviceTierIntent: ServiceTier | undefined;
-    #serviceTierIntentVersion = 0;
+    #selection: RemoteAgentSelection | undefined;
 
     constructor(options: RemoteAgentOptions) {
         this.#client = options.client;
@@ -79,12 +86,6 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         this.#modelId = options.session.modelId;
         this.#models = options.session.models;
         this.#providerId = options.session.providerId;
-        this.#confirmedEffort = options.session.effort ?? options.session.snapshot.effort;
-        this.#confirmedModelId = options.session.modelId;
-        this.#confirmedModels = options.session.models;
-        this.#confirmedProviderId = options.session.providerId;
-        this.#confirmedServiceTier = sessionServiceTier(options.session);
-        this.#serviceTierIntent = this.#confirmedServiceTier;
     }
 
     async steer(
@@ -137,7 +138,7 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
     }
 
     get confirmedServiceTier(): ServiceTier | undefined {
-        return this.#confirmedServiceTier;
+        return sessionServiceTier(this.#session);
     }
 
     get provider(): Provider {
@@ -306,6 +307,9 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
                     ? [{ type: "text" as const, text: content }]
                     : undefined
                 : content;
+        // The local selection travels with the message the protocol applies it to, so a model or
+        // reasoning choice never needs a separate session mutation.
+        const selection = this.#selection;
         const submitted = await this.#client.submitMessage(this.#session.id, {
             ...(options.clientSubmissionId === undefined
                 ? {}
@@ -313,8 +317,10 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
             ...(requestContent === undefined ? {} : { content: requestContent }),
             ...(this.#debug ? { debug: true } : {}),
             ...(options.displayText !== undefined ? { displayText: options.displayText } : {}),
+            ...(selection ?? {}),
             text: displayText,
         });
+        if (selection !== undefined && this.#selection === selection) this.#selection = undefined;
         const streamController = new AbortController();
         let finished:
             | {
@@ -459,28 +465,12 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
     }
 
     setEffort(effort: string | undefined): void {
-        this.#session = {
-            ...this.#session,
-            ...(effort !== undefined ? { effort } : {}),
-            snapshot: {
-                ...this.#session.snapshot,
-                ...(effort !== undefined ? { effort } : {}),
-            },
-        };
-        const request = effort !== undefined ? { effort } : {};
-        void this.#client
-            .changeEffort(this.#session.id, request)
-            .then((response) => {
-                this.#replaceSession(response.session);
-            })
-            .catch(() => undefined);
+        if (effort === undefined) return;
+        this.#selection = { ...this.#selection, effort };
+        this.#applySelection();
     }
 
-    setModel(
-        modelId: string,
-        effort: string | undefined,
-        providerId?: string,
-    ): void | Promise<void> {
+    setModel(modelId: string, effort: string | undefined, providerId?: string): void {
         const nextProviderId = providerId ?? this.#providerId;
         if (
             !this.canChangeModel &&
@@ -498,76 +488,23 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
             throw new Error(`Unknown remote model '${modelId}' for provider '${nextProviderId}'.`);
         }
 
-        const version = ++this.#modelChangeVersion;
-        this.#modelId = modelId;
-        this.#models = nextModels;
-        this.#providerId = nextProviderId;
-        const currentServiceTier = this.#session.serviceTier ?? this.#session.snapshot.serviceTier;
+        const currentServiceTier = sessionServiceTier(this.#session);
         const keepServiceTier =
             currentServiceTier === undefined ||
             nextProvider?.serviceTiers?.includes(currentServiceTier) === true;
-        const { serviceTier: _sessionServiceTier, ...sessionWithoutServiceTier } = this.#session;
-        const { serviceTier: _snapshotServiceTier, ...snapshotWithoutServiceTier } =
-            this.#session.snapshot;
-        this.#session = {
-            ...(keepServiceTier ? this.#session : sessionWithoutServiceTier),
-            ...(effort !== undefined ? { effort } : {}),
+        this.#selection = {
+            ...this.#selection,
+            ...(effort === undefined ? {} : { effort }),
             modelId,
-            models: nextModels,
             providerId: nextProviderId,
-            snapshot: {
-                ...(keepServiceTier ? this.#session.snapshot : snapshotWithoutServiceTier),
-                ...(effort !== undefined ? { effort } : {}),
-                modelId,
-                providerId: nextProviderId,
-            },
+            ...(keepServiceTier ? {} : { serviceTier: null }),
         };
-        const operation = this.#enqueueConfigurationChange(async () => {
-            try {
-                const response = await this.#client.changeModel(this.#session.id, {
-                    ...(effort !== undefined ? { effort } : {}),
-                    modelId,
-                    providerId: nextProviderId,
-                });
-                this.#recordConfirmedSession(response.session);
-                if (version === this.#modelChangeVersion) {
-                    this.#replaceSession(response.session);
-                }
-            } catch (error) {
-                if (version === this.#modelChangeVersion) {
-                    this.#restoreConfirmedModelSelection();
-                }
-                throw error;
-            }
-        });
-        return operation;
+        this.#applySelection();
     }
 
-    setServiceTier(serviceTier: ServiceTier | undefined): Promise<void> {
-        const version = ++this.#serviceTierIntentVersion;
-        this.#serviceTierIntent = serviceTier;
-        this.#serviceTierChangeCount += 1;
-        this.#setLocalServiceTier(serviceTier);
-        const request = serviceTier === undefined ? {} : { serviceTier };
-        return this.#enqueueConfigurationChange(async () => {
-            try {
-                const response = await this.#client.changeServiceTier(this.#session.id, request);
-                this.#confirmedServiceTier = sessionServiceTier(response.session);
-                if (version === this.#serviceTierIntentVersion) {
-                    this.#replaceSession(response.session);
-                }
-            } catch (error) {
-                if (version === this.#serviceTierIntentVersion) {
-                    this.#setLocalServiceTier(this.#confirmedServiceTier);
-                }
-                throw error;
-            } finally {
-                this.#serviceTierChangeCount -= 1;
-                if (this.#serviceTierChangeCount === 0) {
-                    this.#serviceTierIntent = this.#confirmedServiceTier;
-                }
-            }
-        });
+    setServiceTier(serviceTier: ServiceTier | undefined): void {
+        this.#selection = { ...this.#selection, serviceTier: serviceTier ?? null };
+        this.#applySelection();
     }
 
     async setPermissionMode(permissionMode: PermissionMode): Promise<void> {
@@ -902,27 +839,18 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         ) {
             return;
         }
-        this.#recordConfirmedSession(session);
         this.#session = session;
-        if (this.#serviceTierChangeCount > 0) {
-            this.#setLocalServiceTier(this.#serviceTierIntent);
-        }
         this.context.permissions?.setMode(session.permissionMode);
         this.#modelId = session.modelId;
         this.#models = session.models;
         this.#providerId = session.providerId;
+        this.#applySelection();
     }
 
     #discardPendingSteeringMessages(runId: string): void {
         for (const [messageId, pending] of this.#pendingSteeringMessages) {
             if (pending.runId === runId) this.#pendingSteeringMessages.delete(messageId);
         }
-    }
-
-    #enqueueConfigurationChange(change: () => Promise<void>): Promise<void> {
-        const operation = this.#configurationChangeQueue.then(change);
-        this.#configurationChangeQueue = operation.catch(() => undefined);
-        return operation;
     }
 
     #applyAuthoritativeSnapshot(snapshot: AgentSnapshot): void {
@@ -932,42 +860,48 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
             ...(snapshot.serviceTier === undefined ? {} : { serviceTier: snapshot.serviceTier }),
             snapshot,
         };
-        this.#recordConfirmedSession(this.#session);
-        if (this.#serviceTierChangeCount > 0) {
-            this.#setLocalServiceTier(this.#serviceTierIntent);
+        this.#applySelection();
+    }
+
+    /**
+     * Writes the pending local selection over the current session.
+     *
+     * It runs both when the user chooses and whenever the daemon sends an authoritative session,
+     * because until a run has carried the selection the daemon still describes the previous one.
+     */
+    #applySelection(): void {
+        const selection = this.#selection;
+        if (selection === undefined) return;
+        if (selection.modelId !== undefined) {
+            const providerId = selection.providerId ?? this.#providerId;
+            const models =
+                this.#modelCatalog?.providers.find((provider) => provider.providerId === providerId)
+                    ?.models ?? this.#models;
+            this.#modelId = selection.modelId;
+            this.#models = models;
+            this.#providerId = providerId;
+            this.#session = {
+                ...this.#session,
+                modelId: selection.modelId,
+                models,
+                providerId,
+                snapshot: {
+                    ...this.#session.snapshot,
+                    modelId: selection.modelId,
+                    providerId,
+                },
+            };
         }
-    }
-
-    #recordConfirmedSession(session: ProtocolSession): void {
-        this.#confirmedEffort = session.effort ?? session.snapshot.effort;
-        this.#confirmedModelId = session.modelId;
-        this.#confirmedModels = session.models;
-        this.#confirmedProviderId = session.providerId;
-        this.#confirmedServiceTier = sessionServiceTier(session);
-    }
-
-    #restoreConfirmedModelSelection(): void {
-        this.#modelId = this.#confirmedModelId;
-        this.#models = this.#confirmedModels;
-        this.#providerId = this.#confirmedProviderId;
-        const { effort: _sessionEffort, ...session } = this.#session;
-        const { effort: _snapshotEffort, ...snapshot } = this.#session.snapshot;
-        this.#session = {
-            ...session,
-            ...(this.#confirmedEffort === undefined ? {} : { effort: this.#confirmedEffort }),
-            modelId: this.#confirmedModelId,
-            models: this.#confirmedModels,
-            providerId: this.#confirmedProviderId,
-            snapshot: {
-                ...snapshot,
-                ...(this.#confirmedEffort === undefined ? {} : { effort: this.#confirmedEffort }),
-                modelId: this.#confirmedModelId,
-                providerId: this.#confirmedProviderId,
-            },
-        };
-        this.#setLocalServiceTier(
-            this.#serviceTierChangeCount > 0 ? this.#serviceTierIntent : this.#confirmedServiceTier,
-        );
+        if (selection.effort !== undefined) {
+            this.#session = {
+                ...this.#session,
+                effort: selection.effort,
+                snapshot: { ...this.#session.snapshot, effort: selection.effort },
+            };
+        }
+        if (selection.serviceTier !== undefined) {
+            this.#setLocalServiceTier(selection.serviceTier ?? undefined);
+        }
     }
 
     #setLocalServiceTier(serviceTier: ServiceTier | undefined): void {

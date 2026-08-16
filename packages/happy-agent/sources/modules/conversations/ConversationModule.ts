@@ -446,6 +446,13 @@ export class ConversationModule implements AgentModule<AnyAgentTool, LibSQLDatab
         event: SessionEvent,
     ): Promise<void> => {
         await this.recordAgentEvent(ctx, scope.agent.id, "agent_event", event);
+        // A run that ends badly must not settle as completed. Recording the failure here rather
+        // than at settlement keeps the provider's own verdict authoritative; the next run clears
+        // it again when the loop starts.
+        if (event.type === "done" && event.state === "error") {
+            const session = await this.getByAgent(ctx, scope.agent.id);
+            if (session !== undefined) await this.update(ctx, session.id, { status: "error" });
+        }
     };
 
     readonly messageAccepted = async (
@@ -491,7 +498,9 @@ export class ConversationModule implements AgentModule<AnyAgentTool, LibSQLDatab
     ): Promise<void> => {
         const session = await this.getByAgent(ctx, scope.agent.id);
         if (session === undefined) return;
-        await this.update(ctx, session.id, { status: "completed" });
+        if (session.status !== "error") {
+            await this.update(ctx, session.id, { status: "completed" });
+        }
         await this.appendEvent(ctx, session.id, {
             payload: settlement,
             type: "run_finished",

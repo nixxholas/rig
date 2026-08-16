@@ -2443,7 +2443,25 @@ describe("CodingAssistantApp", () => {
             },
         };
         const changeModel = vi.fn(async () => ({ session: bedrockSession }));
-        const client = { changeModel } as unknown as ProtocolHttpClient;
+        const submitMessage = vi.fn(async () => ({
+            eventId: "event-submit",
+            runId: "run-1",
+            sessionId: "session-1",
+        }));
+        const watchSessionEvents = vi.fn(async (options) => {
+            await options.onEvent({
+                createdAt: 1,
+                data: { modelLocked: false, runId: "run-1", stopReason: "stop" },
+                id: "event-finished",
+                sessionId: "session-1",
+                type: "run_finished",
+            });
+        });
+        const client = {
+            changeModel,
+            submitMessage,
+            watchSessionEvents,
+        } as unknown as ProtocolHttpClient;
         const harness = createJustBashToolHarness();
         const agent = new RemoteAgent({
             client,
@@ -2470,18 +2488,20 @@ describe("CodingAssistantApp", () => {
         app.handleInput("\r");
         app.handleInput("\r");
 
-        await vi.waitFor(() =>
-            expect(changeModel).toHaveBeenCalledWith("session-1", {
-                effort: "off",
-                modelId: bedrockOnly.id,
-                providerId: "bedrock",
-            }),
-        );
-        await vi.waitFor(() => expect(agent.provider.id).toBe("bedrock"));
+        expect(agent.provider.id).toBe("bedrock");
         expect(agent.model.id).toBe(bedrockOnly.id);
+        // The choice travels with the message it applies to instead of mutating the session.
+        await agent.send(createTestRootContext().named("send"), "Go.");
+        expect(changeModel).not.toHaveBeenCalled();
+        expect(submitMessage).toHaveBeenCalledWith("session-1", {
+            effort: "off",
+            modelId: bedrockOnly.id,
+            providerId: "bedrock",
+            text: "Go.",
+        });
     });
 
-    it("rolls back a rejected provider change without persisting cleared fast mode", async () => {
+    it("applies a provider change locally and clears fast mode it cannot keep", async () => {
         const codexModel = defineModel({
             id: "openai/gpt-test",
             name: "GPT Test",
@@ -2541,7 +2561,7 @@ describe("CodingAssistantApp", () => {
             tasks: [],
             titleStatus: "idle",
         };
-        const changeModel = vi.fn().mockRejectedValue(new Error("provider unavailable"));
+        const changeModel = vi.fn();
         const agent = new RemoteAgent({
             client: { changeModel } as unknown as ProtocolHttpClient,
             context: createJustBashToolHarness().context,
@@ -2573,18 +2593,20 @@ describe("CodingAssistantApp", () => {
 
         expect(agent.provider.id).toBe("claude");
         expect(agent.snapshot().serviceTier).toBeUndefined();
-        await vi.waitFor(() =>
-            expect(stripAnsi(app.render(100).join("\n"))).toContain(
-                "Could not change to Claude Test: provider unavailable",
-            ),
-        );
-        expect(agent.provider.id).toBe("codex");
-        expect(agent.snapshot().serviceTier).toBe("fast");
-        expect(defaultModelChanges).toEqual([]);
-        expect(stripAnsi(app.render(100).join("\n"))).toContain("gpt-test off fast ·");
+        expect(changeModel).not.toHaveBeenCalled();
+        await vi.waitFor(() => expect(defaultModelChanges).toHaveLength(1));
+        expect(defaultModelChanges).toEqual([
+            {
+                effort: "off",
+                modelId: claudeModel.id,
+                providerId: "claude",
+                serviceTier: null,
+            },
+        ]);
+        expect(stripAnsi(app.render(100).join("\n"))).toContain("claude-test off ·");
     });
 
-    it("does not persist a rejected fast tier through a later model change", async () => {
+    it("keeps a fast choice through a later model change on the same provider", async () => {
         const firstModel = defineModel({
             id: "openai/gpt-first",
             name: "GPT First",
@@ -2645,17 +2667,8 @@ describe("CodingAssistantApp", () => {
             tasks: [],
             titleStatus: "idle",
         };
-        const changedSession: ProtocolSession = {
-            ...session,
-            modelId: secondModel.id,
-            snapshot: { ...snapshot, modelId: secondModel.id },
-        };
-        let resolveModelChange!: (value: { session: ProtocolSession }) => void;
-        const modelChange = new Promise<{ session: ProtocolSession }>((resolve) => {
-            resolveModelChange = resolve;
-        });
-        const changeModel = vi.fn(() => modelChange);
-        const changeServiceTier = vi.fn().mockRejectedValue(new Error("fast unavailable"));
+        const changeModel = vi.fn();
+        const changeServiceTier = vi.fn();
         const agent = new RemoteAgent({
             client: { changeModel, changeServiceTier } as unknown as ProtocolHttpClient,
             context: createJustBashToolHarness().context,
@@ -2688,23 +2701,21 @@ describe("CodingAssistantApp", () => {
 
         expect(agent.model.id).toBe(secondModel.id);
         expect(agent.snapshot().serviceTier).toBe("fast");
-        await vi.waitFor(() => expect(changeModel).toHaveBeenCalledOnce());
-        expect(agent.snapshot().serviceTier).toBeUndefined();
-        resolveModelChange({ session: changedSession });
-        await vi.waitFor(() =>
-            expect(stripAnsi(app.render(100).join("\n"))).toContain(
-                "Could not turn fast mode on: fast unavailable",
-            ),
-        );
-        await vi.waitFor(() => expect(defaultModelChanges).toHaveLength(1));
-        expect(agent.model.id).toBe(secondModel.id);
-        expect(agent.snapshot().serviceTier).toBeUndefined();
+        expect(changeModel).not.toHaveBeenCalled();
+        expect(changeServiceTier).not.toHaveBeenCalled();
+        await vi.waitFor(() => expect(defaultModelChanges).toHaveLength(2));
         expect(defaultModelChanges).toEqual([
+            {
+                effort: "off",
+                modelId: firstModel.id,
+                providerId: "codex",
+                serviceTier: "fast",
+            },
             {
                 effort: "off",
                 modelId: secondModel.id,
                 providerId: "codex",
-                serviceTier: null,
+                serviceTier: "fast",
             },
         ]);
     });
@@ -2956,7 +2967,7 @@ describe("CodingAssistantApp", () => {
         await vi.waitFor(() => expect(writes).toEqual(["fast", null]));
     });
 
-    it("rolls back a rejected fast change without persisting it", async () => {
+    it("applies a fast change locally and persists it as the default", async () => {
         const model = defineModel({
             id: "openai/gpt-test",
             name: "GPT Test",
@@ -3004,7 +3015,7 @@ describe("CodingAssistantApp", () => {
             tasks: [],
             titleStatus: "idle",
         };
-        const changeServiceTier = vi.fn().mockRejectedValue(new Error("daemon unavailable"));
+        const changeServiceTier = vi.fn();
         const agent = new RemoteAgent({
             client: { changeServiceTier } as unknown as ProtocolHttpClient,
             context: createJustBashToolHarness().context,
@@ -3035,16 +3046,19 @@ describe("CodingAssistantApp", () => {
         });
 
         submit(app, "/fast on");
-        expect(agent.snapshot().serviceTier).toBe("fast");
 
-        await vi.waitFor(() =>
-            expect(stripAnsi(app.render(100).join("\n"))).toContain(
-                "Could not turn fast mode on: daemon unavailable",
-            ),
-        );
-        expect(agent.snapshot().serviceTier).toBeUndefined();
-        expect(defaultModelChanges).toEqual([]);
-        expect(stripAnsi(app.render(100).join("\n"))).not.toContain("gpt-test ultra fast ·");
+        expect(agent.snapshot().serviceTier).toBe("fast");
+        expect(changeServiceTier).not.toHaveBeenCalled();
+        await vi.waitFor(() => expect(defaultModelChanges).toHaveLength(1));
+        expect(defaultModelChanges).toEqual([
+            {
+                effort: "ultra",
+                modelId: model.id,
+                providerId: "codex",
+                serviceTier: "fast",
+            },
+        ]);
+        expect(stripAnsi(app.render(100).join("\n"))).toContain("gpt-test ultra fast ·");
     });
 
     it("only offers fast inference for providers that support it", async () => {

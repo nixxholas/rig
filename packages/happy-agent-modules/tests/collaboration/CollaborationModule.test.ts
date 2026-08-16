@@ -300,9 +300,11 @@ describe("CollaborationModule", () => {
             const request = await send.execute(
                 database.context,
                 {
-                    toAgentId: child.id,
-                    text: "Please review this.",
-                    expectReply: true,
+                    input: {
+                        toAgentId: child.id,
+                        text: "Please review this.",
+                        expectReply: true,
+                    },
                 },
                 toolCall("messagecallid", commitDepths, committed, broker),
             );
@@ -331,7 +333,7 @@ describe("CollaborationModule", () => {
             broker.waitResult = answered.obligation;
             const waited = await wait.execute(
                 database.context,
-                { obligationId: request.obligation!.id },
+                { input: { obligationId: request.obligation!.id } },
                 toolCall("waitcallid", commitDepths, committed, broker),
             );
             expect(waited.status).toBe("answered");
@@ -819,7 +821,7 @@ describe("CollaborationModule", () => {
             });
             await wait.execute(
                 database.context,
-                { agentId: "child" },
+                { input: { agentId: "child" } },
                 toolCall("wait-new", [], [], broker),
             );
             broker.observations.set("child", {
@@ -832,7 +834,7 @@ describe("CollaborationModule", () => {
             await expect(
                 wait.execute(
                     database.context,
-                    { agentId: "child" },
+                    { input: { agentId: "child" } },
                     toolCall("wait-old", [], [], broker),
                 ),
             ).rejects.toThrow("observation for");
@@ -846,7 +848,7 @@ describe("CollaborationModule", () => {
             await expect(
                 wait.execute(
                     database.context,
-                    { agentId: "child" },
+                    { input: { agentId: "child" } },
                     toolCall("wait-old-timestamp", [], [], broker),
                 ),
             ).rejects.toThrow("observation for");
@@ -859,7 +861,7 @@ describe("CollaborationModule", () => {
             await expect(
                 wait.execute(
                     database.context,
-                    { agentId: "child" },
+                    { input: { agentId: "child" } },
                     toolCall("wait-same-version", [], [], broker),
                 ),
             ).rejects.toThrow("observation for");
@@ -873,7 +875,7 @@ describe("CollaborationModule", () => {
             await expect(
                 wait.execute(
                     database.context,
-                    { agentId: "child" },
+                    { input: { agentId: "child" } },
                     toolCall("wait-reordered", [], [], broker),
                 ),
             ).rejects.toThrow("observation for");
@@ -959,7 +961,7 @@ describe("CollaborationModule", () => {
             const wait = tools.find(({ name }) => name === "wait_for_reply")!;
             const result = await wait.execute(
                 database.context,
-                { agentId: "child", timeoutMs: 0 },
+                { input: { agentId: "child", timeoutMs: 0 } },
                 toolCall("agent-wait-call", [], [], broker),
             );
             expect(result).toEqual({

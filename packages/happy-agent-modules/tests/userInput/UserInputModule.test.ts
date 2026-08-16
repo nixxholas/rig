@@ -108,7 +108,7 @@ describe("UserInputModule", () => {
             const tool = requestUserInputTool(module, agentId);
             expect(tool.durable).toBe(false);
             expect(tool.transactional).toBeUndefined();
-            const running = tool.execute(database.context, askInput, {
+            const running = tool.execute(database.context, { input: askInput }, {
                 id: "tool-call",
                 providerCallId: "provider-call",
             } as never);
@@ -136,7 +136,7 @@ describe("UserInputModule", () => {
             const tool = requestUserInputTool(module, agentId);
 
             await expect(
-                tool.execute(database.context, askInput, {
+                tool.execute(database.context, { input: askInput }, {
                     id: "away-call",
                     providerCallId: "provider-call",
                 } as never),
@@ -208,7 +208,7 @@ describe("UserInputModule", () => {
             const request = await module.ask(database.context, agentId, askInput, "cancel-call");
             const result = await cancelAskTool(module, agentId).execute(
                 database.context,
-                { requestId: request.id },
+                { input: { requestId: request.id } },
                 {} as never,
             );
             expect(result).toMatchObject({ id: request.id, status: "cancelled" });
@@ -226,31 +226,33 @@ describe("UserInputModule", () => {
             const waiting = requestUserInputTool(module, agentId).execute(
                 database.context,
                 {
-                    context: "Choose the scope and rollout.",
-                    questions: [
-                        {
-                            id: "scope",
-                            header: "Scope",
-                            question: "Which scope should I use?",
-                            options: [
-                                { label: "Small", description: "Safer first step." },
-                                { label: "Wide", description: "Faster broad rollout." },
-                            ],
-                            multiSelect: false,
-                        },
-                        {
-                            id: "rollout",
-                            header: "Rollout",
-                            question: "Should rollout be gradual?",
-                            options: {
-                                choices: [
-                                    { label: "Yes", description: "Reduce deployment risk." },
-                                    { label: "No", description: "Finish sooner." },
+                    input: {
+                        context: "Choose the scope and rollout.",
+                        questions: [
+                            {
+                                id: "scope",
+                                header: "Scope",
+                                question: "Which scope should I use?",
+                                options: [
+                                    { label: "Small", description: "Safer first step." },
+                                    { label: "Wide", description: "Faster broad rollout." },
                                 ],
                                 multiSelect: false,
                             },
-                        },
-                    ],
+                            {
+                                id: "rollout",
+                                header: "Rollout",
+                                question: "Should rollout be gradual?",
+                                options: {
+                                    choices: [
+                                        { label: "Yes", description: "Reduce deployment risk." },
+                                        { label: "No", description: "Finish sooner." },
+                                    ],
+                                    multiSelect: false,
+                                },
+                            },
+                        ],
+                    },
                 },
                 { id: "batch-call", providerCallId: "provider-call" } as never,
             );
@@ -288,10 +290,12 @@ describe("UserInputModule", () => {
             const waiting = requestUserInputTool(module, agentId).execute(
                 database.context,
                 {
-                    question: "Should I continue?",
-                    context: "This is useful but not blocking.",
-                    header: "Continue",
-                    autoResolutionMs: 60_000,
+                    input: {
+                        question: "Should I continue?",
+                        context: "This is useful but not blocking.",
+                        header: "Continue",
+                        autoResolutionMs: 60_000,
+                    },
                 },
                 { id: "auto-call", providerCallId: "provider-call" } as never,
             );

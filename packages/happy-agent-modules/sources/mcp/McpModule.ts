@@ -197,6 +197,15 @@ export class McpModule implements AgentModule {
                 throw new Error("MCP tool catalog exceeded its bound.");
             }
             for (const tool of tools) {
+                // A server outside this repo may describe its tool with any JSON Schema, but every
+                // provider requires an object at the root and refuses the whole request otherwise.
+                // Dropping the one tool keeps a single odd server from breaking every turn.
+                if (!isObjectRootedSchema(tool.inputSchema)) {
+                    ctx.log.warn(
+                        `The ${tool.name} tool from ${server.name} is unavailable: its input schema is not an object at the top level.`,
+                    );
+                    continue;
+                }
                 loadedTools.push(createMcpTool(this, agentId, server.name, tool));
             }
         }
@@ -815,4 +824,12 @@ function formatIdentityRows(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Whether a server-supplied schema is an object at the root, which is what every model provider
+ * requires of a tool's parameters.
+ */
+function isObjectRootedSchema(schema: unknown): boolean {
+    return isRecord(schema) && schema.type === "object";
 }

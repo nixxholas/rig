@@ -236,10 +236,12 @@ describe("PresenceModule", () => {
             const result = await tool.execute(
                 database.context,
                 {
-                    presenceId: "away",
-                    until: 2_000,
-                    fallbackPresenceId: "online",
-                    message: "back soon",
+                    input: {
+                        presenceId: "away",
+                        until: 2_000,
+                        fallbackPresenceId: "online",
+                        message: "back soon",
+                    },
                 },
                 call,
             );

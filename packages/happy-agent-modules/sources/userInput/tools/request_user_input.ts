@@ -28,7 +28,16 @@ const requestUserInputToolResultSchema = Type.Union([
     userInputDetailPageSchema,
 ]);
 
-type RequestUserInputToolInput = Static<typeof requestUserInputToolInputSchema>;
+/**
+ * Providers require an object at the root of a tool's parameters, so the ask and detail variants
+ * stay a closed union and travel as one argument.
+ */
+const requestUserInputToolParametersSchema = Type.Object(
+    { input: requestUserInputToolInputSchema },
+    { additionalProperties: false },
+);
+
+type RequestUserInputToolParameters = Static<typeof requestUserInputToolParametersSchema>;
 
 /**
  * Ask the human and durably wait for the explicit outcome, or read the bounded details of a
@@ -39,11 +48,11 @@ export function requestUserInputTool(userInput: UserInputModule, agentId: string
         name: "request_user_input",
         description:
             "Ask the human one to four related questions with short headers and the Markdown context they need, then wait for an explicit answer, cancellation, away, or timeout outcome. This request is durable across daemon restarts. Set autoResolutionMs from 60000 to 240000 only when continuing with your best judgement is acceptable if nobody answers. To read more detail from a completed request, call this tool with its requestId and an optional cursor.",
-        parameters: requestUserInputToolInputSchema,
+        parameters: requestUserInputToolParametersSchema,
         returnType: requestUserInputToolResultSchema,
         durable: false,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, input: RequestUserInputToolInput, call) => {
+        execute: async (ctx, { input }: RequestUserInputToolParameters, call) => {
             if ("requestId" in input) {
                 const { requestId, ...query } = input;
                 return await userInput.getPage(ctx, agentId, requestId, query);

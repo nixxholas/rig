@@ -1,20 +1,31 @@
-import { Type } from "@sinclair/typebox";
+import { Type, type Static } from "@sinclair/typebox";
 import { defineAgentTool } from "@slopus/happy-agent-base";
 
 import type { PresenceModule } from "../PresenceModule.js";
 import { presenceStateSchema, presenceToolInputSchema } from "../PresenceState.js";
+
+/**
+ * Providers require an object at the root of a tool's parameters, so the presence variants stay a
+ * closed union and travel as one argument.
+ */
+const setPresenceToolParametersSchema = Type.Object(
+    { input: presenceToolInputSchema },
+    { additionalProperties: false },
+);
+
+type SetPresenceToolParameters = Static<typeof setPresenceToolParametersSchema>;
 
 export function setPresenceTool(presence: PresenceModule) {
     return defineAgentTool({
         name: "set_presence",
         description:
             "Set the user's presence only when the user explicitly asked you to change it. You may set an absolute expiry with until and choose a fallbackPresenceId. Never infer consent from conversation context.",
-        parameters: presenceToolInputSchema,
+        parameters: setPresenceToolParametersSchema,
         returnType: Type.Object({ presence: presenceStateSchema }, { additionalProperties: false }),
         durable: true,
         transactional: true,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, input) => ({
+        execute: async (ctx, { input }: SetPresenceToolParameters) => ({
             presence: await presence.setPresence(ctx, input),
         }),
         toLLM: ({ presence }) => [

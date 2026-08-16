@@ -108,11 +108,13 @@ describe("SlotsModule", () => {
                 execute("create_slot")(
                     database.context,
                     {
-                        slot: "status-line",
-                        scope: "everywhere",
-                        content: { type: "text", markdown: "ready" },
-                        description: "A status",
-                        purpose: "Show readiness",
+                        input: {
+                            slot: "status-line",
+                            scope: "everywhere",
+                            content: { type: "text", markdown: "ready" },
+                            description: "A status",
+                            purpose: "Show readiness",
+                        },
                     } as never,
                     call("create-call"),
                 ),

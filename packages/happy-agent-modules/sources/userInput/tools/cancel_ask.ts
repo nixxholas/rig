@@ -25,7 +25,16 @@ const cancelAskToolInputSchema = Type.Union([
     ),
 ]);
 
-type CancelAskToolInput = Static<typeof cancelAskToolInputSchema>;
+/**
+ * Providers require an object at the root of a tool's parameters, so the two request ID spellings
+ * stay a closed union and travel as one argument.
+ */
+const cancelAskToolParametersSchema = Type.Object(
+    { input: cancelAskToolInputSchema },
+    { additionalProperties: false },
+);
+
+type CancelAskToolParameters = Static<typeof cancelAskToolParametersSchema>;
 
 /**
  * Withdraw a pending question after the model continues without waiting for its answer.
@@ -36,11 +45,11 @@ export function cancelAskTool(userInput: UserInputModule, agentId: string) {
         name: "cancel_ask",
         description:
             "Withdraw a question you asked the user that is still waiting for an answer. Use this when you continued without the user and the answer is no longer needed. The request ID is reported when a question stops waiting.",
-        parameters: cancelAskToolInputSchema,
+        parameters: cancelAskToolParametersSchema,
         returnType: userInputRequestSchema,
         durable: false,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, input: CancelAskToolInput) =>
+        execute: async (ctx, { input }: CancelAskToolParameters) =>
             await userInput.cancel(ctx, agentId, {
                 requestId: "requestId" in input ? input.requestId : input.ask_id,
                 reason: input.reason ?? "The answer is no longer needed.",

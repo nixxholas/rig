@@ -52,7 +52,16 @@ const createSlotToolInputSchema = Type.Union([
     ),
 ]);
 
-type SlotCreateToolInput = Static<typeof createSlotToolInputSchema>;
+/**
+ * Providers require an object at the root of a tool's parameters, so the scope variants stay a
+ * closed union and travel as one argument.
+ */
+const createSlotToolParametersSchema = Type.Object(
+    { input: createSlotToolInputSchema },
+    { additionalProperties: false },
+);
+
+type CreateSlotToolParameters = Static<typeof createSlotToolParametersSchema>;
 
 /** Create a persistent slot entry using the stable tool-call ID. */
 export function createSlotTool(slots: SlotsModule, agentId: string) {
@@ -60,12 +69,12 @@ export function createSlotTool(slots: SlotsModule, agentId: string) {
         name: "create_slot",
         description:
             "Create persistent content in one of Happy's fixed UI slots. Use bounded markdown or a button action, provide the exact scope target when needed, and explain both what the entry is and why it exists.",
-        parameters: createSlotToolInputSchema,
+        parameters: createSlotToolParametersSchema,
         returnType: slotEntryResultSchema,
         durable: true,
         transactional: true,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, input: SlotCreateToolInput, call) => ({
+        execute: async (ctx, { input }: CreateSlotToolParameters, call) => ({
             entry: await slots.create(ctx, agentId, { ...input, id: call.id }),
         }),
         toLLM: ({ entry }) => [

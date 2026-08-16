@@ -298,7 +298,132 @@ describe("Rig client to Happy Agent daemon integration", () => {
         childDaemons.delete(second);
         await rm(directory, { force: true, recursive: true });
     }, 30_000);
+
+    it("gives every tool the daemon assembles an object-rooted parameters schema", async () => {
+        const captured: CapturedTool[] = [];
+        const fixture = await startTestDaemon(undefined, capturingProvider(captured));
+        const connection = await connectHappyAgentProtocolServer({
+            agentHome: fixture.daemon.configuration.paths.agentHome,
+        });
+        const sessions = await connection.client.listSessions();
+        const session = sessions.sessions[0];
+        if (session === undefined) throw new Error("Happy Agent exposed no root session.");
+
+        await connection.client.submitMessage(session.id, { text: "Assemble the tool set." });
+
+        await vi.waitFor(() => expect(captured.length).toBeGreaterThan(0), { timeout: 15_000 });
+        // Anchored on tools whose schemas were rewritten for this rule, so a set that quietly
+        // stopped carrying them cannot pass the check below by being empty of anything hard.
+        expect(captured.map((tool) => tool.name)).toEqual(
+            expect.arrayContaining(["create_slot", "list_slots"]),
+        );
+        // Every vendor mapper puts a tool's parameters through the same sanitizer, which refuses a
+        // schema that is not an object at the root, and one refusal fails the whole turn before
+        // inference. Checking the assembled set catches a tool no module test would look at.
+        expect(
+            captured
+                .filter(
+                    (tool) => tool.parameters !== undefined && tool.parameters.type !== "object",
+                )
+                .map((tool) => tool.name),
+        ).toEqual([]);
+    }, 30_000);
+
+    it("ends a failed run as a run_error carrying what the provider said", async () => {
+        const fixture = await startTestDaemon(undefined, failingProvider("The provider refused."));
+        const connection = await connectHappyAgentProtocolServer({
+            agentHome: fixture.daemon.configuration.paths.agentHome,
+        });
+        const sessions = await connection.client.listSessions();
+        const session = sessions.sessions[0];
+        if (session === undefined) throw new Error("Happy Agent exposed no root session.");
+
+        const submitted = await connection.client.submitMessage(session.id, {
+            text: "Ask something the provider cannot answer.",
+        });
+        const abort = new AbortController();
+        const terminal = deferred<{ readonly data: unknown; readonly type: string }>();
+        const watching = connection.client.watchSessionEvents({
+            after: submitted.eventId,
+            onEvent: (event) => {
+                // A failed run has to end as exactly one terminal event, and it has to be the one
+                // that carries the failure text, or the transcript shows a turn that simply stops.
+                if (event.type === "run_error" || event.type === "run_finished") {
+                    terminal.resolve(event);
+                    abort.abort();
+                }
+            },
+            sessionId: session.id,
+            signal: abort.signal,
+        });
+
+        await expect(terminal.promise).resolves.toMatchObject({
+            data: { errorMessage: "The provider refused.", runId: submitted.runId },
+            type: "run_error",
+        });
+        await watching;
+        await expect(connection.client.getSession(session.id)).resolves.toMatchObject({
+            session: { status: "error" },
+        });
+    }, 30_000);
 });
+
+/** A tool as the agent hands it to a provider, narrowed to what the schema rule cares about. */
+interface CapturedTool {
+    readonly name: string;
+    readonly parameters?: { readonly type?: unknown };
+}
+
+/** Records the assembled tool set, then answers without calling anything in it. */
+function capturingProvider(captured: CapturedTool[]): Parameters<AgentProviders["add"]>[1] {
+    return {
+        inputTypes: ["text"],
+        name: "scripted",
+        outputTypes: ["text"],
+        session: async (id: string, options: { tools?: readonly CapturedTool[] }) => {
+            captured.push(...(options.tools ?? []));
+            return {
+                id,
+                compact: async () => {
+                    throw new Error("Compaction is unavailable in this integration test.");
+                },
+                destroy: () => undefined,
+                run: () =>
+                    (async function* () {
+                        yield { type: "text_start" } as const;
+                        yield { type: "text_delta", delta: "Happy Agent replied." } as const;
+                        yield { type: "text_end" } as const;
+                        yield { type: "done", state: "normal" } as const;
+                    })(),
+            };
+        },
+    } as never;
+}
+
+/** Fails the run the way a provider does when it cannot answer at all. */
+function failingProvider(message: string): Parameters<AgentProviders["add"]>[1] {
+    return {
+        inputTypes: ["text"],
+        name: "scripted",
+        outputTypes: ["text"],
+        session: async (id: string) => ({
+            id,
+            compact: async () => {
+                throw new Error("Compaction is unavailable in this integration test.");
+            },
+            destroy: () => undefined,
+            run: () =>
+                (async function* () {
+                    yield {
+                        type: "done",
+                        state: "error",
+                        kind: "internal_error",
+                        message,
+                    } as const;
+                })(),
+        }),
+    } as never;
+}
 
 async function startTestDaemon(
     existingDirectory?: string,
