@@ -79,10 +79,10 @@ the transaction that settles it.
 
 Reading it and delivering the report both happen inside that settling transaction, which is what
 makes the report reliable. `send` composes with an outer storage transaction: the queue entry is
-written in it, and the recipient is woken only once it commits. So the collaborator has stopped and
-its creator has been told, or neither is true. If the delivery fails, the settlement rolls back with
-it and the run stays recorded as unfinished, so the report is made again the next time it settles
-rather than being lost.
+written in it, an idle creator is loaded to receive it, and the run that reads it starts only once
+the transaction commits. So the collaborator has stopped and its creator has been told, or neither
+is true. If the delivery fails, the settlement rolls back with it and the run stays recorded as
+unfinished, so the report is made again the next time it settles rather than being lost.
 
 ### Messages are asynchronous, always
 

@@ -44,13 +44,13 @@
         "smol-toml": "^1.7.0"
     },
     "devDependencies": {
-        "@slopus/happy-agent-base": "npm:@slopus/happy-agent-base@0.0.15",
+        "@slopus/happy-agent-base": "npm:@slopus/happy-agent-base@0.0.16",
         "@types/node": "^24.0.10",
         "typescript": "^7.0.2",
         "vitest": "^3.2.4"
     },
     "peerDependencies": {
-        "@slopus/happy-agent-base": "0.0.15"
+        "@slopus/happy-agent-base": "0.0.16"
     },
     "engines": {
         "node": ">=22.19.0"

@@ -252,19 +252,18 @@ interrupted collaborator that had already answered produced a second notice read
 working without saying anything", which told the creator only what it had just done itself. There
 is no answer in a silent run, and the settle report exists to carry an answer.
 
-Both halves are in the settling transaction, which is only possible from `happy-agent-base` 0.0.15
-onward. The first version of this had to split them — read in the transaction, stash the text in a
-`Map` on the module, send from the post-commit hook — because delivery was refused inside a
-transaction. That left a window where a crash after the commit lost the answer for good, since the
-run store was already erased. It is now one commit, and a failed delivery rolls the settlement back
-so the report is retried the next time the agent settles. The `Map` is gone.
+Both halves are in the settling transaction, which needs `happy-agent-base` 0.0.16. The first
+version of this had to split them — read in the transaction, stash the text in a `Map` on the
+module, send from the post-commit hook — because delivery was refused inside a transaction at all.
+That left a window where a crash after the commit lost the answer for good, since the run store was
+already erased. It is now one commit, and a failed delivery rolls the settlement back so the report
+is retried the next time the agent settles. The `Map` is gone.
 
-One constraint comes with it: a transactional `send` requires the recipient to be live, because
-loading an idle agent is still a lifetime operation. In practice a creator always is — it was live
-when it created the collaborator, agents are only dropped on archive or shutdown, and a restart
-instantiates every stored agent. The narrow exception is a restart where the collaborator settles
-before the creator has finished being instantiated; that delivery fails, the settlement rolls back,
-and the report is made when it settles again.
+0.0.15 allowed the transactional send but only to a creator that was already live, which left a
+narrow restart race: a collaborator settling before its creator had finished being instantiated
+would fail to deliver. 0.0.16 loads an idle target on the way, reading only committed state and
+starting its run only when the commit publishes the message. The race is gone, and the module needs
+nothing of its own to work around it.
 
 ### Verification
 
