@@ -110,22 +110,6 @@ function unavailableIntegrations(): HappyAgentIntegrations {
         throw new Error("This integration is unavailable in the restart fixture.");
     };
     return {
-        collaboration: {
-            config: async () => undefined,
-            create: async (
-                _ctx: Parameters<HappyAgentIntegrations["collaboration"]["create"]>[0],
-                _config: Parameters<HappyAgentIntegrations["collaboration"]["create"]>[1],
-                options: Parameters<HappyAgentIntegrations["collaboration"]["create"]>[2],
-            ) => ({ id: options.id }),
-            interrupt: unavailable,
-            observe: unavailable,
-            selection: async () => undefined,
-            send: async () => undefined,
-            setReadOnly: unavailable,
-            spawnCapacity: async () => ({ canSpawn: false, depth: 0, maxDepth: 0 }),
-            wait: unavailable,
-            waitForAgent: unavailable,
-        },
         happy: {
             notify: async () => ({ accepted: false }),
             setStatus: async () => ({ accepted: false }),

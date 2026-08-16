@@ -52,12 +52,12 @@ That matters because the `Message from agent ...` line ages out of history on co
 relationship does not — an agent that could not name its creator would have no way to answer it.
 Nothing is stored to make this work; the ancestry is read from the agent collection each turn.
 
-### A collaborator always reports when it stops
+### A collaborator's answer comes back on its own
 
-Nothing waits, so a creator could otherwise never learn whether a collaborator finished, failed, or
-simply decided to say nothing. The runtime closes that gap rather than the model: when a
-collaborator's loop settles, the module sends its creator whatever the collaborator said last,
-verbatim.
+Nothing waits, so a creator would otherwise depend on the model remembering to report — and a model
+that has stopped working is no longer following instructions. The runtime closes that gap instead:
+when a collaborator's loop settles, the module sends its creator whatever the collaborator said
+last, verbatim.
 
 ```
 Collaborator b7c1 finished working. Its answer follows, verbatim.
@@ -65,8 +65,9 @@ Collaborator b7c1 finished working. Its answer follows, verbatim.
 The parser change looks correct, but it drops the trailing newline case.
 ```
 
-A collaborator that finished in silence, errored, or was interrupted still produces a report, so
-handing out work always ends in learning it is over. The message is tagged
+A run that said nothing reports nothing. A collaborator interrupted mid-sentence, or told that no
+action is needed, has no answer to pass on, and announcing its silence would only tell the creator
+something it already knows. The message is tagged
 `collaboration.kind = "subagent_report"` with the collaborator's `fromAgentId`, which is what a
 presentation layer keys on to render it as a notice rather than as an agent talking. It is sent
 under the settlement's own identity, so a retried report is the same message rather than a second
@@ -74,7 +75,14 @@ one.
 
 The last thing the model said is kept in the **run store** while the run is in progress — the one
 piece of state this module keeps. That store exists only for the duration of a run and is erased by
-the very transaction that settles it, which is why the report is read there and sent afterwards.
+the transaction that settles it.
+
+Reading it and delivering the report both happen inside that settling transaction, which is what
+makes the report reliable. `send` composes with an outer storage transaction: the queue entry is
+written in it, and the recipient is woken only once it commits. So the collaborator has stopped and
+its creator has been told, or neither is true. If the delivery fails, the settlement rolls back with
+it and the run stays recorded as unfinished, so the report is made again the next time it settles
+rather than being lost.
 
 ### Messages are asynchronous, always
 

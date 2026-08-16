@@ -50,8 +50,6 @@ export class CollaborationModule implements AgentModule {
     /** Only the retirement of the schema this module used to keep. See the file for why it stays. */
     readonly migrations = collaborationMigrations;
 
-    /** What each settled run has to report, carried from its commit to the send that follows. */
-    readonly #reports = new Map<string, { readonly settlementId: string; readonly text?: string }>();
     #agents: AgentSystemRef | undefined;
 
     /** The collection every collaborator is created in and every message is delivered through. */
@@ -174,44 +172,31 @@ export class CollaborationModule implements AgentModule {
     };
 
     /**
-     * This transaction erases the run store, so it is the last chance to keep what the run said.
-     * The report itself cannot be sent from here — delivery refuses to run inside a transaction —
-     * so it is carried across to the observing hook that runs once this has committed.
+     * Pass a collaborator's answer to its creator, verbatim, when the collaborator stops working.
+     *
+     * This is the runtime reporting, not the model choosing to, which is what makes an answer
+     * arrive at all now that nothing waits for one. A run that said nothing reports nothing: a
+     * collaborator interrupted mid-sentence, or told that no action is needed, has no answer to
+     * pass on, and announcing its silence would put a line in the creator's conversation that
+     * tells it something it already knows.
+     *
+     * It all happens in the settling transaction, which is the point: this transaction erases the
+     * run store, so it is the last moment the run's own words can be read, and the delivery
+     * commits with the settlement rather than after it. The collaborator has stopped and its
+     * creator has been told, or neither is true. A failure here rolls the settlement back with it,
+     * leaving the run recorded as unfinished, so the report is made again the next time it settles
+     * rather than being lost.
      */
     readonly afterAgentSettledTransact = async (
         ctx: Context,
         scope: AgentModuleScope,
         settlement: AgentBaseSettlement,
     ): Promise<void> => {
-        const text = await scope.runKV.read(ctx, LAST_TEXT_KEY);
-        this.#reports.set(scope.agent.id, {
-            settlementId: settlement.settlementId,
-            ...(typeof text === "string" ? { text } : {}),
-        });
-    };
-
-    /**
-     * Report to the creator that this collaborator has stopped working, and pass on verbatim
-     * whatever it said last.
-     *
-     * This is the runtime reporting, not the model choosing to. A collaborator that finished in
-     * silence, failed, or was interrupted still produces a report, so an agent that handed out
-     * work always learns it is over — which is the only guarantee available once nothing waits.
-     */
-    readonly afterAgentSettled = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-    ): Promise<void> => {
-        const report = this.#reports.get(scope.agent.id);
-        if (report === undefined) return;
-        this.#reports.delete(scope.agent.id);
         const agents = this.#requireAgents();
         const parent = await agents.parentOf(ctx, scope.agent.id);
         if (parent === null) return;
-        const heading =
-            report.text === undefined
-                ? `Collaborator ${scope.agent.id} finished working without saying anything.`
-                : `Collaborator ${scope.agent.id} finished working. Its answer follows, verbatim.`;
+        const said = await scope.runKV.read(ctx, LAST_TEXT_KEY);
+        if (typeof said !== "string") return;
         await agents.send(
             ctx,
             parent,
@@ -220,17 +205,14 @@ export class CollaborationModule implements AgentModule {
                 content: [
                     {
                         type: "text",
-                        text:
-                            report.text === undefined
-                                ? heading
-                                : `${heading}\n\n${report.text}`,
+                        text: `Collaborator ${scope.agent.id} finished working. Its answer follows, verbatim.\n\n${said}`,
                     },
                 ],
             },
             {
                 // The settlement has one identity, so a retried report is the same message rather
                 // than a second one.
-                id: report.settlementId,
+                id: settlement.settlementId,
                 metadata: {
                     collaboration: {
                         kind: "subagent_report",

@@ -390,7 +390,6 @@ describe("collaboration", () => {
 
         await module.onEventTransact(ctx, scope, textEnd("The parser change looks correct."));
         await module.afterAgentSettledTransact(ctx, scope, settlement("s1"));
-        await module.afterAgentSettled(ctx, scope);
 
         expect(collection.delivered[1]).toMatchObject({
             toAgentId: "parent",
@@ -406,7 +405,6 @@ describe("collaboration", () => {
 
         await module.onEventTransact(ctx, scope, textEnd("Done."));
         await module.afterAgentSettledTransact(ctx, scope, settlement("s1"));
-        await module.afterAgentSettled(ctx, scope);
 
         expect(collection.delivered[1]!.options.metadata).toEqual({
             collaboration: {
@@ -417,20 +415,18 @@ describe("collaboration", () => {
         });
     });
 
-    it("reports even when the collaborator finished in silence", async () => {
+    it("says nothing when the collaborator finished in silence", async () => {
         const collection = new Collection();
         const { module, ctx } = started(collection);
         await module.createAgent(ctx, "parent", TASK, "child");
         const scope = runScope("child");
 
-        // Nothing was said: no text_end ever arrived. The creator still has to learn it is over,
-        // because with nothing waiting this report is the only signal there is.
+        // No text_end ever arrived — an interrupted turn, or one that was told no action was
+        // needed. There is no answer to pass on, and announcing the silence would tell the
+        // creator something it already knows.
         await module.afterAgentSettledTransact(ctx, scope, settlement("s1"));
-        await module.afterAgentSettled(ctx, scope);
 
-        expect(collection.delivered[1]!.text).toBe(
-            "Collaborator child finished working without saying anything.",
-        );
+        expect(collection.delivered).toHaveLength(1);
     });
 
     it("reports under the settlement's identity, so a retry is not a second report", async () => {
@@ -441,7 +437,6 @@ describe("collaboration", () => {
 
         await module.onEventTransact(ctx, scope, textEnd("Done."));
         await module.afterAgentSettledTransact(ctx, scope, settlement("s1"));
-        await module.afterAgentSettled(ctx, scope);
 
         expect(collection.delivered[1]!.options.id).toBe("s1");
     });
@@ -453,7 +448,6 @@ describe("collaboration", () => {
 
         await module.onEventTransact(ctx, scope, textEnd("All done."));
         await module.afterAgentSettledTransact(ctx, scope, settlement("s1"));
-        await module.afterAgentSettled(ctx, scope);
 
         expect(collection.delivered).toHaveLength(0);
     });
@@ -467,7 +461,6 @@ describe("collaboration", () => {
         await module.onEventTransact(ctx, scope, textEnd("Thinking out loud."));
         await module.onEventTransact(ctx, scope, textEnd("Final answer."));
         await module.afterAgentSettledTransact(ctx, scope, settlement("s1"));
-        await module.afterAgentSettled(ctx, scope);
 
         expect(collection.delivered[1]!.text).toContain("Final answer.");
         expect(collection.delivered[1]!.text).not.toContain("Thinking out loud.");

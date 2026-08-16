@@ -185,15 +185,16 @@ surface is fixed. Instructions restate the creator's and collaborators' IDs each
 sender's name in a delivered message ages out on compaction while the relationship does not.
 
 Idempotency is Agent Base's, not the module's. `send` dedups on message ID and a durable tool call
-supplies `call.id`, so a retried call delivers the same message. This is also the only ordering
-available: `AgentBase.#offer` refuses to run inside a caller's storage transaction, and the tool
-result and the queue write live in two different agents' stores under two different locks, so they
-can never be one commit. That is why the ID has to carry the guarantee.
+supplies `call.id`, so a retried call delivers the same message. A tool's own result and the
+recipient's queue write are still two commits in two different agents' stores, so the ID is what
+carries the guarantee across a retry.
 
 The one piece of state the module keeps is a note in the **run store** holding the last thing the
-model said. It exists only while a run does, and the transaction that settles the run erases it —
-which is why the settle report is read inside that transaction and sent after it commits, under the
-settlement's own ID so a retry is the same message.
+model said. It exists only while a run does, and the transaction that settles the run erases it.
+Reading that note and delivering the report both happen inside the settling transaction, which
+`happy-agent-base` 0.0.15 makes possible: `send` now stages its queue write in the caller's
+transaction and wakes the recipient only after commit. The collaborator has stopped and its creator
+has been told, or neither has happened.
 
 ### Finding by finding
 
@@ -239,20 +240,48 @@ that finished silently, errored, or was interrupted would leave whoever assigned
 forever on a message the model simply chose not to send. Instructions cannot fix that, because a
 model that stops working is by definition no longer following them.
 
-So the report is the runtime's. `onEventTransact` keeps each `text_end` in the run store,
-`afterAgentSettledTransact` reads it before that store is erased, and `afterAgentSettled` sends the
-creator a message tagged `collaboration.kind = "subagent_report"`, quoting the collaborator
-verbatim and naming it. A collaborator that said nothing still produces one. This is now the normal
-way an answer travels; `send_agent_message` is for saying something before the work is done.
+So the report is the runtime's. `onEventTransact` keeps each `text_end` in the run store, and
+`afterAgentSettledTransact` reads it and sends the creator a message tagged
+`collaboration.kind = "subagent_report"`, quoting the collaborator verbatim and naming it. This is
+now the normal way an answer travels; `send_agent_message` is for saying something before the work
+is done.
+
+A run that said nothing reports nothing. The first version announced silence too, on the reasoning
+that a creator should always learn its work is over, and a live run showed what that costs: an
+interrupted collaborator that had already answered produced a second notice reading "finished
+working without saying anything", which told the creator only what it had just done itself. There
+is no answer in a silent run, and the settle report exists to carry an answer.
+
+Both halves are in the settling transaction, which is only possible from `happy-agent-base` 0.0.15
+onward. The first version of this had to split them — read in the transaction, stash the text in a
+`Map` on the module, send from the post-commit hook — because delivery was refused inside a
+transaction. That left a window where a crash after the commit lost the answer for good, since the
+run store was already erased. It is now one commit, and a failed delivery rolls the settlement back
+so the report is retried the next time the agent settles. The `Map` is gone.
+
+One constraint comes with it: a transactional `send` requires the recipient to be live, because
+loading an idle agent is still a lifetime operation. In practice a creator always is — it was live
+when it created the collaborator, agents are only dropped on archive or shutdown, and a restart
+instantiates every stored agent. The narrow exception is a restart where the collaborator settles
+before the creator has finished being instantiated; that delivery fails, the settlement rolls back,
+and the report is made when it settles again.
 
 ### Verification
 
+Measured after the branch was rebased on `main` and every package moved to
+`@slopus/happy-agent-base` 0.0.15.
+
 - `packages/happy-agent-modules`: collaboration typechecks clean and lints clean; 27 tests pass.
-- `packages/happy-agent`: typechecks clean against the rebuilt module types, which is what proves
-  the host wiring matches the new signature.
-- Two pre-existing errors in `sources/permissions/PermissionsModule.ts` (646, 665) still fail the
-  package's `check` and `build` scripts. They belong to unrelated in-flight work and are untouched
-  here; `tsc` emits despite them, which is how the host typecheck above was obtained.
+  The package builds green, and its `check` now fails only on `tests/auto/AutoReviewEvidenceStore.test.ts`,
+  which calls a method the store does not have.
+- `packages/happy-agent` and `packages/rig`: both typecheck clean. `rig` needed two fixtures
+  updated — `sources/client/fixtures/happyAgentRestartDaemon.ts` and
+  `sources/client/connectHappyAgentProtocolServer.integration.test.ts` still built a collaboration
+  broker for `HappyAgentIntegrations`, which no longer has that field.
+- The modules suite has 12 failures across `tests/auto`, `tests/permissions`, and
+  `tests/userInput`, none of them collaboration's. They belong to the same unrelated in-flight
+  work, and the 0.0.15 move improves them rather than causing them: pinning this package back to
+  0.0.14 turns those 12 failures into 40. That in-flight code was written against the newer base.
 - `packages/happy-agent`'s own suite has 24 failures, all in `tests/git/**` and
   `tests/projects/**` and all pre-existing. Nothing collaboration-related remains in that package's
   tests: `vanillaCollaboration.test.ts` covered the vanilla broker's refusals and went with it.

@@ -571,28 +571,7 @@ async function startRestartFixture(happyHome: string, attempt: number): Promise<
 }
 
 function unavailableIntegrations(): HappyAgentIntegrations {
-    const unavailable = async () => {
-        throw new Error("This integration is unavailable in the Happy Agent integration test.");
-    };
     return {
-        collaboration: {
-            create: async (
-                _ctx: Parameters<HappyAgentIntegrations["collaboration"]["create"]>[0],
-                _config: Parameters<HappyAgentIntegrations["collaboration"]["create"]>[1],
-                options: Parameters<HappyAgentIntegrations["collaboration"]["create"]>[2],
-            ) => ({ id: options.id }),
-            config: async () => undefined,
-            interrupt: unavailable,
-            observe: unavailable,
-            selection: async () => undefined,
-            send: async () => undefined,
-            setReadOnly: unavailable,
-            spawnCapacity: async () => ({ canSpawn: false, depth: 0, maxDepth: 0 }),
-            wait: async () => {
-                throw new Error("Collaboration waits are unavailable in this integration test.");
-            },
-            waitForAgent: unavailable,
-        },
         happy: {
             notify: async () => ({ accepted: false }),
             setStatus: async () => ({ accepted: false }),
