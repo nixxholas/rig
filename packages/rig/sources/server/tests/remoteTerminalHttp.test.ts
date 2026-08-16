@@ -28,11 +28,14 @@ describe("remote terminal WebSocket protocol", () => {
         expect(otherSession.session.projectId).toBe(scope.projectId);
         const created = await client.createRemoteTerminal(scope, {
             cols: 24,
+            colorScheme: "light",
             command: 'IFS= read -r value; printf "reply:%s\\n" "$value"',
             rows: 3,
         });
+        expect(created.terminal.colorScheme).toBe("light");
         const attachment = await client.attachRemoteTerminal(scope, created.terminal.id, {
             clientId: "primary-viewer",
+            colorScheme: created.terminal.colorScheme,
         });
 
         attachment.writeInput("hello\n");
@@ -41,6 +44,12 @@ describe("remote terminal WebSocket protocol", () => {
             expect(attachment.terminal.snapshot().rows.map(rowText).join("\n")).toContain(
                 "reply:hello",
             );
+        });
+        expect(attachment.terminal.snapshot().defaultBackground).toEqual({
+            blue: 238,
+            green: 238,
+            kind: "rgb",
+            red: 238,
         });
 
         const page = await attachment.requestScrollback(0, 20);
@@ -52,6 +61,7 @@ describe("remote terminal WebSocket protocol", () => {
 
         const late = await client.attachRemoteTerminal(scope, created.terminal.id, {
             clientId: "late-viewer",
+            colorScheme: created.terminal.colorScheme,
         });
         await expect(late.exited).resolves.toBe(0);
         expect(late.terminal.snapshot().rows.map(rowText).join("\n")).toContain("reply:hello");

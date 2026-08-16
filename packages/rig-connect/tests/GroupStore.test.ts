@@ -830,6 +830,7 @@ describe("GroupStore", () => {
         const store = new GroupStore();
         const terminal = {
             cols: 100,
+            colorScheme: "dark" as const,
             epoch: "epoch-1",
             exitCode: null,
             id: "terminal-1",
@@ -862,6 +863,7 @@ describe("GroupStore", () => {
         const store = new GroupStore();
         const terminal = {
             cols: 100,
+            colorScheme: "dark" as const,
             epoch: "epoch-1",
             exitCode: null,
             id: "terminal-1",

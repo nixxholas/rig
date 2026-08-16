@@ -6,6 +6,8 @@ import {
 } from "@slopus/ghostty-wasm/node";
 import type { GhosttySnapshot, GhosttyTerminalLike } from "@slopus/ghostty-web";
 
+import type { RemoteTerminalColorScheme } from "./types.js";
+
 export class GhosttyWebTerminal implements GhosttyTerminalLike {
     readonly #terminal: GhosttyTerminal;
 
@@ -15,6 +17,7 @@ export class GhosttyWebTerminal implements GhosttyTerminalLike {
 
     static async create(options: {
         cols: number;
+        colorScheme: RemoteTerminalColorScheme;
         maxScrollback: number;
         rows: number;
     }): Promise<GhosttyWebTerminal> {

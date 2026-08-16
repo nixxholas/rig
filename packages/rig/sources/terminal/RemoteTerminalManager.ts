@@ -1,9 +1,15 @@
+import { Value } from "@sinclair/typebox/value";
+
 import type { RemoteTerminalProcessFactory } from "./RemoteTerminalProcess.js";
 import { RemoteTerminal } from "./RemoteTerminal.js";
-import type { CreateRemoteTerminalRequest } from "./types.js";
+import {
+    remoteTerminalColorSchemeSchema,
+    type CreateRemoteTerminalRequest,
+} from "./types.js";
 import type { RemoteTerminalSummary } from "./types.js";
 
 const DEFAULT_COLS = 80;
+const DEFAULT_COLOR_SCHEME = "dark";
 const DEFAULT_ROWS = 24;
 const DEFAULT_MAX_SCROLLBACK = 10_000;
 const MAX_COLS = 500;
@@ -40,6 +46,12 @@ export class RemoteTerminalManager {
         if (request.command !== undefined && typeof request.command !== "string") {
             throw new Error("The terminal command must be text.");
         }
+        if (
+            request.colorScheme !== undefined &&
+            !Value.Check(remoteTerminalColorSchemeSchema, request.colorScheme)
+        ) {
+            throw new Error("The terminal color scheme must be light or dark.");
+        }
         if (request.cwd !== undefined && typeof request.cwd !== "string") {
             throw new Error("The terminal working directory must be text.");
         }
@@ -47,6 +59,7 @@ export class RemoteTerminalManager {
             throw new Error("The terminal shell must be text.");
         }
         const cols = boundedInteger(request.cols, DEFAULT_COLS, 1, MAX_COLS, "column count");
+        const colorScheme = request.colorScheme ?? DEFAULT_COLOR_SCHEME;
         const rows = boundedInteger(request.rows, DEFAULT_ROWS, 1, MAX_ROWS, "row count");
         const maxScrollback = boundedInteger(
             request.maxScrollback,
@@ -74,6 +87,7 @@ export class RemoteTerminalManager {
         };
         const terminal = await RemoteTerminal.create({
             cols,
+            colorScheme,
             maxScrollback,
             processFactory: this.#processFactory,
             processOptions,

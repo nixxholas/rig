@@ -56,6 +56,7 @@ export type {
 } from "./external-tools/types.js";
 export type {
     CreateRemoteTerminalRequest,
+    RemoteTerminalColorScheme,
     RemoteTerminalResponse,
     RemoteTerminalScope,
     RemoteTerminalSummary,

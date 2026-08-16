@@ -5,6 +5,8 @@ import {
     type RemoteTerminalReplica,
 } from "@slopus/ghostty-web";
 
+import type { RemoteTerminalColorScheme } from "../terminal/index.js";
+
 export class RemoteTerminalClientReplica implements RemoteTerminalReplica {
     grid: RemoteTerminalGridState | undefined;
     readonly terminal: GhosttyTerminal;
@@ -21,8 +23,10 @@ export class RemoteTerminalClientReplica implements RemoteTerminalReplica {
         });
     }
 
-    static async create(): Promise<RemoteTerminalClientReplica> {
-        return new RemoteTerminalClientReplica(await createGhosttyTerminal());
+    static async create(
+        colorScheme: RemoteTerminalColorScheme,
+    ): Promise<RemoteTerminalClientReplica> {
+        return new RemoteTerminalClientReplica(await createGhosttyTerminal({ colorScheme }));
     }
 
     applyGrid(state: RemoteTerminalGridState): void {

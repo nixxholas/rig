@@ -7,10 +7,38 @@ import type { RemoteTerminalProcess } from "./RemoteTerminalProcess.js";
 import { RemoteTerminal } from "./RemoteTerminal.js";
 
 describe("RemoteTerminal", () => {
+    it("keeps the canonical emulator on the color scheme chosen at creation", async () => {
+        const process = new FakeTerminalProcess();
+        const terminal = await RemoteTerminal.create({
+            cols: 20,
+            colorScheme: "light",
+            maxScrollback: 100,
+            processFactory: { confinement: "host" as const, start: () => Promise.resolve(process) },
+            processOptions: { cols: 20, cwd: globalThis.process.cwd(), rows: 4 },
+            rows: 4,
+        });
+        try {
+            expect(terminal.summary().colorScheme).toBe("light");
+
+            process.emit("\x1b]10;?\x1b]11;?");
+            await vi.waitFor(() => {
+                expect(process.writes.map(writeText)).toContain(
+                    "\x1b]10;rgb:0d0d/0d0d/0d0d\x1b\\",
+                );
+                expect(process.writes.map(writeText)).toContain(
+                    "\x1b]11;rgb:eeee/eeee/eeee\x1b\\",
+                );
+            });
+        } finally {
+            await terminal.dispose();
+        }
+    });
+
     it("publishes each PTY write immediately, encodes it once for concurrent viewers, and routes input through leases", async () => {
         const process = new FakeTerminalProcess();
         const terminal = await RemoteTerminal.create({
             cols: 20,
+            colorScheme: "dark",
             maxScrollback: 100,
             processFactory: { confinement: "host" as const, start: () => Promise.resolve(process) },
             processOptions: { cols: 20, cwd: globalThis.process.cwd(), rows: 4 },
@@ -53,6 +81,7 @@ describe("RemoteTerminal", () => {
         process.blockResize();
         const terminal = await RemoteTerminal.create({
             cols: 20,
+            colorScheme: "dark",
             maxScrollback: 100,
             processFactory: { confinement: "host" as const, start: () => Promise.resolve(process) },
             processOptions: { cols: 20, cwd: globalThis.process.cwd(), rows: 4 },
@@ -82,6 +111,10 @@ describe("RemoteTerminal", () => {
         }
     });
 });
+
+function writeText(value: string | Uint8Array): string {
+    return typeof value === "string" ? value : Buffer.from(value).toString("utf8");
+}
 
 function attachClient(
     terminal: RemoteTerminal,

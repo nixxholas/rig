@@ -139,6 +139,7 @@ import type {
     CreateRemoteTerminalRequest,
     CreateRemoteTerminalResponse,
     ListRemoteTerminalsResponse,
+    RemoteTerminalColorScheme,
     RemoteTerminalResponse,
     ResizeRemoteTerminalRequest,
 } from "../terminal/index.js";
@@ -167,6 +168,7 @@ export interface WatchSessionEventsOptions {
 
 export interface AttachRemoteTerminalOptions {
     clientId?: string;
+    colorScheme?: RemoteTerminalColorScheme;
     creditBytes?: number;
     reconnectState?: RemoteTerminalReconnectState;
     replica?: RemoteTerminalClientReplica;
@@ -509,7 +511,9 @@ export class ProtocolHttpClient {
         terminalId: string,
         options: AttachRemoteTerminalOptions = {},
     ): Promise<RemoteTerminalAttachment> {
-        const replica = options.replica ?? (await RemoteTerminalClientReplica.create());
+        const replica =
+            options.replica ??
+            (await RemoteTerminalClientReplica.create(options.colorScheme ?? "dark"));
         let stream: Duplex;
         try {
             stream = await connectRemoteTerminalWebSocket({

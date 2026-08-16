@@ -26,12 +26,14 @@ project's root checkout; workspace routes target one managed worktree.
 | `DELETE` | `/projects/{projectId}/terminals/{terminalId}`        | `/projects/{projectId}/workspaces/{workspaceId}/terminals/{terminalId}`        | Stop the terminal          |
 | Upgrade  | `/projects/{projectId}/terminals/{terminalId}/attach` | `/projects/{projectId}/workspaces/{workspaceId}/terminals/{terminalId}/attach` | Attach the binary protocol |
 
-Create accepts `cols`, `rows`, `maxScrollback`, `cwd`, `shell`, and an optional `command`. The
-working directory defaults to the project root or managed worktree in the scope's shared host or
-Docker execution environment. Dimensions default to 80 columns, 24 rows, and 10,000 scrollback
-rows. Without a command, Rig starts the environment's interactive shell. Lifecycle responses
-contain stable terminal ID and epoch, dimensions, running or exited status, and the exit code when
-known. They do not contain terminal screen snapshots.
+Create accepts `cols`, `rows`, `maxScrollback`, `cwd`, `shell`, `colorScheme` (`light` or `dark`),
+and an optional `command`. The working directory defaults to the project root or managed worktree
+in the scope's shared host or Docker execution environment. Dimensions default to 80 columns, 24
+rows, and 10,000 scrollback rows; the color scheme defaults to dark. Without a command, Rig starts
+the environment's interactive shell. The color scheme initializes the canonical emulator and
+remains fixed for that terminal's lifetime. Lifecycle responses contain that scheme alongside the
+stable terminal ID and epoch, dimensions, running or exited status, and the exit code when known.
+They do not contain terminal screen snapshots.
 
 Resize accepts `{ "cols": 100, "rows": 30 }`. Rig performs the request through the protocol's
 canonical resize operation: it drains parsing, resizes the PTY and server Ghostty state, broadcasts

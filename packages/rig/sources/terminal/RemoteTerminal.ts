@@ -18,10 +18,11 @@ import type {
     RemoteTerminalProcessFactory,
     RemoteTerminalProcessOptions,
 } from "./RemoteTerminalProcess.js";
-import type { RemoteTerminalSummary } from "./types.js";
+import type { RemoteTerminalColorScheme, RemoteTerminalSummary } from "./types.js";
 
 export class RemoteTerminal {
     readonly id = randomUUID();
+    readonly colorScheme: RemoteTerminalColorScheme;
 
     /**
      * Where this terminal's process actually runs.
@@ -50,7 +51,9 @@ export class RemoteTerminal {
         created: ReturnType<typeof createGhosttyRemoteTerminalServer>,
         onChange: (summary: RemoteTerminalSummary) => void,
         confinement: RemoteTerminalConfinement,
+        colorScheme: RemoteTerminalColorScheme,
     ) {
+        this.colorScheme = colorScheme;
         this.confinement = confinement;
         this.#state = state;
         this.#process = process;
@@ -71,6 +74,7 @@ export class RemoteTerminal {
 
     static async create(options: {
         cols: number;
+        colorScheme: RemoteTerminalColorScheme;
         maxScrollback: number;
         processFactory: RemoteTerminalProcessFactory;
         processOptions: RemoteTerminalProcessOptions;
@@ -112,6 +116,7 @@ export class RemoteTerminal {
                 created,
                 options.onChange ?? (() => undefined),
                 options.processFactory.confinement,
+                options.colorScheme,
             );
             return terminal;
         } catch (error) {
@@ -161,6 +166,7 @@ export class RemoteTerminal {
         const dimensions = this.#protocol.dimensions();
         return {
             ...dimensions,
+            colorScheme: this.colorScheme,
             epoch: this.#protocol.epoch,
             exitCode: this.#exitCode,
             id: this.id,

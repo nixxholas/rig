@@ -284,12 +284,14 @@ export type {
     CreateRemoteTerminalRequest,
     CreateRemoteTerminalResponse,
     ListRemoteTerminalsResponse,
+    RemoteTerminalColorScheme,
     RemoteTerminalResponse,
     RemoteTerminalScope,
     RemoteTerminalStatus,
     RemoteTerminalSummary,
     ResizeRemoteTerminalRequest,
 } from "../terminal/index.js";
+export { remoteTerminalColorSchemeSchema } from "../terminal/index.js";
 export type { GoalStatus, SessionGoal } from "../goals/index.js";
 export type { DurableSkillDefinition } from "../external-skills/index.js";
 export type { ScheduledMessage } from "../scheduling/index.js";

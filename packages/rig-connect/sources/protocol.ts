@@ -1379,6 +1379,7 @@ export interface SessionSummary {
 
 export interface RemoteTerminalSummary {
     cols: number;
+    colorScheme: "dark" | "light";
     epoch: string;
     exitCode: number | null;
     id: string;

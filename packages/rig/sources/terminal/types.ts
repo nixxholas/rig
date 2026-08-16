@@ -1,4 +1,13 @@
+import { Type, type Static } from "@sinclair/typebox";
+
 export type RemoteTerminalStatus = "exited" | "running";
+
+export const remoteTerminalColorSchemeSchema = Type.Union([
+    Type.Literal("dark"),
+    Type.Literal("light"),
+]);
+
+export type RemoteTerminalColorScheme = Static<typeof remoteTerminalColorSchemeSchema>;
 
 export interface RemoteTerminalScope {
     projectId: string;
@@ -7,6 +16,7 @@ export interface RemoteTerminalScope {
 
 export interface CreateRemoteTerminalRequest {
     cols?: number;
+    colorScheme?: RemoteTerminalColorScheme;
     command?: string;
     cwd?: string;
     maxScrollback?: number;
@@ -16,6 +26,7 @@ export interface CreateRemoteTerminalRequest {
 
 export interface RemoteTerminalSummary {
     cols: number;
+    colorScheme: RemoteTerminalColorScheme;
     epoch: string;
     exitCode: number | null;
     id: string;
