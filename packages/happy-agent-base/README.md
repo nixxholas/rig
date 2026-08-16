@@ -33,9 +33,11 @@ persistence lock — the caller holds the database writer while its transaction 
 running turn takes that lock before touching the database, so waiting here could deadlock against a
 live turn; the open transaction supplies the atomicity the lock otherwise guarantees.
 Transactional routing through `AgentSystem.send` or `steer`
-requires a target that is already live; loading an idle target remains a separate lifetime
-operation. Other live `Agent` and `AgentSystem` lifetime commands—creating, resolving, mutating,
-archiving, or closing—remain rejected inside an outer transaction.
+loads an idle target on the way: instantiation reads only committed state and builds memory, so a
+rolled-back delivery leaves nothing but an idle live object with no durable work to pick up, and
+the target's run starts only when the commit publishes the message. Other live `Agent` and
+`AgentSystem` lifetime commands—creating, resolving, mutating, archiving, or closing—remain
+rejected inside an outer transaction.
 
 An agent runs in one of four permission modes — `read_only`, `workspace_write`, `auto`, and
 `full_access` — carried on every context it derives and read back with `agentPermissionMode`. A

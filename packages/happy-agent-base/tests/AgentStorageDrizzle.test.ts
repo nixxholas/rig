@@ -425,6 +425,83 @@ describe("AgentStorage Drizzle persistence", () => {
         close();
     });
 
+    it("loads an idle stored target to deliver a transactional message", async () => {
+        const { close, database } = inMemoryDrizzle();
+        const setup = await AgentSystemLocal.create(
+            ctx,
+            new AgentStorage({ acquireLock: lock(), database }),
+            { providers: providersOf(new ScriptedProvider([])), provider: "scripted", models: [] },
+        );
+        const created = await setup.create(ctx, {});
+        await created.waitForIdle();
+        await setup.close(ctx);
+
+        // A fresh process instantiates only agents with work left, so the target is not live.
+        const provider = new ScriptedProvider([textTurn("delivered")]);
+        const system = await AgentSystemLocal.create(
+            ctx,
+            new AgentStorage({ acquireLock: lock(), database }),
+            { providers: providersOf(provider), provider: "scripted", models: [] },
+        );
+        await withAgentDatabase(ctx, database).inTx(async (txCtx) => {
+            expect(
+                await system.send(txCtx, created.id, user("load on delivery"), {
+                    id: "h12345678901234567890141",
+                }),
+            ).toEqual({
+                accepted: "created",
+                delivery: "send",
+                id: "h12345678901234567890141",
+            });
+            expect(provider.sessions).toEqual([]);
+        });
+        const agent = await system.resolve(ctx, created.id);
+        await agent.waitForIdle();
+        expect(provider.sessions[0]?.requests[0]?.context.messages.at(-1)).toEqual(
+            user("load on delivery"),
+        );
+        await system.close(ctx);
+        close();
+    });
+
+    it("leaves a target loaded by a rolled-back transactional send idle with no live effect", async () => {
+        const { close, database } = inMemoryDrizzle();
+        const setup = await AgentSystemLocal.create(
+            ctx,
+            new AgentStorage({ acquireLock: lock(), database }),
+            { providers: providersOf(new ScriptedProvider([])), provider: "scripted", models: [] },
+        );
+        const created = await setup.create(ctx, {});
+        await created.waitForIdle();
+        await setup.close(ctx);
+
+        const provider = new ScriptedProvider([textTurn("after rollback")]);
+        const system = await AgentSystemLocal.create(
+            ctx,
+            new AgentStorage({ acquireLock: lock(), database }),
+            { providers: providersOf(provider), provider: "scripted", models: [] },
+        );
+        await expect(
+            withAgentDatabase(ctx, database).inTx(async (txCtx) => {
+                await system.send(txCtx, created.id, user("rolled back"), {
+                    id: "h12345678901234567890142",
+                });
+                throw new Error("roll back the load");
+            }),
+        ).rejects.toThrow("roll back the load");
+
+        // The loaded object is live but was never started and owes nothing durable.
+        expect(provider.sessions).toEqual([]);
+        await system.send(ctx, created.id, user("after rollback"), { await: true });
+        const agent = await system.resolve(ctx, created.id);
+        await agent.waitForIdle();
+        expect(provider.sessions[0]?.requests[0]?.context.messages).toEqual([
+            user("after rollback"),
+        ]);
+        await system.close(ctx);
+        close();
+    });
+
     it("claims a distinct queue key for every send inside one transaction", async () => {
         const { close, database } = inMemoryDrizzle();
         const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);

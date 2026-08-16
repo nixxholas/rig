@@ -21,6 +21,7 @@ import {
 } from "./AgentContexts.js";
 import type { AgentDatabase } from "./AgentDatabase.js";
 import type { AgentKV } from "./AgentKV.js";
+import { escapeAgentStorageTransaction } from "./inTx.js";
 import type { AgentPersistence } from "./AgentPersistence.js";
 import {
     agentConfigSchema,
@@ -483,10 +484,10 @@ export class AgentSystemLocal<
     }
 
     /**
-     * Creating, resolving, or removing a live Agent object is a lifetime operation that cannot
-     * roll back with an enclosing transaction. Keep those operations outside host-owned
-     * transactions; durable storage, module hooks, and delivery to an already-live agent remain
-     * composable.
+     * Creating or removing a live Agent object is a lifetime operation that cannot roll back
+     * with an enclosing transaction. Keep those operations outside host-owned transactions;
+     * durable storage, module hooks, and message delivery — which loads an idle target without
+     * starting it — remain composable.
      */
     #assertOutsideStorageTransaction(ctx: Context, operation: string): void {
         if (agentStorageTransaction(ctx) !== undefined) {
@@ -728,17 +729,32 @@ export class AgentSystemLocal<
     }
 
     /**
-     * A transactional message may use an agent that is already live, because delivery publishes
-     * only after commit. Instantiating a missing live object remains a lifetime operation and is
-     * still refused until the caller leaves its transaction.
+     * A transactional message loads its target like any other delivery. Instantiation reads only
+     * committed state and builds memory, so it composes with the open transaction: a rollback
+     * merely leaves an idle live object with nothing durable to pick up. The target is not
+     * started here — the commit that publishes the message starts its run, and a rolled-back
+     * transaction starts nothing.
      */
     async #messageTarget(ctx: Context, agentId: string): Promise<Agent<AnyAgentTool, Database>> {
         if (agentStorageTransaction(ctx) === undefined) return await this.#resolve(ctx, agentId);
         const existing = this.#agents.get(agentId);
         if (existing !== undefined) return existing;
-        throw new Error(
-            `Agent "${agentId}" must already be live before it can receive a transactional message.`,
-        );
+        return await this.#lockFor(agentId).runInLock(ctx, async (lockCtx) => {
+            const resolved = this.#agents.get(agentId);
+            if (resolved !== undefined) return resolved;
+            const config = await this.#config(lockCtx, agentId);
+            if (config === undefined) {
+                throw new Error(`Agent "${agentId}" has not been created.`);
+            }
+            // The load steps outside the transaction scope deliberately: it reads committed
+            // state on the agent's own detached context, which the ambient-transaction guard
+            // would otherwise mistake for a context leaking around the transaction.
+            const agent = await escapeAgentStorageTransaction(
+                async () => await this.#instantiate(agentId, config, false, false),
+            );
+            if (agent === undefined) throw new Error(`Agent "${agentId}" could not be built.`);
+            return agent;
+        });
     }
 
     /** Cancel an agent's active turn, leaving its queued messages durable for the next one. */

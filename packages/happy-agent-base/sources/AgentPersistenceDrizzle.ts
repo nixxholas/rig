@@ -9,7 +9,7 @@ import {
 } from "./AgentDatabase.js";
 import { agentStorageTransaction, withAgentDatabase } from "./AgentContexts.js";
 import type { AgentPersistence, AgentRecord } from "./AgentPersistence.js";
-import { inTx } from "./inTx.js";
+import { insideAgentStorageTransaction, inTx } from "./inTx.js";
 
 /** The database shared by every persistence scope in one AgentStorage. */
 export interface AgentPersistenceDrizzleOptions<Database extends AgentDatabase = AgentDatabase> {
@@ -133,6 +133,13 @@ export class AgentPersistenceDrizzle<
         });
     }
 
+    /**
+     * Run one statement against the carried transaction, or straight against the root database
+     * when the context carries none. Every operation here is a single statement, so it is atomic
+     * on its own; opening a transaction around it would buy nothing and would make an operation
+     * running beside someone else's open transaction contend for the writer even when it only
+     * reads. Work that needs multi-statement atomicity asks for `transaction` explicitly.
+     */
     async #operation<Result>(
         ctx: Context,
         work: (database: AgentDatabaseFacade<Database>) => Promise<Result>,
@@ -147,9 +154,12 @@ export class AgentPersistenceDrizzle<
             }
             return await work(transaction.database as AgentDatabaseFacade<Database>);
         }
-        return await inTx(withAgentDatabase(ctx, this.#options.database), async (txCtx) => {
-            return await work(txCtx.db as AgentDatabaseFacade<Database>);
-        });
+        if (insideAgentStorageTransaction()) {
+            throw new Error(
+                "Work started inside an agent storage transaction must use that transaction's context.",
+            );
+        }
+        return await work(this.#options.database as unknown as AgentDatabaseFacade<Database>);
     }
 
     #bound(ctx: Context): Context {

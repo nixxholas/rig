@@ -55,6 +55,26 @@ if (transactionContextState === undefined) {
 const { activeTransactions } = transactionContextState;
 
 /**
+ * Whether the current asynchronous flow is inside an open agent storage transaction. Storage
+ * operations use this to refuse a root context that would silently write around the transaction
+ * enclosing it.
+ */
+export function insideAgentStorageTransaction(): boolean {
+    const ambient = activeTransactions.getStore();
+    return ambient !== undefined && !ambient.lifetime.aborted;
+}
+
+/**
+ * Run work with the ambient transaction scope set aside, for a lifetime operation that
+ * deliberately acts beside the enclosing transaction rather than inside it — loading an agent to
+ * receive a transactional message reads only committed state, and must not be mistaken for a
+ * root context leaking writes around the transaction.
+ */
+export function escapeAgentStorageTransaction<Result>(work: () => Result): Result {
+    return activeTransactions.exit(work);
+}
+
+/**
  * Run work inside the database transaction carried by `ctx`, or open the one outer transaction
  * for its root database. Nested calls reuse the current transaction. Independent transaction
  * scheduling belongs to the database driver.
