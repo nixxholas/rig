@@ -38,7 +38,7 @@
         "@sinclair/typebox": "^0.34.49",
         "@slopus/happy-agent-compute": "npm:@slopus/happy-agent-compute@0.1.6",
         "@slopus/happy-providers": "0.0.8",
-        "@steve.kite/stdlib": "0.0.10",
+        "@steve.kite/stdlib": "0.0.12",
         "drizzle-orm": "^0.45.2",
         "pino": "^10.3.1",
         "smol-toml": "^1.7.0"

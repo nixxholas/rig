@@ -14,6 +14,8 @@ interface StagedTransaction {
 const stagedNamespace = createContextNamespace<StagedTransaction | undefined>(
     "moduleTestPersistenceTransaction",
     undefined,
+    // Not detachable, exactly like the storage transaction the real persistence carries.
+    { detachable: false },
 );
 
 /** A real store serializes what it is given, so this one copies rather than aliasing values. */

@@ -39,7 +39,12 @@ if (existingDatabaseContextRegistry === undefined) {
 const stdlibRegistryIdentity = registerContextExtension as object;
 let databaseContextState = databaseContextRegistry.get(stdlibRegistryIdentity);
 if (databaseContextState === undefined) {
-    const scope = createContextNamespace<DatabaseScope | undefined>("rig.sql.scope", undefined);
+    // Not detachable. The scope is whatever transaction the caller is in the middle of, and work
+    // that detaches to a lifetime of its own outlives that commit, so it is handed no scope at all
+    // and must be given the real database deliberately rather than writing through a finished one.
+    const scope = createContextNamespace<DatabaseScope | undefined>("rig.sql.scope", undefined, {
+        detachable: false,
+    });
     registerContextExtension("tx", (ctx) => {
         const tx = scope.get(ctx);
         if (tx === undefined) throw new Error("Context has no database scope");

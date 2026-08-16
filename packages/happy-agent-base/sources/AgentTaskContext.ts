@@ -1,10 +1,16 @@
 import type { SessionMessage } from "@slopus/happy-providers";
 import { createContextNamespace, type Context } from "@steve.kite/stdlib";
 
-/** Backing storage for `agentTaskContext`: the parent conversation before a tool call. */
+/**
+ * Backing storage for `agentTaskContext`: the parent conversation before a tool call. Not
+ * detachable — the snapshot describes the call the work is running inside, so an agent that
+ * detaches to a lifetime of its own begins with no parent conversation instead of silently
+ * inheriting somebody else's. A child meant to see it is handed it deliberately.
+ */
 const taskContextNamespace = createContextNamespace<readonly SessionMessage[] | undefined>(
     "happyAgent.taskContext",
     undefined,
+    { detachable: false },
 );
 
 /**

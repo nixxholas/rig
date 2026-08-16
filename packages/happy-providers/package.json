@@ -49,7 +49,7 @@
         "@anthropic-ai/sdk": "0.110.0",
         "@modelcontextprotocol/sdk": "^1.29.0",
         "@sinclair/typebox": "^0.34.49",
-        "@steve.kite/stdlib": "0.0.10",
+        "@steve.kite/stdlib": "0.0.12",
         "deunicode": "1.0.7",
         "openai": "6.46.0",
         "undici": "^8.8.0",

@@ -88,7 +88,7 @@
         "@slopus/happy-agent-base": "npm:@slopus/happy-agent-base@0.0.11",
         "@slopus/happy-providers": "0.0.7",
         "@slopus/murmur": "0.4.4",
-        "@steve.kite/stdlib": "0.0.8",
+        "@steve.kite/stdlib": "0.0.12",
         "@types/node": "^24.0.10",
         "@vscode/ripgrep": "1.18.0",
         "esbuild": "^0.28.1",

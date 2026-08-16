@@ -18,6 +18,8 @@ interface StagedTransaction {
 const stagedNamespace = createContextNamespace<StagedTransaction | undefined>(
     "inMemoryPersistenceTransaction",
     undefined,
+    // Not detachable, exactly like the storage transaction the real persistence carries.
+    { detachable: false },
 );
 
 /**

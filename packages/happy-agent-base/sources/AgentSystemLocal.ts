@@ -85,7 +85,11 @@ export class AgentSystemLocal<
 > implements AgentSystem<Database> {
     /** The models this collection offers its agents. */
     readonly models: readonly AgentModel[];
-    /** The lifetime context retained by this system and its storage lock. */
+    /**
+     * The lifetime context retained by this system, its storage lock, and every agent it builds.
+     * It is the root the collection was created with, so an agent's work is traced and logged as
+     * the collection's rather than as whatever call happened to bring that agent into existence.
+     */
     readonly #ctx: Context;
 
     /**
@@ -142,24 +146,30 @@ export class AgentSystemLocal<
         storage: AgentStorage<Database>,
         config: AgentSystemLocalOptions<Database>,
     ): Promise<AgentSystemLocal<Database>> {
+        // The context the collection is created with is the root every agent in it hangs off:
+        // it is retained as the collection's own, and each agent is built on it rather than on
+        // whatever call happened to ask for it. Bringing the collection up is bounded work of
+        // the caller's, so it gets a span of its own and the agents get none of it.
         const systemCtx = withAgentDatabase(ctx, storage.database);
-        const storageLock = await storage.acquireLock(systemCtx);
-        const system = new AgentSystemLocal(systemCtx, storage, storageLock, config);
-        try {
-            await storage.migrate(systemCtx, system.#modules);
-            await system.#beforeStart(systemCtx);
-            // beforeStart is the initialization barrier. Restoration observers receive the
-            // system ref next and must be able to reconcile other durable agents through it,
-            // even though restored run loops do not start until every observation finishes.
-            system.#lifecycle = "open";
-            const active = await system.#start(systemCtx);
-            for (const agent of active) agent.start();
-            await system.#afterStart(systemCtx);
-            return system;
-        } catch (error: unknown) {
-            await system.close(systemCtx).catch(() => undefined);
-            throw error;
-        }
+        return await systemCtx.span("agent.system.start", async (startCtx) => {
+            const storageLock = await storage.acquireLock(startCtx);
+            const system = new AgentSystemLocal(systemCtx, storage, storageLock, config);
+            try {
+                await storage.migrate(startCtx, system.#modules);
+                await system.#beforeStart(startCtx);
+                // beforeStart is the initialization barrier. Restoration observers receive the
+                // system ref next and must be able to reconcile other durable agents through it,
+                // even though restored run loops do not start until every observation finishes.
+                system.#lifecycle = "open";
+                const active = await system.#start(startCtx);
+                for (const agent of active) agent.start();
+                await system.#afterStart(startCtx);
+                return system;
+            } catch (error: unknown) {
+                await system.close(systemCtx).catch(() => undefined);
+                throw error;
+            }
+        });
     }
 
     /**
@@ -325,7 +335,7 @@ export class AgentSystemLocal<
                         (module) => module.agentCreated,
                     );
                 });
-                const agent = await this.#instantiate(lockCtx, agentId, owned);
+                const agent = await this.#instantiate(agentId, owned);
                 if (agent === undefined) throw new Error(`Agent "${agentId}" could not be built.`);
                 return agent;
             });
@@ -490,7 +500,7 @@ export class AgentSystemLocal<
             if (config === undefined) {
                 throw new Error(`Agent "${agentId}" has not been created.`);
             }
-            const agent = await this.#instantiate(lockCtx, agentId, config);
+            const agent = await this.#instantiate(agentId, config);
             if (agent === undefined) throw new Error(`Agent "${agentId}" could not be built.`);
             return agent;
         });
@@ -501,14 +511,17 @@ export class AgentSystemLocal<
      * that has no live instance yet.
      */
     async #instantiate(
-        ctx: Context,
         agentId: string,
         config: AgentConfig,
         onlyIfActive = false,
         start = true,
     ): Promise<Agent<AnyAgentTool, Database> | undefined> {
+        // An agent outlives whatever asked for it — a restart bringing the collection up, an HTTP
+        // request, another agent's tool — so it takes no context from its caller at all and is
+        // built on the collection's own. A run loop still running long after the call that started
+        // it returned belongs to the collection's lifetime, and traces as the collection's.
         const agentCtx = withAgentDatabase(
-            withAgentConfig(withAgentSystem(ctx, new AgentSystemRef(this, agentId)), config),
+            withAgentConfig(withAgentSystem(this.#ctx, new AgentSystemRef(this, agentId)), config),
             this.#storage.database,
         );
         const options = {
@@ -563,7 +576,7 @@ export class AgentSystemLocal<
                             (module) => module.agentRestored,
                         );
                     });
-                    return await this.#instantiate(lockCtx, agentId, config, true, false);
+                    return await this.#instantiate(agentId, config, true, false);
                 });
             }),
         );

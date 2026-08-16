@@ -21,17 +21,43 @@ const serviceTierNamespace = createContextNamespace<SessionServiceTier | undefin
     "agentServiceTier",
     undefined,
 );
-/** Backing storage for `agentPermissionMode`: how much the work on a context may touch. */
+/**
+ * Backing storage for `agentPermissionMode`: how much the work on a context may touch.
+ *
+ * Not detachable. A mode wider than the agent's own is lent to one reviewed action and to nothing
+ * else, so work that detaches to a lifetime of its own starts again from the product default
+ * rather than inheriting an elevation it was never reviewed for.
+ */
 const permissionModeNamespace = createContextNamespace<AgentPermissionMode>(
     "agentPermissionMode",
     DEFAULT_AGENT_PERMISSION_MODE,
+    { detachable: false },
 );
-/** Backing storage for `agentKV`: the scoped key-value store carried on a context. */
-const kvNamespace = createContextNamespace<AgentKV | undefined>("agentKV", undefined);
-/** Backing storage for `agentRunKV`: the run's own store, erased when the agent settles. */
-const runKVNamespace = createContextNamespace<AgentKV | undefined>("agentRunKV", undefined);
-/** Backing storage for `agentHistoryKV`: state belonging to the current history epoch. */
-const historyKVNamespace = createContextNamespace<AgentKV | undefined>("agentHistoryKV", undefined);
+/**
+ * Backing storage for `agentKV`: the scoped key-value store carried on a context. Not detachable,
+ * because which store this is depends on the call: inside a tool it is that call's own, and that
+ * handle stops accepting writes once the call commits. An agent that detaches to a lifetime of its
+ * own is handed no store and installs its own, rather than keeping one that is about to expire.
+ */
+const kvNamespace = createContextNamespace<AgentKV | undefined>("agentKV", undefined, {
+    detachable: false,
+});
+/**
+ * Backing storage for `agentRunKV`: the run's own store, erased when the agent settles. Not
+ * detachable, because what it holds lives exactly as long as the run that wrote it.
+ */
+const runKVNamespace = createContextNamespace<AgentKV | undefined>("agentRunKV", undefined, {
+    detachable: false,
+});
+/**
+ * Backing storage for `agentHistoryKV`: state belonging to the current history epoch. Not
+ * detachable, because the handle expires when compaction or a model change replaces history.
+ */
+const historyKVNamespace = createContextNamespace<AgentKV | undefined>(
+    "agentHistoryKV",
+    undefined,
+    { detachable: false },
+);
 /** Storage-owned identity and lifetime of an active transaction facade. */
 export interface AgentStorageTransactionContext {
     readonly database: AgentDatabase;
@@ -73,13 +99,18 @@ if (existingDatabaseContextRegistry === undefined) {
 const stdlibRegistryIdentity = registerContextExtension as object;
 let databaseContextState = databaseContextRegistry.get(stdlibRegistryIdentity);
 if (databaseContextState === undefined) {
+    // Neither of these is detachable. The transaction is the caller's in-flight write, and the
+    // database is whatever facade that transaction installed, so work that detaches to a lifetime
+    // of its own is handed no storage at all and has to be given the real one deliberately. That
+    // is what keeps a run outliving its caller from writing through a facade that has committed.
     const databaseNamespace = createContextNamespace<AgentDatabase | undefined>(
         "agentDatabase",
         undefined,
+        { detachable: false },
     );
     const storageTransactionNamespace = createContextNamespace<
         AgentStorageTransactionContext | undefined
-    >("agentStorageTransaction", undefined);
+    >("agentStorageTransaction", undefined, { detachable: false });
     registerContextExtension("db", (ctx) => {
         const transaction = storageTransactionNamespace.get(ctx);
         if (transaction?.lifetime.aborted === true) {
@@ -234,13 +265,4 @@ export function withAgentStorageTransaction(
 /** The storage transaction carried by this context, including its ended state when retained. */
 export function agentStorageTransaction(ctx: Context): AgentStorageTransactionContext | undefined {
     return storageTransactionNamespace.get(ctx);
-}
-
-/** Drop a caller's transaction lifetime when creating independently owned agent work. */
-export function withoutAgentStorageTransaction(ctx: Context): Context {
-    const transaction = storageTransactionNamespace.get(ctx);
-    const withoutTransaction = storageTransactionNamespace.set(ctx, undefined);
-    return transaction === undefined
-        ? withoutTransaction
-        : databaseNamespace.set(withoutTransaction, transaction.root);
 }

@@ -5,7 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  '@steve.kite/stdlib': 0.0.10
+  '@steve.kite/stdlib': 0.0.12
 
 importers:
 
@@ -140,8 +140,8 @@ importers:
         specifier: workspace:*
         version: link:../happy-providers
       '@steve.kite/stdlib':
-        specifier: 0.0.10
-        version: 0.0.10
+        specifier: 0.0.12
+        version: 0.0.12
       drizzle-orm:
         specifier: ^0.45.2
         version: 0.45.2(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@types/pg@8.15.6)(sql.js@1.14.1)
@@ -168,8 +168,8 @@ importers:
         specifier: 0.0.8
         version: 0.0.8(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
       '@steve.kite/stdlib':
-        specifier: 0.0.10
-        version: 0.0.10
+        specifier: 0.0.12
+        version: 0.0.12
       drizzle-orm:
         specifier: ^0.45.2
         version: 0.45.2(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@types/pg@8.15.6)(sql.js@1.14.1)
@@ -196,8 +196,8 @@ importers:
         specifier: 0.0.1
         version: 0.0.1
       '@steve.kite/stdlib':
-        specifier: 0.0.10
-        version: 0.0.10
+        specifier: 0.0.12
+        version: 0.0.12
       dockerode:
         specifier: ^5.0.1
         version: 5.0.1
@@ -261,8 +261,8 @@ importers:
         specifier: 0.0.8
         version: 0.0.8(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
       '@steve.kite/stdlib':
-        specifier: 0.0.10
-        version: 0.0.10
+        specifier: 0.0.12
+        version: 0.0.12
       drizzle-orm:
         specifier: ^0.45.2
         version: 0.45.2(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@types/pg@8.15.6)(sql.js@1.14.1)
@@ -336,8 +336,8 @@ importers:
         specifier: ^0.34.49
         version: 0.34.49
       '@steve.kite/stdlib':
-        specifier: 0.0.10
-        version: 0.0.10
+        specifier: 0.0.12
+        version: 0.0.12
       deunicode:
         specifier: 1.0.7
         version: 1.0.7
@@ -492,8 +492,8 @@ importers:
         specifier: 0.4.4
         version: 0.4.4
       '@steve.kite/stdlib':
-        specifier: 0.0.10
-        version: 0.0.10
+        specifier: 0.0.12
+        version: 0.0.12
       '@types/node':
         specifier: ^24.0.10
         version: 24.13.2
@@ -696,8 +696,8 @@ importers:
         specifier: workspace:*
         version: link:../happy-agent
       '@steve.kite/stdlib':
-        specifier: 0.0.10
-        version: 0.0.10
+        specifier: 0.0.12
+        version: 0.0.12
       tsx:
         specifier: ^4.23.0
         version: 4.23.0
@@ -718,8 +718,8 @@ importers:
         specifier: 0.0.7
         version: 0.0.7(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
       '@steve.kite/stdlib':
-        specifier: 0.0.10
-        version: 0.0.10
+        specifier: 0.0.12
+        version: 0.0.12
     devDependencies:
       '@types/node':
         specifier: ^24.0.10
@@ -2577,8 +2577,8 @@ packages:
   '@stablelib/base64@1.0.1':
     resolution: {integrity: sha512-1bnPQqSxSuc3Ii6MhBysoWCg58j97aUjuCSZrGSmDxNqtytIi0k8utUenAwTZN4V5mXXYGsVUI9zeBqy+jBOSQ==}
 
-  '@steve.kite/stdlib@0.0.10':
-    resolution: {integrity: sha512-asMXmFTF+GHhmwgGZeV7vNJ+RgE8CUYqebZSLEUHPPhoQeAW2eD4caFbLa/LWTqetUengpyTYYxLsrH6xwE6uw==}
+  '@steve.kite/stdlib@0.0.12':
+    resolution: {integrity: sha512-A7YpunkXilK+VbKL5KoaDl+FiDdO6Bc84+mxCtaAxuKSoK4MgsZX6WZWKkzxUebU2dmFgLwuBESQTndWby17BQ==}
 
   '@tokenizer/inflate@0.4.1':
     resolution: {integrity: sha512-2mAv+8pkG6GIZiF1kNg1jAjh27IDxEPKwdGul3snfztFerfPGI1LjDezZp3i7BElXompqEtPmoPx6c2wgtWsOA==}
@@ -6089,7 +6089,7 @@ snapshots:
       '@paralleldrive/cuid2': 3.3.0
       '@sinclair/typebox': 0.34.49
       '@slopus/happy-providers': 0.0.8(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
-      '@steve.kite/stdlib': 0.0.10
+      '@steve.kite/stdlib': 0.0.12
       drizzle-orm: 0.45.2(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@types/pg@8.15.6)(sql.js@1.14.1)
     transitivePeerDependencies:
       - '@aws-sdk/client-rds-data'
@@ -6134,7 +6134,7 @@ snapshots:
       '@lydell/node-pty': 1.2.0-beta.12
       '@sinclair/typebox': 0.34.49
       '@slopus/happy-agent-supervisor': 0.0.1
-      '@steve.kite/stdlib': 0.0.10
+      '@steve.kite/stdlib': 0.0.12
       dockerode: 5.0.1
       just-bash: 3.0.2
     optionalDependencies:
@@ -6173,7 +6173,7 @@ snapshots:
       '@anthropic-ai/sdk': 0.110.0(zod@4.4.3)
       '@modelcontextprotocol/sdk': 1.29.0(zod@4.4.3)
       '@sinclair/typebox': 0.34.49
-      '@steve.kite/stdlib': 0.0.10
+      '@steve.kite/stdlib': 0.0.12
       deunicode: 1.0.7
       openai: 6.46.0(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
       undici: 8.8.0
@@ -6203,7 +6203,7 @@ snapshots:
       '@anthropic-ai/sdk': 0.110.0(zod@4.4.3)
       '@modelcontextprotocol/sdk': 1.29.0(zod@4.4.3)
       '@sinclair/typebox': 0.34.49
-      '@steve.kite/stdlib': 0.0.10
+      '@steve.kite/stdlib': 0.0.12
       deunicode: 1.0.7
       openai: 6.46.0(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
       undici: 8.8.0
@@ -6477,7 +6477,7 @@ snapshots:
 
   '@stablelib/base64@1.0.1': {}
 
-  '@steve.kite/stdlib@0.0.10': {}
+  '@steve.kite/stdlib@0.0.12': {}
 
   '@tokenizer/inflate@0.4.1':
     dependencies:

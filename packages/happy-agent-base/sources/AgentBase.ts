@@ -21,6 +21,7 @@ import {
     afterCommit,
     asyncLock,
     createContextNamespace,
+    detach,
     deterministicStringify,
     withLifetime,
     type AsyncLock,
@@ -37,7 +38,6 @@ import {
     withAgentKV,
     withAgentPermissionMode,
     withAgentRunKV,
-    withoutAgentStorageTransaction,
 } from "./AgentContexts.js";
 import { agentConfig, ownAgentConfig, withAgentConfig, type AgentConfig } from "./AgentConfig.js";
 import { taskContextBeforeToolCall, withAgentTaskContext } from "./AgentTaskContext.js";
@@ -88,8 +88,13 @@ const ABORTED = Symbol("aborted");
  * The agents whose run loop the current execution is running inside. Hooks and tool executions
  * receive a context carrying this, so an operation that would wait for the very loop it is part
  * of can say so instead of hanging for ever.
+ *
+ * Not detachable. Being inside a loop is a fact about the call in progress, and work that detaches
+ * to a lifetime of its own is by definition no longer inside it.
  */
-const insideTurn = createContextNamespace<readonly string[]>("agentInsideTurn", []);
+const insideTurn = createContextNamespace<readonly string[]>("agentInsideTurn", [], {
+    detachable: false,
+});
 
 /**
  * The same fact as `insideTurn`, tracked by the runtime rather than carried by a context. Not
@@ -673,14 +678,19 @@ export class AgentBase {
     private constructor(ctx: Context, options: AgentBaseOptions) {
         this.id = options.id;
         this.#config = ownAgentConfig(agentConfig(ctx) ?? {});
-        // An agent is its own lifetime. Whatever call happened to construct it — a tool of
-        // another agent, most often — is not a loop this one runs inside, so an inherited
-        // marker is dropped rather than carried into work that outlives that call.
-        this.#baseCtx = withoutAgentStorageTransaction(
-            withAgentDatabase(
-                withAgentConfig(insideTurn.set(ctx, [options.id]), this.#config),
-                options.persistence.database,
+        // An agent is its own lifetime, so it makes a root of the context it was handed rather
+        // than working on it. Whatever call happened to construct it — a tool of another agent,
+        // most often — takes its cancellation, its open transaction, and the loop it was itself
+        // running inside with it when it returns, and none of that may reach work that goes on
+        // long afterwards. What survives is what describes the world the agent runs in: its
+        // logger, its tracer, and its configuration. Everything the agent owns is put on
+        // deliberately, beginning with the storage the detached root no longer carries.
+        this.#baseCtx = withAgentDatabase(
+            withAgentConfig(
+                insideTurn.set(detach(ctx).named(`agent.${options.id}`), [options.id]),
+                this.#config,
             ),
+            options.persistence.database,
         );
         this.#providers = options.providers;
         this.#providerId = options.provider;
@@ -708,10 +718,21 @@ export class AgentBase {
     /**
      * The context everything the agent does runs on: its identity and effective selection, plus
      * the session-scoped key-value store and the store of the run in progress. Rebuilt whenever
-     * the selection changes.
+     * the selection changes. It is what the agent does its own work on, outside a run.
      */
     #deriveCtx(): Context {
         return this.#hookContext(this.#baseCtx);
+    }
+
+    /**
+     * The agent's selection, configuration, and stores put onto the context a stretch of work is
+     * running on. The run loop hands each piece of its work the context of the tracing span that
+     * work belongs to, and every use of that context goes through here, so what the agent is
+     * running on is read at the moment of use: a model switch or a metadata change made in the
+     * middle of a turn is seen by the rest of it, and the span the work opened under is kept.
+     */
+    #workContext(ctx: Context): Context {
+        return this.#hookContext(withAgentConfig(ctx, this.#config));
     }
 
     /** Add this agent's selection and stores to a caller context without losing its transaction. */
@@ -816,6 +837,7 @@ export class AgentBase {
      * starting here.
      */
     async #enterStage<Result = void>(
+        ctx: Context,
         stage: AgentBasePendingStage,
         transact?: (ctx: Context) => MaybePromise<Result>,
     ): Promise<Result | undefined> {
@@ -828,7 +850,7 @@ export class AgentBase {
             return undefined;
         }
         try {
-            return await this.#runInPersistenceLock(this.#ctx, async (lockCtx) => {
+            return await this.#runInPersistenceLock(this.#workContext(ctx), async (lockCtx) => {
                 if (!this.#inheritedRead) {
                     this.#inheritedRead = true;
                     this.#inherited = await agentBasePendingStateOf(lockCtx, this.#persistence);
@@ -1288,8 +1310,8 @@ export class AgentBase {
      * Instructions and tools are correctness hooks — a failure here fails the turn loudly
      * instead of silently running with a wrong configuration.
      */
-    async #instructions(): Promise<string> {
-        const hooked = await this.#hooks.instructions?.(this.#ctx);
+    async #instructions(ctx: Context): Promise<string> {
+        const hooked = await this.#hooks.instructions?.(this.#workContext(ctx));
         return [this.state.instructions, hooked ?? ""]
             .filter((text) => text.length > 0)
             .join("\n\n");
@@ -1300,8 +1322,8 @@ export class AgentBase {
      * answer. Two tools sharing one name and namespace are a configuration error that fails
      * the turn, since the provider would receive ambiguous descriptors.
      */
-    async #tools(): Promise<readonly AnyAgentTool[]> {
-        const hooked = await this.#hooks.tools?.(this.#ctx);
+    async #tools(ctx: Context): Promise<readonly AnyAgentTool[]> {
+        const hooked = await this.#hooks.tools?.(this.#workContext(ctx));
         const tools = [...this.state.tools, ...(hooked ?? [])];
         const names = new Set<string>();
         for (const tool of tools) {
@@ -1481,10 +1503,19 @@ export class AgentBase {
      * more work, so the loop hooks always bracket a settled-to-settled span.
      */
     async #runLoop(): Promise<void> {
+        // The run is a stretch of work of its own, and the context of its span is the one the
+        // whole of it runs on. Everything below is handed that context rather than reading a
+        // scope back off the agent, so each turn, inference, tool call, and hook is placed in
+        // the run it actually belongs to even while another agent is running alongside it.
+        await this.#ctx.span("agent.run", (ctx) => this.#runTurns(ctx));
+    }
+
+    /** The run itself, on the context of the span the whole of it belongs to. */
+    async #runTurns(ctx: Context): Promise<void> {
         if (this.#pending?.stage === "settlement") {
             this.#loopId ??= createId();
             this.#settlementId ??= createId();
-            await this.#settleDurably({
+            await this.#settleDurably(ctx, {
                 loopId: this.#loopId,
                 settlementId: this.#settlementId,
             });
@@ -1504,105 +1535,124 @@ export class AgentBase {
             // what matters at this point is that the record exists at all, since its absence is
             // what a later process reads as an agent that finished.
             await this.#enterStage(
+                ctx,
                 "inference",
                 this.#hooks.beforeAgentLoopTransact === undefined
                     ? undefined
                     : (hookCtx) => this.#hooks.beforeAgentLoopTransact?.(hookCtx, loop),
             );
-            await this.#invokeHook(this.#hooks.beforeAgentLoop, loop);
+            await this.#invokeHook(ctx, this.#hooks.beforeAgentLoop, loop);
             do {
-                this.#turnAborted = false;
-                this.#durableWorkBlocked = false;
-                this.#turnId ??= createId();
-                // Claimed before any awaiting, so a request raised while the turn is still
-                // starting up survives into another turn instead of being cleared by it. The
-                // redundant turn this can cost is cheap: an empty queue drains without any
-                // inference.
-                this.#turnRequested = false;
-                // Every turn starts from durable state rather than from what this instance last
-                // remembered, so the store remains authoritative after recovery.
-                this.#loaded = undefined;
-                // The durable history has to be loaded before anything else: a turn that cannot
-                // read the conversation cannot answer it, and must not write to it either —
-                // appending to a conversation it cannot see is how a message ends up after a
-                // tool call nobody answered. The turn ends here instead, leaving everything
-                // durable exactly as it was for the next attempt.
-                const loadFailure = await this.#ensureLoaded().then(
-                    () => undefined,
-                    (error: unknown) => error,
+                const outcome = await ctx.span("agent.turn", (turnCtx) =>
+                    this.#runTurn(turnCtx, loop, abort),
                 );
-                if (loadFailure !== undefined) {
-                    await this.#emit({
-                        type: "done",
-                        state: "error",
-                        kind: "internal_error",
-                        message:
-                            loadFailure instanceof Error
-                                ? loadFailure.message
-                                : String(loadFailure),
-                    });
-                    this.#turnId = undefined;
-                    break;
-                }
-                const turnStart = {
-                    loopId: loop.loopId,
-                    turnId: this.#turnId,
-                    contextTokens: this.#contextTokens,
-                };
-                await this.#enterStage(
-                    "inference",
-                    this.#hooks.beforeTurnTransact === undefined
-                        ? undefined
-                        : (hookCtx) => this.#hooks.beforeTurnTransact?.(hookCtx, turnStart),
-                );
-                await this.#applyActions(this.#hooks.beforeTurn, abort.signal, turnStart);
-                await this.#runInference(abort);
-                if (this.#durableWorkBlocked) return;
-                const turn = {
-                    loopId: loop.loopId,
-                    turnId: turnStart.turnId,
-                    contextTokens: this.#contextTokens,
-                    aborted: this.#turnAborted,
-                };
-                const completedTurnId = this.#turnId;
-                this.#turnId = undefined;
-                try {
-                    await this.#enterStage(
-                        "inference",
-                        this.#hooks.afterTurnTransact === undefined
-                            ? undefined
-                            : (hookCtx) => this.#hooks.afterTurnTransact?.(hookCtx, turn),
-                    );
-                } catch (error: unknown) {
-                    this.#turnId = completedTurnId;
-                    throw error;
-                }
-                await this.#applyActions(this.#hooks.afterTurn, abort.signal, turn);
-                if (!this.#turnRequested || (this.#closed && !this.#hasNoticeWorkToFinish())) {
-                    break;
-                }
+                if (outcome === "blocked") return;
+                if (outcome === "stop") break;
                 // Each turn cancels on its own scope. Reopening it here rather than at the top
                 // keeps the run's first turn under the scope its opening hook already ran in.
                 abort = this.#openAbortScope();
             } while (true);
             await this.#enterStage(
+                ctx,
                 "inference",
                 this.#hooks.afterAgentLoopTransact === undefined
                     ? undefined
                     : (hookCtx) => this.#hooks.afterAgentLoopTransact?.(hookCtx, loop),
             );
-            await this.#applyActions(this.#hooks.afterAgentLoop, abort.signal, loop);
+            await this.#applyActions(ctx, this.#hooks.afterAgentLoop, abort.signal, loop);
         } while (this.#turnRequested && (!this.#closed || this.#hasNoticeWorkToFinish()));
         // Nothing is asked for any more, so the outstanding work is erased. That erasure is what
         // makes the agent idle, and it commits together with whatever the settling hooks write,
         // so no owner can ever see the agent finished without their conclusions or their
         // conclusions without the agent being finished.
         this.#settlementId ??= createId();
-        await this.#enterStage("settlement");
-        await this.#settleDurably({
+        await this.#enterStage(ctx, "settlement");
+        await this.#settleDurably(ctx, {
             loopId: this.#loopId ?? createId(),
             settlementId: this.#settlementId,
         });
+    }
+
+    /**
+     * One turn: reload the durable state, ask the pre-turn hooks what to do, run the inference
+     * and its tools, then ask the post-turn hooks. It answers with what the run should do next —
+     * open another turn, stop because nothing more is asked for, or give up entirely because a
+     * staged tool result could not settle and this run must leave its pending state intact.
+     */
+    async #runTurn(
+        ctx: Context,
+        loop: AgentBaseLoop,
+        abort: AbortController,
+    ): Promise<"continue" | "stop" | "blocked"> {
+        this.#turnAborted = false;
+        this.#durableWorkBlocked = false;
+        this.#turnId ??= createId();
+        // Claimed before any awaiting, so a request raised while the turn is still starting up
+        // survives into another turn instead of being cleared by it. The redundant turn this can
+        // cost is cheap: an empty queue drains without any inference.
+        this.#turnRequested = false;
+        // Every turn starts from durable state rather than from what this instance last
+        // remembered, so the store remains authoritative after recovery.
+        this.#loaded = undefined;
+        // The durable history has to be loaded before anything else: a turn that cannot read the
+        // conversation cannot answer it, and must not write to it either — appending to a
+        // conversation it cannot see is how a message ends up after a tool call nobody answered.
+        // The turn ends here instead, leaving everything durable exactly as it was for the next
+        // attempt.
+        const loadFailure = await this.#ensureLoaded(ctx).then(
+            () => undefined,
+            (error: unknown) => error,
+        );
+        if (loadFailure !== undefined) {
+            await this.#emit(ctx, {
+                type: "done",
+                state: "error",
+                kind: "internal_error",
+                message: loadFailure instanceof Error ? loadFailure.message : String(loadFailure),
+            });
+            this.#turnId = undefined;
+            return "stop";
+        }
+        const turnStart = {
+            loopId: loop.loopId,
+            turnId: this.#turnId,
+            contextTokens: this.#contextTokens,
+        };
+        await this.#enterStage(
+            ctx,
+            "inference",
+            this.#hooks.beforeTurnTransact === undefined
+                ? undefined
+                : (hookCtx) => this.#hooks.beforeTurnTransact?.(hookCtx, turnStart),
+        );
+        await this.#applyActions(ctx, this.#hooks.beforeTurn, abort.signal, turnStart);
+        await this.#runInference(ctx, abort);
+        if (this.#durableWorkBlocked) return "blocked";
+        const turn = {
+            loopId: loop.loopId,
+            turnId: turnStart.turnId,
+            contextTokens: this.#contextTokens,
+            aborted: this.#turnAborted,
+        };
+        const completedTurnId = this.#turnId;
+        this.#turnId = undefined;
+        try {
+            await this.#enterStage(
+                ctx,
+                "inference",
+                this.#hooks.afterTurnTransact === undefined
+                    ? undefined
+                    : (hookCtx) => this.#hooks.afterTurnTransact?.(hookCtx, turn),
+            );
+        } catch (error: unknown) {
+            this.#turnId = completedTurnId;
+            throw error;
+        }
+        await this.#applyActions(ctx, this.#hooks.afterTurn, abort.signal, turn);
+        if (!this.#turnRequested || (this.#closed && !this.#hasNoticeWorkToFinish())) {
+            return "stop";
+        }
+        return "continue";
     }
 
     /**
@@ -1611,9 +1661,14 @@ export class AgentBase {
      * is resumed and finds nothing to do, while one wrongly believed to be finished is never
      * resumed at all.
      */
-    async #settleDurably(settlement: AgentBaseSettlement): Promise<void> {
+    async #settleDurably(ctx: Context, settlement: AgentBaseSettlement): Promise<void> {
+        await ctx.span("agent.settle", (settleCtx) => this.#settleRecord(settleCtx, settlement));
+    }
+
+    /** The settlement itself, on the context of the span it belongs to. */
+    async #settleRecord(ctx: Context, settlement: AgentBaseSettlement): Promise<void> {
         try {
-            await this.#runInPersistenceLock(this.#ctx, (lockCtx) =>
+            await this.#runInPersistenceLock(this.#workContext(ctx), (lockCtx) =>
                 this.#recordTransaction(lockCtx, async (txCtx) => {
                     await this.#clearPending(txCtx);
                     await this.#invokeTransactionalSettle(txCtx, settlement);
@@ -1712,12 +1767,13 @@ export class AgentBase {
         }
     }
 
-    /** Call an observing hook on the agent's own context. */
+    /** Call an observing hook on the context the work in progress is running on. */
     async #invokeHook<Arguments extends readonly unknown[]>(
+        ctx: Context,
         hook: ((ctx: Context, ...args: Arguments) => MaybePromise<void>) | undefined,
         ...args: Arguments
     ): Promise<void> {
-        await this.#invokeHookOn(this.#ctx, hook, ...args);
+        await this.#invokeHookOn(this.#workContext(ctx), hook, ...args);
     }
 
     /**
@@ -1746,6 +1802,7 @@ export class AgentBase {
      * since it was a decision about a turn that no longer exists.
      */
     async #applyActions<Arguments extends readonly unknown[]>(
+        ctx: Context,
         hook:
             | ((
                   ctx: Context,
@@ -1758,12 +1815,12 @@ export class AgentBase {
         if (hook === undefined) return;
         let actions: readonly AgentModuleAction[] | undefined;
         try {
-            actions = await hook(this.#ctx, ...args);
+            actions = await hook(this.#workContext(ctx), ...args);
         } catch {
             return;
         }
         if (signal.aborted) return;
-        await this.#carryOutActions(actions);
+        await this.#carryOutActions(ctx, actions);
     }
 
     /**
@@ -1774,6 +1831,7 @@ export class AgentBase {
      * this belongs to no turn's scope, so nothing can cancel the answer out from under it.
      */
     async #applyActionsAlways<Arguments extends readonly unknown[]>(
+        ctx: Context,
         hook:
             | ((
                   ctx: Context,
@@ -1785,26 +1843,30 @@ export class AgentBase {
         if (hook === undefined) return;
         let actions: readonly AgentModuleAction[] | undefined;
         try {
-            actions = await hook(this.#ctx, ...args);
+            actions = await hook(this.#workContext(ctx), ...args);
         } catch {
             return;
         }
-        await this.#carryOutActions(actions);
+        await this.#carryOutActions(ctx, actions);
     }
 
     /**
      * Carry out what a hook asked for. User messages keep their ordinary queues; system notices
      * enter a separate durable queue consumed only at a safe history boundary.
      */
-    async #carryOutActions(actions: readonly AgentModuleAction[] | undefined): Promise<void> {
+    async #carryOutActions(
+        ctx: Context,
+        actions: readonly AgentModuleAction[] | undefined,
+    ): Promise<void> {
         const batch: QueueRequest[] = [];
         const injections: SessionSystemMessage[] = [];
         const flush = async (): Promise<void> => {
             const pending = batch.splice(0, batch.length);
             const pendingInjections = injections.splice(0, injections.length);
+            const workCtx = this.#workContext(ctx);
             try {
-                await this.#enqueue(this.#ctx, pending);
-                await this.#enqueueInjections(this.#ctx, pendingInjections);
+                await this.#enqueue(workCtx, pending);
+                await this.#enqueueInjections(workCtx, pendingInjections);
             } catch {
                 // A hook-driven action must not fail the run.
             }
@@ -1844,7 +1906,7 @@ export class AgentBase {
      * until nothing is owed an answer. Every failure is caught here and surfaced to the
      * conversation, so a turn ends with a complete context whatever went wrong.
      */
-    async #runInference(abort: AbortController): Promise<void> {
+    async #runInference(ctx: Context, abort: AbortController): Promise<void> {
         // One shared promise for the turn's scope keeps races from piling up listeners on the
         // signal, and a scope that was aborted before this point settles it immediately: a
         // listener added afterwards would never hear the event that already happened.
@@ -1854,7 +1916,7 @@ export class AgentBase {
                   abort.signal.addEventListener("abort", () => resolve(ABORTED), { once: true });
               });
         try {
-            await this.#ensureLoaded();
+            await this.#ensureLoaded(ctx);
             // Resume a tool batch that was dispatched but cut off before its results landed, so
             // the interrupted results reach the main store before any queued message.
             const resumed = this.#pendingTools;
@@ -1865,21 +1927,29 @@ export class AgentBase {
                 // A batch that was never committed has certainly not run — the commit precedes
                 // every execution — so it is dispatched as the fresh batch it never got to be,
                 // rather than resumed, which would refuse the non-durable calls.
-                if (await this.#runToolBatch(resumed, !undispatched, abort.signal, abortPromise)) {
+                if (
+                    await this.#runToolBatch(
+                        ctx,
+                        resumed,
+                        !undispatched,
+                        abort.signal,
+                        abortPromise,
+                    )
+                ) {
                     return;
                 }
             }
             let needsInference = resumed.length > 0;
             // A requested compaction runs before this turn's first inference, so the model
             // always receives a settled conversation — never one still owing tool results.
-            await this.#runCompaction(abort.signal);
+            await this.#runCompaction(ctx, abort.signal);
             // An inference is needed without any injection when tool results from a resumed batch
             // end the context, or — checked once, against the freshly loaded durable state —
             // when a cut-off run left its trailing user or tool message unanswered. Afterwards
             // a trailing user message can be legitimate: a response may have zero blocks.
             if (!this.#recoveryChecked) {
                 this.#recoveryChecked = true;
-                if (await this.#resumesInterruptedRun()) needsInference = true;
+                if (await this.#resumesInterruptedRun(ctx)) needsInference = true;
             }
             // Each cycle first drains the queues, then runs one inference. Steering injects at
             // every stop between responses and always outranks sends; sent messages inject
@@ -1902,106 +1972,32 @@ export class AgentBase {
                         this.#sends.length > 0 ||
                         this.#injections.length > 0 ||
                         this.#noticeAwaitingResponse;
-                    if (hasPendingWork) await this.#emit({ type: "done", state: "cancelled" });
+                    if (hasPendingWork) await this.#emit(ctx, { type: "done", state: "cancelled" });
                     break;
                 }
                 let injected = await this.#consumeQueue(
+                    ctx,
                     this.#steering,
                     this.#steeringMode,
                     "steering",
                 );
                 if (!injected && !needsInference) {
-                    injected = await this.#consumeQueue(this.#sends, this.#sendMode, "send");
+                    injected = await this.#consumeQueue(ctx, this.#sends, this.#sendMode, "send");
                 }
                 // Notices follow queue consumption so a model-switching message can replace
                 // history first. Tool settlement and compaction already finished above.
-                await this.#consumeInjections();
+                await this.#consumeInjections(ctx);
                 // Nothing to answer — a start() on an idle history, or the queues ran dry.
                 if (!this.#noticeAwaitingResponse && !injected && !needsInference) break;
-                const instructions = await this.#instructions();
-                const tools = await this.#tools();
-                const session = await this.#ensureSession(instructions, tools);
-                // Nothing from the previous response may still be holding the session — but
-                // that unwinding was detached from an earlier abort precisely so it could never
-                // hold a cancellation open, so a new cancellation must not start waiting for it
-                // either.
-                if ((await Promise.race([this.#settled(), abortPromise])) === ABORTED) continue;
-                this.#inferenceId ??= createId();
-                const inferenceStart: AgentBaseInferenceStart = {
-                    loopId: this.#loopId ?? createId(),
-                    turnId: this.#turnId ?? createId(),
-                    inferenceId: this.#inferenceId,
-                    contextTokens: this.#contextTokens,
-                };
-                this.#loopId = inferenceStart.loopId;
-                this.#turnId = inferenceStart.turnId;
-                await this.#enterStage(
-                    "inference",
-                    this.#hooks.beforeInferenceTransact === undefined
-                        ? undefined
-                        : (hookCtx) =>
-                              this.#hooks.beforeInferenceTransact?.(hookCtx, inferenceStart),
+                const response = await ctx.span("agent.inference", (inferenceCtx) =>
+                    this.#requestInference(inferenceCtx, abortPromise),
                 );
-                await this.#invokeHook(this.#hooks.beforeInference, inferenceStart);
-                const stream = session.run(this.#ctx, {
-                    context: {
-                        instructions,
-                        messages: [...this.#messages],
-                    },
-                    ...(this.#model === undefined ? {} : { model: this.#model }),
-                    ...(this.#effort === undefined ? {} : { effort: this.#effort }),
-                    ...(this.#serviceTier === undefined ? {} : { serviceTier: this.#serviceTier }),
-                });
-                const { content, state, errorMessage, tokens } = await this.#collect(
-                    stream,
-                    abortPromise,
-                );
-                // A cancellation or a stream ending without a done event did not answer an
-                // appended notice. Keep that obligation and reopen it under a fresh turn scope.
-                // Every terminal provider outcome counts as the response, including an error.
-                if (
-                    this.#noticeAwaitingResponse &&
-                    (state === "cancelled" || state === undefined)
-                ) {
-                    this.#turnRequested = true;
-                } else {
-                    this.#noticeAwaitingResponse = false;
-                    this.#clearTurnRequestIfNoPendingInput();
-                }
-                // A cancelled or failed response measures nothing, so the conversation keeps
-                // the last real measurement instead of forgetting how large it had become.
-                const inference = {
-                    ...inferenceStart,
-                    state,
-                    tokens,
-                    ...(errorMessage === undefined ? {} : { errorMessage }),
-                };
-                const afterInferenceTransact =
-                    this.#hooks.afterInferenceTransact === undefined
-                        ? undefined
-                        : (hookCtx: Context) =>
-                              this.#hooks.afterInferenceTransact?.(hookCtx, inference);
-                const completedInferenceId = this.#inferenceId;
-                this.#inferenceId = undefined;
-                try {
-                    if (tokens === undefined) {
-                        await this.#enterStage("inference", afterInferenceTransact);
-                    } else {
-                        await this.#recordContextTokens(
-                            tokens.input + tokens.output,
-                            afterInferenceTransact,
-                        );
-                    }
-                } catch (error: unknown) {
-                    this.#inferenceId = completedInferenceId;
-                    throw error;
-                }
-                await this.#invokeHook(this.#hooks.afterInference, inference);
-                if (content.length > 0) {
-                    this.#messages.push({ role: "assistant", content });
-                }
+                // A cancellation arrived before the request was made, so the turn cycles rather
+                // than talking to a session it may no longer own.
+                if (response === undefined) continue;
+                const { content, state } = response;
                 needsInference = false;
-                pendingError = state === "error" ? errorMessage : undefined;
+                pendingError = state === "error" ? response.errorMessage : undefined;
                 if (state !== "tool_call") {
                     // A response can carry a tool call and still not end in one — a stream that
                     // failed or was cut off after the call was emitted. Nothing will dispatch
@@ -2010,6 +2006,7 @@ export class AgentBase {
                     // where a later attempt can still answer it.
                     if (
                         !(await this.#settleUnansweredCalls(
+                            ctx,
                             "The response ended before this tool call was dispatched.",
                         ))
                     ) {
@@ -2023,6 +2020,7 @@ export class AgentBase {
                     );
                     if (calls.length === 0) continue;
                     const closedDuringTools = await this.#runToolBatch(
+                        ctx,
                         calls.map((call, index) => this.#newToolEntry(index, call)),
                         false,
                         abort.signal,
@@ -2044,10 +2042,10 @@ export class AgentBase {
                 this.#loaded !== undefined &&
                 this.#unansweredCalls(this.#messages).length === 0
             ) {
-                await this.#appendFailure(pendingError);
+                await this.#appendFailure(ctx, pendingError);
             }
         } catch (error: unknown) {
-            await this.#emit({
+            await this.#emit(ctx, {
                 type: "done",
                 state: "error",
                 kind: "internal_error",
@@ -2059,14 +2057,119 @@ export class AgentBase {
             // note is not written either — the call stays last, and the next run settles it
             // before anything else is said.
             if (
-                await this.#settleUnansweredCalls("The turn failed before this tool call finished.")
+                await this.#settleUnansweredCalls(
+                    ctx,
+                    "The turn failed before this tool call finished.",
+                )
             ) {
-                await this.#appendFailure(error instanceof Error ? error.message : String(error));
+                await this.#appendFailure(
+                    ctx,
+                    error instanceof Error ? error.message : String(error),
+                );
             }
             this.#noticeAwaitingResponse = false;
             this.#clearTurnRequestIfNoPendingInput();
         }
         this.#turnAborted = abort.signal.aborted;
+    }
+
+    /**
+     * Make one request of the provider and take its answer: the instructions and tools the turn
+     * is running with, the session they belong to, the inference brackets around the request, and
+     * the blocks the model actually finished saying. Nothing comes back when a cancellation
+     * arrived before the request was made, since there is no response to account for.
+     */
+    async #requestInference(
+        ctx: Context,
+        abortPromise: Promise<typeof ABORTED>,
+    ): Promise<
+        | {
+              readonly content: SessionAssistantBlock[];
+              readonly state: SessionDoneState | undefined;
+              readonly errorMessage?: string;
+          }
+        | undefined
+    > {
+        const instructions = await this.#instructions(ctx);
+        const tools = await this.#tools(ctx);
+        const session = await this.#ensureSession(instructions, tools);
+        // Nothing from the previous response may still be holding the session — but that
+        // unwinding was detached from an earlier abort precisely so it could never hold a
+        // cancellation open, so a new cancellation must not start waiting for it either.
+        if ((await Promise.race([this.#settled(), abortPromise])) === ABORTED) return undefined;
+        this.#inferenceId ??= createId();
+        const inferenceStart: AgentBaseInferenceStart = {
+            loopId: this.#loopId ?? createId(),
+            turnId: this.#turnId ?? createId(),
+            inferenceId: this.#inferenceId,
+            contextTokens: this.#contextTokens,
+        };
+        this.#loopId = inferenceStart.loopId;
+        this.#turnId = inferenceStart.turnId;
+        await this.#enterStage(
+            ctx,
+            "inference",
+            this.#hooks.beforeInferenceTransact === undefined
+                ? undefined
+                : (hookCtx) => this.#hooks.beforeInferenceTransact?.(hookCtx, inferenceStart),
+        );
+        await this.#invokeHook(ctx, this.#hooks.beforeInference, inferenceStart);
+        const stream = session.run(this.#workContext(ctx), {
+            context: {
+                instructions,
+                messages: [...this.#messages],
+            },
+            ...(this.#model === undefined ? {} : { model: this.#model }),
+            ...(this.#effort === undefined ? {} : { effort: this.#effort }),
+            ...(this.#serviceTier === undefined ? {} : { serviceTier: this.#serviceTier }),
+        });
+        const { content, state, errorMessage, tokens } = await this.#collect(
+            ctx,
+            stream,
+            abortPromise,
+        );
+        // A cancellation or a stream ending without a done event did not answer an appended
+        // notice. Keep that obligation and reopen it under a fresh turn scope. Every terminal
+        // provider outcome counts as the response, including an error.
+        if (this.#noticeAwaitingResponse && (state === "cancelled" || state === undefined)) {
+            this.#turnRequested = true;
+        } else {
+            this.#noticeAwaitingResponse = false;
+            this.#clearTurnRequestIfNoPendingInput();
+        }
+        // A cancelled or failed response measures nothing, so the conversation keeps the last
+        // real measurement instead of forgetting how large it had become.
+        const inference = {
+            ...inferenceStart,
+            state,
+            tokens,
+            ...(errorMessage === undefined ? {} : { errorMessage }),
+        };
+        const afterInferenceTransact =
+            this.#hooks.afterInferenceTransact === undefined
+                ? undefined
+                : (hookCtx: Context) => this.#hooks.afterInferenceTransact?.(hookCtx, inference);
+        const completedInferenceId = this.#inferenceId;
+        this.#inferenceId = undefined;
+        try {
+            if (tokens === undefined) {
+                await this.#enterStage(ctx, "inference", afterInferenceTransact);
+            } else {
+                await this.#recordContextTokens(
+                    ctx,
+                    tokens.input + tokens.output,
+                    afterInferenceTransact,
+                );
+            }
+        } catch (error: unknown) {
+            this.#inferenceId = completedInferenceId;
+            throw error;
+        }
+        await this.#invokeHook(ctx, this.#hooks.afterInference, inference);
+        if (content.length > 0) {
+            this.#messages.push({ role: "assistant", content });
+        }
+        return { content, state, ...(errorMessage === undefined ? {} : { errorMessage }) };
     }
 
     /**
@@ -2079,20 +2182,20 @@ export class AgentBase {
      * beginning of a block that will now never arrive is told to drop it. Only finished blocks
      * are persisted, so the conversation is intact and it is the view being corrected.
      */
-    async #resumesInterruptedRun(): Promise<boolean> {
+    async #resumesInterruptedRun(ctx: Context): Promise<boolean> {
         const owed =
             this.#lastRecordType === "user" ||
             this.#lastRecordType === "tool" ||
             this.#lastRecordType === "system";
         if (owed && this.#inherited?.stage === "inference") {
-            await this.#emit({ type: "block_reset" });
+            await this.#emit(ctx, { type: "block_reset" });
         }
         return owed;
     }
 
     /** Load the durable state once. A failed load is not sticky: the next turn retries it. */
-    async #ensureLoaded(): Promise<void> {
-        this.#loaded ??= this.#loadHistory().catch((error: unknown) => {
+    async #ensureLoaded(ctx: Context): Promise<void> {
+        this.#loaded ??= this.#loadHistory(ctx).catch((error: unknown) => {
             this.#loaded = undefined;
             throw error;
         });
@@ -2105,13 +2208,14 @@ export class AgentBase {
      * a failed write costs only that knowledge and never the response that produced it.
      */
     async #recordContextTokens(
+        ctx: Context,
         tokens: number | undefined,
         transact?: (ctx: Context) => MaybePromise<void>,
     ): Promise<void> {
         const previousTokens = this.#contextTokens;
         this.#contextTokens = tokens;
         try {
-            await this.#runInPersistenceLock(this.#ctx, async (lockCtx) => {
+            await this.#runInPersistenceLock(this.#workContext(ctx), async (lockCtx) => {
                 const write = (writeCtx: Context): Promise<void> =>
                     tokens === undefined
                         ? this.#persistence.deleteValue(writeCtx, "context")
@@ -2142,13 +2246,21 @@ export class AgentBase {
      * promise for every caller awaiting it. A provider failure rejects them and leaves history
      * untouched.
      */
-    async #runCompaction(signal: AbortSignal): Promise<void> {
+    async #runCompaction(ctx: Context, signal: AbortSignal): Promise<void> {
+        if (this.#compaction === undefined) return;
+        await ctx.span("agent.compaction", (compactionCtx) =>
+            this.#compactHistory(compactionCtx, signal),
+        );
+    }
+
+    /** The compaction itself, on the context of the span it belongs to. */
+    async #compactHistory(ctx: Context, signal: AbortSignal): Promise<void> {
         const pending = this.#compaction;
         if (pending === undefined) return;
         try {
-            await this.#enterStage("compaction");
-            const instructions = await this.#instructions();
-            const session = await this.#ensureSession(instructions, await this.#tools());
+            await this.#enterStage(ctx, "compaction");
+            const instructions = await this.#instructions(ctx);
+            const session = await this.#ensureSession(instructions, await this.#tools(ctx));
             const snapshot = [...this.#messages];
             await this.#settled();
             const compactionStart: AgentBaseCompactionStart = {
@@ -2159,16 +2271,16 @@ export class AgentBase {
             };
             this.#loopId = compactionStart.loopId;
             this.#turnId = compactionStart.turnId;
-            await this.#invokeHook(this.#hooks.beforeCompaction, compactionStart);
+            await this.#invokeHook(ctx, this.#hooks.beforeCompaction, compactionStart);
             // Provider compaction is this turn's work, so it runs on this turn's lifetime: an
             // abort reaches the provider operation itself rather than waiting for it to finish
             // work nobody wants any more.
-            const result = await session.compact(withLifetime(this.#ctx, signal), {
+            const result = await session.compact(withLifetime(this.#workContext(ctx), signal), {
                 context: { instructions, messages: snapshot },
                 ...(this.#model === undefined ? {} : { model: this.#model }),
             });
             if (result.status === "failed") {
-                await this.#invokeHook(this.#hooks.afterCompaction, {
+                await this.#invokeHook(ctx, this.#hooks.afterCompaction, {
                     ...compactionStart,
                     result,
                 });
@@ -2176,7 +2288,7 @@ export class AgentBase {
             }
             if (result.status === "completed") {
                 const completed: AgentBaseCompletedCompaction = { ...compactionStart, result };
-                await this.#runInPersistenceLock(this.#ctx, async (lockCtx) => {
+                await this.#runInPersistenceLock(this.#workContext(ctx), async (lockCtx) => {
                     // Physically delete the superseded records and write the replacement —
                     // which keeps the messages that stay — in one atomic step.
                     await this.#recordTransaction(lockCtx, async (txCtx) => {
@@ -2202,9 +2314,9 @@ export class AgentBase {
                 });
                 // The conversation the measurement described is gone; its size is unknown
                 // again until the next response measures the replacement.
-                await this.#recordContextTokens(undefined);
+                await this.#recordContextTokens(ctx, undefined);
             }
-            await this.#invokeHook(this.#hooks.afterCompaction, {
+            await this.#invokeHook(ctx, this.#hooks.afterCompaction, {
                 ...compactionStart,
                 result,
             });
@@ -2225,7 +2337,7 @@ export class AgentBase {
      * happen must append nothing either — leaving the call last is what lets a later attempt,
      * here or after a restart, still answer it.
      */
-    async #settleUnansweredCalls(reason: string): Promise<boolean> {
+    async #settleUnansweredCalls(ctx: Context, reason: string): Promise<boolean> {
         // Nothing is known about the conversation, so nothing may be said about it.
         if (this.#loaded === undefined) return false;
         const owed = this.#unansweredCalls(this.#messages);
@@ -2233,7 +2345,7 @@ export class AgentBase {
         let settled = false;
         let staged = false;
         try {
-            await this.#runInPersistenceLock(this.#ctx, async (lockCtx) => {
+            await this.#runInPersistenceLock(this.#workContext(ctx), async (lockCtx) => {
                 // A call the durable batch still holds belongs to the resume, which answers it
                 // properly — and re-executes it when the tool is durable. Settling it here as
                 // well would give the conversation two results for one call.
@@ -2351,14 +2463,14 @@ export class AgentBase {
      * there is no context to append to; its own failure is swallowed, so surfacing a failure can
      * never cause another.
      */
-    async #appendFailure(message: string): Promise<void> {
+    async #appendFailure(ctx: Context, message: string): Promise<void> {
         if (this.#loaded === undefined) return;
         const failure: SessionSystemMessage = {
             role: "system",
             content: [{ type: "text", text: `The last turn failed: ${message}` }],
         };
         try {
-            await this.#runInPersistenceLock(this.#ctx, async (lockCtx) => {
+            await this.#runInPersistenceLock(this.#workContext(ctx), async (lockCtx) => {
                 await this.#appendRecord(lockCtx, { type: "system", message: failure });
                 this.#messages.push(failure);
             });
@@ -2368,8 +2480,8 @@ export class AgentBase {
     }
 
     /** Move every pending hook notice into history as one atomic, ordered append batch. */
-    async #consumeInjections(): Promise<boolean> {
-        return await this.#runInPersistenceLock(this.#ctx, async (lockCtx) => {
+    async #consumeInjections(ctx: Context): Promise<boolean> {
+        return await this.#runInPersistenceLock(this.#workContext(ctx), async (lockCtx) => {
             if (this.#injections.length === 0) return false;
             const durable = new Set(
                 (await this.#persistence.readValues(lockCtx, "inject.")).map(({ key }) => key),
@@ -2427,6 +2539,7 @@ export class AgentBase {
      * while this still held the store lock would be the hook waiting for its own caller.
      */
     async #consumeQueue(
+        ctx: Context,
         queue: QueueEntry[],
         mode: AgentBaseQueueMode,
         kind: QueueRequest["kind"],
@@ -2435,249 +2548,257 @@ export class AgentBase {
         /** Filled in once the consumption has committed, and reported after the lock is released. */
         const accepted: AgentBaseAcceptedMessage[] = [];
         let permissionChange: AgentBasePermissionModeChange | undefined;
-        const consumed = await this.#runInPersistenceLock(this.#ctx, async (lockCtx) => {
-            if (queue.length === 0) return false;
-            // The durable queue, not memory, decides what is left to consume after a restart.
-            const durable = new Set(
-                (await this.#persistence.readValues(lockCtx, prefix)).map(({ key }) => key),
-            );
-            const remaining = queue.filter((entry) => durable.has(entry.key));
-            if (remaining.length !== queue.length) queue.splice(0, queue.length, ...remaining);
-            if (queue.length === 0) return false;
-            const count = mode === "all" ? queue.length : 1;
-            const batch = queue.slice(0, count);
-            // Settings carried by the consumed messages become the effective settings for the
-            // inference that follows, each defined field superseding the previous value. The
-            // effective values are persisted alongside the consumption so a restart keeps them.
-            let provider = this.#providerId;
-            let model = this.#model;
-            let effort = this.#effort;
-            let serviceTier = this.#serviceTier;
-            let permissionMode = this.#permissionMode;
-            let changed = false;
-            for (const entry of batch) {
-                if (entry.options.provider !== undefined) {
-                    provider = entry.options.provider;
-                    changed = true;
+        const consumed = await this.#runInPersistenceLock(
+            this.#workContext(ctx),
+            async (lockCtx) => {
+                if (queue.length === 0) return false;
+                // The durable queue, not memory, decides what is left to consume after a restart.
+                const durable = new Set(
+                    (await this.#persistence.readValues(lockCtx, prefix)).map(({ key }) => key),
+                );
+                const remaining = queue.filter((entry) => durable.has(entry.key));
+                if (remaining.length !== queue.length) queue.splice(0, queue.length, ...remaining);
+                if (queue.length === 0) return false;
+                const count = mode === "all" ? queue.length : 1;
+                const batch = queue.slice(0, count);
+                // Settings carried by the consumed messages become the effective settings for the
+                // inference that follows, each defined field superseding the previous value. The
+                // effective values are persisted alongside the consumption so a restart keeps them.
+                let provider = this.#providerId;
+                let model = this.#model;
+                let effort = this.#effort;
+                let serviceTier = this.#serviceTier;
+                let permissionMode = this.#permissionMode;
+                let changed = false;
+                for (const entry of batch) {
+                    if (entry.options.provider !== undefined) {
+                        provider = entry.options.provider;
+                        changed = true;
+                    }
+                    if (entry.options.model !== undefined) {
+                        model = entry.options.model;
+                        changed = true;
+                    }
+                    if (entry.options.effort !== undefined) {
+                        effort = entry.options.effort;
+                        changed = true;
+                    }
+                    if (entry.options.serviceTier !== undefined) {
+                        serviceTier = entry.options.serviceTier;
+                        changed = true;
+                    }
+                    if (entry.options.permissionMode !== undefined) {
+                        permissionMode = entry.options.permissionMode;
+                        changed = true;
+                    }
                 }
-                if (entry.options.model !== undefined) {
-                    model = entry.options.model;
-                    changed = true;
-                }
-                if (entry.options.effort !== undefined) {
-                    effort = entry.options.effort;
-                    changed = true;
-                }
-                if (entry.options.serviceTier !== undefined) {
-                    serviceTier = entry.options.serviceTier;
-                    changed = true;
-                }
-                if (entry.options.permissionMode !== undefined) {
-                    permissionMode = entry.options.permissionMode;
-                    changed = true;
-                }
-            }
-            // The mode the messages make effective, kept apart from the rest because it is the one
-            // setting with hooks of its own: a change is announced, and what a module concludes
-            // from it commits with the message that carried it.
-            const modeChange: AgentBasePermissionModeChange | undefined =
-                permissionMode === this.#permissionMode
-                    ? undefined
-                    : { previousMode: this.#permissionMode, mode: permissionMode };
-            // A provider or model change is checked against the provider-model compatibility
-            // matrix. An incompatible change resets the conversation: the history is erased
-            // completely, the old provider session is destroyed, and the `modelChanged` hook
-            // may inject one handoff system message at the very beginning of the fresh
-            // context. A compatible provider change keeps the history but still gets a fresh
-            // session, since a session is bound to the provider that created it.
-            const selectionChanged = provider !== this.#providerId || model !== this.#model;
-            let reset = false;
-            let injected: SessionSystemMessage | undefined;
-            if (selectionChanged) {
-                if (this.#model !== undefined && model !== undefined) {
-                    const previousType = this.#providers.typeOf(this.#providerId);
-                    const nextType = this.#providers.typeOf(provider);
-                    reset =
-                        previousType === null ||
-                        nextType === null ||
-                        !areProviderModelsCompatible(
-                            {
-                                modelId: this.#model,
-                                providerId: this.#providerId,
-                                providerType: previousType,
-                            },
-                            {
-                                modelId: model,
-                                providerId: provider,
-                                providerType: nextType,
-                            },
-                        );
-                } else {
-                    // A selection without a model on either side cannot be judged compatible.
-                    reset = model !== this.#model;
-                }
-            }
-            await this.#recordTransaction(lockCtx, async (txCtx) => {
+                // The mode the messages make effective, kept apart from the rest because it is the one
+                // setting with hooks of its own: a change is announced, and what a module concludes
+                // from it commits with the message that carried it.
+                const modeChange: AgentBasePermissionModeChange | undefined =
+                    permissionMode === this.#permissionMode
+                        ? undefined
+                        : { previousMode: this.#permissionMode, mode: permissionMode };
+                // A provider or model change is checked against the provider-model compatibility
+                // matrix. An incompatible change resets the conversation: the history is erased
+                // completely, the old provider session is destroyed, and the `modelChanged` hook
+                // may inject one handoff system message at the very beginning of the fresh
+                // context. A compatible provider change keeps the history but still gets a fresh
+                // session, since a session is bound to the provider that created it.
+                const selectionChanged = provider !== this.#providerId || model !== this.#model;
+                let reset = false;
+                let injected: SessionSystemMessage | undefined;
                 if (selectionChanged) {
-                    if (this.#hooks.modelChanged !== undefined && model !== undefined) {
-                        // The hook runs while the persistence lock is held and inside the
-                        // transaction that commits the switch, so its store executes directly on
-                        // that transaction: what it writes lands and rolls back with the change
-                        // it was told about, never on its own. The context it is given ends with
-                        // the transaction, so a store it keeps cannot outlive the switch.
-                        const committed = new AbortController();
-                        // Derived from the transaction's own context, which is what makes
-                        // the hook's writes part of the switch rather than a second,
-                        // separate commit, and ending with it.
-                        const changeLifetime = withLifetime(
-                            withAgentContext(txCtx, {
-                                id: this.id,
-                                provider,
-                                model,
-                                effort,
-                                serviceTier,
-                                permissionMode,
-                            }),
-                            committed.signal,
-                        );
-                        const changeCtx = withAgentRunKV(
-                            withAgentHistoryKV(
-                                withAgentKV(changeLifetime, this.#kv),
-                                this.#historyKV,
-                            ),
-                            this.#runKV,
-                        );
-                        try {
-                            injected = await this.#hooks.modelChanged(changeCtx, {
-                                previousModel: this.#model,
-                                model,
-                                previousProvider: this.#providerId,
-                                provider,
-                                providers: this.#providers,
-                                wasReset: reset,
-                            });
-                        } catch {
-                            // A failing handoff must not cost the conversation: an incompatible
-                            // switch is rejected outright — the previous selection stays
-                            // effective and the history is not cleared. A compatible change
-                            // proceeds; the hook only observed it.
-                            if (reset) {
-                                provider = this.#providerId;
-                                model = this.#model;
-                                reset = false;
+                    if (this.#model !== undefined && model !== undefined) {
+                        const previousType = this.#providers.typeOf(this.#providerId);
+                        const nextType = this.#providers.typeOf(provider);
+                        reset =
+                            previousType === null ||
+                            nextType === null ||
+                            !areProviderModelsCompatible(
+                                {
+                                    modelId: this.#model,
+                                    providerId: this.#providerId,
+                                    providerType: previousType,
+                                },
+                                {
+                                    modelId: model,
+                                    providerId: provider,
+                                    providerType: nextType,
+                                },
+                            );
+                    } else {
+                        // A selection without a model on either side cannot be judged compatible.
+                        reset = model !== this.#model;
+                    }
+                }
+                await this.#recordTransaction(lockCtx, async (txCtx) => {
+                    if (selectionChanged) {
+                        if (this.#hooks.modelChanged !== undefined && model !== undefined) {
+                            // The hook runs while the persistence lock is held and inside the
+                            // transaction that commits the switch, so its store executes directly on
+                            // that transaction: what it writes lands and rolls back with the change
+                            // it was told about, never on its own. The context it is given ends with
+                            // the transaction, so a store it keeps cannot outlive the switch.
+                            const committed = new AbortController();
+                            // Derived from the transaction's own context, which is what makes
+                            // the hook's writes part of the switch rather than a second,
+                            // separate commit, and ending with it.
+                            const changeLifetime = withLifetime(
+                                withAgentContext(txCtx, {
+                                    id: this.id,
+                                    provider,
+                                    model,
+                                    effort,
+                                    serviceTier,
+                                    permissionMode,
+                                }),
+                                committed.signal,
+                            );
+                            const changeCtx = withAgentRunKV(
+                                withAgentHistoryKV(
+                                    withAgentKV(changeLifetime, this.#kv),
+                                    this.#historyKV,
+                                ),
+                                this.#runKV,
+                            );
+                            try {
+                                injected = await this.#hooks.modelChanged(changeCtx, {
+                                    previousModel: this.#model,
+                                    model,
+                                    previousProvider: this.#providerId,
+                                    provider,
+                                    providers: this.#providers,
+                                    wasReset: reset,
+                                });
+                            } catch {
+                                // A failing handoff must not cost the conversation: an incompatible
+                                // switch is rejected outright — the previous selection stays
+                                // effective and the history is not cleared. A compatible change
+                                // proceeds; the hook only observed it.
+                                if (reset) {
+                                    provider = this.#providerId;
+                                    model = this.#model;
+                                    reset = false;
+                                }
+                            } finally {
+                                // The store belonged to the hook's call, not to the hook.
+                                committed.abort();
                             }
-                        } finally {
-                            // The store belonged to the hook's call, not to the hook.
-                            committed.abort();
+                            if (!reset) injected = undefined;
                         }
-                        if (!reset) injected = undefined;
                     }
-                }
-                // The queue move is atomic with appending the consumed messages and recording
-                // the inference they make due. The store has one owner, so ordinary deletes
-                // are sufficient.
-                for (const entry of batch) {
-                    await this.#persistence.deleteValue(txCtx, entry.key);
-                }
-                if (reset) {
-                    await this.#deleteRecordIdentities(txCtx, await this.#persistence.load(txCtx));
-                    await this.#historyKV.clear(txCtx);
-                    await this.#persistence.clearRecords(txCtx);
-                    // The erased conversation is what the measurement described.
-                    await this.#persistence.deleteValue(txCtx, "context");
-                    if (injected !== undefined) {
+                    // The queue move is atomic with appending the consumed messages and recording
+                    // the inference they make due. The store has one owner, so ordinary deletes
+                    // are sufficient.
+                    for (const entry of batch) {
+                        await this.#persistence.deleteValue(txCtx, entry.key);
+                    }
+                    if (reset) {
+                        await this.#deleteRecordIdentities(
+                            txCtx,
+                            await this.#persistence.load(txCtx),
+                        );
+                        await this.#historyKV.clear(txCtx);
+                        await this.#persistence.clearRecords(txCtx);
+                        // The erased conversation is what the measurement described.
+                        await this.#persistence.deleteValue(txCtx, "context");
+                        if (injected !== undefined) {
+                            await this.#appendRecord(txCtx, {
+                                type: "system",
+                                message: injected,
+                            });
+                        }
+                    }
+                    for (const entry of batch) {
                         await this.#appendRecord(txCtx, {
-                            type: "system",
-                            message: injected,
-                        });
-                    }
-                }
-                for (const entry of batch) {
-                    await this.#appendRecord(txCtx, {
-                        type: "user",
-                        id: entry.id,
-                        message: entry.message,
-                        ...(entry.metadata === undefined ? {} : { metadata: entry.metadata }),
-                    });
-                }
-                if (changed) {
-                    await this.#persistence.writeValue(txCtx, "settings", {
-                        provider,
-                        ...(model === undefined ? {} : { model }),
-                        ...(effort === undefined ? {} : { effort }),
-                        ...(serviceTier === undefined ? {} : { serviceTier }),
-                        permissionMode,
-                    });
-                }
-                // Consuming a message is precisely the act that makes an inference owed, so
-                // the two commit as one. A crash cannot land between them and leave a
-                // message in the conversation that nothing remembers having to answer.
-                await this.#recordPending(txCtx, "inference");
-                // Last, so a hook writing its own account of the consumption sees a transaction
-                // holding all of it. The mode comes before the messages: it is what they were
-                // said under, and a listener recording them wants to know that first.
-                const selection = { provider, model, effort, serviceTier, permissionMode };
-                if (modeChange !== undefined) {
-                    await this.#invokeTransactHook(
-                        txCtx,
-                        selection,
-                        this.#hooks.permissionModeChangedTransact,
-                        modeChange,
-                    );
-                }
-                for (const entry of batch) {
-                    await this.#invokeTransactHook(
-                        txCtx,
-                        selection,
-                        this.#hooks.messageAcceptedTransact,
-                        {
+                            type: "user",
                             id: entry.id,
-                            kind,
                             message: entry.message,
                             ...(entry.metadata === undefined ? {} : { metadata: entry.metadata }),
-                        },
-                    );
+                        });
+                    }
+                    if (changed) {
+                        await this.#persistence.writeValue(txCtx, "settings", {
+                            provider,
+                            ...(model === undefined ? {} : { model }),
+                            ...(effort === undefined ? {} : { effort }),
+                            ...(serviceTier === undefined ? {} : { serviceTier }),
+                            permissionMode,
+                        });
+                    }
+                    // Consuming a message is precisely the act that makes an inference owed, so
+                    // the two commit as one. A crash cannot land between them and leave a
+                    // message in the conversation that nothing remembers having to answer.
+                    await this.#recordPending(txCtx, "inference");
+                    // Last, so a hook writing its own account of the consumption sees a transaction
+                    // holding all of it. The mode comes before the messages: it is what they were
+                    // said under, and a listener recording them wants to know that first.
+                    const selection = { provider, model, effort, serviceTier, permissionMode };
+                    if (modeChange !== undefined) {
+                        await this.#invokeTransactHook(
+                            txCtx,
+                            selection,
+                            this.#hooks.permissionModeChangedTransact,
+                            modeChange,
+                        );
+                    }
+                    for (const entry of batch) {
+                        await this.#invokeTransactHook(
+                            txCtx,
+                            selection,
+                            this.#hooks.messageAcceptedTransact,
+                            {
+                                id: entry.id,
+                                kind,
+                                message: entry.message,
+                                ...(entry.metadata === undefined
+                                    ? {}
+                                    : { metadata: entry.metadata }),
+                            },
+                        );
+                    }
+                });
+                if (reset) this.#rotateHistoryKV();
+                // Committed: from here the messages are part of the conversation, so what has to be
+                // announced about them is decided now and reported once the lock is released.
+                permissionChange = modeChange;
+                accepted.push(
+                    ...batch.map((entry) => ({
+                        id: entry.id,
+                        kind,
+                        message: entry.message,
+                        ...(entry.metadata === undefined ? {} : { metadata: entry.metadata }),
+                    })),
+                );
+                queue.splice(0, count);
+                if (reset) {
+                    this.#messages = injected === undefined ? [] : [injected];
+                    this.#contextTokens = undefined;
                 }
-            });
-            if (reset) this.#rotateHistoryKV();
-            // Committed: from here the messages are part of the conversation, so what has to be
-            // announced about them is decided now and reported once the lock is released.
-            permissionChange = modeChange;
-            accepted.push(
-                ...batch.map((entry) => ({
-                    id: entry.id,
-                    kind,
-                    message: entry.message,
-                    ...(entry.metadata === undefined ? {} : { metadata: entry.metadata }),
-                })),
-            );
-            queue.splice(0, count);
-            if (reset) {
-                this.#messages = injected === undefined ? [] : [injected];
-                this.#contextTokens = undefined;
-            }
-            this.#messages.push(...batch.map((entry) => entry.message));
-            // This turn is answering the request that these messages raised. A send accepted
-            // while the turn was already running raised it again, and letting that stand would
-            // buy an extra turn with an empty queue and a full set of lifecycle hooks.
-            this.#clearTurnRequestIfNoPendingInput();
-            if (changed) {
-                this.#providerId = provider;
-                this.#model = model;
-                this.#effort = effort;
-                this.#serviceTier = serviceTier;
-                this.#permissionMode = permissionMode;
-                this.#ctx = this.#deriveCtx();
-            }
-            return true;
-        });
-        // Outside the lock, and on the agent's own context, which now carries whatever these
-        // messages made effective.
+                this.#messages.push(...batch.map((entry) => entry.message));
+                // This turn is answering the request that these messages raised. A send accepted
+                // while the turn was already running raised it again, and letting that stand would
+                // buy an extra turn with an empty queue and a full set of lifecycle hooks.
+                this.#clearTurnRequestIfNoPendingInput();
+                if (changed) {
+                    this.#providerId = provider;
+                    this.#model = model;
+                    this.#effort = effort;
+                    this.#serviceTier = serviceTier;
+                    this.#permissionMode = permissionMode;
+                    this.#ctx = this.#deriveCtx();
+                }
+                return true;
+            },
+        );
+        // Outside the lock, and on a context carrying whatever these messages made effective:
+        // the selection is read now rather than when the turn opened.
         if (permissionChange !== undefined) {
-            await this.#invokeHook(this.#hooks.permissionModeChanged, permissionChange);
+            await this.#invokeHook(ctx, this.#hooks.permissionModeChanged, permissionChange);
         }
         for (const message of accepted) {
-            await this.#invokeHook(this.#hooks.messageAccepted, message);
+            await this.#invokeHook(ctx, this.#hooks.messageAccepted, message);
         }
         return consumed;
     }
@@ -2710,8 +2831,8 @@ export class AgentBase {
      * entirely: the main store rebuilds the context, and the sorted queue keys rebuild the
      * not-yet-consumed queues. Consecutive block records reassemble into one assistant message.
      */
-    async #loadHistory(): Promise<void> {
-        await this.#runInPersistenceLock(this.#ctx, async (lockCtx) => {
+    async #loadHistory(ctx: Context): Promise<void> {
+        await this.#runInPersistenceLock(this.#workContext(ctx), async (lockCtx) => {
             const records = await this.#persistence.load(lockCtx);
             const last = records[records.length - 1];
             this.#lastRecordType = last?.type;
@@ -2799,13 +2920,27 @@ export class AgentBase {
      * complete context behind.
      */
     async #runToolBatch(
+        ctx: Context,
+        entries: readonly ToolBatchEntry[],
+        resume: boolean,
+        signal: AbortSignal,
+        abortPromise: Promise<typeof ABORTED>,
+    ): Promise<boolean> {
+        return await ctx.span("agent.tools", (batchCtx) =>
+            this.#dispatchToolBatch(batchCtx, entries, resume, signal, abortPromise),
+        );
+    }
+
+    /** The batch itself, on the context of the span it belongs to. */
+    async #dispatchToolBatch(
+        ctx: Context,
         entries: readonly ToolBatchEntry[],
         resume: boolean,
         signal: AbortSignal,
         abortPromise: Promise<typeof ABORTED>,
     ): Promise<boolean> {
         if (!resume) {
-            await this.#runInPersistenceLock(this.#ctx, (lockCtx) =>
+            await this.#runInPersistenceLock(this.#workContext(ctx), (lockCtx) =>
                 this.#recordTransaction(lockCtx, async (txCtx) => {
                     for (const entry of entries) {
                         await this.#persistence.writeValue(
@@ -2832,7 +2967,7 @@ export class AgentBase {
                 }),
             );
         } else {
-            await this.#enterStage("tools");
+            await this.#enterStage(ctx, "tools");
         }
         const results: (SessionToolResultMessage | undefined)[] = new Array(entries.length);
         // Every execution actually started, whether or not its result reached the conversation.
@@ -2847,7 +2982,7 @@ export class AgentBase {
         const commitReady = async (): Promise<void> => {
             if (commitFailed) return;
             try {
-                await this.#runInPersistenceLock(this.#ctx, async (lockCtx) => {
+                await this.#runInPersistenceLock(this.#workContext(ctx), async (lockCtx) => {
                     while (committed < entries.length) {
                         const entry = entries[committed];
                         const proposed = results[committed];
@@ -2909,16 +3044,21 @@ export class AgentBase {
                 let outcome: SessionToolResultMessage | typeof ABORTED;
                 if (entry.committed !== undefined) {
                     outcome = entry.committed;
-                } else if (resume && !(await this.#isDurable(entry.call))) {
+                } else if (resume && !(await this.#isDurable(ctx, entry.call))) {
                     outcome = toolFailure(
                         entry.call.callId,
                         "The tool call was interrupted by a restart and was not retried.",
                     );
                 } else {
                     const toolLifetime = AbortSignal.any([signal, this.#closeController.signal]);
-                    const execution = this.#executeToolCall(
-                        withLifetime(this.#ctx, toolLifetime),
-                        entry,
+                    // The call's own span hangs off the batch's. Every call in the batch runs at
+                    // the same time, so each opens its span from the batch's context and carries
+                    // its own from there.
+                    const execution = ctx.span("agent.tool", (toolCtx) =>
+                        this.#executeToolCall(
+                            withLifetime(this.#workContext(toolCtx), toolLifetime),
+                            entry,
+                        ),
                     );
                     running.push(execution);
                     outcome = await Promise.race([execution, abortPromise, this.#closingTools()]);
@@ -2971,8 +3111,8 @@ export class AgentBase {
     }
 
     /** Whether this call's tool may safely be executed again after a restart interrupted it. */
-    async #isDurable(call: SessionToolCallBlock): Promise<boolean> {
-        const tool = (await this.#tools()).find(
+    async #isDurable(ctx: Context, call: SessionToolCallBlock): Promise<boolean> {
+        const tool = (await this.#tools(ctx)).find(
             (candidate) => candidate.name === call.name && candidate.namespace === call.namespace,
         );
         return tool?.durable === true;
@@ -3103,7 +3243,7 @@ export class AgentBase {
             content: [{ type: "text", text }],
             isError: true,
         });
-        const tool = (await this.#tools()).find(
+        const tool = (await this.#tools(ctx)).find(
             (candidate) => candidate.name === call.name && candidate.namespace === call.namespace,
         );
         if (tool === undefined) {
@@ -3348,6 +3488,7 @@ export class AgentBase {
      * alone, so memory never differs from what a reload would rebuild.
      */
     async #collect(
+        ctx: Context,
         stream: AsyncIterable<SessionEvent>,
         abortPromise: Promise<typeof ABORTED>,
     ): Promise<{
@@ -3364,7 +3505,7 @@ export class AgentBase {
         const toolCallIndexes = new Map<string, number>();
         const persist = async (event: AgentBasePersistedEvent | undefined): Promise<void> => {
             if (event === undefined) return;
-            await this.#runInPersistenceLock(this.#ctx, async (lockCtx) => {
+            await this.#runInPersistenceLock(this.#workContext(ctx), async (lockCtx) => {
                 if (this.#hooks.onEventTransact === undefined) {
                     await this.#appendRecord(lockCtx, { type: "block", block: event.block });
                 } else {
@@ -3390,7 +3531,7 @@ export class AgentBase {
                 const next = await Promise.race([iterator.next(), abortPromise]);
                 if (next === ABORTED) {
                     // Drop the unfinished block and end the turn.
-                    await this.#emit({ type: "done", state: "cancelled" });
+                    await this.#emit(ctx, { type: "done", state: "cancelled" });
                     return { content: persisted, state: "cancelled" };
                 }
                 if (next.done === true) {
@@ -3398,7 +3539,7 @@ export class AgentBase {
                     break;
                 }
                 const event = next.value;
-                await this.#emit(event);
+                await this.#emit(ctx, event);
                 switch (event.type) {
                     case "text_start":
                         content.push({ type: "text", text: "" });
@@ -3554,9 +3695,9 @@ export class AgentBase {
     }
 
     /** Report one stream event to the hooks. Hooks observe the stream; they never fail a run. */
-    async #emit(event: SessionEvent): Promise<void> {
+    async #emit(ctx: Context, event: SessionEvent): Promise<void> {
         try {
-            await this.#hooks.onEvent?.(this.#ctx, event);
+            await this.#hooks.onEvent?.(this.#workContext(ctx), event);
         } catch {
             // Hooks observe the stream; they never fail a run.
         }
