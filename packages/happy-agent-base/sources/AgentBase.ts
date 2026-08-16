@@ -3253,10 +3253,17 @@ export class AgentBase {
             return failure("The tool call was incomplete and was not executed.");
         }
         let args: unknown;
-        try {
-            args = call.arguments.trim().length === 0 ? {} : JSON.parse(call.arguments);
-        } catch {
-            return failure(`The arguments for "${call.name}" were not valid JSON.`);
+        if (tool.grammar !== undefined) {
+            // A grammar tool is freeform: its own syntax constrained the model, so what arrives is
+            // the text that grammar produced and never JSON. Reading it as JSON would refuse every
+            // call a correct patch or query makes, so it is handed over as written.
+            args = { input: call.arguments };
+        } else {
+            try {
+                args = call.arguments.trim().length === 0 ? {} : JSON.parse(call.arguments);
+            } catch {
+                return failure(`The arguments for "${call.name}" were not valid JSON.`);
+            }
         }
         if (tool.parameters !== undefined && !Value.Check(tool.parameters, args)) {
             return failure(`The arguments for "${call.name}" did not match its schema.`);

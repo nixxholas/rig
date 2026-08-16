@@ -1,5 +1,5 @@
 import type { SessionOutputBlock, SessionToolLarkGrammar } from "@slopus/happy-providers";
-import type { Static, TSchema } from "@sinclair/typebox";
+import { Type, type Static, type TSchema } from "@sinclair/typebox";
 import type { Context } from "@steve.kite/stdlib";
 
 import type { AgentKV } from "./AgentKV.js";
@@ -30,6 +30,17 @@ export type AgentToolAutoPermissionActionDescriber<Args> = {
 }["bivarianceHack"];
 
 /**
+ * What a freeform tool is called with. A grammar constrains the model instead of a JSON schema, so
+ * the call arrives as the text that grammar produced and is handed over under `input` exactly as
+ * written. This is the one shape every grammar tool receives, which is why such a tool declares a
+ * grammar rather than parameters of its own.
+ */
+export const agentGrammarToolParameters = Type.Object({ input: Type.String() });
+
+/** The arguments of a freeform tool, as the agent hands them to `execute`. */
+export type AgentGrammarToolArguments = Static<typeof agentGrammarToolParameters>;
+
+/**
  * An executable tool with TypeBox-typed arguments and structured result. The descriptor fields
  * mirror the provider session tool. The agent validates arguments against `parameters` before
  * execute runs and the result against `returnType` after; `toLLM` renders the structured result
@@ -56,7 +67,11 @@ export interface AgentTool<Args extends TSchema = TSchema, Result extends TSchem
     readonly returnType: Result;
     /** Provider-neutral request to expose this tool through native tool discovery. */
     readonly defer?: boolean;
-    /** Ignored by providers that do not support grammar-based tools. */
+    /**
+     * Ignored by providers that do not support grammar-based tools. A tool that declares one is
+     * freeform: it takes no parameters of its own, and its `execute` is handed the grammar's own
+     * text under `input`. Use `defineAgentTool`, which types those arguments from this field.
+     */
     readonly grammar?: SessionToolLarkGrammar;
     /**
      * Provider-shaped guidance shown only in Auto mode. Use this for fields the model must set
@@ -112,9 +127,44 @@ export interface AgentTool<Args extends TSchema = TSchema, Result extends TSchem
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type AnyAgentTool = AgentTool<any, any>;
 
+/**
+ * A freeform tool as it is written: a grammar rather than parameters, and arguments it does not
+ * get to choose. Declaring `parameters` here is rejected, because the grammar already decides what
+ * the call looks like and the agent always hands that text over as `{ input }`.
+ */
+type AgentGrammarToolDefinition<Result extends TSchema> = Omit<
+    AgentTool<typeof agentGrammarToolParameters, Result>,
+    "grammar" | "parameters"
+> & {
+    readonly grammar: SessionToolLarkGrammar;
+    readonly parameters?: never;
+};
+
+/**
+ * Define a freeform tool. Its `execute` is typed from the grammar rather than from a schema the
+ * tool wrote, so it receives the grammar's own text under `input` and cannot disagree with what
+ * the agent actually passes.
+ */
+export function defineAgentTool<const Result extends TSchema>(
+    tool: AgentGrammarToolDefinition<Result>,
+): AgentTool<typeof agentGrammarToolParameters, Result>;
 /** Define a tool with TypeBox-inferred argument and result types. */
 export function defineAgentTool<const Args extends TSchema, const Result extends TSchema>(
     tool: AgentTool<Args, Result>,
+): AgentTool<Args, Result>;
+export function defineAgentTool<const Args extends TSchema, const Result extends TSchema>(
+    tool: AgentTool<Args, Result> | AgentGrammarToolDefinition<Result>,
 ): AgentTool<Args, Result> {
-    return tool;
+    if (tool.grammar === undefined) return tool as AgentTool<Args, Result>;
+    if (tool.parameters !== undefined) {
+        throw new Error(
+            `Tool "${tool.name}" declares both a grammar and parameters. A grammar tool is freeform: its grammar decides what a call looks like, and its arguments are always the text that grammar produced.`,
+        );
+    }
+    // The grammar tool is given the parameters the agent will actually validate its calls against,
+    // so the schema backing it is never one the tool could have written differently.
+    return { ...tool, parameters: agentGrammarToolParameters } as unknown as AgentTool<
+        Args,
+        Result
+    >;
 }

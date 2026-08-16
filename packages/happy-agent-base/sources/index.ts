@@ -142,7 +142,9 @@ export {
 
 // Tool definitions.
 export {
+    agentGrammarToolParameters,
     defineAgentTool,
+    type AgentGrammarToolArguments,
     type AgentTool,
     type AgentToolCall,
     type AgentToolAutoPermissionActionDescriber,
