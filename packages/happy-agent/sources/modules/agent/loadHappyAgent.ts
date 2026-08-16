@@ -14,6 +14,7 @@ import {
     currentAgentEnvironment,
     type Agent,
     type AgentConfig,
+    type AgentDatabase,
     type AgentModel,
     type AgentModule,
     type AgentProviders,
@@ -237,14 +238,7 @@ export async function loadHappyAgent(
                 await acquireHappyAgentStorageLock(join(agentHome, "agent.lock")),
             database: opened.database,
         });
-        const transaction = storage.transaction.bind(storage);
-        modules = createModules(
-            options.integrations,
-            transaction,
-            agentHome,
-            publicHome,
-            options.events,
-        );
+        modules = createModules(options.integrations, agentHome, publicHome, options.events);
         const loaderStateModule = createLoaderStateModule((identity) => {
             loaderIdentity = identity;
         });
@@ -356,7 +350,6 @@ export async function loadHappyAgent(
 
 function createModules(
     integrations: HappyAgentIntegrations,
-    transaction: AgentStorage<LibSQLDatabase>["transaction"],
     agentHome: string,
     publicHome: string,
     events: EventsModuleOptions | undefined,
@@ -379,12 +372,9 @@ function createModules(
         agentsMd: compute.agentsMdModule,
         applets: new AppletModule({ rootDirectory: join(publicHome, "Applets") }),
         collaboration: new CollaborationModule({ broker: integrations.collaboration }),
-        conversations: new ConversationModule({ defaultCwd: publicHome, transaction }),
+        conversations: new ConversationModule({ defaultCwd: publicHome }),
         compute: compute.computeModule,
-        events: new EventsModule({
-            ...events,
-            transaction,
-        }),
+        events: new EventsModule(events),
         goal: new GoalModule({}),
         happy: new HappyModule({ host: integrations.happy }),
         history,
@@ -493,13 +483,13 @@ function createLoaderStateModule(
                 },
             ],
         ],
-        beforeStart: async (_ctx, _agents, database) => {
-            setIdentity(await ensureLoaderIdentity(database));
+        beforeStart: async (ctx) => {
+            setIdentity(await ctx.inTx(async (txCtx) => await ensureLoaderIdentity(txCtx.db)));
         },
     };
 }
 
-async function ensureLoaderIdentity(database: LibSQLDatabase): Promise<{
+async function ensureLoaderIdentity(database: AgentDatabase): Promise<{
     readonly epoch: string;
     readonly rootAgentId: string;
     readonly schemaVersion: number;

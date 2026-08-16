@@ -19,7 +19,7 @@ import {
     withAgentDatabase,
     withAgentKV,
 } from "./AgentContexts.js";
-import type { AgentDatabase, AgentDatabaseFacade } from "./AgentDatabase.js";
+import type { AgentDatabase } from "./AgentDatabase.js";
 import type { AgentKV } from "./AgentKV.js";
 import type { AgentPersistence } from "./AgentPersistence.js";
 import {
@@ -620,8 +620,7 @@ export class AgentSystemLocal<
         blockAgent: boolean = false,
     ): Promise<void> {
         const lifetime = new AbortController();
-        const database = (agentDatabase(ctx) ??
-            this.#storage.database) as AgentDatabaseFacade<Database>;
+        const database = agentDatabase(ctx) ?? this.#storage.database;
         const sharedKV = this.#sharedModuleKV.scoped(module.name);
         const agents = new AgentSystemRef(this, null, blockAgent ? agent.id : undefined);
         const hookCtx = withLifetime(
@@ -629,7 +628,6 @@ export class AgentSystemLocal<
             lifetime.signal,
         );
         const scope: AgentModuleSystemScope<Database> = {
-            database,
             agents,
             sharedKV,
         };
@@ -644,10 +642,7 @@ export class AgentSystemLocal<
     async #beforeStart(ctx: Context): Promise<void> {
         const startCtx = withAgentSystem(ctx, this.#ref);
         const results = await Promise.allSettled(
-            this.#modules.map(
-                async (module) =>
-                    await module.beforeStart?.(startCtx, this.#ref, this.#storage.database),
-            ),
+            this.#modules.map(async (module) => await module.beforeStart?.(startCtx, this.#ref)),
         );
         throwFirstStartFailure(results);
     }
@@ -656,10 +651,7 @@ export class AgentSystemLocal<
     async #afterStart(ctx: Context): Promise<void> {
         const startCtx = withAgentSystem(ctx, this.#ref);
         const results = await Promise.allSettled(
-            this.#modules.map(
-                async (module) =>
-                    await module.afterStart?.(startCtx, this.#ref, this.#storage.database),
-            ),
+            this.#modules.map(async (module) => await module.afterStart?.(startCtx, this.#ref)),
         );
         throwFirstStartFailure(results);
     }

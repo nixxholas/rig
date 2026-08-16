@@ -22,7 +22,7 @@ import {
 } from "./AgentContexts.js";
 import type { AgentBaseHooks, MaybePromise } from "./AgentBaseHooks.js";
 import type { AgentBaseState } from "./AgentBaseState.js";
-import type { AgentDatabase, AgentDatabaseFacade } from "./AgentDatabase.js";
+import type { AgentDatabase } from "./AgentDatabase.js";
 import type { AgentModule, AgentModuleScope } from "./AgentModule.js";
 import type { AgentPermissionMode } from "./AgentPermissionMode.js";
 import type { AgentModuleAction } from "./AgentModuleAction.js";
@@ -579,15 +579,13 @@ function moduleScope<Tool extends AnyAgentTool, Database extends AgentDatabase>(
 ): AgentModuleScope<Database> {
     const kv = agentKV(ctx);
     const runKV = agentRunKV(ctx);
-    const database = agentDatabase(ctx);
-    if (kv === undefined || runKV === undefined || database === undefined) {
+    if (kv === undefined || runKV === undefined || agentDatabase(ctx) === undefined) {
         throw new Error(
             `The module "${module.name}" was called without its agent storage context.`,
         );
     }
     const provider = agentProvider(ctx) ?? options.provider;
     return {
-        database: database as AgentDatabaseFacade<Database>,
         agent: {
             id: options.id,
             metadata: agentConfig(ctx)?.metadata,

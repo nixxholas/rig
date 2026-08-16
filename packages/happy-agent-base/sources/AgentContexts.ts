@@ -37,6 +37,15 @@ export interface AgentStorageTransactionContext {
     readonly lifetime: AbortSignal;
 }
 
+interface AgentDatabaseContextState {
+    readonly databaseNamespace: ReturnType<
+        typeof createContextNamespace<AgentDatabase | undefined>
+    >;
+    readonly storageTransactionNamespace: ReturnType<
+        typeof createContextNamespace<AgentStorageTransactionContext | undefined>
+    >;
+}
+
 declare global {
     namespace stdlib {
         interface ContextExtensions {
@@ -45,23 +54,43 @@ declare global {
     }
 }
 
-const databaseNamespace = createContextNamespace<AgentDatabase | undefined>(
-    "agentDatabase",
-    undefined,
+// Development loaders and Vitest can evaluate this module again while stdlib's extension registry
+// remains shared. Reuse the namespaces as well as the registration because the getter closes over
+// them and reloaded callers must keep writing to the same context slots.
+const databaseContextRegistryKey = Symbol.for(
+    "@slopus/happy-agent-base/database-context-registry/v1",
 );
-const storageTransactionNamespace = createContextNamespace<
-    AgentStorageTransactionContext | undefined
->("agentStorageTransaction", undefined);
+const existingDatabaseContextRegistry = Reflect.get(globalThis, databaseContextRegistryKey) as
+    | WeakMap<object, AgentDatabaseContextState>
+    | undefined;
+const databaseContextRegistry = existingDatabaseContextRegistry ?? new WeakMap();
+if (existingDatabaseContextRegistry === undefined) {
+    Reflect.set(globalThis, databaseContextRegistryKey, databaseContextRegistry);
+}
 
-registerContextExtension("db", (ctx) => {
-    const transaction = storageTransactionNamespace.get(ctx);
-    if (transaction?.lifetime.aborted === true) {
-        throw new Error("The agent storage transaction carried by this context has ended.");
-    }
-    const database = databaseNamespace.get(ctx);
-    if (database === undefined) throw new Error("Context has no agent database.");
-    return database;
-});
+const stdlibRegistryIdentity = registerContextExtension as object;
+let databaseContextState = databaseContextRegistry.get(stdlibRegistryIdentity);
+if (databaseContextState === undefined) {
+    const databaseNamespace = createContextNamespace<AgentDatabase | undefined>(
+        "agentDatabase",
+        undefined,
+    );
+    const storageTransactionNamespace = createContextNamespace<
+        AgentStorageTransactionContext | undefined
+    >("agentStorageTransaction", undefined);
+    registerContextExtension("db", (ctx) => {
+        const transaction = storageTransactionNamespace.get(ctx);
+        if (transaction?.lifetime.aborted === true) {
+            throw new Error("The agent storage transaction carried by this context has ended.");
+        }
+        const database = databaseNamespace.get(ctx);
+        if (database === undefined) throw new Error("Context has no agent database.");
+        return database;
+    });
+    databaseContextState = { databaseNamespace, storageTransactionNamespace };
+    databaseContextRegistry.set(stdlibRegistryIdentity, databaseContextState);
+}
+const { databaseNamespace, storageTransactionNamespace } = databaseContextState;
 
 /**
  * Derive the agent's context carrying its ID, provider ID, model, effort, service tier, and

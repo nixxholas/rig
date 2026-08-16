@@ -1,3 +1,4 @@
+import { withAgentDatabase } from "@slopus/happy-agent-base";
 import type { Context, RootContext } from "@steve.kite/stdlib";
 
 import {
@@ -83,14 +84,15 @@ async function closeHappyAgentDaemon(
     agent: LoadedHappyAgent,
     http: AgentHttpServer,
 ): Promise<void> {
-    await agent.modules.events.record(ctx, {
+    const agentCtx = withAgentDatabase(ctx, agent.database);
+    await agent.modules.events.record(agentCtx, {
         agentId: agent.agent.id,
         payload: {},
         type: "daemon.stopping",
     });
     const failures: unknown[] = [];
     await http.close().catch((error: unknown) => failures.push(error));
-    await agent.close(ctx).catch((error: unknown) => failures.push(error));
+    await agent.close(agentCtx).catch((error: unknown) => failures.push(error));
     if (failures.length > 0) {
         throw new AggregateError(failures, "The Happy agent daemon did not close cleanly.");
     }

@@ -60,14 +60,14 @@ validation, rendering, and automatic result commit in one outer transaction. It 
 
 Modules may provide an ordered array of `[key, migration]` tuples. Agent base tracks each
 successful key and runs every missing migration transactionally before any `beforeStart` hook; a
-failure aborts system startup. Every module migration and hook scope carries a schema-aware common
-Drizzle facade: a root database outside a transaction and its active transaction facade inside
-one. Driver-only root members such as `$client` and `batch` are deliberately not part of that
-surface. Modules may implement `beforeStart(ctx, agents, database)` and
-`afterStart(ctx, agents, database)` hooks.
+failure aborts system startup. Every module migration and hook context carries the common Drizzle
+facade in `ctx.db`: a root database outside a transaction and its active transaction facade inside
+one. A migration also receives that facade explicitly to retain its exact engine-specific type.
+Driver-only root members such as `$client` and `batch` are deliberately not part of that surface.
+Modules may implement `beforeStart(ctx, agents)` and `afterStart(ctx, agents)` hooks.
 Every `beforeStart` settles successfully before active agents are restored; every `afterStart`
-runs after those agents are restored and started. Both receive the system's `AgentSystemRef` and
-root database.
+runs after those agents are restored and started. Both receive the system's `AgentSystemRef`; their
+context carries the root database.
 All hooks may return synchronously or with a promise, including `onEvent`; the runtime awaits each
 answer and contains failures from observing hooks.
 

@@ -170,15 +170,17 @@ export class AgentStorage<Database extends AgentDatabase = AgentDatabase> {
         if (keys.some((key) => key.length === 0) || new Set(keys).size !== keys.length) {
             throw new Error(`Module "${module}" has an empty or duplicate migration key.`);
         }
-        const applied = await agentDatabaseRows<{
-            migration_key: string;
-            position: number | string;
-        }>(
-            this.#drizzle.database,
-            sql`SELECT migration_key, position
-                FROM happy_agent_migrations
-                WHERE module_key = ${module}
-                ORDER BY position`,
+        const applied = await this.#drizzle.transaction(ctx, async (txCtx) =>
+            agentDatabaseRows<{
+                migration_key: string;
+                position: number | string;
+            }>(
+                txCtx.db,
+                sql`SELECT migration_key, position
+                    FROM happy_agent_migrations
+                    WHERE module_key = ${module}
+                    ORDER BY position`,
+            ),
         );
         for (let index = 0; index < applied.length; index += 1) {
             if (

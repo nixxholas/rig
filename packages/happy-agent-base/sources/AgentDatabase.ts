@@ -36,17 +36,15 @@ export type AgentDatabaseFacade<Database extends AgentDatabase> =
           ? PgDatabase<QueryResult, FullSchema, Schema>
           : never;
 
-/** One ordered, durably tracked module migration. */
+/**
+ * One ordered, durably tracked module migration. The context carries the active facade in
+ * `ctx.db`; the same facade is also passed explicitly so the migration retains its exact
+ * engine-specific type.
+ */
 export type AgentModuleMigration<Database extends AgentDatabase = AgentDatabase> = readonly [
     key: string,
     migrate: (ctx: Context, database: AgentDatabaseFacade<Database>) => void | Promise<void>,
 ];
-
-/** Work run inside the caller's outer transaction integration. */
-export type AgentStorageTransaction<Database extends AgentDatabase = AgentDatabase> = <Result>(
-    ctx: Context,
-    work: (ctx: Context, database: AgentDatabaseFacade<Database>) => Promise<Result>,
-) => Promise<Result>;
 
 /** Whether a supported facade belongs to Drizzle's SQLite family. */
 export function isAgentSQLiteDatabase(database: AgentDatabase): database is AgentSQLiteDatabase {

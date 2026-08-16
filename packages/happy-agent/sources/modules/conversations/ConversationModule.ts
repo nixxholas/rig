@@ -10,12 +10,10 @@ import {
     type AgentBaseSettlement,
     type AgentBaseTurn,
     type AgentDatabase,
-    type AgentDatabaseFacade,
     type AgentModule,
     type AgentModuleAgentLifecycle,
     type AgentModuleScope,
     type AgentModuleSystemScope,
-    type AgentStorageTransaction,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
 import type { SessionEvent } from "@slopus/happy-providers";
@@ -192,7 +190,7 @@ export class ConversationModule implements AgentModule<AnyAgentTool, LibSQLDatab
     readonly migrations = [
         [
             "001-conversation-catalog",
-            async (_ctx: Context, database: AgentDatabaseFacade<AgentDatabase>) => {
+            async (_ctx: Context, database: AgentDatabase) => {
                 await agentDatabaseRun(
                     database,
                     sql`CREATE TABLE IF NOT EXISTS happy_agent_conversations (
@@ -237,19 +235,16 @@ export class ConversationModule implements AgentModule<AnyAgentTool, LibSQLDatab
         ],
     ] as const;
 
-    readonly #transaction: AgentStorageTransaction<LibSQLDatabase>;
     readonly #clock: () => number;
     readonly #createEventId: () => string;
     readonly #defaultCwd: string;
     readonly #ownerInstanceId: string;
 
     constructor(options: {
-        readonly transaction: AgentStorageTransaction<LibSQLDatabase>;
         readonly defaultCwd?: string;
         readonly clock?: () => number;
         readonly ownerInstanceId?: string;
     }) {
-        this.#transaction = options.transaction;
         this.#defaultCwd = options.defaultCwd ?? process.cwd();
         this.#clock = options.clock ?? Date.now;
         this.#createEventId = createUuidV7Factory(this.#clock);
@@ -258,24 +253,24 @@ export class ConversationModule implements AgentModule<AnyAgentTool, LibSQLDatab
 
     async ensure(ctx: Context, input: ConversationCreateInput): Promise<ConversationRecord> {
         assertConversationCreateInput(input);
-        return await this.#transaction(ctx, async (txCtx, database) => {
-            return await this.#ensure(txCtx, database, input);
+        return await ctx.inTx(async (txCtx) => {
+            return await this.#ensure(txCtx, txCtx.db, input);
         });
     }
 
     async get(ctx: Context, sessionId: string): Promise<ConversationRecord | undefined> {
         assertSessionId(sessionId);
-        return await this.#transaction(ctx, async (txCtx, database) => {
-            return await this.#readBySession(txCtx, database, sessionId);
+        return await ctx.inTx(async (txCtx) => {
+            return await this.#readBySession(txCtx, txCtx.db, sessionId);
         });
     }
 
     readonly agentCreatedTransact = async (
         ctx: Context,
-        scope: AgentModuleSystemScope<LibSQLDatabase>,
+        _scope: AgentModuleSystemScope<LibSQLDatabase>,
         agent: AgentModuleAgentLifecycle,
     ): Promise<void> => {
-        await this.#ensure(ctx, scope.database, {
+        await this.#ensure(ctx, ctx.db, {
             agentId: agent.id,
             cwd: this.#defaultCwd,
         });
@@ -283,10 +278,10 @@ export class ConversationModule implements AgentModule<AnyAgentTool, LibSQLDatab
 
     readonly agentRestoredTransact = async (
         ctx: Context,
-        scope: AgentModuleSystemScope<LibSQLDatabase>,
+        _scope: AgentModuleSystemScope<LibSQLDatabase>,
         agent: AgentModuleAgentLifecycle,
     ): Promise<void> => {
-        await this.#ensure(ctx, scope.database, {
+        await this.#ensure(ctx, ctx.db, {
             agentId: agent.id,
             cwd: this.#defaultCwd,
         });
@@ -296,8 +291,8 @@ export class ConversationModule implements AgentModule<AnyAgentTool, LibSQLDatab
         if (!Value.Check(Type.String({ minLength: 1, maxLength: 128 }), agentId)) {
             throw new Error("Conversation agent ID is invalid.");
         }
-        return await this.#transaction(ctx, async (txCtx, database) => {
-            return await this.#readByAgent(txCtx, database, agentId);
+        return await ctx.inTx(async (txCtx) => {
+            return await this.#readByAgent(txCtx, txCtx.db, agentId);
         });
     }
 
@@ -309,13 +304,13 @@ export class ConversationModule implements AgentModule<AnyAgentTool, LibSQLDatab
         if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) {
             throw new Error("Conversation list limit must be between 1 and 50.");
         }
-        return await this.#transaction(ctx, async (_txCtx, database) => {
+        return await ctx.inTx(async (txCtx) => {
             const archived =
                 query.archived === undefined || query.archived === "all"
                     ? undefined
                     : query.archived;
             const rows = await agentDatabaseRows<ConversationRow>(
-                database,
+                txCtx.db,
                 archived === undefined
                     ? sql`SELECT * FROM happy_agent_conversations
                           ORDER BY updated_at DESC, session_id DESC LIMIT ${limit}`
@@ -336,8 +331,8 @@ export class ConversationModule implements AgentModule<AnyAgentTool, LibSQLDatab
         if (!Value.Check(conversationUpdateSchema, update)) {
             throw new Error("Conversation update is invalid.");
         }
-        return await this.#transaction(ctx, async (txCtx, database) => {
-            const current = await this.#readBySession(txCtx, database, sessionId);
+        return await ctx.inTx(async (txCtx) => {
+            const current = await this.#readBySession(txCtx, txCtx.db, sessionId);
             if (current === undefined) throw new Error(`Session "${sessionId}" was not found.`);
             const next = normalizeConversation({
                 ...current,
@@ -346,7 +341,7 @@ export class ConversationModule implements AgentModule<AnyAgentTool, LibSQLDatab
                 updatedAt: this.#now(),
             });
             await agentDatabaseRun(
-                database,
+                txCtx.db,
                 sql`UPDATE happy_agent_conversations SET
                     scope_json = ${JSON.stringify(next.scope)},
                     archived = ${next.archived ? 1 : 0},
@@ -398,9 +393,9 @@ export class ConversationModule implements AgentModule<AnyAgentTool, LibSQLDatab
             sessionId,
             type: input.type,
         };
-        await this.#transaction(ctx, async (_txCtx, database) => {
+        await ctx.inTx(async (txCtx) => {
             await agentDatabaseRun(
-                database,
+                txCtx.db,
                 sql`INSERT OR IGNORE INTO happy_agent_conversation_events
                     (event_id, session_id, type, occurred_at, payload_json)
                     VALUES (${event.id}, ${event.sessionId}, ${event.type},
@@ -420,9 +415,9 @@ export class ConversationModule implements AgentModule<AnyAgentTool, LibSQLDatab
         if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
             throw new Error("Conversation event limit must be between 1 and 100.");
         }
-        return await this.#transaction(ctx, async (_txCtx, database) => {
+        return await ctx.inTx(async (txCtx) => {
             const rows = await agentDatabaseRows<ConversationEventRow>(
-                database,
+                txCtx.db,
                 query.after === undefined
                     ? sql`SELECT * FROM happy_agent_conversation_events
                           WHERE session_id = ${sessionId}
@@ -506,7 +501,7 @@ export class ConversationModule implements AgentModule<AnyAgentTool, LibSQLDatab
 
     async #ensure(
         ctx: Context,
-        database: AgentDatabaseFacade<LibSQLDatabase>,
+        database: AgentDatabase,
         input: ConversationCreateInput,
     ): Promise<ConversationRecord> {
         const existing = await this.#readByAgent(ctx, database, input.agentId);
@@ -555,7 +550,7 @@ export class ConversationModule implements AgentModule<AnyAgentTool, LibSQLDatab
 
     async #readBySession(
         _ctx: Context,
-        database: AgentDatabaseFacade<LibSQLDatabase>,
+        database: AgentDatabase,
         sessionId: string,
     ): Promise<ConversationRecord | undefined> {
         const rows = await agentDatabaseRows<ConversationRow>(
@@ -568,7 +563,7 @@ export class ConversationModule implements AgentModule<AnyAgentTool, LibSQLDatab
 
     async #readByAgent(
         _ctx: Context,
-        database: AgentDatabaseFacade<LibSQLDatabase>,
+        database: AgentDatabase,
         agentId: string,
     ): Promise<ConversationRecord | undefined> {
         const rows = await agentDatabaseRows<ConversationRow>(

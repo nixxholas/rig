@@ -5,7 +5,7 @@ import {
     createRootContext,
     type Context,
 } from "@steve.kite/stdlib";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
     AgentStorage,
@@ -13,9 +13,9 @@ import {
     agentDatabase,
     agentDatabaseRows,
     agentDatabaseRun,
+    isAgentSQLiteDatabase,
     withAgentDatabase,
     type AgentDatabase,
-    type AgentDatabaseFacade,
     type AgentModule,
     type AgentStorageLock,
     type AnyAgentTool,
@@ -58,19 +58,18 @@ describe("AgentStorage Drizzle persistence", () => {
                     },
                 ],
             ],
-            beforeStart: async (_startCtx, _agents, moduleDatabase) => {
-                const exactDatabase: typeof database = moduleDatabase;
-                expect(moduleDatabase).toBe(database);
+            beforeStart: async (startCtx) => {
+                expect(startCtx.db).toBe(database);
                 const rows = await agentDatabaseRows<{ value: string }>(
-                    exactDatabase,
+                    startCtx.db,
                     sql`SELECT value FROM sample_module`,
                 );
                 expect(rows).toEqual([{ value: "ready" }]);
                 events.push("beforeStart");
             },
             instructions: (_moduleCtx, scope) => {
-                const exactDatabase: AgentDatabaseFacade<typeof database> = scope.database;
-                expect(exactDatabase).toBeDefined();
+                expect(_moduleCtx.db).toBe(database);
+                expect(scope.agent.id).toBeDefined();
                 return "";
             },
         };
@@ -247,9 +246,93 @@ describe("AgentStorage Drizzle persistence", () => {
         close();
     });
 
+    it("serializes concurrent transactions sharing one root database", async () => {
+        const { close, database } = inMemoryDrizzle();
+        const rootCtx = withAgentDatabase(ctx, database);
+        let releaseFirst!: () => void;
+        const firstGate = new Promise<void>((resolve) => {
+            releaseFirst = resolve;
+        });
+        let firstEntered!: () => void;
+        const entered = new Promise<void>((resolve) => {
+            firstEntered = resolve;
+        });
+        let firstActive = false;
+
+        const first = rootCtx.inTx(async () => {
+            firstActive = true;
+            firstEntered();
+            await firstGate;
+            firstActive = false;
+        });
+        await entered;
+
+        const second = rootCtx.inTx(async () => {
+            expect(firstActive).toBe(false);
+        });
+        releaseFirst();
+        await Promise.all([first, second]);
+        close();
+    });
+
+    it("does not serialize concurrent non-SQLite transactions", async () => {
+        type TransactionWork = (transaction: AgentDatabase) => Promise<unknown>;
+        const database = {
+            transaction: async (work: TransactionWork) => await work(database as AgentDatabase),
+        } as unknown as AgentDatabase;
+        expect(isAgentSQLiteDatabase(database)).toBe(false);
+        const rootCtx = withAgentDatabase(ctx, database);
+        let releaseFirst!: () => void;
+        const firstGate = new Promise<void>((resolve) => {
+            releaseFirst = resolve;
+        });
+        let firstEntered!: () => void;
+        const entered = new Promise<void>((resolve) => {
+            firstEntered = resolve;
+        });
+        let secondEntered!: () => void;
+        const overlapping = new Promise<void>((resolve) => {
+            secondEntered = resolve;
+        });
+
+        const first = rootCtx.inTx(async () => {
+            firstEntered();
+            await firstGate;
+        });
+        await entered;
+        const second = rootCtx.inTx(async () => {
+            secondEntered();
+        });
+
+        await overlapping;
+        releaseFirst();
+        await Promise.all([first, second]);
+    });
+
     it("rejects ctx.db and ctx.inTx when no agent database is installed", async () => {
         expect(() => ctx.db).toThrow("no agent database");
         await expect(ctx.inTx(async () => undefined)).rejects.toThrow("no agent database");
+    });
+
+    it("reuses database context extensions when modules are evaluated again", async () => {
+        const firstContexts = await import("../sources/AgentContexts.js");
+        const { close, database } = inMemoryDrizzle();
+        const firstCtx = firstContexts.withAgentDatabase(createRootContext(), database);
+        expect(firstCtx.db).toBe(database);
+
+        vi.resetModules();
+        const reloadedContexts = await import("../sources/AgentContexts.js");
+        const reloadedTransactions = await import("../sources/inTx.js");
+        const reloadedCtx = reloadedContexts.withAgentDatabase(createRootContext(), database);
+
+        expect(reloadedCtx.db).toBe(database);
+        expect(firstContexts.agentDatabase(reloadedCtx)).toBe(database);
+        await reloadedCtx.inTx(async (txCtx) => {
+            await reloadedTransactions.inTx(txCtx, async (nestedCtx) => {
+                expect(nestedCtx.db).toBe(txCtx.db);
+            });
+        });
+        close();
     });
 
     it("keeps storage key-value transactions on the same ctx.inTx facade", async () => {

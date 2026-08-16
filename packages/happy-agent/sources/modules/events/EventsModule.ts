@@ -13,7 +13,6 @@ import type {
     AgentModuleAgentLifecycle,
     AgentModuleScope,
     AgentModuleSystemScope,
-    AgentStorageTransaction,
     AnyAgentTool,
 } from "@slopus/happy-agent-base";
 import type {
@@ -97,10 +96,6 @@ export interface EventsModuleOptions {
     readonly now?: () => number;
 }
 
-export interface EventsModuleRuntimeOptions extends EventsModuleOptions {
-    readonly transaction: AgentStorageTransaction<LibSQLDatabase>;
-}
-
 export interface EventReplay {
     readonly cursor: string;
     readonly events: readonly HappyAgentEvent[];
@@ -124,12 +119,11 @@ export class EventsModule implements AgentModule<AnyAgentTool, LibSQLDatabase> {
     readonly #listeners = new Set<HappyAgentEventListener>();
     readonly #now: () => number;
     readonly #runs = new Map<string, ActiveRun>();
-    readonly #transaction: AgentStorageTransaction<LibSQLDatabase>;
     #createId: () => string;
     #originCursor: string;
     #occurredAt = 0;
 
-    constructor(options: EventsModuleRuntimeOptions) {
+    constructor(options: EventsModuleOptions = {}) {
         const capacity = options.capacity ?? 10_000;
         if (!Number.isSafeInteger(capacity) || capacity < 1 || capacity > 100_000) {
             throw new Error("The event queue capacity must be between 1 and 100,000.");
@@ -138,21 +132,16 @@ export class EventsModule implements AgentModule<AnyAgentTool, LibSQLDatabase> {
         this.#now = options.now ?? Date.now;
         this.#createId = createUuidV7Factory(this.#now);
         this.#originCursor = this.#createId();
-        this.#transaction = options.transaction;
     }
 
-    readonly beforeStart = async (
-        _ctx: Context,
-        _agents: unknown,
-        database: LibSQLDatabase,
-    ): Promise<void> => {
-        const loaded = await loadEventState(database, this.#capacity);
+    readonly beforeStart = async (ctx: Context): Promise<void> => {
+        const loaded = await loadEventState(ctx.db, this.#capacity);
         this.#entries.push(...loaded.events.map(freezeEvent));
         this.#occurredAt = this.#entries.at(-1)?.occurredAt ?? 0;
         this.#originCursor = loaded.originCursor ?? this.#originCursor;
         const highWater = this.#entries.at(-1)?.id ?? this.#originCursor;
         this.#createId = createUuidV7Factory(this.#now, highWater);
-        const runs = await loadActiveRuns(database, parseActiveRun);
+        const runs = await loadActiveRuns(ctx.db, parseActiveRun);
         for (const [agentId, run] of runs) this.#runs.set(agentId, run);
     };
 
@@ -169,8 +158,8 @@ export class EventsModule implements AgentModule<AnyAgentTool, LibSQLDatabase> {
     }
 
     async record(ctx: Context, input: AppendHappyAgentEvent): Promise<HappyAgentEvent> {
-        return await this.#transaction(ctx, async (txCtx, database) => {
-            return await this.recordInDatabase(txCtx, database, input);
+        return await ctx.inTx(async (txCtx) => {
+            return await this.recordInDatabase(txCtx, txCtx.db, input);
         });
     }
 
@@ -196,8 +185,8 @@ export class EventsModule implements AgentModule<AnyAgentTool, LibSQLDatabase> {
     ): Promise<{ readonly through: string; readonly trimmed: number } | undefined> {
         if (!Value.Check(happyAgentEventIdSchema, through)) return undefined;
         if (through === this.#originCursor) return { through, trimmed: 0 };
-        return await this.#transaction(ctx, async (txCtx, database) => {
-            const trimmed = await trimEvents(database, through);
+        return await ctx.inTx(async (txCtx) => {
+            const trimmed = await trimEvents(txCtx.db, through);
             if (trimmed === undefined) return undefined;
             afterCommit(txCtx, () => {
                 const index = this.#entries.findIndex((event) => event.id === through);
@@ -227,7 +216,7 @@ export class EventsModule implements AgentModule<AnyAgentTool, LibSQLDatabase> {
         scope: AgentModuleSystemScope<LibSQLDatabase>,
         agent: AgentModuleAgentLifecycle,
     ): Promise<void> => {
-        await this.recordInDatabase(ctx, scope.database, {
+        await this.recordInDatabase(ctx, ctx.db, {
             agentId: agent.id,
             payload: agent,
             type: "agent.created",
@@ -239,7 +228,7 @@ export class EventsModule implements AgentModule<AnyAgentTool, LibSQLDatabase> {
         scope: AgentModuleSystemScope<LibSQLDatabase>,
         agent: AgentModuleAgentLifecycle,
     ): Promise<void> => {
-        await this.recordInDatabase(ctx, scope.database, {
+        await this.recordInDatabase(ctx, ctx.db, {
             agentId: agent.id,
             payload: agent,
             type: "agent.restored",
@@ -247,8 +236,8 @@ export class EventsModule implements AgentModule<AnyAgentTool, LibSQLDatabase> {
         const run = this.#runs.get(agent.id);
         if (run !== undefined) {
             const projected = projectProviderEvent(run, { type: "block_reset" }, this.#now());
-            await saveActiveRun(scope.database, agent.id, projected.run);
-            await this.recordInDatabase(ctx, scope.database, {
+            await saveActiveRun(ctx.db, agent.id, projected.run);
+            await this.recordInDatabase(ctx, ctx.db, {
                 agentId: agent.id,
                 payload: {
                     event: { type: "block_reset" },
@@ -266,7 +255,7 @@ export class EventsModule implements AgentModule<AnyAgentTool, LibSQLDatabase> {
         scope: AgentModuleSystemScope<LibSQLDatabase>,
         agent: AgentModuleAgentLifecycle,
     ): Promise<void> => {
-        await this.recordInDatabase(ctx, scope.database, {
+        await this.recordInDatabase(ctx, ctx.db, {
             agentId: agent.id,
             payload: agent,
             type: "agent.archived",
@@ -283,11 +272,11 @@ export class EventsModule implements AgentModule<AnyAgentTool, LibSQLDatabase> {
             accepted.kind === "steering" && previous !== undefined
                 ? previous
                 : emptyRun(accepted.id);
-        await saveActiveRun(scope.database, scope.agent.id, run);
+        await saveActiveRun(ctx.db, scope.agent.id, run);
         afterCommit(ctx, () => {
             this.#runs.set(scope.agent.id, run);
         });
-        await this.recordInDatabase(ctx, scope.database, {
+        await this.recordInDatabase(ctx, ctx.db, {
             agentId: scope.agent.id,
             payload: { ...accepted, runId: run.runId },
             type: "message.accepted",
@@ -299,7 +288,7 @@ export class EventsModule implements AgentModule<AnyAgentTool, LibSQLDatabase> {
         scope: AgentModuleScope<LibSQLDatabase>,
         change: AgentBasePermissionModeChange,
     ): Promise<void> => {
-        await this.recordInDatabase(ctx, scope.database, {
+        await this.recordInDatabase(ctx, ctx.db, {
             agentId: scope.agent.id,
             payload: change,
             type: "agent.permission-changed",
@@ -311,7 +300,7 @@ export class EventsModule implements AgentModule<AnyAgentTool, LibSQLDatabase> {
         scope: AgentModuleScope<LibSQLDatabase>,
         change: AgentMetadataChange,
     ): Promise<void> => {
-        await this.recordInDatabase(ctx, scope.database, {
+        await this.recordInDatabase(ctx, ctx.db, {
             agentId: scope.agent.id,
             payload: change,
             type: "agent.metadata-changed",
@@ -323,7 +312,7 @@ export class EventsModule implements AgentModule<AnyAgentTool, LibSQLDatabase> {
         scope: AgentModuleScope<LibSQLDatabase>,
         loop: AgentBaseLoop,
     ): Promise<void> => {
-        await this.recordInDatabase(ctx, scope.database, {
+        await this.recordInDatabase(ctx, ctx.db, {
             agentId: scope.agent.id,
             payload: {
                 ...loop,
@@ -338,14 +327,14 @@ export class EventsModule implements AgentModule<AnyAgentTool, LibSQLDatabase> {
         scope: AgentModuleScope<LibSQLDatabase>,
         event: SessionEvent,
     ): Promise<void> => {
-        await this.#transaction(ctx, async (txCtx, database) => {
+        await ctx.inTx(async (txCtx) => {
             const current = this.#runs.get(scope.agent.id) ?? emptyRun(this.#createId());
             const projected = projectProviderEvent(current, event, this.#now());
-            await saveActiveRun(database, scope.agent.id, projected.run);
+            await saveActiveRun(txCtx.db, scope.agent.id, projected.run);
             afterCommit(txCtx, () => {
                 this.#runs.set(scope.agent.id, projected.run);
             });
-            await this.recordInDatabase(txCtx, database, {
+            await this.recordInDatabase(txCtx, txCtx.db, {
                 agentId: scope.agent.id,
                 payload: {
                     event,
@@ -364,7 +353,7 @@ export class EventsModule implements AgentModule<AnyAgentTool, LibSQLDatabase> {
         call: SessionToolCallBlock,
     ): Promise<void> => {
         const runId = this.#runs.get(scope.agent.id)?.runId ?? call.callId;
-        await this.recordInDatabase(ctx, scope.database, {
+        await this.recordInDatabase(ctx, ctx.db, {
             agentId: scope.agent.id,
             payload: {
                 rigEvent: {
@@ -384,7 +373,7 @@ export class EventsModule implements AgentModule<AnyAgentTool, LibSQLDatabase> {
     ): Promise<void> => {
         const run = this.#runs.get(scope.agent.id);
         const toolName = toolNameForCall(run, result.callId);
-        await this.recordInDatabase(ctx, scope.database, {
+        await this.recordInDatabase(ctx, ctx.db, {
             agentId: scope.agent.id,
             payload: {
                 ...result,
@@ -401,7 +390,7 @@ export class EventsModule implements AgentModule<AnyAgentTool, LibSQLDatabase> {
         inference: AgentBaseInference,
     ): Promise<void> => {
         const run = this.#runs.get(scope.agent.id);
-        await this.recordInDatabase(ctx, scope.database, {
+        await this.recordInDatabase(ctx, ctx.db, {
             agentId: scope.agent.id,
             payload: {
                 ...inference,
@@ -422,12 +411,12 @@ export class EventsModule implements AgentModule<AnyAgentTool, LibSQLDatabase> {
         const next =
             run !== undefined && turn.aborted ? { ...run, stopReason: "aborted" as const } : run;
         if (next !== undefined) {
-            await saveActiveRun(scope.database, scope.agent.id, next);
+            await saveActiveRun(ctx.db, scope.agent.id, next);
             afterCommit(ctx, () => {
                 this.#runs.set(scope.agent.id, next);
             });
         }
-        await this.recordInDatabase(ctx, scope.database, {
+        await this.recordInDatabase(ctx, ctx.db, {
             agentId: scope.agent.id,
             payload: { ...turn, runId: next?.runId ?? turn.loopId },
             type: "turn.completed",
@@ -440,7 +429,7 @@ export class EventsModule implements AgentModule<AnyAgentTool, LibSQLDatabase> {
         settlement: AgentBaseSettlement,
     ): Promise<void> => {
         const run = this.#runs.get(scope.agent.id);
-        await this.recordInDatabase(ctx, scope.database, {
+        await this.recordInDatabase(ctx, ctx.db, {
             agentId: scope.agent.id,
             payload: {
                 ...settlement,
@@ -449,7 +438,7 @@ export class EventsModule implements AgentModule<AnyAgentTool, LibSQLDatabase> {
             },
             type: "loop.settled",
         });
-        await deleteActiveRun(scope.database, scope.agent.id);
+        await deleteActiveRun(ctx.db, scope.agent.id);
         afterCommit(ctx, () => {
             this.#runs.delete(scope.agent.id);
         });

@@ -47,7 +47,6 @@ export {
     type AgentModuleMigration,
     type AgentPostgresDatabase,
     type AgentSQLiteDatabase,
-    type AgentStorageTransaction,
 } from "./AgentDatabase.js";
 
 // Provider/model routing and the curated model catalog.

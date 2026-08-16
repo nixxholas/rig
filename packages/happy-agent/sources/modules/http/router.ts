@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
+import { withAgentDatabase } from "@slopus/happy-agent-base";
 import type { Context } from "@steve.kite/stdlib";
 
 import type { LoadedHappyAgent } from "../agent/loadHappyAgent.js";
@@ -94,7 +95,7 @@ export function routeContext(
     dependencies: AgentHttpRouteDependencies,
 ): AgentHttpRouteContext {
     return {
-        ctx,
+        ctx: withAgentDatabase(ctx, dependencies.agent.database),
         dependencies,
         params: {},
         request,

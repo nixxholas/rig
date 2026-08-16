@@ -9,7 +9,7 @@ import type {
 } from "@slopus/happy-providers";
 import type { Context } from "@steve.kite/stdlib";
 
-import type { AgentDatabase, AgentDatabaseFacade, AgentModuleMigration } from "./AgentDatabase.js";
+import type { AgentDatabase, AgentModuleMigration } from "./AgentDatabase.js";
 import type {
     AgentBaseAcceptedMessage,
     AgentBaseInference,
@@ -68,14 +68,13 @@ export interface AgentModuleAgent {
 /**
  * What every hook of a module is handed alongside the context: which agent it is running for,
  * and the three stores it may write to, each with its own lifetime.
+ * Database work uses the active root or transaction facade carried by `ctx.db`.
  *
  * They are passed rather than read off the context because a module's own dependencies are not
  * ambient state to be looked up: a hook is given exactly what it is entitled to, and cannot be
  * handed a context that quietly means a different agent.
  */
-export interface AgentModuleScope<Database extends AgentDatabase = AgentDatabase> {
-    /** The active Drizzle database or transaction facade for this hook. */
-    readonly database: AgentDatabaseFacade<Database>;
+export interface AgentModuleScope<_Database extends AgentDatabase = AgentDatabase> {
     /** The agent this hook is running for, and the selection it is running on. */
     readonly agent: AgentModuleAgent;
     /**
@@ -106,7 +105,6 @@ export interface AgentModuleAgentLifecycle {
 
 /** System-owned capabilities handed to module lifecycle observers. */
 export interface AgentModuleSystemScope<Database extends AgentDatabase = AgentDatabase> {
-    readonly database: AgentDatabaseFacade<Database>;
     readonly agents: AgentSystemRef<Database>;
     readonly sharedKV: AgentKV;
 }
@@ -139,20 +137,12 @@ export interface AgentModule<
      * store lock and before any agent is restored or started. Every module initializes
      * concurrently, and agent work begins only after all of them settle successfully.
      */
-    readonly beforeStart?: (
-        ctx: Context,
-        agents: AgentSystemRef<Database>,
-        database: Database,
-    ) => MaybePromise<void>;
+    readonly beforeStart?: (ctx: Context, agents: AgentSystemRef<Database>) => MaybePromise<void>;
     /**
      * Called once after every durable-active agent has been restored and started. Every module
      * runs concurrently, and system creation resolves only after all of them settle successfully.
      */
-    readonly afterStart?: (
-        ctx: Context,
-        agents: AgentSystemRef<Database>,
-        database: Database,
-    ) => MaybePromise<void>;
+    readonly afterStart?: (ctx: Context, agents: AgentSystemRef<Database>) => MaybePromise<void>;
     readonly agentCreatedTransact?: (
         ctx: Context,
         scope: AgentModuleSystemScope<Database>,
