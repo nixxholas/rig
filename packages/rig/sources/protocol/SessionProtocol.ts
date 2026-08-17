@@ -729,15 +729,16 @@ export interface CreateSessionRequest {
     appendSystemPrompt?: string;
     trackUnread?: boolean;
     cwd: string;
-    effort?: string;
-    serviceTier?: ServiceTier;
+    /** Every session names what it runs on; the agent never chooses on a client's behalf. */
+    effort: string;
+    serviceTier: ServiceTier | null;
     instructions?: string;
     /** Human profile responsible for this session. Required for remote creation. */
     identity?: string;
     /** Refreshes the peer daemon's memory-only GitHub authentication for this managed project. */
     gitSecret?: { kind: "github" };
-    modelId?: string;
-    providerId?: string;
+    modelId: string;
+    providerId: string;
     permissionMode?: PermissionMode;
     secretIds?: readonly string[];
     workflowsEnabled?: boolean;
@@ -977,23 +978,23 @@ export interface SubmitMessageRequest {
     /** Replaces Rig's assembled system prompt. Null restores Rig's normal prompt. */
     systemPrompt?: string | null;
     /**
-     * Reasoning effort for this and subsequent runs. Applied when this message's run starts, so
-     * it never disturbs a run already in progress.
+     * Reasoning effort for this run and subsequent ones. Applied when this message's run starts, so
+     * it never disturbs a run already in progress. Every message names it; nothing is inherited.
      */
-    effort?: string;
+    effort: string;
     /** Model for this and subsequent runs. Applied when this message's run starts. */
-    modelId?: string;
-    /** Provider for `modelId`. Inferred from the model when omitted. */
-    providerId?: string;
+    modelId: string;
+    /** The account serving `modelId`. */
+    providerId: string;
     /**
      * Permission mode for this and subsequent runs. Applied when this message's run starts.
      */
     permissionMode?: PermissionMode;
     /**
-     * Fast mode for this and subsequent runs. Null turns it off; omitting it changes nothing.
-     * Applied when this message's run starts.
+     * Fast mode for this and subsequent runs. Null runs it on the standard tier. Applied when this
+     * message's run starts.
      */
-    serviceTier?: ServiceTier | null;
+    serviceTier: ServiceTier | null;
     text: string;
     /** Identity used to correlate the optimistic action with its stream echo. */
     mutationId?: string;

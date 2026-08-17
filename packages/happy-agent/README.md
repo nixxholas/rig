@@ -17,55 +17,56 @@ import { AgentStorage, AgentSystemLocal, HistoryModule, compute } from "@slopus/
 const machine = compute.createHostCompute({ ctx, cwd });
 ```
 
-## Starting the daemon
+## Starting the agent
 
-`startHappyAgentDaemon` is the top-level composition root. It:
+`startHappyAgent` is the single composition root, and `startHappyAgentDaemon` is a thin wrapper that
+adds the Unix-socket HTTP server on top of it. Both take one path — the Happy root — and infer
+everything else. Startup:
 
 - resolves one Happy root (default `~/.happy`) before any subsystem starts;
 - derives the private `<happyHome>/agent` and sibling public `<parent>/Happy` homes;
 - loads global `Happy/Config/happy.toml`, project `rig.toml` (or `happy.toml`) from the current
   directory, and `<happyHome>/agent/runtime.toml`, with runtime values overriding project and
   global values;
-- opens the authenticated Unix socket first, reporting `status: "starting"` until the Agent
-  System is ready;
+- reads the configuration first, because everything after it is derived from configuration;
+- builds the enabled model catalog and provider accounts from that configuration;
 - opens `<happyHome>/agent/agent.sqlite` through asynchronous libSQL and takes an exclusive process
   lock;
 - creates a host compute rooted at the derived public home;
-- installs every standard module and runs its migrations;
+- installs every module in dependency order, passing each module the modules it needs, and runs
+  their migrations;
 - restores or creates the home’s stable root agent;
-- listens on a mode-`0600` Unix socket, normally `<happyHome>/agent/server.sock`;
-- closes HTTP, the agent system, compute, lock, and database together.
+- unwinds in exact reverse order on `close()`, with observation shut down last.
+
+The daemon adds to that: it opens the authenticated Unix socket first, reporting
+`status: "starting"` until the Agent System is ready, listens on a mode-`0600` socket — normally
+`<happyHome>/agent/server.sock` — and closes HTTP before the agent.
 
 ```ts
-import { createRootContext } from "@steve.kite/stdlib";
-import { startHappyAgentDaemon } from "@slopus/happy-agent";
+import { startHappyAgent, startHappyAgentDaemon } from "@slopus/happy-agent";
 
-const daemon = await startHappyAgentDaemon(createRootContext(), {
-    happyHome: "~/.happy",
-    providers,
-    provider: "codex",
-    models,
-    integrations,
-});
+const agent = await startHappyAgent({ happyHome: "~/.happy" });
+console.log(Object.keys(agent.modules));
+await agent.close();
 
+const daemon = await startHappyAgentDaemon({ happyHome: "~/.happy" });
 console.log(daemon.socketPath);
 await daemon.close();
 ```
 
-Folders provide storage, compute, AGENTS.md, skills, applets, worklets, and generated media.
-Capabilities that reach another service remain explicit in `integrations`: collaboration, Happy,
-MCP, search, image generation, scheduling, user input, workflow/worklet runtimes, and slot
-projection.
+`startHappyAgent` returns only what a host actually needs: the modules, the Agent System, the
+storage and database, and the resolved providers and model catalog.
+
+Every module that would reach another service is disabled here: there is no collaboration host, no
+Happy app bridge, no MCP, no image generation, and no workflow or worklet runtime. Search is served
+only where an enabled provider offers it. Folders still provide storage, compute, AGENTS.md,
+skills, and generated media.
 
 The resolved `daemon.configuration.paths` is the authoritative immutable layout. A custom
 `<parent>/.happy` always uses `<parent>/Happy` as its public home; callers do not provide
 `agentHome`, `publicHome`, socket, token, or database paths separately. Unknown TOML settings are
 ignored and listed on the corresponding configuration source; malformed TOML and invalid known
 values fail startup.
-
-The lower-level `loadHappyAgent(ctx, options)` remains available when a host wants the standard
-agent lifetime without the HTTP daemon; its `configuration` field accepts the same resolved
-configuration object.
 
 ## Unix-socket API
 
@@ -106,9 +107,11 @@ remain unsupported.
 Compatibility reads do not claim unavailable capabilities. Their mutation routes remain
 unsupported instead of reporting fake success.
 
-Message bodies accept either a string or text/image input blocks. The same request may select the
-provider, model, reasoning effort, service tier, and permission mode. An optional caller-generated
-cuid2 makes delivery idempotent.
+Message bodies accept either a string or text/image input blocks. Every request that creates a
+session or runs a turn must name the provider, the model, the reasoning effort and the service tier
+explicitly; the agent inherits nothing from the session row and refuses an incomplete or unserved
+selection with `400`. Permission mode stays optional. An optional caller-generated cuid2 makes
+delivery idempotent.
 
 The Events module observes Agent Base directly and assigns every update a durable UUIDv7 that stays
 strictly ordered across restarts and clock rollback. Current provider `SessionEvent` values,

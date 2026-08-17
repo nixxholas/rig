@@ -1,8 +1,4 @@
-import { createRootContext } from "@steve.kite/stdlib";
-import {
-    startHappyAgentDaemon,
-    type StartHappyAgentDaemonOptions,
-} from "@slopus/happy-agent";
+import { startHappyAgentDaemon, type StartHappyAgentDaemonOptions } from "@slopus/happy-agent";
 
 import { getDaemonIdentity } from "./getDaemonIdentity.js";
 import { getHappyDaemonPaths } from "./getHappyDaemonPaths.js";
@@ -15,7 +11,7 @@ import { getHappyDaemonPaths } from "./getHappyDaemonPaths.js";
  */
 export async function runHappyAgentServer(): Promise<void> {
     const identity = getDaemonIdentity();
-    const daemon = await startHappyAgentDaemon(createRootContext(), {
+    const daemon = await startHappyAgentDaemon({
         happyHome: getHappyDaemonPaths().happyHome,
         httpConfiguration: { identity } as NonNullable<
             StartHappyAgentDaemonOptions["httpConfiguration"]

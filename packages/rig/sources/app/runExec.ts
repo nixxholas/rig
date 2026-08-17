@@ -13,6 +13,7 @@ import type {
 import { parsePermissionMode } from "./parsePermissionMode.js";
 import type { ExecCommandOptions } from "./parseExecCommand.js";
 import { readExecPrompt } from "./readExecPrompt.js";
+import { resolveSessionSelection } from "./resolveSessionSelection.js";
 import { RigUserError } from "../RigUserError.js";
 
 export async function runExec(
@@ -66,17 +67,16 @@ async function run(
     try {
         const submitted = await connection.client.submitMessage(session.id, {
             ...(options.debug === true ? { debug: true } : {}),
-            ...(opened.resumed && options.effort !== undefined ? { effort: options.effort } : {}),
+            // A resumed session keeps running on what it already runs on unless this invocation
+            // said otherwise; a new one was just created with exactly these values.
+            effort: (opened.resumed ? options.effort : undefined) ?? session.effort ?? "medium",
             interactive: false,
-            ...(opened.resumed && options.modelId !== undefined
-                ? { modelId: options.modelId }
-                : {}),
+            modelId: (opened.resumed ? options.modelId : undefined) ?? session.modelId,
             ...(opened.resumed && options.permissionMode !== undefined
                 ? { permissionMode: options.permissionMode }
                 : {}),
-            ...(opened.resumed && options.providerId !== undefined
-                ? { providerId: options.providerId }
-                : {}),
+            providerId: (opened.resumed ? options.providerId : undefined) ?? session.providerId,
+            serviceTier: session.serviceTier ?? null,
             text: prompt,
         });
         if (submitted.debugDirectory !== undefined) onDebugDirectory(submitted.debugDirectory);
@@ -186,9 +186,23 @@ async function openSession(
         return { resumed: true, session: (await client.getSession(sessionId)).session };
     }
 
+    const providerId = options.providerId ?? environment.RIG_PROVIDER ?? defaults.providerId;
+    const effort = options.effort ?? environment.RIG_EFFORT ?? defaults.effort;
+    // The agent chooses nothing, so the catalog it published completes whatever this invocation
+    // and the configuration left unsaid.
+    const catalog = (await client.models()).catalog;
+    const selection = resolveSessionSelection(
+        {
+            modelId: options.modelId ?? environment.RIG_MODEL ?? defaults.modelId,
+            ...(providerId === undefined ? {} : { providerId }),
+            ...(effort === undefined ? {} : { effort }),
+            ...(defaults.serviceTier === undefined ? {} : { serviceTier: defaults.serviceTier }),
+        },
+        catalog,
+    );
     const request: CreateSessionRequest = {
         cwd,
-        modelId: options.modelId ?? environment.RIG_MODEL ?? defaults.modelId,
+        ...selection,
         // Read the same way the model and provider are. An exec run that asked for a narrower
         // mode and silently got the default would be given reach it was told it would not have.
         permissionMode:
@@ -198,14 +212,8 @@ async function openSession(
                 : parsePermissionMode(environment.RIG_PERMISSION_MODE)) ??
             defaults.permissionMode,
     };
-    const providerId = options.providerId ?? environment.RIG_PROVIDER ?? defaults.providerId;
-    const effort = options.effort ?? environment.RIG_EFFORT ?? defaults.effort;
     const instructions = defaults.instructions;
-    const serviceTier = defaults.serviceTier;
-    if (providerId !== undefined) request.providerId = providerId;
-    if (effort !== undefined) request.effort = effort;
     if (instructions !== undefined) request.instructions = instructions;
-    if (serviceTier !== undefined) request.serviceTier = serviceTier;
     return { resumed: false, session: (await client.createSession(request)).session };
 }
 

@@ -99,7 +99,7 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
                     : { expectedRunId: options.expectedRunId }),
                 ...(typeof content === "string" ? {} : { content }),
                 ...(options.displayText !== undefined ? { displayText: options.displayText } : {}),
-                ...(selection ?? {}),
+                ...this.#messageSelection(selection),
                 text: displayText,
             });
             this.#clearSubmittedSelection(selection);
@@ -315,7 +315,7 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
             ...(requestContent === undefined ? {} : { content: requestContent }),
             ...(this.#debug ? { debug: true } : {}),
             ...(options.displayText !== undefined ? { displayText: options.displayText } : {}),
-            ...(selection ?? {}),
+            ...this.#messageSelection(selection),
             text: displayText,
         });
         this.#clearSubmittedSelection(selection);
@@ -861,6 +861,44 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         for (const [messageId, pending] of this.#pendingSteeringMessages) {
             if (pending.runId === runId) this.#pendingSteeringMessages.delete(messageId);
         }
+    }
+
+    /**
+     * The complete selection this message runs on: whatever the person has just changed, over what
+     * the session already runs on. The agent infers nothing from the last message, so every message
+     * carries the whole answer.
+     */
+    #messageSelection(selection: RemoteAgentSelection | undefined): {
+        readonly effort: string;
+        readonly modelId: string;
+        readonly permissionMode?: PermissionMode;
+        readonly providerId: string;
+        readonly serviceTier: ServiceTier | null;
+    } {
+        const modelId = selection?.modelId ?? this.#session.modelId;
+        const providerId = selection?.providerId ?? this.#session.providerId;
+        const provider = this.#modelCatalog?.providers.find(
+            (candidate) => candidate.providerId === providerId,
+        );
+        const model = (provider?.models ?? this.#models).find(
+            (candidate) => candidate.id === modelId,
+        );
+        return {
+            effort:
+                selection?.effort ??
+                this.#session.effort ??
+                model?.defaultThinkingLevel ??
+                "medium",
+            modelId,
+            ...(selection?.permissionMode === undefined
+                ? {}
+                : { permissionMode: selection.permissionMode }),
+            providerId,
+            serviceTier:
+                selection?.serviceTier === undefined
+                    ? (sessionServiceTier(this.#session) ?? null)
+                    : selection.serviceTier,
+        };
     }
 
     #clearSubmittedSelection(selection: RemoteAgentSelection | undefined): void {

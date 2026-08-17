@@ -26,10 +26,9 @@ import {
     type ConversationRecord,
     type ConversationScope,
 } from "../conversations/ConversationModule.js";
-import type { LoadedHappyAgent } from "../agent/loadHappyAgent.js";
+import type { StartedHappyAgent } from "../../start/startHappyAgent.js";
 import { ProjectRegistrationError } from "../projects/ProjectRegistrationError.js";
 import type { ResolvedProjectOwnership } from "../projects/ProjectWorkspaceService.js";
-import type { EffectiveAgentSelection } from "../../vanillaHappyAgentConfiguration.js";
 import { readValidatedBody } from "./body.js";
 import { AgentHttpError, sendJson, serializeJson } from "./errors.js";
 import { createRouteGroup, type AgentHttpRouteGroup } from "./router.js";
@@ -41,9 +40,9 @@ import {
     userInputRequestForProtocol,
 } from "./userInputProtocol.js";
 import {
-    mergeAgentMessageOptions,
-    resolveAgentMessageSelection,
-    type AgentMessageOptionOverrides,
+    agentMessageOptions,
+    checkAgentSelection,
+    type RequestedAgentSelection,
 } from "./agentMessageOptions.js";
 
 const MAX_SESSION_STREAM_PENDING_BYTES = 1_024 * 1_024;
@@ -68,15 +67,15 @@ const submitMessageSchema = Type.Object(
         clientSubmissionId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
         content: Type.Optional(Type.Array(contentBlockSchema, { maxItems: 256 })),
         displayText: Type.Optional(Type.String({ maxLength: 262_144 })),
-        effort: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
+        effort: Type.String({ minLength: 1, maxLength: 64 }),
         identity: Type.Optional(
             Type.Union([Type.String({ minLength: 1, maxLength: 256 }), Type.Null()]),
         ),
-        modelId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+        modelId: Type.String({ minLength: 1, maxLength: 256 }),
         mutationId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
         permissionMode: Type.Optional(agentPermissionModeSchema),
-        providerId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
-        serviceTier: Type.Optional(Type.Union([Type.Literal("fast"), Type.Null()])),
+        providerId: Type.String({ minLength: 1, maxLength: 256 }),
+        serviceTier: Type.Union([Type.Literal("fast"), Type.Null()]),
         systemPrompt: Type.Optional(Type.Union([Type.String({ maxLength: 262_144 }), Type.Null()])),
         text: Type.String({ maxLength: 262_144 }),
     },
@@ -87,19 +86,19 @@ const createSessionSchema = Type.Object(
     {
         appendSystemPrompt: Type.Optional(Type.String({ maxLength: 262_144 })),
         cwd: Type.String({ minLength: 1, maxLength: 4_096 }),
-        effort: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
+        effort: Type.String({ minLength: 1, maxLength: 64 }),
         id: Type.Optional(conversationSessionIdSchema),
         identity: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
         instructions: Type.Optional(Type.String({ maxLength: 262_144 })),
-        modelId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+        modelId: Type.String({ minLength: 1, maxLength: 256 }),
         permissionMode: Type.Optional(agentPermissionModeSchema),
         projectId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
-        providerId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+        providerId: Type.String({ minLength: 1, maxLength: 256 }),
         scope: Type.Optional(conversationScopeSchema),
         secretIds: Type.Optional(
             Type.Array(Type.String({ minLength: 1, maxLength: 256 }), { maxItems: 256 }),
         ),
-        serviceTier: Type.Optional(Type.Literal("fast")),
+        serviceTier: Type.Union([Type.Literal("fast"), Type.Null()]),
         trackUnread: Type.Optional(Type.Boolean()),
         workspaceId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
         workflowsEnabled: Type.Optional(Type.Boolean()),
@@ -122,15 +121,15 @@ const broadcastSchema = Type.Object(
         clientSubmissionId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
         content: Type.Optional(Type.Array(contentBlockSchema, { maxItems: 256 })),
         displayText: Type.Optional(Type.String({ maxLength: 262_144 })),
-        effort: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
+        effort: Type.String({ minLength: 1, maxLength: 64 }),
         identity: Type.Optional(
             Type.Union([Type.String({ minLength: 1, maxLength: 256 }), Type.Null()]),
         ),
-        modelId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+        modelId: Type.String({ minLength: 1, maxLength: 256 }),
         mutationId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
         permissionMode: Type.Optional(agentPermissionModeSchema),
-        providerId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
-        serviceTier: Type.Optional(Type.Union([Type.Literal("fast"), Type.Null()])),
+        providerId: Type.String({ minLength: 1, maxLength: 256 }),
+        serviceTier: Type.Union([Type.Literal("fast"), Type.Null()]),
         sessionIds: Type.Optional(
             Type.Array(conversationSessionIdSchema, { minItems: 1, maxItems: 500 }),
         ),
@@ -271,7 +270,7 @@ type PermissionModeChangedPayload = Static<typeof permissionModeChangedPayloadSc
 const unknownRecordSchema = Type.Record(Type.String(), Type.Unknown());
 type UnknownRecord = Static<typeof unknownRecordSchema>;
 type LoadedSessionDependencies = {
-    readonly agent: LoadedHappyAgent;
+    readonly agent: StartedHappyAgent;
 };
 
 /**
@@ -285,22 +284,8 @@ export function createSessionRoutes(): AgentHttpRouteGroup {
             path: "/v0/sessions",
             handle: async ({ ctx, dependencies, request, response }) => {
                 const body = await readValidatedBody(request, createSessionSchema);
-                if (body.workflowsEnabled === true) assertWorkflowsEnabled(dependencies.agent);
-                resolveAgentMessageSelection(
-                    dependencies.agent.effectiveSelection,
-                    dependencies.agent.system.models,
-                    {
-                        ...(body.modelId === undefined ? {} : { model: body.modelId }),
-                        ...(body.providerId === undefined ? {} : { provider: body.providerId }),
-                        ...(body.effort === undefined ? {} : { effort: body.effort }),
-                        ...(body.serviceTier === undefined
-                            ? {}
-                            : {
-                                  serviceTier:
-                                      body.serviceTier === null ? null : ("priority" as const),
-                              }),
-                    },
-                );
+                if (body.workflowsEnabled === true) refuseWorkflows();
+                checkAgentSelection(dependencies.agent.system.models, requestedSelection(body));
                 const conversation = dependencies.agent.modules.conversations;
                 const existing =
                     body.id === undefined ? undefined : await conversation.get(ctx, body.id);
@@ -322,15 +307,15 @@ export function createSessionRoutes(): AgentHttpRouteGroup {
                 const session = await conversation.ensure(ctx, {
                     agentId,
                     cwd: owner.cwd,
-                    ...(body.effort === undefined ? {} : { effort: body.effort }),
+                    effort: body.effort,
                     ...(body.id === undefined ? {} : { id: body.id }),
-                    ...(body.modelId === undefined ? {} : { modelId: body.modelId }),
+                    modelId: body.modelId,
                     ...(body.permissionMode === undefined
                         ? {}
                         : { permissionMode: body.permissionMode }),
-                    ...(body.providerId === undefined ? {} : { providerId: body.providerId }),
+                    providerId: body.providerId,
                     scope: owner.scope,
-                    ...(body.serviceTier === undefined ? {} : { serviceTier: body.serviceTier }),
+                    ...(body.serviceTier === null ? {} : { serviceTier: body.serviceTier }),
                 });
                 const agent = await dependencies.agent.system.create(
                     ctx,
@@ -856,18 +841,8 @@ function createMutationRoutes(): AgentHttpRouteGroup["routes"] {
         {
             method: "POST",
             path: "/v0/sessions/:sessionId/workflows/:runId/stop",
-            handle: async ({ ctx, dependencies, request, response, url }) => {
-                assertWorkflowsEnabled(dependencies.agent);
-                await readValidatedBody(request, workflowStopSchema);
-                const session = await requireSession(ctx, dependencies, sessionId(url));
-                // Stopping is settled by the run's own identity, so a client that retries the call
-                // gets the run it already cancelled back rather than a second cancellation.
-                const run = await dependencies.agent.modules.workflows.cancel(
-                    ctx,
-                    session.agentId,
-                    lastPathPart(url),
-                );
-                sendJson(response, 200, { workflow: run });
+            handle: async () => {
+                refuseWorkflows();
             },
         },
         {
@@ -1056,7 +1031,7 @@ async function sessionResponse(
         })
     ).map(userInputRequestForProtocol);
     return {
-        ...sessionSummaryValue(session, catalog, dependencies.agent.effectiveSelection),
+        ...sessionSummaryValue(session, catalog, catalogSelection(dependencies)),
         activity: activityFor(session, agent.active),
         agent: {
             depth: 0,
@@ -1079,7 +1054,7 @@ async function sessionResponse(
         subagents: [],
         tasks,
         workflows: [],
-        workflowsEnabled: dependencies.agent.configuration.values.features.workflows,
+        workflowsEnabled: false,
     };
 }
 
@@ -1091,10 +1066,9 @@ function configuredMcpServers(): readonly {
     return [];
 }
 
-function assertWorkflowsEnabled(agent: LoadedHappyAgent): void {
-    if (!agent.configuration.values.features.workflows) {
-        throw new AgentHttpError(503, "Workflows are disabled by configuration.");
-    }
+/** Workflows need a runtime this agent does not host, so a session never runs one. */
+function refuseWorkflows(): never {
+    throw new AgentHttpError(501, "Workflows are not available in this agent.");
 }
 
 export async function sessionSummary(
@@ -1105,7 +1079,7 @@ export async function sessionSummary(
     const config = await dependencies.agent.system.config(ctx, session.agentId);
     const catalog = createRigModelCatalog(dependencies.agent.system.models);
     return {
-        ...sessionSummaryValue(session, catalog, dependencies.agent.effectiveSelection),
+        ...sessionSummaryValue(session, catalog, catalogSelection(dependencies)),
         ...(config?.metadata?.title === undefined ? {} : { title: config.metadata.title }),
         ...(dependencies.agent.modules.events.latestCursor(session.agentId) === undefined
             ? {}
@@ -1116,18 +1090,18 @@ export async function sessionSummary(
 function sessionSummaryValue(
     session: ConversationRecord,
     catalog = { defaultModelId: "", defaultProviderId: "" },
-    defaults?: EffectiveAgentSelection,
+    fallback?: SessionSelection,
 ): Record<string, unknown> {
     return {
         archived: session.archived,
         createdAt: session.createdAt,
         cwd: session.cwd,
-        effort: session.effort ?? defaults?.effort,
+        effort: session.effort ?? fallback?.effort,
         id: session.id,
-        modelId: session.modelId ?? defaults?.model ?? catalog.defaultModelId,
+        modelId: session.modelId ?? fallback?.modelId ?? catalog.defaultModelId,
         ownerInstanceId: session.ownerInstanceId,
-        permissionMode: session.permissionMode ?? defaults?.permissionMode ?? "auto",
-        providerId: session.providerId ?? defaults?.provider ?? catalog.defaultProviderId,
+        permissionMode: session.permissionMode ?? fallback?.permissionMode ?? "auto",
+        providerId: session.providerId ?? fallback?.providerId ?? catalog.defaultProviderId,
         scope: session.scope,
         ...(session.serviceTier === undefined ? {} : { serviceTier: session.serviceTier }),
         status: session.archived ? "archived" : session.status,
@@ -1350,12 +1324,7 @@ async function sendMessage(
 ): Promise<Record<string, unknown>> {
     await nameFromFirstMessage(ctx, dependencies, session, body.displayText ?? body.text);
     const resumeCursor = dependencies.agent.modules.events.cursor();
-    const options = messageOptions(
-        body,
-        session,
-        dependencies.agent.effectiveSelection,
-        dependencies.agent.system.models,
-    );
+    const options = messageOptions(body, dependencies.agent.system.models);
     let acceptance;
     try {
         acceptance = await dependencies.agent.system.send(
@@ -1376,7 +1345,7 @@ async function sendMessage(
         session,
         selectionFromMessageOptions(
             options,
-            sessionSelection(session, dependencies.agent.effectiveSelection),
+            sessionSelection(session, catalogSelection(dependencies)),
         ),
         body.mutationId,
     );
@@ -1451,12 +1420,7 @@ async function steerMessage(
     body: SubmitMessage,
 ): Promise<Record<string, unknown>> {
     const resumeCursor = dependencies.agent.modules.events.cursor();
-    const options = messageOptions(
-        body,
-        session,
-        dependencies.agent.effectiveSelection,
-        dependencies.agent.system.models,
-    );
+    const options = messageOptions(body, dependencies.agent.system.models);
     const acceptance = await dependencies.agent.system.steer(
         ctx,
         session.agentId,
@@ -1470,7 +1434,7 @@ async function steerMessage(
         session,
         selectionFromMessageOptions(
             options,
-            sessionSelection(session, dependencies.agent.effectiveSelection),
+            sessionSelection(session, catalogSelection(dependencies)),
         ),
         body.mutationId,
     );
@@ -1494,62 +1458,56 @@ function messageFromBody(body: SubmitMessage): SessionUserMessage {
     return { content, role: "user" };
 }
 
+/** What one request named, in the shape the catalog check and the message options both take. */
+function requestedSelection(body: CreateSession | SubmitMessage): RequestedAgentSelection {
+    return {
+        effort: body.effort,
+        model: body.modelId,
+        provider: body.providerId,
+        serviceTier: body.serviceTier,
+        ...(body.permissionMode === undefined ? {} : { permissionMode: body.permissionMode }),
+    };
+}
+
 function messageOptions(
     body: SubmitMessage,
-    session: ConversationRecord,
-    defaults: EffectiveAgentSelection,
     models: readonly AgentModel[],
 ): AgentBaseMessageOptions & { readonly await?: boolean } {
-    return mergeAgentMessageOptions(defaults, models, {
+    return agentMessageOptions(models, requestedSelection(body), {
         ...(body.await === undefined ? {} : { await: body.await }),
         ...(body.clientSubmissionId === undefined ? {} : { id: body.clientSubmissionId }),
-        ...(body.effort === undefined
-            ? session.effort === undefined
-                ? {}
-                : { effort: session.effort }
-            : { effort: body.effort }),
-        ...(body.modelId === undefined
-            ? session.modelId === undefined
-                ? {}
-                : { model: session.modelId }
-            : { model: body.modelId }),
-        ...(body.permissionMode === undefined
-            ? session.permissionMode === undefined
-                ? {}
-                : {
-                      permissionMode: session.permissionMode as NonNullable<
-                          AgentMessageOptionOverrides["permissionMode"]
-                      >,
-                  }
-            : {
-                  permissionMode: body.permissionMode as NonNullable<
-                      AgentMessageOptionOverrides["permissionMode"]
-                  >,
-              }),
-        ...(body.providerId === undefined
-            ? session.providerId === undefined
-                ? {}
-                : { provider: session.providerId }
-            : { provider: body.providerId }),
-        ...(body.serviceTier === undefined
-            ? session.serviceTier === undefined
-                ? {}
-                : { serviceTier: "priority" as const }
-            : { serviceTier: body.serviceTier === null ? null : ("priority" as const) }),
     });
+}
+
+/**
+ * What a session that was never given a selection reports.
+ *
+ * Every session created through this API names its own selection, and every message names one
+ * again. The root chat is the exception: the agent creates it while starting, so it runs on the
+ * first entry of the catalog exactly as Agent Base itself would.
+ */
+function catalogSelection(dependencies: LoadedSessionDependencies): SessionSelection {
+    const first = dependencies.agent.system.models[0];
+    return {
+        effort: first?.defaultEffort ?? "medium",
+        modelId: first?.id ?? "",
+        permissionMode: dependencies.agent.configuration.values.defaults.permissionMode,
+        providerId: first?.providerId ?? "",
+        serviceTier: null,
+    };
 }
 
 function sessionSelection(
     session: ConversationRecord,
-    defaults: EffectiveAgentSelection,
+    fallback: SessionSelection,
 ): SessionSelection {
     const selection = {
-        effort: session.effort ?? defaults.effort,
-        modelId: session.modelId ?? defaults.model,
+        effort: session.effort ?? fallback.effort,
+        modelId: session.modelId ?? fallback.modelId,
         permissionMode: Value.Check(agentPermissionModeSchema, session.permissionMode)
             ? session.permissionMode
-            : defaults.permissionMode,
-        providerId: session.providerId ?? defaults.provider,
+            : fallback.permissionMode,
+        providerId: session.providerId ?? fallback.providerId,
         serviceTier: session.serviceTier ?? null,
     };
     if (!Value.Check(sessionSelectionSchema, selection)) {
@@ -1581,7 +1539,7 @@ async function persistSessionSelection(
     if (!Value.Check(sessionSelectionSchema, next)) {
         throw new Error("The requested session selection is invalid.");
     }
-    const current = sessionSelection(session, dependencies.agent.effectiveSelection);
+    const current = sessionSelection(session, catalogSelection(dependencies));
     const changed: SessionConfigurationChangedPayload["changed"][number][] = [];
     if (current.modelId !== next.modelId || current.providerId !== next.providerId) {
         changed.push("model");

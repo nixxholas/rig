@@ -8,7 +8,7 @@ import {
     metadataRequestSchema,
     type MessageRequest,
 } from "./HttpSchemas.js";
-import { mergeAgentMessageOptions } from "./agentMessageOptions.js";
+import { agentMessageOptions } from "./agentMessageOptions.js";
 import { createRouteGroup, type AgentHttpRouteGroup } from "./router.js";
 
 export function createAgentRoutes(): AgentHttpRouteGroup {
@@ -36,21 +36,20 @@ export function createAgentRoutes(): AgentHttpRouteGroup {
                     ctx,
                     dependencies.agent.agent.id,
                     messageFromRequest(body),
-                    mergeAgentMessageOptions(
-                        dependencies.agent.effectiveSelection,
+                    agentMessageOptions(
                         dependencies.agent.system.models,
                         {
-                            ...(body.await === undefined ? {} : { await: body.await }),
-                            ...(body.effort === undefined ? {} : { effort: body.effort }),
-                            ...(body.id === undefined ? {} : { id: body.id }),
-                            ...(body.model === undefined ? {} : { model: body.model }),
+                            effort: body.effort,
+                            model: body.model,
+                            provider: body.provider,
+                            serviceTier: body.serviceTier,
                             ...(body.permissionMode === undefined
                                 ? {}
                                 : { permissionMode: body.permissionMode }),
-                            ...(body.provider === undefined ? {} : { provider: body.provider }),
-                            ...(body.serviceTier === undefined
-                                ? {}
-                                : { serviceTier: body.serviceTier }),
+                        },
+                        {
+                            ...(body.await === undefined ? {} : { await: body.await }),
+                            ...(body.id === undefined ? {} : { id: body.id }),
                         },
                     ),
                 );
@@ -66,21 +65,20 @@ export function createAgentRoutes(): AgentHttpRouteGroup {
                     ctx,
                     dependencies.agent.agent.id,
                     messageFromRequest(body),
-                    mergeAgentMessageOptions(
-                        dependencies.agent.effectiveSelection,
+                    agentMessageOptions(
                         dependencies.agent.system.models,
                         {
-                            ...(body.await === undefined ? {} : { await: body.await }),
-                            ...(body.effort === undefined ? {} : { effort: body.effort }),
-                            ...(body.id === undefined ? {} : { id: body.id }),
-                            ...(body.model === undefined ? {} : { model: body.model }),
+                            effort: body.effort,
+                            model: body.model,
+                            provider: body.provider,
+                            serviceTier: body.serviceTier,
                             ...(body.permissionMode === undefined
                                 ? {}
                                 : { permissionMode: body.permissionMode }),
-                            ...(body.provider === undefined ? {} : { provider: body.provider }),
-                            ...(body.serviceTier === undefined
-                                ? {}
-                                : { serviceTier: body.serviceTier }),
+                        },
+                        {
+                            ...(body.await === undefined ? {} : { await: body.await }),
+                            ...(body.id === undefined ? {} : { id: body.id }),
                         },
                     ),
                 );

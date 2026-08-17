@@ -12,6 +12,17 @@ import { loadConfig, updateRuntimePreferences } from "../config/index.js";
 import { NativeProcessManager } from "../processes/index.js";
 import type { PermissionMode } from "../protocol/index.js";
 import type { CreateSessionRequest, SessionEvent } from "../protocol/index.js";
+
+/** Everything about a new session except the selection, which the catalog completes. */
+type SessionRequestPreferences = Omit<
+    CreateSessionRequest,
+    "effort" | "modelId" | "providerId" | "serviceTier"
+> & {
+    modelId: string;
+    providerId?: string;
+    effort?: string;
+    serviceTier?: CreateSessionRequest["serviceTier"];
+};
 import { CodingAssistantApp, type AppExitReason } from "./CodingAssistantApp.js";
 import { createSerialTaskQueue } from "./createSerialTaskQueue.js";
 import { createStopOnceHandler } from "./createStopOnceHandler.js";
@@ -23,6 +34,7 @@ import { providerQuotaToStartupStatusUsage } from "./providerQuotaToStartupStatu
 import { readPackageVersion } from "../readPackageVersion.js";
 import { reportCliFailure } from "../reportCliFailure.js";
 import { resolveTerminalTheme } from "./resolveTerminalTheme.js";
+import { resolveSessionSelection } from "./resolveSessionSelection.js";
 import { resolveStartupProviderQuota } from "./resolveStartupProviderQuota.js";
 import {
     resolveStartupSessionId,
@@ -60,7 +72,9 @@ export type RunAppResult = { action: "exit" } | { action: "reload"; sessionId: s
 export async function runApp(ctx: Context, options: RunAppOptions = {}): Promise<RunAppResult> {
     const cwd = options.cwd ?? process.cwd();
     const loadedConfig = await loadConfig({ cwd });
-    const agentOptions: CreateSessionRequest = {
+    // The selection is completed against the agent's catalog just before a session is created,
+    // because the agent itself chooses nothing: every request names its model, effort and tier.
+    const agentOptions: SessionRequestPreferences = {
         trackUnread: true,
         cwd,
         modelId: loadedConfig.config.defaults.modelId,
@@ -151,14 +165,16 @@ export async function runApp(ctx: Context, options: RunAppOptions = {}): Promise
                 if (resumeSessionId === undefined) return undefined;
             }
             startup.setStatus("Opening session.");
-            const [openedSession, modelsResponse] = await Promise.all([
+            const modelsResponse = await connection.client.models();
+            const openedSession =
                 resumeSessionId === undefined
-                    ? connection.client.createSession(agentOptions)
-                    : connection.client.getSession(resumeSessionId, {
+                    ? await connection.client.createSession({
+                          ...agentOptions,
+                          ...resolveSessionSelection(agentOptions, modelsResponse.catalog),
+                      })
+                    : await connection.client.getSession(resumeSessionId, {
                           messageLimit: INITIAL_TUI_MESSAGE_LIMIT,
-                      }),
-                connection.client.models(),
-            ]);
+                      });
             if (resumeSessionId !== undefined) {
                 ensureSessionCanResume(openedSession.session);
             }

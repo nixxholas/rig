@@ -13,7 +13,7 @@ import {
     conversationSessionIdSchema,
     type ConversationRecord,
 } from "../conversations/ConversationModule.js";
-import type { LoadedHappyAgent } from "../agent/loadHappyAgent.js";
+import type { StartedHappyAgent } from "../../start/startHappyAgent.js";
 import { readValidatedBody } from "./body.js";
 import { AgentHttpError, sendJson } from "./errors.js";
 import { createRouteGroup, type AgentHttpRouteGroup } from "./router.js";
@@ -114,7 +114,7 @@ export function createSessionProcessRoutes(): AgentHttpRouteGroup {
 
 async function startShellCommand(
     ctx: Context,
-    agent: LoadedHappyAgent,
+    agent: StartedHappyAgent,
     session: ConversationRecord,
     compute: HostCompute,
     body: ShellCommandRequest,
@@ -169,7 +169,7 @@ async function startShellCommand(
 
 async function requireSession(
     ctx: Context,
-    agent: LoadedHappyAgent,
+    agent: StartedHappyAgent,
     sessionId: string | undefined,
 ): Promise<ConversationRecord> {
     if (!Value.Check(conversationSessionIdSchema, sessionId)) {
@@ -182,7 +182,7 @@ async function requireSession(
 
 async function requireSessionCompute(
     ctx: Context,
-    agent: LoadedHappyAgent,
+    agent: StartedHappyAgent,
     session: ConversationRecord,
 ): Promise<HostCompute> {
     const config = await agent.system.config(ctx, session.agentId);
@@ -202,8 +202,11 @@ async function requireSessionCompute(
     return compute;
 }
 
-function permissionMode(agent: LoadedHappyAgent, session: ConversationRecord): AgentPermissionMode {
-    const value = session.permissionMode ?? agent.effectiveSelection.permissionMode;
+function permissionMode(
+    agent: StartedHappyAgent,
+    session: ConversationRecord,
+): AgentPermissionMode {
+    const value = session.permissionMode ?? agent.configuration.values.defaults.permissionMode;
     if (!Value.Check(agentPermissionModeSchema, value)) {
         throw new Error("The session has an invalid permission mode.");
     }

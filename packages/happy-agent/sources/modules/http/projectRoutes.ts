@@ -4,7 +4,7 @@ import { Type } from "@sinclair/typebox";
 import { projectRemoteSourceSchema, type Project } from "@slopus/happy-agent-modules";
 import type { Context } from "@steve.kite/stdlib";
 
-import type { LoadedHappyAgent } from "../agent/loadHappyAgent.js";
+import type { StartedHappyAgent } from "../../start/startHappyAgent.js";
 import { readValidatedBody } from "./body.js";
 import { AgentHttpError, sendJson } from "./errors.js";
 import { createRouteGroup, type AgentHttpRouteGroup } from "./router.js";
@@ -72,7 +72,7 @@ const reorderSchema = Type.Object(
 const emptySchema = Type.Object({}, { additionalProperties: false });
 
 export interface ProjectRouteOptions {
-    readonly agent: LoadedHappyAgent;
+    readonly agent: StartedHappyAgent;
     readonly files?: ProjectFilesModule;
     readonly git?: GitModule;
     readonly projects: ProjectWorkspaceService;
@@ -418,7 +418,7 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
      */
     async function recordProjectEvent(
         ctx: Context,
-        agent: LoadedHappyAgent,
+        agent: StartedHappyAgent,
         projectId: string,
         type: "project.created" | "project.updated",
         payload: Record<string, unknown>,

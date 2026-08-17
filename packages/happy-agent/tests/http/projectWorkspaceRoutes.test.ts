@@ -4,7 +4,6 @@ import { request as httpRequest } from "node:http";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
-import { createRootContext, type RootContext } from "@steve.kite/stdlib";
 import sharp from "sharp";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -13,12 +12,10 @@ import {
     startHappyAgentDaemon,
     type AgentModel,
     type HappyAgentDaemon,
-    type HappyAgentIntegrations,
 } from "../../sources/index.js";
 import { createGitRepository, git, waitFor } from "../projects/support.js";
 
 interface Fixture {
-    readonly ctx: RootContext;
     readonly daemon: HappyAgentDaemon;
     readonly directory: string;
     readonly managedWorkspaces: string;
@@ -37,7 +34,6 @@ type HttpCall = (
 ) => Promise<{ readonly status: number; readonly body: Record<string, never> }>;
 
 const running = new Set<{
-    readonly ctx: RootContext;
     readonly daemon: HappyAgentDaemon;
     readonly directory: string;
     readonly restoreEnvironment: () => void;
@@ -45,8 +41,8 @@ const running = new Set<{
 
 afterEach(async () => {
     await Promise.all(
-        [...running].map(async ({ ctx, daemon, directory, restoreEnvironment }) => {
-            await daemon.close(ctx.named("test-cleanup")).catch(() => undefined);
+        [...running].map(async ({ daemon, directory, restoreEnvironment }) => {
+            await daemon.close().catch(() => undefined);
             restoreEnvironment();
             await rm(directory, { force: true, recursive: true });
         }),
@@ -59,7 +55,9 @@ describe("project and workspace routes over the daemon socket", () => {
         const fixture = await startTestDaemon();
         const folder = await createGitRepository(join(fixture.directory, "work", "alpha"));
 
-        const first = await fixture.call("POST", "/v0/sessions", { body: { cwd: folder } });
+        const first = await fixture.call("POST", "/v0/sessions", {
+            body: newSession({ cwd: folder }),
+        });
         expect(first.status).toBe(201);
         const scope = sessionScope(first.body);
         expect(scope).toMatchObject({ kind: "project" });
@@ -77,7 +75,9 @@ describe("project and workspace routes over the daemon socket", () => {
             ],
         });
 
-        const second = await fixture.call("POST", "/v0/sessions", { body: { cwd: folder } });
+        const second = await fixture.call("POST", "/v0/sessions", {
+            body: newSession({ cwd: folder }),
+        });
         expect(sessionScope(second.body)).toEqual(scope);
         const after = await fixture.call("GET", "/v0/projects");
         expect(readProjects(after.body)).toHaveLength(1);
@@ -86,7 +86,9 @@ describe("project and workspace routes over the daemon socket", () => {
     it("brings an archived project back when a session starts in its folder again", async () => {
         const fixture = await startTestDaemon();
         const folder = await createGitRepository(join(fixture.directory, "work", "beta"));
-        const created = await fixture.call("POST", "/v0/sessions", { body: { cwd: folder } });
+        const created = await fixture.call("POST", "/v0/sessions", {
+            body: newSession({ cwd: folder }),
+        });
         const projectId = sessionScope(created.body).projectId;
 
         const before = await fixture.call("GET", `/v0/projects/${projectId}`);
@@ -97,7 +99,9 @@ describe("project and workspace routes over the daemon socket", () => {
         expect(archived.status).toBe(202);
         expect(readProject(archived.body).status).toBe("archived");
 
-        const reopened = await fixture.call("POST", "/v0/sessions", { body: { cwd: folder } });
+        const reopened = await fixture.call("POST", "/v0/sessions", {
+            body: newSession({ cwd: folder }),
+        });
         expect(sessionScope(reopened.body)).toMatchObject({ kind: "project", projectId });
         const now = await fixture.call("GET", `/v0/projects/${projectId}`);
         expect(readProject(now.body).status).toBe("active");
@@ -107,7 +111,9 @@ describe("project and workspace routes over the daemon socket", () => {
         const fixture = await startTestDaemon();
         const home = await realpath(homedir());
 
-        const created = await fixture.call("POST", "/v0/sessions", { body: { cwd: home } });
+        const created = await fixture.call("POST", "/v0/sessions", {
+            body: newSession({ cwd: home }),
+        });
         const projectId = sessionScope(created.body).projectId;
         const project = await fixture.call("GET", `/v0/projects/${projectId}`);
 
@@ -484,30 +490,41 @@ async function startTestDaemon(): Promise<Fixture> {
             providerId: "scripted",
         },
     ];
-    const ctx = createRootContext() as unknown as RootContext;
     let daemon: HappyAgentDaemon;
     try {
-        daemon = await startHappyAgentDaemon(ctx, {
+        daemon = await startHappyAgentDaemon({
             happyHome: join(directory, ".happy"),
-            integrations: unavailableIntegrations(),
-            models,
-            provider: "scripted",
-            providers,
+            inference: { models, providers },
             version: "project-route-test",
         });
     } catch (error) {
         restoreEnvironment();
         throw error;
     }
-    running.add({ ctx, daemon, directory, restoreEnvironment });
+    running.add({ daemon, directory, restoreEnvironment });
     const token = (await readFile(daemon.tokenPath, "utf8")).trim();
     return {
         call: createCall(daemon.socketPath, token),
-        ctx,
         daemon,
         directory,
         managedWorkspaces,
         token,
+    };
+}
+
+/**
+ * The body of a new session.
+ *
+ * The agent chooses nothing about a turn, so every request names the account, model, effort and
+ * service tier it wants.
+ */
+function newSession(body: Record<string, unknown>): Record<string, unknown> {
+    return {
+        effort: "medium",
+        modelId: "scripted-model",
+        providerId: "scripted",
+        serviceTier: null,
+        ...body,
     };
 }
 
@@ -583,47 +600,4 @@ function scriptedProvider(): Parameters<AgentProviders["add"]>[1] {
                 })(),
         }),
     } as never;
-}
-
-function unavailableIntegrations(): HappyAgentIntegrations {
-    const unavailable = async () => {
-        throw new Error("This integration is unavailable in this test.");
-    };
-    return {
-        collaboration: {
-            create: async (_ctx, _config, options) => ({ id: options.id }),
-            config: async () => undefined,
-            interrupt: unavailable,
-            observe: unavailable,
-            selection: async () => undefined,
-            send: async () => undefined,
-            setReadOnly: unavailable,
-            spawnCapacity: async () => ({ canSpawn: false, depth: 0, maxDepth: 0 }),
-            wait: unavailable,
-            waitForAgent: unavailable,
-        },
-        happy: {
-            notify: async () => ({ accepted: false }),
-            setStatus: async () => ({ accepted: false }),
-        },
-        mcp: {
-            callTool: unavailable,
-            getPrompt: unavailable,
-            listPrompts: async () => ({ prompts: [] }),
-            listResourceTemplates: async () => ({ resourceTemplates: [] }),
-            listResources: async () => ({ resources: [] }),
-            listServers: async () => ({ servers: [] }),
-            listTools: async () => ({ tools: [] }),
-            readResource: unavailable,
-        },
-        search: {
-            fetch: async (_ctx, _agentId, input) => ({
-                content: "",
-                truncated: false,
-                url: input.url,
-            }),
-            search: async (_ctx, _agentId, query) => ({ query: query.query, results: [] }),
-        },
-        userInput: { wait: unavailable },
-    } as unknown as HappyAgentIntegrations;
 }

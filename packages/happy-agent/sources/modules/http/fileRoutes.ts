@@ -1,4 +1,4 @@
-import type { LoadedHappyAgent } from "../agent/loadHappyAgent.js";
+import type { StartedHappyAgent } from "../../start/startHappyAgent.js";
 import {
     ProjectFileError,
     ProjectFilesModule,
@@ -23,7 +23,7 @@ import {
 import { Value } from "@sinclair/typebox/value";
 
 export interface FileRouteOptions {
-    readonly agent: LoadedHappyAgent;
+    readonly agent: StartedHappyAgent;
     readonly files: ProjectFilesModule;
 }
 

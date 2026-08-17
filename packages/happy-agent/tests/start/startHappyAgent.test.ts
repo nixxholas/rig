@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -33,6 +33,7 @@ describe("startHappyAgent", () => {
             "observation",
             "permissions",
             "presence",
+            "projects",
             "scheduling",
             "search",
             "secrets",
@@ -41,6 +42,7 @@ describe("startHappyAgent", () => {
             "tasks",
             "usage",
             "userInput",
+            "workspaces",
         ]);
         expect(first.provider).toBe("codex");
         expect(first.models[0]?.id).toBe("openai/gpt-5.6-terra");
@@ -56,6 +58,7 @@ describe("startHappyAgent", () => {
         // The same folder is the same installation: restarting resolves the agent, never a new one.
         const second = await start(happyHome);
         expect(second.agent.id).toBe(firstAgentId);
+        expect(second.installation.epoch).toBe(first.installation.epoch);
     });
 
     it("refuses a default model no enabled provider serves", async () => {
@@ -63,16 +66,17 @@ describe("startHappyAgent", () => {
         await expect(start(happyHome)).rejects.toThrow(/not served by any enabled provider/);
     });
 
-    it("gives its wait tools to the agent without any host supplying them", async () => {
-        const happyHome = await createHappyHome();
-        const agent = await start(happyHome);
-        const toolNames = (await agent.system.tools(agent.ctx, agent.agent.id)).map(
-            (tool) => tool.name,
-        );
-        expect(toolNames).toContain("wait");
-        expect(toolNames).toContain("wait_until");
-        // Nothing that used to arrive through a host integration is on the agent at all.
-        expect(toolNames).not.toContain("generate_image");
+    it("has no module that would need a host integration", async () => {
+        const agent = await start(await createHappyHome());
+        const names = Object.keys(agent.modules);
+        for (const absent of ["happy", "imageGeneration", "mcp", "workflows"]) {
+            expect(names).not.toContain(absent);
+        }
+        // Everything the daemon serves over its socket comes from the same start, with no host.
+        expect(typeof agent.background).toBe("function");
+        expect(agent.gitTracker).toBeDefined();
+        expect(agent.projectWorkspaces).toBeDefined();
+        expect(agent.installation.schemaVersion).toBe(1);
     });
 });
 
@@ -87,25 +91,25 @@ async function start(happyHome: string): Promise<StartedHappyAgent> {
  * this machine's real credentials.
  */
 async function createHappyHome(options: { readonly modelId?: string } = {}): Promise<string> {
-    const happyHome = await mkdtemp(join(tmpdir(), "happy-start-"));
-    directories.push(happyHome);
+    const root = await mkdtemp(join(tmpdir(), "happy-start-"));
+    directories.push(root);
+    const happyHome = join(root, ".happy");
+    await mkdir(join(root, "Happy", "Config"), { recursive: true });
     await writeFile(
-        join(happyHome, "config.json"),
-        JSON.stringify({
-            defaults: {
-                modelId: options.modelId ?? "openai/gpt-5.6-terra",
-                providerId: "codex",
-                permissionMode: "read_only",
-            },
-            providers: {
-                codex: {
-                    type: "codex",
-                    enabled: true,
-                    apiKey: "test-key",
-                    credentialIsolation: true,
-                },
-            },
-        }),
+        join(root, "Happy", "Config", "happy.toml"),
+        [
+            "[defaults]",
+            `model = "${options.modelId ?? "openai/gpt-5.6-terra"}"`,
+            'provider = "codex"',
+            'permission_mode = "read_only"',
+            "",
+            "[providers.codex]",
+            'type = "codex"',
+            "enabled = true",
+            'api_key = "test-key"',
+            "credential_isolation = true",
+            "",
+        ].join("\n"),
         "utf8",
     );
     return happyHome;

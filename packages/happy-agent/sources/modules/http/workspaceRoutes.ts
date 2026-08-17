@@ -4,7 +4,7 @@ import { Type } from "@sinclair/typebox";
 import type { Workspace } from "@slopus/happy-agent-modules";
 import type { Context } from "@steve.kite/stdlib";
 
-import type { LoadedHappyAgent } from "../agent/loadHappyAgent.js";
+import type { StartedHappyAgent } from "../../start/startHappyAgent.js";
 import { readValidatedBody } from "./body.js";
 import { AgentHttpError, sendJson } from "./errors.js";
 import { createRouteGroup, type AgentHttpRouteGroup } from "./router.js";
@@ -42,7 +42,7 @@ const reorderSchema = Type.Object(
 const emptySchema = Type.Object({}, { additionalProperties: false });
 
 export interface WorkspaceRouteOptions {
-    readonly agent: LoadedHappyAgent;
+    readonly agent: StartedHappyAgent;
     readonly git?: GitModule;
     readonly projects: ProjectWorkspaceService;
 }

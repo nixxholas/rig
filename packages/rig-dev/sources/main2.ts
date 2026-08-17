@@ -47,7 +47,7 @@ async function main(): Promise<void> {
         return;
     }
     const identity = getDaemonIdentity();
-    const daemon = await startHappyAgentDaemon(ctx, {
+    const daemon = await startHappyAgentDaemon({
         happyHome,
         httpConfiguration: { identity },
         version: identity.version,
@@ -64,7 +64,7 @@ async function main(): Promise<void> {
             };
         }
     } finally {
-        await daemon.close(ctx.named("dev2-shutdown"));
+        await daemon.close();
     }
 }
 

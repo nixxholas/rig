@@ -3,7 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { withAgentDatabase } from "@slopus/happy-agent-base";
 import type { Context } from "@steve.kite/stdlib";
 
-import type { LoadedHappyAgent } from "../agent/loadHappyAgent.js";
+import type { StartedHappyAgent } from "../../start/startHappyAgent.js";
 import type { ProjectFilesModule } from "../files/ProjectFilesModule.js";
 import type { GitModule } from "../git/GitModule.js";
 import { AgentHttpError } from "./errors.js";
@@ -29,7 +29,7 @@ export interface AgentHttpConfiguration {
 }
 
 export interface AgentHttpRouteDependencies {
-    readonly agent: LoadedHappyAgent;
+    readonly agent: StartedHappyAgent;
     readonly configuration?: AgentHttpConfiguration;
     readonly onShutdown?: () => void;
     readonly version?: string;

@@ -28,17 +28,15 @@ export const messageRequestSchema = Type.Object(
                 maxItems: 256,
             }),
         ]),
-        effort: Type.Optional(
-            Type.Union([
-                Type.Literal("off"),
-                Type.Literal("minimal"),
-                Type.Literal("low"),
-                Type.Literal("medium"),
-                Type.Literal("high"),
-                Type.Literal("xhigh"),
-                Type.Literal("max"),
-            ]),
-        ),
+        effort: Type.Union([
+            Type.Literal("off"),
+            Type.Literal("minimal"),
+            Type.Literal("low"),
+            Type.Literal("medium"),
+            Type.Literal("high"),
+            Type.Literal("xhigh"),
+            Type.Literal("max"),
+        ]),
         id: Type.Optional(
             Type.String({
                 minLength: 2,
@@ -46,10 +44,10 @@ export const messageRequestSchema = Type.Object(
                 pattern: "^[a-z][a-z0-9]+$",
             }),
         ),
-        model: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+        model: Type.String({ minLength: 1, maxLength: 256 }),
         permissionMode: Type.Optional(agentPermissionModeSchema),
-        provider: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
-        serviceTier: Type.Optional(Type.Literal("priority")),
+        provider: Type.String({ minLength: 1, maxLength: 256 }),
+        serviceTier: Type.Union([Type.Literal("priority"), Type.Null()]),
     },
     { additionalProperties: false },
 );

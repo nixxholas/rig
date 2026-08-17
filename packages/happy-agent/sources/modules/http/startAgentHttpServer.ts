@@ -6,7 +6,7 @@ import { dirname } from "node:path";
 import { withAgentDatabase } from "@slopus/happy-agent-base";
 import { span, type Context } from "@steve.kite/stdlib";
 
-import type { LoadedHappyAgent } from "../agent/loadHappyAgent.js";
+import type { StartedHappyAgent } from "../../start/startHappyAgent.js";
 import type { HappyAgentConfiguration } from "@slopus/happy-agent-modules";
 import { HAPPY_AGENT_RIG_PROTOCOL_VERSION } from "./rigProtocol.js";
 import { ProjectFilesModule } from "../files/ProjectFilesModule.js";
@@ -41,7 +41,7 @@ import {
 } from "./router.js";
 
 export interface StartAgentHttpServerOptions {
-    readonly agent?: LoadedHappyAgent;
+    readonly agent?: StartedHappyAgent;
     /** Required when the socket is opened before the Agent System finishes loading. */
     readonly agentConfiguration: HappyAgentConfiguration;
     readonly configuration?: AgentHttpConfiguration;
@@ -54,7 +54,7 @@ export interface StartAgentHttpServerOptions {
 export interface AgentHttpServer {
     readonly socketPath: string;
     readonly tokenPath: string;
-    setAgent(agent: LoadedHappyAgent): Promise<void>;
+    setAgent(agent: StartedHappyAgent): Promise<void>;
     close(): Promise<void>;
 }
 
@@ -68,7 +68,7 @@ export async function startAgentHttpServer(
     await prepareAgentSocket(paths);
 
     const connections = new Set<Socket>();
-    const state: { agent?: LoadedHappyAgent; groups?: readonly AgentHttpRouteGroup[] } = {};
+    const state: { agent?: StartedHappyAgent; groups?: readonly AgentHttpRouteGroup[] } = {};
     const server = createServer((request, response) => {
         void span(options.ctx, "happy-agent-http-request", (requestCtx) =>
             handleRequest(requestCtx, request, response, options, token, state),
@@ -122,7 +122,7 @@ export async function startAgentHttpServer(
 
 function routeGroups(
     options: StartAgentHttpServerOptions,
-    agent: LoadedHappyAgent,
+    agent: StartedHappyAgent,
 ): readonly AgentHttpRouteGroup[] {
     // The one host the loader composed. Every route reads and writes through it, so a folder a
     // route reports and a folder the background work actually created are the same folder.
@@ -188,7 +188,7 @@ async function handleRequest(
     options: StartAgentHttpServerOptions,
     token: string,
     state: {
-        readonly agent?: LoadedHappyAgent;
+        readonly agent?: StartedHappyAgent;
         readonly groups?: readonly AgentHttpRouteGroup[];
     },
 ): Promise<void> {

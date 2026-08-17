@@ -9,7 +9,7 @@ import {
 } from "@slopus/happy-agent-modules";
 import type { Context } from "@steve.kite/stdlib";
 
-import type { LoadedHappyAgent } from "../agent/loadHappyAgent.js";
+import type { StartedHappyAgent } from "../../start/startHappyAgent.js";
 import { readValidatedBody } from "./body.js";
 import { AgentHttpError, sendJson } from "./errors.js";
 import { createRouteGroup, type AgentHttpRouteGroup } from "./router.js";
@@ -117,7 +117,7 @@ export function createSecretRoutes(): AgentHttpRouteGroup {
 
 async function listRigSecrets(
     ctx: Context,
-    agent: LoadedHappyAgent,
+    agent: StartedHappyAgent,
 ): Promise<readonly RigSecretSummary[]> {
     const secrets: RigSecretSummary[] = [];
     let cursor: number | undefined;
@@ -138,7 +138,7 @@ async function listRigSecrets(
 
 async function registerSecret(
     ctx: Context,
-    agent: LoadedHappyAgent,
+    agent: StartedHappyAgent,
     body: RegisterSecretRequest,
 ): Promise<SecretReference> {
     try {
@@ -150,7 +150,7 @@ async function registerSecret(
 
 async function updateSecret(
     ctx: Context,
-    agent: LoadedHappyAgent,
+    agent: StartedHappyAgent,
     secretId: string,
     body: UpdateSecretRequest,
 ): Promise<SecretReference | undefined> {
@@ -165,7 +165,7 @@ async function updateSecret(
  * Rig's catalog is daemon-global, while SecretsModule deliberately scopes storage by an opaque
  * acting-agent identity. The durable root agent is the daemon's stable owner for this adapter.
  */
-function secretOwner(agent: LoadedHappyAgent): string {
+function secretOwner(agent: StartedHappyAgent): string {
     return agent.agent.id;
 }
 

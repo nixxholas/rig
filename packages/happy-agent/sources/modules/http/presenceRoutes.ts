@@ -1,7 +1,7 @@
 import { Type, type Static } from "@sinclair/typebox";
 import type { Context } from "@steve.kite/stdlib";
 
-import type { LoadedHappyAgent } from "../agent/loadHappyAgent.js";
+import type { StartedHappyAgent } from "../../start/startHappyAgent.js";
 import { readValidatedBody } from "./body.js";
 import { AgentHttpError, sendJson } from "./errors.js";
 import { createRouteGroup, type AgentHttpRouteGroup } from "./router.js";
@@ -72,7 +72,7 @@ export function createPresenceRoutes(): AgentHttpRouteGroup {
 
 export async function readLiveRigPresence(
     ctx: Context,
-    agent: LoadedHappyAgent,
+    agent: StartedHappyAgent,
 ): Promise<PresenceResponse> {
     const [current, definitions] = await Promise.all([
         agent.modules.presence.read(ctx),
@@ -121,7 +121,7 @@ export async function readLiveRigPresence(
 
 async function setPresence(
     ctx: Context,
-    agent: LoadedHappyAgent,
+    agent: StartedHappyAgent,
     body: SetPresenceRequest,
 ): Promise<void> {
     try {

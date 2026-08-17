@@ -1,4 +1,4 @@
-import type { LoadedHappyAgent } from "../agent/loadHappyAgent.js";
+import type { StartedHappyAgent } from "../../start/startHappyAgent.js";
 import { readValidatedBody } from "./body.js";
 import { AgentHttpError, sendJson } from "./errors.js";
 import { createRouteGroup, type AgentHttpRouteGroup } from "./router.js";
@@ -7,7 +7,7 @@ import { GitModule, gitWatchSchema } from "../git/GitModule.js";
 import type { GitStateTracker, GitTrackedEntity } from "../git/GitStateTracker.js";
 
 export interface GitRouteOptions {
-    readonly agent: LoadedHappyAgent;
+    readonly agent: StartedHappyAgent;
     readonly files: ProjectFilesModule;
     readonly git: GitModule;
     /** The daemon's one live watcher. Watching registers with it instead of scanning here. */

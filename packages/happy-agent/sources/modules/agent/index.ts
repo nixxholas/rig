@@ -1,7 +1,3 @@
-export {
-    loadHappyAgent,
-    type HappyAgentIntegrations,
-    type HappyAgentModuleCollection,
-    type LoadedHappyAgent,
-    type LoadHappyAgentOptions,
-} from "./loadHappyAgent.js";
+export { openHappyAgentDatabase, type HappyAgentDatabase } from "./HappyAgentDatabase.js";
+export { acquireHappyAgentStorageLock } from "./HappyAgentStorageLock.js";
+export { readGlobalInstructions } from "./readGlobalInstructions.js";

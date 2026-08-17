@@ -16,11 +16,4 @@ export {
     type StartedHappyAgent,
     type StartHappyAgentOptions,
 } from "./start/startHappyAgent.js";
-export { agentModels, agentProviders, defaultAgentProvider } from "./start/agentCatalog.js";
-export {
-    applyEffectiveAgentSelection,
-    createVanillaHappyAgentConfiguration,
-    resolveEffectiveAgentSelection,
-    type EffectiveAgentSelection,
-    type VanillaHappyAgentConfiguration,
-} from "./vanillaHappyAgentConfiguration.js";
+export { agentModels, agentProviders } from "./start/agentCatalog.js";

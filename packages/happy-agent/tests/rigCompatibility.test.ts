@@ -3,7 +3,6 @@ import { request as httpRequest } from "node:http";
 import { join, resolve } from "node:path";
 
 import { Value } from "@sinclair/typebox/value";
-import { createRootContext, type RootContext } from "@steve.kite/stdlib";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
@@ -22,20 +21,26 @@ import {
     startHappyAgentDaemon,
     type AgentModel,
     type HappyAgentDaemon,
-    type HappyAgentIntegrations,
 } from "../sources/index.js";
 import { createCompatibilitySnapshots } from "../sources/modules/http/compatibilityRoutes.js";
 
+/** Every request names the account, the model, the effort and the tier: the agent assumes nothing. */
+const SELECTION = {
+    effort: "medium",
+    modelId: "scripted-model",
+    providerId: "scripted",
+    serviceTier: null,
+} as const;
+
 const running = new Set<{
-    readonly ctx: RootContext;
     readonly daemon: HappyAgentDaemon;
     readonly directory: string;
 }>();
 
 afterEach(async () => {
     await Promise.all(
-        [...running].map(async ({ ctx, daemon, directory }) => {
-            await daemon.close(ctx.named("test-cleanup")).catch(() => undefined);
+        [...running].map(async ({ daemon, directory }) => {
+            await daemon.close().catch(() => undefined);
             await rm(directory, { force: true, recursive: true });
         }),
     );
@@ -107,7 +112,7 @@ describe("Happy Agent Rig compatibility", () => {
                 subagents: [],
                 tasks: [],
                 workflows: [],
-                workflowsEnabled: true,
+                workflowsEnabled: false,
             },
         });
         await expect(connection.client.listFolders()).resolves.toEqual({
@@ -219,9 +224,10 @@ describe("Happy Agent Rig compatibility", () => {
         });
         await expect(
             connection.client.submitMessage(session.id, {
+                ...SELECTION,
                 await: true,
                 text: "Hello from Rig.",
-            } as never),
+            }),
         ).resolves.toMatchObject({
             eventId: expect.any(String),
             runId: expect.any(String),
@@ -321,6 +327,7 @@ describe("Happy Agent Rig compatibility", () => {
         });
 
         const created = await connection.client.createSession({
+            ...SELECTION,
             cwd: fixture.directory,
             permissionMode: "full_access",
         });
@@ -377,10 +384,12 @@ describe("Happy Agent Rig compatibility", () => {
 
         const messageSession = (
             await connection.client.createSession({
+                ...SELECTION,
                 cwd: fixture.directory,
             })
         ).session;
         await connection.client.submitMessage(messageSession.id, {
+            ...SELECTION,
             await: true,
             modelId: "scripted-model-2",
             mutationId: "message-model",
@@ -416,7 +425,9 @@ describe("Happy Agent Rig compatibility", () => {
         });
 
         await connection.client.submitMessage(messageSession.id, {
+            ...SELECTION,
             await: true,
+            modelId: "scripted-model-2",
             text: "Keep using it.",
         });
         await expect
@@ -456,9 +467,8 @@ async function startTestDaemon() {
             providerId: "scripted",
         },
     ];
-    const ctx = createRootContext() as unknown as RootContext;
     const unexpectedErrors: unknown[] = [];
-    const daemon = await startHappyAgentDaemon(ctx, {
+    const daemon = await startHappyAgentDaemon({
         happyHome: join(directory, ".happy"),
         httpConfiguration: {
             onUnexpectedError: (error) => {
@@ -466,13 +476,10 @@ async function startTestDaemon() {
             },
             p2pName: "Happy Agent",
         },
-        integrations: unavailableIntegrations(),
-        models,
-        provider: "scripted",
-        providers,
+        inference: { models, providers },
         version: "compatibility-test",
     });
-    const fixture = { ctx, daemon, directory, modelRuns, unexpectedErrors };
+    const fixture = { daemon, directory, modelRuns, unexpectedErrors };
     running.add(fixture);
     return fixture;
 }
@@ -517,52 +524,6 @@ function scriptedProvider(
             },
         }),
     } as never;
-}
-
-function unavailableIntegrations(): HappyAgentIntegrations {
-    const unavailable = async () => {
-        throw new Error("This integration is unavailable in the compatibility test.");
-    };
-    return {
-        collaboration: {
-            create: async (_ctx, _config, options) => ({ id: options.id }),
-            config: async () => undefined,
-            interrupt: unavailable,
-            observe: unavailable,
-            selection: async () => undefined,
-            send: async () => undefined,
-            setReadOnly: unavailable,
-            spawnCapacity: async () => ({ canSpawn: false, depth: 0, maxDepth: 0 }),
-            wait: unavailable,
-            waitForAgent: unavailable,
-        },
-        happy: {
-            notify: async () => ({ accepted: false }),
-            setStatus: async () => ({ accepted: false }),
-        },
-        mcp: {
-            callTool: unavailable,
-            getPrompt: unavailable,
-            listPrompts: async () => ({ prompts: [] }),
-            listResourceTemplates: async () => ({ resourceTemplates: [] }),
-            listResources: async () => ({ resources: [] }),
-            listServers: async () => ({ servers: [] }),
-            listTools: async () => ({ tools: [] }),
-            readResource: unavailable,
-        },
-        search: {
-            fetch: async (_ctx, _agentId, input) => ({
-                content: "",
-                truncated: false,
-                url: input.url,
-            }),
-            search: async (_ctx, _agentId, query) => ({
-                query: query.query,
-                results: [],
-            }),
-        },
-        userInput: { wait: unavailable },
-    } as unknown as HappyAgentIntegrations;
 }
 
 async function requestJson(socketPath: string, token: string, path: string): Promise<unknown> {

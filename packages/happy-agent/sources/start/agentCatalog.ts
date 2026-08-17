@@ -95,11 +95,6 @@ export function agentModels(configuration: HappyAgentConfiguration): readonly Ag
     return [first, ...available.filter((candidate) => candidate !== chosen)];
 }
 
-/** The provider the configuration reaches for when a session names none. */
-export function defaultAgentProvider(configuration: HappyAgentConfiguration): string {
-    return configuration.values.defaults.providerId ?? "codex";
-}
-
 /**
  * One registry holding every enabled provider, each constructing its client on first use so a
  * credential is read when a session needs it rather than at startup.
