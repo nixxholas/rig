@@ -1,4 +1,3 @@
-import type { SessionUserMessage } from "@slopus/happy-providers";
 import type { Context } from "@steve.kite/stdlib";
 
 import type { Agent } from "./Agent.js";
@@ -7,6 +6,7 @@ import { agentId } from "./AgentContexts.js";
 import type { AgentDatabase } from "./AgentDatabase.js";
 import type { AgentMetadata } from "./AgentMetadata.js";
 import type { AgentMessageAcceptance } from "./AgentMessageAcceptance.js";
+import type { AgentQueuedMessage } from "./AgentQueuedMessage.js";
 import type { AnyAgentTool } from "./AgentTool.js";
 
 /**
@@ -54,7 +54,7 @@ export class AgentRef<Database extends AgentDatabase = AgentDatabase> {
     /** Queue a message that injects as soon as the current response and its tool batch finish. */
     async steer(
         ctx: Context,
-        message: SessionUserMessage,
+        message: AgentQueuedMessage,
         options?: AgentBaseMessageOptions,
     ): Promise<AgentMessageAcceptance> {
         return await this.#agent.steer(ctx, message, {
@@ -66,7 +66,7 @@ export class AgentRef<Database extends AgentDatabase = AgentDatabase> {
     /** Queue a message that injects when the agent would otherwise stop. */
     async send(
         ctx: Context,
-        message: SessionUserMessage,
+        message: AgentQueuedMessage,
         options?: AgentBaseMessageOptions,
     ): Promise<AgentMessageAcceptance> {
         return await this.#agent.send(ctx, message, {

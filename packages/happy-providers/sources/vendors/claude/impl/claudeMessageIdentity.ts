@@ -42,7 +42,9 @@ function toIdentity(message: SessionMessage): unknown {
         };
     }
     if (message.role === "agent") {
-        throw new Error("Encrypted Codex agent messages cannot be replayed by Claude.");
+        // The author is part of the identity: the same words from a different agent are a
+        // different message, and Claude is told which one sent them.
+        return { role: "agent", author: message.author, content: message.content };
     }
     return {
         role: message.role,

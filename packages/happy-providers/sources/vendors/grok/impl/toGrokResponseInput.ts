@@ -5,6 +5,7 @@ import type {
     SessionContext,
     SessionOutputBlock,
 } from "@/core/SessionContext.js";
+import { toSessionAgentNotificationMessage } from "@/core/toSessionAgentNotificationMessage.js";
 import { toSessionReminderMessage } from "@/core/toSessionReminderMessage.js";
 import type { GrokToolVendor } from "@/vendors/grok/GrokToolVendor.js";
 import { toGrokInputContent } from "@/vendors/grok/impl/toGrokInputContent.js";
@@ -15,7 +16,11 @@ export function toGrokResponseInput(context: SessionContext): ResponseInput {
     ];
     const customToolCallIds = new Set<string>();
     const toolSearchCallIds = new Set<string>();
-    for (const message of context.messages) {
+    for (const original of context.messages) {
+        // xAI has no in-conversation system role, so a notice — including the one that carries a
+        // message from another agent — reaches the model as a `<system-reminder>` user turn.
+        const message =
+            original.role === "agent" ? toSessionAgentNotificationMessage(original) : original;
         if (message.role === "system") {
             const reminder = toSessionReminderMessage(message);
             input.push({
@@ -32,9 +37,6 @@ export function toGrokResponseInput(context: SessionContext): ResponseInput {
                 content: toGrokInputContent(message.content),
             });
             continue;
-        }
-        if (message.role === "agent") {
-            throw new Error("Encrypted Codex agent messages cannot be replayed by Grok.");
         }
         if (message.role === "compaction") continue;
         if (message.role === "tool") {

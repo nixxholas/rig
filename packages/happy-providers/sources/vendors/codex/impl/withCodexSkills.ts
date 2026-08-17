@@ -17,7 +17,9 @@ export function withCodexSkills(
     const target = messages.find(
         (message) =>
             message.role === "system" &&
-            message.content.some((part) => part.text.startsWith("<apps_instructions>")),
+            message.content.some(
+                (part) => part.type === "text" && part.text.startsWith("<apps_instructions>"),
+            ),
     );
     if (target === undefined) {
         const firstSystemMessage = messages.find((message) => message.role === "system");

@@ -111,7 +111,7 @@ function completedCompaction(text: string): SessionCompaction {
 
 function userTexts(persistence: InMemoryPersistence): string[] {
     return persistence.records.flatMap((record) =>
-        record.type === "user"
+        record.type === "user" && record.message.role !== "agent"
             ? record.message.content.flatMap((block) => (block.type === "text" ? [block.text] : []))
             : [],
     );

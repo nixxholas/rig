@@ -1,6 +1,7 @@
-import type { SessionSystemMessage, SessionUserMessage } from "@slopus/happy-providers";
+import type { SessionSystemMessage } from "@slopus/happy-providers";
 
 import type { AgentMessageMetadata } from "./AgentMetadata.js";
+import type { AgentQueuedMessage } from "./AgentQueuedMessage.js";
 
 /**
  * What a lifecycle hook can ask the agent to do next: queue a steering or sent message, inject a
@@ -12,13 +13,13 @@ export type AgentModuleAction =
     | {
           readonly type: "steer";
           readonly id?: string;
-          readonly message: SessionUserMessage;
+          readonly message: AgentQueuedMessage;
           readonly metadata?: AgentMessageMetadata;
       }
     | {
           readonly type: "send";
           readonly id?: string;
-          readonly message: SessionUserMessage;
+          readonly message: AgentQueuedMessage;
           readonly metadata?: AgentMessageMetadata;
       }
     | {

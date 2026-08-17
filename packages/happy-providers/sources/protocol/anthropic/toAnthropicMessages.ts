@@ -15,6 +15,7 @@ import type {
     SessionTextBlock,
     SessionToolResultMessage,
 } from "@/core/SessionContext.js";
+import { toSessionAgentNotificationMessage } from "@/core/toSessionAgentNotificationMessage.js";
 import { toSessionReminderMessage } from "@/core/toSessionReminderMessage.js";
 import { toAnthropicCompactionBlock } from "@/protocol/anthropic/toAnthropicCompactionBlock.js";
 import { toAnthropicToolName } from "@/protocol/anthropic/toAnthropicToolName.js";
@@ -25,10 +26,13 @@ export type AnthropicReasoningState =
 
 export function toAnthropicMessages(messages: readonly SessionMessage[]): BetaMessageParam[] {
     const converted = messages.flatMap((message): BetaMessageParam[] => {
-        if (message.role === "system") {
+        if (message.role === "system" || message.role === "agent") {
             // Anthropic has no system role inside a conversation, so a notice keeps the position
-            // the caller chose as a `<system-reminder>` user turn.
-            const reminder = toSessionReminderMessage(message);
+            // the caller chose as a `<system-reminder>` user turn. A message from another agent
+            // arrives the same way, as the notification that names who sent it.
+            const notice =
+                message.role === "agent" ? toSessionAgentNotificationMessage(message) : message;
+            const reminder = toSessionReminderMessage(notice);
             return [{ role: "user", content: toInputContent(reminder.content) }];
         }
         if (message.role === "compaction") {
@@ -40,7 +44,6 @@ export function toAnthropicMessages(messages: readonly SessionMessage[]): BetaMe
         if (message.role === "tool") {
             return [{ role: "user", content: [toToolResult(message)] }];
         }
-        if (message.role === "agent") return [];
         return [{ role: "assistant", content: toAssistantContent(message) }];
     });
     const last = converted.at(-1);

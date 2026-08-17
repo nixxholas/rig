@@ -8,6 +8,7 @@ import type {
 } from "@anthropic-ai/claude-agent-sdk";
 
 import type {
+    SessionAgentMessage,
     SessionAssistantMessage,
     SessionContext,
     SessionImageBlock,
@@ -19,10 +20,11 @@ import type {
     SessionToolResultMessage,
     SessionUserMessage,
 } from "@/core/SessionContext.js";
+import { toSessionAgentNotificationMessage } from "@/core/toSessionAgentNotificationMessage.js";
 import { toSessionReminderMessage } from "@/core/toSessionReminderMessage.js";
 
 /** A message Claude can replay, once system notices have been projected onto the user role. */
-type ReplayMessage = Exclude<SessionMessage, SessionSystemMessage>;
+type ReplayMessage = Exclude<SessionMessage, SessionSystemMessage | SessionAgentMessage>;
 
 export interface ClaudeSessionReplay {
     compactionSummary(): string | undefined;
@@ -85,12 +87,16 @@ export function createClaudeLivePromptMessage(
 
 /**
  * Anthropic has no system role inside a conversation, so a session system message becomes a
- * `<system-reminder>` user turn in the position the caller placed it.
+ * `<system-reminder>` user turn in the position the caller placed it. A message from another
+ * agent takes the same route, as the notification that names who sent it.
  */
 function toReplayMessages(messages: readonly SessionMessage[]): ReplayMessage[] {
-    return messages.map((message) =>
-        message.role === "system" ? toSessionReminderMessage(message) : message,
-    );
+    return messages.map((message) => {
+        if (message.role === "agent") {
+            return toSessionReminderMessage(toSessionAgentNotificationMessage(message));
+        }
+        return message.role === "system" ? toSessionReminderMessage(message) : message;
+    });
 }
 
 function findPromptStart(messages: readonly ReplayMessage[]): number {
@@ -136,9 +142,6 @@ function toSessionStoreEntries(
     for (let index = 0; index < messages.length; index += 1) {
         const message = messages[index];
         if (message === undefined) continue;
-        if (message.role === "agent") {
-            throw new Error("Encrypted Codex agent messages cannot be replayed by Claude.");
-        }
         const uuid = stableMessageUuid(options.sessionId, message, index);
         const base = {
             // Rig runs every tool itself, so Claude Code never works from a caller-owned

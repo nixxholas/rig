@@ -460,6 +460,7 @@ describe("abort and shutdown lifecycle gaps", () => {
             await originalAppend(appendCtx, record);
             if (
                 record.type === "user" &&
+                record.message.role === "user" &&
                 record.message.content[0]?.type === "text" &&
                 record.message.content[0].text === "second request"
             ) {
@@ -568,6 +569,7 @@ describe("abort and shutdown lifecycle gaps", () => {
         persistence.append = async (appendCtx, record) => {
             if (
                 record.type === "user" &&
+                record.message.role === "user" &&
                 record.message.content[0]?.type === "text" &&
                 record.message.content[0].text === "switch models"
             ) {

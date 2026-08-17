@@ -1,5 +1,6 @@
 import type {
     BaseProvider,
+    SessionAgentMessage,
     SessionEvent,
     SessionSystemMessage,
     SessionUserMessage,
@@ -11,6 +12,7 @@ import {
     AgentProviders,
     AgentStorage,
     type AgentPersistence,
+    type AgentQueuedMessage,
     type AgentRecord,
     type AgentStorageLock,
 } from "../../sources/index.js";
@@ -121,16 +123,32 @@ export function system(text: string): SessionSystemMessage {
     return { role: "system", content: [{ type: "text", text }] };
 }
 
+/**
+ * A message one collaborating agent addresses to another.
+ *
+ * Built against the `@slopus/happy-providers` release this package compiles with. Its shape
+ * changes when the portable agent message ships; nothing here reads its fields.
+ */
+export function agentMessage(header: string): SessionAgentMessage {
+    return {
+        role: "agent",
+        author: "author-agent",
+        recipient: "recipient-agent",
+        header,
+        encryptedContent: `encrypted:${header}`,
+    };
+}
+
 /** The durable envelope a queued message is stored under before it is consumed. */
-export function queued(message: SessionUserMessage): {
+export function queued(message: AgentQueuedMessage): {
     id: string;
-    message: SessionUserMessage;
+    message: AgentQueuedMessage;
     options: Record<string, never>;
 } {
     return { id: messageId(message), message, options: {} };
 }
 
-function messageId(message: SessionUserMessage): string {
+function messageId(message: AgentQueuedMessage): string {
     const serialized = JSON.stringify(message);
     let hash = 0;
     for (const character of serialized) {

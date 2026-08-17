@@ -5,8 +5,12 @@ import type {
     SessionContext,
     SessionOutputBlock,
 } from "@/core/SessionContext.js";
+import { toSessionAgentNotificationMessage } from "@/core/toSessionAgentNotificationMessage.js";
 import { createCodexCallIdMapper } from "@/protocol/responses/createCodexCallIdMapper.js";
-import { toOpenAIInputContent } from "@/protocol/responses/toOpenAIInputContent.js";
+import {
+    toOpenAIInputContent,
+    toOpenAIInputContentBlocks,
+} from "@/protocol/responses/toOpenAIInputContent.js";
 import type { ResponsesToolCallType } from "@/protocol/responses/ResponsesToolVendor.js";
 
 export function toOpenAIResponseInput(context: SessionContext): ResponseInput {
@@ -16,12 +20,16 @@ export function toOpenAIResponseInput(context: SessionContext): ResponseInput {
     const mapCallId = createCodexCallIdMapper();
     let messageId = 0;
 
-    for (const message of context.messages) {
+    for (const original of context.messages) {
+        // A message from another agent is a developer notification naming its author, the same
+        // one every other provider receives; Responses is given no native agent item.
+        const message =
+            original.role === "agent" ? toSessionAgentNotificationMessage(original) : original;
         if (message.role === "system") {
             input.push({
                 type: "message",
                 role: "developer",
-                content: message.content.map((block) => ({ type: "input_text", text: block.text })),
+                content: toOpenAIInputContentBlocks(message.content),
             });
             continue;
         }
@@ -31,18 +39,6 @@ export function toOpenAIResponseInput(context: SessionContext): ResponseInput {
                 role: "user",
                 content: toOpenAIInputContent(message.content),
             });
-            continue;
-        }
-        if (message.role === "agent") {
-            input.push({
-                type: "agent_message",
-                author: message.author,
-                recipient: message.recipient,
-                content: [
-                    { type: "input_text", text: message.header },
-                    { type: "encrypted_content", encrypted_content: message.encryptedContent },
-                ],
-            } as unknown as ResponseInputItem);
             continue;
         }
         if (message.role === "compaction") {

@@ -849,19 +849,31 @@ describe("AnthropicBedrockProvider", () => {
         ]);
     });
 
-    it("does not replay Codex-native agent messages through Anthropic Bedrock", () => {
+    it("replays a message from another agent as a reminder naming its author", () => {
         expect(
             toAnthropicMessages([
                 {
                     role: "agent",
-                    author: "root",
-                    recipient: "worker",
-                    header: "Delegated task",
-                    encryptedContent: "encrypted",
-                    agentMessageTriggerTurn: true,
+                    author: { id: "agt_worker", description: "the worker" },
+                    content: [{ type: "text", text: "Delegated task is done." }],
                 },
             ]),
-        ).toEqual([]);
+        ).toEqual([
+            {
+                role: "user",
+                content: [
+                    {
+                        type: "text",
+                        text:
+                            "<system-reminder>\n" +
+                            "Message from agent the worker (agt_worker):\n\n" +
+                            "Delegated task is done.\n" +
+                            "</system-reminder>",
+                        cache_control: { type: "ephemeral" },
+                    },
+                ],
+            },
+        ]);
     });
 
     it("owns transient retries and reports them before inference starts", async () => {

@@ -1,4 +1,4 @@
-import type { SessionMessage, SessionUserMessage } from "@slopus/happy-providers";
+import type { SessionMessage } from "@slopus/happy-providers";
 import type { Context } from "@steve.kite/stdlib";
 
 import type { Agent } from "./Agent.js";
@@ -8,6 +8,7 @@ import type { AgentDatabase } from "./AgentDatabase.js";
 import type { AgentMetadata } from "./AgentMetadata.js";
 import type { AgentMessageAcceptance } from "./AgentMessageAcceptance.js";
 import type { AgentModel } from "./AgentModel.js";
+import type { AgentQueuedMessage } from "./AgentQueuedMessage.js";
 import type { AnyAgentTool } from "./AgentTool.js";
 
 /** Conversation state installed atomically before a newly created agent starts. */
@@ -77,21 +78,21 @@ export interface AgentSystem<Database extends AgentDatabase = AgentDatabase> {
     resolve(ctx: Context, agentId: string): Promise<Agent<AnyAgentTool, Database>>;
 
     /**
-     * Queue a user message for an agent, injected as soon as its current response and tool batch
+     * Queue a message for an agent, injected as soon as its current response and tool batch
      * finish.
      */
     steer(
         ctx: Context,
         agentId: string,
-        message: SessionUserMessage,
+        message: AgentQueuedMessage,
         options?: AgentBaseMessageOptions & AgentBaseAwaitOptions,
     ): Promise<AgentMessageAcceptance>;
 
-    /** Queue a user message for an agent that injects only when the agent would otherwise stop. */
+    /** Queue a message for an agent that injects only when the agent would otherwise stop. */
     send(
         ctx: Context,
         agentId: string,
-        message: SessionUserMessage,
+        message: AgentQueuedMessage,
         options?: AgentBaseMessageOptions & AgentBaseAwaitOptions,
     ): Promise<AgentMessageAcceptance>;
 

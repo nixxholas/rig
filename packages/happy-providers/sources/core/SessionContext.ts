@@ -17,25 +17,33 @@ export interface SessionUserMessage {
     readonly content: readonly SessionInputBlock[];
 }
 
+/** Who wrote an agent message, as the receiving model should understand them. */
+export interface SessionAgentAuthor {
+    /** Stable identity of the sending agent. */
+    readonly id: string;
+    /** Short human-readable description of the sender, shown to the receiving model. */
+    readonly description: string;
+}
+
+/** What one agent may say to another: ordinary content, never provider-native payloads. */
+export type SessionAgentBlock = SessionTextBlock | SessionImageBlock | SessionReasoningBlock;
+
 /**
- * Opaque Codex-native message exchanged between collaborating Codex agents.
+ * A message one agent addressed to another.
  *
- * Other providers ignore this block. Callers should only persist and replay values emitted by a
- * Codex integration; the encrypted payload is not a general-purpose application message.
+ * This is a portable application message, not a provider-native one. No vendor is given an agent
+ * role, because none of them agree on what that is; every provider receives the message as a
+ * system notification naming its author, built by `toSessionAgentNotificationMessage`.
  */
 export interface SessionAgentMessage {
     readonly role: "agent";
-    readonly author: string;
-    readonly recipient: string;
-    readonly header: string;
-    readonly encryptedContent: string;
-    /** Whether this message establishes the boundary for a new inference turn. */
-    readonly agentMessageTriggerTurn?: boolean;
+    readonly author: SessionAgentAuthor;
+    readonly content: readonly SessionAgentBlock[];
 }
 
 export interface SessionSystemMessage {
     readonly role: "system";
-    readonly content: readonly SessionTextBlock[];
+    readonly content: readonly SessionInputBlock[];
 }
 
 /**

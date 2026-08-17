@@ -1,4 +1,3 @@
-import type { SessionUserMessage } from "@slopus/happy-providers";
 import type { Context } from "@steve.kite/stdlib";
 
 import type { AgentBaseMessageOptions } from "./AgentBase.js";
@@ -7,6 +6,7 @@ import type { AgentDatabase } from "./AgentDatabase.js";
 import type { AgentMetadata } from "./AgentMetadata.js";
 import type { AgentMessageAcceptance } from "./AgentMessageAcceptance.js";
 import type { AgentModel } from "./AgentModel.js";
+import type { AgentQueuedMessage } from "./AgentQueuedMessage.js";
 import { acceptanceIsWaitable, AgentRef } from "./AgentRef.js";
 import type { AgentCreateOptions, AgentSystem } from "./AgentSystem.js";
 
@@ -101,7 +101,7 @@ export class AgentSystemRef<Database extends AgentDatabase = AgentDatabase> {
     async steer(
         ctx: Context,
         agentId: string,
-        message: SessionUserMessage,
+        message: AgentQueuedMessage,
         options?: AgentBaseMessageOptions,
     ): Promise<AgentMessageAcceptance> {
         this.#assertNotLifecycleTarget(agentId);
@@ -119,7 +119,7 @@ export class AgentSystemRef<Database extends AgentDatabase = AgentDatabase> {
     async send(
         ctx: Context,
         agentId: string,
-        message: SessionUserMessage,
+        message: AgentQueuedMessage,
         options?: AgentBaseMessageOptions,
     ): Promise<AgentMessageAcceptance> {
         this.#assertNotLifecycleTarget(agentId);

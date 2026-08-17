@@ -1,4 +1,4 @@
-import type { SessionSystemMessage, SessionUserMessage } from "@slopus/happy-providers";
+import type { SessionSystemMessage } from "@slopus/happy-providers";
 import type { Context } from "@steve.kite/stdlib";
 
 import { agentConfig } from "./AgentConfig.js";
@@ -27,6 +27,7 @@ import type { AgentBaseState } from "./AgentBaseState.js";
 import type { AgentDatabase } from "./AgentDatabase.js";
 import type { AgentModule, AgentModuleRuntime, AgentModuleScope } from "./AgentModule.js";
 import type { AgentPermissionMode } from "./AgentPermissionMode.js";
+import type { AgentQueuedMessage } from "./AgentQueuedMessage.js";
 import type { AgentModuleAction } from "./AgentModuleAction.js";
 import type { AgentKV } from "./AgentKV.js";
 import type { AgentMetadata } from "./AgentMetadata.js";
@@ -156,19 +157,19 @@ export class Agent<
         return this.#base.state;
     }
 
-    /** Queue a user message that injects as soon as the current response and tool batch finish. */
+    /** Queue a message that injects as soon as the current response and tool batch finish. */
     async steer(
         ctx: Context,
-        message: SessionUserMessage,
+        message: AgentQueuedMessage,
         options?: AgentBaseMessageOptions & AgentBaseAwaitOptions,
     ): Promise<AgentMessageAcceptance> {
         return await this.#base.steer(ctx, message, options);
     }
 
-    /** Queue a user message that injects only when the agent would otherwise stop. */
+    /** Queue a message that injects only when the agent would otherwise stop. */
     async send(
         ctx: Context,
-        message: SessionUserMessage,
+        message: AgentQueuedMessage,
         options?: AgentBaseMessageOptions & AgentBaseAwaitOptions,
     ): Promise<AgentMessageAcceptance> {
         return await this.#base.send(ctx, message, options);

@@ -10,13 +10,13 @@ import type {
     SessionTokens,
     SessionToolCallBlock,
     SessionToolResultMessage,
-    SessionUserMessage,
 } from "@slopus/happy-providers";
 import type { Context } from "@steve.kite/stdlib";
 
 import type { AgentModuleAction } from "./AgentModuleAction.js";
 import type { AgentMessageMetadata, AgentMetadataChange } from "./AgentMetadata.js";
 import type { AgentPermissionMode } from "./AgentPermissionMode.js";
+import type { AgentQueuedMessage } from "./AgentQueuedMessage.js";
 import type { AgentProviders } from "./AgentProviders.js";
 import type { AnyAgentTool } from "./AgentTool.js";
 
@@ -70,8 +70,8 @@ export interface AgentBaseAcceptedMessage {
     readonly id: string;
     /** Which queue the message waited in, and therefore what made it inject when it did. */
     readonly kind: "steering" | "send";
-    /** The message exactly as it entered the conversation. */
-    readonly message: SessionUserMessage;
+    /** The message exactly as it entered the conversation, in the role it was queued under. */
+    readonly message: AgentQueuedMessage;
     /** Immutable module-owned metadata supplied with the message. */
     readonly metadata?: AgentMessageMetadata;
 }

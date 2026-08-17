@@ -1,5 +1,5 @@
 import { createId } from "@paralleldrive/cuid2";
-import type { SessionMessage, SessionUserMessage } from "@slopus/happy-providers";
+import type { SessionMessage } from "@slopus/happy-providers";
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import {
@@ -41,6 +41,7 @@ import { cuid2Schema, ownAgentMetadata, type AgentMetadata } from "./AgentMetada
 import type { AgentMessageAcceptance } from "./AgentMessageAcceptance.js";
 import type { AgentModel } from "./AgentModel.js";
 import type { AgentProviders } from "./AgentProviders.js";
+import type { AgentQueuedMessage } from "./AgentQueuedMessage.js";
 import type { AgentStorage, AgentStorageLock } from "./AgentStorage.js";
 import type { AgentCreateOptions, AgentSystem } from "./AgentSystem.js";
 import { withAgentSystem } from "./AgentSystemContext.js";
@@ -746,7 +747,7 @@ export class AgentSystemLocal<
     async steer(
         ctx: Context,
         agentId: string,
-        message: SessionUserMessage,
+        message: AgentQueuedMessage,
         options?: AgentBaseMessageOptions & AgentBaseAwaitOptions,
     ): Promise<AgentMessageAcceptance> {
         return await this.#admit(async () => {
@@ -759,7 +760,7 @@ export class AgentSystemLocal<
     async send(
         ctx: Context,
         agentId: string,
-        message: SessionUserMessage,
+        message: AgentQueuedMessage,
         options?: AgentBaseMessageOptions & AgentBaseAwaitOptions,
     ): Promise<AgentMessageAcceptance> {
         return await this.#admit(async () => {

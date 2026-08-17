@@ -150,9 +150,12 @@ describe("AgentBase permission modes", () => {
         const persistence = new InMemoryPersistence();
         const order: string[] = [];
         const note = (stage: string, accepted: AgentBaseAcceptedMessage): void => {
-            const text = accepted.message.content
-                .map((block) => (block.type === "text" ? block.text : ""))
-                .join("");
+            const text =
+                accepted.message.role === "agent"
+                    ? ""
+                    : accepted.message.content
+                          .map((block) => (block.type === "text" ? block.text : ""))
+                          .join("");
             order.push(`${stage}:${accepted.kind}:${text}`);
         };
         const agent = await AgentBase.create(

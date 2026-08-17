@@ -36,6 +36,8 @@ export type {
 } from "@/core/SessionCompaction.js";
 export type {
     SessionAssistantMessage,
+    SessionAgentAuthor,
+    SessionAgentBlock,
     SessionAgentMessage,
     SessionCompactionMessage,
     SessionContext,

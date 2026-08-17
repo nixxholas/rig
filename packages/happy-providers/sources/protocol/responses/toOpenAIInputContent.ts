@@ -9,6 +9,13 @@ export function toOpenAIInputContent(
     content: readonly (SessionInputBlock | SessionOutputBlock)[],
 ): string | Array<ResponseInputText | ResponseInputImage> {
     if (content.length === 1 && content[0]?.type === "text") return content[0].text;
+    return toOpenAIInputContentBlocks(content);
+}
+
+/** The same projection without the single-text shorthand, for items that always take blocks. */
+export function toOpenAIInputContentBlocks(
+    content: readonly (SessionInputBlock | SessionOutputBlock)[],
+): Array<ResponseInputText | ResponseInputImage> {
     return content.map((block) =>
         block.type === "text"
             ? { type: "input_text", text: block.text }

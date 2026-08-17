@@ -4,19 +4,15 @@ import type { SessionMessage } from "@/core/SessionContext.js";
 import { getCodexTurnKey } from "@/vendors/codex/impl/getCodexTurnKey.js";
 
 describe("getCodexTurnKey", () => {
-    it("keeps one turn across continuations after a triggering native agent message", () => {
-        const task: SessionMessage = {
-            role: "agent",
-            author: "/root",
-            recipient: "/root/child",
-            header: "Message Type: NEW_TASK\nPayload:\n",
-            encryptedContent: "opaque-task",
-            agentMessageTriggerTurn: true,
+    it("keeps one turn across continuations after the user message that opened it", () => {
+        const human: SessionMessage = {
+            role: "user",
+            content: [{ type: "text", text: "Original task" }],
         };
 
-        expect(getCodexTurnKey([task])).toBe(
+        expect(getCodexTurnKey([human])).toBe(
             getCodexTurnKey([
-                task,
+                human,
                 { role: "assistant", content: [{ type: "text", text: "Working." }] },
                 {
                     role: "tool",
@@ -27,17 +23,15 @@ describe("getCodexTurnKey", () => {
         );
     });
 
-    it("does not treat a queued native agent message as a new turn", () => {
+    it("does not treat a message from another agent as a new turn", () => {
         const human: SessionMessage = {
             role: "user",
             content: [{ type: "text", text: "Original task" }],
         };
         const queued: SessionMessage = {
             role: "agent",
-            author: "/root",
-            recipient: "/root/child",
-            header: "Message Type: MESSAGE\nPayload:\n",
-            encryptedContent: "opaque-message",
+            author: { id: "agent-1", description: "the reviewer" },
+            content: [{ type: "text", text: "I finished the review." }],
         };
 
         expect(getCodexTurnKey([human, queued])).toBe(getCodexTurnKey([human]));

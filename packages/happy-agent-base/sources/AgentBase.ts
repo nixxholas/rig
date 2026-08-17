@@ -10,7 +10,6 @@ import type {
     SessionTokens,
     SessionToolCallBlock,
     SessionToolResultMessage,
-    SessionUserMessage,
 } from "@slopus/happy-providers";
 import { areProviderModelsCompatible } from "@slopus/happy-providers";
 import { createId } from "@paralleldrive/cuid2";
@@ -78,6 +77,7 @@ import {
 import type { AgentBaseState } from "./AgentBaseState.js";
 import { AgentProviders } from "./AgentProviders.js";
 import type { AgentModuleAction } from "./AgentModuleAction.js";
+import type { AgentQueuedMessage } from "./AgentQueuedMessage.js";
 import type { AnyAgentTool } from "./AgentTool.js";
 import { setAgentSpanAttributes, type AgentSpanAttributes } from "./AgentSpanAttributes.js";
 
@@ -169,7 +169,7 @@ interface QueueEntry {
     /** The store key the message was written under and removed through when consumed. */
     readonly key: string;
     readonly id: string;
-    readonly message: SessionUserMessage;
+    readonly message: AgentQueuedMessage;
     readonly metadata?: AgentMessageMetadata;
     /** The settings this message makes effective when it is consumed. */
     readonly options: AgentBaseMessageOptions;
@@ -223,7 +223,7 @@ interface QueueRequest {
     /** Which of the two queues it belongs in, and so when it will be injected. */
     readonly kind: "steering" | "send";
     readonly id: string;
-    readonly message: SessionUserMessage;
+    readonly message: AgentQueuedMessage;
     readonly metadata?: AgentMessageMetadata;
     readonly options: AgentBaseMessageOptions;
 }
@@ -989,7 +989,7 @@ export class AgentBase {
     }
 
     /**
-     * Queue a user message that injects as soon as the current assistant response and its tool
+     * Queue a message that injects as soon as the current assistant response and its tool
      * batch finish; steering always takes precedence over sent messages. Returns once the message
      * has been handed to the agent and returns its acceptance identity. Outside the target's own
      * loop it waits for the durable created/existing result by default; a failed write rejects and
@@ -997,14 +997,14 @@ export class AgentBase {
      */
     async steer(
         ctx: Context,
-        message: SessionUserMessage,
+        message: AgentQueuedMessage,
         options?: AgentBaseMessageOptions & AgentBaseAwaitOptions,
     ): Promise<AgentMessageAcceptance> {
         return await this.#offer(ctx, "steering", message, options);
     }
 
     /**
-     * Queue a user message that waits until the agent would otherwise stop — no tool calls or
+     * Queue a message that waits until the agent would otherwise stop — no tool calls or
      * steering remain — before injecting. Returns once the message has been handed to the agent,
      * without waiting for the turn that answers it and returns its acceptance identity. Outside
      * the target's own loop it waits for the durable created/existing result by default; a failed
@@ -1012,7 +1012,7 @@ export class AgentBase {
      */
     async send(
         ctx: Context,
-        message: SessionUserMessage,
+        message: AgentQueuedMessage,
         options?: AgentBaseMessageOptions & AgentBaseAwaitOptions,
     ): Promise<AgentMessageAcceptance> {
         return await this.#offer(ctx, "send", message, options);
@@ -1084,7 +1084,7 @@ export class AgentBase {
     async #offer(
         ctx: Context,
         kind: QueueRequest["kind"],
-        message: SessionUserMessage,
+        message: AgentQueuedMessage,
         options: (AgentBaseMessageOptions & AgentBaseAwaitOptions) | undefined,
     ): Promise<AgentMessageAcceptance> {
         const outerTransaction = agentStorageTransaction(ctx);
@@ -3147,7 +3147,7 @@ export class AgentBase {
             const entry = (key: string, value: unknown): QueueEntry => {
                 const envelope = value as {
                     readonly id: string;
-                    readonly message: SessionUserMessage;
+                    readonly message: AgentQueuedMessage;
                     readonly metadata?: AgentMessageMetadata;
                     readonly options?: AgentBaseMessageOptions;
                 };

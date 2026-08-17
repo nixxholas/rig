@@ -42,6 +42,7 @@ export {
     type AgentMetadataValue,
 } from "./AgentMetadata.js";
 export { type AgentMessageAcceptance } from "./AgentMessageAcceptance.js";
+export { type AgentQueuedMessage } from "./AgentQueuedMessage.js";
 export { AgentStorage, type AgentStorageLock, type AgentStorageOptions } from "./AgentStorage.js";
 export {
     agentDatabaseRows,

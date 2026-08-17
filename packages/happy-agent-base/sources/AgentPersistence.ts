@@ -3,16 +3,16 @@ import type {
     SessionMessage,
     SessionSystemMessage,
     SessionToolResultMessage,
-    SessionUserMessage,
 } from "@slopus/happy-providers";
 import type { Context } from "@steve.kite/stdlib";
 
 import type { AgentDatabase } from "./AgentDatabase.js";
 import type { AgentMessageMetadata } from "./AgentMetadata.js";
+import type { AgentQueuedMessage } from "./AgentQueuedMessage.js";
 
 /**
  * One record of the main context store. Only content that is part of the model context lives
- * here: user messages enter when a turn consumes them, assistant output is appended one finished
+ * here: queued messages enter when a turn consumes them, assistant output is appended one finished
  * block at a time, and tool results follow the blocks that called them, so records always arrive
  * in context order and consecutive block records reassemble into one assistant message. A
  * compaction record carries the complete replacement context — the messages that stay — and is
@@ -20,10 +20,15 @@ import type { AgentMessageMetadata } from "./AgentMetadata.js";
  * the store; the records after it append as usual.
  */
 export type AgentRecord =
+    /**
+     * A message a turn consumed from one of the delivery queues. It is identified and
+     * deduplicated whatever role it carries, so this is also where a queued system notice or an
+     * agent-to-agent payload lands.
+     */
     | {
           readonly type: "user";
           readonly id: string;
-          readonly message: SessionUserMessage;
+          readonly message: AgentQueuedMessage;
           readonly metadata?: AgentMessageMetadata;
       }
     | { readonly type: "block"; readonly block: SessionAssistantBlock }

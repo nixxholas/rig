@@ -9,13 +9,16 @@ import type { SessionSystemMessage, SessionUserMessage } from "@/core/SessionCon
  * cached prefix on every notice.
  */
 export function toSessionReminderMessage(message: SessionSystemMessage): SessionUserMessage {
+    const text = message.content
+        .flatMap((block) => (block.type === "text" ? [block.text] : []))
+        .join("\n\n");
     return {
         role: "user",
         content: [
-            {
-                type: "text",
-                text: `<system-reminder>\n${message.content.map((block) => block.text).join("\n\n")}\n</system-reminder>`,
-            },
+            { type: "text", text: `<system-reminder>\n${text}\n</system-reminder>` },
+            // An image cannot be wrapped in the reminder text, so it follows it intact rather
+            // than being dropped along with whatever the notice was showing.
+            ...message.content.filter((block) => block.type === "image"),
         ],
     };
 }

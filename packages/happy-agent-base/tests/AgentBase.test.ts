@@ -26,7 +26,15 @@ import {
     type AgentBaseTurn,
     type AgentBaseTurnStart,
 } from "../sources/index.js";
-import { providersOf, queued, system, textTurn, user, userRecord } from "./gym/fixtures.js";
+import {
+    agentMessage,
+    providersOf,
+    queued,
+    system,
+    textTurn,
+    user,
+    userRecord,
+} from "./gym/fixtures.js";
 import { InMemoryPersistence } from "./gym/InMemoryPersistence.js";
 import { ScriptedProvider, ScriptedSession } from "./gym/ScriptedProvider.js";
 
@@ -738,7 +746,11 @@ describe("AgentBase persistence", () => {
         persistence.writeValue = async (writeCtx, key, value) => {
             // The first write is slow; without the lock the second would land first.
             const { message } = value as Partial<ReturnType<typeof queued>>;
-            if (message?.content[0]?.type === "text" && message.content[0].text === "first") {
+            if (
+                message?.role === "user" &&
+                message.content[0]?.type === "text" &&
+                message.content[0].text === "first"
+            ) {
                 await new Promise((resolve) => setTimeout(resolve, 20));
             }
             await write(writeCtx, key, value);
@@ -1095,6 +1107,63 @@ describe("AgentBase persistence", () => {
         ]);
         expect(persistence.pending.size).toBe(0);
         await agent.close();
+    });
+
+    it("carries a queued system or agent message into the context under its own role", async () => {
+        const provider = new ScriptedProvider([textTurn("noted"), textTurn("acknowledged")]);
+        const persistence = new InMemoryPersistence();
+        const roles: string[] = [];
+        const notice = system("the background process exited");
+        const handoff = agentMessage("handoff");
+        const agent = await AgentBase.create(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+            hooks: {
+                messageAccepted: (_hookCtx, accepted) => {
+                    roles.push(`${accepted.kind}:${accepted.message.role}`);
+                },
+            },
+        });
+
+        await agent.send(ctx, notice, { await: true });
+        await agent.waitForIdle();
+        await agent.send(ctx, handoff, { await: true });
+        await agent.waitForIdle();
+        await agent.close();
+
+        const requests = provider.sessions[0]?.requests ?? [];
+        expect(requests[0]?.context.messages).toEqual([notice]);
+        expect(requests[1]?.context.messages.at(-1)).toEqual(handoff);
+        expect(persistence.records.filter((record) => record.type === "user")).toEqual([
+            expect.objectContaining({ type: "user", message: notice }),
+            expect.objectContaining({ type: "user", message: handoff }),
+        ]);
+        expect(roles).toEqual(["send:system", "send:agent"]);
+    });
+
+    it("resumes a system message the queue was still holding when the process died", async () => {
+        const persistence = new InMemoryPersistence();
+        const notice = system("the background process exited");
+        persistence.values.set("send.00000000000001.000000", queued(notice));
+        const provider = new ScriptedProvider([textTurn("caught up")]);
+        const agent = await AgentBase.create(ctx, {
+            id: "test-agent",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+        });
+
+        agent.start();
+        await agent.waitForIdle();
+        await agent.close();
+
+        expect(provider.sessions[0]?.requests[0]?.context.messages).toEqual([notice]);
+        expect(persistence.records).toEqual([
+            expect.objectContaining({ type: "user", message: notice }),
+            { type: "block", block: { type: "text", text: "caught up" } },
+        ]);
     });
 
     it("closes a provider stream that is still open once the response is done", async () => {
