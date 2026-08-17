@@ -128,8 +128,8 @@ importers:
         specifier: ^0.34.49
         version: 0.34.49
       '@slopus/happy-agent-base':
-        specifier: npm:@slopus/happy-agent-base@0.0.17
-        version: 0.0.17(@aws-sdk/credential-provider-node@3.972.71)(@electric-sql/pglite@0.5.5)(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(postgres@3.4.9)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)
+        specifier: npm:@slopus/happy-agent-base@0.0.18
+        version: 0.0.18(@aws-sdk/credential-provider-node@3.972.71)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)
       '@slopus/happy-agent-compute':
         specifier: npm:@slopus/happy-agent-compute@0.1.6
         version: 0.1.6
@@ -276,8 +276,8 @@ importers:
         specifier: npm:@slopus/happy-agent-compute@0.1.6
         version: 0.1.6
       '@slopus/happy-providers':
-        specifier: 0.0.8
-        version: 0.0.8(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
+        specifier: 0.0.9
+        version: 0.0.9(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
       '@steve.kite/stdlib':
         specifier: 0.0.12
         version: 0.0.12
@@ -292,8 +292,8 @@ importers:
         version: 1.7.0
     devDependencies:
       '@slopus/happy-agent-base':
-        specifier: npm:@slopus/happy-agent-base@0.0.17
-        version: 0.0.17(@aws-sdk/credential-provider-node@3.972.71)(@electric-sql/pglite@0.5.5)(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(postgres@3.4.9)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)
+        specifier: npm:@slopus/happy-agent-base@0.0.18
+        version: 0.0.18(@aws-sdk/credential-provider-node@3.972.71)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)
       '@types/node':
         specifier: ^24.0.10
         version: 24.13.3
@@ -1786,8 +1786,8 @@ packages:
   '@slopus/ghostty-wasm@1.3.6':
     resolution: {integrity: sha512-S8KS9VyGgv451D8ZrRoS5vAg1Eqk8dZJWzM28HrjXVmD1B8g3Ec1QsjUWAIVqReuZyZqLFxZfjH6rU0N/f7n2Q==}
 
-  '@slopus/happy-agent-base@0.0.17':
-    resolution: {integrity: sha512-TK0nspayRLSv402kozE3CHL31p8RdV6ios2iipNRvdK8vWstHURAEEsuJUblkIsxX5oUCNGB+574pFpxj6w0/g==}
+  '@slopus/happy-agent-base@0.0.18':
+    resolution: {integrity: sha512-YlChJwBmNd4XXKYMVei0of9yn1RZXybYg0WNCAQ5WKTP/Q5xYXpJBSF5eVdLbESki9YJxDJ5Kcssg6v7aP0SiQ==}
     engines: {node: '>=22.19.0'}
 
   '@slopus/happy-agent-compute@0.1.6':
@@ -4798,20 +4798,21 @@ snapshots:
 
   '@slopus/ghostty-wasm@1.3.6': {}
 
-  '@slopus/happy-agent-base@0.0.17(@aws-sdk/credential-provider-node@3.972.71)(@electric-sql/pglite@0.5.5)(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(postgres@3.4.9)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)':
+  '@slopus/happy-agent-base@0.0.18(@aws-sdk/credential-provider-node@3.972.71)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)':
     dependencies:
+      '@electric-sql/pglite': 0.5.5
+      '@libsql/client': 0.17.4
       '@paralleldrive/cuid2': 3.3.0
       '@sinclair/typebox': 0.34.49
-      '@slopus/happy-providers': 0.0.8(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
+      '@slopus/happy-providers': 0.0.9(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
       '@steve.kite/stdlib': 0.0.12
       drizzle-orm: 0.45.2(@electric-sql/pglite@0.5.5)(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@types/pg@8.15.6)(postgres@3.4.9)(sql.js@1.14.1)
+      postgres: 3.4.9
     transitivePeerDependencies:
       - '@aws-sdk/client-rds-data'
       - '@aws-sdk/credential-provider-node'
       - '@cfworker/json-schema'
       - '@cloudflare/workers-types'
-      - '@electric-sql/pglite'
-      - '@libsql/client'
       - '@libsql/client-wasm'
       - '@neondatabase/serverless'
       - '@op-engineering/op-sqlite'
@@ -4828,6 +4829,7 @@ snapshots:
       - '@vercel/postgres'
       - '@xata.io/client'
       - better-sqlite3
+      - bufferutil
       - bun-types
       - expo-sqlite
       - gel
@@ -4835,11 +4837,11 @@ snapshots:
       - kysely
       - mysql2
       - pg
-      - postgres
       - prisma
       - sql.js
       - sqlite3
       - supports-color
+      - utf-8-validate
       - ws
       - zod
 
