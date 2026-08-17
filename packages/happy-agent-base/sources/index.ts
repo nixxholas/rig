@@ -133,6 +133,8 @@ export {
     type AgentModule,
     type AgentModuleAgent,
     type AgentModuleAgentLifecycle,
+    type AgentModuleHooks,
+    type AgentModuleRuntime,
     type AgentModuleScope,
     type AgentModuleSystemScope,
 } from "./AgentModule.js";

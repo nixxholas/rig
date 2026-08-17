@@ -73,10 +73,13 @@ failure aborts system startup. Every module migration and hook context carries t
 facade in `ctx.db`: a root database outside a transaction and its active transaction facade inside
 one. A migration also receives that facade explicitly to retain its exact engine-specific type.
 Driver-only root members such as `$client` and `batch` are deliberately not part of that surface.
-Modules may implement `beforeStart(ctx, agents)` and `afterStart(ctx, agents)` hooks.
-Every `beforeStart` settles successfully before active agents are restored; every `afterStart`
-runs after those agents are restored and started. Both receive the system's `AgentSystemRef`; their
-context carries the root database.
+A module is a name, its migrations, and one entry point: `beforeStart(ctx, agents)`. Everything
+the module does at runtime is in the `AgentModuleHooks` object that entry point returns —
+including `afterStart` and every agent and lifecycle hook — so implementations close over the
+state `beforeStart` built instead of living on the module object. Returning nothing means the
+module only migrates and initializes. Every `beforeStart` settles successfully before active
+agents are restored; every returned `afterStart` runs after those agents are restored and
+started. Both receive the system's `AgentSystemRef`; their context carries the root database.
 All hooks may return synchronously or with a promise, including `onEvent`; the runtime awaits each
 answer and contains failures from observing hooks.
 

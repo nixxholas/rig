@@ -32,6 +32,8 @@ import {
 import type {
     AgentModule,
     AgentModuleAgentLifecycle,
+    AgentModuleHooks,
+    AgentModuleRuntime,
     AgentModuleSystemScope,
 } from "./AgentModule.js";
 import { cuid2Schema, ownAgentMetadata, type AgentMetadata } from "./AgentMetadata.js";
@@ -100,6 +102,8 @@ export class AgentSystemLocal<
     readonly #ref: AgentSystemRef<Database> = new AgentSystemRef(this, null);
     /** The collection's module instances, every one of them serving every agent it builds. */
     readonly #modules: readonly AgentModule<AnyAgentTool, Database>[];
+    /** Every module beside the hooks its beforeStart returned, resolved once at start. */
+    #runtimes: readonly AgentModuleRuntime<AnyAgentTool, Database>[] = [];
     /** Where the collection's identities, configuration, and per-agent state are durable. */
     readonly #storage: AgentStorage<Database>;
     /** The registry providers are resolved from when an agent is built. */
@@ -342,8 +346,8 @@ export class AgentSystemLocal<
                     await this.#recordLifecycle(
                         txCtx,
                         lifecycle,
-                        (module) => module.agentCreatedTransact,
-                        (module) => module.agentCreated,
+                        (hooks) => hooks.agentCreatedTransact,
+                        (hooks) => hooks.agentCreated,
                     );
                 });
                 const agent = await this.#instantiate(agentId, owned);
@@ -382,8 +386,8 @@ export class AgentSystemLocal<
                         await this.#recordLifecycle(
                             txCtx,
                             lifecycleAgent(agentId, config),
-                            (module) => module.agentArchivedTransact,
-                            (module) => module.agentArchived,
+                            (hooks) => hooks.agentArchivedTransact,
+                            (hooks) => hooks.agentArchived,
                         );
                     }
                 });
@@ -543,7 +547,7 @@ export class AgentSystemLocal<
             sharedKV: this.#sharedModuleKV,
             // The collection's modules come first, so the instructions they contribute — the
             // system prompt above all — open every agent's prompt.
-            modules: this.#modules,
+            modules: this.#runtimes,
         };
         // An identity built here may already have durable state — this is the path a restart
         // resolves through — so the agent is loaded rather than created, and knows whether it
@@ -583,8 +587,8 @@ export class AgentSystemLocal<
                         await this.#recordLifecycle(
                             txCtx,
                             lifecycleAgent(agentId, config),
-                            (module) => module.agentRestoredTransact,
-                            (module) => module.agentRestored,
+                            (hooks) => hooks.agentRestoredTransact,
+                            (hooks) => hooks.agentRestored,
                         );
                     });
                     return await this.#instantiate(agentId, config, true, false);
@@ -603,24 +607,24 @@ export class AgentSystemLocal<
         txCtx: Context,
         agent: AgentModuleAgentLifecycle,
         transact: (
-            module: AgentModule<AnyAgentTool, Database>,
+            hooks: AgentModuleHooks<AnyAgentTool, Database>,
         ) => AgentLifecycleHook<Database> | undefined,
         observe: (
-            module: AgentModule<AnyAgentTool, Database>,
+            hooks: AgentModuleHooks<AnyAgentTool, Database>,
         ) => AgentLifecycleHook<Database> | undefined,
     ): Promise<void> {
-        for (const module of this.#modules) {
-            const hook = transact(module);
+        for (const runtime of this.#runtimes) {
+            const hook = transact(runtime.hooks);
             if (hook === undefined) continue;
-            await this.#invokeLifecycleHook(txCtx, module, hook, agent, true);
+            await this.#invokeLifecycleHook(txCtx, runtime, hook, agent, true);
         }
         afterCommit(txCtx, () => {
             const observed = (async () => {
-                for (const module of this.#modules) {
-                    const hook = observe(module);
+                for (const runtime of this.#runtimes) {
+                    const hook = observe(runtime.hooks);
                     if (hook === undefined) continue;
                     try {
-                        await this.#invokeLifecycleHook(this.#ctx, module, hook, agent);
+                        await this.#invokeLifecycleHook(this.#ctx, runtime, hook, agent);
                     } catch {
                         // The durable change already committed; observers cannot undo it.
                     }
@@ -638,7 +642,7 @@ export class AgentSystemLocal<
     /** Give one lifecycle hook its module-scoped shared KV and active Drizzle facade. */
     async #invokeLifecycleHook(
         ctx: Context,
-        module: AgentModule<AnyAgentTool, Database>,
+        module: { readonly name: string },
         hook: AgentLifecycleHook<Database>,
         agent: AgentModuleAgentLifecycle,
         blockAgent: boolean = false,
@@ -662,20 +666,34 @@ export class AgentSystemLocal<
         }
     }
 
-    /** Initialize every module before any active agent is restored or started. */
+    /**
+     * Initialize every module before any active agent is restored or started. What each
+     * beforeStart returns is the module's whole runtime behavior, so this is also where the
+     * collection resolves the hooks every agent it builds will run with.
+     */
     async #beforeStart(ctx: Context): Promise<void> {
         const startCtx = withAgentSystem(ctx, this.#ref);
         const results = await Promise.allSettled(
-            this.#modules.map(async (module) => await module.beforeStart?.(startCtx, this.#ref)),
+            this.#modules.map(
+                async (module): Promise<AgentModuleRuntime<AnyAgentTool, Database>> => {
+                    const hooks = (await module.beforeStart?.(startCtx, this.#ref)) ?? {};
+                    return { name: module.name, module, hooks };
+                },
+            ),
         );
         throwFirstStartFailure(results);
+        this.#runtimes = results.flatMap((result) =>
+            result.status === "fulfilled" ? [result.value] : [],
+        );
     }
 
     /** Notify every module after all active agents have been restored and started. */
     async #afterStart(ctx: Context): Promise<void> {
         const startCtx = withAgentSystem(ctx, this.#ref);
         const results = await Promise.allSettled(
-            this.#modules.map(async (module) => await module.afterStart?.(startCtx, this.#ref)),
+            this.#runtimes.map(
+                async (runtime) => await runtime.hooks.afterStart?.(startCtx, this.#ref),
+            ),
         );
         throwFirstStartFailure(results);
     }

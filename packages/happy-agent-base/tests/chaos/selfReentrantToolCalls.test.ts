@@ -113,8 +113,10 @@ async function managerHarness(
     class SelfToolModule implements AgentModule {
         readonly name = "self-tool";
 
-        tools(): readonly [typeof tool] {
-            return [tool];
+        beforeStart() {
+            return {
+                tools: (): readonly [typeof tool] => [tool],
+            };
         }
     }
 

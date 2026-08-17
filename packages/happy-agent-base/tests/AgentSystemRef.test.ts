@@ -200,23 +200,28 @@ describe("AgentSystemRef", () => {
         const module: AgentModule = new (class implements AgentModule {
             readonly name = "self-compacting";
 
-            readonly tools = () => [
-                defineAgentTool({
-                    name: "compact_me",
-                    parameters: Type.Object({}),
-                    returnType: Type.Object({}),
-                    shouldReviewInAutoMode: () => false,
-                    execute: async (callCtx: Context) => {
-                        try {
-                            await reference.compact(callCtx, agentId(callCtx) ?? "");
-                        } catch (error: unknown) {
-                            failure = error instanceof Error ? error.message : String(error);
-                        }
-                        return {};
-                    },
-                    toLLM: () => [{ type: "text", text: "asked" }],
-                }),
-            ];
+            beforeStart() {
+                return {
+                    tools: () => [
+                        defineAgentTool({
+                            name: "compact_me",
+                            parameters: Type.Object({}),
+                            returnType: Type.Object({}),
+                            shouldReviewInAutoMode: () => false,
+                            execute: async (callCtx: Context) => {
+                                try {
+                                    await reference.compact(callCtx, agentId(callCtx) ?? "");
+                                } catch (error: unknown) {
+                                    failure =
+                                        error instanceof Error ? error.message : String(error);
+                                }
+                                return {};
+                            },
+                            toLLM: () => [{ type: "text", text: "asked" }],
+                        }),
+                    ],
+                };
+            }
         })();
         const system = await localSystem(provider, stores, [module]);
         const reference = new AgentSystemRef(system);
@@ -239,20 +244,23 @@ describe("AgentSystemRef", () => {
         const module: AgentModule = new (class implements AgentModule {
             readonly name = "self-aborting";
 
-            readonly onEvent = (
-                _hookCtx: Context,
-                _scope: AgentModuleScope,
-                event: { readonly type: string; readonly state?: string },
-            ) => {
-                if (event.type === "done") events.push(event.state ?? "unknown");
-            };
-
-            readonly beforeInference = async (hookCtx: Context) => {
-                if (asked) return;
-                asked = true;
-                // `agent.abort()` here would wait for the loop that is waiting for this hook.
-                await reference.abort(hookCtx, agentId(hookCtx) ?? "");
-            };
+            beforeStart() {
+                return {
+                    onEvent: (
+                        _hookCtx: Context,
+                        _scope: AgentModuleScope,
+                        event: { readonly type: string; readonly state?: string },
+                    ) => {
+                        if (event.type === "done") events.push(event.state ?? "unknown");
+                    },
+                    beforeInference: async (hookCtx: Context) => {
+                        if (asked) return;
+                        asked = true;
+                        // `agent.abort()` here would wait for the loop that is waiting for this hook.
+                        await reference.abort(hookCtx, agentId(hookCtx) ?? "");
+                    },
+                };
+            }
         })();
         const system = await localSystem(provider, stores, [module]);
         const reference = new AgentSystemRef(system);

@@ -119,13 +119,10 @@ export interface AgentModuleSystemScope<Database extends AgentDatabase = AgentDa
 }
 
 /**
- * One independent capability of an `Agent`: a module implements any subset of the agent hooks,
- * and the agent merges every module's implementations into the singular hooks its internal
- * `AgentBase` runs with. The hook contracts are the same as `AgentBaseHooks`; see there for
- * when each hook fires and what its return value means.
- *
- * Agent-scoped hooks receive the agent's context first and their `AgentModuleScope<Database>` second.
- * System start hooks instead receive the system context and its deadlock-safe `AgentSystemRef`.
+ * One independent capability of an `Agent`: a name, its durable migrations, and one entry
+ * point. Everything the module does at runtime is in the hooks `beforeStart` returns, so an
+ * implementation closes over whatever state that entry point built rather than exposing it on
+ * the module object.
  */
 export interface AgentModule<
     Tool extends AnyAgentTool = AnyAgentTool,
@@ -142,11 +139,47 @@ export interface AgentModule<
      */
     readonly migrations?: readonly AgentModuleMigration<Database>[];
     /**
-     * The first hook a module receives. Called once after the owning AgentSystem acquires its
-     * store lock and before any agent is restored or started. Every module initializes
-     * concurrently, and agent work begins only after all of them settle successfully.
+     * The module's one entry point. Called once after the owning AgentSystem acquires its store
+     * lock and before any agent is restored or started. Every module initializes concurrently,
+     * and agent work begins only after all of them settle successfully. The hooks it returns are
+     * the module's whole runtime behavior; returning nothing means the module only migrates and
+     * initializes.
      */
-    readonly beforeStart?: (ctx: Context, agents: AgentSystemRef<Database>) => MaybePromise<void>;
+    readonly beforeStart?: (
+        ctx: Context,
+        agents: AgentSystemRef<Database>,
+    ) => MaybePromise<AgentModuleHooks<Tool, Database> | void>;
+}
+
+/**
+ * One module resolved for runtime: its identity beside the hooks its `beforeStart` returned.
+ * The system resolves every module once at start and hands these to the agents it builds.
+ */
+export interface AgentModuleRuntime<
+    Tool extends AnyAgentTool = AnyAgentTool,
+    Database extends AgentDatabase = AgentDatabase,
+> {
+    /** The module's stable name, which scopes its key-value stores. */
+    readonly name: string;
+    /** The module these hooks came from. */
+    readonly module: AgentModule<Tool, Database>;
+    /** What the module's beforeStart returned, or nothing at all. */
+    readonly hooks: AgentModuleHooks<Tool, Database>;
+}
+
+/**
+ * The runtime behavior one module returned from its `beforeStart`: any subset of the agent
+ * hooks, which the agent merges into the singular hooks its internal `AgentBase` runs with. The
+ * hook contracts are the same as `AgentBaseHooks`; see there for when each hook fires and what
+ * its return value means.
+ *
+ * Agent-scoped hooks receive the agent's context first and their `AgentModuleScope<Database>` second.
+ * System hooks instead receive the system context and its deadlock-safe `AgentSystemRef`.
+ */
+export interface AgentModuleHooks<
+    Tool extends AnyAgentTool = AnyAgentTool,
+    Database extends AgentDatabase = AgentDatabase,
+> {
     /**
      * Called once after every durable-active agent has been restored and started. Every module
      * runs concurrently, and system creation resolves only after all of them settle successfully.

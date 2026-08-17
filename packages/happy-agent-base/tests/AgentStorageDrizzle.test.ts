@@ -65,11 +65,13 @@ describe("AgentStorage Drizzle persistence", () => {
                 );
                 expect(rows).toEqual([{ value: "ready" }]);
                 events.push("beforeStart");
-            },
-            instructions: (_moduleCtx, scope) => {
-                expect(_moduleCtx.db).toBe(database);
-                expect(scope.agent.id).toBeDefined();
-                return "";
+                return {
+                    instructions: (_moduleCtx, scope) => {
+                        expect(_moduleCtx.db).toBe(database);
+                        expect(scope.agent.id).toBeDefined();
+                        return "";
+                    },
+                };
             },
         };
         const config = {
@@ -553,12 +555,14 @@ describe("AgentStorage Drizzle persistence", () => {
         let blockFirstInference = true;
         const gate: AgentModule = {
             name: "transactional-message-gate",
-            beforeInference: async () => {
-                if (!blockFirstInference) return;
-                blockFirstInference = false;
-                inferenceEntered();
-                await inferenceMayContinue;
-            },
+            beforeStart: () => ({
+                beforeInference: async () => {
+                    if (!blockFirstInference) return;
+                    blockFirstInference = false;
+                    inferenceEntered();
+                    await inferenceMayContinue;
+                },
+            }),
         };
         const storage = new AgentStorage({ acquireLock: lock(), database });
         const system = await AgentSystemLocal.create(ctx, storage, {

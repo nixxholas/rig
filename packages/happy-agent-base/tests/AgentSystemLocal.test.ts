@@ -11,6 +11,7 @@ import {
     type AgentConfig,
     type AgentEnvironment,
     type AgentModule,
+    type AgentModuleHooks,
     type AgentModuleScope,
 } from "../sources/index.js";
 import {
@@ -64,35 +65,42 @@ describe("AgentSystemLocal", () => {
             new (class implements AgentModule {
                 readonly name = name;
 
-                beforeStart(startCtx: Context, agents: AgentSystemRef): Promise<void> {
+                beforeStart(startCtx: Context, agents: AgentSystemRef): Promise<AgentModuleHooks> {
                     events.push(`beforeStart:${name}:start`);
                     references.push(agents);
                     expect(agentsFromContext(startCtx)).toBe(agents);
                     return new Promise((resolve) => {
                         releases.set(name, () => {
                             events.push(`beforeStart:${name}:end`);
-                            resolve();
+                            resolve({
+                                afterStart: async (
+                                    afterStartCtx: Context,
+                                    afterStartAgents: AgentSystemRef,
+                                ): Promise<void> => {
+                                    expect(agentsFromContext(afterStartCtx)).toBe(afterStartAgents);
+                                    expect(
+                                        (await afterStartAgents.resolve(afterStartCtx, "active"))
+                                            .id,
+                                    ).toBe("active");
+                                    events.push(`afterStart:${name}`);
+                                },
+                                beforeAgentLoop: async (
+                                    hookCtx: Context,
+                                    scope: AgentModuleScope,
+                                ): Promise<void> => {
+                                    const loopAgents = agentsFromContext(hookCtx);
+                                    expect(
+                                        (await loopAgents?.resolve(hookCtx, scope.agent.id))?.id,
+                                    ).toBe(scope.agent.id);
+                                    events.push(`agentLoop:${name}`);
+                                },
+                                instructions: (): string => {
+                                    events.push(`instructions:${name}`);
+                                    return "";
+                                },
+                            });
                         });
                     });
-                }
-
-                async afterStart(startCtx: Context, agents: AgentSystemRef): Promise<void> {
-                    expect(agentsFromContext(startCtx)).toBe(agents);
-                    expect((await agents.resolve(startCtx, "active")).id).toBe("active");
-                    events.push(`afterStart:${name}`);
-                }
-
-                async beforeAgentLoop(hookCtx: Context, scope: AgentModuleScope): Promise<void> {
-                    const agents = agentsFromContext(hookCtx);
-                    expect((await agents?.resolve(hookCtx, scope.agent.id))?.id).toBe(
-                        scope.agent.id,
-                    );
-                    events.push(`agentLoop:${name}`);
-                }
-
-                instructions(): string {
-                    events.push(`instructions:${name}`);
-                    return "";
                 }
             })();
         const storage = new InMemoryAgentStorage({
@@ -278,7 +286,10 @@ describe("AgentSystemLocal", () => {
                 modules: [
                     {
                         name: "failing-after",
-                        afterStart: () => Promise.reject(new Error("Module post-start failed.")),
+                        beforeStart: () => ({
+                            afterStart: () =>
+                                Promise.reject(new Error("Module post-start failed.")),
+                        }),
                     },
                 ],
                 providers,
@@ -348,11 +359,15 @@ describe("AgentSystemLocal", () => {
             new (class implements AgentModule {
                 readonly name = moduleName;
 
-                readonly instructions = (hookCtx: Context, scope: AgentModuleScope): string => {
-                    owners.push(agentsFromContext(hookCtx));
-                    served.push(`${this.name}:${scope.agent.id}`);
-                    return "";
-                };
+                beforeStart() {
+                    return {
+                        instructions: (hookCtx: Context, scope: AgentModuleScope): string => {
+                            owners.push(agentsFromContext(hookCtx));
+                            served.push(`${this.name}:${scope.agent.id}`);
+                            return "";
+                        },
+                    };
+                }
             })();
 
         let stores = 0;
@@ -501,11 +516,15 @@ describe("AgentSystemLocal configuration", () => {
         const recorder: AgentModule = new (class implements AgentModule {
             readonly name = "recorder";
 
-            instructions(hookCtx: Context): string {
-                const config = agentConfig(hookCtx);
-                if (config !== undefined) seen.push(config);
-                settings.push(agentModuleConfig(hookCtx, "recorder"));
-                return "";
+            beforeStart() {
+                return {
+                    instructions(hookCtx: Context): string {
+                        const config = agentConfig(hookCtx);
+                        if (config !== undefined) seen.push(config);
+                        settings.push(agentModuleConfig(hookCtx, "recorder"));
+                        return "";
+                    },
+                };
             }
         })();
         return await AgentSystemLocal.create(
@@ -600,14 +619,18 @@ describe("AgentSystemLocal shared modules", () => {
             SharedRecorder.instances.push(this);
         }
 
-        readonly instructions = (hookCtx: Context, scope: AgentModuleScope): string => {
-            const id = scope.agent.id;
-            if (!this.served.includes(id)) {
-                this.served.push(id);
-                this.configurations.push(agentConfig(hookCtx));
-            }
-            return `shared for ${id}`;
-        };
+        beforeStart() {
+            return {
+                instructions: (hookCtx: Context, scope: AgentModuleScope): string => {
+                    const id = scope.agent.id;
+                    if (!this.served.includes(id)) {
+                        this.served.push(id);
+                        this.configurations.push(agentConfig(hookCtx));
+                    }
+                    return `shared for ${id}`;
+                },
+            };
+        }
     }
 
     async function collectionOf(
@@ -659,18 +682,22 @@ describe("AgentSystemLocal shared modules", () => {
             /** What each agent found in the shared store, and in its own, before writing. */
             readonly found: { shared: unknown; own: unknown }[] = [];
 
-            readonly instructions = async (
-                hookCtx: Context,
-                scope: AgentModuleScope,
-            ): Promise<string> => {
-                this.found.push({
-                    shared: await scope.sharedKV.read(hookCtx, "note"),
-                    own: await scope.kv.read(hookCtx, "note"),
-                });
-                await scope.sharedKV.write(hookCtx, "note", `from ${scope.agent.id}`);
-                await scope.kv.write(hookCtx, "note", "mine");
-                return "";
-            };
+            beforeStart() {
+                return {
+                    instructions: async (
+                        hookCtx: Context,
+                        scope: AgentModuleScope,
+                    ): Promise<string> => {
+                        this.found.push({
+                            shared: await scope.sharedKV.read(hookCtx, "note"),
+                            own: await scope.kv.read(hookCtx, "note"),
+                        });
+                        await scope.sharedKV.write(hookCtx, "note", `from ${scope.agent.id}`);
+                        await scope.kv.write(hookCtx, "note", "mine");
+                        return "";
+                    },
+                };
+            }
         }
         const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
         const postbox = new Postbox();
@@ -696,10 +723,15 @@ describe("AgentSystemLocal shared modules", () => {
         let seen: unknown;
         class Peek implements AgentModule {
             readonly name = "peek";
-            readonly instructions = (hookCtx: Context): string => {
-                seen = agentsFromContext(hookCtx);
-                return "";
-            };
+
+            beforeStart() {
+                return {
+                    instructions: (hookCtx: Context): string => {
+                        seen = agentsFromContext(hookCtx);
+                        return "";
+                    },
+                };
+            }
         }
         const agentSystem = await AgentSystemLocal.create(
             ctx,
@@ -748,31 +780,33 @@ describe("AgentSystemLocal shared modules", () => {
         let restoredRefId: string | undefined;
         const lifecycleModule: AgentModule = {
             name: "lifecycle",
-            agentCreatedTransact: async (hookCtx, scope, agent) => {
-                await scope.sharedKV.write(hookCtx, agent.id, "created");
-                events.push("created:transact");
-            },
-            agentCreated: async (hookCtx, scope, agent) => {
-                events.push(`created:${String(await scope.sharedKV.read(hookCtx, agent.id))}`);
-                snapshots.push(agent);
-            },
-            agentRestoredTransact: async (hookCtx, scope, agent) => {
-                await scope.sharedKV.write(hookCtx, agent.id, "restored");
-                events.push("restored:transact");
-            },
-            agentRestored: async (hookCtx, scope, agent) => {
-                restoredRefId = (await scope.agents.resolve(hookCtx, agent.id)).id;
-                events.push(`restored:${String(await scope.sharedKV.read(hookCtx, agent.id))}`);
-                snapshots.push(agent);
-            },
-            agentArchivedTransact: async (hookCtx, scope, agent) => {
-                await scope.sharedKV.write(hookCtx, agent.id, "archived");
-                events.push("archived:transact");
-            },
-            agentArchived: async (hookCtx, scope, agent) => {
-                events.push(`archived:${String(await scope.sharedKV.read(hookCtx, agent.id))}`);
-                snapshots.push(agent);
-            },
+            beforeStart: () => ({
+                agentCreatedTransact: async (hookCtx, scope, agent) => {
+                    await scope.sharedKV.write(hookCtx, agent.id, "created");
+                    events.push("created:transact");
+                },
+                agentCreated: async (hookCtx, scope, agent) => {
+                    events.push(`created:${String(await scope.sharedKV.read(hookCtx, agent.id))}`);
+                    snapshots.push(agent);
+                },
+                agentRestoredTransact: async (hookCtx, scope, agent) => {
+                    await scope.sharedKV.write(hookCtx, agent.id, "restored");
+                    events.push("restored:transact");
+                },
+                agentRestored: async (hookCtx, scope, agent) => {
+                    restoredRefId = (await scope.agents.resolve(hookCtx, agent.id)).id;
+                    events.push(`restored:${String(await scope.sharedKV.read(hookCtx, agent.id))}`);
+                    snapshots.push(agent);
+                },
+                agentArchivedTransact: async (hookCtx, scope, agent) => {
+                    await scope.sharedKV.write(hookCtx, agent.id, "archived");
+                    events.push("archived:transact");
+                },
+                agentArchived: async (hookCtx, scope, agent) => {
+                    events.push(`archived:${String(await scope.sharedKV.read(hookCtx, agent.id))}`);
+                    snapshots.push(agent);
+                },
+            }),
         };
         const storage = () =>
             new InMemoryAgentStorage({
@@ -846,13 +880,15 @@ describe("AgentSystemLocal shared modules", () => {
                 modules: [
                     {
                         name: "reject-created",
-                        agentCreatedTransact: async (hookCtx, scope, agent) => {
-                            await scope.sharedKV.write(hookCtx, agent.id, "must roll back");
-                            throw new Error("creation projection failed");
-                        },
-                        agentCreated: () => {
-                            observed += 1;
-                        },
+                        beforeStart: () => ({
+                            agentCreatedTransact: async (hookCtx, scope, agent) => {
+                                await scope.sharedKV.write(hookCtx, agent.id, "must roll back");
+                                throw new Error("creation projection failed");
+                            },
+                            agentCreated: () => {
+                                observed += 1;
+                            },
+                        }),
                     },
                 ],
                 providers: providersOf(new ScriptedProvider([])),
@@ -887,18 +923,20 @@ describe("AgentSystemLocal shared modules", () => {
                 modules: [
                     {
                         name: "lifecycle-reentry",
-                        agentCreatedTransact: async (hookCtx, scope, agent) => {
-                            try {
-                                await scope.agents.resolve(hookCtx, agent.id);
-                            } catch (error: unknown) {
-                                transactionalError =
-                                    error instanceof Error ? error.message : String(error);
-                            }
-                        },
-                        agentCreated: async (hookCtx, scope, agent) => {
-                            observerResolved =
-                                (await scope.agents.resolve(hookCtx, agent.id)).id === agent.id;
-                        },
+                        beforeStart: () => ({
+                            agentCreatedTransact: async (hookCtx, scope, agent) => {
+                                try {
+                                    await scope.agents.resolve(hookCtx, agent.id);
+                                } catch (error: unknown) {
+                                    transactionalError =
+                                        error instanceof Error ? error.message : String(error);
+                                }
+                            },
+                            agentCreated: async (hookCtx, scope, agent) => {
+                                observerResolved =
+                                    (await scope.agents.resolve(hookCtx, agent.id)).id === agent.id;
+                            },
+                        }),
                     },
                 ],
                 providers: providersOf(new ScriptedProvider([])),

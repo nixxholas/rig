@@ -79,18 +79,20 @@ describe("agent provenance", () => {
         // rather than by whoever set the whole turn going.
         const spawner: AgentModule = {
             name: "spawner",
-            tools: () => [
-                defineAgentTool({
-                    name: "spawn",
-                    returnType: Type.Object({}),
-                    shouldReviewInAutoMode: () => false,
-                    execute: async (toolCtx) => {
-                        childId = (await system.create(toolCtx, {})).id;
-                        return {};
-                    },
-                    toLLM: () => [{ type: "text", text: "spawned" }],
-                }),
-            ],
+            beforeStart: () => ({
+                tools: () => [
+                    defineAgentTool({
+                        name: "spawn",
+                        returnType: Type.Object({}),
+                        shouldReviewInAutoMode: () => false,
+                        execute: async (toolCtx) => {
+                            childId = (await system.create(toolCtx, {})).id;
+                            return {};
+                        },
+                        toLLM: () => [{ type: "text", text: "spawned" }],
+                    }),
+                ],
+            }),
         };
         const system = await systemOf([spawner], [toolCallTurn("spawn"), textTurn("spawned one")]);
         const parent = await system.create(ctx, {});

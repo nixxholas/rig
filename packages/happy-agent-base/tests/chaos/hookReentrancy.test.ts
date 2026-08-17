@@ -533,16 +533,20 @@ describe("hook and event re-entrancy", () => {
         const reentrantModule: AgentModule = new (class implements AgentModule {
             readonly name = "model-change-self-send";
 
-            async modelChanged(hookCtx: Context): Promise<undefined> {
-                hookEntered.resolve();
-                const owner = agentsFromContext(hookCtx);
-                if (owner === undefined) throw new Error("missing collection");
-                await owner.send(
-                    hookCtx,
-                    agentId(hookCtx) ?? "",
-                    user("message from modelChanged"),
-                );
-                return undefined;
+            beforeStart() {
+                return {
+                    modelChanged: async (hookCtx: Context): Promise<undefined> => {
+                        hookEntered.resolve();
+                        const owner = agentsFromContext(hookCtx);
+                        if (owner === undefined) throw new Error("missing collection");
+                        await owner.send(
+                            hookCtx,
+                            agentId(hookCtx) ?? "",
+                            user("message from modelChanged"),
+                        );
+                        return undefined;
+                    },
+                };
             }
         })();
         const owner = await collection(
@@ -571,12 +575,20 @@ describe("hook and event re-entrancy", () => {
         const reentrantModule: AgentModule = new (class implements AgentModule {
             readonly name = "model-change-cross-send";
 
-            async modelChanged(hookCtx: Context): Promise<undefined> {
-                if (agentId(hookCtx) !== sourceId) return undefined;
-                const owner = agentsFromContext(hookCtx);
-                if (owner === undefined) throw new Error("missing collection");
-                await owner.send(hookCtx, targetId ?? "", user("message from source modelChanged"));
-                return undefined;
+            beforeStart() {
+                return {
+                    modelChanged: async (hookCtx: Context): Promise<undefined> => {
+                        if (agentId(hookCtx) !== sourceId) return undefined;
+                        const owner = agentsFromContext(hookCtx);
+                        if (owner === undefined) throw new Error("missing collection");
+                        await owner.send(
+                            hookCtx,
+                            targetId ?? "",
+                            user("message from source modelChanged"),
+                        );
+                        return undefined;
+                    },
+                };
             }
         })();
         const provider = new ScriptedProvider([textTurn("target"), textTurn("source")]);

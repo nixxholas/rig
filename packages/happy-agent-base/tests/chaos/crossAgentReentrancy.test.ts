@@ -225,13 +225,17 @@ function crossAgentModule(
             toLLM: () => [{ type: "text", text: "Cross-agent operation completed." }],
         });
 
-        readonly tools = (hookCtx: Context): readonly AnyAgentTool[] => {
-            // A module is given the collection as a reference, and nothing more.
-            if (agentSystem(hookCtx) === undefined) {
-                throw new Error("Cross-agent module requires its owning collection.");
-            }
-            return [this.#tool];
-        };
+        beforeStart() {
+            return {
+                tools: (hookCtx: Context): readonly AnyAgentTool[] => {
+                    // A module is given the collection as a reference, and nothing more.
+                    if (agentSystem(hookCtx) === undefined) {
+                        throw new Error("Cross-agent module requires its owning collection.");
+                    }
+                    return [this.#tool];
+                },
+            };
+        }
     })();
 }
 

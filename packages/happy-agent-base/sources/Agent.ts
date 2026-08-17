@@ -25,7 +25,7 @@ import {
 import type { AgentBaseHooks, MaybePromise } from "./AgentBaseHooks.js";
 import type { AgentBaseState } from "./AgentBaseState.js";
 import type { AgentDatabase } from "./AgentDatabase.js";
-import type { AgentModule, AgentModuleScope } from "./AgentModule.js";
+import type { AgentModule, AgentModuleRuntime, AgentModuleScope } from "./AgentModule.js";
 import type { AgentPermissionMode } from "./AgentPermissionMode.js";
 import type { AgentModuleAction } from "./AgentModuleAction.js";
 import type { AgentKV } from "./AgentKV.js";
@@ -41,8 +41,8 @@ export interface AgentOptions<
     Tool extends AnyAgentTool = AnyAgentTool,
     Database extends AgentDatabase = AgentDatabase,
 > extends Omit<AgentBaseOptions, "hooks"> {
-    /** Independent capabilities whose hook implementations are merged, in array order. */
-    readonly modules?: readonly AgentModule<Tool, Database>[];
+    /** Modules resolved by the owning system: each name beside the hooks its beforeStart returned. */
+    readonly modules?: readonly AgentModuleRuntime<Tool, Database>[];
     /**
      * The store modules share with every other agent built over the same storage. Each module
      * is handed its own scope of it, which is where anything outliving one conversation belongs.
@@ -70,8 +70,8 @@ export class Agent<
 > {
     /** The session this agent is a facade over; every operation delegates straight to it. */
     readonly #base: AgentBase;
-    /** The modules whose hooks were merged into the base, kept in the order they were given. */
-    readonly #modules: readonly AgentModule<Tool, Database>[];
+    /** The resolved modules whose hooks were merged into the base, in the order they were given. */
+    readonly #modules: readonly AgentModuleRuntime<Tool, Database>[];
 
     /**
      * A new agent over a fresh identity, with its modules' hooks merged into one set. Touches
@@ -117,7 +117,7 @@ export class Agent<
      * Wrap an already-built base. Private, because an agent is made by `create` or by `load`,
      * and which of the two the caller means is worth saying.
      */
-    private constructor(base: AgentBase, modules: readonly AgentModule<Tool, Database>[]) {
+    private constructor(base: AgentBase, modules: readonly AgentModuleRuntime<Tool, Database>[]) {
         this.#modules = modules;
         this.#base = base;
     }
@@ -139,7 +139,7 @@ export class Agent<
      * it is the collection's instance, serving every agent at once.
      */
     module(name: string): AgentModule<Tool, Database> | undefined {
-        return this.#modules.find((module) => module.name === name);
+        return this.#modules.find((module) => module.name === name)?.module;
     }
 
     /**
@@ -219,7 +219,7 @@ export class Agent<
  */
 function split<Tool extends AnyAgentTool, Database extends AgentDatabase>(
     options: AgentOptions<Tool, Database>,
-): { modules: readonly AgentModule<Tool, Database>[]; base: AgentBaseOptions } {
+): { modules: readonly AgentModuleRuntime<Tool, Database>[]; base: AgentBaseOptions } {
     const { modules, sharedKV, ...rest } = options;
     const resolved = modules ?? [];
     return {
@@ -229,25 +229,27 @@ function split<Tool extends AnyAgentTool, Database extends AgentDatabase>(
 }
 
 function mergeModules<Tool extends AnyAgentTool, Database extends AgentDatabase>(
-    modules: readonly AgentModule<Tool, Database>[],
+    modules: readonly AgentModuleRuntime<Tool, Database>[],
     options: AgentOptions<Tool, Database>,
     sharedKV: AgentKV,
 ): AgentBaseHooks {
     /** What one module's hook is handed alongside the context, for this call. */
     const scopeOf = (
         ctx: Context,
-        module: AgentModule<Tool, Database>,
+        module: AgentModuleRuntime<Tool, Database>,
     ): AgentModuleScope<Database> => moduleScope(ctx, module, options, sharedKV);
-    const withInstructions = modules.filter((module) => module.instructions !== undefined);
-    const withTools = modules.filter((module) => module.tools !== undefined);
-    const withBeforeToolCall = modules.filter((module) => module.beforeToolCall !== undefined);
-    const withModelChanged = modules.filter((module) => module.modelChanged !== undefined);
-    const withEvents = modules.filter((module) => module.onEvent !== undefined);
+    const withInstructions = modules.filter((module) => module.hooks.instructions !== undefined);
+    const withTools = modules.filter((module) => module.hooks.tools !== undefined);
+    const withBeforeToolCall = modules.filter(
+        (module) => module.hooks.beforeToolCall !== undefined,
+    );
+    const withModelChanged = modules.filter((module) => module.hooks.modelChanged !== undefined);
+    const withEvents = modules.filter((module) => module.hooks.onEvent !== undefined);
     // Observing hooks fan out with per-module isolation: one throwing module must never
     // prevent the modules after it from observing.
     const fanOut = <Arguments extends readonly unknown[]>(
         pick: (
-            module: AgentModule<Tool, Database>,
+            module: AgentModuleRuntime<Tool, Database>,
         ) =>
             | ((
                   ctx: Context,
@@ -273,7 +275,7 @@ function mergeModules<Tool extends AnyAgentTool, Database extends AgentDatabase>
     // failure would commit a conclusion the rest of the transaction contradicts.
     const chain = <Arguments extends readonly unknown[]>(
         pick: (
-            module: AgentModule<Tool, Database>,
+            module: AgentModuleRuntime<Tool, Database>,
         ) =>
             | ((
                   ctx: Context,
@@ -294,7 +296,7 @@ function mergeModules<Tool extends AnyAgentTool, Database extends AgentDatabase>
     // own actions.
     const collect = <Arguments extends readonly unknown[]>(
         pick: (
-            module: AgentModule<Tool, Database>,
+            module: AgentModuleRuntime<Tool, Database>,
         ) =>
             | ((
                   ctx: Context,
@@ -332,7 +334,7 @@ function mergeModules<Tool extends AnyAgentTool, Database extends AgentDatabase>
                   onEvent: (async (ctx, event) => {
                       for (const module of withEvents) {
                           try {
-                              await module.onEvent?.(
+                              await module.hooks.onEvent?.(
                                   moduleCtx(ctx, module),
                                   scopeOf(ctx, module),
                                   event,
@@ -346,7 +348,7 @@ function mergeModules<Tool extends AnyAgentTool, Database extends AgentDatabase>
               }),
         ...spread(
             "onEventTransact",
-            chain((module) => module.onEventTransact),
+            chain((module) => module.hooks.onEventTransact),
         ),
         ...(withInstructions.length === 0
             ? {}
@@ -356,7 +358,7 @@ function mergeModules<Tool extends AnyAgentTool, Database extends AgentDatabase>
                       const texts: string[] = [];
                       for (const module of withInstructions) {
                           texts.push(
-                              (await module.instructions?.(
+                              (await module.hooks.instructions?.(
                                   moduleCtx(ctx, module),
                                   scopeOf(ctx, module),
                               )) ?? "",
@@ -374,7 +376,7 @@ function mergeModules<Tool extends AnyAgentTool, Database extends AgentDatabase>
                       const tools: AnyAgentTool[] = [];
                       for (const module of withTools) {
                           tools.push(
-                              ...((await module.tools?.(
+                              ...((await module.hooks.tools?.(
                                   moduleCtx(ctx, module),
                                   scopeOf(ctx, module),
                               )) ?? []),
@@ -385,19 +387,19 @@ function mergeModules<Tool extends AnyAgentTool, Database extends AgentDatabase>
               }),
         ...spread(
             "beforeCompaction",
-            fanOut((module) => module.beforeCompaction),
+            fanOut((module) => module.hooks.beforeCompaction),
         ),
         ...spread(
             "historyErasedTransact",
-            chain((module) => module.historyErasedTransact),
+            chain((module) => module.hooks.historyErasedTransact),
         ),
         ...spread(
             "afterCompaction",
-            fanOut((module) => module.afterCompaction),
+            fanOut((module) => module.hooks.afterCompaction),
         ),
         ...spread(
             "beforeToolCallTransact",
-            chain((module) => module.beforeToolCallTransact),
+            chain((module) => module.hooks.beforeToolCallTransact),
         ),
         ...(withBeforeToolCall.length === 0
             ? {}
@@ -411,7 +413,7 @@ function mergeModules<Tool extends AnyAgentTool, Database extends AgentDatabase>
                       // last module to name one is the one that meant it about the run itself.
                       let permissionMode: AgentPermissionMode | undefined;
                       for (const module of withBeforeToolCall) {
-                          const decision = await module.beforeToolCall?.(
+                          const decision = await module.hooks.beforeToolCall?.(
                               moduleCtx(ctx, module),
                               scopeOf(ctx, module),
                               current,
@@ -446,11 +448,11 @@ function mergeModules<Tool extends AnyAgentTool, Database extends AgentDatabase>
               }),
         ...spread(
             "afterToolCall",
-            fanOut((module) => module.afterToolCall),
+            fanOut((module) => module.hooks.afterToolCall),
         ),
         ...spread(
             "afterToolCallTransact",
-            chain((module) => module.afterToolCallTransact),
+            chain((module) => module.hooks.afterToolCallTransact),
         ),
         ...(withModelChanged.length === 0
             ? {}
@@ -463,7 +465,7 @@ function mergeModules<Tool extends AnyAgentTool, Database extends AgentDatabase>
                       // the first returned handoff wins.
                       for (const module of withModelChanged) {
                           try {
-                              const message = await module.modelChanged?.(
+                              const message = await module.hooks.modelChanged?.(
                                   moduleCtx(ctx, module),
                                   scopeOf(ctx, module),
                                   change,
@@ -484,83 +486,83 @@ function mergeModules<Tool extends AnyAgentTool, Database extends AgentDatabase>
               }),
         ...spread(
             "messageAcceptedTransact",
-            chain((module) => module.messageAcceptedTransact),
+            chain((module) => module.hooks.messageAcceptedTransact),
         ),
         ...spread(
             "messageAccepted",
-            fanOut((module) => module.messageAccepted),
+            fanOut((module) => module.hooks.messageAccepted),
         ),
         ...spread(
             "permissionModeChangedTransact",
-            chain((module) => module.permissionModeChangedTransact),
+            chain((module) => module.hooks.permissionModeChangedTransact),
         ),
         ...spread(
             "permissionModeChanged",
-            fanOut((module) => module.permissionModeChanged),
+            fanOut((module) => module.hooks.permissionModeChanged),
         ),
         ...spread(
             "metadataChangedTransact",
-            chain((module) => module.metadataChangedTransact),
+            chain((module) => module.hooks.metadataChangedTransact),
         ),
         ...spread(
             "metadataChanged",
-            fanOut((module) => module.metadataChanged),
+            fanOut((module) => module.hooks.metadataChanged),
         ),
         ...spread(
             "beforeAgentLoopTransact",
-            chain((module) => module.beforeAgentLoopTransact),
+            chain((module) => module.hooks.beforeAgentLoopTransact),
         ),
         ...spread(
             "beforeAgentLoop",
-            fanOut((module) => module.beforeAgentLoop),
+            fanOut((module) => module.hooks.beforeAgentLoop),
         ),
         ...spread(
             "beforeTurnTransact",
-            chain((module) => module.beforeTurnTransact),
+            chain((module) => module.hooks.beforeTurnTransact),
         ),
         ...spread(
             "beforeTurn",
-            collect((module) => module.beforeTurn),
+            collect((module) => module.hooks.beforeTurn),
         ),
         ...spread(
             "beforeInferenceTransact",
-            chain((module) => module.beforeInferenceTransact),
+            chain((module) => module.hooks.beforeInferenceTransact),
         ),
         ...spread(
             "beforeInference",
-            fanOut((module) => module.beforeInference),
+            fanOut((module) => module.hooks.beforeInference),
         ),
         ...spread(
             "afterInferenceTransact",
-            chain((module) => module.afterInferenceTransact),
+            chain((module) => module.hooks.afterInferenceTransact),
         ),
         ...spread(
             "afterInference",
-            fanOut((module) => module.afterInference),
+            fanOut((module) => module.hooks.afterInference),
         ),
         ...spread(
             "afterTurnTransact",
-            chain((module) => module.afterTurnTransact),
+            chain((module) => module.hooks.afterTurnTransact),
         ),
         ...spread(
             "afterTurn",
-            collect((module) => module.afterTurn),
+            collect((module) => module.hooks.afterTurn),
         ),
         ...spread(
             "afterAgentLoopTransact",
-            chain((module) => module.afterAgentLoopTransact),
+            chain((module) => module.hooks.afterAgentLoopTransact),
         ),
         ...spread(
             "afterAgentLoop",
-            collect((module) => module.afterAgentLoop),
+            collect((module) => module.hooks.afterAgentLoop),
         ),
         ...spread(
             "afterAgentSettledTransact",
-            chain((module) => module.afterAgentSettledTransact),
+            chain((module) => module.hooks.afterAgentSettledTransact),
         ),
         ...spread(
             "afterAgentSettled",
-            fanOut((module) => module.afterAgentSettled),
+            fanOut((module) => module.hooks.afterAgentSettled),
         ),
     };
 }
@@ -592,7 +594,7 @@ function moduleCtx(ctx: Context, module: { readonly name: string }): Context {
  */
 function moduleScope<Tool extends AnyAgentTool, Database extends AgentDatabase>(
     ctx: Context,
-    module: AgentModule<Tool, Database>,
+    module: { readonly name: string },
     options: AgentOptions<Tool, Database>,
     sharedKV: AgentKV,
 ): AgentModuleScope<Database> {

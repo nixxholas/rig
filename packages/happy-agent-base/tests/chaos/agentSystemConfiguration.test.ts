@@ -49,9 +49,13 @@ describe("agent system configuration", () => {
         const recorder: AgentModule = new (class implements AgentModule {
             readonly name = "recorder";
 
-            instructions(hookCtx: Context): string {
-                observedSetting = agentModuleConfig(hookCtx, "recorder")?.label;
-                return "";
+            beforeStart() {
+                return {
+                    instructions(hookCtx: Context): string {
+                        observedSetting = agentModuleConfig(hookCtx, "recorder")?.label;
+                        return "";
+                    },
+                };
             }
         })();
         const owner = await collection(

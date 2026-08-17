@@ -47,15 +47,18 @@ export class ModuleGymHarness implements AgentModule {
         ],
     });
 
-    readonly tools = () => [this.recordAnswerTool] as const;
-
-    readonly instructions = (): string =>
-        [
-            "# Automated check",
-            "An automated check is exercising you. Answer exactly what is asked, in as few words as possible, and never ask a follow-up question.",
-            "Do not start subagents; answer directly yourself.",
-            "Use a tool only when you are explicitly asked to; otherwise just reply in text.",
-        ].join("\n");
+    beforeStart() {
+        return {
+            tools: () => [this.recordAnswerTool] as const,
+            instructions: (): string =>
+                [
+                    "# Automated check",
+                    "An automated check is exercising you. Answer exactly what is asked, in as few words as possible, and never ask a follow-up question.",
+                    "Do not start subagents; answer directly yourself.",
+                    "Use a tool only when you are explicitly asked to; otherwise just reply in text.",
+                ].join("\n"),
+        };
+    }
 }
 
 /**

@@ -8,8 +8,9 @@ import {
     agentKV,
     defineAgentTool,
     withAgentDatabase,
-    type AgentModule,
     type AgentModuleAgent,
+    type AgentModuleHooks,
+    type AgentModuleRuntime,
 } from "../sources/index.js";
 import {
     providersOf,
@@ -34,8 +35,9 @@ function tool(name: string) {
     });
 }
 
-function module(hooks: AgentModule): AgentModule {
-    return { ...hooks };
+function module(spec: { name: string } & AgentModuleHooks): AgentModuleRuntime {
+    const { name, ...hooks } = spec;
+    return { name, module: { name }, hooks };
 }
 
 function toolCallTurn(callId: string, name: string, argumentsJson: string): SessionEvent[] {
@@ -142,7 +144,7 @@ describe("Agent", () => {
             },
             toLLM: ({ value }) => [{ type: "text", text: value }],
         });
-        const amend = (name: string, suffix: string): AgentModule =>
+        const amend = (name: string, suffix: string): AgentModuleRuntime =>
             module({
                 name,
                 beforeToolCall: (_hookCtx, _scope, call) => {
@@ -249,7 +251,7 @@ describe("Agent", () => {
 
     it("fans events out to every module in order", async () => {
         const seen: string[] = [];
-        const observe = (name: string): AgentModule =>
+        const observe = (name: string): AgentModuleRuntime =>
             module({
                 name,
                 onEvent: (_hookCtx, _scope, event) => {
@@ -321,7 +323,7 @@ describe("Agent", () => {
     it("concatenates lifecycle actions from every module", async () => {
         const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
         let done = false;
-        const followUp = (text: string): AgentModule =>
+        const followUp = (text: string): AgentModuleRuntime =>
             module({
                 name: `follow-up-${text.replaceAll(" ", "-")}`,
                 afterTurn: () => {

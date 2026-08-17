@@ -9,7 +9,8 @@ import {
     AgentKV,
     defineAgentTool,
     withAgentDatabase,
-    type AgentModule,
+    type AgentModuleHooks,
+    type AgentModuleRuntime,
 } from "../../sources/index.js";
 import { providersOf, sharedKV, testAgentDatabase, textTurn, user } from "../gym/fixtures.js";
 import { InMemoryPersistence } from "../gym/InMemoryPersistence.js";
@@ -19,6 +20,10 @@ const ctx = withAgentDatabase(
     createRootContext().named("module-consistency-races-test"),
     testAgentDatabase(),
 );
+
+function runtime(name: string, hooks: AgentModuleHooks): AgentModuleRuntime {
+    return { name, module: { name }, hooks };
+}
 
 describe("module consistency races", () => {
     it("isolates a dotted KV scope segment from an equivalent dotted relative key", async () => {
@@ -40,8 +45,7 @@ describe("module consistency races", () => {
         const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
         let dottedModuleObserved: unknown;
         let dottedModuleCalls = 0;
-        const dottedModule: AgentModule = {
-            name: "alpha.beta",
+        const dottedModule = runtime("alpha.beta", {
             instructions: async (moduleCtx) => {
                 const kv = requiredKV(moduleCtx);
                 dottedModuleCalls += 1;
@@ -52,14 +56,13 @@ describe("module consistency races", () => {
                 }
                 return "";
             },
-        };
-        const dottedKeyModule: AgentModule = {
-            name: "alpha",
+        });
+        const dottedKeyModule = runtime("alpha", {
             instructions: async (moduleCtx) => {
                 await requiredKV(moduleCtx).write(moduleCtx, "beta.state", "dotted key");
                 return "";
             },
-        };
+        });
         const agent = await Agent.create(ctx, {
             id: "module-scope-collision",
             providers: providersOf(provider),
@@ -121,10 +124,9 @@ describe("module consistency races", () => {
             },
             toLLM: () => [{ type: "text", text: "dotted key done" }],
         });
-        const toolsModule: AgentModule = {
-            name: "collision-tools",
+        const toolsModule = runtime("collision-tools", {
             tools: () => [dottedCallTool, dottedKeyTool],
-        };
+        });
         const provider = new ScriptedProvider([
             toolCallsTurn([
                 { callId: "part.one", name: "dotted_call" },

@@ -375,26 +375,28 @@ describe("agent metadata, custom identity, and parentage", () => {
         let rejectNext = false;
         const module: AgentModule = {
             name: "metadata-recorder",
-            instructions: (hookCtx, scope) => {
-                scopedMetadata.push({
-                    config: agentConfig(hookCtx)?.metadata,
-                    scope: scope.agent.metadata,
-                });
-                return "";
-            },
-            metadataChangedTransact: async (hookCtx, scope, change) => {
-                expect(agentConfig(hookCtx)?.metadata).toEqual(change.metadata);
-                expect(scope.agent.metadata).toEqual(change.metadata);
-                await scope.kv.write(hookCtx, "metadata-attempt", change.metadata.title);
-                retainedTransaction = { ctx: hookCtx, kv: scope.kv };
-                changes.push({ phase: "transaction", change });
-                if (rejectNext) throw new Error("metadata rejected");
-            },
-            metadataChanged: (hookCtx, scope, change) => {
-                expect(agentConfig(hookCtx)?.metadata).toEqual(change.metadata);
-                expect(scope.agent.metadata).toEqual(change.metadata);
-                changes.push({ phase: "committed", change });
-            },
+            beforeStart: () => ({
+                instructions: (hookCtx, scope) => {
+                    scopedMetadata.push({
+                        config: agentConfig(hookCtx)?.metadata,
+                        scope: scope.agent.metadata,
+                    });
+                    return "";
+                },
+                metadataChangedTransact: async (hookCtx, scope, change) => {
+                    expect(agentConfig(hookCtx)?.metadata).toEqual(change.metadata);
+                    expect(scope.agent.metadata).toEqual(change.metadata);
+                    await scope.kv.write(hookCtx, "metadata-attempt", change.metadata.title);
+                    retainedTransaction = { ctx: hookCtx, kv: scope.kv };
+                    changes.push({ phase: "transaction", change });
+                    if (rejectNext) throw new Error("metadata rejected");
+                },
+                metadataChanged: (hookCtx, scope, change) => {
+                    expect(agentConfig(hookCtx)?.metadata).toEqual(change.metadata);
+                    expect(scope.agent.metadata).toEqual(change.metadata);
+                    changes.push({ phase: "committed", change });
+                },
+            }),
         };
         const system = await AgentSystemLocal.create(ctx, systemStorage(manager, stores), {
             modules: [module],
@@ -529,10 +531,12 @@ describe("agent metadata, custom identity, and parentage", () => {
         let rootRef: AgentSystemRef | undefined;
         const module: AgentModule = {
             name: "capture-reference",
-            instructions: (hookCtx: Context, _scope: AgentModuleScope) => {
-                rootRef = agentSystem(hookCtx);
-                return "";
-            },
+            beforeStart: () => ({
+                instructions: (hookCtx: Context, _scope: AgentModuleScope) => {
+                    rootRef = agentSystem(hookCtx);
+                    return "";
+                },
+            }),
         };
         const system = await AgentSystemLocal.create(ctx, systemStorage(manager, stores), {
             modules: [module],
