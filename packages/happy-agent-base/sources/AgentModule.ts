@@ -12,6 +12,7 @@ import type { Context } from "@steve.kite/stdlib";
 import type { AgentDatabase, AgentModuleMigration } from "./AgentDatabase.js";
 import type {
     AgentBaseAcceptedMessage,
+    AgentBaseActivation,
     AgentBaseCompaction,
     AgentBaseCompactionStart,
     AgentBaseCompletedCompaction,
@@ -333,6 +334,16 @@ export interface AgentModuleHooks<
         ctx: Context,
         scope: AgentModuleScope<Database>,
         change: AgentMetadataChange,
+    ) => MaybePromise<void>;
+    /**
+     * Runs inside the transaction that makes a settled agent owe work again: scheduling a
+     * message activates it, and a restart reactivates one that still owed work, with `restored`
+     * true. Modules run in array order and a failure propagates, rolling the activation back.
+     */
+    readonly afterAgentActivatedTransact?: (
+        ctx: Context,
+        scope: AgentModuleScope<Database>,
+        activation: AgentBaseActivation,
     ) => MaybePromise<void>;
     /** Transactional counterpart to `beforeAgentLoop`. */
     readonly beforeAgentLoopTransact?: (

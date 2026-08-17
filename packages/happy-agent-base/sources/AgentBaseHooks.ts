@@ -76,6 +76,16 @@ export interface AgentBaseAcceptedMessage {
     readonly metadata?: AgentMessageMetadata;
 }
 
+/** What the activation hook sees when the agent stops being settled and starts owing work. */
+export interface AgentBaseActivation {
+    /**
+     * True when the work being taken up was inherited from a previous process: the agent was
+     * already recorded as owing it when this process started, so it is being reactivated by the
+     * agent system's restart rather than by a message scheduled just now.
+     */
+    readonly restored: boolean;
+}
+
 /** What the permission-mode hooks see when a consumed message changes how much may be touched. */
 export interface AgentBasePermissionModeChange {
     /** The mode in force until this message was consumed. */
@@ -346,8 +356,8 @@ export interface AgentBaseHooks {
         accepted: AgentBaseAcceptedMessage,
     ) => MaybePromise<void>;
     /**
-     * Called once per message after the consumption has committed and the lock is released, in the
-     * order the messages were appended. This is the observing half: it may take as long as it
+     * Called once per message after the consumption has committed, in the order the messages were
+     * appended. This is the observing half: it may take as long as it
      * likes and its failure is contained, so anything that must not be able to undo the message
      * belongs here rather than in the transactional hook.
      */
@@ -383,6 +393,19 @@ export interface AgentBaseHooks {
     ) => MaybePromise<void>;
     /** Observes an agent metadata update after the merged configuration has committed. */
     readonly metadataChanged?: (ctx: Context, change: AgentMetadataChange) => MaybePromise<void>;
+    /**
+     * Runs inside the transaction that makes a settled agent owe work again. For a scheduled
+     * message that is the transaction admitting it to its durable queue — the moment the agent
+     * becomes active, before the message is ever accepted into the conversation. When a restart
+     * resumes work a previous process left owing, it is the transaction in which the resumed run
+     * first records its stage, and `restored` is true. A failure rolls the activation back: a
+     * scheduling is refused with the message kept out of the queue, and a resumed run retries
+     * the announcement with its next stage record.
+     */
+    readonly afterAgentActivatedTransact?: (
+        ctx: Context,
+        activation: AgentBaseActivation,
+    ) => MaybePromise<void>;
     /**
      * Runs after the agent is staged as working, inside the transaction committing that state.
      */

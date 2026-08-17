@@ -16,7 +16,7 @@ importers:
         version: 24.13.2
       drizzle-orm:
         specifier: ^0.45.2
-        version: 0.45.2(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@types/pg@8.15.6)(sql.js@1.14.1)
+        version: 0.45.2(@electric-sql/pglite@0.5.5)(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@types/pg@8.15.6)(postgres@3.4.9)(sql.js@1.14.1)
       oxfmt:
         specifier: ^0.57.0
         version: 0.57.0
@@ -129,7 +129,7 @@ importers:
         version: 0.34.49
       '@slopus/happy-agent-base':
         specifier: npm:@slopus/happy-agent-base@0.0.17
-        version: 0.0.17(@aws-sdk/credential-provider-node@3.972.71)(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)
+        version: 0.0.17(@aws-sdk/credential-provider-node@3.972.71)(@electric-sql/pglite@0.5.5)(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(postgres@3.4.9)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)
       '@slopus/happy-agent-compute':
         specifier: npm:@slopus/happy-agent-compute@0.1.6
         version: 0.1.6
@@ -147,7 +147,7 @@ importers:
         version: 1.0.7
       drizzle-orm:
         specifier: ^0.45.2
-        version: 0.45.2(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@types/pg@8.15.6)(sql.js@1.14.1)
+        version: 0.45.2(@electric-sql/pglite@0.5.5)(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@types/pg@8.15.6)(postgres@3.4.9)(sql.js@1.14.1)
       sharp:
         specifier: ^0.35.3
         version: 0.35.3(@types/node@24.13.3)
@@ -167,6 +167,12 @@ importers:
 
   packages/happy-agent-base:
     dependencies:
+      '@electric-sql/pglite':
+        specifier: ^0.5.5
+        version: 0.5.5
+      '@libsql/client':
+        specifier: ^0.17.4
+        version: 0.17.4
       '@paralleldrive/cuid2':
         specifier: ^3.3.0
         version: 3.3.0
@@ -181,11 +187,11 @@ importers:
         version: 0.0.12
       drizzle-orm:
         specifier: ^0.45.2
-        version: 0.45.2(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@types/pg@8.15.6)(sql.js@1.14.1)
+        version: 0.45.2(@electric-sql/pglite@0.5.5)(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@types/pg@8.15.6)(postgres@3.4.9)(sql.js@1.14.1)
+      postgres:
+        specifier: ^3.4.9
+        version: 3.4.9
     devDependencies:
-      '@libsql/client':
-        specifier: ^0.17.4
-        version: 0.17.4
       '@types/node':
         specifier: ^24.0.10
         version: 24.13.2
@@ -277,7 +283,7 @@ importers:
         version: 0.0.12
       drizzle-orm:
         specifier: ^0.45.2
-        version: 0.45.2(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@types/pg@8.15.6)(sql.js@1.14.1)
+        version: 0.45.2(@electric-sql/pglite@0.5.5)(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@types/pg@8.15.6)(postgres@3.4.9)(sql.js@1.14.1)
       pino:
         specifier: ^10.3.1
         version: 10.3.1
@@ -287,7 +293,7 @@ importers:
     devDependencies:
       '@slopus/happy-agent-base':
         specifier: npm:@slopus/happy-agent-base@0.0.17
-        version: 0.0.17(@aws-sdk/credential-provider-node@3.972.71)(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)
+        version: 0.0.17(@aws-sdk/credential-provider-node@3.972.71)(@electric-sql/pglite@0.5.5)(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(postgres@3.4.9)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)
       '@types/node':
         specifier: ^24.0.10
         version: 24.13.3
@@ -710,6 +716,9 @@ packages:
   '@earendil-works/pi-tui@0.80.3':
     resolution: {integrity: sha512-2BJI6qwRQfnM0Q7seL1+SbacU/jRRjBnN7Hu3n9BjAn7/s5FaBNnvdD1qBQYRsFTHfjqMaDsjYqanPyqwXj99w==}
     engines: {node: '>=22.19.0'}
+
+  '@electric-sql/pglite@0.5.5':
+    resolution: {integrity: sha512-QeZ+oB7QaU4EJj2awrB8hwFZ5TXxLRBQ9Gfq0dQauYDdWsRtuWRCERgtri35vRfL07KQHlVlc/4Qxvn7a5AXeA==}
 
   '@emnapi/runtime@1.11.2':
     resolution: {integrity: sha512-kyOl3X0DuTiT1h2ft8r2fYO8JYtU9a9Xis/zBSiGArNaagCOWx90N1k2wxp18czFDH+OgcWGb5ZP/XMt3dcyPA==}
@@ -3151,6 +3160,10 @@ packages:
     resolution: {integrity: sha512-9ZhXKM/rw350N1ovuWHbGxnGh/SNJ4cnxHiM0rxE4VN41wsg8P8zWn9hv/buK00RP4WvlOyr/RBDiptyxVbkZQ==}
     engines: {node: '>=0.10.0'}
 
+  postgres@3.4.9:
+    resolution: {integrity: sha512-GD3qdB0x1z9xgFI6cdRD6xu2Sp2WCOEoe3mtnyB5Ee0XrrL5Pe+e4CCnJrRMnL1zYtRDZmQQVbvOttLnKDLnaw==}
+    engines: {node: '>=12'}
+
   proc-log@5.0.0:
     resolution: {integrity: sha512-Azwzvl90HaF0aCz1JrDdXQykFakSSNPaPoiZ9fm5qJIMHioDZEi7OAdRwSm6rSoPtY3Qutnm3L7ogmg3dc+wbQ==}
     engines: {node: ^18.17.0 || >=20.5.0}
@@ -4015,6 +4028,8 @@ snapshots:
       get-east-asian-width: 1.6.0
       marked: 18.0.5
 
+  '@electric-sql/pglite@0.5.5': {}
+
   '@emnapi/runtime@1.11.2':
     dependencies:
       tslib: 2.8.1
@@ -4779,13 +4794,13 @@ snapshots:
 
   '@slopus/ghostty-wasm@1.3.6': {}
 
-  '@slopus/happy-agent-base@0.0.17(@aws-sdk/credential-provider-node@3.972.71)(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)':
+  '@slopus/happy-agent-base@0.0.17(@aws-sdk/credential-provider-node@3.972.71)(@electric-sql/pglite@0.5.5)(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(postgres@3.4.9)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)':
     dependencies:
       '@paralleldrive/cuid2': 3.3.0
       '@sinclair/typebox': 0.34.49
       '@slopus/happy-providers': 0.0.8(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
       '@steve.kite/stdlib': 0.0.12
-      drizzle-orm: 0.45.2(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@types/pg@8.15.6)(sql.js@1.14.1)
+      drizzle-orm: 0.45.2(@electric-sql/pglite@0.5.5)(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@types/pg@8.15.6)(postgres@3.4.9)(sql.js@1.14.1)
     transitivePeerDependencies:
       - '@aws-sdk/client-rds-data'
       - '@aws-sdk/credential-provider-node'
@@ -5573,11 +5588,13 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  drizzle-orm@0.45.2(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@types/pg@8.15.6)(sql.js@1.14.1):
+  drizzle-orm@0.45.2(@electric-sql/pglite@0.5.5)(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@types/pg@8.15.6)(postgres@3.4.9)(sql.js@1.14.1):
     optionalDependencies:
+      '@electric-sql/pglite': 0.5.5
       '@libsql/client': 0.17.4
       '@opentelemetry/api': 1.9.1
       '@types/pg': 8.15.6
+      postgres: 3.4.9
       sql.js: 1.14.1
 
   dunder-proto@1.0.1:
@@ -6261,6 +6278,8 @@ snapshots:
     dependencies:
       xtend: 4.0.2
     optional: true
+
+  postgres@3.4.9: {}
 
   proc-log@5.0.0: {}
 

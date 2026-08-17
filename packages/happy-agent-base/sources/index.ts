@@ -53,6 +53,22 @@ export {
     type AgentPostgresDatabase,
     type AgentSQLiteDatabase,
 } from "./AgentDatabase.js";
+export {
+    AgentDatabaseConnection,
+    agentDatabaseConnection,
+    ensureAgentDatabaseConnection,
+} from "./AgentDatabaseConnection.js";
+export { openAgentSQLiteDatabase, type AgentLibSQLDatabase } from "./openAgentSQLiteDatabase.js";
+export {
+    openAgentPGliteDatabase,
+    type AgentPGliteDatabase,
+    type OpenAgentPGliteDatabaseOptions,
+} from "./openAgentPGliteDatabase.js";
+export {
+    openAgentPostgresDatabase,
+    type AgentPostgresJsDatabase,
+    type OpenAgentPostgresDatabaseOptions,
+} from "./openAgentPostgresDatabase.js";
 
 // Provider/model routing and the curated model catalog.
 export { type AgentModel } from "./AgentModel.js";
@@ -100,6 +116,7 @@ export { inTx, type AgentTransactionWork } from "./inTx.js";
 export { AgentKV } from "./AgentKV.js";
 export {
     type AgentBaseAcceptedMessage,
+    type AgentBaseActivation,
     type AgentBaseCompaction,
     type AgentBaseCompactionStart,
     type AgentBaseCompletedCompaction,

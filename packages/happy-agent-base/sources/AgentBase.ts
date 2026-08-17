@@ -19,12 +19,10 @@ import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import {
     afterCommit,
-    asyncLock,
     createContextNamespace,
     detach,
     deterministicStringify,
     withLifetime,
-    type AsyncLock,
     type Context,
 } from "@steve.kite/stdlib";
 
@@ -40,6 +38,7 @@ import {
     withAgentRunKV,
 } from "./AgentContexts.js";
 import { agentConfig, ownAgentConfig, withAgentConfig, type AgentConfig } from "./AgentConfig.js";
+import { outsideAgentDatabaseOperation } from "./AgentDatabaseConnection.js";
 import { taskContextBeforeToolCall, withAgentTaskContext } from "./AgentTaskContext.js";
 import { AgentKV } from "./AgentKV.js";
 import {
@@ -106,8 +105,6 @@ const insideTurn = createContextNamespace<readonly string[]>("agentInsideTurn", 
  * its own and outlives whatever happened to start it.
  */
 const insideLoops = new AsyncLocalStorage<readonly string[]>();
-/** Persistence locks held by the current asynchronous call chain, independent of Context. */
-const insidePersistenceLocks = new AsyncLocalStorage<readonly string[]>();
 
 /**
  * How long a close asked for from inside the agent's own run loop waits for the shutdown before
@@ -275,10 +272,10 @@ export interface AgentBaseOptions {
  *
  * ## Serialization
  *
- * One lock serializes every persistence operation together with its in-memory effect, so storage
- * order always matches history order and a load never overlaps an append. Anything that decides
- * from durable state resolves that state inside the lock rather than capturing it beforehand; a
- * reference taken before a wait can belong to a history that has since been replaced.
+ * Database transactions and ordered keys keep persistence changes aligned with their in-memory
+ * publication. Anything that decides from durable state resolves that state inside the committing
+ * step rather than capturing it beforehand; a reference taken before a wait can belong to a
+ * history that has since been replaced.
  *
  * ## Accepting a message
  *
@@ -331,8 +328,8 @@ export interface AgentBaseOptions {
  *
  * An incompatible provider or model change resets the conversation; a compatible one keeps it.
  * Either way the change lands on one side or the other, never the old history under the new
- * model. `modelChanged` runs inside the lock and is lent a store bound to that hold — a
- * capability released when the hook returns, so it cannot be retained to bypass the lock later.
+ * model. `modelChanged` runs inside the transaction and is lent a store bound to it — a
+ * capability released when the hook returns, so it cannot be retained to write after commit.
  * A failing handoff rejects an incompatible switch outright rather than costing the history.
  *
  * ## Permission modes
@@ -456,13 +453,6 @@ export class AgentBase {
     #permissionMode: AgentPermissionMode;
     /** The single set of hooks the run is observed by and its configuration extended from. */
     readonly #hooks: AgentBaseHooks;
-    /**
-     * Serializes every persistence operation together with its in-memory effect, so storage
-     * order always matches history order and a load never overlaps an append. The lock belongs
-     * to the store, so an owner inspecting the same store sees only whole steps.
-     */
-    readonly #persistenceLock: AsyncLock;
-
     /** The session-scoped key-value store carried on every context the agent derives. */
     readonly #kv: AgentKV;
     /** Durable state tied to the current history and invalidated when that history is replaced. */
@@ -551,6 +541,14 @@ export class AgentBase {
     /** Whether that inherited record has been read; it can only be read before it is overwritten. */
     #inheritedRead = false;
     /**
+     * Whether the activation hook is still owed an announcement for inherited work: the store
+     * already said the agent was working when this process first looked, and no run of this
+     * process has announced taking that work up yet.
+     */
+    #restoreActivationOwed = false;
+    /** Whether this process has announced the activation of the current active period. */
+    #activationAnnounced = false;
+    /**
      * The compaction that has been asked for and not carried out yet, together with the promise
      * every caller waiting for it shares. Requesting one while it is pending joins that promise
      * rather than queueing a second compaction.
@@ -590,6 +588,8 @@ export class AgentBase {
     #closing: Promise<void> | undefined;
     /** Operations accepted from a caller and not finished yet; a close waits for every one. */
     readonly #admitted = new Set<Promise<unknown>>();
+    /** Queue acceptances the run loop must publish before it may decide its queues are empty. */
+    readonly #messageAdmissions = new Set<Promise<readonly AgentMessageAcceptance[]>>();
     /**
      * Work from an earlier response that is still unwinding: a provider stream that has not
      * finished closing, or a tool that was settled in the conversation by an abort and is still
@@ -625,10 +625,20 @@ export class AgentBase {
      * they are needed by the first turn and by nothing before it, so an owner resuming a hundred
      * identities at startup pays for a hundred small reads rather than a hundred transcripts.
      * The rest loads on the way into the turn that actually needs it.
+     *
+     * The read normally runs on the agent's own context. A caller resolving the agent from
+     * inside an open storage transaction passes `loadCtx` to route this one read through that
+     * transaction's connection instead, because a single-connection driver cannot serve a read
+     * beside the transaction it is holding open. The agent's own lifetime context is detached
+     * either way and never carries the caller's transaction.
      */
-    static async load(ctx: Context, options: AgentBaseOptions): Promise<AgentBase> {
+    static async load(
+        ctx: Context,
+        options: AgentBaseOptions,
+        loadCtx?: Context,
+    ): Promise<AgentBase> {
         const agent = new AgentBase(ctx, options);
-        await agent.#loadPendingState();
+        await agent.#loadPendingState(loadCtx ?? agent.#ctx);
         return agent;
     }
 
@@ -654,14 +664,18 @@ export class AgentBase {
     /**
      * Read the outstanding work the store already holds, before this instance has written any of
      * its own. It is both what `active` answers from and what an interrupted run is recognized
-     * by, so reading it here leaves the later stage writes nothing to learn from the store.
+     * by, so reading it here leaves the later stage writes nothing to learn from the store. The
+     * context is the caller's choice: the agent's own for an ordinary load, or the resolving
+     * transaction's when the read has to ride that transaction's connection.
      */
-    async #loadPendingState(): Promise<void> {
-        await this.#runInPersistenceLock(this.#ctx, async (lockCtx) => {
-            await this.#loadConfig(lockCtx);
-            const stored = await agentBasePendingStateOf(lockCtx, this.#persistence);
+    async #loadPendingState(ctx: Context): Promise<void> {
+        await this.#runPersistenceStep(ctx, async (operationCtx) => {
+            await this.#loadConfig(operationCtx);
+            const stored = await agentBasePendingStateOf(operationCtx, this.#persistence);
             this.#inherited = stored;
             this.#inheritedRead = true;
+            this.#restoreActivationOwed =
+                stored !== undefined && this.#hooks.afterAgentActivatedTransact !== undefined;
             this.#pending = stored;
             this.#loopId = stored?.loopId;
             this.#turnId = stored?.turnId;
@@ -698,7 +712,6 @@ export class AgentBase {
         this.#providers = options.providers;
         this.#providerId = options.provider;
         this.#persistence = options.persistence;
-        this.#persistenceLock = asyncLock({ reentry: "block" });
         this.#hooks = options.hooks ?? {};
         this.state = {
             instructions: options.initialState?.instructions ?? "",
@@ -861,7 +874,7 @@ export class AgentBase {
     }
 
     /**
-     * Record the stage the run has reached, taking the store lock when not already inside it.
+     * Record the stage the run has reached through the store's transaction boundary.
      *
      * The first of these also reads what the store already held, before overwriting it. That
      * reading is the only chance to see it: from this point the record says what this instance
@@ -876,28 +889,44 @@ export class AgentBase {
         const pending = this.#pendingState(stage);
         if (
             transact === undefined &&
+            !this.#restoreActivationOwed &&
             deterministicStringify(pending) === this.#pendingWritten &&
             this.#inheritedRead
         ) {
             return undefined;
         }
         try {
-            return await this.#runInPersistenceLock(this.#workContext(ctx), async (lockCtx) => {
+            return await this.#runPersistenceStep(this.#workContext(ctx), async (lockCtx) => {
                 if (!this.#inheritedRead) {
                     this.#inheritedRead = true;
                     this.#inherited = await agentBasePendingStateOf(lockCtx, this.#persistence);
+                    this.#restoreActivationOwed =
+                        this.#inherited !== undefined &&
+                        !this.#activationAnnounced &&
+                        this.#hooks.afterAgentActivatedTransact !== undefined;
                 }
-                if (transact === undefined) {
+                const announceRestore = this.#restoreActivationOwed;
+                if (transact === undefined && !announceRestore) {
                     await this.#recordPending(lockCtx, stage);
                     return undefined;
                 }
-                return await this.#recordTransaction(lockCtx, async (txCtx) => {
+                const result = await this.#recordTransaction(lockCtx, async (txCtx) => {
                     // The state is staged first. The callback then writes against this exact
                     // transaction, so neither its conclusion nor the state it observed can land
                     // without the other.
                     await this.#recordPending(txCtx, stage, true);
-                    return await this.#withTransactionalContext(txCtx, transact);
+                    // Taking up inherited work is what reactivates the agent after a restart,
+                    // so the announcement commits with the resumed run's own stage record.
+                    if (announceRestore) await this.#announceActivation(txCtx, true);
+                    return transact === undefined
+                        ? undefined
+                        : await this.#withTransactionalContext(txCtx, transact);
                 });
+                if (announceRestore) {
+                    this.#restoreActivationOwed = false;
+                    this.#activationAnnounced = true;
+                }
+                return result;
             });
         } catch (error) {
             if (transact !== undefined) throw error;
@@ -916,6 +945,47 @@ export class AgentBase {
         await this.#persistence.deleteValue(ctx, AGENT_BASE_PENDING_KEY);
         this.#pending = undefined;
         this.#pendingWritten = undefined;
+    }
+
+    /**
+     * Tell the activation hook the agent stopped being settled, inside the very transaction that
+     * records the work it now owes. A failure propagates and rolls that transaction back, so a
+     * module never concludes the agent woke up from a wake-up that never became durable.
+     */
+    async #announceActivation(txCtx: Context, restored: boolean): Promise<void> {
+        const hook = this.#hooks.afterAgentActivatedTransact;
+        if (hook === undefined) return;
+        await this.#withTransactionalContext(txCtx, (hookCtx) =>
+            hook(this.#workContext(hookCtx), { restored }),
+        );
+    }
+
+    /**
+     * Record that scheduled work made an inference owed, and decide whether this transaction is
+     * the one that woke a settled agent. The decision is the store's own absent-only insert of
+     * the pending record, so transactions racing to wake the same agent are arbitrated by the
+     * database rather than by a read another writer could make stale: exactly one creates the
+     * record and activates, and the others find it already present. A record that is present
+     * but unreadable counts as no pending state, as it does everywhere else.
+     */
+    async #claimPendingWork(txCtx: Context): Promise<boolean> {
+        const pending = this.#pendingState("inference");
+        const serialized = deterministicStringify(pending);
+        // This instance already recorded the current run, so the work is already owed and
+        // nothing here can be an activation.
+        if (this.#pendingWritten === serialized) return false;
+        let created = await this.#persistence.writeValueIfAbsent(
+            txCtx,
+            AGENT_BASE_PENDING_KEY,
+            pending,
+        );
+        if (!created) {
+            created = (await agentBasePendingStateOf(txCtx, this.#persistence)) === undefined;
+            await this.#persistence.writeValue(txCtx, AGENT_BASE_PENDING_KEY, pending);
+        }
+        this.#pending = pending;
+        this.#pendingWritten = serialized;
+        return created;
     }
 
     /**
@@ -957,11 +1027,7 @@ export class AgentBase {
         const ownedUpdate = ownAgentMetadata(update);
         if (ownedUpdate === undefined) throw new Error("The agent metadata is not valid.");
         if (this.#closed) throw new Error("The agent has been closed.");
-        if (
-            insideTurn.get(ctx).includes(this.id) ||
-            this.#insideOwnLoop() ||
-            this.#insideOwnPersistenceLock()
-        ) {
+        if (insideTurn.get(ctx).includes(this.id) || this.#insideOwnLoop()) {
             throw new Error(
                 "Updating metadata from inside this agent's current operation would wait for " +
                     "that same operation to finish. Update it after the hook or tool returns.",
@@ -969,20 +1035,24 @@ export class AgentBase {
         }
         let change!: AgentMetadataChange;
         let next!: AgentConfig;
-        await this.#runInPersistenceLock(ctx, async (lockCtx) => {
-            const previousMetadata = ownAgentMetadata(this.#config.metadata ?? {});
-            const metadata = ownAgentMetadata({ ...previousMetadata, ...ownedUpdate });
-            if (previousMetadata === undefined || metadata === undefined) {
-                throw new Error("The agent metadata is not valid.");
-            }
-            next = ownAgentConfig({ ...this.#config, metadata });
-            change = {
-                agentId: this.id,
-                previousMetadata,
-                update: ownedUpdate,
-                metadata,
-            };
+        await this.#runPersistenceStep(ctx, async (lockCtx) => {
             await this.#persistence.transaction(lockCtx, async (txCtx) => {
+                const stored = await this.#persistence.readValues(txCtx, "agentConfig");
+                const exact = stored.find(({ key }) => key === "agentConfig")?.value;
+                const current =
+                    exact === undefined ? this.#config : ownAgentConfig(exact as AgentConfig);
+                const previousMetadata = ownAgentMetadata(current.metadata ?? {});
+                const metadata = ownAgentMetadata({ ...previousMetadata, ...ownedUpdate });
+                if (previousMetadata === undefined || metadata === undefined) {
+                    throw new Error("The agent metadata is not valid.");
+                }
+                next = ownAgentConfig({ ...current, metadata });
+                change = {
+                    agentId: this.id,
+                    previousMetadata,
+                    update: ownedUpdate,
+                    metadata,
+                };
                 await this.#persistence.writeValue(txCtx, "agentConfig", next);
                 await this.#withTransactionalContext(
                     withAgentConfig(txCtx, next),
@@ -992,10 +1062,12 @@ export class AgentBase {
                             change,
                         ),
                 );
+                afterCommit(txCtx, () => {
+                    this.#config = next;
+                    this.#baseCtx = withAgentConfig(this.#baseCtx, next);
+                    this.#ctx = this.#deriveCtx();
+                });
             });
-            this.#config = next;
-            this.#baseCtx = withAgentConfig(this.#baseCtx, next);
-            this.#ctx = this.#deriveCtx();
         });
         await this.#invokeHookOn(
             this.#hookContext(withAgentConfig(ctx, next)),
@@ -1018,11 +1090,6 @@ export class AgentBase {
         const outerTransaction = agentStorageTransaction(ctx);
         if (outerTransaction?.lifetime.aborted === true) {
             throw new Error("The agent storage transaction carried by this context has ended.");
-        }
-        if (outerTransaction !== undefined && this.#insideOwnPersistenceLock()) {
-            throw new Error(
-                "Agent message delivery cannot reenter its own persistence operation inside a transaction.",
-            );
         }
         const {
             await: requestedWait,
@@ -1113,11 +1180,6 @@ export class AgentBase {
         return insideLoops.getStore()?.includes(this.id) === true;
     }
 
-    /** Whether this call chain already holds this agent's persistence lock. */
-    #insideOwnPersistenceLock(): boolean {
-        return insidePersistenceLocks.getStore()?.includes(this.id) === true;
-    }
-
     /** Live agent commands cannot be staged or undone by an enclosing database transaction. */
     #assertOutsideStorageTransaction(ctx: Context, operation: string): void {
         if (agentStorageTransaction(ctx) !== undefined) {
@@ -1127,24 +1189,18 @@ export class AgentBase {
         }
     }
 
-    /** Hold the persistence lock while marking it independently of the caller's Context. */
-    async #runInPersistenceLock<Result>(
+    /** Run one persistence step; its database statements and transactions own consistency. */
+    async #runPersistenceStep<Result>(
         ctx: Context,
-        work: (lockCtx: Context) => Promise<Result>,
+        work: (stepCtx: Context) => Promise<Result>,
     ): Promise<Result> {
-        return await this.#persistenceLock.runInLock(ctx, async (lockCtx) => {
-            const held = insidePersistenceLocks.getStore() ?? [];
-            return await insidePersistenceLocks.run([...held, this.id], async () => {
-                return await work(lockCtx);
-            });
-        });
+        return await work(ctx);
     }
 
     /**
-     * Accept a batch of messages as one durable step. Every message is written under the same
-     * hold of the persistence lock and inside one transaction, so a caller arriving while a
-     * batch is being written lands after the whole batch rather than in the middle of it, and a
-     * failure admits none of them.
+     * Accept a batch of messages as one durable transaction, so a caller arriving while it is
+     * being written lands after the whole batch rather than in the middle of it, and a failure
+     * admits none of them.
      */
     async #enqueue(
         ctx: Context,
@@ -1159,22 +1215,25 @@ export class AgentBase {
                 ? this.#enqueueIndependently(ctx, batch)
                 : this.#enqueueInTransaction(ctx, batch);
         this.#admitted.add(admitted);
+        this.#messageAdmissions.add(admitted);
         try {
             return await admitted;
         } finally {
             this.#admitted.delete(admitted);
+            this.#messageAdmissions.delete(admitted);
         }
     }
 
-    /** Accept a batch under the persistence lock, in a transaction of the acceptance's own. */
+    /** Accept a batch in a transaction of the acceptance's own. */
     async #enqueueIndependently(
         ctx: Context,
         batch: readonly QueueRequest[],
     ): Promise<readonly AgentMessageAcceptance[]> {
-        return await this.#runInPersistenceLock(ctx, async (lockCtx) => {
+        return await this.#runPersistenceStep(ctx, async (lockCtx) => {
             const accepted: { readonly key: string; readonly request: QueueRequest }[] = [];
             const results: AgentMessageAcceptance[] = [];
             await this.#recordTransaction(lockCtx, async (txCtx) => {
+                let activated = false;
                 for (const request of batch) {
                     const identityKey = `message.${request.id}`;
                     if (!(await this.#persistence.writeValueIfAbsent(txCtx, identityKey, true))) {
@@ -1203,37 +1262,42 @@ export class AgentBase {
                 // Accepting a message is what makes the work owed: the same transaction that
                 // admits it records that the agent owes an answer, so a process that dies right
                 // here is discovered still owing it rather than looking idle over a full queue.
-                await this.#recordPending(txCtx, "inference");
-            });
-            for (const { key, request } of accepted) {
-                // The queue is resolved inside the lock: a history load running just before this
-                // one replaces the queue arrays wholesale, and a reference taken before the wait
-                // would push the message into an array nobody reads again.
-                const queue = request.kind === "steering" ? this.#steering : this.#sends;
-                queue.push({
-                    key,
-                    id: request.id,
-                    message: request.message,
-                    ...(request.metadata === undefined ? {} : { metadata: request.metadata }),
-                    options: request.options,
+                // Creating that record where none existed is what makes a settled agent active,
+                // and the activation hook commits with the very transaction that admits the
+                // message.
+                if (await this.#claimPendingWork(txCtx)) {
+                    await this.#announceActivation(txCtx, false);
+                    activated = true;
+                }
+                afterCommit(txCtx, () => {
+                    if (activated) {
+                        this.#activationAnnounced = true;
+                        this.#restoreActivationOwed = false;
+                    }
+                    for (const { key, request } of accepted) {
+                        const queue = request.kind === "steering" ? this.#steering : this.#sends;
+                        queue.push({
+                            key,
+                            id: request.id,
+                            message: request.message,
+                            ...(request.metadata === undefined
+                                ? {}
+                                : { metadata: request.metadata }),
+                            options: request.options,
+                        });
+                    }
+                    this.#turnRequested = true;
+                    this.#startRun();
                 });
-            }
-            if (accepted.length > 0) {
-                this.#turnRequested = true;
-                this.#startRun();
-            }
+            });
             return results;
         });
     }
 
     /**
-     * Accept a batch inside the caller's own open transaction. This path must not take the
-     * agent's persistence lock: the caller holds the database writer for as long as its
-     * transaction stays open, while a running turn takes the lock first and the database second,
-     * so waiting for the lock here would close a cycle nothing could break. The outer transaction
-     * supplies the atomicity the lock otherwise guarantees, queue keys are claimed with
-     * absent-only writes so a racing independent enqueue cannot be overwritten, and no heap
-     * state changes until the commit publishes the batch.
+     * Accept a batch inside the caller's own open transaction. The outer transaction supplies
+     * atomicity, queue keys are claimed with absent-only writes so a racing independent enqueue
+     * cannot be overwritten, and no heap state changes until the commit publishes the batch.
      */
     async #enqueueInTransaction(
         ctx: Context,
@@ -1267,29 +1331,39 @@ export class AgentBase {
         // Accepting a message is what makes the work owed, so the same transaction that admits
         // it records that the agent owes an answer; here that record is staged durably and made
         // live only once the outermost commit publishes the whole batch.
-        const stagedPending = acceptedAny
-            ? await this.#stagePendingMessageWork(ctx)
-            : undefined;
+        const staged = acceptedAny ? await this.#stagePendingMessageWork(ctx) : undefined;
+        // Scheduling onto a settled agent is what makes it active; the announcement writes into
+        // the caller's own transaction and is published or rolled back with the batch itself.
+        if (staged?.activated === true) await this.#announceActivation(ctx, false);
         const offeredIds = batch.map(({ id }) => id);
         afterCommit(ctx, async () => {
-            await this.#activateCommittedMessages(offeredIds, stagedPending);
+            await this.#activateCommittedMessages(offeredIds, staged);
         });
         return results;
     }
 
     /**
      * Persist the pending inference an outer transaction will make live after commit, without
-     * changing any heap state that would survive a rollback. Reading the transaction's current
-     * value also makes multiple sends in one outer transaction reuse the same lifecycle IDs.
+     * changing any heap state that would survive a rollback. Whether the agent was settled is
+     * decided by the store's own absent-only insert of the pending record, so concurrent
+     * transactions waking the same agent are arbitrated by the database itself: exactly one
+     * creates the record and activates. Reading the transaction's current value on the taken
+     * path also makes multiple sends in one outer transaction reuse the same lifecycle IDs.
      */
-    async #stagePendingMessageWork(ctx: Context): Promise<AgentBasePendingState> {
+    async #stagePendingMessageWork(
+        ctx: Context,
+    ): Promise<{ readonly pending: AgentBasePendingState; readonly activated: boolean }> {
+        const fresh: AgentBasePendingState = { stage: "inference", loopId: createId() };
+        if (await this.#persistence.writeValueIfAbsent(ctx, AGENT_BASE_PENDING_KEY, fresh)) {
+            return { pending: fresh, activated: true };
+        }
         const stored = await agentBasePendingStateOf(ctx, this.#persistence);
+        // A record that is present but unreadable counts as no pending state, as everywhere
+        // else, so this transaction still claims the activation when it replaces one.
         const pending: AgentBasePendingState =
-            stored === undefined
-                ? { stage: "inference", loopId: createId() }
-                : { ...stored, stage: "inference" };
+            stored === undefined ? fresh : { ...stored, stage: "inference" };
         await this.#persistence.writeValue(ctx, AGENT_BASE_PENDING_KEY, pending);
-        return pending;
+        return { pending, activated: stored === undefined };
     }
 
     /**
@@ -1299,15 +1373,23 @@ export class AgentBase {
      */
     async #activateCommittedMessages(
         offeredIds: readonly string[],
-        stagedPending: AgentBasePendingState | undefined,
+        staged:
+            | { readonly pending: AgentBasePendingState; readonly activated: boolean }
+            | undefined,
     ): Promise<void> {
         for (const id of offeredIds) this.#offeredMessageIds.add(id);
-        if (stagedPending === undefined) return;
-        await this.#runInPersistenceLock(this.#ctx, async (lockCtx) => {
-            let pending = stagedPending;
+        if (staged === undefined) return;
+        // The commit published the staged activation announcement along with the batch, so the
+        // current active period is now an announced one.
+        if (staged.activated) {
+            this.#activationAnnounced = true;
+            this.#restoreActivationOwed = false;
+        }
+        await this.#runPersistenceStep(this.#ctx, async (lockCtx) => {
+            let pending = staged.pending;
             try {
                 pending =
-                    (await agentBasePendingStateOf(lockCtx, this.#persistence)) ?? stagedPending;
+                    (await agentBasePendingStateOf(lockCtx, this.#persistence)) ?? staged.pending;
             } catch {
                 // The committed staged value is enough to start; a turn reload retries storage.
             }
@@ -1338,21 +1420,30 @@ export class AgentBase {
     async #enqueueInjections(ctx: Context, batch: readonly SessionSystemMessage[]): Promise<void> {
         if (batch.length === 0) return;
         if (this.#closed) throw new Error("The agent has been closed.");
-        await this.#runInPersistenceLock(ctx, async (lockCtx) => {
+        await this.#runPersistenceStep(ctx, async (lockCtx) => {
             const accepted: InjectionEntry[] = [];
             await this.#recordTransaction(lockCtx, async (txCtx) => {
+                let activated = false;
                 for (const message of batch) {
                     const key = await this.#queueKey(txCtx, "inject.");
                     await this.#persistence.writeValue(txCtx, key, message);
                     accepted.push({ key, message });
                 }
-                if (accepted.length > 0) await this.#recordPending(txCtx, "inference");
+                if (accepted.length === 0) return;
+                if (await this.#claimPendingWork(txCtx)) {
+                    await this.#announceActivation(txCtx, false);
+                    activated = true;
+                }
+                afterCommit(txCtx, () => {
+                    if (activated) {
+                        this.#activationAnnounced = true;
+                        this.#restoreActivationOwed = false;
+                    }
+                    this.#injections.push(...accepted);
+                    this.#turnRequested = true;
+                    this.#startRun();
+                });
             });
-            this.#injections.push(...accepted);
-            if (accepted.length > 0) {
-                this.#turnRequested = true;
-                this.#startRun();
-            }
         });
     }
 
@@ -1652,19 +1743,21 @@ export class AgentBase {
         if (this.#runPromise !== undefined) return;
         // The loop is a lifetime of its own, so it marks itself rather than inheriting whatever
         // happened to start it — a tool of another agent, most often, which will be long gone.
-        this.#runPromise = insideLoops
-            .run([this.id], () => this.#runLoop())
-            .finally(() => {
-                this.#runPromise = undefined;
-                // A request that arrived while the loop was settling would otherwise be stranded:
-                // the loop had stopped checking, and the caller's own `#startRun` saw a run still
-                // in flight. Waiters re-check the field, so they pick this continuation up.
-                if (this.#turnRequested && !this.#closed) {
-                    this.#startRun();
-                    return;
-                }
-                this.#announceSettled();
-            });
+        this.#runPromise = outsideAgentDatabaseOperation(() =>
+            insideLoops
+                .run([this.id], () => this.#runLoop())
+                .finally(() => {
+                    this.#runPromise = undefined;
+                    // A request that arrived while the loop was settling would otherwise be stranded:
+                    // the loop had stopped checking, and the caller's own `#startRun` saw a run still
+                    // in flight. Waiters re-check the field, so they pick this continuation up.
+                    if (this.#turnRequested && !this.#closed) {
+                        this.#startRun();
+                        return;
+                    }
+                    this.#announceSettled();
+                }),
+        );
     }
 
     /**
@@ -1853,7 +1946,7 @@ export class AgentBase {
     /** The settlement itself, on the context of the span it belongs to. */
     async #settleRecord(ctx: Context, settlement: AgentBaseSettlement): Promise<void> {
         try {
-            await this.#runInPersistenceLock(this.#workContext(ctx), (lockCtx) =>
+            await this.#runPersistenceStep(this.#workContext(ctx), (lockCtx) =>
                 this.#recordTransaction(lockCtx, async (txCtx) => {
                     await this.#clearPending(txCtx);
                     await this.#invokeTransactionalSettle(txCtx, settlement);
@@ -1869,6 +1962,10 @@ export class AgentBase {
             this.#inferenceId = undefined;
             this.#settlementId = undefined;
             this.#settlement = settlement;
+            // Settled means nothing is owed: the next scheduled message activates the agent
+            // afresh, and nothing inherited remains to announce.
+            this.#activationAnnounced = false;
+            this.#restoreActivationOwed = false;
         } catch {
             // The run itself is over and succeeded; only the record of its ending failed.
         }
@@ -2160,6 +2257,7 @@ export class AgentBase {
                     if (hasPendingWork) await this.#emit(ctx, { type: "done", state: "cancelled" });
                     break;
                 }
+                await this.#finishAdmittedQueueWrites();
                 let injected = await this.#consumeQueue(
                     ctx,
                     this.#steering,
@@ -2256,6 +2354,17 @@ export class AgentBase {
             this.#clearTurnRequestIfNoPendingInput();
         }
         this.#turnAborted = abort.signal.aborted;
+    }
+
+    /**
+     * Let queue writes already admitted by a re-entrant hook publish before deciding the queues
+     * are empty. Their database transactions own ordering; this waits for those concrete writes
+     * without holding another agent or database lock.
+     */
+    async #finishAdmittedQueueWrites(): Promise<void> {
+        while (this.#messageAdmissions.size > 0) {
+            await Promise.allSettled(this.#messageAdmissions);
+        }
     }
 
     /**
@@ -2405,7 +2514,7 @@ export class AgentBase {
         const previousTokens = this.#contextTokens;
         this.#contextTokens = tokens;
         try {
-            await this.#runInPersistenceLock(this.#workContext(ctx), async (lockCtx) => {
+            await this.#runPersistenceStep(this.#workContext(ctx), async (lockCtx) => {
                 const write = (writeCtx: Context): Promise<void> =>
                     tokens === undefined
                         ? this.#persistence.deleteValue(writeCtx, "context")
@@ -2483,7 +2592,7 @@ export class AgentBase {
             }
             if (result.status === "completed") {
                 const completed: AgentBaseCompletedCompaction = { ...compactionStart, result };
-                await this.#runInPersistenceLock(this.#workContext(ctx), async (lockCtx) => {
+                await this.#runPersistenceStep(this.#workContext(ctx), async (lockCtx) => {
                     // Physically delete the superseded records and write the replacement —
                     // which keeps the messages that stay — in one atomic step.
                     await this.#recordTransaction(lockCtx, async (txCtx) => {
@@ -2540,7 +2649,7 @@ export class AgentBase {
         let settled = false;
         let staged = false;
         try {
-            await this.#runInPersistenceLock(this.#workContext(ctx), async (lockCtx) => {
+            await this.#runPersistenceStep(this.#workContext(ctx), async (lockCtx) => {
                 // A call the durable batch still holds belongs to the resume, which answers it
                 // properly — and re-executes it when the tool is durable. Settling it here as
                 // well would give the conversation two results for one call.
@@ -2665,7 +2774,7 @@ export class AgentBase {
             content: [{ type: "text", text: `The last turn failed: ${message}` }],
         };
         try {
-            await this.#runInPersistenceLock(this.#workContext(ctx), async (lockCtx) => {
+            await this.#runPersistenceStep(this.#workContext(ctx), async (lockCtx) => {
                 await this.#appendRecord(lockCtx, { type: "system", message: failure });
                 this.#messages.push(failure);
             });
@@ -2676,7 +2785,7 @@ export class AgentBase {
 
     /** Move every pending hook notice into history as one atomic, ordered append batch. */
     async #consumeInjections(ctx: Context): Promise<boolean> {
-        return await this.#runInPersistenceLock(this.#workContext(ctx), async (lockCtx) => {
+        return await this.#runPersistenceStep(this.#workContext(ctx), async (lockCtx) => {
             if (this.#injections.length === 0) return false;
             const durable = new Set(
                 (await this.#persistence.readValues(lockCtx, "inject.")).map(({ key }) => key),
@@ -2730,9 +2839,9 @@ export class AgentBase {
      * context store and the in-memory history. The moves run in one transaction, so a message
      * is never durable in both stores or neither, and memory changes only after the commit.
      *
-     * What the consumption has to announce is announced once the lock has been released. A hook
-     * told a message has landed may perfectly well answer by sending another one, and doing that
-     * while this still held the store lock would be the hook waiting for its own caller.
+     * What the consumption has to announce is announced once the transaction has committed. A
+     * hook told a message has landed may perfectly well answer by sending another one without
+     * re-entering the transaction that delivered the first message.
      */
     async #consumeQueue(
         ctx: Context,
@@ -2741,253 +2850,244 @@ export class AgentBase {
         kind: QueueRequest["kind"],
     ): Promise<boolean> {
         const prefix = `${kind}.`;
-        /** Filled in once the consumption has committed, and reported after the lock is released. */
+        /** Filled in once the consumption has committed, then reported to observers. */
         const accepted: AgentBaseAcceptedMessage[] = [];
         let permissionChange: AgentBasePermissionModeChange | undefined;
-        const consumed = await this.#runInPersistenceLock(
-            this.#workContext(ctx),
-            async (lockCtx) => {
-                if (queue.length === 0) return false;
-                // The durable queue, not memory, decides what is left to consume after a restart.
-                const durable = new Set(
-                    (await this.#persistence.readValues(lockCtx, prefix)).map(({ key }) => key),
-                );
-                const remaining = queue.filter((entry) => durable.has(entry.key));
-                if (remaining.length !== queue.length) queue.splice(0, queue.length, ...remaining);
-                if (queue.length === 0) return false;
-                const count = mode === "all" ? queue.length : 1;
-                const batch = queue.slice(0, count);
-                // Settings carried by the consumed messages become the effective settings for the
-                // inference that follows, each defined field superseding the previous value. The
-                // effective values are persisted alongside the consumption so a restart keeps them.
-                let provider = this.#providerId;
-                let model = this.#model;
-                let effort = this.#effort;
-                let serviceTier = this.#serviceTier;
-                let permissionMode = this.#permissionMode;
-                let changed = false;
-                for (const entry of batch) {
-                    if (entry.options.provider !== undefined) {
-                        provider = entry.options.provider;
-                        changed = true;
-                    }
-                    if (entry.options.model !== undefined) {
-                        model = entry.options.model;
-                        changed = true;
-                    }
-                    if (entry.options.effort !== undefined) {
-                        effort = entry.options.effort;
-                        changed = true;
-                    }
-                    if (entry.options.serviceTier !== undefined) {
-                        serviceTier = entry.options.serviceTier;
-                        changed = true;
-                    }
-                    if (entry.options.permissionMode !== undefined) {
-                        permissionMode = entry.options.permissionMode;
-                        changed = true;
-                    }
+        const consumed = await this.#runPersistenceStep(this.#workContext(ctx), async (lockCtx) => {
+            if (queue.length === 0) return false;
+            // The durable queue, not memory, decides what is left to consume after a restart.
+            const durable = new Set(
+                (await this.#persistence.readValues(lockCtx, prefix)).map(({ key }) => key),
+            );
+            const remaining = queue.filter((entry) => durable.has(entry.key));
+            if (remaining.length !== queue.length) queue.splice(0, queue.length, ...remaining);
+            if (queue.length === 0) return false;
+            const count = mode === "all" ? queue.length : 1;
+            const batch = queue.slice(0, count);
+            // Settings carried by the consumed messages become the effective settings for the
+            // inference that follows, each defined field superseding the previous value. The
+            // effective values are persisted alongside the consumption so a restart keeps them.
+            let provider = this.#providerId;
+            let model = this.#model;
+            let effort = this.#effort;
+            let serviceTier = this.#serviceTier;
+            let permissionMode = this.#permissionMode;
+            let changed = false;
+            for (const entry of batch) {
+                if (entry.options.provider !== undefined) {
+                    provider = entry.options.provider;
+                    changed = true;
                 }
-                // The mode the messages make effective, kept apart from the rest because it is the one
-                // setting with hooks of its own: a change is announced, and what a module concludes
-                // from it commits with the message that carried it.
-                const modeChange: AgentBasePermissionModeChange | undefined =
-                    permissionMode === this.#permissionMode
-                        ? undefined
-                        : { previousMode: this.#permissionMode, mode: permissionMode };
-                // A provider or model change is checked against the provider-model compatibility
-                // matrix. An incompatible change resets the conversation: the history is erased
-                // completely, the old provider session is destroyed, and the `modelChanged` hook
-                // may inject one handoff system message at the very beginning of the fresh
-                // context. A compatible provider change keeps the history but still gets a fresh
-                // session, since a session is bound to the provider that created it.
-                const selectionChanged = provider !== this.#providerId || model !== this.#model;
-                let reset = false;
-                let injected: SessionSystemMessage | undefined;
-                if (selectionChanged) {
-                    if (this.#model !== undefined && model !== undefined) {
-                        const previousType = this.#providers.typeOf(this.#providerId);
-                        const nextType = this.#providers.typeOf(provider);
-                        reset =
-                            previousType === null ||
-                            nextType === null ||
-                            !areProviderModelsCompatible(
-                                {
-                                    modelId: this.#model,
-                                    providerId: this.#providerId,
-                                    providerType: previousType,
-                                },
-                                {
-                                    modelId: model,
-                                    providerId: provider,
-                                    providerType: nextType,
-                                },
-                            );
-                    } else {
-                        // A selection without a model on either side cannot be judged compatible.
-                        reset = model !== this.#model;
-                    }
+                if (entry.options.model !== undefined) {
+                    model = entry.options.model;
+                    changed = true;
                 }
-                await this.#recordTransaction(lockCtx, async (txCtx) => {
-                    if (selectionChanged) {
-                        if (this.#hooks.modelChanged !== undefined && model !== undefined) {
-                            // The hook runs while the persistence lock is held and inside the
-                            // transaction that commits the switch, so its store executes directly on
-                            // that transaction: what it writes lands and rolls back with the change
-                            // it was told about, never on its own. The context it is given ends with
-                            // the transaction, so a store it keeps cannot outlive the switch.
-                            const committed = new AbortController();
-                            // Derived from the transaction's own context, which is what makes
-                            // the hook's writes part of the switch rather than a second,
-                            // separate commit, and ending with it.
-                            const changeLifetime = withLifetime(
-                                withAgentContext(txCtx, {
-                                    id: this.id,
-                                    provider,
-                                    model,
-                                    effort,
-                                    serviceTier,
-                                    permissionMode,
-                                }),
-                                committed.signal,
-                            );
-                            const changeCtx = withAgentRunKV(
-                                withAgentHistoryKV(
-                                    withAgentKV(changeLifetime, this.#kv),
-                                    this.#historyKV,
-                                ),
-                                this.#runKV,
-                            );
-                            try {
-                                injected = await this.#hooks.modelChanged(changeCtx, {
-                                    previousModel: this.#model,
-                                    model,
-                                    previousProvider: this.#providerId,
-                                    provider,
-                                    providers: this.#providers,
-                                    wasReset: reset,
-                                });
-                            } catch {
-                                // A failing handoff must not cost the conversation: an incompatible
-                                // switch is rejected outright — the previous selection stays
-                                // effective and the history is not cleared. A compatible change
-                                // proceeds; the hook only observed it.
-                                if (reset) {
-                                    provider = this.#providerId;
-                                    model = this.#model;
-                                    reset = false;
-                                }
-                            } finally {
-                                // The store belonged to the hook's call, not to the hook.
-                                committed.abort();
-                            }
-                            if (!reset) injected = undefined;
-                        }
-                    }
-                    // The queue move is atomic with appending the consumed messages and recording
-                    // the inference they make due. The store has one owner, so ordinary deletes
-                    // are sufficient.
-                    for (const entry of batch) {
-                        await this.#persistence.deleteValue(txCtx, entry.key);
-                    }
-                    if (reset) {
-                        await this.#deleteRecordIdentities(
-                            txCtx,
-                            await this.#persistence.load(txCtx),
-                        );
-                        await this.#historyKV.clear(txCtx);
-                        await this.#persistence.clearRecords(txCtx);
-                        // The erased conversation is what the measurement described.
-                        await this.#persistence.deleteValue(txCtx, "context");
-                        if (injected !== undefined) {
-                            await this.#appendRecord(txCtx, {
-                                type: "system",
-                                message: injected,
-                            });
-                        }
-                    }
-                    for (const entry of batch) {
-                        await this.#appendRecord(txCtx, {
-                            type: "user",
-                            id: entry.id,
-                            message: entry.message,
-                            ...(entry.metadata === undefined ? {} : { metadata: entry.metadata }),
-                        });
-                    }
-                    if (changed) {
-                        await this.#persistence.writeValue(txCtx, "settings", {
-                            provider,
-                            ...(model === undefined ? {} : { model }),
-                            ...(effort === undefined ? {} : { effort }),
-                            ...(serviceTier === undefined ? {} : { serviceTier }),
-                            permissionMode,
-                        });
-                    }
-                    // Consuming a message is precisely the act that makes an inference owed, so
-                    // the two commit as one. A crash cannot land between them and leave a
-                    // message in the conversation that nothing remembers having to answer.
-                    await this.#recordPending(txCtx, "inference");
-                    // Last, so a hook writing its own account of the consumption sees a transaction
-                    // holding all of it. The mode comes before the messages: it is what they were
-                    // said under, and a listener recording them wants to know that first.
-                    const selection = { provider, model, effort, serviceTier, permissionMode };
-                    if (modeChange !== undefined) {
-                        await this.#invokeTransactHook(
-                            txCtx,
-                            selection,
-                            this.#hooks.permissionModeChangedTransact,
-                            modeChange,
-                        );
-                    }
-                    for (const entry of batch) {
-                        await this.#invokeTransactHook(
-                            txCtx,
-                            selection,
-                            this.#hooks.messageAcceptedTransact,
+                if (entry.options.effort !== undefined) {
+                    effort = entry.options.effort;
+                    changed = true;
+                }
+                if (entry.options.serviceTier !== undefined) {
+                    serviceTier = entry.options.serviceTier;
+                    changed = true;
+                }
+                if (entry.options.permissionMode !== undefined) {
+                    permissionMode = entry.options.permissionMode;
+                    changed = true;
+                }
+            }
+            // The mode the messages make effective, kept apart from the rest because it is the one
+            // setting with hooks of its own: a change is announced, and what a module concludes
+            // from it commits with the message that carried it.
+            const modeChange: AgentBasePermissionModeChange | undefined =
+                permissionMode === this.#permissionMode
+                    ? undefined
+                    : { previousMode: this.#permissionMode, mode: permissionMode };
+            // A provider or model change is checked against the provider-model compatibility
+            // matrix. An incompatible change resets the conversation: the history is erased
+            // completely, the old provider session is destroyed, and the `modelChanged` hook
+            // may inject one handoff system message at the very beginning of the fresh
+            // context. A compatible provider change keeps the history but still gets a fresh
+            // session, since a session is bound to the provider that created it.
+            const selectionChanged = provider !== this.#providerId || model !== this.#model;
+            let reset = false;
+            let injected: SessionSystemMessage | undefined;
+            if (selectionChanged) {
+                if (this.#model !== undefined && model !== undefined) {
+                    const previousType = this.#providers.typeOf(this.#providerId);
+                    const nextType = this.#providers.typeOf(provider);
+                    reset =
+                        previousType === null ||
+                        nextType === null ||
+                        !areProviderModelsCompatible(
                             {
-                                id: entry.id,
-                                kind,
-                                message: entry.message,
-                                ...(entry.metadata === undefined
-                                    ? {}
-                                    : { metadata: entry.metadata }),
+                                modelId: this.#model,
+                                providerId: this.#providerId,
+                                providerType: previousType,
+                            },
+                            {
+                                modelId: model,
+                                providerId: provider,
+                                providerType: nextType,
                             },
                         );
+                } else {
+                    // A selection without a model on either side cannot be judged compatible.
+                    reset = model !== this.#model;
+                }
+            }
+            await this.#recordTransaction(lockCtx, async (txCtx) => {
+                if (selectionChanged) {
+                    if (this.#hooks.modelChanged !== undefined && model !== undefined) {
+                        // The hook runs inside the transaction that commits the switch, so its store executes directly on
+                        // that transaction: what it writes lands and rolls back with the change
+                        // it was told about, never on its own. The context it is given ends with
+                        // the transaction, so a store it keeps cannot outlive the switch.
+                        const committed = new AbortController();
+                        // Derived from the transaction's own context, which is what makes
+                        // the hook's writes part of the switch rather than a second,
+                        // separate commit, and ending with it.
+                        const changeLifetime = withLifetime(
+                            withAgentContext(txCtx, {
+                                id: this.id,
+                                provider,
+                                model,
+                                effort,
+                                serviceTier,
+                                permissionMode,
+                            }),
+                            committed.signal,
+                        );
+                        const changeCtx = withAgentRunKV(
+                            withAgentHistoryKV(
+                                withAgentKV(changeLifetime, this.#kv),
+                                this.#historyKV,
+                            ),
+                            this.#runKV,
+                        );
+                        try {
+                            injected = await this.#hooks.modelChanged(changeCtx, {
+                                previousModel: this.#model,
+                                model,
+                                previousProvider: this.#providerId,
+                                provider,
+                                providers: this.#providers,
+                                wasReset: reset,
+                            });
+                        } catch {
+                            // A failing handoff must not cost the conversation: an incompatible
+                            // switch is rejected outright — the previous selection stays
+                            // effective and the history is not cleared. A compatible change
+                            // proceeds; the hook only observed it.
+                            if (reset) {
+                                provider = this.#providerId;
+                                model = this.#model;
+                                reset = false;
+                            }
+                        } finally {
+                            // The store belonged to the hook's call, not to the hook.
+                            committed.abort();
+                        }
+                        if (!reset) injected = undefined;
                     }
-                });
-                if (reset) this.#rotateHistoryKV();
-                // Committed: from here the messages are part of the conversation, so what has to be
-                // announced about them is decided now and reported once the lock is released.
-                permissionChange = modeChange;
-                accepted.push(
-                    ...batch.map((entry) => ({
+                }
+                // The queue move is atomic with appending the consumed messages and recording
+                // the inference they make due. The store has one owner, so ordinary deletes
+                // are sufficient.
+                for (const entry of batch) {
+                    await this.#persistence.deleteValue(txCtx, entry.key);
+                }
+                if (reset) {
+                    await this.#deleteRecordIdentities(txCtx, await this.#persistence.load(txCtx));
+                    await this.#historyKV.clear(txCtx);
+                    await this.#persistence.clearRecords(txCtx);
+                    // The erased conversation is what the measurement described.
+                    await this.#persistence.deleteValue(txCtx, "context");
+                    if (injected !== undefined) {
+                        await this.#appendRecord(txCtx, {
+                            type: "system",
+                            message: injected,
+                        });
+                    }
+                }
+                for (const entry of batch) {
+                    await this.#appendRecord(txCtx, {
+                        type: "user",
                         id: entry.id,
-                        kind,
                         message: entry.message,
                         ...(entry.metadata === undefined ? {} : { metadata: entry.metadata }),
-                    })),
-                );
-                queue.splice(0, count);
-                if (reset) {
-                    this.#messages = injected === undefined ? [] : [injected];
-                    this.#contextTokens = undefined;
+                    });
                 }
-                this.#messages.push(...batch.map((entry) => entry.message));
-                // This turn is answering the request that these messages raised. A send accepted
-                // while the turn was already running raised it again, and letting that stand would
-                // buy an extra turn with an empty queue and a full set of lifecycle hooks.
-                this.#clearTurnRequestIfNoPendingInput();
                 if (changed) {
-                    this.#providerId = provider;
-                    this.#model = model;
-                    this.#effort = effort;
-                    this.#serviceTier = serviceTier;
-                    this.#permissionMode = permissionMode;
-                    this.#ctx = this.#deriveCtx();
+                    await this.#persistence.writeValue(txCtx, "settings", {
+                        provider,
+                        ...(model === undefined ? {} : { model }),
+                        ...(effort === undefined ? {} : { effort }),
+                        ...(serviceTier === undefined ? {} : { serviceTier }),
+                        permissionMode,
+                    });
                 }
-                return true;
-            },
-        );
+                // Consuming a message is precisely the act that makes an inference owed, so
+                // the two commit as one. A crash cannot land between them and leave a
+                // message in the conversation that nothing remembers having to answer.
+                await this.#recordPending(txCtx, "inference");
+                // Last, so a hook writing its own account of the consumption sees a transaction
+                // holding all of it. The mode comes before the messages: it is what they were
+                // said under, and a listener recording them wants to know that first.
+                const selection = { provider, model, effort, serviceTier, permissionMode };
+                if (modeChange !== undefined) {
+                    await this.#invokeTransactHook(
+                        txCtx,
+                        selection,
+                        this.#hooks.permissionModeChangedTransact,
+                        modeChange,
+                    );
+                }
+                for (const entry of batch) {
+                    await this.#invokeTransactHook(
+                        txCtx,
+                        selection,
+                        this.#hooks.messageAcceptedTransact,
+                        {
+                            id: entry.id,
+                            kind,
+                            message: entry.message,
+                            ...(entry.metadata === undefined ? {} : { metadata: entry.metadata }),
+                        },
+                    );
+                }
+            });
+            if (reset) this.#rotateHistoryKV();
+            // Committed: from here the messages are part of the conversation, so what has to be
+            // announced about them is decided now and reported once the transaction commits.
+            permissionChange = modeChange;
+            accepted.push(
+                ...batch.map((entry) => ({
+                    id: entry.id,
+                    kind,
+                    message: entry.message,
+                    ...(entry.metadata === undefined ? {} : { metadata: entry.metadata }),
+                })),
+            );
+            queue.splice(0, count);
+            if (reset) {
+                this.#messages = injected === undefined ? [] : [injected];
+                this.#contextTokens = undefined;
+            }
+            this.#messages.push(...batch.map((entry) => entry.message));
+            // This turn is answering the request that these messages raised. A send accepted
+            // while the turn was already running raised it again, and letting that stand would
+            // buy an extra turn with an empty queue and a full set of lifecycle hooks.
+            this.#clearTurnRequestIfNoPendingInput();
+            if (changed) {
+                this.#providerId = provider;
+                this.#model = model;
+                this.#effort = effort;
+                this.#serviceTier = serviceTier;
+                this.#permissionMode = permissionMode;
+                this.#ctx = this.#deriveCtx();
+            }
+            return true;
+        });
         // Outside the lock, and on a context carrying whatever these messages made effective:
         // the selection is read now rather than when the turn opened.
         if (permissionChange !== undefined) {
@@ -3022,13 +3122,13 @@ export class AgentBase {
     }
 
     /**
-     * Replace the in-memory state with the durable one. The persistence lock guarantees every
+     * Replace the in-memory state with the durable one. Durable queue acceptance guarantees every
      * message already in memory reached storage first, so the load result supersedes memory
      * entirely: the main store rebuilds the context, and the sorted queue keys rebuild the
      * not-yet-consumed queues. Consecutive block records reassemble into one assistant message.
      */
     async #loadHistory(ctx: Context): Promise<void> {
-        await this.#runInPersistenceLock(this.#workContext(ctx), async (lockCtx) => {
+        await this.#runPersistenceStep(this.#workContext(ctx), async (lockCtx) => {
             const records = await this.#persistence.load(lockCtx);
             const last = records[records.length - 1];
             this.#lastRecordType = last?.type;
@@ -3140,7 +3240,7 @@ export class AgentBase {
         abortPromise: Promise<typeof ABORTED>,
     ): Promise<boolean> {
         if (!resume) {
-            await this.#runInPersistenceLock(this.#workContext(ctx), (lockCtx) =>
+            await this.#runPersistenceStep(this.#workContext(ctx), (lockCtx) =>
                 this.#recordTransaction(lockCtx, async (txCtx) => {
                     for (const entry of entries) {
                         await this.#persistence.writeValue(
@@ -3182,7 +3282,7 @@ export class AgentBase {
         const commitReady = async (): Promise<void> => {
             if (commitFailed) return;
             try {
-                await this.#runInPersistenceLock(this.#workContext(ctx), async (lockCtx) => {
+                await this.#runPersistenceStep(this.#workContext(ctx), async (lockCtx) => {
                     while (committed < entries.length) {
                         const entry = entries[committed];
                         const proposed = results[committed];
@@ -3700,7 +3800,7 @@ export class AgentBase {
 
     /**
      * Write a queue entry under a key nothing else holds. An enqueue running outside the
-     * persistence lock can race an independent one for the tail position, so the key is claimed
+     * database transaction can race an independent one for the tail position, so the key is claimed
      * with an absent-only write and a taken key moves one sequence further rather than
      * overwriting whatever claimed it first.
      */
@@ -3738,7 +3838,7 @@ export class AgentBase {
         const toolCallIndexes = new Map<string, number>();
         const persist = async (event: AgentBasePersistedEvent | undefined): Promise<void> => {
             if (event === undefined) return;
-            await this.#runInPersistenceLock(this.#workContext(ctx), async (lockCtx) => {
+            await this.#runPersistenceStep(this.#workContext(ctx), async (lockCtx) => {
                 if (this.#hooks.onEventTransact === undefined) {
                     await this.#appendRecord(lockCtx, { type: "block", block: event.block });
                 } else {

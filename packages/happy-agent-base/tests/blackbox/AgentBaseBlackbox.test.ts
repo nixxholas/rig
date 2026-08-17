@@ -812,6 +812,14 @@ describe("AgentBase black-box persistence and restart behavior", () => {
         // two messages queued in the same millisecond by two processes collide on one key and
         // the first one is simply overwritten.
         const persistence = new InMemoryPersistence();
+        const loadEntered = deferred<void>();
+        const releaseLoad = deferred<void>();
+        const load = persistence.load.bind(persistence);
+        persistence.load = async () => {
+            loadEntered.resolve();
+            await releaseLoad.promise;
+            return await load();
+        };
         const options = {
             id: "restart-queue-order",
             providers: providersOf(new ScriptedProvider([])),
@@ -820,6 +828,7 @@ describe("AgentBase black-box persistence and restart behavior", () => {
         };
         const first = await AgentBase.create(ctx, options);
         await first.send(ctx, user("first"), { await: true });
+        await loadEntered.promise;
         const second = await AgentBase.create(ctx, options);
         await second.send(ctx, user("second"), { await: true });
 
@@ -830,6 +839,7 @@ describe("AgentBase black-box persistence and restart behavior", () => {
             user("first"),
             user("second"),
         ]);
+        releaseLoad.resolve();
         await first.close();
         await second.close();
     });

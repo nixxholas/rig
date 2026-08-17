@@ -11,7 +11,7 @@ import type { AnyAgentTool } from "./AgentTool.js";
 
 /**
  * Whether this caller may be told that `agentId` durably accepted a message. Acceptance is a
- * queue write under that agent's own persistence lock, so waiting for it is safe from anywhere
+ * queue write through that agent's database transaction, so waiting for it is safe from anywhere
  * except inside that agent's loop, which is holding the lock the write needs. A caller naming no
  * agent is an external host and may wait; only the target agent itself cannot.
  */

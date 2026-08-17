@@ -32,7 +32,7 @@ async function pause(next: () => number): Promise<void> {
  * Nothing here crashes: the chaos is that everybody talks at once. Messages, interruptions and
  * starts arrive concurrently from callers that know nothing about each other, landing at every
  * point of a turn — while it loads, between its inferences, in the middle of a tool batch. The
- * conversation still has to come out consistent, which is what the persistence lock and the
+ * conversation still has to come out consistent, which is what the database transactions and
  * durable queues exist for.
  */
 describe("durability under concurrent callers", () => {

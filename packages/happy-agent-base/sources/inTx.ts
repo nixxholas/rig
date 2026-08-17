@@ -8,6 +8,7 @@ import {
     withAgentStorageTransaction,
     type AgentStorageTransactionContext,
 } from "./AgentContexts.js";
+import { agentDatabaseTransaction } from "./AgentDatabaseConnection.js";
 
 /** Work whose database operations should share one outer Agent Storage transaction. */
 export type AgentTransactionWork<Result> = (ctx: Context) => Result | PromiseLike<Result>;
@@ -65,16 +66,6 @@ export function insideAgentStorageTransaction(): boolean {
 }
 
 /**
- * Run work with the ambient transaction scope set aside, for a lifetime operation that
- * deliberately acts beside the enclosing transaction rather than inside it — loading an agent to
- * receive a transactional message reads only committed state, and must not be mistaken for a
- * root context leaking writes around the transaction.
- */
-export function escapeAgentStorageTransaction<Result>(work: () => Result): Result {
-    return activeTransactions.exit(work);
-}
-
-/**
  * Run work inside the database transaction carried by `ctx`, or open the one outer transaction
  * for its root database. Nested calls reuse the current transaction. Independent transaction
  * scheduling belongs to the database driver.
@@ -104,26 +95,31 @@ export async function inTx<Result>(
     }
 
     let runAfterCommit!: () => Promise<void>;
-    const result = await root.transaction(async (database) => {
-        const [afterCommitCtx, drain] = withAfterCommit(ctx);
-        runAfterCommit = drain;
-        const lifetime = new AbortController();
-        const state: AgentStorageTransactionContext = {
-            database,
-            root,
-            lifetime: lifetime.signal,
-        };
-        const txCtx = withAgentStorageTransaction(afterCommitCtx, state);
-        try {
-            return await activeTransactions.run(state, async () => await work(txCtx));
-        } finally {
-            lifetime.abort();
-        }
-    });
-    try {
-        await runAfterCommit();
-    } catch (error: unknown) {
-        ctx.log.warn("Agent storage committed, but post-commit work failed.", error);
-    }
+    const result = await agentDatabaseTransaction(
+        root,
+        async (database) => {
+            const [afterCommitCtx, drain] = withAfterCommit(ctx);
+            runAfterCommit = drain;
+            const lifetime = new AbortController();
+            const state: AgentStorageTransactionContext = {
+                database,
+                root,
+                lifetime: lifetime.signal,
+            };
+            const txCtx = withAgentStorageTransaction(afterCommitCtx, state);
+            try {
+                return await activeTransactions.run(state, async () => await work(txCtx));
+            } finally {
+                lifetime.abort();
+            }
+        },
+        async () => {
+            try {
+                await runAfterCommit();
+            } catch (error: unknown) {
+                ctx.log.warn("Agent storage committed, but post-commit work failed.", error);
+            }
+        },
+    );
     return result;
 }

@@ -88,13 +88,19 @@ export class Agent<
     /**
      * An agent over an identity that may already have durable state, with that state's one
      * externally meaningful fact — whether it has work left — read before it is handed back.
+     * A caller resolving the agent from inside an open storage transaction passes `loadCtx` so
+     * that one read rides the transaction's own connection.
      */
     static async load<
         Tool extends AnyAgentTool = AnyAgentTool,
         Database extends AgentDatabase = AgentDatabase,
-    >(ctx: Context, options: AgentOptions<Tool, Database>): Promise<Agent<Tool, Database>> {
+    >(
+        ctx: Context,
+        options: AgentOptions<Tool, Database>,
+        loadCtx?: Context,
+    ): Promise<Agent<Tool, Database>> {
         const { modules, base } = split(options);
-        return new Agent(await AgentBase.load(ctx, base), modules);
+        return new Agent(await AgentBase.load(ctx, base, loadCtx), modules);
     }
 
     /**
@@ -507,6 +513,10 @@ function mergeModules<Tool extends AnyAgentTool, Database extends AgentDatabase>
         ...spread(
             "metadataChanged",
             fanOut((module) => module.hooks.metadataChanged),
+        ),
+        ...spread(
+            "afterAgentActivatedTransact",
+            chain((module) => module.hooks.afterAgentActivatedTransact),
         ),
         ...spread(
             "beforeAgentLoopTransact",

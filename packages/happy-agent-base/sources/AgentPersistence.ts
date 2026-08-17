@@ -40,10 +40,10 @@ export type AgentRecord =
  * it reaches the main store only when a turn consumes it into the context, and its pending key
  * is deleted at that moment. A `message.` uniqueness key makes retrying a cuid2 message ID an
  * ignored database conflict; history replacement removes keys for the records it deletes.
- * Exactly one owner connects to a store, and the agent serializes its own record and bookkeeping
- * writes through one lock, so history order always matches storage order. Key-value operations —
- * a module's or a tool's — run as they come, so each one has to be atomic on its own, but no
- * implementation ever has to defend against a second owner.
+ * Exactly one owner connects to a store. Transactions, uniqueness constraints, and ordered keys
+ * keep history order aligned with storage order. Key-value operations — a module's or a tool's —
+ * run as they come, so each one has to be atomic on its own, but no implementation ever has to
+ * defend against a second owner.
  */
 export interface AgentPersistence {
     /** The root Drizzle facade for this store. */

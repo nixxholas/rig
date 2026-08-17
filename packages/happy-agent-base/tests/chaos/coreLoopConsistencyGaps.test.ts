@@ -144,9 +144,11 @@ describe("core loop consistency gaps", () => {
                 JSON.stringify(envelope.message) === JSON.stringify(actionA) &&
                 externalSend === undefined
             ) {
-                // Calling send while action A still owns the persistence lock queues the
-                // external writer before the action loop gets a chance to enqueue action B.
-                externalSend = agent.send(ctx, external, { await: true });
+                // Calling send during action A races an external writer against the action
+                // batch; the database transaction must still keep A and B contiguous.
+                externalSend = persistence.outsideTransaction(
+                    () => agent.send(ctx, external, { await: true }),
+                );
             }
         };
 

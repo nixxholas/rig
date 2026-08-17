@@ -20,7 +20,7 @@ import {
     type AnyAgentTool,
 } from "../sources/index.js";
 import { inMemoryStorageLock, providersOf, textTurn, user } from "./gym/fixtures.js";
-import { inMemoryDrizzle } from "./gym/InMemoryDrizzle.js";
+import { databaseBackends } from "./gym/databaseBackends.js";
 import { ScriptedProvider } from "./gym/ScriptedProvider.js";
 
 const ctx = createRootContext().named("agent-storage-drizzle-test");
@@ -29,9 +29,13 @@ function lock(): (ctx: Context) => Promise<AgentStorageLock> {
     return inMemoryStorageLock();
 }
 
-describe("AgentStorage Drizzle persistence", () => {
+// PGlite boots a WebAssembly PostgreSQL per test, and its cold start under a loaded suite can
+// exceed the default five-second budget; the tests themselves are quick once the engine is up.
+vi.setConfig({ testTimeout: 30_000 });
+
+describe.each(databaseBackends)("AgentStorage Drizzle persistence ($label)", ({ open }) => {
     it("runs ordered module migrations once before beforeStart and provides the database", async () => {
-        const { close, database } = inMemoryDrizzle();
+        const { close, database } = await open();
         const events: string[] = [];
         const module: AgentModule<AnyAgentTool, typeof database> = {
             name: "sample",
@@ -95,11 +99,11 @@ describe("AgentStorage Drizzle persistence", () => {
         await second.close(ctx);
 
         expect(events).toEqual(["migration:001", "migration:002", "beforeStart", "beforeStart"]);
-        close();
+        await close();
     });
 
     it("rolls back a failed migration marker and never reaches beforeStart", async () => {
-        const { close, database } = inMemoryDrizzle();
+        const { close, database } = await open();
         let beforeStart = 0;
         const module: AgentModule = {
             name: "failing",
@@ -136,11 +140,11 @@ describe("AgentStorage Drizzle persistence", () => {
             sql`SELECT migration_key FROM happy_agent_migrations WHERE module_key = 'failing'`,
         );
         expect(markers).toEqual([]);
-        close();
+        await close();
     });
 
     it("runs afterCommit immediately outside a transaction and after a successful outer commit", async () => {
-        const { close, database } = inMemoryDrizzle();
+        const { close, database } = await open();
         const storage = new AgentStorage({ acquireLock: lock(), database });
         await storage.migrate(ctx, []);
         const events: string[] = [];
@@ -190,11 +194,11 @@ describe("AgentStorage Drizzle persistence", () => {
         ]);
         expect(await storage.kv.list(ctx, "Case.")).toEqual([{ key: "Case.one", value: 3 }]);
         expect(await storage.kv.list(ctx, "😀.")).toEqual([{ key: "😀.one", value: 5 }]);
-        close();
+        await close();
     });
 
     it("exposes the root database and active transaction through ctx.db and ctx.inTx", async () => {
-        const { close, database } = inMemoryDrizzle();
+        const { close, database } = await open();
         const storage = new AgentStorage({ acquireLock: lock(), database });
         await storage.migrate(ctx, []);
         const rootCtx = withAgentDatabase(ctx, database);
@@ -222,11 +226,11 @@ describe("AgentStorage Drizzle persistence", () => {
         if (endedCtx === undefined) throw new Error("Transaction context was not captured.");
         expect(() => endedCtx.db).toThrow("has ended");
         await expect(endedCtx.inTx(async () => undefined)).rejects.toThrow("has ended");
-        close();
+        await close();
     });
 
     it("rolls back ctx.inTx work and drops queued post-commit callbacks", async () => {
-        const { close, database } = inMemoryDrizzle();
+        const { close, database } = await open();
         const storage = new AgentStorage({ acquireLock: lock(), database });
         await storage.migrate(ctx, []);
         const rootCtx = withAgentDatabase(ctx, database);
@@ -244,10 +248,10 @@ describe("AgentStorage Drizzle persistence", () => {
 
         expect(await storage.kv.read(rootCtx, "rolled-back")).toBeUndefined();
         expect(events).toEqual([]);
-        close();
+        await close();
     });
 
-    it("leaves independent transaction scheduling to the database driver", async () => {
+    it("leaves an explicitly unowned test facade's scheduling to its driver", async () => {
         type TransactionWork = (transaction: AgentDatabase) => Promise<unknown>;
         const database = {
             transaction: async (work: TransactionWork) => await work(database as AgentDatabase),
@@ -286,7 +290,7 @@ describe("AgentStorage Drizzle persistence", () => {
 
     it("reuses database context extensions when modules are evaluated again", async () => {
         const firstContexts = await import("../sources/AgentContexts.js");
-        const { close, database } = inMemoryDrizzle();
+        const { close, database } = await open();
         const firstCtx = firstContexts.withAgentDatabase(createRootContext(), database);
         expect(firstCtx.db).toBe(database);
 
@@ -302,11 +306,11 @@ describe("AgentStorage Drizzle persistence", () => {
                 expect(nestedCtx.db).toBe(txCtx.db);
             });
         });
-        close();
+        await close();
     });
 
     it("keeps storage key-value transactions on the same ctx.inTx facade", async () => {
-        const { close, database } = inMemoryDrizzle();
+        const { close, database } = await open();
         const storage = new AgentStorage({ acquireLock: lock(), database });
         await storage.migrate(ctx, []);
         const rootCtx = withAgentDatabase(ctx, database);
@@ -323,11 +327,11 @@ describe("AgentStorage Drizzle persistence", () => {
         expect(activeDatabase).toBeDefined();
         expect(activeDatabase).not.toBe(database);
         expect(await storage.kv.read(rootCtx, "nested-value")).toBe("ready");
-        close();
+        await close();
     });
 
     it("rejects a root context reused inside a transaction instead of leaking its writes", async () => {
-        const { close, database } = inMemoryDrizzle();
+        const { close, database } = await open();
         const storage = new AgentStorage({ acquireLock: lock(), database });
         await storage.migrate(ctx, []);
 
@@ -343,12 +347,12 @@ describe("AgentStorage Drizzle persistence", () => {
 
         expect(await storage.kv.read(ctx, "wrong-context")).toBeUndefined();
         expect(await storage.kv.read(ctx, "rolled-back")).toBeUndefined();
-        close();
+        await close();
     });
 
     it("routes foreign root contexts to the right store and rejects foreign transactions", async () => {
-        const first = inMemoryDrizzle();
-        const second = inMemoryDrizzle();
+        const first = await open();
+        const second = await open();
         const firstStorage = new AgentStorage({
             acquireLock: lock(),
             database: first.database,
@@ -372,12 +376,12 @@ describe("AgentStorage Drizzle persistence", () => {
         });
         expect(await firstStorage.kv.read(ctx, "must-not-cross")).toBeUndefined();
         expect(await secondStorage.kv.read(ctx, "must-not-cross")).toBeUndefined();
-        first.close();
-        second.close();
+        await first.close();
+        await second.close();
     });
 
     it("queues live send and steer messages inside an outer transaction and starts after commit", async () => {
-        const { close, database } = inMemoryDrizzle();
+        const { close, database } = await open();
         const provider = new ScriptedProvider([textTurn("steered"), textTurn("committed")]);
         const storage = new AgentStorage({ acquireLock: lock(), database });
         const system = await AgentSystemLocal.create(ctx, storage, {
@@ -424,11 +428,11 @@ describe("AgentStorage Drizzle persistence", () => {
             user("inside transaction"),
         );
         await system.close(ctx);
-        close();
+        await close();
     });
 
-    it("loads an idle stored target to deliver a transactional message", async () => {
-        const { close, database } = inMemoryDrizzle();
+    it("transactionally delivers to an unloaded idle target", async () => {
+        const { close, database } = await open();
         const setup = await AgentSystemLocal.create(
             ctx,
             new AgentStorage({ acquireLock: lock(), database }),
@@ -446,16 +450,9 @@ describe("AgentStorage Drizzle persistence", () => {
             { providers: providersOf(provider), provider: "scripted", models: [] },
         );
         await withAgentDatabase(ctx, database).inTx(async (txCtx) => {
-            expect(
-                await system.send(txCtx, created.id, user("load on delivery"), {
-                    id: "h12345678901234567890141",
-                }),
-            ).toEqual({
-                accepted: "created",
-                delivery: "send",
+            await system.send(txCtx, created.id, user("load on delivery"), {
                 id: "h12345678901234567890141",
             });
-            expect(provider.sessions).toEqual([]);
         });
         const agent = await system.resolve(ctx, created.id);
         await agent.waitForIdle();
@@ -463,11 +460,119 @@ describe("AgentStorage Drizzle persistence", () => {
             user("load on delivery"),
         );
         await system.close(ctx);
-        close();
+        await close();
     });
 
-    it("leaves a target loaded by a rolled-back transactional send idle with no live effect", async () => {
-        const { close, database } = inMemoryDrizzle();
+    it("reuses one unloaded target for two sends in the same transaction", async () => {
+        const { close, database } = await open();
+        const setup = await AgentSystemLocal.create(
+            ctx,
+            new AgentStorage({ acquireLock: lock(), database }),
+            { providers: providersOf(new ScriptedProvider([])), provider: "scripted", models: [] },
+        );
+        const created = await setup.create(ctx, {});
+        await created.waitForIdle();
+        await setup.close(ctx);
+
+        const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
+        const system = await AgentSystemLocal.create(
+            ctx,
+            new AgentStorage({ acquireLock: lock(), database }),
+            { providers: providersOf(provider), provider: "scripted", models: [] },
+        );
+        await withAgentDatabase(ctx, database).inTx(async (txCtx) => {
+            await system.send(txCtx, created.id, user("first"), {
+                id: "h12345678901234567890143",
+            });
+            await system.send(txCtx, created.id, user("second"), {
+                id: "h12345678901234567890144",
+            });
+        });
+        const agent = await system.resolve(ctx, created.id);
+        await agent.waitForIdle();
+        expect(provider.sessions).toHaveLength(1);
+        expect(provider.sessions[0]?.requests).toHaveLength(2);
+        expect(provider.sessions[0]?.requests[0]?.context.messages.at(-1)).toEqual(user("first"));
+        expect(provider.sessions[0]?.requests[1]?.context.messages.at(-1)).toEqual(user("second"));
+
+        await system.close(ctx);
+        await close();
+    });
+
+    it("reuses the canonical agent when resolution publishes during transactional loading", async () => {
+        const opened = await open();
+        const { close, connection, database } = opened;
+        const setup = await AgentSystemLocal.create(
+            ctx,
+            new AgentStorage({ acquireLock: lock(), database }),
+            { providers: providersOf(new ScriptedProvider([])), provider: "scripted", models: [] },
+        );
+        const created = await setup.create(ctx, {});
+        await created.waitForIdle();
+        await setup.close(ctx);
+
+        const provider = new ScriptedProvider([textTurn("delivered once")]);
+        const system = await AgentSystemLocal.create(
+            ctx,
+            new AgentStorage({ acquireLock: lock(), database }),
+            { providers: providersOf(provider), provider: "scripted", models: [] },
+        );
+        const resolverRead = deferred<void>();
+        const releaseResolver = deferred<void>();
+        const transactionRead = deferred<void>();
+        const releaseTransaction = deferred<void>();
+        const originalOperation = connection.operation.bind(connection) as (
+            facade: AgentDatabase,
+            work: () => Promise<unknown>,
+        ) => Promise<unknown>;
+        let rootReads = 0;
+        let interceptTransaction = false;
+        let transactionIntercepted = false;
+        Object.defineProperty(connection, "operation", {
+            configurable: true,
+            value: async (facade: AgentDatabase, work: () => Promise<unknown>) => {
+                const result = await originalOperation(facade, work);
+                if (facade === database && !interceptTransaction) {
+                    rootReads += 1;
+                    if (rootReads === 4) {
+                        resolverRead.resolve();
+                        await releaseResolver.promise;
+                    }
+                } else if (facade !== database && interceptTransaction && !transactionIntercepted) {
+                    transactionIntercepted = true;
+                    transactionRead.resolve();
+                    await releaseTransaction.promise;
+                }
+                return result;
+            },
+        });
+
+        const resolving = system.resolve(ctx, created.id);
+        await resolverRead.promise;
+        interceptTransaction = true;
+        const sending = withAgentDatabase(ctx, database).inTx(async (txCtx) => {
+            await system.send(txCtx, created.id, user("concurrent delivery"), {
+                id: "h12345678901234567890145",
+            });
+        });
+        await transactionRead.promise;
+        releaseResolver.resolve();
+        const canonical = await resolving;
+        releaseTransaction.resolve();
+        await sending;
+        expect(await system.resolve(ctx, created.id)).toBe(canonical);
+        await canonical.waitForIdle();
+        expect(provider.sessions).toHaveLength(1);
+        expect(provider.sessions[0]?.requests[0]?.context.messages.at(-1)).toEqual(
+            user("concurrent delivery"),
+        );
+
+        await system.close(ctx);
+        await close();
+    });
+
+    it("leaves a loaded target idle when its transactional send rolls back", async () => {
+        const { close, database } = await open();
         const setup = await AgentSystemLocal.create(
             ctx,
             new AgentStorage({ acquireLock: lock(), database }),
@@ -492,7 +597,7 @@ describe("AgentStorage Drizzle persistence", () => {
             }),
         ).rejects.toThrow("roll back the load");
 
-        // The loaded object is live but was never started and owes nothing durable.
+        // The provisional object was never published and the rolled-back message is not durable.
         expect(provider.sessions).toEqual([]);
         await system.send(ctx, created.id, user("after rollback"), { await: true });
         const agent = await system.resolve(ctx, created.id);
@@ -501,11 +606,11 @@ describe("AgentStorage Drizzle persistence", () => {
             user("after rollback"),
         ]);
         await system.close(ctx);
-        close();
+        await close();
     });
 
     it("claims a distinct queue key for every send inside one transaction", async () => {
-        const { close, database } = inMemoryDrizzle();
+        const { close, database } = await open();
         const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
         const storage = new AgentStorage({ acquireLock: lock(), database });
         const system = await AgentSystemLocal.create(ctx, storage, {
@@ -538,11 +643,11 @@ describe("AgentStorage Drizzle persistence", () => {
         expect(first).toBeGreaterThanOrEqual(0);
         expect(second).toBeGreaterThan(first);
         await system.close(ctx);
-        close();
+        await close();
     });
 
     it("reloads a transactional message committed while the target is already running", async () => {
-        const { close, database } = inMemoryDrizzle();
+        const { close, database } = await open();
         const provider = new ScriptedProvider([textTurn("first"), textTurn("second")]);
         let releaseInference!: () => void;
         const inferenceMayContinue = new Promise<void>((resolve) => {
@@ -592,11 +697,11 @@ describe("AgentStorage Drizzle persistence", () => {
             user("committed while running"),
         );
         await system.close(ctx);
-        close();
+        await close();
     });
 
     it("drops every live effect when an outer transactional send rolls back", async () => {
-        const { close, database } = inMemoryDrizzle();
+        const { close, database } = await open();
         const provider = new ScriptedProvider([textTurn("retried")]);
         const storage = new AgentStorage({ acquireLock: lock(), database });
         const system = await AgentSystemLocal.create(ctx, storage, {
@@ -644,11 +749,11 @@ describe("AgentStorage Drizzle persistence", () => {
             user("retry after rollback"),
         ]);
         await system.close(ctx);
-        close();
+        await close();
     });
 
     it("rejects other live agent and system commands from an outer storage transaction", async () => {
-        const { close, database } = inMemoryDrizzle();
+        const { close, database } = await open();
         const storage = new AgentStorage({ acquireLock: lock(), database });
         const system = await AgentSystemLocal.create(ctx, storage, {
             providers: providersOf(new ScriptedProvider([])),
@@ -682,6 +787,17 @@ describe("AgentStorage Drizzle persistence", () => {
             provenance: { createdAt: expect.any(Number) },
         });
         await system.close(ctx);
-        close();
+        await close();
     });
 });
+
+function deferred<Value>(): {
+    readonly promise: Promise<Value>;
+    resolve(value: Value): void;
+} {
+    let resolve!: (value: Value) => void;
+    const promise = new Promise<Value>((resolvePromise) => {
+        resolve = resolvePromise;
+    });
+    return { promise, resolve };
+}

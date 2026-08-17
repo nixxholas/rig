@@ -1757,7 +1757,7 @@ describe("AgentBase message delivery strategies", () => {
 
     it("answers a message that lands while the history is being loaded", async () => {
         // The load replaces the in-memory queues wholesale. A send that waits on the same
-        // persistence lock must join the queue the load left behind, not the one it discarded.
+        // durable queue acceptance must join the queue the load left behind, not the one it discarded.
         const provider = new ScriptedProvider([textTurn("answered")]);
         let releaseLoad = (): void => undefined;
         const inLoad = new Promise<void>((resolve) => {
@@ -1783,7 +1783,7 @@ describe("AgentBase message delivery strategies", () => {
 
         agent.start();
         await entered;
-        // The send blocks on the persistence lock the load is holding.
+        // The send commits while the load is in flight and must remain visible afterwards.
         const sent = agent.send(ctx, user("hello"), { await: true });
         releaseLoad();
         await sent;
@@ -3932,7 +3932,7 @@ describe("AgentBase scoped persistence", () => {
         await agent.send(ctx, user("switch"), { await: true, model: "openai/gpt" });
         await agent.waitForIdle();
 
-        // The hook runs while the agent holds its persistence lock; the store executed
+        // The hook runs inside the transaction committing the model change; the store executed
         // directly on the held lock instead of deadlocking, and the switch completed.
         expect(persistence.values.get("kv.test-agent.last-model")).toBe("openai/gpt");
         expect(provider.sessions[1]?.requests[0]?.context.messages).toEqual([

@@ -359,8 +359,35 @@ describe("agent metadata, custom identity, and parentage", () => {
             },
         });
         expect(reentryFailures).toEqual([
-            expect.stringContaining("inside this agent's current operation"),
+            expect.stringContaining("must use that transaction's context"),
         ]);
+        await agent.close();
+    });
+
+    it("merges concurrent metadata updates from the transaction's current configuration", async () => {
+        const persistence = new InMemoryPersistence();
+        const agent = await AgentBase.create(
+            withAgentConfig(ctx, { metadata: { title: "Base" } }),
+            {
+                id: "concurrent-metadata",
+                providers: providersOf(new ScriptedProvider([])),
+                provider: "scripted",
+                persistence,
+            },
+        );
+
+        await Promise.all([
+            agent.updateMetadata(ctx, { color: "green" }),
+            agent.updateMetadata(ctx, { source: "collaboration" }),
+        ]);
+
+        expect(persistence.values.get("agentConfig")).toEqual({
+            metadata: {
+                title: "Base",
+                color: "green",
+                source: "collaboration",
+            },
+        });
         await agent.close();
     });
 

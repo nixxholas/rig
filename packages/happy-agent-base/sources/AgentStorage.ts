@@ -8,6 +8,7 @@ import {
     type AgentDatabaseFacade,
     type AgentModuleMigration,
 } from "./AgentDatabase.js";
+import { ensureAgentDatabaseConnection } from "./AgentDatabaseConnection.js";
 import type { AgentModule } from "./AgentModule.js";
 import { AgentKV } from "./AgentKV.js";
 import type { AgentPersistence } from "./AgentPersistence.js";
@@ -56,6 +57,7 @@ export class AgentStorage<Database extends AgentDatabase = AgentDatabase> {
     constructor(options: AgentStorageOptions<Database>) {
         this.#acquireLock = options.acquireLock;
         this.database = options.database;
+        ensureAgentDatabaseConnection(options.database);
         const integration = {
             database: options.database,
         };

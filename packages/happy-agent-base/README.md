@@ -19,6 +19,15 @@ Drizzle SQLite or PostgreSQL/PGlite database plus a hard database-level lock. It
 record, key-value, and migration tables itself. `AgentSystem.close()` stops its agents and releases
 the lock; the runtime intentionally contains no CAS or multi-owner coordination.
 
+Agent Base also provides production database implementations through `openAgentSQLiteDatabase`,
+`openAgentPGliteDatabase`, and `openAgentPostgresDatabase`. Each returns one
+`AgentDatabaseConnection` that owns its Drizzle facade, driver lifetime, root-operation FIFO, root
+transactions, and awaited close boundary. All three implementations use the same scheduling
+contract: root statements and transactions serialize, while statements already using the active
+transaction facade execute directly. Database work must use `agentDatabaseRows`,
+`agentDatabaseRun`, or `ctx.inTx`; invoking the exposed root Drizzle facade directly bypasses the
+owner and is not a supported persistence path.
+
 Storage uses Drizzle transactions and installs stdlib's universal `afterCommit` scope on their
 contexts, draining it only after the outer transaction succeeds. Agent contexts expose the root or
 active Drizzle facade as `ctx.db`; `ctx.inTx(work)` and the exported `inTx(ctx, work)` helper open
@@ -133,4 +142,15 @@ implementations belong in [`@slopus/happy-providers`](../happy-providers).
 pnpm --filter @slopus/happy-agent-base check
 pnpm --filter @slopus/happy-agent-base test
 pnpm --filter @slopus/happy-agent-base build
+```
+
+The full suite selects its production database backend with
+`HAPPY_AGENT_BASE_TEST_DATABASE=sqlite|pglite|postgres`; SQLite is the local default. PostgreSQL
+also requires `HAPPY_AGENT_BASE_TEST_POSTGRES_URL`:
+
+```sh
+HAPPY_AGENT_BASE_TEST_DATABASE=pglite pnpm --filter @slopus/happy-agent-base test
+HAPPY_AGENT_BASE_TEST_DATABASE=postgres \
+HAPPY_AGENT_BASE_TEST_POSTGRES_URL=postgres://postgres:postgres@127.0.0.1:5432/happy_agent_base \
+pnpm --filter @slopus/happy-agent-base test
 ```

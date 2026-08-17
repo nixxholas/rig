@@ -18,10 +18,11 @@ import {
     agentStorageTransaction,
     withAgentDatabase,
     withAgentKV,
+    type AgentStorageTransactionContext,
 } from "./AgentContexts.js";
 import type { AgentDatabase } from "./AgentDatabase.js";
+import { outsideAgentDatabaseOperation } from "./AgentDatabaseConnection.js";
 import type { AgentKV } from "./AgentKV.js";
-import { escapeAgentStorageTransaction } from "./inTx.js";
 import type { AgentPersistence } from "./AgentPersistence.js";
 import {
     agentConfigSchema,
@@ -123,6 +124,11 @@ export class AgentSystemLocal<
     readonly #sharedModuleKV: AgentKV;
     /** The live `Agent` instances this process has built, keyed by identity. */
     readonly #agents = new Map<string, Agent<AnyAgentTool, Database>>();
+    /** Unpublished agents built once per transaction for delivery to an unloaded target. */
+    readonly #transactionAgents = new WeakMap<
+        AgentStorageTransactionContext,
+        Map<string, Agent<AnyAgentTool, Database>>
+    >();
     // One agent has one store for the life of the collection, so inspecting an agent's durable
     // work and running that agent never end up looking at two different stores.
     readonly #persistences = new Map<string, AgentPersistence>();
@@ -515,8 +521,13 @@ export class AgentSystemLocal<
             if (config === undefined) {
                 throw new Error(`Agent "${agentId}" has not been created.`);
             }
-            const agent = await this.#instantiate(agentId, config);
+            const published = this.#agents.get(agentId);
+            if (published !== undefined) return published;
+            const agent = await this.#instantiate(agentId, config, false, false, undefined, false);
             if (agent === undefined) throw new Error(`Agent "${agentId}" could not be built.`);
+            const concurrent = this.#agents.get(agentId);
+            if (concurrent !== undefined) return concurrent;
+            this.#publish(agent, true);
             return agent;
         });
     }
@@ -530,6 +541,8 @@ export class AgentSystemLocal<
         config: AgentConfig,
         onlyIfActive = false,
         start = true,
+        loadCtx?: Context,
+        publish = true,
     ): Promise<Agent<AnyAgentTool, Database> | undefined> {
         // An agent outlives whatever asked for it — a restart bringing the collection up, an HTTP
         // request, another agent's tool — so it takes no context from its caller at all and is
@@ -553,14 +566,23 @@ export class AgentSystemLocal<
         // resolves through — so the agent is loaded rather than created, and knows whether it
         // has work left before anything asks it. Bringing a collection up asks only for the
         // agents that do; anything else resolving an agent wants it whether it owes work or not.
-        const agent = await Agent.load(agentCtx, options);
+        const agent = await Agent.load(agentCtx, options, loadCtx);
         if (onlyIfActive && !agent.active) {
             await agent.close();
             return undefined;
         }
-        this.#agents.set(agentId, agent);
-        if (start) agent.start();
+        if (publish) this.#publish(agent, start);
         return agent;
+    }
+
+    /** Publish one fully loaded lifetime synchronously, before the database slot is released. */
+    #publish(agent: Agent<AnyAgentTool, Database>, start: boolean): void {
+        const existing = this.#agents.get(agent.id);
+        if (existing !== undefined && existing !== agent) {
+            throw new Error(`Agent "${agent.id}" already has a live instance.`);
+        }
+        this.#agents.set(agent.id, agent);
+        if (start) agent.start();
     }
 
     /**
@@ -619,7 +641,7 @@ export class AgentSystemLocal<
             await this.#invokeLifecycleHook(txCtx, runtime, hook, agent, true);
         }
         afterCommit(txCtx, () => {
-            const observed = (async () => {
+            const observed = outsideAgentDatabaseOperation(async () => {
                 for (const runtime of this.#runtimes) {
                     const hook = observe(runtime.hooks);
                     if (hook === undefined) continue;
@@ -629,7 +651,7 @@ export class AgentSystemLocal<
                         // The durable change already committed; observers cannot undo it.
                     }
                 }
-            })();
+            });
             this.#admitted.add(observed);
             this.#lifecycleObservations.add(observed);
             void observed.finally(() => {
@@ -747,32 +769,34 @@ export class AgentSystemLocal<
     }
 
     /**
-     * A transactional message loads its target like any other delivery. Instantiation reads only
-     * committed state and builds memory, so it composes with the open transaction: a rollback
-     * merely leaves an idle live object with nothing durable to pick up. The target is not
-     * started here — the commit that publishes the message starts its run, and a rolled-back
-     * transaction starts nothing.
+     * Transactional delivery may load an idle target through the transaction it already owns.
+     * The provisional object is published only after commit, before the database owner admits
+     * another root operation. A rollback therefore leaves neither a live object nor leaked
+     * uncommitted state, and this path never waits for an identity lock while owning the database.
      */
     async #messageTarget(ctx: Context, agentId: string): Promise<Agent<AnyAgentTool, Database>> {
-        if (agentStorageTransaction(ctx) === undefined) return await this.#resolve(ctx, agentId);
+        const transaction = agentStorageTransaction(ctx);
+        if (transaction === undefined) return await this.#resolve(ctx, agentId);
         const existing = this.#agents.get(agentId);
         if (existing !== undefined) return existing;
-        return await this.#lockFor(agentId).runInLock(ctx, async (lockCtx) => {
-            const resolved = this.#agents.get(agentId);
-            if (resolved !== undefined) return resolved;
-            const config = await this.#config(lockCtx, agentId);
-            if (config === undefined) {
-                throw new Error(`Agent "${agentId}" has not been created.`);
-            }
-            // The load steps outside the transaction scope deliberately: it reads committed
-            // state on the agent's own detached context, which the ambient-transaction guard
-            // would otherwise mistake for a context leaking around the transaction.
-            const agent = await escapeAgentStorageTransaction(
-                async () => await this.#instantiate(agentId, config, false, false),
-            );
-            if (agent === undefined) throw new Error(`Agent "${agentId}" could not be built.`);
-            return agent;
-        });
+        let provisional = this.#transactionAgents.get(transaction);
+        if (provisional === undefined) {
+            provisional = new Map();
+            this.#transactionAgents.set(transaction, provisional);
+        }
+        const cached = provisional.get(agentId);
+        if (cached !== undefined) return cached;
+        const config = await this.#config(ctx, agentId);
+        if (config === undefined) {
+            throw new Error(`Agent "${agentId}" has not been created.`);
+        }
+        const agent = await this.#instantiate(agentId, config, false, false, ctx, false);
+        if (agent === undefined) throw new Error(`Agent "${agentId}" could not be built.`);
+        const concurrent = this.#agents.get(agentId);
+        if (concurrent !== undefined) return concurrent;
+        provisional.set(agentId, agent);
+        afterCommit(ctx, () => this.#publish(agent, false));
+        return agent;
     }
 
     /** Cancel an agent's active turn, leaving its queued messages durable for the next one. */

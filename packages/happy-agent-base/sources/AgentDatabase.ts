@@ -3,6 +3,8 @@ import { PgDatabase } from "drizzle-orm/pg-core";
 import { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 import type { Context } from "@steve.kite/stdlib";
 
+import { agentDatabaseConnection } from "./AgentDatabaseConnection.js";
+
 /**
  * Any asynchronous Drizzle SQLite database or transaction. The erased schema and result types
  * deliberately preserve the complete Drizzle query-builder surface without choosing a driver.
@@ -56,23 +58,35 @@ export async function agentDatabaseRows<Row>(
     database: AgentDatabase,
     query: SQL,
 ): Promise<readonly Row[]> {
-    if (isAgentSQLiteDatabase(database)) {
-        return await database.all<Row>(query);
-    }
-    const result = await database.execute(query);
-    if (Array.isArray(result)) return result as Row[];
-    const rows = Reflect.get(result as object, "rows");
-    if (!Array.isArray(rows)) {
-        throw new Error("The PostgreSQL Drizzle query did not return a row collection.");
-    }
-    return rows as Row[];
+    const work = async (): Promise<readonly Row[]> => {
+        if (isAgentSQLiteDatabase(database)) {
+            return await database.all<Row>(query);
+        }
+        const result = await database.execute(query);
+        if (Array.isArray(result)) return result as Row[];
+        const rows = Reflect.get(result as object, "rows");
+        if (!Array.isArray(rows)) {
+            throw new Error("The PostgreSQL Drizzle query did not return a row collection.");
+        }
+        return rows as Row[];
+    };
+    const connection = agentDatabaseConnection(database);
+    return connection === undefined ? await work() : await connection.operation(database, work);
 }
 
 /** Run a statement that does not need its returned rows. */
 export async function agentDatabaseRun(database: AgentDatabase, query: SQL): Promise<void> {
-    if (isAgentSQLiteDatabase(database)) {
-        await database.run(query);
+    const work = async (): Promise<void> => {
+        if (isAgentSQLiteDatabase(database)) {
+            await database.run(query);
+            return;
+        }
+        await database.execute(query);
+    };
+    const connection = agentDatabaseConnection(database);
+    if (connection === undefined) {
+        await work();
         return;
     }
-    await database.execute(query);
+    await connection.operation(database, work);
 }

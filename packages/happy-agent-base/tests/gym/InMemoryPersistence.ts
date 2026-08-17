@@ -1,4 +1,12 @@
-import { createContextNamespace, withAfterCommit, type Context } from "@steve.kite/stdlib";
+import { AsyncLocalStorage } from "node:async_hooks";
+
+import {
+    asyncLock,
+    createContextNamespace,
+    withAfterCommit,
+    type AsyncLock,
+    type Context,
+} from "@steve.kite/stdlib";
 
 import type { AgentPersistence, AgentRecord } from "../../sources/index.js";
 import { inMemoryDrizzle } from "./InMemoryDrizzle.js";
@@ -41,10 +49,19 @@ export class InMemoryPersistence implements AgentPersistence {
     readonly database = inMemoryPersistenceDatabase;
     readonly records: AgentRecord[];
     readonly values = new Map<string, unknown>();
+    /** The fake database's transaction scheduler, corresponding to a production driver. */
+    readonly #transactions: AsyncLock = asyncLock({ reentry: "block" });
+    /** Detects a root context escaping around this fake database's active transaction. */
+    readonly #activeTransaction = new AsyncLocalStorage<boolean>();
     loads = 0;
 
     constructor(records: AgentRecord[] = []) {
         this.records = records;
+    }
+
+    /** Run a genuinely independent test caller outside an intercepted transaction callback. */
+    outsideTransaction<Result>(work: () => Result): Result {
+        return this.#activeTransaction.exit(work);
     }
 
     /**
@@ -69,21 +86,33 @@ export class InMemoryPersistence implements AgentPersistence {
     ): Promise<Result> {
         const existing = this.#staged(ctx);
         if (existing !== undefined) return await work(ctx);
-        const staged: StagedTransaction = {
-            owner: this,
-            cleared: false,
-            records: [],
-            writes: new Map(),
-            deletes: new Set(),
-        };
-        const [transactionCtx, runAfterCommit] = withAfterCommit(stagedNamespace.set(ctx, staged));
-        const result = await work(transactionCtx);
-        if (staged.cleared) this.records.length = 0;
-        this.records.push(...staged.records);
-        for (const [key, value] of staged.writes) this.values.set(key, value);
-        for (const key of staged.deletes) this.values.delete(key);
-        await runAfterCommit();
-        return result;
+        if (this.#activeTransaction.getStore() === true) {
+            throw new Error(
+                "Work started inside an in-memory transaction must use that transaction's context.",
+            );
+        }
+        return await this.#transactions.runInLock(ctx, async (transactionLockCtx) => {
+            const staged: StagedTransaction = {
+                owner: this,
+                cleared: false,
+                records: [],
+                writes: new Map(),
+                deletes: new Set(),
+            };
+            const [transactionCtx, runAfterCommit] = withAfterCommit(
+                stagedNamespace.set(transactionLockCtx, staged),
+            );
+            const result = await this.#activeTransaction.run(
+                true,
+                async () => await work(transactionCtx),
+            );
+            if (staged.cleared) this.records.length = 0;
+            this.records.push(...staged.records);
+            for (const [key, value] of staged.writes) this.values.set(key, value);
+            for (const key of staged.deletes) this.values.delete(key);
+            await runAfterCommit();
+            return result;
+        });
     }
 
     clearRecords(ctx: Context): Promise<void> {
