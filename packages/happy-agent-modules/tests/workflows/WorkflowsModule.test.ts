@@ -20,6 +20,7 @@ import {
 } from "../../sources/workflows/Workflow.js";
 import type { WorkflowRuntime } from "../../sources/workflows/WorkflowStore.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
+import { resolveModuleHooks } from "../support/moduleHooks.js";
 
 const OWNER = "agent-1";
 
@@ -74,7 +75,7 @@ function run(
     return { ...common, status, finishedAt: updatedAt, updatedAt };
 }
 
-function workflowTest(name: string) {
+async function workflowTest(name: string) {
     const runtimeRuns = new Map<string, WorkflowRun>();
     const launchRequests: WorkflowLaunchRequest[] = [];
     const mutationRequests: WorkflowMutationRequest[] = [];
@@ -146,9 +147,12 @@ function workflowTest(name: string) {
         clock: () => 10,
     });
     database = moduleDatabase(module.migrations, name);
+    await database.ready;
+    const hooks = await resolveModuleHooks(database.context, module);
     return {
         database,
         module,
+        hooks,
         runtimeRuns,
         launchRequests,
         mutationRequests,
@@ -196,8 +200,7 @@ describe("WorkflowsModule", () => {
     });
 
     it("adds a forward migration that drops the obsolete receipt and proof tables", async () => {
-        const test = workflowTest("workflow-migrations");
-        await test.database.ready;
+        const test = await workflowTest("workflow-migrations");
         try {
             expect(test.module.migrations.map(([key]) => key)).toEqual([
                 "001-workflows-runs",
@@ -220,12 +223,12 @@ describe("WorkflowsModule", () => {
     });
 
     it("uses call.id as the launch identity without a custom tool commit", async () => {
-        const test = workflowTest("workflow-launch-tool");
-        await test.database.ready;
+        const test = await workflowTest("workflow-launch-tool");
         try {
-            const tool = test.module
-                .tools(test.database.context, { agent: { id: OWNER } } as never)
-                .find(({ name }) => name === "run_workflow");
+            const tools = await test.hooks.tools!(test.database.context, {
+                agent: { id: OWNER },
+            } as never);
+            const tool = tools.find(({ name }) => name === "run_workflow");
             expect(tool).toBeDefined();
             const result = await tool!.execute(
                 test.database.context,
@@ -247,12 +250,12 @@ describe("WorkflowsModule", () => {
     });
 
     it("accepts bounded script orchestration inputs and forwards them to the host", async () => {
-        const test = workflowTest("workflow-script-launch");
-        await test.database.ready;
+        const test = await workflowTest("workflow-script-launch");
         try {
-            const tool = test.module
-                .tools(test.database.context, { agent: { id: OWNER } } as never)
-                .find(({ name }) => name === "run_workflow");
+            const tools = await test.hooks.tools!(test.database.context, {
+                agent: { id: OWNER },
+            } as never);
+            const tool = tools.find(({ name }) => name === "run_workflow");
             expect(tool).toBeDefined();
             await tool!.execute(
                 test.database.context,
@@ -297,8 +300,7 @@ describe("WorkflowsModule", () => {
     });
 
     it("includes accumulated logs, agent count, and a legacy status projection", async () => {
-        const test = workflowTest("workflow-observations");
-        await test.database.ready;
+        const test = await workflowTest("workflow-observations");
         try {
             await test.module.launch(test.database.context, OWNER, {
                 workflow: "demo",
@@ -333,8 +335,7 @@ describe("WorkflowsModule", () => {
     });
 
     it("marks model-facing accumulated logs when the character budget truncates them", async () => {
-        const test = workflowTest("workflow-log-formatting");
-        await test.database.ready;
+        const test = await workflowTest("workflow-log-formatting");
         try {
             const text = test.module.formatRunForModel({
                 ...run("run-1", "completed", { updatedAt: 2 }),
@@ -396,10 +397,9 @@ describe("WorkflowsModule", () => {
     });
 
     it("marks database reads transactional and host-runtime tools non-durable", async () => {
-        const test = workflowTest("workflow-tool-contracts");
-        await test.database.ready;
+        const test = await workflowTest("workflow-tool-contracts");
         try {
-            const tools = test.module.tools(test.database.context, {
+            const tools = await test.hooks.tools!(test.database.context, {
                 agent: { id: OWNER },
             } as never);
             for (const name of ["list_workflows", "workflow_status", "workflow_logs"]) {
@@ -428,16 +428,16 @@ describe("WorkflowsModule", () => {
     });
 
     it("uses call.id for cancellation without holding a runtime transaction", async () => {
-        const test = workflowTest("workflow-cancel-tool");
-        await test.database.ready;
+        const test = await workflowTest("workflow-cancel-tool");
         try {
             await test.module.launch(test.database.context, OWNER, {
                 workflow: "demo",
                 operationId: "run-1",
             });
-            const tool = test.module
-                .tools(test.database.context, { agent: { id: OWNER } } as never)
-                .find(({ name }) => name === "cancel_workflow");
+            const tools = await test.hooks.tools!(test.database.context, {
+                agent: { id: OWNER },
+            } as never);
+            const tool = tools.find(({ name }) => name === "cancel_workflow");
             const result = await tool!.execute(
                 test.database.context,
                 { id: "run-1" },
@@ -458,8 +458,7 @@ describe("WorkflowsModule", () => {
     });
 
     it("does not replay duplicate public operation IDs", async () => {
-        const test = workflowTest("workflow-no-replay");
-        await test.database.ready;
+        const test = await workflowTest("workflow-no-replay");
         try {
             await test.module.launch(test.database.context, OWNER, {
                 workflow: "demo",
@@ -478,8 +477,7 @@ describe("WorkflowsModule", () => {
     });
 
     it("waits outside a transaction, then persists the completion", async () => {
-        const test = workflowTest("workflow-wait-tool");
-        await test.database.ready;
+        const test = await workflowTest("workflow-wait-tool");
         try {
             await test.module.launch(test.database.context, OWNER, {
                 workflow: "demo",
@@ -489,9 +487,10 @@ describe("WorkflowsModule", () => {
                 "run-1",
                 run("run-1", "completed", { updatedAt: 3, startedAt: 1 }),
             );
-            const tool = test.module
-                .tools(test.database.context, { agent: { id: OWNER } } as never)
-                .find(({ name }) => name === "wait_workflow");
+            const tools = await test.hooks.tools!(test.database.context, {
+                agent: { id: OWNER },
+            } as never);
+            const tool = tools.find(({ name }) => name === "wait_workflow");
             const result = await tool!.execute(
                 test.database.context,
                 { id: "run-1" },
@@ -515,8 +514,7 @@ describe("WorkflowsModule", () => {
     });
 
     it("keeps bounded reads and model formatting", async () => {
-        const test = workflowTest("workflow-reads");
-        await test.database.ready;
+        const test = await workflowTest("workflow-reads");
         try {
             await test.module.launch(test.database.context, OWNER, {
                 workflow: "demo",

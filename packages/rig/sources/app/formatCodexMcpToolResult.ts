@@ -1,4 +1,4 @@
-import type { ContentBlock } from "../agent/types.js";
+import type { ContentBlock } from "../protocol/index.js";
 import type { CodexMcpToolCall } from "./CodexMcpToolCall.js";
 
 const MAXIMUM_RESULT_BLOCKS = 128;

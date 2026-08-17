@@ -13,6 +13,7 @@ import {
     type AgentModuleAgent,
     type AgentModule,
     type AgentModuleAgentLifecycle,
+    type AgentModuleHooks,
     type AgentModuleScope,
     type AgentModuleSystemScope,
     type AgentStorage,
@@ -221,7 +222,10 @@ export class AutoModule implements AgentModule {
 
     // ---- Private review system lifecycle ------------------------------------------------------
 
-    readonly beforeStart = async (_ctx: Context, _agents: AgentSystemRef): Promise<void> => {
+    readonly beforeStart = async (
+        _ctx: Context,
+        _agents: AgentSystemRef,
+    ): Promise<AgentModuleHooks> => {
         const main = this.#options.providers;
         const privateProviders = new AgentProviders();
         for (const id of main.ids) {
@@ -255,6 +259,7 @@ export class AutoModule implements AgentModule {
                 providers: privateProviders,
             },
         );
+        return this.#hooks;
     };
 
     readonly close = async (_ctx: Context): Promise<void> => {
@@ -268,103 +273,105 @@ export class AutoModule implements AgentModule {
 
     // ---- Main-agent evidence hooks ------------------------------------------------------------
 
-    /** Learn the route the current turn runs on before every inference (v1 model fallback). */
-    readonly beforeInference = async (
-        _ctx: Context,
-        scope: AgentModuleScope,
-        _inference: AgentBaseInferenceStart,
-    ): Promise<void> => {
-        this.#rememberRoute(scope.agent);
-    };
+    readonly #hooks: AgentModuleHooks = {
+        /** Learn the route the current turn runs on before every inference (v1 model fallback). */
+        beforeInference: async (
+            _ctx: Context,
+            scope: AgentModuleScope,
+            _inference: AgentBaseInferenceStart,
+        ): Promise<void> => {
+            this.#rememberRoute(scope.agent);
+        },
 
-    readonly messageAcceptedTransact = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-        accepted: AgentBaseAcceptedMessage,
-    ): Promise<void> => {
-        this.#rememberRoute(scope.agent);
-        const entry = userMessageEvidence(
-            accepted.message,
-            accepted.metadata as never,
-        );
-        if (entry === undefined) return;
-        await this.#appendEvidence(ctx, scope.agent.id, () => entry);
-    };
-
-    readonly onEventTransact = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-        event: AgentBasePersistedEvent,
-    ): Promise<void> => {
-        this.#rememberRoute(scope.agent);
-        if (event.type === "text_end") {
-            await this.#appendEvidence(ctx, scope.agent.id, () =>
-                assistantTextEvidence(event.block.text),
+        messageAcceptedTransact: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+            accepted: AgentBaseAcceptedMessage,
+        ): Promise<void> => {
+            this.#rememberRoute(scope.agent);
+            const entry = userMessageEvidence(
+                accepted.message,
+                accepted.metadata as never,
             );
-        } else if (event.type === "toolcall_end") {
-            this.#callTools.set(callKey(scope.agent.id, event.block.callId), event.block.name);
-            await this.#appendEvidence(ctx, scope.agent.id, () =>
-                assistantToolCallEvidence(event.block.name, event.block.arguments),
+            if (entry === undefined) return;
+            await this.#appendEvidence(ctx, scope.agent.id, () => entry);
+        },
+
+        onEventTransact: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+            event: AgentBasePersistedEvent,
+        ): Promise<void> => {
+            this.#rememberRoute(scope.agent);
+            if (event.type === "text_end") {
+                await this.#appendEvidence(ctx, scope.agent.id, () =>
+                    assistantTextEvidence(event.block.text),
+                );
+            } else if (event.type === "toolcall_end") {
+                this.#callTools.set(callKey(scope.agent.id, event.block.callId), event.block.name);
+                await this.#appendEvidence(ctx, scope.agent.id, () =>
+                    assistantToolCallEvidence(event.block.name, event.block.arguments),
+                );
+            }
+        },
+
+        afterToolCallTransact: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+            result: SessionToolResultMessage,
+        ): Promise<void> => {
+            const database = this.#databaseOf(ctx);
+            const answer = await this.#evidence.consumeUserAnswer(
+                database,
+                scope.agent.id,
+                result.callId,
             );
-        }
-    };
-
-    readonly afterToolCallTransact = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-        result: SessionToolResultMessage,
-    ): Promise<void> => {
-        const database = this.#databaseOf(ctx);
-        const answer = await this.#evidence.consumeUserAnswer(
-            database,
-            scope.agent.id,
-            result.callId,
-        );
-        const toolName =
-            this.#callTools.get(callKey(scope.agent.id, result.callId)) ?? "tool";
-        this.#callTools.delete(callKey(scope.agent.id, result.callId));
-        await this.#appendEvidence(ctx, scope.agent.id, () =>
-            toolResultEvidence({
-                toolName,
-                content: result.content,
-                isError: result.isError === true,
-                ...(answer === undefined ? {} : { trustedUserAnswer: trustedAnswerText(answer) }),
-            }),
-        );
-    };
-
-    /** Provider retry and terminal error responses are untrusted context, exactly as v1. */
-    readonly onEvent = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-        event: SessionEvent,
-    ): Promise<void> => {
-        if (event.type === "retrying") {
+            const toolName =
+                this.#callTools.get(callKey(scope.agent.id, result.callId)) ?? "tool";
+            this.#callTools.delete(callKey(scope.agent.id, result.callId));
             await this.#appendEvidence(ctx, scope.agent.id, () =>
-                errorEvidence(event.reason, true),
+                toolResultEvidence({
+                    toolName,
+                    content: result.content,
+                    isError: result.isError === true,
+                    ...(answer === undefined ? {} : { trustedUserAnswer: trustedAnswerText(answer) }),
+                }),
             );
-        } else if (event.type === "done" && event.state === "error") {
-            await this.#appendEvidence(ctx, scope.agent.id, () =>
-                errorEvidence(event.message, false),
-            );
-        }
-    };
+        },
 
-    /** A compaction erased the conversation the evidence described; start a new generation. */
-    readonly historyErasedTransact = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-    ): Promise<void> => {
-        await this.#evidence.bumpGeneration(this.#databaseOf(ctx), scope.agent.id);
-    };
+        /** Provider retry and terminal error responses are untrusted context, exactly as v1. */
+        onEvent: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+            event: SessionEvent,
+        ): Promise<void> => {
+            if (event.type === "retrying") {
+                await this.#appendEvidence(ctx, scope.agent.id, () =>
+                    errorEvidence(event.reason, true),
+                );
+            } else if (event.type === "done" && event.state === "error") {
+                await this.#appendEvidence(ctx, scope.agent.id, () =>
+                    errorEvidence(event.message, false),
+                );
+            }
+        },
 
-    /** A (re)created identity may reuse an ID; clear any stale evidence under it atomically. */
-    readonly agentCreatedTransact = async (
-        ctx: Context,
-        _scope: AgentModuleSystemScope,
-        agent: AgentModuleAgentLifecycle,
-    ): Promise<void> => {
-        await this.#evidence.bumpGeneration(this.#databaseOf(ctx), agent.id);
+        /** A compaction erased the conversation the evidence described; start a new generation. */
+        historyErasedTransact: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+        ): Promise<void> => {
+            await this.#evidence.bumpGeneration(this.#databaseOf(ctx), scope.agent.id);
+        },
+
+        /** A (re)created identity may reuse an ID; clear any stale evidence under it atomically. */
+        agentCreatedTransact: async (
+            ctx: Context,
+            _scope: AgentModuleSystemScope,
+            agent: AgentModuleAgentLifecycle,
+        ): Promise<void> => {
+            await this.#evidence.bumpGeneration(this.#databaseOf(ctx), agent.id);
+        },
     };
 
     /**

@@ -3,6 +3,7 @@ import {
     type AgentDatabase,
     type AgentDatabaseFacade,
     type AgentModule,
+    type AgentModuleHooks,
     type AgentModuleScope,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
@@ -481,15 +482,19 @@ export class TasksModule implements AgentModule {
         return change.result;
     }
 
-    /** The common provider-neutral task tools exposed to each agent. */
-    readonly tools = (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => [
-        createTaskTool(this, scope.agent.id),
-        listTasksTool(this, scope.agent.id),
-        getTaskTool(this, scope.agent.id),
-        updateTaskTool(this, scope.agent.id),
-        completeTaskTool(this, scope.agent.id),
-        removeTaskTool(this, scope.agent.id),
-    ];
+    readonly #hooks: AgentModuleHooks = {
+        /** The common provider-neutral task tools exposed to each agent. */
+        tools: (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => [
+            createTaskTool(this, scope.agent.id),
+            listTasksTool(this, scope.agent.id),
+            getTaskTool(this, scope.agent.id),
+            updateTaskTool(this, scope.agent.id),
+            completeTaskTool(this, scope.agent.id),
+            removeTaskTool(this, scope.agent.id),
+        ],
+    };
+
+    readonly beforeStart = (): AgentModuleHooks => this.#hooks;
 
     /** Render a bounded model-facing task summary without changing the structured result. */
     formatForModel(tasks: readonly Task[]): string {

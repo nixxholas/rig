@@ -1,5 +1,6 @@
 import {
     type AgentModule,
+    type AgentModuleHooks,
     type AgentModuleScope,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
@@ -646,17 +647,21 @@ export class SecretsModule implements AgentModule {
         });
     }
 
-    /** Common provider-neutral tools. None can call the raw host resolver. */
-    readonly tools = (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => [
-        listSecretsTool(this, scope.agent.id),
-        referenceSecretTool(this, scope.agent.id),
-        attachSecretTool(this, scope.agent.id),
-        detachSecretTool(this, scope.agent.id),
-    ];
+    readonly #hooks: AgentModuleHooks = {
+        /** Common provider-neutral tools. None can call the raw host resolver. */
+        tools: (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => [
+            listSecretsTool(this, scope.agent.id),
+            referenceSecretTool(this, scope.agent.id),
+            attachSecretTool(this, scope.agent.id),
+            detachSecretTool(this, scope.agent.id),
+        ],
 
-    /** Tell the model that metadata is available while values remain host-only. */
-    readonly instructions = async (): Promise<string> =>
-        "Secret tools expose references and environment-variable names only. Secret values are available only to the host and must never be requested in chat, tool arguments, or model output.";
+        /** Tell the model that metadata is available while values remain host-only. */
+        instructions: async (): Promise<string> =>
+            "Secret tools expose references and environment-variable names only. Secret values are available only to the host and must never be requested in chat, tool arguments, or model output.",
+    };
+
+    readonly beforeStart = (): AgentModuleHooks => this.#hooks;
 
     /** Render safe metadata for a model without ever reading host values. */
     formatForModel(page: SecretPage): string {

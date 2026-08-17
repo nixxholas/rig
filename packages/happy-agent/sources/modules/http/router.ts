@@ -17,6 +17,8 @@ export interface AgentHttpInspector {
 
 export interface AgentHttpConfiguration {
     readonly git?: GitModule;
+    /** Full daemon identity echoed by health, for hosts whose identity is more than a version. */
+    readonly identity?: { readonly version: string; readonly developmentBuildId?: string };
     readonly p2pName?: string;
     readonly projectFiles?: ProjectFilesModule;
     readonly inferenceMaxRetries?: number;

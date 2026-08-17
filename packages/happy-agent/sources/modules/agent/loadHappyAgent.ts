@@ -24,7 +24,6 @@ import {
 } from "@slopus/happy-agent-base";
 import { hostComputeProvider } from "@slopus/happy-agent-compute";
 import {
-    AppletModule,
     AUTO_PERMISSION_REVIEW_BUDGET_MS,
     AutoModule,
     boundSecurityFileText,
@@ -48,13 +47,11 @@ import {
     SearchModule,
     SecretsModule,
     SkillsModule,
-    SlotsModule,
     SystemPromptModule,
     TasksModule,
     UsageModule,
     UserInputModule,
     WorkflowsModule,
-    WorkletsModule,
     WorkspacesModule,
     agentComputeConfigSchema,
     createComputeModules,
@@ -68,11 +65,8 @@ import {
     type SchedulingScheduler,
     type SearchBackend,
     type SecretResolver,
-    type SlotPublisher,
-    type SlotScopeResolver,
     type UserInputBroker,
     type WorkflowRuntime,
-    type WorkletRuntime,
     type PresenceModuleOptions,
 } from "@slopus/happy-agent-modules";
 import { sql } from "drizzle-orm";
@@ -153,13 +147,8 @@ export interface HappyAgentIntegrations {
     readonly mcp: McpHost;
     readonly scheduling: SchedulingScheduler;
     readonly search: SearchBackend;
-    readonly slots: {
-        readonly publisher: SlotPublisher;
-        readonly scopeResolver: SlotScopeResolver;
-    };
     readonly userInput: UserInputBroker;
     readonly workflows: WorkflowRuntime;
-    readonly worklets: WorkletRuntime;
     readonly permissionReviewer?: PermissionReviewer;
     readonly secretResolver?: SecretResolver;
     /**
@@ -186,7 +175,6 @@ export interface LoadHappyAgentOptions {
 
 export interface HappyAgentModuleCollection {
     readonly config: ConfigModule;
-    readonly applets: AppletModule;
     readonly collaboration: CollaborationModule;
     readonly conversations: ConversationModule;
     readonly compute: ComputeModule;
@@ -205,13 +193,11 @@ export interface HappyAgentModuleCollection {
     readonly search: SearchModule;
     readonly secrets: SecretsModule;
     readonly skills: SkillsModule;
-    readonly slots: SlotsModule;
     readonly systemPrompt: SystemPromptModule;
     readonly tasks: TasksModule;
     readonly usage: UsageModule;
     readonly userInput: UserInputModule;
     readonly workflows: WorkflowsModule;
-    readonly worklets: WorkletsModule;
     readonly workspaces: WorkspacesModule;
 }
 
@@ -363,13 +349,10 @@ export async function loadHappyAgent(
             modules.projects,
             modules.workspaces,
             modules.secrets,
-            modules.slots,
             modules.collaboration,
             modules.scheduling,
             modules.userInput,
             modules.workflows,
-            modules.worklets,
-            modules.applets,
             modules.imageGeneration,
             modules.search,
             modules.happy,
@@ -784,7 +767,6 @@ async function createModules(
     const modules: HappyAgentModuleCollection = {
         config: configModule,
         observation,
-        applets: new AppletModule({ rootDirectory: configuration.paths.appletsPath }),
         collaboration: new CollaborationModule(),
         conversations,
         compute: compute.computeModule,
@@ -814,10 +796,6 @@ async function createModules(
                 : { resolveForHost: integrations.secretResolver },
         ),
         skills: compute.skillsModule,
-        slots: new SlotsModule({
-            publisher: integrations.slots.publisher,
-            scopeResolver: integrations.slots.scopeResolver,
-        }),
         systemPrompt,
         tasks: new TasksModule({}),
         usage: new UsageModule({}),
@@ -858,10 +836,6 @@ async function createModules(
         workflows: new WorkflowsModule({
             enabled: configuration.values.features.workflows,
             runtime: integrations.workflows,
-        }),
-        worklets: new WorkletsModule({
-            installRoot: configuration.paths.workletsPath,
-            runtime: integrations.worklets,
         }),
         workspaces: new WorkspacesModule({
             // Removing a workspace's folder is the consequence of an archive that has already been
@@ -1133,9 +1107,7 @@ async function prepareHomes(configuration: HappyAgentConfiguration): Promise<voi
     await chmod(configuration.paths.agentHome, 0o700);
     await Promise.all([
         mkdir(configuration.paths.publicHome, { mode: 0o755, recursive: true }),
-        mkdir(configuration.paths.appletsPath, { mode: 0o755, recursive: true }),
         mkdir(configuration.paths.generatedPath, { mode: 0o755, recursive: true }),
-        mkdir(configuration.paths.workletsPath, { mode: 0o755, recursive: true }),
     ]);
 }
 

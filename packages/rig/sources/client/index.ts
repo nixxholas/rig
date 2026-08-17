@@ -8,11 +8,6 @@ export {
 export { stopLocalProtocolServer } from "./stopLocalProtocolServer.js";
 export { createUnixSocketFetch } from "./createUnixSocketFetch.js";
 export {
-    connectHappyAgentProtocolServer,
-    type ConnectHappyAgentProtocolServerOptions,
-    type HappyAgentProtocolServerConnection,
-} from "./connectHappyAgentProtocolServer.js";
-export {
     ProtocolHttpClient,
     type AttachRemoteTerminalOptions,
     type ProtocolHttpClientOptions,

@@ -57,12 +57,6 @@ export function createSlashCommands(
             aliases: ["todos"],
         },
         {
-            value: "plugins",
-            label: "/plugins",
-            description: "Show plugins, or add a name to read its current log.",
-            aliases: [],
-        },
-        {
             value: "presence",
             label: "/presence",
             description: "Say whether you are here to answer questions.",
@@ -108,12 +102,6 @@ export function createSlashCommands(
             value: "goal",
             label: "/goal",
             description: "Set or manage a persistent long-running goal.",
-            aliases: [],
-        },
-        {
-            value: "review",
-            label: "/review",
-            description: "Review current changes and find actionable issues.",
             aliases: [],
         },
         {

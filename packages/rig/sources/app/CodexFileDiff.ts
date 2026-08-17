@@ -4,7 +4,7 @@ import type {
     FileDiffKind,
     FileDiffLine,
     FileDiffLineKind,
-} from "../agent/ToolResultPresentation.js";
+} from "../protocol/index.js";
 
 export type CodexFileDiffKind = FileDiffKind;
 export type CodexFileDiffLineKind = FileDiffLineKind;

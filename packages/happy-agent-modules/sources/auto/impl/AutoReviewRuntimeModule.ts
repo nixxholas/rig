@@ -3,6 +3,7 @@ import type {
     AgentBasePersistedEvent,
     AgentBaseToolOutcome,
     AgentModule,
+    AgentModuleHooks,
     AgentModuleScope,
 } from "@slopus/happy-agent-base";
 import type {
@@ -120,69 +121,73 @@ export class AutoReviewRuntimeModule implements AgentModule {
         });
     }
 
-    readonly instructions = (_ctx: Context, scope: AgentModuleScope): string =>
-        this.#state.get(scope.agent.id)?.instructions ?? PERMISSION_REVIEW_INSTRUCTIONS;
+    readonly #hooks: AgentModuleHooks = {
+        instructions: (_ctx: Context, scope: AgentModuleScope): string =>
+            this.#state.get(scope.agent.id)?.instructions ?? PERMISSION_REVIEW_INSTRUCTIONS,
 
-    /** Capture the reviewer's own completed reasoning, text, and tool-call blocks. */
-    readonly onEventTransact = (
-        _ctx: Context,
-        scope: AgentModuleScope,
-        event: AgentBasePersistedEvent,
-    ): void => {
-        const state = this.#state.get(scope.agent.id);
-        if (state === undefined) return;
-        if (event.type === "text_end") {
-            state.entries.push({ type: "text", text: event.block.text });
-        } else if (event.type === "reasoning_end") {
-            state.entries.push({ type: "thinking", text: event.block.text ?? "" });
-        } else if (event.type === "toolcall_end") {
+        /** Capture the reviewer's own completed reasoning, text, and tool-call blocks. */
+        onEventTransact: (
+            _ctx: Context,
+            scope: AgentModuleScope,
+            event: AgentBasePersistedEvent,
+        ): void => {
+            const state = this.#state.get(scope.agent.id);
+            if (state === undefined) return;
+            if (event.type === "text_end") {
+                state.entries.push({ type: "text", text: event.block.text });
+            } else if (event.type === "reasoning_end") {
+                state.entries.push({ type: "thinking", text: event.block.text ?? "" });
+            } else if (event.type === "toolcall_end") {
+                state.entries.push({
+                    type: "tool_call",
+                    name: event.block.name,
+                    arguments: event.block.arguments,
+                });
+            }
+        },
+
+        /** Capture the result of each read-only tool call the reviewer made. */
+        afterToolCall: (
+            _ctx: Context,
+            scope: AgentModuleScope,
+            outcome: AgentBaseToolOutcome,
+        ): void => {
+            const state = this.#state.get(scope.agent.id);
+            if (state === undefined) return;
             state.entries.push({
-                type: "tool_call",
-                name: event.block.name,
-                arguments: event.block.arguments,
+                type: "tool_result",
+                name: toolName(outcome.tool),
+                isError: outcome.isError,
+                text: renderContent(outcome.content),
             });
-        }
-    };
+        },
 
-    /** Capture the result of each read-only tool call the reviewer made. */
-    readonly afterToolCall = (
-        _ctx: Context,
-        scope: AgentModuleScope,
-        outcome: AgentBaseToolOutcome,
-    ): void => {
-        const state = this.#state.get(scope.agent.id);
-        if (state === undefined) return;
-        state.entries.push({
-            type: "tool_result",
-            name: toolName(outcome.tool),
-            isError: outcome.isError,
-            text: renderContent(outcome.content),
-        });
-    };
+        /** Sum provider usage and remember how the run ended, both taken before any bounding. */
+        onEvent: (_ctx: Context, scope: AgentModuleScope, event: SessionEvent): void => {
+            const state = this.#state.get(scope.agent.id);
+            if (state === undefined) return;
+            if (event.type === "token_usage") {
+                state.usage = addUsage(state.usage, event.usage);
+                state.inferred = true;
+            } else if (event.type === "done") {
+                state.doneState = event.state;
+            }
+        },
 
-    /** Sum provider usage and remember how the run ended, both taken before any bounding. */
-    readonly onEvent = (_ctx: Context, scope: AgentModuleScope, event: SessionEvent): void => {
-        const state = this.#state.get(scope.agent.id);
-        if (state === undefined) return;
-        if (event.type === "token_usage") {
-            state.usage = addUsage(state.usage, event.usage);
+        /** A done event without token usage still marks that an inference ran. */
+        afterInference: (
+            _ctx: Context,
+            scope: AgentModuleScope,
+            inference: AgentBaseInference,
+        ): void => {
+            const state = this.#state.get(scope.agent.id);
+            if (state === undefined) return;
             state.inferred = true;
-        } else if (event.type === "done") {
-            state.doneState = event.state;
-        }
+            if (inference.state !== undefined) state.doneState = inference.state;
+        },
     };
 
-    /** A done event without token usage still marks that an inference ran. */
-    readonly afterInference = (
-        _ctx: Context,
-        scope: AgentModuleScope,
-        inference: AgentBaseInference,
-    ): void => {
-        const state = this.#state.get(scope.agent.id);
-        if (state === undefined) return;
-        state.inferred = true;
-        if (inference.state !== undefined) state.doneState = inference.state;
-    };
+    readonly beforeStart = (): AgentModuleHooks => this.#hooks;
 }
 
 function addUsage(total: SessionUsage, next: SessionUsage): SessionUsage {

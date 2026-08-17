@@ -2,7 +2,7 @@ import { open } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
-import type { AgentModule } from "@slopus/happy-agent-base";
+import type { AgentModule, AgentModuleHooks } from "@slopus/happy-agent-base";
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { parse, TomlDate, type TomlTable, type TomlValue } from "smol-toml";
@@ -736,7 +736,6 @@ const pathSchemaSet = Type.Object(
     {
         agentHome: pathSchema,
         agentLockPath: pathSchema,
-        appletsPath: pathSchema,
         autoAgentLockPath: pathSchema,
         autoDatabasePath: pathSchema,
         configHome: pathSchema,
@@ -754,7 +753,6 @@ const pathSchemaSet = Type.Object(
         securityPath: pathSchema,
         socketPath: pathSchema,
         tokenPath: pathSchema,
-        workletsPath: pathSchema,
     },
     { additionalProperties: false },
 );
@@ -898,9 +896,13 @@ export class ConfigModule implements AgentModule {
         this.configuration = configuration;
     }
 
-    /** Apply configured root instructions through the normal pre-inference hook. */
-    readonly instructions = async (): Promise<string> =>
-        this.configuration.values.defaults.instructions ?? "";
+    readonly #hooks: AgentModuleHooks = {
+        /** Apply configured root instructions through the normal pre-inference hook. */
+        instructions: async (): Promise<string> =>
+            this.configuration.values.defaults.instructions ?? "",
+    };
+
+    readonly beforeStart = (): AgentModuleHooks => this.#hooks;
 
     static async load(input?: HappyAgentConfigurationInput): Promise<ConfigModule> {
         const paths = derivePaths(input);
@@ -1123,7 +1125,6 @@ function derivePaths(input: HappyAgentConfigurationInput): HappyAgentConfigurati
     const paths = {
         agentHome,
         agentLockPath: join(agentHome, "agent.lock"),
-        appletsPath: join(publicHome, "Applets"),
         // The automatic permission reviewer keeps its own review-only agent system in a separate
         // database and single-owner lock beside, never on top of, the main agent's own files, so
         // the reviewer's state shares nothing with the agent it reviews.
@@ -1144,7 +1145,6 @@ function derivePaths(input: HappyAgentConfigurationInput): HappyAgentConfigurati
         securityPath: join(configHome, "SECURITY.md"),
         socketPath: join(agentHome, "server.sock"),
         tokenPath: join(agentHome, "token"),
-        workletsPath: join(publicHome, "Worklets"),
     };
     if (!Value.Check(happyAgentConfigurationPathsSchema, paths)) {
         throw new Error("The Happy Agent filesystem layout is invalid.");

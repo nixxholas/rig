@@ -1,8 +1,15 @@
-import type { AgentModule, AgentModuleScope, AnyAgentTool } from "@slopus/happy-agent-base";
+import type {
+    AgentModule,
+    AgentModuleHooks,
+    AgentModuleScope,
+    AgentSystemRef,
+    AnyAgentTool,
+} from "@slopus/happy-agent-base";
 import type { Context } from "@steve.kite/stdlib";
 import type { LibSQLDatabase } from "drizzle-orm/libsql";
 
 type LoadedModule = AgentModule<AnyAgentTool, LibSQLDatabase>;
+type LoadedHooks = AgentModuleHooks<AnyAgentTool, LibSQLDatabase>;
 
 /**
  * Rejects a tool whose parameters are not an object at the top level, as the module assembles it.
@@ -11,17 +18,29 @@ type LoadedModule = AgentModule<AnyAgentTool, LibSQLDatabase>;
  * kills every turn before inference, with nothing in the transcript to say why. Failing here instead
  * names the tool at the moment its module offers it.
  *
- * The module's own `tools` hook is replaced rather than wrapped in a proxy, because a module is a
- * class instance with private state and the hook is an ordinary own property: swapping it leaves the
- * module's identity and every other hook exactly as they were.
+ * A module's hooks are private to it and only ever surface as the object its `beforeStart` returns,
+ * so that entry point is what gets replaced: the original still runs and still builds the module's
+ * own state, and only the `tools` hook in what it returned is wrapped. The module's identity and
+ * every other hook are left exactly as they were.
  */
 export function checkModuleToolParameters(module: LoadedModule): LoadedModule {
-    const tools = module.tools;
-    if (tools === undefined) return module;
-    Object.defineProperty(module, "tools", {
+    const beforeStart = module.beforeStart;
+    if (beforeStart === undefined) return module;
+    Object.defineProperty(module, "beforeStart", {
         configurable: true,
-        value: async (ctx: Context, scope: AgentModuleScope) =>
-            assertObjectRootedParameters(await tools(ctx, scope)),
+        value: async (
+            ctx: Context,
+            agents: AgentSystemRef<LibSQLDatabase>,
+        ): Promise<LoadedHooks | void> => {
+            const hooks = await beforeStart.call(module, ctx, agents);
+            const tools = hooks?.tools;
+            if (hooks === undefined || tools === undefined) return hooks;
+            return {
+                ...hooks,
+                tools: async (toolCtx: Context, scope: AgentModuleScope<LibSQLDatabase>) =>
+                    assertObjectRootedParameters(await tools(toolCtx, scope)),
+            };
+        },
         writable: true,
     });
     return module;

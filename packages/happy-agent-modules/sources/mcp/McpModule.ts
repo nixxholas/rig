@@ -1,9 +1,10 @@
 import { sql } from "drizzle-orm";
 import {
     agentDatabaseRun,
-    type AgentModule,
-    type AgentModuleScope,
     type AgentDatabase,
+    type AgentModule,
+    type AgentModuleHooks,
+    type AgentModuleScope,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
 import { Type, type Static } from "@sinclair/typebox";
@@ -137,95 +138,100 @@ export class McpModule implements AgentModule {
         this.#maxOutputCharacters = options.maxOutputCharacters ?? DEFAULT_OUTPUT_CHARACTERS;
     }
 
-    /**
-     * Keep a durable, bounded server index for prompt projections and restart diagnostics. The
-     * host remains authoritative for live calls; this snapshot is only written through the
-     * caller's Agent Storage transaction.
-     */
-    readonly beforeAgentLoop = async (ctx: Context, scope: AgentModuleScope): Promise<void> => {
-        const servers = await this.#listAllServers(ctx, scope.agent.id, scope.agent.permissionMode);
-        await ctx.inTx(async (txCtx) => {
-            await agentDatabaseRun(
-                txCtx.db,
-                sql`DELETE FROM mcp_module_index WHERE agent_id = ${scope.agent.id}`,
+    readonly #hooks: AgentModuleHooks = {
+        /**
+         * Keep a durable, bounded server index for prompt projections and restart diagnostics.
+         * The host remains authoritative for live calls; this snapshot is only written through
+         * the caller's Agent Storage transaction.
+         */
+        beforeAgentLoop: async (ctx: Context, scope: AgentModuleScope): Promise<void> => {
+            const servers = await this.#listAllServers(
+                ctx,
+                scope.agent.id,
+                scope.agent.permissionMode,
             );
-            for (const server of servers) {
-                const entry: McpIndexedServer = {
-                    agentId: scope.agent.id,
-                    ...(server.errorMessage === undefined
-                        ? {}
-                        : { errorMessage: server.errorMessage }),
-                    ...(server.fingerprint === undefined
-                        ? {}
-                        : { fingerprint: server.fingerprint }),
-                    name: server.name,
-                    status: server.status,
-                    toolCount: server.toolCount,
-                    updatedAt: Date.now(),
-                };
-                if (!Value.Check(mcpIndexedServerSchema, entry)) {
-                    throw new Error("MCP server index entry is invalid.");
-                }
+            await ctx.inTx(async (txCtx) => {
                 await agentDatabaseRun(
                     txCtx.db,
-                    sql`INSERT INTO mcp_module_index
-                        (agent_id, name, fingerprint, status, tool_count, error_message, updated_at)
-                        VALUES (${entry.agentId}, ${entry.name}, ${entry.fingerprint ?? null},
-                            ${entry.status}, ${entry.toolCount}, ${entry.errorMessage ?? null},
-                            ${entry.updatedAt})`,
+                    sql`DELETE FROM mcp_module_index WHERE agent_id = ${scope.agent.id}`,
                 );
+                for (const server of servers) {
+                    const entry: McpIndexedServer = {
+                        agentId: scope.agent.id,
+                        ...(server.errorMessage === undefined
+                            ? {}
+                            : { errorMessage: server.errorMessage }),
+                        ...(server.fingerprint === undefined
+                            ? {}
+                            : { fingerprint: server.fingerprint }),
+                        name: server.name,
+                        status: server.status,
+                        toolCount: server.toolCount,
+                        updatedAt: Date.now(),
+                    };
+                    if (!Value.Check(mcpIndexedServerSchema, entry)) {
+                        throw new Error("MCP server index entry is invalid.");
+                    }
+                    await agentDatabaseRun(
+                        txCtx.db,
+                        sql`INSERT INTO mcp_module_index
+                            (agent_id, name, fingerprint, status, tool_count, error_message, updated_at)
+                            VALUES (${entry.agentId}, ${entry.name}, ${entry.fingerprint ?? null},
+                                ${entry.status}, ${entry.toolCount}, ${entry.errorMessage ?? null},
+                                ${entry.updatedAt})`,
+                    );
+                }
+            });
+        },
+
+        /**
+         * The dynamic tool list is intentionally rebuilt from the host's current connected
+         * catalog. Rig remains authoritative for connection lifetime and trust; the module never
+         * caches a client or treats its own heap as a server record.
+         */
+        tools: async (ctx: Context, scope: AgentModuleScope): Promise<readonly AnyAgentTool[]> => {
+            const agentId = assertAgentId(scope.agent.id);
+            const servers = await this.#listAllServers(ctx, agentId, scope.agent.permissionMode);
+            const connected = servers.filter((server) => server.status === "connected");
+            const loadedTools: AnyAgentTool[] = [];
+            for (const server of connected) {
+                const tools = await this.#listAllTools(ctx, agentId, server.name);
+                if (loadedTools.length + tools.length > MAX_MCP_TOTAL_TOOLS) {
+                    throw new Error("MCP tool catalog exceeded its bound.");
+                }
+                for (const tool of tools) {
+                    // A server outside this repo may describe its tool with any JSON Schema, but every
+                    // provider requires an object at the root and refuses the whole request otherwise.
+                    // Dropping the one tool keeps a single odd server from breaking every turn.
+                    if (!isObjectRootedSchema(tool.inputSchema)) {
+                        ctx.log.warn(
+                            `The ${tool.name} tool from ${server.name} is unavailable: its input schema is not an object at the top level.`,
+                        );
+                        continue;
+                    }
+                    loadedTools.push(createMcpTool(this, agentId, server.name, tool));
+                }
             }
-        });
+            const merged = mergeMcpTools([], { servers: connected, tools: loadedTools });
+            const quarantined = merged.servers.filter((server) => server.status === "failed");
+            const protocolTools = merged.servers.every((server) => server.status !== "connected")
+                ? []
+                : createMcpProtocolTools(
+                      this,
+                      agentId,
+                      merged.servers
+                          .filter((server) => server.status === "connected")
+                          .map((server) => ({ name: server.name })),
+                  );
+            return [
+                listMcpServersTool(this, agentId, scope.agent.permissionMode, quarantined),
+                ...merged.tools,
+                ...protocolTools,
+            ];
+        },
     };
 
-    /**
-     * The dynamic tool list is intentionally rebuilt from the host's current connected catalog.
-     * Rig remains authoritative for connection lifetime and trust; the module never caches a
-     * client or treats its own heap as a server record.
-     */
-    readonly tools = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-    ): Promise<readonly AnyAgentTool[]> => {
-        const agentId = assertAgentId(scope.agent.id);
-        const servers = await this.#listAllServers(ctx, agentId, scope.agent.permissionMode);
-        const connected = servers.filter((server) => server.status === "connected");
-        const loadedTools: AnyAgentTool[] = [];
-        for (const server of connected) {
-            const tools = await this.#listAllTools(ctx, agentId, server.name);
-            if (loadedTools.length + tools.length > MAX_MCP_TOTAL_TOOLS) {
-                throw new Error("MCP tool catalog exceeded its bound.");
-            }
-            for (const tool of tools) {
-                // A server outside this repo may describe its tool with any JSON Schema, but every
-                // provider requires an object at the root and refuses the whole request otherwise.
-                // Dropping the one tool keeps a single odd server from breaking every turn.
-                if (!isObjectRootedSchema(tool.inputSchema)) {
-                    ctx.log.warn(
-                        `The ${tool.name} tool from ${server.name} is unavailable: its input schema is not an object at the top level.`,
-                    );
-                    continue;
-                }
-                loadedTools.push(createMcpTool(this, agentId, server.name, tool));
-            }
-        }
-        const merged = mergeMcpTools([], { servers: connected, tools: loadedTools });
-        const quarantined = merged.servers.filter((server) => server.status === "failed");
-        const protocolTools = merged.servers.every((server) => server.status !== "connected")
-            ? []
-            : createMcpProtocolTools(
-                  this,
-                  agentId,
-                  merged.servers
-                      .filter((server) => server.status === "connected")
-                      .map((server) => ({ name: server.name })),
-              );
-        return [
-            listMcpServersTool(this, agentId, scope.agent.permissionMode, quarantined),
-            ...merged.tools,
-            ...protocolTools,
-        ];
-    };
+    readonly beforeStart = (): AgentModuleHooks => this.#hooks;
 
     async listServerPage(
         ctx: Context,

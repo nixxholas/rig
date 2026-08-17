@@ -1,5 +1,6 @@
 import { Type, type Static } from "@sinclair/typebox";
-import { happyComputeErrorSchema } from "happy-plugins/internal";
+
+import { happyComputeErrorSchema } from "./PluginWireTypes.js";
 
 const exact = { additionalProperties: false } as const;
 const nonEmptyText = Type.String({ minLength: 1 });

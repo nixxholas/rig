@@ -1,4 +1,9 @@
-import type { AgentModule, AgentModuleScope, AnyAgentTool } from "@slopus/happy-agent-base";
+import type {
+    AgentModule,
+    AgentModuleHooks,
+    AgentModuleScope,
+    AnyAgentTool,
+} from "@slopus/happy-agent-base";
 import type { Context } from "@steve.kite/stdlib";
 
 /**
@@ -31,6 +36,10 @@ export class AutoReviewComputeModule implements AgentModule {
         this.#reviewerTools = reviewerTools;
     }
 
-    readonly tools = (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] =>
-        this.#reviewerTools(scope);
+    readonly #hooks: AgentModuleHooks = {
+        tools: (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] =>
+            this.#reviewerTools(scope),
+    };
+
+    readonly beforeStart = (): AgentModuleHooks => this.#hooks;
 }

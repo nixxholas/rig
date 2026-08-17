@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import {
     agentDatabaseRun,
     type AgentModule,
+    type AgentModuleHooks,
     type AgentModuleMigration,
     type AgentModuleScope,
     type AnyAgentTool,
@@ -263,18 +264,22 @@ export class WorkflowsModule implements AgentModule {
         this.#now();
     }
 
-    readonly tools = (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] =>
-        this.#enabled
-            ? [
-                  runWorkflowTool(this, scope.agent.id),
-                  listWorkflowsTool(this, scope.agent.id),
-                  workflowStatusTool(this, scope.agent.id),
-                  cancelWorkflowTool(this, scope.agent.id),
-                  resumeWorkflowTool(this, scope.agent.id),
-                  waitWorkflowTool(this, scope.agent.id),
-                  workflowLogsTool(this, scope.agent.id),
-              ]
-            : [];
+    readonly #hooks: AgentModuleHooks = {
+        tools: (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] =>
+            this.#enabled
+                ? [
+                      runWorkflowTool(this, scope.agent.id),
+                      listWorkflowsTool(this, scope.agent.id),
+                      workflowStatusTool(this, scope.agent.id),
+                      cancelWorkflowTool(this, scope.agent.id),
+                      resumeWorkflowTool(this, scope.agent.id),
+                      waitWorkflowTool(this, scope.agent.id),
+                      workflowLogsTool(this, scope.agent.id),
+                  ]
+                : [],
+    };
+
+    readonly beforeStart = (): AgentModuleHooks => this.#hooks;
 
     async launch(
         ctx: Context,

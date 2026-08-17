@@ -1,9 +1,11 @@
+import type { AgentModuleHooks, AgentModuleScope } from "@slopus/happy-agent-base";
 import { describe, expect, it } from "vitest";
 import { Value } from "@sinclair/typebox/value";
 
 import * as SchedulingExports from "../../sources/scheduling/index.js";
 import { SchedulingModule } from "../../sources/scheduling/SchedulingModule.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
+import { resolveModuleHooks } from "../support/moduleHooks.js";
 import {
     InMemorySchedulingScheduler,
     InMemorySchedulingStore,
@@ -14,6 +16,7 @@ const agentId = "agent-a";
 interface Harness {
     readonly database: ReturnType<typeof moduleDatabase>;
     readonly module: SchedulingModule;
+    readonly hooks: AgentModuleHooks;
     readonly scheduler: InMemorySchedulingScheduler;
     readonly setNow: (value: number) => void;
 }
@@ -36,9 +39,11 @@ async function harness(
     });
     const database = moduleDatabase(module.migrations, name);
     await database.ready;
+    const hooks = await resolveModuleHooks(database.context, module);
     return {
         database,
         module,
+        hooks,
         scheduler,
         setNow: (value) => {
             now = value;
@@ -132,8 +137,8 @@ describe("SchedulingModule", () => {
     it("marks one-transaction tools transactional but leaves long waits unwrapped", async () => {
         const created = await harness("scheduling-tool-surface");
         try {
-            const scope = { agent: { id: agentId } } as Parameters<SchedulingModule["tools"]>[1];
-            const tools = await created.module.tools(created.database.context, scope);
+            const scope = { agent: { id: agentId } } as AgentModuleScope;
+            const tools = await created.hooks.tools!(created.database.context, scope);
             const byName = new Map(tools.map((tool) => [tool.name, tool]));
 
             expect(tools.every((tool) => tool.durable)).toBe(true);
@@ -178,8 +183,8 @@ describe("SchedulingModule", () => {
     it("lets the model schedule to the requested agent", async () => {
         const created = await harness("scheduling-target-tool");
         try {
-            const scope = { agent: { id: agentId } } as Parameters<SchedulingModule["tools"]>[1];
-            const tool = (await created.module.tools(created.database.context, scope)).find(
+            const scope = { agent: { id: agentId } } as AgentModuleScope;
+            const tool = (await created.hooks.tools!(created.database.context, scope)).find(
                 (candidate) => candidate.name === "schedule_message",
             );
             expect(tool).toBeDefined();
@@ -302,8 +307,8 @@ describe("SchedulingModule", () => {
                 seconds: 30,
                 minutes: 1,
             });
-            const scope = { agent: { id: agentId } } as Parameters<SchedulingModule["tools"]>[1];
-            const waitTool = (await created.module.tools(created.database.context, scope)).find(
+            const scope = { agent: { id: agentId } } as AgentModuleScope;
+            const waitTool = (await created.hooks.tools!(created.database.context, scope)).find(
                 (candidate) => candidate.name === "wait",
             );
             expect(
@@ -341,8 +346,9 @@ describe("SchedulingModule", () => {
     it("does not expose schedule_message when no role policy is supplied", async () => {
         const scheduler = new InMemorySchedulingScheduler(new InMemorySchedulingStore());
         const module = new SchedulingModule({ scheduler });
-        const scope = { agent: { id: agentId } } as Parameters<SchedulingModule["tools"]>[1];
-        const tools = await module.tools({} as never, scope);
+        const hooks = await resolveModuleHooks({} as never, module);
+        const scope = { agent: { id: agentId } } as AgentModuleScope;
+        const tools = await hooks.tools!({} as never, scope);
 
         expect(tools.map((tool) => tool.name)).not.toContain("schedule_message");
         await expect(

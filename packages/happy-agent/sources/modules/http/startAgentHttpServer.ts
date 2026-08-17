@@ -22,7 +22,10 @@ import { createInspectorRoutes } from "./inspectorRoutes.js";
 import { createFileRoutes } from "./fileRoutes.js";
 import { createGitRoutes } from "./gitRoutes.js";
 import { createProjectRoutes } from "./projectRoutes.js";
+import { createPresenceRoutes } from "./presenceRoutes.js";
+import { createSecretRoutes } from "./secretRoutes.js";
 import { createSessionRoutes } from "./sessionRoutes.js";
+import { createSessionProcessRoutes } from "./sessionProcessRoutes.js";
 import { createWorkspaceRoutes } from "./workspaceRoutes.js";
 import {
     prepareAgentSocket,
@@ -150,7 +153,10 @@ function routeGroups(
         createCompatibilityRoutes(),
         createInspectorRoutes(),
         createAgentRoutes(),
+        createPresenceRoutes(),
+        createSecretRoutes(),
         createSessionRoutes(),
+        createSessionProcessRoutes(),
         createProjectRoutes({
             agent,
             files: projectFiles,

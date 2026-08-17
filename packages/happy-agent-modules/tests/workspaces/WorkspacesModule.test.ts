@@ -12,6 +12,7 @@ import {
     WorkspacesModule,
 } from "../../sources/workspaces/index.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
+import { resolveModuleHooks } from "../support/moduleHooks.js";
 
 /**
  * Migrations are ordered, and the fourth one replaces the table the first one created. The shared
@@ -676,6 +677,7 @@ describe("WorkspacesModule", () => {
         });
         const database = workspaceDatabase("workspaces-tool-commit-test");
         await database.ready;
+        const hooks = await resolveModuleHooks(database.context, workspaces);
 
         try {
             const call = (id: string) =>
@@ -686,8 +688,8 @@ describe("WorkspacesModule", () => {
                 }) as never;
             const scope = {
                 agent: { id: "agent-a" },
-            } as Parameters<WorkspacesModule["tools"]>[1];
-            const tools = workspaces.tools(database.context, scope);
+            } as Parameters<NonNullable<typeof hooks.tools>>[1];
+            const tools = await hooks.tools!(database.context, scope);
             const tool = (name: string) => tools.find((candidate) => candidate.name === name)!;
 
             const created = await tool("create_workspace").execute(
@@ -790,12 +792,13 @@ describe("WorkspacesModule", () => {
         const workspaces = new WorkspacesModule({ host: HOST });
         const database = workspaceDatabase("workspaces-review-test");
         await database.ready;
+        const hooks = await resolveModuleHooks(database.context, workspaces);
 
         try {
             const scope = {
                 agent: { id: "agent-a" },
-            } as Parameters<WorkspacesModule["tools"]>[1];
-            const tools = workspaces.tools(database.context, scope);
+            } as Parameters<NonNullable<typeof hooks.tools>>[1];
+            const tools = await hooks.tools!(database.context, scope);
             const transfer = tools.find((tool) => tool.name === "transfer_workspace");
             const archive = tools.find((tool) => tool.name === "archive_workspace");
             expect(transfer).toBeDefined();

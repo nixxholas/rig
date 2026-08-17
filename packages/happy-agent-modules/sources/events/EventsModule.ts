@@ -11,6 +11,7 @@ import type {
     AgentMetadataChange,
     AgentModule,
     AgentModuleAgentLifecycle,
+    AgentModuleHooks,
     AgentModuleScope,
     AgentModuleSystemScope,
     AnyAgentTool,
@@ -118,7 +119,7 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
         this.#moduleListener = options.listener;
     }
 
-    readonly beforeStart = async (ctx: Context): Promise<void> => {
+    readonly beforeStart = async (ctx: Context): Promise<AgentModuleHooks> => {
         const loaded = await loadEventState(ctx.db, this.#capacity);
         this.#entries.push(...loaded.events.map(freezeEvent));
         this.#occurredAt = this.#entries.at(-1)?.occurredAt ?? 0;
@@ -127,6 +128,7 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
         this.#createId = createUuidV7Factory(this.#now, highWater);
         const runs = await loadActiveRuns(ctx.db, parseActiveRun);
         for (const [agentId, run] of runs) this.#runs.set(agentId, run);
+        return this.#hooks;
     };
 
     cursor(): string {
@@ -199,238 +201,247 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
         )?.id;
     }
 
-    readonly agentCreatedTransact = async (
-        ctx: Context,
-        scope: AgentModuleSystemScope,
-        agent: AgentModuleAgentLifecycle,
-    ): Promise<void> => {
-        await this.recordInDatabase(ctx, ctx.db, {
-            agentId: agent.id,
-            payload: agent,
-            type: "agent.created",
-        });
-    };
-
-    readonly agentRestoredTransact = async (
-        ctx: Context,
-        scope: AgentModuleSystemScope,
-        agent: AgentModuleAgentLifecycle,
-    ): Promise<void> => {
-        await this.recordInDatabase(ctx, ctx.db, {
-            agentId: agent.id,
-            payload: agent,
-            type: "agent.restored",
-        });
-        const run = this.#runs.get(agent.id);
-        if (run !== undefined) {
-            const projected = projectProviderEvent(run, { type: "block_reset" }, this.#now());
-            await saveActiveRun(ctx.db, agent.id, projected.run);
+    readonly #hooks: AgentModuleHooks = {
+        agentCreatedTransact: async (
+            ctx: Context,
+            scope: AgentModuleSystemScope,
+            agent: AgentModuleAgentLifecycle,
+        ): Promise<void> => {
             await this.recordInDatabase(ctx, ctx.db, {
                 agentId: agent.id,
-                payload: {
-                    event: { type: "block_reset" },
-                    recovered: true,
-                    rigEvent: projected.rigEvent,
-                    runId: run.runId,
-                },
-                type: "provider.event",
+                payload: agent,
+                type: "agent.created",
             });
-        }
-    };
+        },
 
-    readonly agentArchivedTransact = async (
-        ctx: Context,
-        scope: AgentModuleSystemScope,
-        agent: AgentModuleAgentLifecycle,
-    ): Promise<void> => {
-        await this.recordInDatabase(ctx, ctx.db, {
-            agentId: agent.id,
-            payload: agent,
-            type: "agent.archived",
-        });
-    };
-
-    readonly messageAcceptedTransact = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-        accepted: AgentBaseAcceptedMessage,
-    ): Promise<void> => {
-        const previous = this.#runs.get(scope.agent.id);
-        const run =
-            accepted.kind === "steering" && previous !== undefined
-                ? previous
-                : emptyRun(accepted.id);
-        await saveActiveRun(ctx.db, scope.agent.id, run);
-        afterCommit(ctx, () => {
-            this.#runs.set(scope.agent.id, run);
-        });
-        await this.recordInDatabase(ctx, ctx.db, {
-            agentId: scope.agent.id,
-            payload: { ...accepted, runId: run.runId },
-            type: "message.accepted",
-        });
-    };
-
-    readonly permissionModeChangedTransact = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-        change: AgentBasePermissionModeChange,
-    ): Promise<void> => {
-        await this.recordInDatabase(ctx, ctx.db, {
-            agentId: scope.agent.id,
-            payload: change,
-            type: "agent.permission-changed",
-        });
-    };
-
-    readonly metadataChangedTransact = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-        change: AgentMetadataChange,
-    ): Promise<void> => {
-        await this.recordInDatabase(ctx, ctx.db, {
-            agentId: scope.agent.id,
-            payload: change,
-            type: "agent.metadata-changed",
-        });
-    };
-
-    readonly beforeAgentLoopTransact = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-        loop: AgentBaseLoop,
-    ): Promise<void> => {
-        await this.recordInDatabase(ctx, ctx.db, {
-            agentId: scope.agent.id,
-            payload: {
-                ...loop,
-                runId: this.#runs.get(scope.agent.id)?.runId ?? loop.loopId,
-            },
-            type: "loop.started",
-        });
-    };
-
-    readonly onEvent = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-        event: SessionEvent,
-    ): Promise<void> => {
-        await ctx.inTx(async (txCtx) => {
-            const current = this.#runs.get(scope.agent.id) ?? emptyRun(this.#createId());
-            const projected = projectProviderEvent(current, event, this.#now());
-            await saveActiveRun(txCtx.db, scope.agent.id, projected.run);
-            afterCommit(txCtx, () => {
-                this.#runs.set(scope.agent.id, projected.run);
+        agentRestoredTransact: async (
+            ctx: Context,
+            scope: AgentModuleSystemScope,
+            agent: AgentModuleAgentLifecycle,
+        ): Promise<void> => {
+            await this.recordInDatabase(ctx, ctx.db, {
+                agentId: agent.id,
+                payload: agent,
+                type: "agent.restored",
             });
-            await this.recordInDatabase(txCtx, txCtx.db, {
+            const run = this.#runs.get(agent.id);
+            if (run !== undefined) {
+                const projected = projectProviderEvent(run, { type: "block_reset" }, this.#now());
+                await saveActiveRun(ctx.db, agent.id, projected.run);
+                await this.recordInDatabase(ctx, ctx.db, {
+                    agentId: agent.id,
+                    payload: {
+                        event: { type: "block_reset" },
+                        recovered: true,
+                        rigEvent: projected.rigEvent,
+                        runId: run.runId,
+                    },
+                    type: "provider.event",
+                });
+            }
+        },
+
+        agentArchivedTransact: async (
+            ctx: Context,
+            scope: AgentModuleSystemScope,
+            agent: AgentModuleAgentLifecycle,
+        ): Promise<void> => {
+            await this.recordInDatabase(ctx, ctx.db, {
+                agentId: agent.id,
+                payload: agent,
+                type: "agent.archived",
+            });
+        },
+
+        messageAcceptedTransact: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+            accepted: AgentBaseAcceptedMessage,
+        ): Promise<void> => {
+            const previous = this.#runs.get(scope.agent.id);
+            const run =
+                accepted.kind === "steering" && previous !== undefined
+                    ? previous
+                    : emptyRun(accepted.id);
+            await saveActiveRun(ctx.db, scope.agent.id, run);
+            afterCommit(ctx, () => {
+                this.#runs.set(scope.agent.id, run);
+            });
+            await this.recordInDatabase(ctx, ctx.db, {
+                agentId: scope.agent.id,
+                payload: { ...accepted, runId: run.runId },
+                type: "message.accepted",
+            });
+        },
+
+        permissionModeChangedTransact: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+            change: AgentBasePermissionModeChange,
+        ): Promise<void> => {
+            await this.recordInDatabase(ctx, ctx.db, {
+                agentId: scope.agent.id,
+                payload: change,
+                type: "agent.permission-changed",
+            });
+        },
+
+        metadataChangedTransact: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+            change: AgentMetadataChange,
+        ): Promise<void> => {
+            await this.recordInDatabase(ctx, ctx.db, {
+                agentId: scope.agent.id,
+                payload: change,
+                type: "agent.metadata-changed",
+            });
+        },
+
+        beforeAgentLoopTransact: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+            loop: AgentBaseLoop,
+        ): Promise<void> => {
+            await this.recordInDatabase(ctx, ctx.db, {
                 agentId: scope.agent.id,
                 payload: {
-                    event,
-                    rigEvent: projected.rigEvent,
-                    runId: projected.run.runId,
-                    ...(event.type === "text_end" ? { text: projected.run.text } : {}),
+                    ...loop,
+                    runId: this.#runs.get(scope.agent.id)?.runId ?? loop.loopId,
                 },
-                type: "provider.event",
+                type: "loop.started",
             });
-        });
-    };
+        },
 
-    readonly beforeToolCallTransact = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-        call: SessionToolCallBlock,
-    ): Promise<void> => {
-        const runId = this.#runs.get(scope.agent.id)?.runId ?? call.callId;
-        await this.recordInDatabase(ctx, ctx.db, {
-            agentId: scope.agent.id,
-            payload: {
-                rigEvent: {
-                    toolCall: presentedToolCall(call),
-                    type: "tool_execution_start",
+        onEvent: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+            event: SessionEvent,
+        ): Promise<void> => {
+            await ctx.inTx(async (txCtx) => {
+                const current = this.#runs.get(scope.agent.id) ?? emptyRun(this.#createId());
+                const projected = projectProviderEvent(current, event, this.#now());
+                await saveActiveRun(txCtx.db, scope.agent.id, projected.run);
+                afterCommit(txCtx, () => {
+                    this.#runs.set(scope.agent.id, projected.run);
+                });
+                await this.recordInDatabase(txCtx, txCtx.db, {
+                    agentId: scope.agent.id,
+                    payload: {
+                        event,
+                        rigEvent: projected.rigEvent,
+                        runId: projected.run.runId,
+                        ...(event.type === "text_end" ? { text: projected.run.text } : {}),
+                    },
+                    type: "provider.event",
+                });
+            });
+        },
+
+        beforeToolCallTransact: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+            call: SessionToolCallBlock,
+        ): Promise<void> => {
+            const runId = this.#runs.get(scope.agent.id)?.runId ?? call.callId;
+            await this.recordInDatabase(ctx, ctx.db, {
+                agentId: scope.agent.id,
+                payload: {
+                    rigEvent: {
+                        toolCall: presentedToolCall(call),
+                        type: "tool_execution_start",
+                    },
+                    runId,
                 },
-                runId,
-            },
-            type: "tool.started",
-        });
-    };
+                type: "tool.started",
+            });
+        },
 
-    readonly afterToolCallTransact = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-        result: SessionToolResultMessage,
-    ): Promise<void> => {
-        const run = this.#runs.get(scope.agent.id);
-        const toolName = toolNameForCall(run, result.callId);
-        await this.recordInDatabase(ctx, ctx.db, {
-            agentId: scope.agent.id,
-            payload: {
-                ...result,
-                rigEvent: toolExecutionEnd(result.callId, toolName, result.content, result.isError),
-                runId: run?.runId,
-            },
-            type: "tool.completed",
-        });
-    };
+        afterToolCallTransact: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+            result: SessionToolResultMessage,
+        ): Promise<void> => {
+            const run = this.#runs.get(scope.agent.id);
+            const toolName = toolNameForCall(run, result.callId);
+            await this.recordInDatabase(ctx, ctx.db, {
+                agentId: scope.agent.id,
+                payload: {
+                    ...result,
+                    rigEvent: toolExecutionEnd(
+                        result.callId,
+                        toolName,
+                        result.content,
+                        result.isError,
+                    ),
+                    runId: run?.runId,
+                },
+                type: "tool.completed",
+            });
+        },
 
-    readonly afterInferenceTransact = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-        inference: AgentBaseInference,
-    ): Promise<void> => {
-        const run = this.#runs.get(scope.agent.id);
-        await this.recordInDatabase(ctx, ctx.db, {
-            agentId: scope.agent.id,
-            payload: {
-                ...inference,
-                blocks: run?.blocks ?? [],
-                runId: run?.runId ?? inference.loopId,
-                text: run?.text ?? "",
-            },
-            type: "inference.completed",
-        });
-    };
+        afterInferenceTransact: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+            inference: AgentBaseInference,
+        ): Promise<void> => {
+            const run = this.#runs.get(scope.agent.id);
+            await this.recordInDatabase(ctx, ctx.db, {
+                agentId: scope.agent.id,
+                payload: {
+                    ...inference,
+                    blocks: run?.blocks ?? [],
+                    runId: run?.runId ?? inference.loopId,
+                    text: run?.text ?? "",
+                },
+                type: "inference.completed",
+            });
+        },
 
-    readonly afterTurnTransact = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-        turn: AgentBaseTurn,
-    ): Promise<void> => {
-        const run = this.#runs.get(scope.agent.id);
-        const next =
-            run !== undefined && turn.aborted ? { ...run, stopReason: "aborted" as const } : run;
-        if (next !== undefined) {
-            await saveActiveRun(ctx.db, scope.agent.id, next);
+        afterTurnTransact: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+            turn: AgentBaseTurn,
+        ): Promise<void> => {
+            const run = this.#runs.get(scope.agent.id);
+            const next =
+                run !== undefined && turn.aborted
+                    ? { ...run, stopReason: "aborted" as const }
+                    : run;
+            if (next !== undefined) {
+                await saveActiveRun(ctx.db, scope.agent.id, next);
+                afterCommit(ctx, () => {
+                    this.#runs.set(scope.agent.id, next);
+                });
+            }
+            await this.recordInDatabase(ctx, ctx.db, {
+                agentId: scope.agent.id,
+                payload: { ...turn, runId: next?.runId ?? turn.loopId },
+                type: "turn.completed",
+            });
+        },
+
+        afterAgentSettledTransact: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+            settlement: AgentBaseSettlement,
+        ): Promise<void> => {
+            const run = this.#runs.get(scope.agent.id);
+            await this.recordInDatabase(ctx, ctx.db, {
+                agentId: scope.agent.id,
+                payload: {
+                    ...settlement,
+                    ...(run?.errorMessage === undefined ? {} : { errorMessage: run.errorMessage }),
+                    runId: run?.runId ?? settlement.loopId,
+                    stopReason: run?.stopReason ?? "stop",
+                },
+                type: "loop.settled",
+            });
+            await deleteActiveRun(ctx.db, scope.agent.id);
             afterCommit(ctx, () => {
-                this.#runs.set(scope.agent.id, next);
+                this.#runs.delete(scope.agent.id);
             });
-        }
-        await this.recordInDatabase(ctx, ctx.db, {
-            agentId: scope.agent.id,
-            payload: { ...turn, runId: next?.runId ?? turn.loopId },
-            type: "turn.completed",
-        });
-    };
-
-    readonly afterAgentSettledTransact = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-        settlement: AgentBaseSettlement,
-    ): Promise<void> => {
-        const run = this.#runs.get(scope.agent.id);
-        await this.recordInDatabase(ctx, ctx.db, {
-            agentId: scope.agent.id,
-            payload: {
-                ...settlement,
-                ...(run?.errorMessage === undefined ? {} : { errorMessage: run.errorMessage }),
-                runId: run?.runId ?? settlement.loopId,
-                stopReason: run?.stopReason ?? "stop",
-            },
-            type: "loop.settled",
-        });
-        await deleteActiveRun(ctx.db, scope.agent.id);
-        afterCommit(ctx, () => {
-            this.#runs.delete(scope.agent.id);
-        });
+        },
     };
 
     private async recordInDatabase(

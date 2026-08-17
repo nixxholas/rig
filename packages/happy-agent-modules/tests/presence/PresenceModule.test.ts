@@ -12,6 +12,7 @@ import { presenceUserInputPolicySchema } from "../../sources/presence/PresencePo
 import { presenceStateSchema } from "../../sources/presence/PresenceState.js";
 import { setPresenceTool } from "../../sources/presence/tools/set_presence.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
+import { resolveModuleHooks } from "../support/moduleHooks.js";
 import { Value } from "@sinclair/typebox/value";
 
 describe("PresenceModule", () => {
@@ -151,7 +152,8 @@ describe("PresenceModule", () => {
                 emoji: "🎧",
                 prompt: "Continue independently unless an answer is essential.",
             });
-            await expect(module.instructions(database.context, {} as never)).resolves.toContain(
+            const hooks = await resolveModuleHooks(database.context, module);
+            await expect(hooks.instructions!(database.context, {} as never)).resolves.toContain(
                 "Continue independently unless an answer is essential.",
             );
 

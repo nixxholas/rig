@@ -1,6 +1,6 @@
 import { Type, type Static } from "@sinclair/typebox";
 
-import { environmentVariableNameSchema, secretIdSchema } from "../secrets/types.js";
+import { environmentVariableNameSchema, secretIdSchema } from "./ClientProtocolTypes.js";
 
 const attachmentBase = {
     downloadUrl: Type.Optional(Type.String({ minLength: 1 })),

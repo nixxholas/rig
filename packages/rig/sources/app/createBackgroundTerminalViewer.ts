@@ -5,7 +5,7 @@ import {
     type Component,
 } from "@earendil-works/pi-tui";
 
-import type { BashSessionSnapshot } from "../agent/context/BashContext.js";
+import type { BashSessionSnapshot } from "../protocol/index.js";
 import { DEFAULT_TERMINAL_THEME } from "./defaultTerminalTheme.js";
 import { sanitizeTerminalText } from "./sanitizeTerminalText.js";
 import type { TerminalTheme } from "./TerminalTheme.js";

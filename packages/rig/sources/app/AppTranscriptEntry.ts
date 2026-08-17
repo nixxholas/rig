@@ -1,11 +1,11 @@
-import type { ProviderError, Usage } from "@slopus/rig-execution";
+import type { ProviderError, Usage } from "../protocol/index.js";
 
 import type {
     BackgroundTerminalInteractionPresentation,
     ExecCommandPresentation,
     FileDiff,
-} from "../agent/ToolResultPresentation.js";
-import type { ExplorationToolCallPresentation } from "../agent/ToolCallPresentation.js";
+} from "../protocol/index.js";
+import type { ExplorationToolCallPresentation } from "../protocol/index.js";
 import type { CodexMcpToolCall } from "./CodexMcpToolCall.js";
 import type { CompletedTurn } from "./CompletedTurn.js";
 import type { NoticeChild } from "./NoticeChild.js";

@@ -4,7 +4,7 @@ import type {
     HappyComputeProviderContribution,
     HappyPluginAppContribution,
     HappyPluginCategory,
-} from "happy-plugins";
+} from "./PluginWireTypes.js";
 import { Type, type Static } from "@sinclair/typebox";
 
 import type { EventId } from "./EventId.js";
@@ -24,7 +24,7 @@ import {
     githubPluginCatalogSchema,
     githubPluginPackageSourceSchema,
     githubRepositorySchema,
-} from "../plugins/githubPluginCatalog.js";
+} from "./GitHubPluginProtocol.js";
 import type { Folder, FolderEvent, FolderItem } from "./FolderProtocol.js";
 import type { DocumentEvent } from "./DocumentProtocol.js";
 import type { HappyCloudChangedEvent } from "./HappyCloudProtocol.js";

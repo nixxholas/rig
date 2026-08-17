@@ -1,4 +1,4 @@
-import type { WorkflowRunStatus } from "../workflows/index.js";
+import type { WorkflowRunStatus } from "../protocol/index.js";
 
 export function humanizeWorkflowStatus(status: WorkflowRunStatus): string {
     if (status === "completed") return "Completed";

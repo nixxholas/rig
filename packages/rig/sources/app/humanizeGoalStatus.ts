@@ -1,4 +1,4 @@
-import type { GoalStatus } from "../goals/index.js";
+import type { GoalStatus } from "../protocol/index.js";
 
 export function humanizeGoalStatus(status: GoalStatus): string {
     if (status === "active") return "Active";

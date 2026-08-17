@@ -13,6 +13,7 @@ import type { PermissionReviewRequest } from "../../sources/permissions/Permissi
 import { agentWorld } from "../support/agentWorld.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
 import { providersOf } from "../support/fixtures.js";
+import { resolveModuleHooks } from "../support/moduleHooks.js";
 import { ScriptedProvider } from "../support/ScriptedProvider.js";
 
 /**
@@ -84,11 +85,11 @@ async function reviewWorld(script: SessionEvent[][]): Promise<{
     const mainDatabase = moduleDatabase(auto.migrations, "auto-main-evidence");
     await mainDatabase.ready;
 
-    await auto.beforeStart(lifetime, {} as unknown as AgentSystemRef);
+    const hooks = await resolveModuleHooks(lifetime, auto, {} as unknown as AgentSystemRef);
 
     // A review is only ever requested mid-turn, so the reviewed agent's live model route has already
     // been observed by the base inference hook. Reproduce that one observation here.
-    auto.beforeInference(
+    hooks.beforeInference!(
         mainDatabase.context,
         {
             agent: {

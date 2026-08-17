@@ -1,16 +1,20 @@
 import type {
-    AgentContext,
     AgentCompactionResult,
-    AgentRunOptions,
-    AgentRunResult,
+    AgentLoopEvent,
     AgentSnapshot,
     ContentBlock,
+    GoalStatus,
+    Message,
+    Model,
+    PermissionMode,
+    ProviderError,
+    SecretAttachmentScope,
+    ServiceTier,
+    SessionGoal,
+    StopReason,
     UserMessage,
-} from "../agent/index.js";
-import type { Model, Provider, ServiceTier } from "@slopus/rig-execution";
+} from "../protocol/index.js";
 import type { Context } from "@steve.kite/stdlib";
-import type { PermissionMode } from "../permissions/index.js";
-import type { GoalStatus, SessionGoal } from "../goals/index.js";
 import type {
     AbortRunOptions,
     AbortRunResponse,
@@ -21,7 +25,32 @@ import type {
     SubmitContextMessageResponse,
     StopBackgroundProcessResponse,
 } from "../protocol/index.js";
-import type { SecretAttachmentScope } from "../secrets/index.js";
+
+export interface CodingAssistantClientProvider {
+    id: string;
+    models: readonly Model[];
+    serviceTiers?: readonly ServiceTier[];
+}
+
+export interface AgentRunOptions {
+    clientSubmissionId?: string;
+    displayText?: string;
+    onEvent?: (event: AgentLoopEvent) => void | Promise<void>;
+    onMessage?: (message: Message) => void | Promise<void>;
+    signal?: AbortSignal;
+}
+
+export interface AgentRunResult {
+    contextMessages: readonly Message[];
+    debugDirectory?: string;
+    errorMessage?: string;
+    messages: readonly Message[];
+    providerError?: ProviderError;
+    providerId?: string;
+    requestedModelId?: string;
+    runId: string;
+    stopReason: StopReason;
+}
 
 export interface CodingAssistantModelChoice {
     model: Model;
@@ -36,9 +65,8 @@ export interface SteeringRunOptions extends AgentRunOptions {
 export interface CodingAssistantAgentBackend {
     readonly canChangeModel: boolean;
     readonly confirmedServiceTier: ServiceTier | undefined;
-    readonly context: AgentContext;
     readonly id: string;
-    readonly provider: Provider;
+    readonly provider: CodingAssistantClientProvider;
     readonly model: Model;
     readonly modelChoices?: readonly CodingAssistantModelChoice[];
     readonly permissionMode: PermissionMode;
@@ -51,7 +79,7 @@ export interface CodingAssistantAgentBackend {
     readonly secretIds?: readonly string[];
     readonly sessionSecretIds?: readonly string[];
     getUsage?(): Promise<GetSessionUsageResponse>;
-    readBackgroundProcess?(
+    readBackgroundProcess(
         sessionId: number,
         options?: { waitMs?: number },
     ): Promise<ReadBackgroundProcessResponse | undefined>;
@@ -66,13 +94,13 @@ export interface CodingAssistantAgentBackend {
     clearGoal?(): Promise<void>;
     detachSecret?(secretId: string, scope?: SecretAttachmentScope): Promise<void>;
     reset(): Promise<void>;
-    runShellCommand?(
+    runShellCommand(
         command: string,
         options: { commandId: string },
     ): Promise<RunShellCommandResponse>;
     rewind?(messageId: string): Promise<UserMessage>;
-    stopBackgroundProcesses?(): Promise<number>;
-    stopBackgroundProcess?(sessionId: number): Promise<StopBackgroundProcessResponse>;
+    stopBackgroundProcesses(): Promise<number>;
+    stopBackgroundProcess(sessionId: number): Promise<StopBackgroundProcessResponse>;
     send(
         ctx: Context,
         content: string | readonly ContentBlock[],

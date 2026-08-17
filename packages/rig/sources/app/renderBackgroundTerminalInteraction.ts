@@ -1,6 +1,6 @@
 import { truncateToWidth } from "@earendil-works/pi-tui";
 
-import type { BackgroundTerminalInteractionPresentation } from "../agent/ToolResultPresentation.js";
+import type { BackgroundTerminalInteractionPresentation } from "../protocol/index.js";
 import { sanitizeTerminalText } from "./sanitizeTerminalText.js";
 import { renderChildRows } from "./renderChildRows.js";
 

@@ -1,11 +1,10 @@
-import { createRootContext } from "@steve.kite/stdlib";
+let pending: Promise<void> = Promise.resolve();
 
-import { asyncLock } from "../concurrency/index.js";
-
-const lock = asyncLock({ reentry: "block" });
-const lockContext = createRootContext();
-
-/** Serializes every read-modify-write operation against Rig's machine-owned runtime config. */
-export function runWithRuntimeConfigLock<T>(work: () => Promise<T>): Promise<T> {
-    return lock.runInLock(lockContext.named("runtime-config-operation"), async () => await work());
+export function runWithRuntimeConfigLock<T>(operation: () => Promise<T>): Promise<T> {
+    const result = pending.then(operation, operation);
+    pending = result.then(
+        () => undefined,
+        () => undefined,
+    );
+    return result;
 }

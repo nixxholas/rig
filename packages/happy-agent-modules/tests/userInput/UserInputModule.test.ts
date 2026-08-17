@@ -12,6 +12,7 @@ import {
 import { cancelAskTool } from "../../sources/userInput/tools/cancel_ask.js";
 import { requestUserInputTool } from "../../sources/userInput/tools/request_user_input.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
+import { resolveModuleHooks } from "../support/moduleHooks.js";
 
 const agentId = "agent-one";
 const askInput = {
@@ -99,7 +100,7 @@ describe("UserInputModule", () => {
         }
     });
 
-    it("uses call.id, does not commit manually, and waits outside its transaction", async () => {
+    it("uses the provider call ID, does not commit manually, and waits outside its transaction", async () => {
         const database = moduleDatabase(userInputMigrations, "user-input-tool-wait");
         await database.ready;
         try {
@@ -115,13 +116,16 @@ describe("UserInputModule", () => {
 
             await vi.waitFor(() => expect(broker.calls).toEqual(["wait"]));
             const settled = await module.answer(database.context, agentId, {
-                requestId: "tool-call",
+                requestId: "provider-call",
                 answer: "Use the first option.",
             });
             if (settled.status !== "answered") throw new Error("expected an answer");
             broker.settle(settled);
 
-            await expect(running).resolves.toMatchObject({ id: "tool-call", status: "answered" });
+            await expect(running).resolves.toMatchObject({
+                id: "provider-call",
+                status: "answered",
+            });
         } finally {
             database.close();
         }
@@ -137,8 +141,8 @@ describe("UserInputModule", () => {
 
             await expect(
                 tool.execute(database.context, { input: askInput }, {
-                    id: "away-call",
-                    providerCallId: "provider-call",
+                    id: "internal-away-call",
+                    providerCallId: "away-call",
                 } as never),
             ).resolves.toMatchObject({ id: "away-call", status: "away" });
             expect(broker.calls).toEqual([]);
@@ -201,7 +205,8 @@ describe("UserInputModule", () => {
         await database.ready;
         try {
             const module = createModule(new TestBroker());
-            const tools = module.tools(database.context, {
+            const hooks = await resolveModuleHooks(database.context, module);
+            const tools = await hooks.tools!(database.context, {
                 agent: { id: agentId },
             } as never);
             expect(tools.map((tool) => tool.name)).toEqual(["request_user_input", "cancel_ask"]);
@@ -254,7 +259,7 @@ describe("UserInputModule", () => {
                         ],
                     },
                 },
-                { id: "batch-call", providerCallId: "provider-call" } as never,
+                { id: "internal-batch-call", providerCallId: "batch-call" } as never,
             );
             await vi.waitFor(() => expect(broker.calls).toEqual(["wait"]));
             const request = await module.get(database.context, agentId, "batch-call");
@@ -297,7 +302,7 @@ describe("UserInputModule", () => {
                         autoResolutionMs: 60_000,
                     },
                 },
-                { id: "auto-call", providerCallId: "provider-call" } as never,
+                { id: "internal-auto-call", providerCallId: "auto-call" } as never,
             );
             await vi.waitFor(() => expect(broker.options[0]?.timeoutAt).toBe(60_101));
             const answered = await module.answer(database.context, agentId, {

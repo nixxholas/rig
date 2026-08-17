@@ -9,6 +9,7 @@ import {
     type AgentModule,
     type AgentModuleAgentLifecycle,
     type AgentModuleAction,
+    type AgentModuleHooks,
     type AgentModuleScope,
     type AgentModuleSystemScope,
     type AgentSystemRef,
@@ -171,17 +172,89 @@ export class GoalModule implements AgentModule {
         this.#onPostCommitError = normalized.onPostCommitError;
     }
 
-    readonly beforeStart = (_ctx: Context, agents: AgentSystemRef): Promise<void> => {
-        this.#agents = agents;
-        return Promise.resolve();
+    readonly #hooks: AgentModuleHooks = {
+        agentArchivedTransact: async (
+            ctx: Context,
+            _scope: AgentModuleSystemScope,
+            agent: AgentModuleAgentLifecycle,
+        ): Promise<void> => {
+            await this.#pauseActiveGoal(ctx, agent.id, "session_archived");
+        },
+
+        tools: (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => [
+            createGoalTool(
+                this,
+                scope.agent.id,
+                this.#maxOutputCharacters,
+                async (toolCtx, goal, lifecycleId) => {
+                    if (agentRunningInside(toolCtx) !== scope.agent.id) return;
+                    await scope.runKV.write(toolCtx, GOAL_OBSERVED_LIFECYCLE_ID_KEY, lifecycleId);
+                },
+            ),
+            getGoalTool(this, scope.agent.id, this.#maxOutputCharacters),
+            updateGoalTool(this, scope.agent.id, this.#maxOutputCharacters),
+            clearGoalTool(this, scope.agent.id),
+        ],
+
+        afterInferenceTransact: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+            inference: AgentBaseInference,
+        ): Promise<void> => {
+            const value = inference.state === undefined ? {} : { state: inference.state };
+            if (!Value.Check(goalInferenceSchema, value)) {
+                throw new Error("Goal inference state is invalid.");
+            }
+            await scope.runKV.write(ctx, GOAL_LAST_INFERENCE_KEY, value);
+        },
+
+        afterTurnTransact: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+            turn: AgentBaseTurn,
+        ): Promise<void> => {
+            const inference = await scope.runKV.read(ctx, GOAL_LAST_INFERENCE_KEY);
+            if (!Value.Check(Type.Union([goalInferenceSchema, Type.Undefined()]), inference)) {
+                throw new Error("The stored Goal inference state is invalid.");
+            }
+            const failed =
+                turn.aborted ||
+                inference === undefined ||
+                inference.state === undefined ||
+                inference.state === "cancelled" ||
+                inference.state === "error";
+            if (!failed) return;
+            await this.#pauseActiveGoal(
+                ctx,
+                scope.agent.id,
+                turn.aborted ? "session_interrupted" : "session_failed",
+            );
+        },
+
+        beforeAgentLoopTransact: async (ctx: Context, scope: AgentModuleScope): Promise<void> => {
+            const state = await readGoalAuthoritativeState(
+                ctx,
+                goalKV(scope.agent.id),
+                scope.agent.id,
+            );
+            await scope.runKV.delete(ctx, GOAL_CONTINUATION_ID_KEY);
+            if (state.goal?.status !== "active") {
+                await scope.runKV.delete(ctx, GOAL_OBSERVED_LIFECYCLE_ID_KEY);
+            } else {
+                const lifecycle = state.lifecycle;
+                if (lifecycle === undefined) {
+                    throw new Error("An active Goal requires its exact lifecycle sidecar.");
+                }
+                await scope.runKV.write(ctx, GOAL_OBSERVED_LIFECYCLE_ID_KEY, lifecycle.id);
+            }
+        },
+
+        afterAgentLoop: (ctx: Context, scope: AgentModuleScope) => this.#afterAgentLoop(ctx, scope),
     };
 
-    readonly agentArchivedTransact = async (
-        ctx: Context,
-        _scope: AgentModuleSystemScope,
-        agent: AgentModuleAgentLifecycle,
-    ): Promise<void> => {
-        await this.#pauseActiveGoal(ctx, agent.id, "session_archived");
+    readonly beforeStart = (_ctx: Context, agents: AgentSystemRef): AgentModuleHooks => {
+        this.#agents = agents;
+        return this.#hooks;
     };
 
     async goal(ctx: Context, agentId: string): Promise<SessionGoal | undefined> {
@@ -222,77 +295,10 @@ export class GoalModule implements AgentModule {
         return await ctx.inTx(async (txCtx) => await this.#clearGoal(txCtx, agentId));
     }
 
-    readonly tools = (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => [
-        createGoalTool(
-            this,
-            scope.agent.id,
-            this.#maxOutputCharacters,
-            async (toolCtx, goal, lifecycleId) => {
-                if (agentRunningInside(toolCtx) !== scope.agent.id) return;
-                await scope.runKV.write(toolCtx, GOAL_OBSERVED_LIFECYCLE_ID_KEY, lifecycleId);
-            },
-        ),
-        getGoalTool(this, scope.agent.id, this.#maxOutputCharacters),
-        updateGoalTool(this, scope.agent.id, this.#maxOutputCharacters),
-        clearGoalTool(this, scope.agent.id),
-    ];
-
-    readonly afterInferenceTransact = async (
+    async #afterAgentLoop(
         ctx: Context,
         scope: AgentModuleScope,
-        inference: AgentBaseInference,
-    ): Promise<void> => {
-        const value = inference.state === undefined ? {} : { state: inference.state };
-        if (!Value.Check(goalInferenceSchema, value)) {
-            throw new Error("Goal inference state is invalid.");
-        }
-        await scope.runKV.write(ctx, GOAL_LAST_INFERENCE_KEY, value);
-    };
-
-    readonly afterTurnTransact = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-        turn: AgentBaseTurn,
-    ): Promise<void> => {
-        const inference = await scope.runKV.read(ctx, GOAL_LAST_INFERENCE_KEY);
-        if (!Value.Check(Type.Union([goalInferenceSchema, Type.Undefined()]), inference)) {
-            throw new Error("The stored Goal inference state is invalid.");
-        }
-        const failed =
-            turn.aborted ||
-            inference === undefined ||
-            inference.state === undefined ||
-            inference.state === "cancelled" ||
-            inference.state === "error";
-        if (!failed) return;
-        await this.#pauseActiveGoal(
-            ctx,
-            scope.agent.id,
-            turn.aborted ? "session_interrupted" : "session_failed",
-        );
-    };
-
-    readonly beforeAgentLoopTransact = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-    ): Promise<void> => {
-        const state = await readGoalAuthoritativeState(ctx, goalKV(scope.agent.id), scope.agent.id);
-        await scope.runKV.delete(ctx, GOAL_CONTINUATION_ID_KEY);
-        if (state.goal?.status !== "active") {
-            await scope.runKV.delete(ctx, GOAL_OBSERVED_LIFECYCLE_ID_KEY);
-        } else {
-            const lifecycle = state.lifecycle;
-            if (lifecycle === undefined) {
-                throw new Error("An active Goal requires its exact lifecycle sidecar.");
-            }
-            await scope.runKV.write(ctx, GOAL_OBSERVED_LIFECYCLE_ID_KEY, lifecycle.id);
-        }
-    };
-
-    readonly afterAgentLoop = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-    ): Promise<readonly AgentModuleAction[] | undefined> => {
+    ): Promise<readonly AgentModuleAction[] | undefined> {
         const continuation = await ctx.inTx(async (txCtx) => {
             const kv = goalKV(scope.agent.id);
             const observed = await scope.runKV.read(txCtx, GOAL_OBSERVED_LIFECYCLE_ID_KEY);
@@ -365,7 +371,7 @@ export class GoalModule implements AgentModule {
                 },
             },
         ];
-    };
+    }
 
     async #setGoal(
         ctx: Context,

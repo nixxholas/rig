@@ -4,14 +4,10 @@ import { updateRuntimeConfig } from "./updateRuntimeConfig.js";
 
 export function updateRuntimePreferences(
     path: string,
-    preferences: Omit<PartialRigConfig, "p2p">,
+    preferences: PartialRigConfig,
 ): Promise<void> {
     return updateRuntimeConfig(path, async () => {
         const current = await readConfigFile(path);
-        return {
-            ...current.values,
-            ...preferences,
-            ...(current.values.p2p === undefined ? {} : { p2p: current.values.p2p }),
-        };
+        return { ...current.values, ...preferences };
     });
 }

@@ -18,7 +18,7 @@ export async function openHappyAgentDatabase(path: string): Promise<HappyAgentDa
     try {
         await configure(client);
         const database = drizzle(client);
-        serializeTransactions(database);
+        serializeDatabaseAccess(client, database);
         return {
             database,
             close: () => client.close(),
@@ -30,15 +30,15 @@ export async function openHappyAgentDatabase(path: string): Promise<HappyAgentDa
 }
 
 /**
- * libSQL's local client exposes one SQLite connection and rejects overlapping root transactions.
- * Agent Base deliberately delegates transaction concurrency to the host driver, so the local host
- * supplies a FIFO boundary here. Nested Agent Storage work reuses its transaction context and
- * never re-enters this queue.
+ * libSQL's local client can run root statements on separate logical connections, so a statement
+ * started beside an interactive transaction can take its writer lock and make the transaction
+ * fail with SQLITE_BUSY. Agent Base deliberately delegates concurrency to the host driver, so the
+ * local host puts every root statement and transaction through one FIFO. Statements on a Drizzle
+ * transaction use the transaction's own client and never re-enter this queue.
  */
-function serializeTransactions(database: LibSQLDatabase): void {
-    const original = database.transaction.bind(database);
+function serializeDatabaseAccess(client: Client, database: LibSQLDatabase): void {
     let available = Promise.resolve();
-    const serialized = async (...args: Parameters<typeof original>) => {
+    const serialized = async <Result>(work: () => Promise<Result>): Promise<Result> => {
         const previous = available;
         let release!: () => void;
         available = new Promise<void>((resolve) => {
@@ -46,15 +46,50 @@ function serializeTransactions(database: LibSQLDatabase): void {
         });
         await previous;
         try {
-            return await original(...args);
+            return await work();
         } finally {
             release();
         }
     };
+
+    const execute = client.execute.bind(client);
+    Object.defineProperty(client, "execute", {
+        configurable: false,
+        value: ((...args: Parameters<typeof execute>) =>
+            serialized(async () => await execute(...args))) as Client["execute"],
+        writable: false,
+    });
+
+    const batch = client.batch.bind(client);
+    Object.defineProperty(client, "batch", {
+        configurable: false,
+        value: ((...args: Parameters<typeof batch>) =>
+            serialized(async () => await batch(...args))) as Client["batch"],
+        writable: false,
+    });
+
+    const migrate = client.migrate.bind(client);
+    Object.defineProperty(client, "migrate", {
+        configurable: false,
+        value: ((...args: Parameters<typeof migrate>) =>
+            serialized(async () => await migrate(...args))) as Client["migrate"],
+        writable: false,
+    });
+
+    const executeMultiple = client.executeMultiple.bind(client);
+    Object.defineProperty(client, "executeMultiple", {
+        configurable: false,
+        value: ((...args: Parameters<typeof executeMultiple>) =>
+            serialized(async () => await executeMultiple(...args))) as Client["executeMultiple"],
+        writable: false,
+    });
+
+    const transaction = database.transaction.bind(database);
     Object.defineProperty(database, "transaction", {
         configurable: false,
         enumerable: false,
-        value: serialized,
+        value: (...args: Parameters<typeof transaction>) =>
+            serialized(async () => await transaction(...args)),
         writable: false,
     });
 }

@@ -3,26 +3,15 @@ import { basename } from "node:path";
 import { TUI } from "@earendil-works/pi-tui";
 import type { Context } from "@steve.kite/stdlib";
 
-import { createNodeAgentContext } from "../agent/index.js";
 import {
-    connectHappyAgentProtocolServer,
     ensureLocalProtocolServer,
     RemoteAgent,
     type SessionTerminalConnection,
 } from "../client/index.js";
-import {
-    createProjectConfigSecurityNotice,
-    createProjectConfigSecurityNoticeTitle,
-    loadConfig,
-    resolveProtectedPaths,
-    updateRuntimePreferences,
-} from "../config/index.js";
-import { createProjectMcpSecurityNotice, loadMcpServerConfigEntries } from "../mcp/index.js";
+import { loadConfig, updateRuntimePreferences } from "../config/index.js";
 import { NativeProcessManager } from "../processes/index.js";
-import type { PermissionMode } from "../permissions/index.js";
+import type { PermissionMode } from "../protocol/index.js";
 import type { CreateSessionRequest, SessionEvent } from "../protocol/index.js";
-import { resolveDockerExecutionConfig } from "../execution/index.js";
-import type { DockerExecutionConfig } from "../execution/index.js";
 import { CodingAssistantApp, type AppExitReason } from "./CodingAssistantApp.js";
 import { createSerialTaskQueue } from "./createSerialTaskQueue.js";
 import { createStopOnceHandler } from "./createStopOnceHandler.js";
@@ -52,12 +41,10 @@ import {
 const INITIAL_TUI_MESSAGE_LIMIT = 30;
 
 export interface RunAppOptions {
-    apiKey?: string;
     compactCompletedTurns?: boolean;
     cwd?: string;
     debug?: boolean;
     effort?: string;
-    happyAgentHome?: string;
     instructions?: string;
     modelId?: string;
     providerId?: string;
@@ -66,36 +53,18 @@ export interface RunAppOptions {
     sessionSelection?: StartupSessionSelection;
     showReasoning?: boolean;
     showUsage?: boolean;
-    docker?: DockerExecutionConfig | null;
 }
 
 export type RunAppResult = { action: "exit" } | { action: "reload"; sessionId: string };
 
 export async function runApp(ctx: Context, options: RunAppOptions = {}): Promise<RunAppResult> {
     const cwd = options.cwd ?? process.cwd();
-    const [loadedConfig, mcpConfigEntries] = await Promise.all([
-        loadConfig({ cwd }),
-        loadMcpServerConfigEntries(cwd),
-    ]);
-    const projectConfigNotice = createProjectConfigSecurityNotice(
-        loadedConfig.sources.local.values,
-        basename(loadedConfig.sources.local.path),
-    );
-    const projectMcpNotice = createProjectMcpSecurityNotice(mcpConfigEntries);
-    const machineProtectedPaths = [
-        ...new Set([
-            ...(loadedConfig.sources.global.values.permissions?.protectedPaths ?? []),
-            ...(loadedConfig.sources.runtime.values.permissions?.protectedPaths ?? []),
-            ...(loadedConfig.sources.global.values.workspace?.protectedSync ?? []),
-            ...(loadedConfig.sources.runtime.values.workspace?.protectedSync ?? []),
-        ]),
-    ];
+    const loadedConfig = await loadConfig({ cwd });
     const agentOptions: CreateSessionRequest = {
         trackUnread: true,
         cwd,
         modelId: loadedConfig.config.defaults.modelId,
         permissionMode: loadedConfig.config.defaults.permissionMode,
-        workflowsEnabled: loadedConfig.config.features.workflows,
     };
     if (loadedConfig.config.defaults.providerId !== undefined) {
         agentOptions.providerId = loadedConfig.config.defaults.providerId;
@@ -109,16 +78,6 @@ export async function runApp(ctx: Context, options: RunAppOptions = {}): Promise
     if (loadedConfig.config.defaults.instructions !== undefined) {
         agentOptions.instructions = loadedConfig.config.defaults.instructions;
     }
-    if (loadedConfig.config.docker !== undefined) {
-        agentOptions.docker = resolveDockerExecutionConfig(loadedConfig.config.docker, cwd);
-    }
-    if (options.docker === null) {
-        delete agentOptions.docker;
-        agentOptions.local = true;
-    } else if (options.docker !== undefined) {
-        agentOptions.docker = resolveDockerExecutionConfig(options.docker, cwd);
-    }
-    if (options.apiKey !== undefined) agentOptions.apiKey = options.apiKey;
     if (options.effort !== undefined) agentOptions.effort = options.effort;
     if (options.instructions !== undefined) agentOptions.instructions = options.instructions;
     if (options.modelId !== undefined) agentOptions.modelId = options.modelId;
@@ -126,10 +85,7 @@ export async function runApp(ctx: Context, options: RunAppOptions = {}): Promise
     if (options.permissionMode !== undefined) agentOptions.permissionMode = options.permissionMode;
     let compactCompletedTurns =
         options.compactCompletedTurns ?? loadedConfig.config.settings.compactCompletedTurns;
-    let inferenceMaxRetries = loadedConfig.config.settings.inferenceMaxRetries;
     let completionChime = loadedConfig.config.settings.completionChime;
-    const daemonHeapSnapshots = loadedConfig.config.settings.daemonHeapSnapshots;
-    let durableGlobalEventQueue = loadedConfig.config.settings.durableGlobalEventQueue;
     let showReasoning = options.showReasoning ?? loadedConfig.config.settings.showReasoning;
     let showUsage = options.showUsage ?? loadedConfig.config.settings.showUsage;
     const enqueueRuntimeConfigWrite = createSerialTaskQueue();
@@ -177,17 +133,12 @@ export async function runApp(ctx: Context, options: RunAppOptions = {}): Promise
     const opened = await (async () => {
         let sessionTerminal: SessionTerminalConnection | undefined;
         try {
-            const connection =
-                options.happyAgentHome === undefined
-                    ? await ensureLocalProtocolServer({
-                          confirmRestart: (request) => startup.confirmDaemonRestart(request),
-                          onStatus: (message) => {
-                              startup.setStatus(message);
-                          },
-                      })
-                    : await connectHappyAgentProtocolServer({
-                          agentHome: options.happyAgentHome,
-                      });
+            const connection = await ensureLocalProtocolServer({
+                confirmRestart: (request) => startup.confirmDaemonRestart(request),
+                onStatus: (message) => {
+                    startup.setStatus(message);
+                },
+            });
             let resumeSessionId = options.resumeSessionId;
             if (options.sessionSelection !== undefined) {
                 resumeSessionId = await resolveStartupSessionId({
@@ -283,15 +234,8 @@ export async function runApp(ctx: Context, options: RunAppOptions = {}): Promise
             terminalCrashCleanup.uninstall();
             throw error;
         });
-        const context = createNodeAgentContext(ctx, {
-            cwd: sessionCwd,
-            permissionMode: session.session.permissionMode,
-            processManager,
-            protectedPaths: resolveProtectedPaths(sessionCwd, machineProtectedPaths),
-        });
         const agent = new RemoteAgent({
             client: localServer.client,
-            context,
             debug: options.debug === true,
             modelCatalog,
             session: session.session,
@@ -312,19 +256,6 @@ export async function runApp(ctx: Context, options: RunAppOptions = {}): Promise
                       },
                   ]
                 : []),
-            ...(projectConfigNotice === undefined
-                ? []
-                : [
-                      {
-                          text: projectConfigNotice,
-                          title: createProjectConfigSecurityNoticeTitle(
-                              loadedConfig.sources.local.values,
-                          ),
-                      },
-                  ]),
-            ...(projectMcpNotice === undefined
-                ? []
-                : [{ text: projectMcpNotice, title: "Project MCP needs trust" }]),
         ];
         const tuiInspectorUrl = getNodeInspectorUrl();
         // Presence is daemon-wide, so a client that cannot read it simply hides the control.
@@ -384,11 +315,8 @@ export async function runApp(ctx: Context, options: RunAppOptions = {}): Promise
                             serviceTier: preference.serviceTier,
                         },
                         settings: {
-                            inferenceMaxRetries,
                             compactCompletedTurns,
                             completionChime,
-                            daemonHeapSnapshots,
-                            durableGlobalEventQueue,
                             showReasoning,
                             showUsage,
                         },
@@ -396,10 +324,8 @@ export async function runApp(ctx: Context, options: RunAppOptions = {}): Promise
                     }),
                 ),
             onSettingsChange: async (settings) => {
-                inferenceMaxRetries = settings.inferenceMaxRetries;
                 compactCompletedTurns = settings.compactCompletedTurns;
                 completionChime = settings.completionChime;
-                durableGlobalEventQueue = settings.durableGlobalEventQueue;
                 showReasoning = settings.showReasoning;
                 showUsage = settings.showUsage;
                 await enqueueRuntimeConfigWrite(() =>
@@ -411,16 +337,10 @@ export async function runApp(ctx: Context, options: RunAppOptions = {}): Promise
                             permissionMode: agent.permissionMode,
                             serviceTier: agent.confirmedServiceTier ?? null,
                         },
-                        settings: { ...settings, daemonHeapSnapshots },
+                        settings,
                         ...(runtimeTheme === undefined ? {} : { theme: runtimeTheme }),
                     }),
                 );
-                await localServer.client.updateDaemonConfig({
-                    settings: {
-                        inferenceMaxRetries,
-                        durableGlobalEventQueue,
-                    },
-                });
             },
             onTerminalFocusChange: (focused) => {
                 void sessionTerminal.setFocused(focused).catch(() => {});
@@ -457,10 +377,8 @@ export async function runApp(ctx: Context, options: RunAppOptions = {}): Promise
                     .then((response) => response.files);
             },
             sessionBacked: true,
-            inferenceMaxRetries,
             compactCompletedTurns,
             completionChime,
-            durableGlobalEventQueue,
             debugInfo: {
                 daemonLogPath: localServer.paths.logPath,
                 sessionId: session.session.id,

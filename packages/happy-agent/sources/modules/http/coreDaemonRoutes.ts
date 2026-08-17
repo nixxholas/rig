@@ -68,6 +68,9 @@ export function createCoreDaemonRoutes(): AgentHttpRouteGroup {
 
 export type HappyModelCatalog = RigModelCatalog;
 
-function daemonIdentity(dependencies: { readonly version?: string }): { readonly version: string } {
-    return { version: dependencies.version ?? "0.0.0" };
+function daemonIdentity(dependencies: {
+    readonly configuration?: { readonly identity?: { readonly version: string } };
+    readonly version?: string;
+}): { readonly version: string } {
+    return dependencies.configuration?.identity ?? { version: dependencies.version ?? "0.0.0" };
 }

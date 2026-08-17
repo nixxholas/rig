@@ -278,8 +278,78 @@ export {
     type ListDocumentUpdatesRequest,
     type WriteDocumentRequest,
 } from "./DocumentProtocol.js";
-export type { McpServerSummary } from "../mcp/index.js";
-export type { SessionTask, TaskStatus } from "../tasks/index.js";
+export type {
+    AgentBlock,
+    AgentCompactionResult,
+    AgentLoopEvent,
+    AgentMessage,
+    AgentSnapshot,
+    AutoPermissionRisk,
+    AutoPermissionUserAuthorization,
+    BackgroundTerminalInteractionPresentation,
+    BashSessionActivity,
+    BashSessionSnapshot,
+    ChangeGoalStatusRequest,
+    CompactionMessage,
+    ContentBlock,
+    CreateGoalRequest,
+    DockerExecutionConfig,
+    DockerMountConfig,
+    DurableSkillDefinition,
+    EnvironmentSecretRegistration,
+    EnvironmentSecretUpdate,
+    ErrorMessage,
+    ExecCommandPresentation,
+    ExplorationOperation,
+    ExplorationToolCallPresentation,
+    ExternalToolCall,
+    ExternalToolCallResolution,
+    ExternalToolDefinition,
+    FileDiff,
+    FileDiffHunk,
+    FileDiffKind,
+    FileDiffLine,
+    FileDiffLineKind,
+    FileDiffToolResultPresentation,
+    GoalStatus,
+    ImageBlock,
+    McpServerSummary,
+    Message,
+    Model,
+    PermissionMode,
+    ProviderError,
+    ScheduledMessage,
+    SecretAttachmentScope,
+    SecretReference,
+    ServiceTier,
+    SessionExecutionEnvironment,
+    SessionGoal,
+    SessionTask,
+    StopReason,
+    SystemMessage,
+    TaskStatus,
+    TextBlock,
+    ThinkingBlock,
+    ToolCallBlock,
+    ToolCallPresentation,
+    ToolResultBlock,
+    ToolResultPresentation,
+    Usage,
+    UserInputOption,
+    UserInputQuestion,
+    UserInputRequest,
+    UserInputResponse,
+    UserMessage,
+    WorkflowRun,
+    WorkflowRunStatus,
+    WorkflowRunUpdate,
+} from "./ClientProtocolTypes.js";
+export {
+    environmentSecretRegistrationSchema,
+    environmentSecretUpdateSchema,
+    environmentVariableNameSchema,
+    secretIdSchema,
+} from "./ClientProtocolTypes.js";
 export type {
     CreateRemoteTerminalRequest,
     CreateRemoteTerminalResponse,
@@ -292,15 +362,11 @@ export type {
     ResizeRemoteTerminalRequest,
 } from "../terminal/index.js";
 export { remoteTerminalColorSchemeSchema } from "../terminal/index.js";
-export type { GoalStatus, SessionGoal } from "../goals/index.js";
-export type { DurableSkillDefinition } from "../external-skills/index.js";
-export type { ScheduledMessage } from "../scheduling/index.js";
 export type {
     ProviderUsage,
     ProviderUsageCredits,
     ProviderUsageWindow,
 } from "@slopus/happy-providers";
-export type { WorkflowRun, WorkflowRunStatus, WorkflowRunUpdate } from "../workflows/index.js";
 export { isLiveGlobalEvent } from "./ProjectProtocol.js";
 export {
     discoverPluginCatalogRequestSchema,
@@ -352,10 +418,6 @@ export type {
     AgentMessageEvent,
     AgentStreamEvent,
     BaseSessionEvent,
-    ChangeEffortRequest,
-    ChangeModelRequest,
-    ChangePermissionModeRequest,
-    ChangeServiceTierRequest,
     CancelScheduledMessageResponse,
     ChangeSessionGoalStatusRequest,
     CompactSessionResponse,

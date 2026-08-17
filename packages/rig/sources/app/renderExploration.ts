@@ -3,7 +3,7 @@ import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works
 import type {
     ExplorationOperation,
     ExplorationToolCallPresentation,
-} from "../agent/ToolCallPresentation.js";
+} from "../protocol/index.js";
 
 const RESET = "\x1b[0m";
 const BOLD = "\x1b[1m";

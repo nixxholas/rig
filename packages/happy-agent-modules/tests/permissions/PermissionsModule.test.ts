@@ -25,6 +25,7 @@ import { permissionModeGuidance } from "../../sources/permissions/impl/permissio
 import { permissionTurnStoppedReason } from "../../sources/permissions/impl/permissionRefusalMessage.js";
 import { agentWorld } from "../support/agentWorld.js";
 import { providersOf, sharedKV, textTurn, toolCallTurn, user } from "../support/fixtures.js";
+import { resolveModuleRuntime } from "../support/moduleHooks.js";
 import { ScriptedProvider } from "../support/ScriptedProvider.js";
 
 const ctx = createRootContext().named("happy-agent-modules-permissions");
@@ -167,7 +168,7 @@ async function permissionAgent(
         provider: "scripted",
         persistence: world.storage.persistence(agentId),
         sharedKV: sharedKV(),
-        modules: [permissions],
+        modules: [await resolveModuleRuntime(ctx, permissions)],
         initialState: {
             tools: [
                 routineTool,
@@ -270,7 +271,7 @@ describe("PermissionsModule", () => {
 
         expect(ran).toEqual([]);
         const results = toolResults(provider).join("\n");
-        expect(results).toContain("reviewed and refused");
+        expect(results).toContain("Automatic permission review refused");
         expect(results).toContain("The file belongs to the system");
         expect(results).toContain("materially safer alternative");
         expect(events[0]).toMatchObject({ type: "permission_action_denied", callId: "call-1" });
@@ -346,9 +347,9 @@ describe("PermissionsModule", () => {
 
         expect(ran).toEqual([]);
         const results = toolResults(provider).join("\n");
-        expect(results).toContain("could not be reviewed");
-        expect(results).toContain("it is unproven");
-        expect(results).not.toContain("reviewed and refused");
+        expect(results).toContain("could not run");
+        expect(results).toContain("No judgement was made");
+        expect(results).not.toContain("Automatic permission review refused");
         expect(events[0]).toMatchObject({ type: "permission_action_unproven" });
     });
 
@@ -872,12 +873,20 @@ describe("PermissionsModule", () => {
     it("trips on the refusal rate with the exact window even when successes reset the streak", async () => {
         ran.length = 0;
         const events: PermissionEvent[] = [];
-        const reviewer = reviewerAnswering(() => ({
-            outcome: "denied",
-            reason: "Not authorized.",
-            risk: "high",
-            userAuthorization: "low",
-        }));
+        const reviewer = reviewerAnswering((request) =>
+            request.action.includes("allowed")
+                ? {
+                      outcome: "allowed",
+                      risk: "low",
+                      userAuthorization: "high",
+                  }
+                : {
+                      outcome: "denied",
+                      reason: "Not authorized.",
+                      risk: "high",
+                      userAuthorization: "low",
+                  },
+        );
         const turn: SessionEvent[] = [];
         for (let index = 1; index <= 10; index += 1) {
             turn.push(
@@ -888,11 +897,16 @@ describe("PermissionsModule", () => {
                     arguments: JSON.stringify({ target: `t${index}` }),
                 },
             );
-            // A successful call between refusals clears the streak but stays in the rate window.
+            // A successfully reviewed call between refusals clears the streak but stays in the
+            // rate window. Routine calls do not affect the review-refusal circuit.
             if (index < 10) {
                 turn.push(
-                    { type: "toolcall_start", callId: `l${index}`, name: "look" },
-                    { type: "toolcall_end", callId: `l${index}`, arguments: "{}" },
+                    { type: "toolcall_start", callId: `a${index}`, name: "publish" },
+                    {
+                        type: "toolcall_end",
+                        callId: `a${index}`,
+                        arguments: JSON.stringify({ target: `allowed-${index}` }),
+                    },
                 );
             }
         }
@@ -953,9 +967,11 @@ describe("PermissionsModule", () => {
         // turn-stop event must be durably observed before the settlement the abort produces.
         const settleObserver = {
             name: "settle-observer",
-            afterAgentSettled: () => {
-                order.push("settled");
-            },
+            beforeStart: () => ({
+                afterAgentSettled: () => {
+                    order.push("settled");
+                },
+            }),
         };
         const system = await AgentSystemLocal.create(ctx, world.storage, {
             providers: providersOf(provider),
@@ -1072,7 +1088,9 @@ describe("PermissionsModule", () => {
         throwingAgent.state.tools = [routineTool, escalatingTool, externalTool];
         await throwingAgent.send(ctx, user("publish it"), { await: true });
         await throwingAgent.waitForIdle();
-        expect(toolResults(throwingProvider).join("\n")).toContain("reviewed and refused");
+        expect(toolResults(throwingProvider).join("\n")).toContain(
+            "Automatic permission review refused",
+        );
         await throwingSystem.close(ctx);
     });
 });

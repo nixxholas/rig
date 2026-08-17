@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { join, resolve } from "node:path";
 
@@ -16,7 +16,7 @@ import {
     sharingSnapshotSchema,
     happyCloudStatusSchema,
 } from "../../rig-connect/sources/protocol.js";
-import { connectHappyAgentProtocolServer } from "../../rig/sources/client/connectHappyAgentProtocolServer.js";
+import { ProtocolHttpClient } from "../../rig/sources/client/ProtocolHttpClient.js";
 import {
     AgentProviders,
     startHappyAgentDaemon,
@@ -58,9 +58,7 @@ describe("Happy Agent Rig compatibility", () => {
 
     it("loads a chat and optional empty collections through the unchanged Rig client", async () => {
         const fixture = await startTestDaemon();
-        const connection = await connectHappyAgentProtocolServer({
-            agentHome: fixture.daemon.configuration.paths.agentHome,
-        });
+        const connection = await connectTestDaemon(fixture.daemon);
 
         await expect(connection.client.health()).resolves.toMatchObject({
             healthy: true,
@@ -255,6 +253,177 @@ describe("Happy Agent Rig compatibility", () => {
         });
         expect(fixture.unexpectedErrors).toEqual([]);
     });
+
+    it("backs presence, secrets, and session processes with live daemon modules", async () => {
+        const fixture = await startTestDaemon();
+        const connection = await connectTestDaemon(fixture.daemon);
+
+        const until = Date.now() + 60_000;
+        await expect(
+            connection.client.setPresence({
+                fallbackPresenceId: "online",
+                presenceId: "away",
+                until,
+            }),
+        ).resolves.toMatchObject({
+            presence: {
+                changesAt: until,
+                fallbackPresenceId: "online",
+                presence: { id: "away", title: "Away" },
+            },
+        });
+        await expect(connection.client.getPresence()).resolves.toMatchObject({
+            presence: {
+                changesAt: until,
+                fallbackPresenceId: "online",
+                presence: { id: "away" },
+            },
+        });
+
+        const registered = await connection.client.registerSecret({
+            description: "Compatibility credentials",
+            environment: {
+                KEEP: "not-in-the-response",
+                ROTATE: "also-not-in-the-response",
+            },
+            id: "compatibility-secret",
+        });
+        expect(registered).toEqual({
+            secret: {
+                description: "Compatibility credentials",
+                environmentVariables: ["KEEP", "ROTATE"],
+                id: "compatibility-secret",
+            },
+        });
+        expect(JSON.stringify(registered)).not.toContain("not-in-the-response");
+        expect(JSON.stringify(registered)).not.toContain("also-not-in-the-response");
+        expect(Object.hasOwn(registered.secret, "revision")).toBe(false);
+        await expect(connection.client.listSecrets()).resolves.toEqual({
+            secrets: [registered.secret],
+        });
+        await expect(
+            connection.client.updateSecret("compatibility-secret", {
+                description: "Rotated compatibility credentials",
+                environment: { ADDED: "not-returned-either", ROTATE: null },
+            }),
+        ).resolves.toEqual({
+            secret: {
+                description: "Rotated compatibility credentials",
+                environmentVariables: ["ADDED", "KEEP"],
+                id: "compatibility-secret",
+            },
+        });
+        await expect(connection.client.unregisterSecret("compatibility-secret")).resolves.toEqual({
+            removed: true,
+        });
+        await expect(connection.client.unregisterSecret("compatibility-secret")).resolves.toEqual({
+            removed: false,
+        });
+
+        const created = await connection.client.createSession({
+            cwd: fixture.directory,
+            permissionMode: "full_access",
+        });
+        const started = await connection.client.runShellCommand(created.session.id, {
+            command: "sleep 60",
+            commandId: "compatibility-shell",
+        });
+        expect(started).toMatchObject({
+            command: "sleep 60",
+            commandId: "compatibility-shell",
+            status: "running",
+        });
+        if (started.status !== "running") throw new Error("Expected a running shell command.");
+        await expect(
+            connection.client.readBackgroundProcess(created.session.id, started.sessionId),
+        ).resolves.toMatchObject({
+            command: "sleep 60",
+            sessionId: started.sessionId,
+            status: "running",
+        });
+        await expect(
+            connection.client.stopBackgroundProcess(created.session.id, started.sessionId),
+        ).resolves.toMatchObject({
+            process: { sessionId: started.sessionId, status: "killed" },
+            stopped: true,
+        });
+        const first = await connection.client.runShellCommand(created.session.id, {
+            command: "sleep 60",
+            commandId: "compatibility-shell-first",
+        });
+        const second = await connection.client.runShellCommand(created.session.id, {
+            command: "sleep 60",
+            commandId: "compatibility-shell-second",
+        });
+        if (first.status !== "running" || second.status !== "running") {
+            throw new Error("Expected two running shell commands.");
+        }
+        await expect(
+            connection.client.stopBackgroundProcesses(created.session.id),
+        ).resolves.toEqual({ stoppedProcesses: 2 });
+        await expect(
+            connection.client.readBackgroundProcess(created.session.id, first.sessionId),
+        ).resolves.toMatchObject({ status: "killed" });
+        await expect(
+            connection.client.readBackgroundProcess(created.session.id, second.sessionId),
+        ).resolves.toMatchObject({ status: "killed" });
+
+        expect(fixture.unexpectedErrors).toEqual([]);
+    });
+
+    it("persists message-carried selection and emits configuration events", async () => {
+        const fixture = await startTestDaemon();
+        const connection = await connectTestDaemon(fixture.daemon);
+
+        const messageSession = (
+            await connection.client.createSession({
+                cwd: fixture.directory,
+            })
+        ).session;
+        await connection.client.submitMessage(messageSession.id, {
+            await: true,
+            modelId: "scripted-model-2",
+            mutationId: "message-model",
+            permissionMode: "read_only",
+            text: "Use the second model.",
+        });
+        await expect(connection.client.getSession(messageSession.id)).resolves.toMatchObject({
+            session: {
+                modelId: "scripted-model-2",
+                permissionMode: "read_only",
+                providerId: "scripted",
+            },
+        });
+        await expect(connection.client.getEvents(messageSession.id)).resolves.toMatchObject({
+            events: expect.arrayContaining([
+                expect.objectContaining({
+                    data: expect.objectContaining({
+                        changed: ["model"],
+                        modelId: "scripted-model-2",
+                        mutationId: "message-model",
+                        providerId: "scripted",
+                    }),
+                    type: "session_configuration_changed",
+                }),
+                expect.objectContaining({
+                    data: expect.objectContaining({
+                        mutationId: "message-model",
+                        permissionMode: "read_only",
+                    }),
+                    type: "permission_mode_changed",
+                }),
+            ]),
+        });
+
+        await connection.client.submitMessage(messageSession.id, {
+            await: true,
+            text: "Keep using it.",
+        });
+        await expect
+            .poll(() => fixture.modelRuns.slice(-2), { timeout: 5_000 })
+            .toEqual(["scripted-model-2", "scripted-model-2"]);
+        expect(fixture.unexpectedErrors).toEqual([]);
+    });
 });
 
 async function startTestDaemon() {
@@ -262,13 +431,28 @@ async function startTestDaemon() {
     await mkdir(scratch, { recursive: true });
     const directory = await mkdtemp(join(scratch, "ha-"));
     const providers = new AgentProviders();
-    providers.add("scripted", scriptedProvider(), "gym");
+    const modelRuns: string[] = [];
+    providers.add(
+        "scripted",
+        (selection) =>
+            scriptedProvider(() => {
+                modelRuns.push(selection.model ?? "");
+            }),
+        "gym",
+    );
     const models: readonly AgentModel[] = [
         {
             defaultEffort: "medium",
             effortLevels: ["low", "medium", "high"],
             id: "scripted-model",
             name: "Scripted Model",
+            providerId: "scripted",
+        },
+        {
+            defaultEffort: "medium",
+            effortLevels: ["low", "medium", "high"],
+            id: "scripted-model-2",
+            name: "Scripted Model 2",
             providerId: "scripted",
         },
     ];
@@ -288,12 +472,27 @@ async function startTestDaemon() {
         providers,
         version: "compatibility-test",
     });
-    const fixture = { ctx, daemon, directory, unexpectedErrors };
+    const fixture = { ctx, daemon, directory, modelRuns, unexpectedErrors };
     running.add(fixture);
     return fixture;
 }
 
-function scriptedProvider(): Parameters<AgentProviders["add"]>[1] {
+async function connectTestDaemon(daemon: HappyAgentDaemon) {
+    const token = (await readFile(daemon.tokenPath, "utf8")).trim();
+    return {
+        client: new ProtocolHttpClient({
+            pathPrefix: "/v0",
+            socketPath: daemon.socketPath,
+            token,
+        }),
+        socketPath: daemon.socketPath,
+        token,
+    };
+}
+
+function scriptedProvider(
+    onRun: () => void = () => undefined,
+): Parameters<AgentProviders["add"]>[1] {
     return {
         inputTypes: ["text"],
         name: "scripted",
@@ -304,8 +503,9 @@ function scriptedProvider(): Parameters<AgentProviders["add"]>[1] {
                 throw new Error("Compaction is unavailable in this test.");
             },
             destroy: () => undefined,
-            run: () =>
-                (async function* () {
+            run: () => {
+                onRun();
+                return (async function* () {
                     yield { type: "text_start" } as const;
                     yield { type: "text_delta", delta: "Happy Agent replied." } as const;
                     yield { type: "text_end" } as const;
@@ -313,7 +513,8 @@ function scriptedProvider(): Parameters<AgentProviders["add"]>[1] {
                         type: "done",
                         state: "normal",
                     } as const;
-                })(),
+                })();
+            },
         }),
     } as never;
 }
@@ -368,21 +569,12 @@ function unavailableIntegrations(): HappyAgentIntegrations {
                 results: [],
             }),
         },
-        slots: {
-            publisher: async () => undefined,
-            scopeResolver: async () => false,
-        },
         userInput: { wait: unavailable },
         workflows: {
             cancel: unavailable,
             launch: unavailable,
             resume: unavailable,
             wait: unavailable,
-        },
-        worklets: {
-            invokeOperation: unavailable,
-            readLogs: async () => ({ lines: [] }),
-            status: async () => ({ name: "unavailable", status: "stopped" }),
         },
     } as unknown as HappyAgentIntegrations;
 }

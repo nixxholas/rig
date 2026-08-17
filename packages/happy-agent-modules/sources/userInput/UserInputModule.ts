@@ -1,5 +1,6 @@
 import {
     type AgentModule,
+    type AgentModuleHooks,
     type AgentModuleScope,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
@@ -231,10 +232,17 @@ export class UserInputModule implements AgentModule {
             validated.maxDetailPageCharacters ?? DEFAULT_MAX_DETAIL_PAGE_CHARACTERS;
     }
 
-    readonly tools = (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => {
-        this.#assertAgentId(scope.agent.id);
-        return [requestUserInputTool(this, scope.agent.id), cancelAskTool(this, scope.agent.id)];
+    readonly #hooks: AgentModuleHooks = {
+        tools: (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => {
+            this.#assertAgentId(scope.agent.id);
+            return [
+                requestUserInputTool(this, scope.agent.id),
+                cancelAskTool(this, scope.agent.id),
+            ];
+        },
     };
+
+    readonly beforeStart = (): AgentModuleHooks => this.#hooks;
 
     async ask(
         ctx: Context,

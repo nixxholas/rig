@@ -9,6 +9,7 @@ import type { UsageEvent } from "../../sources/usage/UsageEvent.js";
 import { getAgentTreeUsageTool } from "../../sources/usage/tools/get_agent_tree_usage.js";
 import { getUsageTool } from "../../sources/usage/tools/get_usage.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
+import { resolveModuleHooks } from "../support/moduleHooks.js";
 
 class FakeKV {
     readonly values = new Map<string, unknown>();
@@ -64,18 +65,19 @@ describe("UsageModule", () => {
                 },
             },
         });
+        const hooks = await resolveModuleHooks(ctx, module);
         await module.migrations[0]![1](database.context, database.database);
         await module.migrations[1]![1](database.context, database.database);
         const runKV = new FakeKV();
         const agentScope = scope(database.database, runKV);
 
-        await module.beforeTurnTransact!(ctx, agentScope, {
+        await hooks.beforeTurnTransact!(ctx, agentScope, {
             loopId: "loop-1",
             turnId: "turn-base-id",
             contextTokens: undefined,
         });
         now = 125;
-        await module.beforeInferenceTransact!(ctx, agentScope, {
+        await hooks.beforeInferenceTransact!(ctx, agentScope, {
             loopId: "loop-1",
             turnId: "turn-base-id",
             inferenceId: "inference-base-id",
@@ -83,7 +85,7 @@ describe("UsageModule", () => {
         });
         now = 150;
         await inCompletion(ctx, async (txCtx) => {
-            await module.afterInferenceTransact!(txCtx, agentScope, {
+            await hooks.afterInferenceTransact!(txCtx, agentScope, {
                 loopId: "loop-1",
                 turnId: "turn-base-id",
                 inferenceId: "inference-base-id",
@@ -94,7 +96,7 @@ describe("UsageModule", () => {
         });
         now = 175;
         await inCompletion(ctx, async (txCtx) => {
-            await module.afterTurnTransact!(txCtx, agentScope, {
+            await hooks.afterTurnTransact!(txCtx, agentScope, {
                 loopId: "loop-1",
                 turnId: "turn-base-id",
                 contextTokens: 14,
@@ -141,19 +143,20 @@ describe("UsageModule", () => {
         const module = new UsageModule({
             clock: () => now,
         });
+        const hooks = await resolveModuleHooks(ctx, module);
         await module.migrations[0]![1](database.context, database.database);
         await module.migrations[1]![1](database.context, database.database);
         const runKV = new FakeKV();
         const agentScope = scope(database.database, runKV);
 
-        await module.beforeTurnTransact!(ctx, agentScope, {
+        await hooks.beforeTurnTransact!(ctx, agentScope, {
             loopId: "loop-1",
             turnId: "turn-1",
             contextTokens: undefined,
         });
         now = 120;
         await inCompletion(ctx, async (txCtx) => {
-            await module.afterTurnTransact!(txCtx, agentScope, {
+            await hooks.afterTurnTransact!(txCtx, agentScope, {
                 loopId: "loop-1",
                 turnId: "turn-1",
                 contextTokens: 12,
@@ -165,14 +168,14 @@ describe("UsageModule", () => {
         });
 
         now = 140;
-        await module.beforeTurnTransact!(ctx, agentScope, {
+        await hooks.beforeTurnTransact!(ctx, agentScope, {
             loopId: "loop-2",
             turnId: "turn-2",
             contextTokens: undefined,
         });
         now = 160;
         await inCompletion(ctx, async (txCtx) => {
-            await module.afterTurnTransact!(txCtx, agentScope, {
+            await hooks.afterTurnTransact!(txCtx, agentScope, {
                 loopId: "loop-2",
                 turnId: "turn-2",
                 contextTokens: undefined,
@@ -191,12 +194,13 @@ describe("UsageModule", () => {
         const module = new UsageModule({
             clock: () => now,
         });
+        const hooks = await resolveModuleHooks(ctx, module);
         await module.migrations[0]![1](database.context, database.database);
         await module.migrations[1]![1](database.context, database.database);
         const runKV = new FakeKV();
         const agentScope = scope(database.database, runKV);
 
-        await module.beforeInferenceTransact!(ctx, agentScope, {
+        await hooks.beforeInferenceTransact!(ctx, agentScope, {
             loopId: "loop-1",
             turnId: "turn-1",
             inferenceId: "inference-1",
@@ -204,7 +208,7 @@ describe("UsageModule", () => {
         });
         now = 110;
         await inCompletion(ctx, async (txCtx) => {
-            await module.afterInferenceTransact!(txCtx, agentScope, {
+            await hooks.afterInferenceTransact!(txCtx, agentScope, {
                 loopId: "loop-1",
                 turnId: "turn-1",
                 inferenceId: "inference-1",
@@ -283,6 +287,7 @@ describe("UsageModule", () => {
             clock: () => 100,
             idFactory: () => `reset-event-${nextEventId++}`,
         });
+        const hooks = await resolveModuleHooks(ctx, module);
         await module.migrations[0]![1](database.context, database.database);
         const beforeDrop = await agentDatabaseRows<{ name: string }>(
             database.database,
@@ -301,14 +306,14 @@ describe("UsageModule", () => {
 
         const runKV = new FakeKV();
         const agentScope = scope(database.database, runKV);
-        await module.beforeInferenceTransact!(ctx, agentScope, {
+        await hooks.beforeInferenceTransact!(ctx, agentScope, {
             loopId: "loop-1",
             turnId: "turn-1",
             inferenceId: "inference-1",
             contextTokens: undefined,
         });
         await inCompletion(ctx, async (txCtx) => {
-            await module.afterInferenceTransact!(txCtx, agentScope, {
+            await hooks.afterInferenceTransact!(txCtx, agentScope, {
                 loopId: "loop-1",
                 turnId: "turn-1",
                 inferenceId: "inference-1",
@@ -319,14 +324,14 @@ describe("UsageModule", () => {
         });
         expect(await module.reset(ctx, "agent-1")).toBe(1);
 
-        await module.beforeInferenceTransact!(ctx, agentScope, {
+        await hooks.beforeInferenceTransact!(ctx, agentScope, {
             loopId: "loop-2",
             turnId: "turn-2",
             inferenceId: "inference-2",
             contextTokens: undefined,
         });
         await inCompletion(ctx, async (txCtx) => {
-            await module.afterInferenceTransact!(txCtx, agentScope, {
+            await hooks.afterInferenceTransact!(txCtx, agentScope, {
                 loopId: "loop-2",
                 turnId: "turn-2",
                 inferenceId: "inference-2",

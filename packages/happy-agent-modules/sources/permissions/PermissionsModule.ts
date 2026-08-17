@@ -3,6 +3,7 @@ import type {
     AgentBaseToolCall,
     AgentBaseToolCallDecision,
     AgentModule,
+    AgentModuleHooks,
     AgentModuleScope,
     AgentPermissionMode,
     AgentSystemRef,
@@ -249,67 +250,75 @@ export class PermissionsModule implements AgentModule {
      * Keep the collection the module is part of. It is what lets a turn drowning in refusals be
      * stopped.
      */
-    readonly beforeStart = (_ctx: Context, agents: AgentSystemRef): Promise<void> => {
+    readonly beforeStart = (_ctx: Context, agents: AgentSystemRef): AgentModuleHooks => {
         this.#agents = agents;
-        return Promise.resolve();
+        return this.#hooks;
     };
 
-    readonly instructions = async (ctx: Context, scope: AgentModuleScope): Promise<string> =>
-        permissionModeGuidance(
-            scope.agent.permissionMode,
-            await this.#resolveToolGuidance(ctx, scope.agent.id),
-        );
+    readonly #hooks: AgentModuleHooks = {
+        instructions: async (ctx: Context, scope: AgentModuleScope): Promise<string> =>
+            permissionModeGuidance(
+                scope.agent.permissionMode,
+                await this.#resolveToolGuidance(ctx, scope.agent.id),
+            ),
 
-    /**
-     * Announce a change inside the transaction that commits it, so a listener keeping its own
-     * record of what an agent was allowed to do commits that record with the change itself.
-     */
-    readonly permissionModeChangedTransact = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-        change: AgentBasePermissionModeChange,
-    ): Promise<void> => {
-        await this.#listener?.onEventTransactional?.(ctx, {
-            type: "permission_mode_changed",
-            agentId: scope.agent.id,
-            previousMode: change.previousMode,
-            mode: change.mode,
-        });
-    };
+        /**
+         * Announce a change inside the transaction that commits it, so a listener keeping its own
+         * record of what an agent was allowed to do commits that record with the change itself.
+         */
+        permissionModeChangedTransact: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+            change: AgentBasePermissionModeChange,
+        ): Promise<void> => {
+            await this.#listener?.onEventTransactional?.(ctx, {
+                type: "permission_mode_changed",
+                agentId: scope.agent.id,
+                previousMode: change.previousMode,
+                mode: change.mode,
+            });
+        },
 
-    readonly permissionModeChanged = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-        change: AgentBasePermissionModeChange,
-    ): Promise<void> => {
-        if (isPermissionReduction(change.previousMode, change.mode)) {
-            try {
-                await this.#killAllSessions(ctx, scope.agent.id);
-            } catch (error: unknown) {
-                await this.#announce(ctx, {
-                    type: "permission_mode_cleanup_failed",
-                    agentId: scope.agent.id,
-                    previousMode: change.previousMode,
-                    mode: change.mode,
-                    reason: safeErrorMessage(error),
-                });
+        permissionModeChanged: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+            change: AgentBasePermissionModeChange,
+        ): Promise<void> => {
+            if (isPermissionReduction(change.previousMode, change.mode)) {
+                try {
+                    await this.#killAllSessions(ctx, scope.agent.id);
+                } catch (error: unknown) {
+                    await this.#announce(ctx, {
+                        type: "permission_mode_cleanup_failed",
+                        agentId: scope.agent.id,
+                        previousMode: change.previousMode,
+                        mode: change.mode,
+                        reason: safeErrorMessage(error),
+                    });
+                }
             }
-        }
-        await this.#announce(ctx, {
-            type: "permission_mode_changed",
-            agentId: scope.agent.id,
-            previousMode: change.previousMode,
-            mode: change.mode,
-        });
-    };
+            await this.#announce(ctx, {
+                type: "permission_mode_changed",
+                agentId: scope.agent.id,
+                previousMode: change.previousMode,
+                mode: change.mode,
+            });
+        },
 
-    /** A run that is over takes its refusals with it; the next one starts from nothing. */
-    readonly afterAgentSettled = (_ctx: Context, scope: AgentModuleScope): void => {
-        if (this.#decisionTails.has(scope.agent.id)) {
-            this.#settledWhileBusy.add(scope.agent.id);
-            return;
-        }
-        this.#refusals.delete(scope.agent.id);
+        /** A run that is over takes its refusals with it; the next one starts from nothing. */
+        afterAgentSettled: (_ctx: Context, scope: AgentModuleScope): void => {
+            if (this.#decisionTails.has(scope.agent.id)) {
+                this.#settledWhileBusy.add(scope.agent.id);
+                return;
+            }
+            this.#refusals.delete(scope.agent.id);
+        },
+
+        beforeToolCall: (
+            ctx: Context,
+            scope: AgentModuleScope,
+            call: AgentBaseToolCall,
+        ): Promise<AgentBaseToolCallDecision | undefined> => this.#beforeToolCall(ctx, scope, call),
     };
 
     /**
@@ -318,7 +327,7 @@ export class PermissionsModule implements AgentModule {
      * and whether allowing it means lifting the sandbox for its length. The module decides only;
      * running the call, and running it under what was decided, belongs to the agent.
      */
-    readonly beforeToolCall = async (
+    readonly #beforeToolCall = async (
         ctx: Context,
         scope: AgentModuleScope,
         call: AgentBaseToolCall,
@@ -644,7 +653,10 @@ export class PermissionsModule implements AgentModule {
             void reviewPromise.catch(() => undefined);
             const candidate = await Promise.race([reviewPromise, timeout]);
             if (hasStopped(owner) && !timedOut) throw new PermissionReviewCancelledError();
-            if (candidate === REVIEW_TIMEOUT) {
+            // Aborting on timeout may synchronously settle a cooperative reviewer before the
+            // timeout promise's own resolution reaches the microtask queue. Once the timer fired,
+            // that settlement is still a timeout rather than a late verdict.
+            if (candidate === REVIEW_TIMEOUT || timedOut) {
                 return {
                     outcome: "unproven",
                     kind: "timed_out",
@@ -702,7 +714,11 @@ export class PermissionsModule implements AgentModule {
             if (outcome === ANNOUNCE_TIMEOUT) {
                 ctx.log.warn(
                     "A permission event was not durably recorded before the decision continued: its listener did not settle in time. The client may fall back to the generic interruption row.",
-                    { agentId: event.agentId, type: event.type, timeoutMs: this.#announceTimeoutMs },
+                    {
+                        agentId: event.agentId,
+                        type: event.type,
+                        timeoutMs: this.#announceTimeoutMs,
+                    },
                 );
             }
         } catch (error: unknown) {

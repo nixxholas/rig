@@ -1,37 +1,31 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { chmod, open } from "node:fs/promises";
+import { mkdir, open } from "node:fs/promises";
 
 import {
-    getEnvironmentLocalServerPaths,
-    prepareDaemonDiagnostics,
-    prepareLocalServerDirectory,
-    readLocalServerToken,
-    rotateDaemonLog,
-    runLocalProtocolServer,
-    writeLocalServerToken,
-    type LocalServerPaths,
-} from "../server/index.js";
-import { daemonIdentitiesMatch, getDaemonIdentity } from "../daemon/index.js";
+    daemonIdentitiesMatch,
+    getDaemonIdentity,
+    getHappyDaemonPaths,
+    runHappyAgentServer,
+    type HappyDaemonPaths,
+} from "../daemon/index.js";
 import {
-    acquireSqliteProcessLock,
-    SqliteProcessLockUnavailableError,
-    type SqliteProcessLock,
-} from "../persistence/database/acquireSqliteProcessLock.js";
-import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
+    readDaemonToken,
+    readDaemonTokenIfPresent,
+    readOrCreateDaemonToken,
+} from "../daemon/daemonToken.js";
+import { rotateDaemonLog } from "../daemon/rotateDaemonLog.js";
 import { RigUserError } from "../RigUserError.js";
 import type { DaemonIdentity, ReadyHealthResponse } from "../protocol/index.js";
 import { ProtocolHttpClient } from "./ProtocolHttpClient.js";
-import { loadDaemonSettings } from "../config/index.js";
 import { stopLocalProtocolServer } from "./stopLocalProtocolServer.js";
 
-const DAEMON_STARTUP_LOCK_TIMEOUT_MS = 60_000;
-const DATABASE_OWNERSHIP_HANDOFF_TIMEOUT_MS = 30_000;
 const DAEMON_CHILD_STARTUP_TIMEOUT_MS = 60_000;
 const DAEMON_CHILD_TERMINATION_TIMEOUT_MS = 2_000;
+const DAEMON_RESTART_ATTEMPTS = 20;
 
 export interface LocalProtocolServerConnection {
     client: ProtocolHttpClient;
-    paths: LocalServerPaths;
+    paths: HappyDaemonPaths;
     token: string;
 }
 
@@ -45,23 +39,28 @@ export interface DaemonRestartRequest {
     runningIdentity: DaemonIdentity;
 }
 
+/**
+ * Connects to the local Happy agent daemon, starting one when none is running.
+ *
+ * The daemon is the complete Happy agent (`rig --server` runs `startHappyAgentDaemon`); Rig only
+ * observes its health, matches its identity, and spawns or restarts the process.
+ */
 export async function ensureLocalProtocolServer(
     options: EnsureLocalProtocolServerOptions = {},
 ): Promise<LocalProtocolServerConnection> {
-    const paths = getEnvironmentLocalServerPaths();
+    const paths = getHappyDaemonPaths();
     const currentIdentity = getDaemonIdentity();
-    await prepareLocalServerDirectory(paths.directory);
+    await mkdir(paths.directory, { mode: 0o700, recursive: true });
 
-    for (;;) {
+    for (let attempt = 0; attempt < DAEMON_RESTART_ATTEMPTS; attempt += 1) {
         const observed = await observeLocalProtocolServer(paths);
         if (
             observed !== undefined &&
             daemonIdentitiesMatch(currentIdentity, observed.health.identity)
         ) {
-            return connectToObservedServer(observed, paths);
+            return await connectToObservedServer(observed, paths);
         }
 
-        let approvedIdentity: DaemonIdentity | undefined;
         if (observed !== undefined) {
             const request: DaemonRestartRequest = {
                 currentIdentity,
@@ -73,46 +72,28 @@ export async function ensureLocalProtocolServer(
                     hint: "Run rig daemon stop, then try again.",
                 });
             }
-            approvedIdentity = observed.health.identity;
+            options.onStatus?.("Restarting local daemon.");
+            await stopLocalProtocolServer(observed.client);
         }
 
-        const startupLock = await acquireDaemonStartupLock(paths);
-        try {
-            const current = await observeLocalProtocolServer(paths);
-            if (
-                current !== undefined &&
-                daemonIdentitiesMatch(currentIdentity, current.health.identity)
-            ) {
-                const connection = await connectToObservedServer(current, paths);
-                return connection;
-            }
-            if (current !== undefined) {
-                if (
-                    approvedIdentity === undefined ||
-                    !daemonIdentitiesMatch(approvedIdentity, current.health.identity)
-                ) {
-                    continue;
-                }
-                options.onStatus?.("Restarting local daemon.");
-                await stopLocalProtocolServer(current.client);
-            }
-
-            await waitForDatabaseOwnershipHandoff(paths);
-            options.onStatus?.("Starting local daemon.");
-            const connection = await startLocalProtocolServer(paths, options);
-            return connection;
-        } finally {
-            await startupLock.release();
+        options.onStatus?.("Starting local daemon.");
+        const connection = await startLocalProtocolServer(paths, options);
+        const health = await readHealth(connection.client);
+        // Another Rig may have won the race to start a daemon with a different identity; observe
+        // again instead of handing back a connection to the wrong daemon.
+        if (health === undefined || !daemonIdentitiesMatch(currentIdentity, health.identity)) {
+            await delay(250);
+            continue;
         }
+        return connection;
     }
+    throw new RigUserError("Rig could not start the local daemon.", {
+        hint: "Another Rig process keeps replacing it. Run rig daemon stop, then try again.",
+    });
 }
 
 export async function readTokenIfPresent(tokenPath: string): Promise<string | undefined> {
-    try {
-        return await readLocalServerToken(tokenPath);
-    } catch {
-        return undefined;
-    }
+    return readDaemonTokenIfPresent(tokenPath);
 }
 
 interface ObservedLocalProtocolServer {
@@ -122,69 +103,31 @@ interface ObservedLocalProtocolServer {
 }
 
 async function observeLocalProtocolServer(
-    paths: LocalServerPaths,
+    paths: HappyDaemonPaths,
 ): Promise<ObservedLocalProtocolServer | undefined> {
-    const token = await readTokenIfPresent(paths.tokenPath);
+    const token = await readDaemonTokenIfPresent(paths.tokenPath);
     if (token === undefined) return undefined;
-    const client = new ProtocolHttpClient({ socketPath: paths.socketPath, token });
+    const client = createDaemonClient(paths, token);
     const health = await readHealth(client);
     return health === undefined ? undefined : { client, health, token };
 }
 
 async function connectToObservedServer(
     observed: ObservedLocalProtocolServer,
-    paths: LocalServerPaths,
+    paths: HappyDaemonPaths,
 ): Promise<LocalProtocolServerConnection> {
     await resolveReadyHealth(observed.client, observed.health);
-    await reconcileDaemonSettings(observed.client);
     return { client: observed.client, paths, token: observed.token };
 }
 
-async function acquireDaemonStartupLock(paths: LocalServerPaths): Promise<SqliteProcessLock> {
-    try {
-        return await acquireSqliteProcessLock(`${paths.registryPath}.startup.lock`, {
-            timeoutMs: DAEMON_STARTUP_LOCK_TIMEOUT_MS,
-        });
-    } catch (error) {
-        if (error instanceof SqliteProcessLockUnavailableError) {
-            throw new RigUserError("Rig could not coordinate local daemon startup.", {
-                hint: "Another Rig process is still starting or stopping the daemon. Try again.",
-            });
-        }
-        throw error;
-    }
-}
-
-async function waitForDatabaseOwnershipHandoff(paths: LocalServerPaths): Promise<void> {
-    let ownership: SqliteProcessLock;
-    try {
-        ownership = await acquireSqliteProcessLock(`${paths.databasePath}.lock`, {
-            timeoutMs: DATABASE_OWNERSHIP_HANDOFF_TIMEOUT_MS,
-        });
-    } catch (error) {
-        if (error instanceof SqliteProcessLockUnavailableError) {
-            throw new RigUserError("Another Rig daemon still owns the session database.", {
-                hint: "Wait for it to stop before starting a replacement.",
-            });
-        }
-        throw error;
-    }
-    await ownership.release();
-}
-
 async function startLocalProtocolServer(
-    paths: LocalServerPaths,
+    paths: HappyDaemonPaths,
     options: EnsureLocalProtocolServerOptions,
 ): Promise<LocalProtocolServerConnection> {
-    const token = await readOrCreateLocalServerToken(paths.tokenPath);
+    const token = await readOrCreateDaemonToken(paths.tokenPath);
     let child: ChildProcess | undefined;
     if (process.env.RIG_GYM_IN_PROCESS_DAEMON === "1") {
-        void runLocalProtocolServer({
-            happyIntegration: "enabled",
-            socketPath: paths.socketPath,
-            tokenPath: paths.tokenPath,
-        }).catch((error: unknown) => {
-            if (isDatabaseFailure(error)) throw error;
+        void runHappyAgentServer().catch((error: unknown) => {
             options.onStatus?.(
                 `Local daemon stopped: ${error instanceof Error ? error.message : String(error)}`,
             );
@@ -192,30 +135,25 @@ async function startLocalProtocolServer(
     } else {
         child = await spawnLocalServer(paths);
     }
-    const client = new ProtocolHttpClient({ socketPath: paths.socketPath, token });
+    const client = createDaemonClient(paths, token);
     const readiness = waitForReady(client);
     if (child === undefined) {
         await readiness;
     } else {
         await superviseSpawnedLocalServer(child, readiness, DAEMON_CHILD_STARTUP_TIMEOUT_MS);
     }
-    await reconcileDaemonSettings(client);
-    return { client, paths, token };
+    // The daemon may have created its own token when none existed; reread so the connection uses
+    // whatever the daemon actually serves.
+    const servedToken = await readDaemonToken(paths.tokenPath);
+    return {
+        client: servedToken === token ? client : createDaemonClient(paths, servedToken),
+        paths,
+        token: servedToken,
+    };
 }
 
-/**
- * Keeps already-connected local clients authorized when the daemon process is replaced.
- *
- * The token file lives in the daemon's private state directory and is already restricted to the
- * current user. Rotating it on every daemon start strands clients whose event streams reconnect
- * after a reload: their immutable client connection still carries the previous token and the new
- * daemon rejects it with HTTP 401.
- */
-export async function readOrCreateLocalServerToken(tokenPath: string): Promise<string> {
-    const existing = await readTokenIfPresent(tokenPath);
-    if (existing === undefined || existing.length === 0) return writeLocalServerToken(tokenPath);
-    await chmod(tokenPath, 0o600);
-    return existing;
+function createDaemonClient(paths: HappyDaemonPaths, token: string): ProtocolHttpClient {
+    return new ProtocolHttpClient({ pathPrefix: "/v0", socketPath: paths.socketPath, token });
 }
 
 async function readHealth(
@@ -228,38 +166,21 @@ async function readHealth(
     }
 }
 
-async function spawnLocalServer(paths: LocalServerPaths): Promise<ChildProcess> {
+async function spawnLocalServer(paths: HappyDaemonPaths): Promise<ChildProcess> {
     const entrypoint = process.argv[1];
     if (entrypoint === undefined) {
         throw new Error("Cannot locate the current CLI entrypoint.");
     }
 
     await rotateDaemonLog(paths.logPath).catch(() => undefined);
-    const daemonSettings = await loadDaemonSettings();
     const log = await open(paths.logPath, "a", 0o600);
     try {
         await log.chmod(0o600);
-        const diagnosticArguments = await prepareDaemonDiagnostics({
-            heapSnapshots: daemonSettings.daemonHeapSnapshots,
-            path: paths.diagnosticsPath,
-        }).catch(async (error: unknown) => {
-            const message = error instanceof Error ? error.message : String(error);
-            await log.write(`[daemon diagnostics unavailable] ${message}\n`).catch(() => undefined);
-            return [];
+        const child = spawn(process.execPath, [...process.execArgv, entrypoint, "--server"], {
+            detached: true,
+            env: process.env,
+            stdio: ["ignore", log.fd, log.fd],
         });
-        const child = spawn(
-            process.execPath,
-            [...process.execArgv, ...diagnosticArguments, entrypoint, "--server"],
-            {
-                detached: true,
-                env: {
-                    ...process.env,
-                    RIG_SERVER_SOCKET_PATH: paths.socketPath,
-                    RIG_SERVER_TOKEN_PATH: paths.tokenPath,
-                },
-                stdio: ["ignore", log.fd, log.fd],
-            },
-        );
         return child;
     } finally {
         await log.close();
@@ -283,8 +204,8 @@ export interface SpawnedLocalServerProcess {
 
 /**
  * Keeps a replacement child owned until it proves that it can serve the socket. A child that
- * stalls during database ownership or startup is terminated and reaped instead of becoming an
- * invisible detached daemon that can survive for days.
+ * stalls during startup is terminated and reaped instead of becoming an invisible detached daemon
+ * that can survive for days.
  */
 export async function superviseSpawnedLocalServer<Result>(
     child: SpawnedLocalServerProcess,
@@ -371,30 +292,6 @@ async function resolveReadyHealth(
     if (health.status === "error") throw daemonStartupError(health.error);
     if (health.status === "ready") return health;
     return waitForReady(client);
-}
-
-async function reconcileDaemonSettings(client: ProtocolHttpClient): Promise<void> {
-    const daemonSettings = await loadDaemonSettings();
-    const current = await client.getDaemonConfig();
-    if (
-        current.config.settings.inferenceMaxRetries === daemonSettings.inferenceMaxRetries &&
-        current.config.settings.durableGlobalEventQueue === daemonSettings.durableGlobalEventQueue
-    ) {
-        return;
-    }
-
-    const updated = await client.updateDaemonConfig({
-        settings: {
-            inferenceMaxRetries: daemonSettings.inferenceMaxRetries,
-            durableGlobalEventQueue: daemonSettings.durableGlobalEventQueue,
-        },
-    });
-    if (
-        updated.config.settings.inferenceMaxRetries !== daemonSettings.inferenceMaxRetries ||
-        updated.config.settings.durableGlobalEventQueue !== daemonSettings.durableGlobalEventQueue
-    ) {
-        throw new Error("The local daemon did not apply the requested configuration.");
-    }
 }
 
 function daemonStartupError(message: string): Error {

@@ -1,5 +1,5 @@
 import { humanizeToolName } from "./humanizeToolName.js";
-import type { ToolResultBlock } from "../agent/types.js";
+import type { ToolResultBlock } from "../protocol/index.js";
 
 export function formatToolResultForDisplay(
     block: Pick<ToolResultBlock, "display" | "failure" | "toolName">,

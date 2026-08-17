@@ -1,6 +1,7 @@
 import type {
     AgentBaseModelChange,
     AgentModule,
+    AgentModuleHooks,
     AgentModuleScope,
     AgentSystemRef,
 } from "@slopus/happy-agent-base";
@@ -92,32 +93,34 @@ export class ModelSwitchModule implements AgentModule {
     }
 
     /** Keep the collection, so a model can be named the way a person would name it. */
-    readonly beforeStart = (_ctx: Context, agents: AgentSystemRef): Promise<void> => {
+    readonly beforeStart = (_ctx: Context, agents: AgentSystemRef): AgentModuleHooks => {
         this.#agents = agents;
-        return Promise.resolve();
+        return this.#hooks;
     };
 
-    readonly modelChanged = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-        change: AgentBaseModelChange,
-    ): Promise<SessionSystemMessage | undefined> => {
-        // A compatible change carries the history across, so there is nothing to explain.
-        if (!change.wasReset) return undefined;
-        // An agent that never had a model never held a conversation either: its first message
-        // settles the selection rather than replacing one. The base still reports that as a
-        // reset because the empty context is discarded, but there is no erased work to inherit,
-        // so a notice would only tell a new agent to go looking for a past it never had.
-        if (change.previousModel === undefined) return undefined;
-        const text = createModelSwitchNotice({
-            previousModel: this.#label(change.previousModel, change.previousProvider),
-            previousProvider: change.previousProvider,
-            model: this.#label(change.model, change.provider),
-            provider: change.provider,
-            ...(this.#history === undefined ? {} : { historyTool: HISTORY_TOOL_NAME }),
-            ...(await this.#excerpt(ctx, scope.agent.id)),
-        });
-        return { role: "system", content: [{ type: "text", text }] };
+    readonly #hooks: AgentModuleHooks = {
+        modelChanged: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+            change: AgentBaseModelChange,
+        ): Promise<SessionSystemMessage | undefined> => {
+            // A compatible change carries the history across, so there is nothing to explain.
+            if (!change.wasReset) return undefined;
+            // An agent that never had a model never held a conversation either: its first message
+            // settles the selection rather than replacing one. The base still reports that as a
+            // reset because the empty context is discarded, but there is no erased work to inherit,
+            // so a notice would only tell a new agent to go looking for a past it never had.
+            if (change.previousModel === undefined) return undefined;
+            const text = createModelSwitchNotice({
+                previousModel: this.#label(change.previousModel, change.previousProvider),
+                previousProvider: change.previousProvider,
+                model: this.#label(change.model, change.provider),
+                provider: change.provider,
+                ...(this.#history === undefined ? {} : { historyTool: HISTORY_TOOL_NAME }),
+                ...(await this.#excerpt(ctx, scope.agent.id)),
+            });
+            return { role: "system", content: [{ type: "text", text }] };
+        },
     };
 
     /**

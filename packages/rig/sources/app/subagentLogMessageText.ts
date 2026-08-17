@@ -1,4 +1,4 @@
-import type { Message } from "../agent/types.js";
+import type { Message } from "../protocol/index.js";
 
 export function subagentLogMessageText(message: Message): string {
     return message.blocks

@@ -1,4 +1,4 @@
-import { humanizeMcpName } from "../mcp/humanizeMcpName.js";
+import { humanizeMcpName } from "./humanizeMcpName.js";
 
 export function humanizeToolName(name: string): string {
     if (name === "Agent") return "Subagent";

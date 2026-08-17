@@ -3,6 +3,7 @@ import { basename, dirname, join } from "node:path";
 import {
     defineAgentTool,
     type AgentModule,
+    type AgentModuleHooks,
     type AgentModuleScope,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
@@ -163,60 +164,64 @@ export class SkillsModule implements AgentModule {
         return structuredClone(document);
     }
 
-    readonly instructions = async (ctx: Context, scope: AgentModuleScope): Promise<string> => {
-        const compute = await this.#compute.resolve(ctx, scope.agent.id);
-        const entries = await discoverSkills(
-            compute,
-            compute === undefined ? undefined : computePermissionsForContext(ctx),
-            this.#skillRoots,
-        );
-        return entries.length === 0 ? "" : formatInstructions(entries);
+    readonly #hooks: AgentModuleHooks = {
+        instructions: async (ctx: Context, scope: AgentModuleScope): Promise<string> => {
+            const compute = await this.#compute.resolve(ctx, scope.agent.id);
+            const entries = await discoverSkills(
+                compute,
+                compute === undefined ? undefined : computePermissionsForContext(ctx),
+                this.#skillRoots,
+            );
+            return entries.length === 0 ? "" : formatInstructions(entries);
+        },
+
+        tools: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+        ): Promise<readonly AnyAgentTool[]> => {
+            const durableSkillsConfigured = hasDurableSkills(this.#skillRoots);
+            if (
+                (await this.#compute.resolve(ctx, scope.agent.id)) === undefined &&
+                !durableSkillsConfigured
+            ) {
+                return [];
+            }
+            return [
+                defineAgentTool({
+                    name: "list_skills",
+                    description: "List the skills available to this agent.",
+                    parameters: skillListInputSchema,
+                    returnType: skillListResultSchema,
+                    shouldReviewInAutoMode: () => false,
+                    execute: async (ctx, input) => await this.list(ctx, scope.agent.id, input),
+                    toLLM: (result) => [{ type: "text", text: renderList(result) }],
+                }),
+                defineAgentTool({
+                    name: "read_skill",
+                    description: "Read the complete instructions for one available skill.",
+                    parameters: skillReadInputSchema,
+                    returnType: skillDocumentSchema,
+                    ...(durableSkillsConfigured
+                        ? {
+                              autoPermissionInstructions:
+                                  "When reading a durable skill, this request crosses Rig's local sandbox and must be reviewed.",
+                              describeAutoPermissionAction: ({ name }: SkillReadInput) =>
+                                  `request the ${JSON.stringify(name)} skill from an external integration outside Rig's sandbox`,
+                              requiresAutoOrFullAccess: true,
+                              shouldRunInFullAccessInAutoMode: ({ name }: SkillReadInput) =>
+                                  isDurableSkill(this.#skillRoots, name),
+                          }
+                        : {}),
+                    shouldReviewInAutoMode: ({ name }: SkillReadInput) =>
+                        durableSkillsConfigured && isDurableSkill(this.#skillRoots, name),
+                    execute: async (ctx, input) => await this.read(ctx, scope.agent.id, input),
+                    toLLM: (result) => [{ type: "text", text: result.content }],
+                }),
+            ];
+        },
     };
 
-    readonly tools = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-    ): Promise<readonly AnyAgentTool[]> => {
-        const durableSkillsConfigured = hasDurableSkills(this.#skillRoots);
-        if (
-            (await this.#compute.resolve(ctx, scope.agent.id)) === undefined &&
-            !durableSkillsConfigured
-        ) {
-            return [];
-        }
-        return [
-            defineAgentTool({
-                name: "list_skills",
-                description: "List the skills available to this agent.",
-                parameters: skillListInputSchema,
-                returnType: skillListResultSchema,
-                shouldReviewInAutoMode: () => false,
-                execute: async (ctx, input) => await this.list(ctx, scope.agent.id, input),
-                toLLM: (result) => [{ type: "text", text: renderList(result) }],
-            }),
-            defineAgentTool({
-                name: "read_skill",
-                description: "Read the complete instructions for one available skill.",
-                parameters: skillReadInputSchema,
-                returnType: skillDocumentSchema,
-                ...(durableSkillsConfigured
-                    ? {
-                          autoPermissionInstructions:
-                              "When reading a durable skill, this request crosses Rig's local sandbox and must be reviewed.",
-                          describeAutoPermissionAction: ({ name }: SkillReadInput) =>
-                              `request the ${JSON.stringify(name)} skill from an external integration outside Rig's sandbox`,
-                          requiresAutoOrFullAccess: true,
-                          shouldRunInFullAccessInAutoMode: ({ name }: SkillReadInput) =>
-                              isDurableSkill(this.#skillRoots, name),
-                      }
-                    : {}),
-                shouldReviewInAutoMode: ({ name }: SkillReadInput) =>
-                    durableSkillsConfigured && isDurableSkill(this.#skillRoots, name),
-                execute: async (ctx, input) => await this.read(ctx, scope.agent.id, input),
-                toLLM: (result) => [{ type: "text", text: result.content }],
-            }),
-        ];
-    };
+    readonly beforeStart = (): AgentModuleHooks => this.#hooks;
 }
 
 function materializeOptions(options: SkillsModuleOptions): unknown {

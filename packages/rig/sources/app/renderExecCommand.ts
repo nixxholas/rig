@@ -1,6 +1,6 @@
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
-import type { ExecCommandPresentation } from "../agent/ToolResultPresentation.js";
+import type { ExecCommandPresentation } from "../protocol/index.js";
 import { highlightShellCommand } from "./highlightShellCommand.js";
 import { renderChildRows, type ChildRow } from "./renderChildRows.js";
 import { sanitizeTerminalText } from "./sanitizeTerminalText.js";

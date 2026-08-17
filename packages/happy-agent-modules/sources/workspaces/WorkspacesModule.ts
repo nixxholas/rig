@@ -1,5 +1,6 @@
 import {
     type AgentModule,
+    type AgentModuleHooks,
     type AgentModuleScope,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
@@ -245,19 +246,23 @@ export class WorkspacesModule implements AgentModule {
         });
     }
 
-    readonly tools = (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => {
-        this.#assertAgentId(scope.agent.id);
-        if (!this.#enabled) return [];
-        return [
-            createWorkspaceTool(this, scope.agent.id),
-            listWorkspacesTool(this, scope.agent.id),
-            getWorkspaceTool(this, scope.agent.id),
-            renameWorkspaceTool(this, scope.agent.id),
-            transferWorkspaceTool(this, scope.agent.id),
-            archiveWorkspaceTool(this, scope.agent.id),
-            getBranchMetadataTool(this, scope.agent.id),
-        ];
+    readonly #hooks: AgentModuleHooks = {
+        tools: (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => {
+            this.#assertAgentId(scope.agent.id);
+            if (!this.#enabled) return [];
+            return [
+                createWorkspaceTool(this, scope.agent.id),
+                listWorkspacesTool(this, scope.agent.id),
+                getWorkspaceTool(this, scope.agent.id),
+                renameWorkspaceTool(this, scope.agent.id),
+                transferWorkspaceTool(this, scope.agent.id),
+                archiveWorkspaceTool(this, scope.agent.id),
+                getBranchMetadataTool(this, scope.agent.id),
+            ];
+        },
     };
+
+    readonly beforeStart = (): AgentModuleHooks => this.#hooks;
 
     /**
      * Reserves one workspace: a name, folder key, and branch nothing else has taken, recorded

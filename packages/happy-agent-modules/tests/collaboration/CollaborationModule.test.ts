@@ -3,12 +3,14 @@ import {
     type AgentConfig,
     type AgentMessageAcceptance,
     type AgentModel,
+    type AgentModuleHooks,
     type AgentSystemRef,
 } from "@slopus/happy-agent-base";
 import { createRootContext, type Context } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
 import { CollaborationModule } from "../../sources/collaboration/index.js";
+import { resolveModuleHooks } from "../support/moduleHooks.js";
 
 const MODELS: readonly AgentModel[] = [
     {
@@ -111,7 +113,9 @@ class Collection {
     }
 }
 
-function started(collection: Collection): { module: CollaborationModule; ctx: Context } {
+async function started(
+    collection: Collection,
+): Promise<{ module: CollaborationModule; hooks: AgentModuleHooks; ctx: Context }> {
     const module = new CollaborationModule();
     const ctx = withAgentConfig(createRootContext().named("collaboration-test"), {
         environment: {
@@ -123,8 +127,8 @@ function started(collection: Collection): { module: CollaborationModule; ctx: Co
         modules: { collaboration: {} },
         metadata: { title: "Parent agent" },
     });
-    module.beforeStart(ctx, collection.asRef());
-    return { module, ctx };
+    const hooks = await resolveModuleHooks(ctx, module, collection.asRef());
+    return { module, hooks, ctx };
 }
 
 /** A stand-in run store; the module only ever keeps one note in it. */
@@ -159,7 +163,7 @@ const TASK = {
 describe("collaboration", () => {
     it("creates a collaborator as a child of its creator", async () => {
         const collection = new Collection();
-        const { module, ctx } = started(collection);
+        const { module, hooks, ctx } = await started(collection);
 
         const result = await module.createAgent(ctx, "parent", TASK, "child");
 
@@ -169,7 +173,7 @@ describe("collaboration", () => {
 
     it("puts the collaborator's name in the agent's real metadata", async () => {
         const collection = new Collection();
-        const { module, ctx } = started(collection);
+        const { module, hooks, ctx } = await started(collection);
 
         await module.createAgent(ctx, "parent", TASK, "child");
 
@@ -178,7 +182,7 @@ describe("collaboration", () => {
 
     it("gives a collaborator the machine its creator works on", async () => {
         const collection = new Collection();
-        const { module, ctx } = started(collection);
+        const { module, hooks, ctx } = await started(collection);
 
         await module.createAgent(ctx, "parent", TASK, "child");
 
@@ -188,7 +192,7 @@ describe("collaboration", () => {
 
     it("chooses what a collaborator runs on with the message that starts it", async () => {
         const collection = new Collection();
-        const { module, ctx } = started(collection);
+        const { module, hooks, ctx } = await started(collection);
 
         await module.createAgent(
             ctx,
@@ -208,7 +212,7 @@ describe("collaboration", () => {
 
     it("never lets a later message change what a collaborator runs on", async () => {
         const collection = new Collection();
-        const { module, ctx } = started(collection);
+        const { module, hooks, ctx } = await started(collection);
         await module.createAgent(ctx, "parent", TASK, "child");
 
         await module.sendMessage(
@@ -228,7 +232,7 @@ describe("collaboration", () => {
 
     it("names the sender in the text, because that is the address a reply goes to", async () => {
         const collection = new Collection();
-        const { module, ctx } = started(collection);
+        const { module, hooks, ctx } = await started(collection);
         await module.createAgent(ctx, "parent", TASK, "child");
 
         expect(collection.delivered[0]!.text).toBe(
@@ -238,20 +242,17 @@ describe("collaboration", () => {
 
     it("delivers under the durable tool call's own identity", async () => {
         const collection = new Collection();
-        const { module, ctx } = started(collection);
+        const { module, hooks, ctx } = await started(collection);
 
         await module.createAgent(ctx, "parent", TASK, "child");
         await module.sendMessage(ctx, "parent", { toAgentId: "child", text: "Again." }, "call-2");
 
-        expect(collection.delivered.map(({ options }) => options.id)).toEqual([
-            "child",
-            "call-2",
-        ]);
+        expect(collection.delivered.map(({ options }) => options.id)).toEqual(["child", "call-2"]);
     });
 
     it("does not create a collaborator twice when its durable call is retried", async () => {
         const collection = new Collection();
-        const { module, ctx } = started(collection);
+        const { module, hooks, ctx } = await started(collection);
 
         await module.createAgent(ctx, "parent", TASK, "child");
         await module.createAgent(ctx, "parent", TASK, "child");
@@ -263,7 +264,7 @@ describe("collaboration", () => {
 
     it("refuses a model the collection does not offer", async () => {
         const collection = new Collection();
-        const { module, ctx } = started(collection);
+        const { module, hooks, ctx } = await started(collection);
 
         await expect(
             module.createAgent(ctx, "parent", { ...TASK, model: "imaginary" }, "child"),
@@ -273,16 +274,21 @@ describe("collaboration", () => {
 
     it("refuses an effort the chosen model does not support", async () => {
         const collection = new Collection();
-        const { module, ctx } = started(collection);
+        const { module, hooks, ctx } = await started(collection);
 
         await expect(
-            module.createAgent(ctx, "parent", { ...TASK, effort: "low", model: "opus-5", provider: "claude" }, "child"),
+            module.createAgent(
+                ctx,
+                "parent",
+                { ...TASK, effort: "low", model: "opus-5", provider: "claude" },
+                "child",
+            ),
         ).rejects.toThrow('Effort "low" is not available for collaborator model "opus-5".');
     });
 
     it("asks for a provider when a model name alone is ambiguous", async () => {
         const collection = new Collection();
-        const { module, ctx } = started(collection);
+        const { module, hooks, ctx } = await started(collection);
 
         await expect(
             module.createAgent(ctx, "parent", { ...TASK, model: "opus-5" }, "child"),
@@ -291,7 +297,7 @@ describe("collaboration", () => {
 
     it("refuses a service tier the chosen model does not offer", async () => {
         const collection = new Collection();
-        const { module, ctx } = started(collection);
+        const { module, hooks, ctx } = await started(collection);
 
         await expect(
             module.createAgent(
@@ -305,7 +311,7 @@ describe("collaboration", () => {
 
     it("lets a collaborator answer the agent that created it", async () => {
         const collection = new Collection();
-        const { module, ctx } = started(collection);
+        const { module, hooks, ctx } = await started(collection);
         await module.createAgent(ctx, "parent", TASK, "child");
 
         await module.sendMessage(ctx, "child", { toAgentId: "parent", text: "Done." }, "m1");
@@ -319,7 +325,7 @@ describe("collaboration", () => {
     it("refuses a message between agents with no relationship", async () => {
         const collection = new Collection();
         collection.seed("stranger", null);
-        const { module, ctx } = started(collection);
+        const { module, hooks, ctx } = await started(collection);
         await module.createAgent(ctx, "parent", TASK, "child");
 
         await expect(
@@ -329,7 +335,7 @@ describe("collaboration", () => {
 
     it("interrupts a collaborator it created", async () => {
         const collection = new Collection();
-        const { module, ctx } = started(collection);
+        const { module, hooks, ctx } = await started(collection);
         await module.createAgent(ctx, "parent", TASK, "child");
 
         await module.interruptAgent(ctx, "parent", "child");
@@ -340,7 +346,7 @@ describe("collaboration", () => {
     it("refuses to interrupt an agent it has no relationship with", async () => {
         const collection = new Collection();
         collection.seed("stranger", null);
-        const { module, ctx } = started(collection);
+        const { module, hooks, ctx } = await started(collection);
 
         await expect(module.interruptAgent(ctx, "parent", "stranger")).rejects.toThrow(
             "is not authorized to interrupt",
@@ -350,12 +356,12 @@ describe("collaboration", () => {
 
     it("tells a collaborator the address to answer on", async () => {
         const collection = new Collection();
-        const { module, ctx } = started(collection);
+        const { module, hooks, ctx } = await started(collection);
         await module.createAgent(ctx, "parent", TASK, "child");
 
         // The sender's name is in the delivered message too, but that line ages out of history on
         // compaction while the relationship does not.
-        const instructions = await module.instructions(ctx, {
+        const instructions = await hooks.instructions!(ctx, {
             agent: { id: "child" },
         } as never);
 
@@ -365,10 +371,10 @@ describe("collaboration", () => {
 
     it("tells an agent which collaborators it created", async () => {
         const collection = new Collection();
-        const { module, ctx } = started(collection);
+        const { module, hooks, ctx } = await started(collection);
         await module.createAgent(ctx, "parent", TASK, "child");
 
-        const instructions = await module.instructions(ctx, {
+        const instructions = await hooks.instructions!(ctx, {
             agent: { id: "parent" },
         } as never);
 
@@ -377,19 +383,19 @@ describe("collaboration", () => {
 
     it("says nothing to an agent with no collaborators at all", async () => {
         const collection = new Collection();
-        const { module, ctx } = started(collection);
+        const { module, hooks, ctx } = await started(collection);
 
-        expect(await module.instructions(ctx, { agent: { id: "lonely" } } as never)).toBe("");
+        expect(await hooks.instructions!(ctx, { agent: { id: "lonely" } } as never)).toBe("");
     });
 
     it("reports a collaborator's last words to its creator when it stops working", async () => {
         const collection = new Collection();
-        const { module, ctx } = started(collection);
+        const { module, hooks, ctx } = await started(collection);
         await module.createAgent(ctx, "parent", TASK, "child");
         const scope = runScope("child");
 
-        await module.onEventTransact(ctx, scope, textEnd("The parser change looks correct."));
-        await module.afterAgentSettledTransact(ctx, scope, settlement("s1"));
+        await hooks.onEventTransact!(ctx, scope, textEnd("The parser change looks correct."));
+        await hooks.afterAgentSettledTransact!(ctx, scope, settlement("s1"));
 
         expect(collection.delivered[1]).toMatchObject({
             toAgentId: "parent",
@@ -399,12 +405,12 @@ describe("collaboration", () => {
 
     it("marks the report so it can be shown as a notice rather than as someone talking", async () => {
         const collection = new Collection();
-        const { module, ctx } = started(collection);
+        const { module, hooks, ctx } = await started(collection);
         await module.createAgent(ctx, "parent", TASK, "child");
         const scope = runScope("child");
 
-        await module.onEventTransact(ctx, scope, textEnd("Done."));
-        await module.afterAgentSettledTransact(ctx, scope, settlement("s1"));
+        await hooks.onEventTransact!(ctx, scope, textEnd("Done."));
+        await hooks.afterAgentSettledTransact!(ctx, scope, settlement("s1"));
 
         expect(collection.delivered[1]!.options.metadata).toEqual({
             collaboration: {
@@ -418,50 +424,50 @@ describe("collaboration", () => {
 
     it("says nothing when the collaborator finished in silence", async () => {
         const collection = new Collection();
-        const { module, ctx } = started(collection);
+        const { module, hooks, ctx } = await started(collection);
         await module.createAgent(ctx, "parent", TASK, "child");
         const scope = runScope("child");
 
         // No text_end ever arrived — an interrupted turn, or one that was told no action was
         // needed. There is no answer to pass on, and announcing the silence would tell the
         // creator something it already knows.
-        await module.afterAgentSettledTransact(ctx, scope, settlement("s1"));
+        await hooks.afterAgentSettledTransact!(ctx, scope, settlement("s1"));
 
         expect(collection.delivered).toHaveLength(1);
     });
 
     it("reports under the settlement's identity, so a retry is not a second report", async () => {
         const collection = new Collection();
-        const { module, ctx } = started(collection);
+        const { module, hooks, ctx } = await started(collection);
         await module.createAgent(ctx, "parent", TASK, "child");
         const scope = runScope("child");
 
-        await module.onEventTransact(ctx, scope, textEnd("Done."));
-        await module.afterAgentSettledTransact(ctx, scope, settlement("s1"));
+        await hooks.onEventTransact!(ctx, scope, textEnd("Done."));
+        await hooks.afterAgentSettledTransact!(ctx, scope, settlement("s1"));
 
         expect(collection.delivered[1]!.options.id).toBe("s1");
     });
 
     it("says nothing upward when the agent that stopped has no creator", async () => {
         const collection = new Collection();
-        const { module, ctx } = started(collection);
+        const { module, hooks, ctx } = await started(collection);
         const scope = runScope("root");
 
-        await module.onEventTransact(ctx, scope, textEnd("All done."));
-        await module.afterAgentSettledTransact(ctx, scope, settlement("s1"));
+        await hooks.onEventTransact!(ctx, scope, textEnd("All done."));
+        await hooks.afterAgentSettledTransact!(ctx, scope, settlement("s1"));
 
         expect(collection.delivered).toHaveLength(0);
     });
 
     it("keeps only the most recent thing the model said", async () => {
         const collection = new Collection();
-        const { module, ctx } = started(collection);
+        const { module, hooks, ctx } = await started(collection);
         await module.createAgent(ctx, "parent", TASK, "child");
         const scope = runScope("child");
 
-        await module.onEventTransact(ctx, scope, textEnd("Thinking out loud."));
-        await module.onEventTransact(ctx, scope, textEnd("Final answer."));
-        await module.afterAgentSettledTransact(ctx, scope, settlement("s1"));
+        await hooks.onEventTransact!(ctx, scope, textEnd("Thinking out loud."));
+        await hooks.onEventTransact!(ctx, scope, textEnd("Final answer."));
+        await hooks.afterAgentSettledTransact!(ctx, scope, settlement("s1"));
 
         expect(collection.delivered[1]!.text).toContain("Final answer.");
         expect(collection.delivered[1]!.text).not.toContain("Thinking out loud.");

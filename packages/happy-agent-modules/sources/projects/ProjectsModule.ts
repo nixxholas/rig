@@ -1,5 +1,6 @@
 import {
     type AgentModule,
+    type AgentModuleHooks,
     type AgentModuleScope,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
@@ -242,23 +243,27 @@ export class ProjectsModule implements AgentModule {
         });
     }
 
-    readonly tools = (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => {
-        this.#assertAgentId(scope.agent.id);
-        return [
-            listProjectsTool(this, scope.agent.id),
-            getProjectTool(this, scope.agent.id),
-            createProjectTool(this, scope.agent.id),
-            ensureProjectTool(this, scope.agent.id),
-            renameProjectTool(this, scope.agent.id),
-            archiveProjectTool(this, scope.agent.id),
-            restoreProjectTool(this, scope.agent.id),
-            reorderProjectTool(this, scope.agent.id),
-            setProjectAvatarTool(this, scope.agent.id),
-            clearProjectAvatarTool(this, scope.agent.id),
-            getProjectSettingsTool(this, scope.agent.id),
-            updateProjectSettingsTool(this, scope.agent.id),
-        ];
+    readonly #hooks: AgentModuleHooks = {
+        tools: (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => {
+            this.#assertAgentId(scope.agent.id);
+            return [
+                listProjectsTool(this, scope.agent.id),
+                getProjectTool(this, scope.agent.id),
+                createProjectTool(this, scope.agent.id),
+                ensureProjectTool(this, scope.agent.id),
+                renameProjectTool(this, scope.agent.id),
+                archiveProjectTool(this, scope.agent.id),
+                restoreProjectTool(this, scope.agent.id),
+                reorderProjectTool(this, scope.agent.id),
+                setProjectAvatarTool(this, scope.agent.id),
+                clearProjectAvatarTool(this, scope.agent.id),
+                getProjectSettingsTool(this, scope.agent.id),
+                updateProjectSettingsTool(this, scope.agent.id),
+            ];
+        },
     };
+
+    readonly beforeStart = (): AgentModuleHooks => this.#hooks;
 
     async list(ctx: Context, agentId: string, query: ProjectPageQuery = {}): Promise<ProjectPage> {
         this.#assertAgentId(agentId);

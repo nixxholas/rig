@@ -20,30 +20,23 @@ import {
     type AgentLoopEvent,
     type ContentBlock,
     type Message,
-    type Skill,
     type ToolResultBlock,
     type UserMessage,
-    formatSkillInvocation,
-} from "../agent/index.js";
-import type { BashSessionActivity, BashSessionSnapshot } from "../agent/context/BashContext.js";
-import { loadAgentSkillCatalog } from "../agent/skills/loadAgentSkillCatalog.js";
-import { MAXIMUM_SKILL_FILE_BYTES } from "../agent/skills/loadSkillFromFile.js";
-import { parseSkillFrontmatter } from "../agent/skills/parseSkillFrontmatter.js";
-import type { FileDiff } from "../agent/ToolResultPresentation.js";
+    type BashSessionActivity,
+    type BashSessionSnapshot,
+    type FileDiff,
+    type ServiceTier,
+    type Usage,
+    type UserInputRequest,
+    type UserInputResponse,
+} from "../protocol/index.js";
 import { errorToMessage } from "../errorToMessage.js";
-import { ONLINE_PRESENCE_ID } from "../presence/index.js";
 import type { NativeProcessManager } from "../processes/index.js";
-import { humanizeMcpName } from "../mcp/humanizeMcpName.js";
-import type { ServiceTier, Usage } from "@slopus/rig-execution";
-import {
-    DEFAULT_INFERENCE_MAX_RETRIES,
-    MAX_INFERENCE_MAX_RETRIES,
-} from "../config/inferenceRetrySettings.js";
+import { humanizeMcpName } from "./humanizeMcpName.js";
 import type {
     FileSearchResult,
     EventId,
     McpServerSummary,
-    PluginSummary,
     PresenceSnapshot,
     PresenceSummary,
     RunShellCommandResult,
@@ -60,10 +53,8 @@ import type {
     EnvironmentSecretRegistration,
     EnvironmentSecretUpdate,
     SecretAttachmentScope,
-} from "../secrets/index.js";
-import type { UserInputRequest, UserInputResponse } from "../user-input/index.js";
-import { humanizeWorkflowName } from "../workflows/index.js";
-import { createCodeReviewPrompt } from "../review/index.js";
+} from "../protocol/index.js";
+import { humanizeWorkflowName } from "./workflowDisplay.js";
 import type { AppTranscriptEntry } from "./AppTranscriptEntry.js";
 import type { CodexMcpToolCall } from "./CodexMcpToolCall.js";
 import { CODEX_DARK_DIFF_PALETTE, CODEX_LIGHT_DIFF_PALETTE } from "./CodexFileDiff.js";
@@ -143,7 +134,7 @@ import type { TerminalTheme } from "./TerminalTheme.js";
 import type { StartupStatusCardModel } from "./StartupStatusCardModel.js";
 import { SecretMenuController } from "./SecretMenuController.js";
 import { TemporaryFullscreenController } from "./TemporaryFullscreenController.js";
-import { updateSessionTokenCount } from "../session/usage/updateSessionTokenCount.js";
+import { updateSessionTokenCount } from "./updateSessionTokenCount.js";
 import { renderFullscreenComponent } from "./renderFullscreenComponent.js";
 
 const RESET = "\x1b[0m";
@@ -162,11 +153,7 @@ const PENDING_TOOL_CALL_TITLE = "Working";
 // for the same run without breaking the moment the wording of the title changes.
 const PERMISSION_TURN_STOPPED_NOTICE_CODE = "permission_turn_stopped";
 const ACTIVITY_ANIMATION_MS = 120;
-const PLUGIN_STATUS_LABELS = {
-    failed: "Failed",
-    running: "Running",
-    stopped: "Stopped",
-} satisfies Record<PluginSummary["status"], string>;
+const ONLINE_PRESENCE_ID = "online";
 const REASONING_DOWN_RAW_KEYS = new Set(["\x1b,", "\x1b[1;2B"]);
 const REASONING_UP_RAW_KEYS = new Set(["\x1b.", "\x1b[1;2A"]);
 const MODEL_MENU_RAW_KEYS = new Set(["\x1bm", "\x1bM"]);
@@ -253,7 +240,6 @@ export interface CodingAssistantAppOptions {
         options?: ReadClipboardImageOptions,
     ) => Promise<ClipboardImage | undefined>;
     searchFiles?: (query: string) => Promise<readonly FileSearchResult[]>;
-    inferenceMaxRetries?: number;
     compactCompletedTurns?: boolean;
     completionChime?: boolean;
     registerSecret?: (
@@ -265,7 +251,6 @@ export interface CodingAssistantAppOptions {
         update: EnvironmentSecretUpdate,
     ) => SecretSummary | Promise<SecretSummary>;
     detachSecret?: (id: string, scope: SecretAttachmentScope) => void | Promise<void>;
-    durableGlobalEventQueue?: boolean;
     debugInfo?: AppDebugInfo;
     showReasoning?: boolean;
     showUsage?: boolean;
@@ -325,10 +310,8 @@ export interface DefaultModelPreference {
 }
 
 export interface AppSettings {
-    inferenceMaxRetries: number;
     compactCompletedTurns: boolean;
     completionChime: boolean;
-    durableGlobalEventQueue: boolean;
     showReasoning: boolean;
     showUsage: boolean;
 }
@@ -495,12 +478,10 @@ export class CodingAssistantApp implements Component, Focusable {
     #backgroundProcesses: readonly BashSessionActivity[] = [];
     #observedShellProcesses: readonly BashSessionActivity[] = [];
     #yieldedBackgroundTerminals = new Map<number, string>();
-    #inferenceMaxRetries: number;
     #compactCompletedTurns: boolean;
     #directShellCommandsBySessionId = new Map<number, { command: string; commandId: string }>();
     #backgroundedShellCommandIds = new Set<string>();
     #completionChime: boolean;
-    #durableGlobalEventQueue: boolean;
     #showReasoning: boolean;
     #showUsage: boolean;
     #sessionBacked: boolean;
@@ -508,10 +489,6 @@ export class CodingAssistantApp implements Component, Focusable {
     #mcpServers: readonly McpServerSummary[];
     #slashCommandSelectionIndex = 0;
     readonly #slashCommands: readonly SlashCommandItem[];
-    #skillCommands: SlashCommandItem[] = [];
-    #skillCommandsLoaded = false;
-    #skillCommandsRefresh: Promise<void> | undefined;
-    #skillsByName = new Map<string, Skill>();
     #imagePasteInFlight: Promise<void> | undefined;
     #nextPastedImageId = 1;
     #runToken = 0;
@@ -577,10 +554,8 @@ export class CodingAssistantApp implements Component, Focusable {
         this.#processManager = options.processManager;
         this.#readClipboardImage = options.readClipboardImage ?? readClipboardImage;
         this.#sessionBacked = options.sessionBacked ?? false;
-        this.#inferenceMaxRetries = options.inferenceMaxRetries ?? DEFAULT_INFERENCE_MAX_RETRIES;
         this.#compactCompletedTurns = options.compactCompletedTurns ?? false;
         this.#completionChime = options.completionChime ?? false;
-        this.#durableGlobalEventQueue = options.durableGlobalEventQueue ?? false;
         this.#debugInfo = options.debugInfo;
         this.#showReasoning = options.showReasoning ?? false;
         this.#showUsage = options.showUsage ?? false;
@@ -707,8 +682,6 @@ export class CodingAssistantApp implements Component, Focusable {
         }
         this.#syncProviderErrorResetTimer();
         this.#syncSubagentRefreshTimer();
-
-        void this.#refreshSkillCommands();
     }
 
     get focused(): boolean {
@@ -1841,13 +1814,6 @@ export class CodingAssistantApp implements Component, Focusable {
             return;
         }
 
-        if (prompt.startsWith("/skill:")) {
-            this.#editor.addToHistory(prompt);
-            await this.#submitSkillCommand(prompt);
-            this.#requestRender();
-            return;
-        }
-
         if (prompt === "/compact") {
             await this.#compactSession();
             this.#requestRender();
@@ -1939,10 +1905,7 @@ export class CodingAssistantApp implements Component, Focusable {
 
         const shellCommand = shellMode ? prompt : undefined;
         const displayText = shellMode ? `!${prompt}` : prompt;
-        const content =
-            shellCommand === undefined
-                ? (createCodeReviewPrompt(prompt) ?? this.#contentFromPrompt(prompt))
-                : "";
+        const content = shellCommand === undefined ? this.#contentFromPrompt(prompt) : "";
         return {
             content,
             displayText,
@@ -1987,97 +1950,6 @@ export class CodingAssistantApp implements Component, Focusable {
         }
 
         return blocks;
-    }
-
-    async #submitSkillCommand(prompt: string): Promise<void> {
-        const parsed = /^\/skill:([a-z0-9-]+)(?:\s+([\s\S]*))?$/u.exec(prompt);
-        if (parsed === null) {
-            this.#appendEntry({
-                role: "event",
-                title: "Skill",
-                text: "Use /skill:<name> followed by optional instructions.",
-            });
-            return;
-        }
-
-        await this.#refreshSkillCommands({ force: true });
-        const skillName = parsed[1];
-        const skill = skillName === undefined ? undefined : this.#skillsByName.get(skillName);
-        if (skill === undefined) {
-            this.#appendEntry({
-                role: "event",
-                title: "Skill",
-                text: `Skill '${skillName ?? ""}' was not found.`,
-            });
-            return;
-        }
-
-        let content: string;
-        try {
-            content =
-                skill.source.type === "plugin"
-                    ? Buffer.from(
-                          await this.#agent.context.fs.readFileBuffer(skill.filePath, {
-                              maxBytes: MAXIMUM_SKILL_FILE_BYTES,
-                              noFollow: true,
-                          }),
-                      ).toString("utf8")
-                    : await this.#agent.context.fs.readFile(skill.filePath);
-        } catch (error) {
-            this.#appendEntry({
-                role: "error",
-                title: "Skill",
-                text: errorToMessage(error),
-            });
-            return;
-        }
-
-        const expandedPrompt = formatSkillInvocation(
-            skill,
-            parseSkillFrontmatter(content).body,
-            parsed[2] ?? "",
-        );
-        const submission: PromptSubmission = {
-            content: expandedPrompt,
-            displayText: prompt,
-        };
-
-        this.#recordUserInput(this.#now());
-        this.#modelLocked = true;
-        if (this.#running) {
-            if (this.#sessionBacked && this.#activeSessionRunId === undefined) {
-                this.#pendingPrompts.push(submission);
-                this.#requestRender();
-                return;
-            }
-            const localSteering = this.#trackLocalSteeringSubmission(submission);
-            try {
-                const response = await this.#agent.steer(expandedPrompt, {
-                    ...(localSteering === undefined
-                        ? {}
-                        : { clientSubmissionId: localSteering.messageId }),
-                    displayText: prompt,
-                    ...(localSteering === undefined ? {} : { expectedRunId: localSteering.runId }),
-                });
-                this.#settleLocalSteeringSubmission(localSteering, true, response);
-            } catch (error) {
-                if (localSteering?.invalidated === true) return;
-                if (localSteering?.accepted === true) {
-                    this.#settleLocalSteeringSubmission(localSteering, true);
-                    return;
-                }
-                this.#settleLocalSteeringSubmission(localSteering, false);
-                throw error;
-            }
-            if (!this.#sessionBacked) this.#appendEntry({ role: "user", text: prompt });
-            return;
-        }
-        if (!this.#sessionBacked) {
-            this.#appendEntry({ role: "user", text: prompt });
-            submission.transcriptAppended = true;
-        }
-        this.#pendingPrompts.push(submission);
-        this.#startDrainQueue();
     }
 
     #handleCommand(prompt: string): boolean {
@@ -2129,20 +2001,6 @@ export class CodingAssistantApp implements Component, Focusable {
 
         if (prompt === "/mcp") {
             this.#showMcpStatus();
-            return true;
-        }
-
-        if (prompt === "/plugins" || prompt.startsWith("/plugins ")) {
-            void this.#showPlugins(prompt.slice("/plugins".length).trim()).catch(
-                (error: unknown) => {
-                    this.#appendEntry({
-                        role: "error",
-                        title: "Plugins",
-                        text: errorToMessage(error),
-                    });
-                    this.#requestRender();
-                },
-            );
             return true;
         }
 
@@ -2475,48 +2333,6 @@ export class CodingAssistantApp implements Component, Focusable {
         this.#appendEntry({ role: "event", title: "MCP servers", text });
     }
 
-    async #showPlugins(name: string): Promise<void> {
-        const plugins = this.#agent.context.plugins;
-        if (plugins === undefined) throw new Error("Plugins are unavailable in this session.");
-        if (name.length > 0) {
-            const log = await plugins.readLog(this.#ctx, name);
-            const text = `${log.truncated ? "[Earlier plugin output omitted.]\n" : ""}${log.text}`;
-            const displayText =
-                log.error !== undefined && log.error !== log.text
-                    ? `${log.error}${text.length === 0 ? "" : `\n\n${text}`}`
-                    : text;
-            this.#appendEntry({
-                role: "event",
-                title: `${log.name} · ${PLUGIN_STATUS_LABELS[log.status]}`,
-                text:
-                    displayText.length === 0
-                        ? "This plugin has not written any output."
-                        : displayText,
-            });
-            this.#requestRender();
-            return;
-        }
-        const result = await plugins.list(this.#ctx);
-        const lines = [
-            ...result.plugins.map(
-                (plugin) =>
-                    `${plugin.name}: ${PLUGIN_STATUS_LABELS[plugin.status]}${plugin.error === undefined ? "" : ` — ${plugin.error}`}`,
-            ),
-            ...result.failures.map(
-                (failure) => `${failure.folder}: could not register — ${failure.error}`,
-            ),
-        ];
-        this.#appendEntry({
-            role: "event",
-            title: "Plugins",
-            text:
-                lines.length === 0
-                    ? "No plugins are installed."
-                    : `${lines.join("\n")}\n\nUse /plugins <name> to read the bounded current log.`,
-        });
-        this.#requestRender();
-    }
-
     #showUsageSummary(): void {
         if (this.#agent.getUsage !== undefined) {
             const version = ++this.#usageRequestVersion;
@@ -2717,10 +2533,7 @@ export class CodingAssistantApp implements Component, Focusable {
             text: "Stopping all background terminals.",
         });
         this.#stoppingBackgroundTerminals = true;
-        const stop =
-            this.#agent.stopBackgroundProcesses === undefined
-                ? (this.#agent.context.bash.killAllSessions?.() ?? Promise.resolve(0))
-                : this.#agent.stopBackgroundProcesses();
+        const stop = this.#agent.stopBackgroundProcesses();
         void stop
             .then(() => {
                 this.#backgroundProcesses = [];
@@ -2940,11 +2753,6 @@ export class CodingAssistantApp implements Component, Focusable {
             this.#latestSessionRunId !== undefined &&
             this.#latestSessionRunId !== this.#activeLocalSessionRunId;
         try {
-            await this.#refreshSkillCommands({ force: true });
-            if (!this.#isCurrentRun(runToken)) {
-                return;
-            }
-
             if (this.#pendingPrompts[0] !== prompt) {
                 return;
             }
@@ -3774,7 +3582,7 @@ export class CodingAssistantApp implements Component, Focusable {
                 toolEntry.permissionReview = "Approved automatically: temporary Full access.";
             }
         } else if (event.type === "background_processes_changed") {
-            const nextProcesses =
+            const nextProcesses: readonly BashSessionActivity[] =
                 event.processes ?? (event.running === 0 ? [] : this.#observedShellProcesses);
             this.#recordClosedBackgroundTerminals(nextProcesses);
             this.#observedShellProcesses = nextProcesses;
@@ -5126,30 +4934,14 @@ export class CodingAssistantApp implements Component, Focusable {
                     description: "Ring once when all session work has settled.",
                 },
                 {
-                    value: "durable-events",
-                    label: this.#durableGlobalEventQueue
-                        ? "Disable durable event queue"
-                        : "Enable durable event queue",
-                    description: "Persist every daemon event for external synchronization.",
-                },
-                {
                     value: "compact-turns",
                     label: this.#compactCompletedTurns
                         ? "Show full completed turns"
                         : "Compact completed turns",
                     description: "Keep turn stats and the final response after completion.",
                 },
-                {
-                    value: "inference-retries",
-                    label: `Inference retries · ${this.#inferenceMaxRetries}`,
-                    description: "Maximum retries before any inference provider reports failure.",
-                },
             ],
             onSelect: (item) => {
-                if (item.value === "inference-retries") {
-                    this.#openInferenceRetriesInput();
-                    return;
-                }
                 if (item.value === "compact-turns") {
                     this.#compactCompletedTurns = !this.#compactCompletedTurns;
                 }
@@ -5158,12 +4950,9 @@ export class CodingAssistantApp implements Component, Focusable {
                 if (item.value === "completion-chime") {
                     this.#completionChime = !this.#completionChime;
                 }
-                if (item.value === "durable-events") {
-                    this.#durableGlobalEventQueue = !this.#durableGlobalEventQueue;
-                }
                 this.#persistSettings();
                 this.#closeSelectionPanel();
-                let text: string;
+                let text = "Settings updated.";
                 if (item.value === "compact-turns") {
                     text = `Completed turn compaction ${this.#compactCompletedTurns ? "enabled" : "disabled"}.`;
                 } else if (item.value === "reasoning") {
@@ -5172,8 +4961,6 @@ export class CodingAssistantApp implements Component, Focusable {
                     text = `Token status ${this.#showUsage ? "enabled" : "disabled"}.`;
                 } else if (item.value === "completion-chime") {
                     text = `Completion chime ${this.#completionChime ? "enabled" : "disabled"}.`;
-                } else {
-                    text = `Durable event queue ${this.#durableGlobalEventQueue ? "enabled" : "disabled"}.`;
                 }
                 this.#appendEntry({
                     role: "event",
@@ -5187,43 +4974,6 @@ export class CodingAssistantApp implements Component, Focusable {
             },
         });
         this.#showSelectionPanel(panel);
-    }
-
-    #openInferenceRetriesInput(error?: string): void {
-        this.#showSelectionPanel(
-            createSecretInputPanel({
-                label: "Attempts",
-                masked: false,
-                onCancel: () => this.#openConfigureMenu(),
-                onSubmit: (value) => {
-                    const normalized = value.trim();
-                    const attempts = Number(normalized);
-                    if (
-                        !/^\d+$/u.test(normalized) ||
-                        !Number.isInteger(attempts) ||
-                        attempts > MAX_INFERENCE_MAX_RETRIES
-                    ) {
-                        this.#openInferenceRetriesInput(
-                            `Enter a whole number from 0 to ${MAX_INFERENCE_MAX_RETRIES}.`,
-                        );
-                        return;
-                    }
-                    this.#inferenceMaxRetries = attempts;
-                    this.#closeSelectionPanel();
-                    this.#persistSettings(() => {
-                        this.#appendEntry({
-                            role: "event",
-                            title: "Settings",
-                            text: `Inference retries set to ${attempts}.`,
-                        });
-                        this.#requestRender();
-                    });
-                },
-                subtitle: error ?? `Enter a whole number from 0 to ${MAX_INFERENCE_MAX_RETRIES}.`,
-                theme: this.#theme,
-                title: "Inference retries",
-            }),
-        );
     }
 
     #openPermissionsMenu(): void {
@@ -6418,10 +6168,8 @@ export class CodingAssistantApp implements Component, Focusable {
 
         void Promise.resolve(
             this.#onSettingsChange({
-                inferenceMaxRetries: this.#inferenceMaxRetries,
                 compactCompletedTurns: this.#compactCompletedTurns,
                 completionChime: this.#completionChime,
-                durableGlobalEventQueue: this.#durableGlobalEventQueue,
                 showReasoning: this.#showReasoning,
                 showUsage: this.#showUsage,
             }),
@@ -6457,41 +6205,6 @@ export class CodingAssistantApp implements Component, Focusable {
         }
 
         return false;
-    }
-
-    #refreshSkillCommands(options: { force?: boolean } = {}): Promise<void> {
-        if (
-            options.force !== true &&
-            (this.#skillCommandsLoaded || this.#skillCommandsRefresh !== undefined)
-        ) {
-            return this.#skillCommandsRefresh ?? Promise.resolve();
-        }
-
-        const refresh = loadAgentSkillCatalog(this.#ctx, this.#agent.context)
-            .then((skills) => {
-                this.#skillsByName = new Map(skills.map((skill) => [skill.name, skill]));
-                this.#skillCommands = skills.map((skill) => ({
-                    value: `skill:${skill.name}`,
-                    label: `/skill:${skill.name}`,
-                    description: skill.description,
-                    aliases: [],
-                }));
-                this.#skillCommandsLoaded = true;
-            })
-            .catch(() => {
-                this.#skillsByName = new Map();
-                this.#skillCommands = [];
-                this.#skillCommandsLoaded = true;
-            });
-
-        const trackedRefresh = refresh.finally(() => {
-            if (this.#skillCommandsRefresh === trackedRefresh) {
-                this.#skillCommandsRefresh = undefined;
-            }
-            this.#requestRender();
-        });
-        this.#skillCommandsRefresh = trackedRefresh;
-        return trackedRefresh;
     }
 
     #handleSlashCommandAutocompleteInput(data: string): boolean {
@@ -6544,11 +6257,7 @@ export class CodingAssistantApp implements Component, Focusable {
         }
 
         const query = text.slice(1).toLowerCase();
-        if (!this.#skillCommandsLoaded && this.#skillCommandsRefresh === undefined) {
-            void this.#refreshSkillCommands();
-        }
-
-        const suggestions = [...this.#slashCommands, ...this.#skillCommands].filter((command) => {
+        const suggestions = this.#slashCommands.filter((command) => {
             if (command.value === "fast" && !this.#supportsFastInference()) {
                 return false;
             }
@@ -6615,10 +6324,7 @@ export class CodingAssistantApp implements Component, Focusable {
         this.#ensureShellCommandEntry(command, commandId);
 
         try {
-            const response =
-                this.#agent.runShellCommand === undefined
-                    ? await this.#startLocalShellCommand(command, commandId)
-                    : await this.#agent.runShellCommand(command, { commandId });
+            const response = await this.#agent.runShellCommand(command, { commandId });
             if (response.status === "finished") {
                 this.#finishShellCommand(response);
                 return;
@@ -6648,23 +6354,6 @@ export class CodingAssistantApp implements Component, Focusable {
             role: "tool",
             text: command,
         });
-    }
-
-    async #startLocalShellCommand(
-        command: string,
-        commandId: string,
-    ): Promise<RunShellCommandResponse> {
-        const sessionId = await this.#agent.context.bash.startSession({
-            command,
-            maxOutputBytes: 512_000,
-        });
-        return {
-            command,
-            commandId,
-            eventId: `local-shell:${commandId}`,
-            sessionId,
-            status: "running",
-        };
     }
 
     async #runForegroundShellCommand(
@@ -6736,15 +6425,10 @@ export class CodingAssistantApp implements Component, Focusable {
         waitMs: number,
     ): Promise<BashSessionSnapshot | undefined> {
         // Watching a command must not consume output the agent has not read.
-        return this.#agent.readBackgroundProcess === undefined
-            ? this.#agent.context.bash.readSession(sessionId, { peek: true, waitMs })
-            : this.#agent.readBackgroundProcess(sessionId, { waitMs });
+        return this.#agent.readBackgroundProcess(sessionId, { waitMs });
     }
 
     async #stopBackgroundProcess(sessionId: number): Promise<BashSessionSnapshot | undefined> {
-        if (this.#agent.stopBackgroundProcess === undefined) {
-            return this.#agent.context.bash.killSession(sessionId);
-        }
         return (await this.#agent.stopBackgroundProcess(sessionId)).process;
     }
 

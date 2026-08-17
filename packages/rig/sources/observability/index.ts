@@ -1,5 +1,3 @@
-export { startObservability } from "./startObservability.js";
-export { createDaemonLogger } from "./createDaemonLogger.js";
 export {
     initializeDaemonContext,
     setSpanAttributes,
@@ -12,4 +10,3 @@ export {
     withWorkerContext,
     type ContextWork,
 } from "./daemonContext.js";
-export { recordApiRequest } from "./recordApiRequest.js";

@@ -1,5 +1,6 @@
 import {
     type AgentModule,
+    type AgentModuleHooks,
     type AgentModuleScope,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
@@ -199,22 +200,26 @@ export class SchedulingModule implements AgentModule {
         this.#maxMessageLength = validated.maxMessageLength ?? DEFAULT_MAX_MESSAGE_LENGTH;
     }
 
-    readonly tools = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-    ): Promise<readonly AnyAgentTool[]> => {
-        this.#assertAgentId(scope.agent.id, "tool agent");
-        const tools: AnyAgentTool[] = [
-            waitTool(this, scope.agent.id),
-            waitUntilTool(this, scope.agent.id),
-            cancelScheduledMessageTool(this, scope.agent.id),
-            listScheduledMessagesTool(this, scope.agent.id),
-        ];
-        if (await this.#maySchedule(ctx, scope.agent.id)) {
-            tools.splice(2, 0, scheduleMessageTool(this, scope.agent.id));
-        }
-        return tools;
+    readonly #hooks: AgentModuleHooks = {
+        tools: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+        ): Promise<readonly AnyAgentTool[]> => {
+            this.#assertAgentId(scope.agent.id, "tool agent");
+            const tools: AnyAgentTool[] = [
+                waitTool(this, scope.agent.id),
+                waitUntilTool(this, scope.agent.id),
+                cancelScheduledMessageTool(this, scope.agent.id),
+                listScheduledMessagesTool(this, scope.agent.id),
+            ];
+            if (await this.#maySchedule(ctx, scope.agent.id)) {
+                tools.splice(2, 0, scheduleMessageTool(this, scope.agent.id));
+            }
+            return tools;
+        },
     };
+
+    readonly beforeStart = (): AgentModuleHooks => this.#hooks;
 
     async wait(
         ctx: Context,

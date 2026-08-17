@@ -1,4 +1,4 @@
-import type { WorkflowRun, WorkflowRunUpdate } from "../workflows/index.js";
+import type { WorkflowRun, WorkflowRunUpdate } from "../protocol/index.js";
 
 export function applyWorkflowRunUpdate(
     workflows: readonly WorkflowRun[],

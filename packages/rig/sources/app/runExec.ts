@@ -1,21 +1,18 @@
-import { basename } from "node:path";
-
-import { findLastAgentResponseText } from "../agent/impl/findLastAgentResponseText.js";
+import { findLastAgentResponseText } from "./findLastAgentResponseText.js";
 import { errorToMessage } from "../errorToMessage.js";
 import { ensureLocalProtocolServer } from "../client/index.js";
-import {
-    createProjectConfigSecurityNotice,
-    createProjectConfigSecurityNoticeTitle,
-    loadConfig,
-} from "../config/index.js";
-import { createProjectMcpSecurityNotice, loadMcpServerConfigEntries } from "../mcp/index.js";
-import type { CreateSessionRequest, ProtocolSession, SessionEvent } from "../protocol/index.js";
-import type { ServiceTier, StopReason } from "@slopus/rig-execution";
-import { parsePermissionMode, type PermissionMode } from "../permissions/index.js";
+import { loadConfig } from "../config/index.js";
+import type {
+    CreateSessionRequest,
+    PermissionMode,
+    ProtocolSession,
+    ServiceTier,
+    SessionEvent,
+    StopReason,
+} from "../protocol/index.js";
+import { parsePermissionMode } from "./parsePermissionMode.js";
 import type { ExecCommandOptions } from "./parseExecCommand.js";
 import { readExecPrompt } from "./readExecPrompt.js";
-import type { DockerExecutionConfig } from "../execution/index.js";
-import { resolveDockerExecutionConfig } from "../execution/index.js";
 import { RigUserError } from "../RigUserError.js";
 
 export async function runExec(
@@ -46,79 +43,40 @@ async function run(
 ): Promise<void> {
     const cwd = process.cwd();
     const prompt = await readExecPrompt(options.prompt);
-    const [loadedConfig, mcpConfigEntries] = await Promise.all([
-        loadConfig({ cwd, env: environment }),
-        loadMcpServerConfigEntries(cwd, { env: environment }),
-    ]);
-    const projectConfigNotice = createProjectConfigSecurityNotice(
-        loadedConfig.sources.local.values,
-        basename(loadedConfig.sources.local.path),
-    );
-    const projectMcpNotice = createProjectMcpSecurityNotice(mcpConfigEntries);
-    if (projectConfigNotice !== undefined) {
-        const projectConfigNoticeTitle = createProjectConfigSecurityNoticeTitle(
-            loadedConfig.sources.local.values,
-        );
-        if (options.outputFormat === "stream-json") {
-            process.stdout.write(
-                `${JSON.stringify({ message: projectConfigNotice, title: projectConfigNoticeTitle, type: "warning" })}\n`,
-            );
-        } else {
-            process.stderr.write(`${projectConfigNoticeTitle}: ${projectConfigNotice}\n`);
-        }
-    }
-    if (projectMcpNotice !== undefined) {
-        if (options.outputFormat === "stream-json") {
-            process.stdout.write(
-                `${JSON.stringify({ message: projectMcpNotice, title: "Project MCP needs trust", type: "warning" })}\n`,
-            );
-        } else {
-            process.stderr.write(`Project MCP needs trust: ${projectMcpNotice}\n`);
-        }
-    }
+    const loadedConfig = await loadConfig({ cwd, env: environment });
     const connection = await ensureLocalProtocolServer(
         options.outputFormat === "text"
             ? { onStatus: (message: string) => process.stderr.write(`${message}\n`) }
             : {},
     );
 
-    let session = await openSession(
+    const opened = await openSession(
         options,
         cwd,
         loadedConfig.config.defaults,
-        loadedConfig.config.features.workflows,
-        options.docker === undefined ? loadedConfig.config.docker : options.docker,
         connection.client,
         environment,
     );
+    let session = opened.session;
     if (options.fork) {
         session = (await connection.client.forkSession(session.id)).session;
-    }
-    if (options.permissionMode !== undefined && options.permissionMode !== session.permissionMode) {
-        session = (
-            await connection.client.changePermissionMode(session.id, {
-                permissionMode: options.permissionMode,
-            })
-        ).session;
-    }
-    if (options.modelId !== undefined || options.providerId !== undefined) {
-        session = (
-            await connection.client.changeModel(session.id, {
-                ...(options.effort !== undefined ? { effort: options.effort } : {}),
-                modelId: options.modelId ?? session.modelId,
-                ...(options.providerId !== undefined ? { providerId: options.providerId } : {}),
-            })
-        ).session;
-    } else if (options.effort !== undefined) {
-        session = (await connection.client.changeEffort(session.id, { effort: options.effort }))
-            .session;
     }
 
     const sessionTerminal = await connection.client.connectSessionTerminal(session.id);
     try {
         const submitted = await connection.client.submitMessage(session.id, {
             ...(options.debug === true ? { debug: true } : {}),
+            ...(opened.resumed && options.effort !== undefined ? { effort: options.effort } : {}),
             interactive: false,
+            ...(opened.resumed && options.modelId !== undefined
+                ? { modelId: options.modelId }
+                : {}),
+            ...(opened.resumed && options.permissionMode !== undefined
+                ? { permissionMode: options.permissionMode }
+                : {}),
+            ...(opened.resumed && options.providerId !== undefined
+                ? { providerId: options.providerId }
+                : {}),
             text: prompt,
         });
         if (submitted.debugDirectory !== undefined) onDebugDirectory(submitted.debugDirectory);
@@ -211,11 +169,9 @@ async function openSession(
         providerId?: string;
         serviceTier?: ServiceTier;
     },
-    workflowsEnabled: boolean,
-    docker: DockerExecutionConfig | null | undefined,
     client: Awaited<ReturnType<typeof ensureLocalProtocolServer>>["client"],
     environment: NodeJS.ProcessEnv,
-): Promise<ProtocolSession> {
+): Promise<{ readonly resumed: boolean; readonly session: ProtocolSession }> {
     let sessionId = options.resumeSessionId;
     if (options.last) {
         const listed = await client.listSessions();
@@ -226,7 +182,9 @@ async function openSession(
             });
         }
     }
-    if (sessionId !== undefined) return (await client.getSession(sessionId)).session;
+    if (sessionId !== undefined) {
+        return { resumed: true, session: (await client.getSession(sessionId)).session };
+    }
 
     const request: CreateSessionRequest = {
         cwd,
@@ -239,23 +197,16 @@ async function openSession(
                 ? undefined
                 : parsePermissionMode(environment.RIG_PERMISSION_MODE)) ??
             defaults.permissionMode,
-        workflowsEnabled,
-        ...(docker === null ? { local: true } : {}),
-        ...(docker === undefined || docker === null
-            ? {}
-            : { docker: resolveDockerExecutionConfig(docker, cwd) }),
     };
     const providerId = options.providerId ?? environment.RIG_PROVIDER ?? defaults.providerId;
     const effort = options.effort ?? environment.RIG_EFFORT ?? defaults.effort;
     const instructions = defaults.instructions;
     const serviceTier = defaults.serviceTier;
-    const apiKey = environment.OPENAI_API_KEY;
     if (providerId !== undefined) request.providerId = providerId;
     if (effort !== undefined) request.effort = effort;
     if (instructions !== undefined) request.instructions = instructions;
     if (serviceTier !== undefined) request.serviceTier = serviceTier;
-    if (apiKey !== undefined) request.apiKey = apiKey;
-    return (await client.createSession(request)).session;
+    return { resumed: false, session: (await client.createSession(request)).session };
 }
 
 function belongsToRun(event: SessionEvent, runId: string): boolean {

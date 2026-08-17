@@ -8,12 +8,14 @@ import {
 import { HistoryModule } from "../../sources/history/HistoryModule.js";
 import { formatHistoryMessage } from "../../sources/history/impl/formatHistoryMessage.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
+import { resolveModuleHooks } from "../support/moduleHooks.js";
 
 describe("HistoryModule durability", () => {
     it("marks the durable read tool transactional", async () => {
         const history = new HistoryModule();
         const database = moduleDatabase(history.migrations, "history-tool-commit-test");
         await database.ready;
+        const hooks = await resolveModuleHooks(database.context, history);
 
         try {
             await history.record(database.context, "agent-a", {
@@ -24,8 +26,8 @@ describe("HistoryModule durability", () => {
             });
             const scope = {
                 agent: { id: "agent-a" },
-            } as Parameters<HistoryModule["tools"]>[1];
-            const [tool] = history.tools(database.context, scope);
+            } as Parameters<NonNullable<typeof hooks.tools>>[1];
+            const [tool] = await hooks.tools!(database.context, scope);
             const result = await tool!.execute(database.context, {}, {
                 id: "call-history-1",
                 providerCallId: "provider-history-1",
@@ -78,6 +80,7 @@ describe("HistoryModule durability", () => {
         });
         const database = moduleDatabase(history.migrations, "history-agent-tree-test");
         await database.ready;
+        const hooks = await resolveModuleHooks(database.context, history);
 
         try {
             await history.record(database.context, "agent-b", {
@@ -88,8 +91,8 @@ describe("HistoryModule durability", () => {
             });
             const scope = {
                 agent: { id: "agent-a" },
-            } as Parameters<HistoryModule["tools"]>[1];
-            const [tool] = history.tools(database.context, scope);
+            } as Parameters<NonNullable<typeof hooks.tools>>[1];
+            const [tool] = await hooks.tools!(database.context, scope);
             const result = await tool!.execute(database.context, { target: "/root/audit" }, {
                 id: "call-history-tree",
                 providerCallId: "provider-history-tree",
@@ -123,6 +126,7 @@ describe("HistoryModule durability", () => {
         const history = new HistoryModule();
         const database = moduleDatabase(history.migrations, "history-open-read-test");
         await database.ready;
+        const hooks = await resolveModuleHooks(database.context, history);
 
         try {
             await history.record(database.context, "agent-b", {
@@ -133,8 +137,8 @@ describe("HistoryModule durability", () => {
             });
             const scope = {
                 agent: { id: "agent-a" },
-            } as Parameters<HistoryModule["tools"]>[1];
-            const [tool] = history.tools(database.context, scope);
+            } as Parameters<NonNullable<typeof hooks.tools>>[1];
+            const [tool] = await hooks.tools!(database.context, scope);
             const result = await tool!.execute(database.context, { target: "agent-b" }, {
                 id: "call-history-open",
                 providerCallId: "provider-history-open",
@@ -155,19 +159,20 @@ describe("HistoryModule durability", () => {
         const history = new HistoryModule();
         const database = moduleDatabase(history.migrations, "history-origin-test");
         await database.ready;
+        const hooks = await resolveModuleHooks(database.context, history);
 
         const scope = {
             agent: { id: "agent-a" },
-        } as Parameters<HistoryModule["messageAcceptedTransact"]>[1];
+        } as Parameters<NonNullable<typeof hooks.messageAcceptedTransact>>[1];
 
         try {
-            await history.messageAcceptedTransact(database.context, scope, {
+            await hooks.messageAcceptedTransact!(database.context, scope, {
                 id: "accepted-user",
                 kind: "send",
                 message: { role: "user", content: [{ text: "Please deploy.", type: "text" }] },
                 metadata: { ...USER_MESSAGE_ORIGIN_METADATA },
             });
-            await history.messageAcceptedTransact(database.context, scope, {
+            await hooks.messageAcceptedTransact!(database.context, scope, {
                 id: "accepted-agent",
                 kind: "send",
                 message: { role: "user", content: [{ text: "Audit finished.", type: "text" }] },
@@ -176,7 +181,7 @@ describe("HistoryModule durability", () => {
                     ...senderAgentIdMetadata("agent-b"),
                 },
             });
-            await history.messageAcceptedTransact(database.context, scope, {
+            await hooks.messageAcceptedTransact!(database.context, scope, {
                 id: "accepted-unstamped",
                 kind: "steering",
                 message: { role: "user", content: [{ text: "Unstamped.", type: "text" }] },
@@ -240,6 +245,7 @@ describe("HistoryModule durability", () => {
         });
         const database = moduleDatabase(history.migrations, "history-tool-display-test");
         await database.ready;
+        const hooks = await resolveModuleHooks(database.context, history);
 
         const values = new Map<string, unknown>();
         const scope = {
@@ -254,13 +260,13 @@ describe("HistoryModule durability", () => {
         } as never;
 
         try {
-            await history.beforeToolCallTransact(database.context, scope, {
+            await hooks.beforeToolCallTransact!(database.context, scope, {
                 arguments: "{}",
                 callId: "call-display-1",
                 name: "list_files",
                 type: "tool_call",
             });
-            await history.afterToolCallTransact(database.context, scope, {
+            await hooks.afterToolCallTransact!(database.context, scope, {
                 callId: "call-display-1",
                 content: [{ text: "file.txt", type: "text" }],
                 role: "tool",
@@ -289,6 +295,7 @@ describe("HistoryModule durability", () => {
         const history = new HistoryModule();
         const database = moduleDatabase(history.migrations, "history-tool-display-fallback-test");
         await database.ready;
+        const hooks = await resolveModuleHooks(database.context, history);
 
         const values = new Map<string, unknown>();
         const scope = {
@@ -303,13 +310,13 @@ describe("HistoryModule durability", () => {
         } as never;
 
         try {
-            await history.beforeToolCallTransact(database.context, scope, {
+            await hooks.beforeToolCallTransact!(database.context, scope, {
                 arguments: "{}",
                 callId: "call-display-2",
                 name: "list_files",
                 type: "tool_call",
             });
-            await history.afterToolCallTransact(database.context, scope, {
+            await hooks.afterToolCallTransact!(database.context, scope, {
                 callId: "call-display-2",
                 content: [{ text: "file.txt", type: "text" }],
                 role: "tool",

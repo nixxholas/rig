@@ -7,8 +7,8 @@ import {
 } from "@earendil-works/pi-tui";
 
 import type { SubagentSummary } from "../protocol/index.js";
-import type { WorkflowRun } from "../workflows/index.js";
-import { humanizeWorkflowName, serializeWorkflowValue } from "../workflows/index.js";
+import type { WorkflowRun } from "../protocol/index.js";
+import { humanizeWorkflowName, serializeWorkflowValue } from "./workflowDisplay.js";
 import { formatActivityElapsedTime } from "./formatActivityElapsedTime.js";
 import { humanizeSubagentStatus } from "./humanizeSubagentStatus.js";
 import { humanizeWorkflowStatus } from "./humanizeWorkflowStatus.js";

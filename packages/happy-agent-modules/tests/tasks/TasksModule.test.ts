@@ -1,7 +1,9 @@
+import type { AgentModuleScope } from "@slopus/happy-agent-base";
 import { describe, expect, it } from "vitest";
 
 import { TasksModule } from "../../sources/tasks/TasksModule.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
+import { resolveModuleHooks } from "../support/moduleHooks.js";
 
 describe("TasksModule durable tools", () => {
     it("uses the tool-call ID and marks each mutation transactional", async () => {
@@ -20,8 +22,9 @@ describe("TasksModule durable tools", () => {
                     providerCallId: `provider-${id}`,
                     kv: {},
                 }) as never;
-            const scope = { agent: { id: "agent-a" } } as Parameters<TasksModule["tools"]>[1];
-            const [create, , , update, complete] = tasks.tools(database.context, scope);
+            const scope = { agent: { id: "agent-a" } } as AgentModuleScope;
+            const hooks = await resolveModuleHooks(database.context, tasks);
+            const [create, , , update, complete] = await hooks.tools!(database.context, scope);
             expect([create?.transactional, update?.transactional, complete?.transactional]).toEqual(
                 [true, true, true],
             );
@@ -163,8 +166,12 @@ describe("TasksModule durable tools", () => {
                     providerCallId: `provider-${id}`,
                     kv: {},
                 }) as never;
-            const scope = { agent: { id: "agent-a" } } as Parameters<TasksModule["tools"]>[1];
-            const [create, , get, update, complete, remove] = tasks.tools(database.context, scope);
+            const scope = { agent: { id: "agent-a" } } as AgentModuleScope;
+            const hooks = await resolveModuleHooks(database.context, tasks);
+            const [create, , get, update, complete, remove] = await hooks.tools!(
+                database.context,
+                scope,
+            );
             const blocking = await create!.execute(
                 database.context,
                 { title: "Blocking task" },

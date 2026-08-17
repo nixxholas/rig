@@ -10,8 +10,9 @@ import {
 } from "@slopus/happy-agent";
 import { createRootContext } from "@steve.kite/stdlib";
 
-import { parsePermissionMode } from "../../rig/sources/permissions/index.js";
+import { parsePermissionMode } from "../../rig/sources/app/parsePermissionMode.js";
 import { configureDevelopmentEnvironment } from "../../rig/sources/development/index.js";
+import { getDaemonIdentity } from "../../rig/sources/daemon/index.js";
 import { installCliFailureReporting } from "../../rig/sources/installCliFailureReporting.js";
 import { reportCliFailure } from "../../rig/sources/reportCliFailure.js";
 import { runApp, type RunAppOptions } from "../../rig/sources/app/runApp.js";
@@ -27,21 +28,32 @@ async function main(): Promise<void> {
         process.chdir(invokedFrom);
     }
 
+    // A developer-set Happy home wins over both the development default and the global opt-in.
+    const configuredHome = process.env.HAPPY_HOME_DIR?.trim();
     const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
     await configureDevelopmentEnvironment({ repositoryRoot });
 
     const ctx = createRootContext();
-    const happyHome = happyAgentHome(repositoryRoot, process.env.RIG_DEV2_GLOBAL === "1");
+    const happyHome = happyAgentHome(
+        repositoryRoot,
+        process.env.RIG_DEV2_GLOBAL === "1",
+        configuredHome,
+    );
+    // The in-process daemon and the TUI's own connection logic must agree on the Happy home and
+    // the daemon identity, or runApp would try to replace the daemon this process just started.
+    process.env.HAPPY_HOME_DIR = happyHome;
     if (isDaemonStop(process.argv.slice(2))) {
         await stopDaemon(happyHome);
         return;
     }
+    const identity = getDaemonIdentity();
     const daemon = await startHappyAgentDaemon(ctx, {
         happyHome,
-        version: "development",
+        httpConfiguration: { identity },
+        version: identity.version,
     });
     try {
-        let options = runOptions(daemon.configuration.paths.agentHome);
+        let options = runOptions();
         for (;;) {
             const result = await runApp(ctx.named("rig-tui"), options);
             if (result.action === "exit") break;
@@ -72,18 +84,19 @@ async function stopDaemon(happyHome: string): Promise<void> {
     process.stdout.write(`Stopped the Happy agent${owner}.\n`);
 }
 
-function happyAgentHome(repositoryRoot: string, global: boolean): string {
-    const developmentRoot = join(resolve(repositoryRoot), ".rig-dev");
-    return (
-        process.env.HAPPY_HOME_DIR?.trim() ||
-        (global ? join(homedir(), ".happy") : join(developmentRoot, ".happy"))
-    );
+function happyAgentHome(
+    repositoryRoot: string,
+    global: boolean,
+    configuredHome: string | undefined,
+): string {
+    if (configuredHome !== undefined && configuredHome.length > 0) return configuredHome;
+    if (global) return join(homedir(), ".happy");
+    return join(resolve(repositoryRoot), ".rig-dev", ".happy");
 }
 
-function runOptions(agentHome: string): RunAppOptions {
+function runOptions(): RunAppOptions {
     const options: RunAppOptions = {
         cwd: process.cwd(),
-        happyAgentHome: agentHome,
     };
     if (process.env.RIG_EFFORT !== undefined) options.effort = process.env.RIG_EFFORT;
     if (process.env.RIG_MODEL !== undefined) options.modelId = process.env.RIG_MODEL;

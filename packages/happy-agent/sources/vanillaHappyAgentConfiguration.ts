@@ -569,21 +569,12 @@ function createVanillaIntegrations(
                 results: [],
             }),
         },
-        slots: {
-            publisher: async () => undefined,
-            scopeResolver: async () => false,
-        },
         userInput: { wait: unavailable },
         workflows: {
             cancel: unavailable,
             launch: unavailable,
             resume: unavailable,
             wait: unavailable,
-        },
-        worklets: {
-            invokeOperation: unavailable,
-            readLogs: async () => ({ lines: [] }),
-            status: async () => ({ name: "unavailable", status: "stopped" }),
         },
     } as unknown as HappyAgentIntegrations;
 }

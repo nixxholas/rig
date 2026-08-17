@@ -8,6 +8,7 @@ import {
     createComputeModules,
     type HostComputeProvider,
 } from "../../sources/index.js";
+import { resolveModuleHooks } from "../support/moduleHooks.js";
 import { FakeCompute } from "./support/FakeCompute.js";
 import { computeToolset } from "./support/computeTools.js";
 
@@ -64,8 +65,10 @@ describe("ComputeModule", () => {
         fakeA.disposeWait = new Promise<void>((resolve) => {
             finishDisposal = resolve;
         });
-        const archiving = created.computeModule.agentArchived?.(ctx, {} as never, {
+        const computeHooks = await resolveModuleHooks(ctx, created.computeModule);
+        const archiving = computeHooks.agentArchived?.(ctx, {} as never, {
             id: "agent-a",
+            metadata: undefined,
         });
         const replacementPending = created.computeModule.resolve(agentACtx, "agent-a");
         await expect(
@@ -85,7 +88,8 @@ describe("ComputeModule", () => {
     it("does nothing for an agent without compute configuration", async () => {
         const module = new ComputeModule();
         await expect(module.resolve(ctx, "agent-a")).resolves.toBeUndefined();
-        await expect(module.tools(ctx, { agent: { id: "agent-a" } } as never)).resolves.toEqual([]);
+        const hooks = await resolveModuleHooks(ctx, module);
+        await expect(hooks.tools!(ctx, { agent: { id: "agent-a" } } as never)).resolves.toEqual([]);
     });
 
     it("hands each model its own vendor's tools", async () => {
@@ -151,7 +155,8 @@ describe("ComputeModule", () => {
         const agentCtx = withAgentConfig(ctx, {
             modules: { compute: { cwd: "/srv/app" } },
         });
-        const claudeInstructions = await module.instructions(agentCtx, {
+        const hooks = await resolveModuleHooks(agentCtx, module);
+        const claudeInstructions = await hooks.instructions!(agentCtx, {
             agent: { id: "agent-a", model: CLAUDE_MODEL },
         } as never);
 
@@ -160,7 +165,7 @@ describe("ComputeModule", () => {
         expect(claudeInstructions).toContain("Write and Edit refuse a file you have not read");
         expect(claudeInstructions).toContain("comes back with a shell ID");
 
-        const grokInstructions = await module.instructions(agentCtx, {
+        const grokInstructions = await hooks.instructions!(agentCtx, {
             agent: { id: "agent-b", model: "xai/grok-4.5" },
         } as never);
         expect(grokInstructions).toContain("write and search_replace refuse a file");

@@ -1,1 +1,0 @@
-export const MCP_RESULT_MAXIMUM_TEXT_BYTES = 512 * 1024;

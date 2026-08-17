@@ -1,5 +1,6 @@
 import {
     type AgentModule,
+    type AgentModuleHooks,
     type AgentModuleScope,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
@@ -191,15 +192,19 @@ export class SearchModule implements AgentModule {
         };
     }
 
-    readonly tools = (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => [
-        webFetchTool(this, scope.agent.id),
-        geminiWebSearchTool(this, scope.agent.id),
-        claudeWebSearchTool(this, scope.agent.id),
-        codexWebSearchTool(this, scope.agent.id),
-        bedrockWebSearchTool(this, scope.agent.id),
-        grokWebSearchTool(this, scope.agent.id),
-        grokXSearchTool(this, scope.agent.id),
-    ];
+    readonly #hooks: AgentModuleHooks = {
+        tools: (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => [
+            webFetchTool(this, scope.agent.id),
+            geminiWebSearchTool(this, scope.agent.id),
+            claudeWebSearchTool(this, scope.agent.id),
+            codexWebSearchTool(this, scope.agent.id),
+            bedrockWebSearchTool(this, scope.agent.id),
+            grokWebSearchTool(this, scope.agent.id),
+            grokXSearchTool(this, scope.agent.id),
+        ],
+    };
+
+    readonly beforeStart = (): AgentModuleHooks => this.#hooks;
 
     formatSearchForModel(page: SearchPage): string {
         if (!Value.Check(searchPageSchema, page)) {

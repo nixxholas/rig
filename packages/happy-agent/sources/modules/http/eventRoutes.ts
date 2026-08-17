@@ -6,9 +6,9 @@ import { eventIdSchema, type AgentEvent } from "@slopus/happy-agent-modules";
 
 import { readValidatedBody, parsePositiveLimit } from "./body.js";
 import { AgentHttpError, sendJson, serializeJson } from "./errors.js";
+import { readLiveRigPresence } from "./presenceRoutes.js";
 import { createRouteGroup, type AgentHttpRouteGroup } from "./router.js";
 import { createRigModelCatalog, HAPPY_AGENT_RIG_PROTOCOL_VERSION } from "./rigProtocol.js";
-import { readLiveRigPresence } from "./compatibilityRoutes.js";
 import { sessionSummary } from "./sessionRoutes.js";
 import { createSseWriter } from "./sseWriter.js";
 

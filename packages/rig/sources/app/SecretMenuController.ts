@@ -5,7 +5,7 @@ import type {
     EnvironmentSecretRegistration,
     EnvironmentSecretUpdate,
     SecretAttachmentScope,
-} from "../secrets/index.js";
+} from "../protocol/index.js";
 import type { AppTranscriptEntry } from "./AppTranscriptEntry.js";
 import { createSecretInputPanel } from "./createSecretInputPanel.js";
 import { createSelectionPanel } from "./createSelectionPanel.js";

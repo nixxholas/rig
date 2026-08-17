@@ -1,15 +1,23 @@
 import type {
-    AgentContext,
     AgentCompactionResult,
-    AgentRunOptions,
-    AgentRunResult,
     AgentSnapshot,
     ContentBlock,
+    GoalStatus,
+    Model,
+    PermissionMode,
+    ProviderError,
+    SecretAttachmentScope,
+    ServiceTier,
+    SessionGoal,
+    StopReason,
     UserMessage,
-} from "../agent/index.js";
+} from "../protocol/index.js";
 import type { Context } from "@steve.kite/stdlib";
 import type {
+    AgentRunOptions,
+    AgentRunResult,
     CodingAssistantAgentBackend,
+    CodingAssistantClientProvider,
     CodingAssistantModelChoice,
     SteeringRunOptions,
 } from "../app/CodingAssistantAgentBackend.js";
@@ -24,31 +32,19 @@ import type {
     SteerMessageResponse,
     SubmitContextMessageResponse,
 } from "../protocol/index.js";
-import {
-    defineProvider,
-    type Model,
-    type Provider,
-    type ProviderError,
-    type ServiceTier,
-    type StopReason,
-} from "@slopus/rig-execution";
-import type { PermissionMode } from "../permissions/index.js";
-import type { SecretAttachmentScope } from "../secrets/index.js";
-import type { GoalStatus, SessionGoal } from "../goals/index.js";
 import { ProtocolHttpClient } from "./ProtocolHttpClient.js";
 import { RemoteAgentRunError } from "./RemoteAgentRunError.js";
 
 export interface RemoteAgentOptions {
     client: ProtocolHttpClient;
-    context: AgentContext;
     debug?: boolean;
     modelCatalog?: ModelCatalog;
     session: ProtocolSession;
 }
 
 /**
- * A model, reasoning effort, or fast-mode choice the user has made here and that no run has
- * carried to the daemon yet.
+ * A model, reasoning effort, fast-mode, or permission choice the user has made here and that no
+ * run has carried to the daemon yet.
  *
  * The protocol applies these fields when the next message's run starts, so choosing a model is a
  * local decision rather than a separate session mutation that a busy or restrictive daemon could
@@ -57,13 +53,13 @@ export interface RemoteAgentOptions {
 interface RemoteAgentSelection {
     readonly effort?: string;
     readonly modelId?: string;
+    readonly permissionMode?: PermissionMode;
     readonly providerId?: string;
     /** Null turns fast mode off; absent leaves it untouched. */
     readonly serviceTier?: ServiceTier | null;
 }
 
 export class RemoteAgent implements CodingAssistantAgentBackend {
-    readonly context: AgentContext;
     readonly id: string;
 
     #client: ProtocolHttpClient;
@@ -81,7 +77,6 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         this.#debug = options.debug === true;
         this.#session = options.session;
         this.#modelCatalog = options.modelCatalog;
-        this.context = options.context;
         this.id = options.session.agentId;
         this.#modelId = options.session.modelId;
         this.#models = options.session.models;
@@ -93,8 +88,9 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         options: SteeringRunOptions = {},
     ): Promise<SteerMessageResponse> {
         const displayText = options.displayText ?? contentToDisplayText(content);
+        const selection = this.#selection;
         try {
-            return await this.#client.steerMessage(this.#session.id, {
+            const submitted = await this.#client.steerMessage(this.#session.id, {
                 ...(options.clientSubmissionId === undefined
                     ? {}
                     : { clientSubmissionId: options.clientSubmissionId }),
@@ -103,8 +99,11 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
                     : { expectedRunId: options.expectedRunId }),
                 ...(typeof content === "string" ? {} : { content }),
                 ...(options.displayText !== undefined ? { displayText: options.displayText } : {}),
+                ...(selection ?? {}),
                 text: displayText,
             });
+            this.#clearSubmittedSelection(selection);
+            return submitted;
         } catch (error) {
             if (options.clientSubmissionId !== undefined) {
                 try {
@@ -118,12 +117,14 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
                         submitted?.type === "message_submitted" &&
                         submitted.data.delivery !== "context"
                     ) {
-                        return {
+                        const reconciled = {
                             delivery: submitted.data.delivery ?? "run",
                             eventId: submitted.id,
                             runId: submitted.data.runId,
                             sessionId: submitted.sessionId,
                         };
+                        this.#clearSubmittedSelection(selection);
+                        return reconciled;
                     }
                 } catch {
                     // Preserve the original steering error when acceptance cannot be reconciled.
@@ -141,18 +142,15 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         return sessionServiceTier(this.#session);
     }
 
-    get provider(): Provider {
+    get provider(): CodingAssistantClientProvider {
         const serviceTiers = this.#modelCatalog?.providers.find(
             (provider) => provider.providerId === this.#providerId,
         )?.serviceTiers;
-        return defineProvider({
+        return {
             id: this.#providerId,
             models: this.#models,
             ...(serviceTiers === undefined ? {} : { serviceTiers }),
-            stream() {
-                throw new Error("RemoteAgent does not expose provider streaming locally.");
-            },
-        });
+        };
     }
 
     get model(): Model {
@@ -320,7 +318,7 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
             ...(selection ?? {}),
             text: displayText,
         });
-        if (selection !== undefined && this.#selection === selection) this.#selection = undefined;
+        this.#clearSubmittedSelection(selection);
         const streamController = new AbortController();
         let finished:
             | {
@@ -507,11 +505,10 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         this.#applySelection();
     }
 
-    async setPermissionMode(permissionMode: PermissionMode): Promise<void> {
-        const response = await this.#client.changePermissionMode(this.#session.id, {
-            permissionMode,
-        });
-        this.#replaceSession(response.session);
+    setPermissionMode(permissionMode: PermissionMode): Promise<void> {
+        this.#selection = { ...this.#selection, permissionMode };
+        this.#applySelection();
+        return Promise.resolve();
     }
 
     snapshot(): AgentSnapshot {
@@ -765,7 +762,6 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
                 ...this.#session,
                 permissionMode: event.data.permissionMode,
             };
-            this.context.permissions?.setMode(event.data.permissionMode);
             return;
         }
 
@@ -855,7 +851,6 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
             return;
         }
         this.#session = session;
-        this.context.permissions?.setMode(session.permissionMode);
         this.#modelId = session.modelId;
         this.#models = session.models;
         this.#providerId = session.providerId;
@@ -866,6 +861,10 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         for (const [messageId, pending] of this.#pendingSteeringMessages) {
             if (pending.runId === runId) this.#pendingSteeringMessages.delete(messageId);
         }
+    }
+
+    #clearSubmittedSelection(selection: RemoteAgentSelection | undefined): void {
+        if (selection !== undefined && this.#selection === selection) this.#selection = undefined;
     }
 
     #applyAuthoritativeSnapshot(snapshot: AgentSnapshot): void {
@@ -916,6 +915,12 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         }
         if (selection.serviceTier !== undefined) {
             this.#setLocalServiceTier(selection.serviceTier ?? undefined);
+        }
+        if (selection.permissionMode !== undefined) {
+            this.#session = {
+                ...this.#session,
+                permissionMode: selection.permissionMode,
+            };
         }
     }
 

@@ -3,11 +3,11 @@ import { promisify } from "node:util";
 
 import { main } from "../../rig/sources/app/main.js";
 import { ProtocolHttpClient, readTokenIfPresent } from "../../rig/sources/client/index.js";
+import { getHappyDaemonPaths } from "../../rig/sources/daemon/index.js";
 import { resolveGlobalDevelopmentIdentityVersion } from "../../rig/sources/development/resolveGlobalDevelopmentIdentityVersion.js";
 import { installCliFailureReporting } from "../../rig/sources/installCliFailureReporting.js";
 import { readPackageVersion } from "../../rig/sources/readPackageVersion.js";
 import { reportCliFailure } from "../../rig/sources/reportCliFailure.js";
-import { getEnvironmentLocalServerPaths } from "../../rig/sources/server/index.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -24,12 +24,10 @@ async function run(): Promise<void> {
         return;
     }
 
-    // Global development deliberately uses the user's normal database, socket, and release
-    // identity. Reloading first guarantees this checkout owns the daemon process; retaining the
-    // release identity prevents another installed client (including Happy) from replacing it.
-    delete process.env.RIG_SERVER_DIRECTORY;
-    delete process.env.RIG_SERVER_SOCKET_PATH;
-    delete process.env.RIG_SERVER_TOKEN_PATH;
+    // Global development deliberately uses the user's normal Happy home and release identity.
+    // Reloading first guarantees this checkout owns the daemon process; retaining the release
+    // identity prevents another installed client (including Happy) from replacing it.
+    delete process.env.HAPPY_HOME_DIR;
     delete process.env.RIG_DEVELOPMENT_BUILD_ID;
     process.env.RIG_DAEMON_IDENTITY_VERSION = await resolveGlobalDevelopmentIdentityVersion({
         currentSourceVersion: readPackageVersion(),
@@ -43,11 +41,12 @@ async function run(): Promise<void> {
 }
 
 async function readRunningVersion(): Promise<string | undefined> {
-    const paths = getEnvironmentLocalServerPaths();
+    const paths = getHappyDaemonPaths();
     const token = await readTokenIfPresent(paths.tokenPath);
     if (token === undefined) return undefined;
     try {
         const health = await new ProtocolHttpClient({
+            pathPrefix: "/v0",
             socketPath: paths.socketPath,
             token,
         }).health();

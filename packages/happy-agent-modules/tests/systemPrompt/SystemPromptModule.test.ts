@@ -25,6 +25,7 @@ import {
 import { formatAvailableModels } from "../../sources/systemPrompt/impl/assembleEnvironmentPrompt.js";
 import { systemPromptForModel } from "../../sources/systemPrompt/impl/systemPromptForModel.js";
 import { FakeCompute } from "../compute/support/FakeCompute.js";
+import { resolveModuleHooks } from "../support/moduleHooks.js";
 
 const ctx: Context = createRootContext();
 const testEnvironment = {
@@ -79,10 +80,11 @@ function catalogWithBytes(targetBytes: number) {
 describe("SystemPromptModule", () => {
     it("gives each model the prompt it was written for", async () => {
         const module = new SystemPromptModule();
+        const hooks = await resolveModuleHooks(ctx, module);
 
-        const opus5 = await module.instructions(ctx, scopeOf("anthropic/opus-5", "claude"));
-        const opus48 = await module.instructions(ctx, scopeOf("anthropic/opus-4-8", "claude"));
-        const codex = await module.instructions(ctx, scopeOf("openai/gpt-5.6-sol", "codex"));
+        const opus5 = await hooks.instructions!(ctx, scopeOf("anthropic/opus-5", "claude"));
+        const opus48 = await hooks.instructions!(ctx, scopeOf("anthropic/opus-4-8", "claude"));
+        const codex = await hooks.instructions!(ctx, scopeOf("openai/gpt-5.6-sol", "codex"));
 
         expect(opus5).toContain("mid-conversation system turns");
         expect(opus48).not.toContain("mid-conversation system turns");
@@ -93,44 +95,48 @@ describe("SystemPromptModule", () => {
 
     it("follows the model rather than the provider it is served through", async () => {
         const module = new SystemPromptModule();
+        const hooks = await resolveModuleHooks(ctx, module);
 
-        expect(await module.instructions(ctx, scopeOf("anthropic/opus-5", "bedrock"))).toBe(
-            await module.instructions(ctx, scopeOf("anthropic/opus-5", "claude")),
+        expect(await hooks.instructions!(ctx, scopeOf("anthropic/opus-5", "bedrock"))).toBe(
+            await hooks.instructions!(ctx, scopeOf("anthropic/opus-5", "claude")),
         );
-        expect(await module.instructions(ctx, scopeOf("xai/grok-build", "grok"))).toBe(
-            await module.instructions(ctx, scopeOf("xai/grok-4.5", "grok")),
+        expect(await hooks.instructions!(ctx, scopeOf("xai/grok-build", "grok"))).toBe(
+            await hooks.instructions!(ctx, scopeOf("xai/grok-4.5", "grok")),
         );
     });
 
     it("falls back to the provider's family when the model is unknown or absent", async () => {
         const module = new SystemPromptModule();
+        const hooks = await resolveModuleHooks(ctx, module);
 
-        expect(await module.instructions(ctx, scopeOf("openai/gpt-9-unreleased", "codex"))).toBe(
-            await module.instructions(ctx, scopeOf("openai/gpt-5.6-sol", "codex")),
+        expect(await hooks.instructions!(ctx, scopeOf("openai/gpt-9-unreleased", "codex"))).toBe(
+            await hooks.instructions!(ctx, scopeOf("openai/gpt-5.6-sol", "codex")),
         );
-        expect(await module.instructions(ctx, scopeOf(undefined, "grok"))).toBe(
-            await module.instructions(ctx, scopeOf("xai/grok-4.5", "grok")),
+        expect(await hooks.instructions!(ctx, scopeOf(undefined, "grok"))).toBe(
+            await hooks.instructions!(ctx, scopeOf("xai/grok-4.5", "grok")),
         );
     });
 
     it("falls back to the simple prompt when nothing was written for the model", async () => {
         const module = new SystemPromptModule();
+        const hooks = await resolveModuleHooks(ctx, module);
 
-        const unknown = await module.instructions(ctx, scopeOf("mystery/model", "gym"));
+        const unknown = await hooks.instructions!(ctx, scopeOf("mystery/model", "gym"));
 
         expect(unknown).toContain("You are an expert coding assistant.");
         expect(unknown.startsWith("You are Rig, built by Happy")).toBe(true);
-        expect(await module.instructions(ctx, scopeOf(undefined, undefined))).toBe(unknown);
+        expect(await hooks.instructions!(ctx, scopeOf(undefined, undefined))).toBe(unknown);
     });
 
     it("substitutes the identity it was built with", async () => {
         const named = new SystemPromptModule({
             identity: { name: "Scout", prompt: "You are Scout, built by Happy" },
         });
+        const hooks = await resolveModuleHooks(ctx, named);
 
         const [claudePrompt, codexPrompt] = await Promise.all([
-            named.instructions(ctx, scopeOf("anthropic/opus-5", "claude")),
-            named.instructions(ctx, scopeOf("openai/gpt-5.6-sol", "codex")),
+            hooks.instructions!(ctx, scopeOf("anthropic/opus-5", "claude")),
+            hooks.instructions!(ctx, scopeOf("openai/gpt-5.6-sol", "codex")),
         ]);
 
         for (const prompt of [claudePrompt, codexPrompt]) {
@@ -143,9 +149,11 @@ describe("SystemPromptModule", () => {
 
     it("substitutes replacement-string metacharacters literally", async () => {
         for (const value of ["$&", "$`", "$'"]) {
-            const prompt = await new SystemPromptModule({
+            const module = new SystemPromptModule({
                 identity: { name: value, prompt: value },
-            }).instructions(ctx, scopeOf("anthropic/opus-5", "claude"));
+            });
+            const hooks = await resolveModuleHooks(ctx, module);
+            const prompt = await hooks.instructions!(ctx, scopeOf("anthropic/opus-5", "claude"));
 
             expect(prompt.startsWith(value)).toBe(true);
             expect(prompt).toContain(value);
@@ -156,9 +164,10 @@ describe("SystemPromptModule", () => {
 
     it("names Rig when the host names nobody", async () => {
         const module = new SystemPromptModule();
+        const hooks = await resolveModuleHooks(ctx, module);
         const [claudePrompt, codexPrompt] = await Promise.all([
-            module.instructions(ctx, scopeOf("anthropic/opus-5", "claude")),
-            module.instructions(ctx, scopeOf("openai/gpt-5.6-sol", "codex")),
+            hooks.instructions!(ctx, scopeOf("anthropic/opus-5", "claude")),
+            hooks.instructions!(ctx, scopeOf("openai/gpt-5.6-sol", "codex")),
         ]);
 
         expect(claudePrompt.startsWith("You are Rig, built by Happy")).toBe(true);
@@ -173,8 +182,9 @@ describe("SystemPromptModule", () => {
                 { name: "Codex", id: "openai/gpt-5.6-sol", providerId: "openai" },
             ],
         });
+        const hooks = await resolveModuleHooks(ctx, module);
 
-        const prompt = await module.instructions(
+        const prompt = await hooks.instructions!(
             contextWithEnvironment(),
             scopeOf("anthropic/opus-5", "claude"),
         );
@@ -184,6 +194,7 @@ describe("SystemPromptModule", () => {
         expect(prompt).toContain("- Platform: darwin");
         expect(prompt).toContain("- Shell: /bin/zsh");
         expect(prompt).toContain("- OS version: 25.5.0");
+        expect(prompt).toContain("- Current model: Claude Opus (`anthropic/opus-5`)");
         expect(prompt).toContain(
             "- Scratch directory: `.context/` in the working directory. Strongly prefer it",
         );
@@ -204,9 +215,10 @@ describe("SystemPromptModule", () => {
                 { name: "Claude Opus", id: "anthropic/opus-5", providerId: "anthropic" },
             ],
         });
+        const hooks = await resolveModuleHooks(ctx, module);
         const selection = { model: "anthropic/opus-5", providerKind: "claude" as const };
 
-        const prompt = await module.instructions(
+        const prompt = await hooks.instructions!(
             ctx,
             scopeOf(selection.model, selection.providerKind),
         );
@@ -216,13 +228,16 @@ describe("SystemPromptModule", () => {
     });
 
     it("omits blank shell and empty available-model sections", async () => {
-        const prompt = await new SystemPromptModule().instructions(
+        const module = new SystemPromptModule();
+        const hooks = await resolveModuleHooks(ctx, module);
+        const prompt = await hooks.instructions!(
             contextWithEnvironment({ ...testEnvironment, shell: "" }),
             scopeOf("anthropic/opus-5", "claude"),
         );
 
         expect(prompt).not.toContain("- Shell:");
         expect(prompt).not.toContain("## Available models");
+        expect(prompt).toContain("- Current model: `anthropic/opus-5`");
     });
 
     it("renders the complete legacy environment text in its exact order", async () => {
@@ -239,6 +254,7 @@ describe("SystemPromptModule", () => {
             "- Platform: darwin",
             "- Shell: /bin/zsh",
             "- OS version: 25.5.0",
+            "- Current model: Claude Opus (`anthropic/opus-5`)",
             "- Scratch directory: `.context/` in the working directory. Strongly prefer it for temporary files, throwaway scripts, and notes or instructions for other agents; keep it gitignored (add the entry if missing) unless there is a real reason not to, and never commit it.",
             "- By default the user sees only the last message you send before stopping; earlier messages are collapsed. Include all essential information in that last message.",
             "- When the project is a Git folder, a workspace and a worktree are the same thing: creating a workspace creates a new worktree, and deleting a workspace archives it.",
@@ -247,9 +263,10 @@ describe("SystemPromptModule", () => {
             "- Claude Opus — model ID: `anthropic/opus-5`; provider ID: `anthropic`",
             "- Codex — model ID: `openai/gpt-5.6-sol`; provider ID: `openai`",
         ].join("\n");
+        const hooks = await resolveModuleHooks(ctx, module);
 
         expect(
-            await module.instructions(
+            await hooks.instructions!(
                 contextWithEnvironment(),
                 scopeOf(selection.model, selection.providerKind),
             ),
@@ -261,8 +278,9 @@ describe("SystemPromptModule", () => {
             identity: { name: "Scout", prompt: "You are Scout, built by Happy" },
             availableModels: [{ name: "Codex", id: "openai/gpt-5.6-sol", providerId: "openai" }],
         });
+        const hooks = await resolveModuleHooks(ctx, module);
 
-        const prompt = await module.instructions(
+        const prompt = await hooks.instructions!(
             contextWithEnvironment(),
             scopeOf("openai/gpt-5.6-sol", "codex"),
         );
@@ -339,8 +357,9 @@ describe("SystemPromptModule", () => {
                 read: async () => "界".repeat(131_072),
             },
         });
+        const hooks = await resolveModuleHooks(ctx, module);
 
-        const prompt = await module.instructions(
+        const prompt = await hooks.instructions!(
             contextWithEnvironment(),
             scopeOf("anthropic/opus-5", "claude"),
         );
@@ -356,12 +375,11 @@ describe("SystemPromptModule", () => {
             ...testEnvironment,
             osVersion: "x".repeat(MAX_SYSTEM_PROMPT_OUTPUT_BYTES),
         });
+        const module = new SystemPromptModule();
+        const hooks = await resolveModuleHooks(ctx, module);
 
         await expect(
-            new SystemPromptModule().instructions(
-                environmentCtx,
-                scopeOf("anthropic/opus-5", "claude"),
-            ),
+            hooks.instructions!(environmentCtx, scopeOf("anthropic/opus-5", "claude")),
         ).rejects.toThrow("The system prompt exceeds the configured output bound");
     });
 
@@ -370,10 +388,11 @@ describe("SystemPromptModule", () => {
             { name: "Claude Opus", id: "anthropic/opus-5", providerId: "anthropic" },
         ];
         const module = new SystemPromptModule({ availableModels });
+        const hooks = await resolveModuleHooks(ctx, module);
         availableModels[0]!.name = "Mutated";
 
         const environmentCtx = contextWithEnvironment();
-        const prompt = await module.instructions(
+        const prompt = await hooks.instructions!(
             environmentCtx,
             scopeOf("anthropic/opus-5", "claude"),
         );
@@ -412,12 +431,13 @@ describe("SystemPromptModule", () => {
     it("validates closed options and detaches the configured identity", async () => {
         const identity = { name: "Scout", prompt: "You are Scout, built by Happy" };
         const module = new SystemPromptModule({ identity });
+        const hooks = await resolveModuleHooks(ctx, module);
 
         identity.name = "Mutated";
         identity.prompt = "A hostile replacement";
 
         expect(
-            (await module.instructions(ctx, scopeOf("anthropic/opus-5", "claude"))).startsWith(
+            (await hooks.instructions!(ctx, scopeOf("anthropic/opus-5", "claude"))).startsWith(
                 "You are Scout, built by Happy",
             ),
         ).toBe(true);

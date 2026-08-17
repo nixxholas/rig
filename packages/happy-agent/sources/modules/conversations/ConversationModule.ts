@@ -12,6 +12,7 @@ import {
     type AgentDatabase,
     type AgentModule,
     type AgentModuleAgentLifecycle,
+    type AgentModuleHooks,
     type AgentModuleScope,
     type AgentModuleSystemScope,
     type AnyAgentTool,
@@ -66,12 +67,14 @@ const conversationRecordSchema = Type.Object(
         createdAt: Type.Integer({ minimum: 0 }),
         cwd: Type.String({ minLength: 1, maxLength: 4_096 }),
         draft: Type.Optional(Type.String({ maxLength: 100_000 })),
+        effort: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
         id: conversationSessionIdSchema,
         modelId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
         ownerInstanceId: Type.String({ minLength: 1, maxLength: 128 }),
         permissionMode: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
         providerId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
         scope: conversationScopeSchema,
+        serviceTier: Type.Optional(Type.Literal("fast")),
         status: conversationStatusSchema,
         titleStatus: Type.Union([Type.Literal("pending"), Type.Literal("ready")]),
         unread: Type.Boolean(),
@@ -82,55 +85,41 @@ const conversationRecordSchema = Type.Object(
 
 export type ConversationRecord = Static<typeof conversationRecordSchema>;
 
-export interface ConversationCreateInput {
-    readonly id?: string;
-    readonly agentId: string;
-    readonly cwd: string;
-    readonly scope?: ConversationScope;
-    readonly providerId?: string;
-    readonly modelId?: string;
-    readonly permissionMode?: string;
-    readonly ownerInstanceId?: string;
-}
-
 export const conversationCreateInputSchema = Type.Object(
     {
         agentId: Type.String({ minLength: 1, maxLength: 128 }),
         cwd: Type.String({ minLength: 1, maxLength: 4_096 }),
+        effort: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
         id: Type.Optional(conversationSessionIdSchema),
         modelId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
         ownerInstanceId: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
         permissionMode: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
         providerId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
         scope: Type.Optional(conversationScopeSchema),
+        serviceTier: Type.Optional(Type.Literal("fast")),
     },
     { additionalProperties: false },
 );
 
-export interface ConversationUpdate {
-    readonly archived?: boolean;
-    readonly draft?: string;
-    readonly scope?: ConversationScope;
-    readonly unread?: boolean;
-    readonly status?: ConversationStatus;
-    readonly providerId?: string;
-    readonly modelId?: string;
-    readonly permissionMode?: string;
-}
+export type ConversationCreateInput = Static<typeof conversationCreateInputSchema>;
 
 export const conversationUpdateSchema = Type.Object(
     {
         archived: Type.Optional(Type.Boolean()),
         draft: Type.Optional(Type.String({ maxLength: 100_000 })),
+        effort: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
         modelId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
         permissionMode: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
         providerId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
         scope: Type.Optional(conversationScopeSchema),
+        serviceTier: Type.Optional(Type.Union([Type.Literal("fast"), Type.Null()])),
         status: Type.Optional(conversationStatusSchema),
         unread: Type.Optional(Type.Boolean()),
     },
     { additionalProperties: false },
 );
+
+export type ConversationUpdate = Static<typeof conversationUpdateSchema>;
 
 export interface ConversationEvent {
     readonly id: string;
@@ -157,11 +146,13 @@ interface ConversationRow {
     readonly created_at: number;
     readonly cwd: string;
     readonly draft: string | null;
+    readonly effort: string | null;
     readonly model_id: string | null;
     readonly owner_instance_id: string;
     readonly permission_mode: string | null;
     readonly provider_id: string | null;
     readonly scope_json: string;
+    readonly service_tier: string | null;
     readonly session_id: string;
     readonly status: string;
     readonly title_status: string;
@@ -232,6 +223,19 @@ export class ConversationModule implements AgentModule<AnyAgentTool, LibSQLDatab
                 );
             },
         ],
+        [
+            "002-conversation-selection",
+            async (_ctx: Context, database: AgentDatabase) => {
+                await agentDatabaseRun(
+                    database,
+                    sql`ALTER TABLE happy_agent_conversations ADD COLUMN effort TEXT`,
+                );
+                await agentDatabaseRun(
+                    database,
+                    sql`ALTER TABLE happy_agent_conversations ADD COLUMN service_tier TEXT`,
+                );
+            },
+        ],
     ] as const;
 
     readonly #clock: () => number;
@@ -263,28 +267,6 @@ export class ConversationModule implements AgentModule<AnyAgentTool, LibSQLDatab
             return await this.#readBySession(txCtx, txCtx.db, sessionId);
         });
     }
-
-    readonly agentCreatedTransact = async (
-        ctx: Context,
-        _scope: AgentModuleSystemScope<LibSQLDatabase>,
-        agent: AgentModuleAgentLifecycle,
-    ): Promise<void> => {
-        await this.#ensure(ctx, ctx.db, {
-            agentId: agent.id,
-            cwd: this.#defaultCwd,
-        });
-    };
-
-    readonly agentRestoredTransact = async (
-        ctx: Context,
-        _scope: AgentModuleSystemScope<LibSQLDatabase>,
-        agent: AgentModuleAgentLifecycle,
-    ): Promise<void> => {
-        await this.#ensure(ctx, ctx.db, {
-            agentId: agent.id,
-            cwd: this.#defaultCwd,
-        });
-    };
 
     async getByAgent(ctx: Context, agentId: string): Promise<ConversationRecord | undefined> {
         if (!Value.Check(Type.String({ minLength: 1, maxLength: 128 }), agentId)) {
@@ -333,12 +315,14 @@ export class ConversationModule implements AgentModule<AnyAgentTool, LibSQLDatab
         return await ctx.inTx(async (txCtx) => {
             const current = await this.#readBySession(txCtx, txCtx.db, sessionId);
             if (current === undefined) throw new Error(`Session "${sessionId}" was not found.`);
-            const next = normalizeConversation({
+            const candidate: Record<string, unknown> = {
                 ...current,
                 ...update,
                 ...(update.draft === undefined ? {} : { draft: update.draft }),
                 updatedAt: this.#now(),
-            });
+            };
+            if (update.serviceTier === null) delete candidate.serviceTier;
+            const next = normalizeConversation(candidate);
             await agentDatabaseRun(
                 txCtx.db,
                 sql`UPDATE happy_agent_conversations SET
@@ -348,6 +332,8 @@ export class ConversationModule implements AgentModule<AnyAgentTool, LibSQLDatab
                     status = ${next.status},
                     provider_id = ${next.providerId ?? null},
                     model_id = ${next.modelId ?? null},
+                    effort = ${next.effort ?? null},
+                    service_tier = ${next.serviceTier ?? null},
                     permission_mode = ${next.permissionMode ?? null},
                     draft = ${next.draft ?? null},
                     updated_at = ${next.updatedAt}
@@ -440,72 +426,98 @@ export class ConversationModule implements AgentModule<AnyAgentTool, LibSQLDatab
         await this.appendEvent(ctx, session.id, { type, payload });
     }
 
-    readonly onEvent = async (
-        ctx: Context,
-        scope: AgentModuleScope<LibSQLDatabase>,
-        event: SessionEvent,
-    ): Promise<void> => {
-        await this.recordAgentEvent(ctx, scope.agent.id, "agent_event", event);
-        // A run that ends badly must not settle as completed. Recording the failure here rather
-        // than at settlement keeps the provider's own verdict authoritative; the next run clears
-        // it again when the loop starts.
-        if (event.type === "done" && event.state === "error") {
+    readonly #hooks: AgentModuleHooks<AnyAgentTool, LibSQLDatabase> = {
+        agentCreatedTransact: async (
+            ctx: Context,
+            _scope: AgentModuleSystemScope<LibSQLDatabase>,
+            agent: AgentModuleAgentLifecycle,
+        ): Promise<void> => {
+            await this.#ensure(ctx, ctx.db, {
+                agentId: agent.id,
+                cwd: this.#defaultCwd,
+            });
+        },
+
+        agentRestoredTransact: async (
+            ctx: Context,
+            _scope: AgentModuleSystemScope<LibSQLDatabase>,
+            agent: AgentModuleAgentLifecycle,
+        ): Promise<void> => {
+            await this.#ensure(ctx, ctx.db, {
+                agentId: agent.id,
+                cwd: this.#defaultCwd,
+            });
+        },
+
+        onEvent: async (
+            ctx: Context,
+            scope: AgentModuleScope<LibSQLDatabase>,
+            event: SessionEvent,
+        ): Promise<void> => {
+            await this.recordAgentEvent(ctx, scope.agent.id, "agent_event", event);
+            // A run that ends badly must not settle as completed. Recording the failure here
+            // rather than at settlement keeps the provider's own verdict authoritative; the next
+            // run clears it again when the loop starts.
+            if (event.type === "done" && event.state === "error") {
+                const session = await this.getByAgent(ctx, scope.agent.id);
+                if (session !== undefined) await this.update(ctx, session.id, { status: "error" });
+            }
+        },
+
+        messageAccepted: async (
+            ctx: Context,
+            scope: AgentModuleScope<LibSQLDatabase>,
+            accepted: AgentBaseAcceptedMessage,
+        ): Promise<void> => {
+            await this.recordAgentEvent(ctx, scope.agent.id, "message_submitted", accepted);
+        },
+
+        beforeAgentLoop: async (
+            ctx: Context,
+            scope: AgentModuleScope<LibSQLDatabase>,
+            loop: AgentBaseLoop,
+        ): Promise<void> => {
             const session = await this.getByAgent(ctx, scope.agent.id);
-            if (session !== undefined) await this.update(ctx, session.id, { status: "error" });
-        }
+            if (session === undefined) return;
+            await this.update(ctx, session.id, { status: "running" });
+            await this.appendEvent(ctx, session.id, { payload: loop, type: "run_started" });
+        },
+
+        afterInference: async (
+            ctx: Context,
+            scope: AgentModuleScope<LibSQLDatabase>,
+            inference: AgentBaseInference,
+        ): Promise<void> => {
+            await this.recordAgentEvent(ctx, scope.agent.id, "inference_completed", inference);
+        },
+
+        afterTurn: async (
+            ctx: Context,
+            scope: AgentModuleScope<LibSQLDatabase>,
+            turn: AgentBaseTurn,
+        ): Promise<readonly never[]> => {
+            await this.recordAgentEvent(ctx, scope.agent.id, "turn_completed", turn);
+            return [];
+        },
+
+        afterAgentSettled: async (
+            ctx: Context,
+            scope: AgentModuleScope<LibSQLDatabase>,
+            settlement: AgentBaseSettlement,
+        ): Promise<void> => {
+            const session = await this.getByAgent(ctx, scope.agent.id);
+            if (session === undefined) return;
+            if (session.status !== "error") {
+                await this.update(ctx, session.id, { status: "completed" });
+            }
+            await this.appendEvent(ctx, session.id, {
+                payload: settlement,
+                type: "run_finished",
+            });
+        },
     };
 
-    readonly messageAccepted = async (
-        ctx: Context,
-        scope: AgentModuleScope<LibSQLDatabase>,
-        accepted: AgentBaseAcceptedMessage,
-    ): Promise<void> => {
-        await this.recordAgentEvent(ctx, scope.agent.id, "message_submitted", accepted);
-    };
-
-    readonly beforeAgentLoop = async (
-        ctx: Context,
-        scope: AgentModuleScope<LibSQLDatabase>,
-        loop: AgentBaseLoop,
-    ): Promise<void> => {
-        const session = await this.getByAgent(ctx, scope.agent.id);
-        if (session === undefined) return;
-        await this.update(ctx, session.id, { status: "running" });
-        await this.appendEvent(ctx, session.id, { payload: loop, type: "run_started" });
-    };
-
-    readonly afterInference = async (
-        ctx: Context,
-        scope: AgentModuleScope<LibSQLDatabase>,
-        inference: AgentBaseInference,
-    ): Promise<void> => {
-        await this.recordAgentEvent(ctx, scope.agent.id, "inference_completed", inference);
-    };
-
-    readonly afterTurn = async (
-        ctx: Context,
-        scope: AgentModuleScope<LibSQLDatabase>,
-        turn: AgentBaseTurn,
-    ): Promise<readonly never[]> => {
-        await this.recordAgentEvent(ctx, scope.agent.id, "turn_completed", turn);
-        return [];
-    };
-
-    readonly afterAgentSettled = async (
-        ctx: Context,
-        scope: AgentModuleScope<LibSQLDatabase>,
-        settlement: AgentBaseSettlement,
-    ): Promise<void> => {
-        const session = await this.getByAgent(ctx, scope.agent.id);
-        if (session === undefined) return;
-        if (session.status !== "error") {
-            await this.update(ctx, session.id, { status: "completed" });
-        }
-        await this.appendEvent(ctx, session.id, {
-            payload: settlement,
-            type: "run_finished",
-        });
-    };
+    readonly beforeStart = (): AgentModuleHooks<AnyAgentTool, LibSQLDatabase> => this.#hooks;
 
     async #ensure(
         ctx: Context,
@@ -529,9 +541,11 @@ export class ConversationModule implements AgentModule<AnyAgentTool, LibSQLDatab
             archived: false,
             createdAt: now,
             cwd: input.cwd,
+            ...(input.effort === undefined ? {} : { effort: input.effort }),
             ...(input.modelId === undefined ? {} : { modelId: input.modelId }),
             ...(input.permissionMode === undefined ? {} : { permissionMode: input.permissionMode }),
             ...(input.providerId === undefined ? {} : { providerId: input.providerId }),
+            ...(input.serviceTier === undefined ? {} : { serviceTier: input.serviceTier }),
             id,
             ownerInstanceId: input.ownerInstanceId ?? this.#ownerInstanceId,
             scope: input.scope ?? { kind: "unsorted" },
@@ -544,12 +558,13 @@ export class ConversationModule implements AgentModule<AnyAgentTool, LibSQLDatab
             database,
             sql`INSERT INTO happy_agent_conversations (
                 session_id, agent_id, owner_instance_id, cwd, scope_json, archived, unread,
-                status, title_status, provider_id, model_id, permission_mode, draft,
-                created_at, updated_at
+                status, title_status, provider_id, model_id, effort, service_tier,
+                permission_mode, draft, created_at, updated_at
             ) VALUES (
                 ${record.id}, ${record.agentId}, ${record.ownerInstanceId}, ${record.cwd},
                 ${JSON.stringify(record.scope)}, 0, 0, ${record.status}, ${record.titleStatus},
                 ${record.providerId ?? null}, ${record.modelId ?? null},
+                ${record.effort ?? null}, ${record.serviceTier ?? null},
                 ${record.permissionMode ?? null}, NULL, ${record.createdAt}, ${record.updatedAt}
             )`,
         );
@@ -603,12 +618,14 @@ function rowFromDatabase(row: ConversationRow): ConversationRecord {
         createdAt: Number(row.created_at),
         cwd: row.cwd,
         ...(row.draft === null ? {} : { draft: row.draft }),
+        ...(row.effort === null ? {} : { effort: row.effort }),
         id: row.session_id,
         ...(row.model_id === null ? {} : { modelId: row.model_id }),
         ownerInstanceId: row.owner_instance_id,
         ...(row.permission_mode === null ? {} : { permissionMode: row.permission_mode }),
         ...(row.provider_id === null ? {} : { providerId: row.provider_id }),
         scope,
+        ...(row.service_tier === null ? {} : { serviceTier: row.service_tier }),
         status: row.status,
         titleStatus: row.title_status,
         unread: row.unread !== 0,

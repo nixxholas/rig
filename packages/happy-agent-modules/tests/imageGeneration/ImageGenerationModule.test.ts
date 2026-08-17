@@ -29,6 +29,7 @@ import type {
     ImageGeneratorRequest,
 } from "../../sources/imageGeneration/ImageGenerator.js";
 import { InMemoryPersistence } from "../support/InMemoryPersistence.js";
+import { resolveModuleHooks } from "../support/moduleHooks.js";
 
 const root = createRootContext().named("image-generation-tests");
 const PNG_BYTES = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3, 4]);
@@ -62,13 +63,13 @@ interface Harness {
     readonly tool: AnyAgentTool;
 }
 
-function harness(
+async function harness(
     service: ImageGenerator,
     overrides: Partial<ImageGenerationModuleOptions> = {},
     persistence = new InMemoryPersistence(),
     agentId = "agent-1",
     agent: Partial<AgentModuleScope["agent"]> = {},
-): Harness {
+): Promise<Harness> {
     const module = new ImageGenerationModule({
         generator: service,
         outputDirectory: outputRoot,
@@ -78,7 +79,8 @@ function harness(
         ...overrides,
     });
     const kv = new AgentKV(persistence, `kv.${agentId}.`).scoped("module", "image-generation");
-    const tools = module.tools(root, {
+    const hooks = await resolveModuleHooks(root, module);
+    const tools = await hooks.tools!(root, {
         agent: {
             id: agentId,
             provider: "claude-primary",
@@ -108,7 +110,7 @@ function textFromTool(tool: AnyAgentTool, status: ImageGenerationStatus): string
 describe("ImageGenerationModule", () => {
     it("writes the generator bytes to a usable file inside the configured root", async () => {
         const generated = generator();
-        const images = harness(generated.generator);
+        const images = await harness(generated.generator);
         const transaction = vi.spyOn(images.persistence, "transaction");
         const result = await images.module.generate(root, "agent-1", {
             operationId: "operation-file",
@@ -142,7 +144,7 @@ describe("ImageGenerationModule", () => {
 
     it("uses the configured operation ID factory for direct host calls", async () => {
         const generated = generator();
-        const images = harness(generated.generator);
+        const images = await harness(generated.generator);
 
         const result = await images.module.generate(root, "agent-1", {
             prompt: "A host-generated image",
@@ -157,7 +159,7 @@ describe("ImageGenerationModule", () => {
 
     it("rejects a duplicate operation ID from a fresh module", async () => {
         const firstGenerator = generator();
-        const first = harness(firstGenerator.generator);
+        const first = await harness(firstGenerator.generator);
         const input: ImageGenerationInput = {
             operationId: "operation-conflict",
             prompt: "A lighthouse",
@@ -166,7 +168,7 @@ describe("ImageGenerationModule", () => {
         completed(created);
 
         const conflictingGenerator = generator();
-        const reloaded = harness(conflictingGenerator.generator, {}, first.persistence);
+        const reloaded = await harness(conflictingGenerator.generator, {}, first.persistence);
         await expect(reloaded.module.generate(root, "agent-1", input)).rejects.toThrow(
             "operation ID already exists",
         );
@@ -178,7 +180,7 @@ describe("ImageGenerationModule", () => {
 
     it("uses the call ID for non-durable imagegen and returns the real path", async () => {
         const generated = generator();
-        const images = harness(generated.generator);
+        const images = await harness(generated.generator);
         const call = { id: "tool-call-1" } as never;
 
         const first = await images.tool.execute(root, { prompt: "  A tiny observatory  " }, call);
@@ -212,7 +214,7 @@ describe("ImageGenerationModule", () => {
 
     it("uses Rig's Codex surface and forwards bounded edit selectors", async () => {
         const generated = generator();
-        const images = harness(generated.generator, {}, new InMemoryPersistence(), "agent-1", {
+        const images = await harness(generated.generator, {}, new InMemoryPersistence(), "agent-1", {
             provider: "codex-primary",
             providerKind: "codex",
         });
@@ -251,7 +253,7 @@ describe("ImageGenerationModule", () => {
         const transactional: ImageGenerationEvent[] = [];
         const postCommit: ImageGenerationEvent[] = [];
         const generate = vi.fn().mockRejectedValue(new Error("provider unavailable"));
-        const images = harness(
+        const images = await harness(
             { generate },
             {
                 listener: {
@@ -303,7 +305,7 @@ describe("ImageGenerationModule", () => {
     it("emits schema-valid completion and removal events around durable state changes", async () => {
         const transactional: ImageGenerationEvent[] = [];
         const postCommit: ImageGenerationEvent[] = [];
-        const images = harness(generator().generator, {
+        const images = await harness(generator().generator, {
             listener: {
                 onEventTransactional: async (_ctx, event) => {
                     transactional.push(structuredClone(event));
@@ -347,7 +349,7 @@ describe("ImageGenerationModule", () => {
     });
 
     it("removes a published file when the durable transaction fails", async () => {
-        const images = harness(generator().generator, {
+        const images = await harness(generator().generator, {
             listener: {
                 onEventTransactional: async () => {
                     throw new Error("transactional listener failed");
@@ -367,7 +369,7 @@ describe("ImageGenerationModule", () => {
 
     it("enforces input, generator-output, byte, and model-output bounds", async () => {
         const generated = generator();
-        const images = harness(generated.generator);
+        const images = await harness(generated.generator);
 
         await expect(
             images.module.generate(root, "agent-1", {
@@ -384,7 +386,7 @@ describe("ImageGenerationModule", () => {
         ).rejects.toThrow("input is invalid");
         expect(generated.generate).not.toHaveBeenCalled();
 
-        const oversized = harness(
+        const oversized = await harness(
             generator({ bytes: new Uint8Array([1, 2, 3, 4]), mediaType: "image/png" }).generator,
             { maxOutputBytes: 3 },
             new InMemoryPersistence(),
@@ -399,7 +401,7 @@ describe("ImageGenerationModule", () => {
             expect(oversizedResult.error).toContain("byte limit");
         }
 
-        const malformed = harness(
+        const malformed = await harness(
             generator({
                 bytes: new Uint8Array([1]),
                 mediaType: "not-an-image",
@@ -439,7 +441,7 @@ describe("ImageGenerationModule", () => {
 
     it("passes normalized input to the generator and rejects operation ID reuse", async () => {
         const generated = generator();
-        const images = harness(generated.generator);
+        const images = await harness(generated.generator);
         const operationId = "operation-conflict";
         const created = await images.module.generate(root, "agent-1", {
             operationId,
@@ -466,7 +468,7 @@ describe("ImageGenerationModule", () => {
     });
 
     it("keeps model rendering bounded while retaining actionable identities", async () => {
-        const images = harness(generator().generator);
+        const images = await harness(generator().generator);
         const result = await images.module.generate(root, "agent-1", {
             operationId: "o".repeat(MAX_IMAGE_ID_CHARACTERS),
             prompt: "A prompt whose optional rendering can be dropped",

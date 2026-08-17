@@ -1,6 +1,7 @@
 import {
     agentModuleConfig,
     type AgentModule,
+    type AgentModuleHooks,
     type AgentModuleScope,
     type AgentModuleSystemScope,
     type AnyAgentTool,
@@ -231,21 +232,6 @@ export class ComputeModule implements AgentModule {
         return await this.#disposePromise;
     }
 
-    readonly instructions = async (ctx: Context, scope: AgentModuleScope): Promise<string> => {
-        const compute = await this.resolve(ctx, scope.agent.id);
-        return compute === undefined ? "" : computeInstructionsForVendor(vendorFor(scope));
-    };
-
-    readonly tools = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-    ): Promise<readonly AnyAgentTool[]> => {
-        const compute = await this.resolve(ctx, scope.agent.id);
-        if (compute === undefined) return [];
-        const reads = new FileReadLog(scope.kv, this.#readLocks, scope.agent.id);
-        return assembleComputeTools(vendorFor(scope), compute, reads);
-    };
-
     /**
      * Build the fixed, read-only tool array the automatic permission reviewer runs with, over a
      * compute the host owns for the reviewer.
@@ -264,21 +250,40 @@ export class ComputeModule implements AgentModule {
         return assembleReviewerTools(vendorFor(scope), compute, reads);
     }
 
-    readonly agentArchived = async (
-        ctx: Context,
-        _scope: AgentModuleSystemScope,
-        agent: { readonly id: string },
-    ): Promise<void> => {
-        await this.#track(
-            this.#computeLocks.runInLock(ctx, agent.id, async (lockCtx) => {
-                if (this.#closed) return;
-                const cached = this.#computes.get(agent.id);
-                if (cached === undefined) return;
-                this.#computes.delete(agent.id);
-                await cached.compute.dispose(lockCtx);
-            }),
-        );
+    readonly #hooks: AgentModuleHooks = {
+        instructions: async (ctx: Context, scope: AgentModuleScope): Promise<string> => {
+            const compute = await this.resolve(ctx, scope.agent.id);
+            return compute === undefined ? "" : computeInstructionsForVendor(vendorFor(scope));
+        },
+
+        tools: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+        ): Promise<readonly AnyAgentTool[]> => {
+            const compute = await this.resolve(ctx, scope.agent.id);
+            if (compute === undefined) return [];
+            const reads = new FileReadLog(scope.kv, this.#readLocks, scope.agent.id);
+            return assembleComputeTools(vendorFor(scope), compute, reads);
+        },
+
+        agentArchived: async (
+            ctx: Context,
+            _scope: AgentModuleSystemScope,
+            agent: { readonly id: string },
+        ): Promise<void> => {
+            await this.#track(
+                this.#computeLocks.runInLock(ctx, agent.id, async (lockCtx) => {
+                    if (this.#closed) return;
+                    const cached = this.#computes.get(agent.id);
+                    if (cached === undefined) return;
+                    this.#computes.delete(agent.id);
+                    await cached.compute.dispose(lockCtx);
+                }),
+            );
+        },
     };
+
+    readonly beforeStart = (): AgentModuleHooks => this.#hooks;
 
     async #track<Result>(operation: Promise<Result>): Promise<Result> {
         this.#activeOperations.add(operation);

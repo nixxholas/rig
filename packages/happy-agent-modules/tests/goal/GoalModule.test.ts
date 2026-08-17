@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { GoalModule } from "../../sources/goal/GoalModule.js";
 import { GOAL_LAST_INFERENCE_KEY } from "../../sources/goal/impl/goalState.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
+import { resolveModuleHooks } from "../support/moduleHooks.js";
 import { recordingAgents } from "./recordingAgents.js";
 
 function goalTestModule(name: string) {
@@ -71,7 +72,7 @@ describe("GoalModule", () => {
         const test = goalTestModule("goal-transactional-tool-test");
         await test.database.ready;
         const agents = recordingAgents();
-        await test.module.beforeStart(test.database.context, agents.ref);
+        const hooks = await resolveModuleHooks(test.database.context, test.module, agents.ref);
         try {
             const activation = await test.module.setGoal(
                 test.database.context,
@@ -92,7 +93,7 @@ describe("GoalModule", () => {
                 id: "call-cuid2",
             });
 
-            const tools = test.module.tools(test.database.context, {
+            const tools = await hooks.tools!(test.database.context, {
                 agent: { id: "agent-tool" },
             } as never);
             expect(tools.map((tool) => [tool.name, tool.durable, tool.transactional])).toEqual([
@@ -183,7 +184,7 @@ describe("GoalModule", () => {
         const database = moduleDatabase(module.migrations, "goal-auto-pause-test");
         await database.ready;
         const agents = recordingAgents();
-        await module.beforeStart(database.context, agents.ref);
+        const hooks = await resolveModuleHooks(database.context, module, agents.ref);
         const runValues = new Map<string, unknown>();
         const runKV = {
             read: async (_ctx: unknown, key: string) => runValues.get(key),
@@ -197,7 +198,7 @@ describe("GoalModule", () => {
         try {
             await module.setGoal(database.context, "agent-failed", "ship it");
             runValues.set(GOAL_LAST_INFERENCE_KEY, { state: "error" });
-            await module.afterTurnTransact(
+            await hooks.afterTurnTransact!(
                 database.context,
                 {
                     agent: { id: "agent-failed" },
@@ -216,7 +217,7 @@ describe("GoalModule", () => {
             expect(interruptions).toEqual(["session_failed"]);
 
             await module.setGoal(database.context, "agent-archived", "archive me");
-            await module.agentArchivedTransact(database.context, { sharedKV: {} } as never, {
+            await hooks.agentArchivedTransact!(database.context, { sharedKV: {} } as never, {
                 id: "agent-archived",
                 metadata: undefined,
             });

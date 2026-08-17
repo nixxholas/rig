@@ -3,6 +3,7 @@ import type {
     AgentBaseInference,
     AgentBasePersistedEvent,
     AgentModule,
+    AgentModuleHooks,
     AgentModuleScope,
     AnyAgentTool,
 } from "@slopus/happy-agent-base";
@@ -384,10 +385,6 @@ export class HistoryModule implements AgentModule {
         });
     }
 
-    readonly tools = (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => [
-        readAgentHistoryTool(this, scope.agent.id),
-    ];
-
     /**
      * Resolve a tool target. Any agent may read any agent's history: the host resolver, when one
      * is configured, only maps canonical session-tree paths to Agent IDs and may raise its own
@@ -420,76 +417,11 @@ export class HistoryModule implements AgentModule {
         return requestedTarget;
     }
 
-    /**
-     * Keep each completed block of the response in the run-scoped Agent KV.
-     *
-     * The event runs inside the transaction that appends the block to the agent's own durable
-     * state. A block whose commit is rolled back is therefore never retained by this module, and
-     * a process restart can resume from the same pending blocks without relying on heap state.
-     */
-    readonly onEventTransact = (
-        ctx: Context,
-        scope: AgentModuleScope,
-        event: AgentBasePersistedEvent,
-    ): Promise<void> => {
-        return this.#appendPendingBlock(ctx, scope, toHistoryBlock(event));
-    };
-
-    /**
-     * Record an accepted incoming message beside the Agent Base message transaction. Who sent it
-     * is recorded from the message's provenance metadata while it still exists: only a message
-     * the host positively stamped as an end-user submission is recorded as `role: "user"`, and
-     * everything else — a goal continuation, a collaboration delivery, an unstamped message — is
-     * recorded as `role: "agent"`, naming the specific sender when the metadata named one. This
-     * fails closed: a forgetful path under-attributes rather than a synthetic message
-     * impersonating the person.
-     */
-    readonly messageAcceptedTransact = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-        accepted: AgentBaseAcceptedMessage,
-    ): Promise<void> => {
-        const fromUser = isUserOriginMetadata(accepted.metadata);
-        const sender = fromUser ? undefined : senderAgentIdOf(accepted.metadata);
-        await this.#append(ctx, scope.agent.id, {
-            at: Date.now(),
-            blocks: accepted.message.content.map(toHistoryOutputBlock),
-            recordId: createRecordId(),
-            role: fromUser ? "user" : "agent",
-            ...(sender === undefined ? {} : { senderAgentId: sender }),
-        });
-    };
-
-    /**
-     * Remember the name before the base dispatches a tool. The call-scoped run KV survives the
-     * dispatch and is visible to `afterToolCallTransact`, including after a restart.
-     */
-    readonly beforeToolCallTransact = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-        call: SessionToolCallBlock,
-    ): Promise<void> => {
-        const callBlock: HistoryBlock = {
-            arguments: parseArguments(call.arguments),
-            callId: call.callId,
-            name: call.name,
-            type: "tool_call",
-        };
-        if (
-            !Value.Check(historyToolCallBlockSchema, callBlock) ||
-            !historyToolArgumentsWithinByteLimit(callBlock.arguments)
-        ) {
-            throw new Error("History module received an invalid tool call.");
-        }
-        await scope.runKV.write(ctx, TOOL_NAME_KEY, call.name);
-    };
-
-    /** Record each tool result in the same transaction as the result in Agent Base history. */
-    readonly afterToolCallTransact = async (
+    async #afterToolCall(
         ctx: Context,
         scope: AgentModuleScope,
         result: SessionToolResultMessage,
-    ): Promise<void> => {
+    ): Promise<void> {
         const storedName = await scope.runKV.read(ctx, TOOL_NAME_KEY);
         const toolName = typeof storedName === "string" ? storedName : "unknown tool";
         const output = renderOutput(result.content, this.#toolOutputLimit);
@@ -526,20 +458,13 @@ export class HistoryModule implements AgentModule {
             recordId: createRecordId(),
             role: "assistant",
         });
-    };
+    }
 
-    /**
-     * Write the finished response as one message, and the failure as one of its own when the
-     * response failed. Both land in the transaction that commits the inference, so the record and
-     * the thing recorded become durable together. A response that produced nothing records
-     * nothing. In strict mode a store failure propagates and rolls back the inference transaction;
-     * best-effort mode is an explicit opt-in and drops the record.
-     */
-    readonly afterInferenceTransact = async (
+    async #afterInference(
         ctx: Context,
         scope: AgentModuleScope,
         inference: AgentBaseInference,
-    ): Promise<void> => {
+    ): Promise<void> {
         const blocks = await this.#pendingBlocks(ctx, scope);
         const responseId =
             blocks.length > 0 || inference.errorMessage !== undefined
@@ -573,30 +498,7 @@ export class HistoryModule implements AgentModule {
         }
         await this.#append(ctx, scope.agent.id, ...messages);
         await scope.runKV.delete(ctx, PENDING_BLOCKS_KEY);
-    };
-
-    /**
-     * Finish an archive that was interrupted after its response blocks were committed.
-     *
-     * The settling transaction is the last place the run KV is available. A strict archive
-     * failure therefore rolls settlement back and leaves the pending blocks for the next restart.
-     */
-    readonly afterAgentSettledTransact = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-    ): Promise<void> => {
-        const blocks = await this.#pendingBlocks(ctx, scope);
-        if (blocks.length === 0) return;
-        await this.#append(ctx, scope.agent.id, {
-            at: Date.now(),
-            blocks,
-            recordId: createRecordId(),
-            ...(scope.agent.model === undefined ? {} : { model: scope.agent.model }),
-            provider: scope.agent.provider,
-            role: "assistant",
-        });
-        await scope.runKV.delete(ctx, PENDING_BLOCKS_KEY);
-    };
+    }
 
     async #appendPendingBlock(
         ctx: Context,
@@ -914,6 +816,123 @@ export class HistoryModule implements AgentModule {
             }
         });
     }
+
+    readonly #hooks: AgentModuleHooks = {
+        tools: (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => [
+            readAgentHistoryTool(this, scope.agent.id),
+        ],
+
+        /**
+         * Keep each completed block of the response in the run-scoped Agent KV.
+         *
+         * The event runs inside the transaction that appends the block to the agent's own
+         * durable state. A block whose commit is rolled back is therefore never retained by this
+         * module, and a process restart can resume from the same pending blocks without relying
+         * on heap state.
+         */
+        onEventTransact: (
+            ctx: Context,
+            scope: AgentModuleScope,
+            event: AgentBasePersistedEvent,
+        ): Promise<void> => {
+            return this.#appendPendingBlock(ctx, scope, toHistoryBlock(event));
+        },
+
+        /**
+         * Record an accepted incoming message beside the Agent Base message transaction. Who
+         * sent it is recorded from the message's provenance metadata while it still exists: only
+         * a message the host positively stamped as an end-user submission is recorded as
+         * `role: "user"`, and everything else — a goal continuation, a collaboration delivery, an
+         * unstamped message — is recorded as `role: "agent"`, naming the specific sender when the
+         * metadata named one. This fails closed: a forgetful path under-attributes rather than a
+         * synthetic message impersonating the person.
+         */
+        messageAcceptedTransact: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+            accepted: AgentBaseAcceptedMessage,
+        ): Promise<void> => {
+            const fromUser = isUserOriginMetadata(accepted.metadata);
+            const sender = fromUser ? undefined : senderAgentIdOf(accepted.metadata);
+            await this.#append(ctx, scope.agent.id, {
+                at: Date.now(),
+                blocks: accepted.message.content.map(toHistoryOutputBlock),
+                recordId: createRecordId(),
+                role: fromUser ? "user" : "agent",
+                ...(sender === undefined ? {} : { senderAgentId: sender }),
+            });
+        },
+
+        /**
+         * Remember the name before the base dispatches a tool. The call-scoped run KV survives
+         * the dispatch and is visible to `afterToolCallTransact`, including after a restart.
+         */
+        beforeToolCallTransact: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+            call: SessionToolCallBlock,
+        ): Promise<void> => {
+            const callBlock: HistoryBlock = {
+                arguments: parseArguments(call.arguments),
+                callId: call.callId,
+                name: call.name,
+                type: "tool_call",
+            };
+            if (
+                !Value.Check(historyToolCallBlockSchema, callBlock) ||
+                !historyToolArgumentsWithinByteLimit(callBlock.arguments)
+            ) {
+                throw new Error("History module received an invalid tool call.");
+            }
+            await scope.runKV.write(ctx, TOOL_NAME_KEY, call.name);
+        },
+
+        /** Record each tool result in the same transaction as the result in Agent Base history. */
+        afterToolCallTransact: (
+            ctx: Context,
+            scope: AgentModuleScope,
+            result: SessionToolResultMessage,
+        ): Promise<void> => this.#afterToolCall(ctx, scope, result),
+
+        /**
+         * Write the finished response as one message, and the failure as one of its own when the
+         * response failed. Both land in the transaction that commits the inference, so the
+         * record and the thing recorded become durable together. A response that produced
+         * nothing records nothing. In strict mode a store failure propagates and rolls back the
+         * inference transaction; best-effort mode is an explicit opt-in and drops the record.
+         */
+        afterInferenceTransact: (
+            ctx: Context,
+            scope: AgentModuleScope,
+            inference: AgentBaseInference,
+        ): Promise<void> => this.#afterInference(ctx, scope, inference),
+
+        /**
+         * Finish an archive that was interrupted after its response blocks were committed.
+         *
+         * The settling transaction is the last place the run KV is available. A strict archive
+         * failure therefore rolls settlement back and leaves the pending blocks for the next
+         * restart.
+         */
+        afterAgentSettledTransact: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+        ): Promise<void> => {
+            const blocks = await this.#pendingBlocks(ctx, scope);
+            if (blocks.length === 0) return;
+            await this.#append(ctx, scope.agent.id, {
+                at: Date.now(),
+                blocks,
+                recordId: createRecordId(),
+                ...(scope.agent.model === undefined ? {} : { model: scope.agent.model }),
+                provider: scope.agent.provider,
+                role: "assistant",
+            });
+            await scope.runKV.delete(ctx, PENDING_BLOCKS_KEY);
+        },
+    };
+
+    readonly beforeStart = (): AgentModuleHooks => this.#hooks;
 }
 
 interface HistoryRow {

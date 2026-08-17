@@ -163,36 +163,6 @@ const patchSessionSchema = Type.Object(
     },
     { additionalProperties: false },
 );
-const modelSchema = Type.Object(
-    {
-        effort: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
-        modelId: Type.String({ minLength: 1, maxLength: 256 }),
-        mutationId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
-        providerId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
-    },
-    { additionalProperties: false },
-);
-const effortSchema = Type.Object(
-    {
-        effort: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
-        mutationId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
-    },
-    { additionalProperties: false },
-);
-const tierSchema = Type.Object(
-    {
-        mutationId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
-        serviceTier: Type.Optional(Type.Literal("fast")),
-    },
-    { additionalProperties: false },
-);
-const permissionsSchema = Type.Object(
-    {
-        mutationId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
-        permissionMode: agentPermissionModeSchema,
-    },
-    { additionalProperties: false },
-);
 const expectedRunSchema = Type.Object(
     {
         expectedRunId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
@@ -239,6 +209,39 @@ const workflowStopSchema = Type.Object(
     { mutationId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })) },
     { additionalProperties: false },
 );
+const sessionConfigurationFieldSchema = Type.Union([
+    Type.Literal("model"),
+    Type.Literal("effort"),
+    Type.Literal("serviceTier"),
+]);
+const sessionSelectionSchema = Type.Object(
+    {
+        effort: Type.String({ minLength: 1, maxLength: 64 }),
+        modelId: Type.String({ minLength: 1, maxLength: 256 }),
+        permissionMode: agentPermissionModeSchema,
+        providerId: Type.String({ minLength: 1, maxLength: 256 }),
+        serviceTier: Type.Union([Type.Literal("fast"), Type.Null()]),
+    },
+    { additionalProperties: false },
+);
+const sessionConfigurationChangedPayloadSchema = Type.Object(
+    {
+        changed: Type.Array(sessionConfigurationFieldSchema, { minItems: 1, maxItems: 3 }),
+        effort: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
+        modelId: Type.String({ minLength: 1, maxLength: 256 }),
+        mutationId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+        providerId: Type.String({ minLength: 1, maxLength: 256 }),
+        serviceTier: Type.Union([Type.Literal("fast"), Type.Null()]),
+    },
+    { additionalProperties: false },
+);
+const permissionModeChangedPayloadSchema = Type.Object(
+    {
+        mutationId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+        permissionMode: agentPermissionModeSchema,
+    },
+    { additionalProperties: false },
+);
 const transferSessionSchema = Type.Object(
     {
         mutationId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
@@ -250,6 +253,9 @@ const unsupportedSchema = Type.Object({}, { additionalProperties: false });
 
 type SubmitMessage = Static<typeof submitMessageSchema>;
 type CreateSession = Static<typeof createSessionSchema>;
+type SessionSelection = Static<typeof sessionSelectionSchema>;
+type SessionConfigurationChangedPayload = Static<typeof sessionConfigurationChangedPayloadSchema>;
+type PermissionModeChangedPayload = Static<typeof permissionModeChangedPayloadSchema>;
 const unknownRecordSchema = Type.Record(Type.String(), Type.Unknown());
 type UnknownRecord = Static<typeof unknownRecordSchema>;
 type LoadedSessionDependencies = {
@@ -304,6 +310,7 @@ export function createSessionRoutes(): AgentHttpRouteGroup {
                 const session = await conversation.ensure(ctx, {
                     agentId,
                     cwd: owner.cwd,
+                    ...(body.effort === undefined ? {} : { effort: body.effort }),
                     ...(body.id === undefined ? {} : { id: body.id }),
                     ...(body.modelId === undefined ? {} : { modelId: body.modelId }),
                     ...(body.permissionMode === undefined
@@ -311,6 +318,7 @@ export function createSessionRoutes(): AgentHttpRouteGroup {
                         : { permissionMode: body.permissionMode }),
                     ...(body.providerId === undefined ? {} : { providerId: body.providerId }),
                     scope: owner.scope,
+                    ...(body.serviceTier === undefined ? {} : { serviceTier: body.serviceTier }),
                 });
                 const agent = await dependencies.agent.system.create(
                     ctx,
@@ -728,38 +736,6 @@ function createMutationRoutes(): AgentHttpRouteGroup["routes"] {
             },
         },
         {
-            method: "PATCH",
-            path: "/v0/sessions/:sessionId/model",
-            handle: async ({ request }) => {
-                await readValidatedBody(request, modelSchema);
-                throw new AgentHttpError(409, "Model changes require a queued message.");
-            },
-        },
-        {
-            method: "PATCH",
-            path: "/v0/sessions/:sessionId/effort",
-            handle: async ({ request }) => {
-                await readValidatedBody(request, effortSchema);
-                throw new AgentHttpError(409, "Effort changes require a queued message.");
-            },
-        },
-        {
-            method: "PATCH",
-            path: "/v0/sessions/:sessionId/service-tier",
-            handle: async ({ request }) => {
-                await readValidatedBody(request, tierSchema);
-                throw new AgentHttpError(409, "Service-tier changes require a queued message.");
-            },
-        },
-        {
-            method: "PATCH",
-            path: "/v0/sessions/:sessionId/permissions",
-            handle: async ({ request }) => {
-                await readValidatedBody(request, permissionsSchema);
-                throw new AgentHttpError(409, "Permission changes require a queued message.");
-            },
-        },
-        {
             method: "POST",
             path: "/v0/sessions/:sessionId/goal",
             handle: async ({ ctx, dependencies, request, response, url }) => {
@@ -929,9 +905,7 @@ function createMutationRoutes(): AgentHttpRouteGroup["routes"] {
                         await projects.prepareSessionTransfer(
                             ctx,
                             projectId,
-                            session.scope.kind === "workspace"
-                                ? session.scope.workspaceId
-                                : "",
+                            session.scope.kind === "workspace" ? session.scope.workspaceId : "",
                             body.workspaceId,
                             // Stopping the agent is the last thing before the working tree moves
                             // under it, so a run cannot write into the folder being replaced.
@@ -1129,12 +1103,14 @@ function sessionSummaryValue(
         archived: session.archived,
         createdAt: session.createdAt,
         cwd: session.cwd,
+        effort: session.effort ?? defaults?.effort,
         id: session.id,
         modelId: session.modelId ?? defaults?.model ?? catalog.defaultModelId,
         ownerInstanceId: session.ownerInstanceId,
         permissionMode: session.permissionMode ?? defaults?.permissionMode ?? "auto",
         providerId: session.providerId ?? defaults?.provider ?? catalog.defaultProviderId,
         scope: session.scope,
+        ...(session.serviceTier === undefined ? {} : { serviceTier: session.serviceTier }),
         status: session.archived ? "archived" : session.status,
         titleStatus: session.titleStatus === "ready" ? "ready" : "idle",
         ...(session.unread
@@ -1217,8 +1193,11 @@ async function rigTranscript(
             messageIds: string[];
         }
     >();
-    const notices: { readonly createdAt: number; readonly eventId: string; readonly message: unknown }[] =
-        [];
+    const notices: {
+        readonly createdAt: number;
+        readonly eventId: string;
+        readonly message: unknown;
+    }[] = [];
     for (const { event, value } of projected) {
         const data = recordValue(value.data);
         if (value.type === "system_notice" && data !== undefined) {
@@ -1352,22 +1331,33 @@ async function sendMessage(
 ): Promise<Record<string, unknown>> {
     await nameFromFirstMessage(ctx, dependencies, session, body.displayText ?? body.text);
     const resumeCursor = dependencies.agent.modules.events.cursor();
+    const options = messageOptions(
+        body,
+        session,
+        dependencies.agent.effectiveSelection,
+        dependencies.agent.system.models,
+    );
     let acceptance;
     try {
         acceptance = await dependencies.agent.system.send(
             ctx,
             session.agentId,
             messageFromBody(body),
-            messageOptions(
-                body,
-                session,
-                dependencies.agent.effectiveSelection,
-                dependencies.agent.system.models,
-            ),
+            options,
         );
     } catch (cause) {
         throw new Error("Agent Base rejected the session message.", { cause });
     }
+    await persistSessionSelection(
+        ctx,
+        dependencies,
+        session,
+        selectionFromMessageOptions(
+            options,
+            sessionSelection(session, dependencies.agent.effectiveSelection),
+        ),
+        body.mutationId,
+    );
     return {
         accepted: acceptance.accepted,
         delivery: acceptance.delivery,
@@ -1439,16 +1429,27 @@ async function steerMessage(
     body: SubmitMessage,
 ): Promise<Record<string, unknown>> {
     const resumeCursor = dependencies.agent.modules.events.cursor();
+    const options = messageOptions(
+        body,
+        session,
+        dependencies.agent.effectiveSelection,
+        dependencies.agent.system.models,
+    );
     const acceptance = await dependencies.agent.system.steer(
         ctx,
         session.agentId,
         messageFromBody(body),
-        messageOptions(
-            body,
-            session,
-            dependencies.agent.effectiveSelection,
-            dependencies.agent.system.models,
+        options,
+    );
+    await persistSessionSelection(
+        ctx,
+        dependencies,
+        session,
+        selectionFromMessageOptions(
+            options,
+            sessionSelection(session, dependencies.agent.effectiveSelection),
         ),
+        body.mutationId,
     );
     return {
         accepted: acceptance.accepted,
@@ -1479,7 +1480,11 @@ function messageOptions(
     return mergeAgentMessageOptions(defaults, models, {
         ...(body.await === undefined ? {} : { await: body.await }),
         ...(body.clientSubmissionId === undefined ? {} : { id: body.clientSubmissionId }),
-        ...(body.effort === undefined ? {} : { effort: body.effort }),
+        ...(body.effort === undefined
+            ? session.effort === undefined
+                ? {}
+                : { effort: session.effort }
+            : { effort: body.effort }),
         ...(body.modelId === undefined
             ? session.modelId === undefined
                 ? {}
@@ -1504,8 +1509,108 @@ function messageOptions(
                 : { provider: session.providerId }
             : { provider: body.providerId }),
         ...(body.serviceTier === undefined
-            ? {}
+            ? session.serviceTier === undefined
+                ? {}
+                : { serviceTier: "priority" as const }
             : { serviceTier: body.serviceTier === null ? null : ("priority" as const) }),
+    });
+}
+
+function sessionSelection(
+    session: ConversationRecord,
+    defaults: EffectiveAgentSelection,
+): SessionSelection {
+    const selection = {
+        effort: session.effort ?? defaults.effort,
+        modelId: session.modelId ?? defaults.model,
+        permissionMode: Value.Check(agentPermissionModeSchema, session.permissionMode)
+            ? session.permissionMode
+            : defaults.permissionMode,
+        providerId: session.providerId ?? defaults.provider,
+        serviceTier: session.serviceTier ?? null,
+    };
+    if (!Value.Check(sessionSelectionSchema, selection)) {
+        throw new Error("The session has an invalid model selection.");
+    }
+    return selection;
+}
+
+function selectionFromMessageOptions(
+    options: AgentBaseMessageOptions,
+    current: SessionSelection,
+): SessionSelection {
+    return {
+        effort: options.effort ?? current.effort,
+        modelId: options.model ?? current.modelId,
+        permissionMode: options.permissionMode ?? current.permissionMode,
+        providerId: options.provider ?? current.providerId,
+        serviceTier: options.serviceTier === "priority" ? "fast" : null,
+    };
+}
+
+async function persistSessionSelection(
+    ctx: import("@steve.kite/stdlib").Context,
+    dependencies: LoadedSessionDependencies,
+    session: ConversationRecord,
+    next: SessionSelection,
+    mutationId?: string,
+): Promise<ConversationRecord> {
+    if (!Value.Check(sessionSelectionSchema, next)) {
+        throw new Error("The requested session selection is invalid.");
+    }
+    const current = sessionSelection(session, dependencies.agent.effectiveSelection);
+    const changed: SessionConfigurationChangedPayload["changed"][number][] = [];
+    if (current.modelId !== next.modelId || current.providerId !== next.providerId) {
+        changed.push("model");
+    }
+    if (current.effort !== next.effort) changed.push("effort");
+    if (current.serviceTier !== next.serviceTier) changed.push("serviceTier");
+    const permissionChanged = current.permissionMode !== next.permissionMode;
+    if (changed.length === 0 && !permissionChanged) return session;
+
+    return await ctx.inTx(async (txCtx) => {
+        const updated = await dependencies.agent.modules.conversations.update(txCtx, session.id, {
+            effort: next.effort,
+            modelId: next.modelId,
+            permissionMode: next.permissionMode,
+            providerId: next.providerId,
+            serviceTier: next.serviceTier,
+        });
+        if (changed.length > 0) {
+            const payload: SessionConfigurationChangedPayload = {
+                changed,
+                effort: next.effort,
+                modelId: next.modelId,
+                ...(mutationId === undefined ? {} : { mutationId }),
+                providerId: next.providerId,
+                serviceTier: next.serviceTier,
+            };
+            await dependencies.agent.modules.conversations.appendEvent(txCtx, session.id, {
+                payload,
+                type: "session_configuration_changed",
+            });
+            await dependencies.agent.modules.events.record(txCtx, {
+                agentId: session.agentId,
+                payload,
+                type: "session.configuration-changed",
+            });
+        }
+        if (permissionChanged) {
+            const payload: PermissionModeChangedPayload = {
+                ...(mutationId === undefined ? {} : { mutationId }),
+                permissionMode: next.permissionMode,
+            };
+            await dependencies.agent.modules.conversations.appendEvent(txCtx, session.id, {
+                payload,
+                type: "permission_mode_changed",
+            });
+            await dependencies.agent.modules.events.record(txCtx, {
+                agentId: session.agentId,
+                payload,
+                type: "session.permission-mode-changed",
+            });
+        }
+        return updated;
     });
 }
 
@@ -1772,6 +1877,26 @@ export function projectSessionEvent(
         sessionId: sessionIdValue,
         worktreeSupport: "unknown",
     };
+    if (
+        event.type === "session.configuration-changed" &&
+        Value.Check(sessionConfigurationChangedPayloadSchema, payload)
+    ) {
+        return {
+            ...base,
+            data: payload,
+            type: "session_configuration_changed",
+        };
+    }
+    if (
+        event.type === "session.permission-mode-changed" &&
+        Value.Check(permissionModeChangedPayloadSchema, payload)
+    ) {
+        return {
+            ...base,
+            data: payload,
+            type: "permission_mode_changed",
+        };
+    }
     const runId = typeof payload.runId === "string" ? payload.runId : undefined;
     if (event.type === "message.accepted" && runId !== undefined) {
         const message = recordValue(payload.message);
@@ -1931,7 +2056,9 @@ function projectPermissionEvent(
         const timedOut = permissionEvent.kind === "timed_out";
         return systemNotice(
             base,
-            timedOut ? "Automatic permission review did not finish" : "Automatic permission review could not run",
+            timedOut
+                ? "Automatic permission review did not finish"
+                : "Automatic permission review could not run",
             timedOut
                 ? "The action was not performed because its automatic permission review did not finish in time. No judgment was made that the action was unsafe."
                 : "The action was not performed because no reliable automatic permission decision was available. No judgment was made about the action itself.",

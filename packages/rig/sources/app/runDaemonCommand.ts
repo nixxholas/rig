@@ -4,7 +4,7 @@ import {
     readTokenIfPresent,
     stopLocalProtocolServer,
 } from "../client/index.js";
-import { getEnvironmentLocalServerPaths } from "../server/index.js";
+import { getHappyDaemonPaths } from "../daemon/index.js";
 import type { HealthResponse } from "../protocol/index.js";
 
 export type DaemonCommand = "reload" | "start" | "stop" | "status";
@@ -15,7 +15,7 @@ export async function runDaemonCommand(command: DaemonCommand): Promise<void> {
             confirmRestart: async () => true,
         });
         console.log(`Daemon is running at ${connection.paths.socketPath}`);
-        console.log(`Daemon diagnostics: ${connection.paths.diagnosticsPath}`);
+        console.log(`Daemon log: ${connection.paths.logPath}`);
         return;
     }
 
@@ -28,70 +28,29 @@ export async function runDaemonCommand(command: DaemonCommand): Promise<void> {
             confirmRestart: async () => true,
         });
         console.log(`Daemon is running at ${reloaded.paths.socketPath}`);
-        console.log(`Daemon diagnostics: ${reloaded.paths.diagnosticsPath}`);
+        console.log(`Daemon log: ${reloaded.paths.logPath}`);
         return;
     }
 
     if (command === "status") {
+        const paths = getHappyDaemonPaths();
         if (connection === undefined) {
             console.log("Daemon is not running.");
-            console.log(`Daemon diagnostics: ${getEnvironmentLocalServerPaths().diagnosticsPath}`);
+            console.log(`Daemon log: ${paths.logPath}`);
             return;
         }
         if (connection.health.status === "error") {
             console.log(`Daemon could not start: ${connection.health.error}`);
-            console.log(`Daemon diagnostics: ${getEnvironmentLocalServerPaths().diagnosticsPath}`);
+            console.log(`Daemon log: ${paths.logPath}`);
             return;
         }
         if (connection.health.status === "starting") {
             console.log(`Daemon is starting at ${connection.client.socketPath}`);
-            console.log(`Daemon diagnostics: ${getEnvironmentLocalServerPaths().diagnosticsPath}`);
+            console.log(`Daemon log: ${paths.logPath}`);
             return;
         }
         console.log(`Daemon is running at ${connection.client.socketPath}`);
-        try {
-            const p2p = await connection.client.getP2pStatus();
-            if (p2p.transports.length === 0) console.log("P2P networking is disabled.");
-            if (p2p.instanceId !== undefined) {
-                console.log(`P2P instance: ${p2p.instanceId}`);
-            }
-            if (p2p.publicKey !== undefined) {
-                console.log(`P2P public key: ${p2p.publicKey}`);
-            }
-            for (const transport of p2p.transports) {
-                if (transport.state === "unavailable") {
-                    console.log(
-                        `${describeTransport(transport.transport)} P2P networking is unavailable: ${transport.error}`,
-                    );
-                    continue;
-                }
-                const label = describeTransport(transport.transport);
-                if ("localAddress" in transport && transport.localAddress !== undefined) {
-                    console.log(`${label} P2P endpoint: ${transport.localAddress}`);
-                }
-                if ("apiExposed" in transport) {
-                    console.log(
-                        `${label} P2P API sharing: ${transport.apiExposed ? "Enabled" : "Disabled"}`,
-                    );
-                }
-                for (const peer of transport.peers) {
-                    const latency =
-                        peer.rttMs === undefined ? "" : ` (${String(Math.round(peer.rttMs))} ms)`;
-                    const error = peer.error === undefined ? "" : ` — ${peer.error}`;
-                    const identity =
-                        peer.peerId === undefined
-                            ? `unverified endpoint ${peer.address}`
-                            : `${peer.peerId} via endpoint ${peer.address}`;
-                    console.log(
-                        `${label} P2P peer ${identity}: ${describePeerStatus(peer.status)}${latency}${error}`,
-                    );
-                }
-            }
-        } catch {
-            // A daemon from before the P2P status route still has a useful status.
-            console.log("P2P status is unavailable from this daemon.");
-        }
-        console.log(`Daemon diagnostics: ${getEnvironmentLocalServerPaths().diagnosticsPath}`);
+        console.log(`Daemon log: ${paths.logPath}`);
         return;
     }
 
@@ -103,18 +62,6 @@ export async function runDaemonCommand(command: DaemonCommand): Promise<void> {
     console.log("Daemon is stopping.");
 }
 
-function describeTransport(transport: "direct" | "iroh" | "ssh"): string {
-    if (transport === "direct") return "Direct";
-    if (transport === "ssh") return "SSH";
-    return "Iroh";
-}
-
-function describePeerStatus(status: "connected" | "connecting" | "unreachable"): string {
-    if (status === "connected") return "Connected";
-    if (status === "connecting") return "Connecting";
-    return "Unreachable";
-}
-
 async function connectToExistingDaemon(): Promise<
     | {
           client: ProtocolHttpClient;
@@ -122,13 +69,14 @@ async function connectToExistingDaemon(): Promise<
       }
     | undefined
 > {
-    const paths = getEnvironmentLocalServerPaths();
+    const paths = getHappyDaemonPaths();
     const token = await readTokenIfPresent(paths.tokenPath);
     if (token === undefined) {
         return undefined;
     }
 
     const client = new ProtocolHttpClient({
+        pathPrefix: "/v0",
         socketPath: paths.socketPath,
         token,
     });

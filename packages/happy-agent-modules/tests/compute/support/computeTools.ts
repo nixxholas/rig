@@ -13,6 +13,7 @@ import {
     type HostCompute,
     type HostComputeProvider,
 } from "../../../sources/index.js";
+import { resolveModuleHooks } from "../../support/moduleHooks.js";
 
 /** One agent's compute tools, with the module they came from and a way to reach one by name. */
 export interface ComputeToolset {
@@ -110,7 +111,8 @@ export async function computeToolset(
         },
         kv,
     } as AgentModuleScope;
-    const tools = await module.tools(agentCtx, scope);
+    const hooks = await resolveModuleHooks(agentCtx, module);
+    const tools = await hooks.tools!(agentCtx, scope);
     const call: AgentToolCall = {
         id: "compute-test-call",
         providerCallId: "compute-test-provider-call",

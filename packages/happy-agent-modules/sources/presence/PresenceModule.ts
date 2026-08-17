@@ -1,5 +1,6 @@
 import {
     type AgentModule,
+    type AgentModuleHooks,
     type AgentModuleScope,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
@@ -138,9 +139,9 @@ export class PresenceModule implements AgentModule, PresenceReader {
         };
     }
 
-    readonly beforeStart = async (ctx: Context): Promise<void> => {
+    readonly beforeStart = async (ctx: Context): Promise<AgentModuleHooks> => {
         const initialState = this.#initialState;
-        if (initialState === undefined) return;
+        if (initialState === undefined) return this.#hooks;
         await ctx.inTx(async (txCtx) => {
             const existing = await this.#readConfigured(txCtx);
             if (existing === undefined) {
@@ -157,6 +158,7 @@ export class PresenceModule implements AgentModule, PresenceReader {
                 await this.#store.set(txCtx, cloneValue(normalized));
             }
         });
+        return this.#hooks;
     };
 
     /** Read the host-resolved effective presence at the injected clock instant. */
@@ -419,15 +421,17 @@ export class PresenceModule implements AgentModule, PresenceReader {
         });
     }
 
-    readonly instructions = async (ctx: Context, _scope: AgentModuleScope): Promise<string> => {
-        const current = await this.read(ctx);
-        return current === undefined ? "" : formatPresenceInstruction(current);
-    };
+    readonly #hooks: AgentModuleHooks = {
+        instructions: async (ctx: Context, _scope: AgentModuleScope): Promise<string> => {
+            const current = await this.read(ctx);
+            return current === undefined ? "" : formatPresenceInstruction(current);
+        },
 
-    readonly tools = (_ctx: Context, _scope: AgentModuleScope): readonly AnyAgentTool[] => {
-        const tools: AnyAgentTool[] = [getPresenceTool(this), listPresenceTool(this)];
-        if (this.#allowModelMutation) tools.push(setPresenceTool(this));
-        return tools;
+        tools: (_ctx: Context, _scope: AgentModuleScope): readonly AnyAgentTool[] => {
+            const tools: AnyAgentTool[] = [getPresenceTool(this), listPresenceTool(this)];
+            if (this.#allowModelMutation) tools.push(setPresenceTool(this));
+            return tools;
+        },
     };
 
     async #mutate<Result>(

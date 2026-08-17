@@ -2,8 +2,8 @@ import { runDaemonCommand, type DaemonCommand } from "./runDaemonCommand.js";
 import { runApp, type RunAppOptions } from "./runApp.js";
 import { runMonit } from "./runMonit.js";
 import { runExec } from "./runExec.js";
-import { parsePermissionMode } from "../permissions/index.js";
-import { runLocalProtocolServer } from "../server/index.js";
+import { parsePermissionMode } from "./parsePermissionMode.js";
+import { runHappyAgentServer } from "../daemon/index.js";
 import { parseExecCommand } from "./parseExecCommand.js";
 import { parseDesktopCommand } from "./parseDesktopCommand.js";
 import { parseSessionCommand } from "./parseSessionCommand.js";
@@ -12,23 +12,13 @@ import { formatCliHelp, formatDesktopCliHelp } from "./formatCliHelp.js";
 import { readPackageVersion } from "../readPackageVersion.js";
 import { RigUserError } from "../RigUserError.js";
 import { rigInspectionExitCode, runRigInspection } from "./runRigInspection.js";
-import { runP2pBridgeCommand } from "./runP2pBridgeCommand.js";
-import { runP2pPairingCommand } from "./runP2pPairingCommand.js";
 import { runUpgradeCommand } from "./runUpgradeCommand.js";
 import type { Context, Logger } from "@steve.kite/stdlib";
 import { initializeDaemonContext, withProcessContext } from "../observability/index.js";
 
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<0 | 2 | void> {
     if (argv.length === 1 && argv[0] === "--server") {
-        await runLocalProtocolServer({
-            happyIntegration: "enabled",
-            ...(process.env.RIG_SERVER_SOCKET_PATH !== undefined
-                ? { socketPath: process.env.RIG_SERVER_SOCKET_PATH }
-                : {}),
-            ...(process.env.RIG_SERVER_TOKEN_PATH !== undefined
-                ? { tokenPath: process.env.RIG_SERVER_TOKEN_PATH }
-                : {}),
-        });
+        await runHappyAgentServer();
         return;
     }
     initializeDaemonContext(cliLogger());
@@ -36,11 +26,6 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
 }
 
 async function runMain(appCtx: Context, argv: readonly string[]): Promise<0 | 2 | void> {
-    if (argv.length === 3 && argv[0] === "p2p" && argv[1] === "bridge" && argv[2] === "--stdio") {
-        await runP2pBridgeCommand();
-        return;
-    }
-
     const parsedEnvironment = parseSessionEnvironmentOptions(argv);
     argv = parsedEnvironment.remaining;
     const [command, ...commandArgs] = argv;
@@ -75,13 +60,11 @@ async function runMain(appCtx: Context, argv: readonly string[]): Promise<0 | 2 
     const options: RunAppOptions = {
         cwd: process.cwd(),
         ...(parsedEnvironment.debug === true ? { debug: true } : {}),
-        ...(parsedEnvironment.docker === undefined ? {} : { docker: parsedEnvironment.docker }),
     };
     if (command === "exec") {
         await runExec({
             ...parseExecCommand(commandArgs),
             ...(parsedEnvironment.debug === true ? { debug: true } : {}),
-            ...(parsedEnvironment.docker === undefined ? {} : { docker: parsedEnvironment.docker }),
         });
         return;
     }
@@ -95,12 +78,6 @@ async function runMain(appCtx: Context, argv: readonly string[]): Promise<0 | 2 
         return;
     }
     if (command === "resume" || command === "fork") {
-        if (parsedEnvironment.docker !== undefined) {
-            throw new RigUserError(
-                "A resumed or forked session keeps its existing execution environment.",
-                { hint: "Drop the environment flags, or start a new session with rig." },
-            );
-        }
         options.sessionSelection = { command, selection: parseSessionCommand(commandArgs) };
     }
     if (command === "daemon") {
@@ -113,34 +90,6 @@ async function runMain(appCtx: Context, argv: readonly string[]): Promise<0 | 2 
         await runDaemonCommand(daemonCommand);
         return;
     }
-    if (command === "invite") {
-        if (commandArgs.length !== 0) {
-            throw new RigUserError("Rig invite does not take arguments.", {
-                hint: "Usage: rig invite",
-            });
-        }
-        await runP2pPairingCommand("invite");
-        return;
-    }
-    if (command === "join") {
-        if (commandArgs.length !== 1) {
-            throw new RigUserError("Rig needs one invitation link.", {
-                hint: "Usage: rig join <rig://join/...>",
-            });
-        }
-        await runP2pPairingCommand("join", commandArgs[0]);
-        return;
-    }
-    if (command === "happy") {
-        if (commandArgs.length !== 1 || commandArgs[0] !== "auth") {
-            throw new RigUserError("Rig only supports one Happy command.", {
-                hint: "Usage: rig happy auth",
-            });
-        }
-        const { runHappyAuthCommand } = await import("../happy/index.js");
-        await runHappyAuthCommand();
-        return;
-    }
     if (command === "monit") {
         await runMonit();
         return;
@@ -150,9 +99,6 @@ async function runMain(appCtx: Context, argv: readonly string[]): Promise<0 | 2 
         throw new RigUserError(`Rig does not have ${kind} called '${command}'.`, {
             hint: "Run rig --help to see everything Rig can do.",
         });
-    }
-    if (process.env.OPENAI_API_KEY !== undefined) {
-        options.apiKey = process.env.OPENAI_API_KEY;
     }
     if (process.env.RIG_EFFORT !== undefined) {
         options.effort = process.env.RIG_EFFORT;

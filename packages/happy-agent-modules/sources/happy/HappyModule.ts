@@ -6,6 +6,7 @@ import {
     defineAgentTool,
     type AgentDatabase,
     type AgentModule,
+    type AgentModuleHooks,
     type AgentModuleScope,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
@@ -221,44 +222,53 @@ export class HappyModule implements AgentModule {
         return rows.map((row) => parseNotification(row));
     }
 
-    readonly instructions = (): string =>
-        "Happy is the connected client. Use notify_happy for an explicit user-visible notification and set_happy_status to keep the client status current. Keep notifications concise and never include secrets.";
+    readonly #hooks: AgentModuleHooks = {
+        instructions: (): string =>
+            "Happy is the connected client. Use notify_happy for an explicit user-visible notification and set_happy_status to keep the client status current. Keep notifications concise and never include secrets.",
 
-    readonly tools = (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => [
-        defineAgentTool({
-            name: "notify_happy",
-            description: "Send a concise user-visible notification to the connected Happy client.",
-            parameters: happyNotificationToolInputSchema,
-            returnType: happyNotificationSchema,
-            durable: false,
-            transactional: true,
-            shouldReviewInAutoMode: () => false,
-            execute: async (ctx, input) => await this.notify(ctx, scope.agent.id, input),
-            toLLM: (result) => [{ type: "text", text: formatNotification(result) }],
-        }),
-        defineAgentTool({
-            name: "set_happy_status",
-            description: "Set the short status shown for this agent in the connected Happy client.",
-            parameters: happyStatusToolInputSchema,
-            returnType: happyStatusRecordSchema,
-            durable: true,
-            transactional: true,
-            shouldReviewInAutoMode: () => false,
-            execute: async (ctx, input) => await this.setStatus(ctx, scope.agent.id, input),
-            toLLM: (result) => [{ type: "text", text: formatStatus(result) }],
-        }),
-        defineAgentTool({
-            name: "get_happy_status",
-            description: "Read the status currently shown for this agent in Happy.",
-            parameters: Type.Object({}, exact),
-            returnType: Type.Union([happyStatusRecordSchema, Type.Null()]),
-            shouldReviewInAutoMode: () => false,
-            execute: async (ctx) => (await this.getStatus(ctx, scope.agent.id)) ?? null,
-            toLLM: (result) => [
-                { type: "text", text: result === null ? "No Happy status." : formatStatus(result) },
-            ],
-        }),
-    ];
+        tools: (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => [
+            defineAgentTool({
+                name: "notify_happy",
+                description:
+                    "Send a concise user-visible notification to the connected Happy client.",
+                parameters: happyNotificationToolInputSchema,
+                returnType: happyNotificationSchema,
+                durable: false,
+                transactional: true,
+                shouldReviewInAutoMode: () => false,
+                execute: async (ctx, input) => await this.notify(ctx, scope.agent.id, input),
+                toLLM: (result) => [{ type: "text", text: formatNotification(result) }],
+            }),
+            defineAgentTool({
+                name: "set_happy_status",
+                description:
+                    "Set the short status shown for this agent in the connected Happy client.",
+                parameters: happyStatusToolInputSchema,
+                returnType: happyStatusRecordSchema,
+                durable: true,
+                transactional: true,
+                shouldReviewInAutoMode: () => false,
+                execute: async (ctx, input) => await this.setStatus(ctx, scope.agent.id, input),
+                toLLM: (result) => [{ type: "text", text: formatStatus(result) }],
+            }),
+            defineAgentTool({
+                name: "get_happy_status",
+                description: "Read the status currently shown for this agent in Happy.",
+                parameters: Type.Object({}, exact),
+                returnType: Type.Union([happyStatusRecordSchema, Type.Null()]),
+                shouldReviewInAutoMode: () => false,
+                execute: async (ctx) => (await this.getStatus(ctx, scope.agent.id)) ?? null,
+                toLLM: (result) => [
+                    {
+                        type: "text",
+                        text: result === null ? "No Happy status." : formatStatus(result),
+                    },
+                ],
+            }),
+        ],
+    };
+
+    readonly beforeStart = (): AgentModuleHooks => this.#hooks;
 
     async #findStatus(ctx: Context, agentId: string): Promise<HappyStatusRecord | undefined> {
         const rows = await agentDatabaseRows<StatusRow>(

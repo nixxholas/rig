@@ -1,4 +1,4 @@
-import type { PermissionMode } from "../permissions/index.js";
+import type { PermissionMode } from "../protocol/index.js";
 
 export function humanizePermissionMode(mode: PermissionMode): string {
     if (mode === "auto") return "Auto";

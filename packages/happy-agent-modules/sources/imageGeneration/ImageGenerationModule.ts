@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import {
     type AgentModule,
+    type AgentModuleHooks,
     type AgentModuleScope,
     type AgentKV,
     type AnyAgentTool,
@@ -310,22 +311,26 @@ export class ImageGenerationModule implements AgentModule {
         return true;
     }
 
-    /** Provider-shaped ordinary tool names over the same provider-neutral host generator. */
-    readonly tools = (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => {
-        this.#catalogs.set(scope.agent.id, scope.kv.scoped("catalog"));
-        const codexSurface =
-            scope.agent.providerKind === "codex" ||
-            (scope.agent.providerKind === "bedrock" &&
-                scope.agent.model?.startsWith("openai/") === true);
-        return [
-            generateImageTool(
-                this,
-                scope.agent.id,
-                codexSurface ? "codex_imagegen" : "imagegen",
-                scope.agent.provider,
-            ),
-        ];
+    readonly #hooks: AgentModuleHooks = {
+        /** Provider-shaped ordinary tool names over the same provider-neutral host generator. */
+        tools: (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => {
+            this.#catalogs.set(scope.agent.id, scope.kv.scoped("catalog"));
+            const codexSurface =
+                scope.agent.providerKind === "codex" ||
+                (scope.agent.providerKind === "bedrock" &&
+                    scope.agent.model?.startsWith("openai/") === true);
+            return [
+                generateImageTool(
+                    this,
+                    scope.agent.id,
+                    codexSurface ? "codex_imagegen" : "imagegen",
+                    scope.agent.provider,
+                ),
+            ];
+        },
     };
+
+    readonly beforeStart = (): AgentModuleHooks => this.#hooks;
 
     /** Render bounded metadata the model can use without exposing image bytes. */
     formatForModel(

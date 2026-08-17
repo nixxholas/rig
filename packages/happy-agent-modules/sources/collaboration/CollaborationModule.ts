@@ -5,6 +5,7 @@ import {
     type AgentConfig,
     type AgentModel,
     type AgentModule,
+    type AgentModuleHooks,
     type AgentModuleScope,
     type AgentSystemRef,
     type AnyAgentTool,
@@ -52,11 +53,6 @@ export class CollaborationModule implements AgentModule {
     readonly migrations = collaborationMigrations;
 
     #agents: AgentSystemRef | undefined;
-
-    /** The collection every collaborator is created in and every message is delivered through. */
-    readonly beforeStart = (_ctx: Context, agents: AgentSystemRef): void => {
-        this.#agents = agents;
-    };
 
     /**
      * Create a collaborator and hand it its opening task. The call returns as soon as the work is
@@ -128,48 +124,72 @@ export class CollaborationModule implements AgentModule {
         await this.#requireAgents().abort(ctx, targetAgentId);
     }
 
-    /**
-     * Who this agent can reach, by ID.
-     *
-     * An agent that cannot name its creator cannot send it anything. The sender's name is in each
-     * delivered message, but that line ages out of history on compaction — while the relationship
-     * does not. Reading it from the agent collection every turn means the address is always
-     * available and never stored twice.
-     */
-    readonly instructions = async (ctx: Context, scope: AgentModuleScope): Promise<string> => {
-        const agents = this.#requireAgents();
-        const [parent, children] = await Promise.all([
-            agents.parentOf(ctx, scope.agent.id),
-            agents.childOf(ctx, scope.agent.id),
-        ]);
-        const lines: string[] = [];
-        if (parent !== null) {
-            lines.push(
-                `You were created by agent ${parent}. When you stop working, whatever you said last is reported to it automatically, so finish by stating your answer. Use send_agent_message only to tell it something before then.`,
-            );
-        }
-        if (children.length > 0) {
-            lines.push(
-                `Collaborators you created: ${children.join(", ")}. Each reports back on its own when it finishes; nothing waits for them.`,
-            );
-        }
-        return lines.join("\n");
+    readonly #hooks: AgentModuleHooks = {
+        /**
+         * Who this agent can reach, by ID.
+         *
+         * An agent that cannot name its creator cannot send it anything. The sender's name is in each
+         * delivered message, but that line ages out of history on compaction — while the relationship
+         * does not. Reading it from the agent collection every turn means the address is always
+         * available and never stored twice.
+         */
+        instructions: async (ctx: Context, scope: AgentModuleScope): Promise<string> => {
+            const agents = this.#requireAgents();
+            const [parent, children] = await Promise.all([
+                agents.parentOf(ctx, scope.agent.id),
+                agents.childOf(ctx, scope.agent.id),
+            ]);
+            const lines: string[] = [];
+            if (parent !== null) {
+                lines.push(
+                    `You were created by agent ${parent}. When you stop working, whatever you said last is reported to it automatically, so finish by stating your answer. Use send_agent_message only to tell it something before then.`,
+                );
+            }
+            if (children.length > 0) {
+                lines.push(
+                    `Collaborators you created: ${children.join(", ")}. Each reports back on its own when it finishes; nothing waits for them.`,
+                );
+            }
+            return lines.join("\n");
+        },
+
+        /**
+         * Keep the last thing the model said, for as long as the run that said it. The run store is
+         * the right place: it exists only while the agent is working, a crash mid-run leaves a note
+         * the resumed run can still read, and a finished run leaves nothing behind.
+         */
+        onEventTransact: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+            event: AgentBasePersistedEvent,
+        ): Promise<void> => {
+            if (event.type !== "text_end") return;
+            const text = event.block.text.trim();
+            if (text === "") return;
+            await scope.runKV.write(ctx, LAST_TEXT_KEY, text);
+        },
+
+        afterAgentSettledTransact: (
+            ctx: Context,
+            scope: AgentModuleScope,
+            settlement: AgentBaseSettlement,
+        ): Promise<void> => this.#afterAgentSettledTransact(ctx, scope, settlement),
+
+        /**
+         * The tool surface is fixed for one collection's models, so a model sees the same capabilities
+         * on every turn and provider prompt caching still applies.
+         */
+        tools: (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => [
+            createAgentTool(this, scope.agent.id, this.#requireAgents().models),
+            sendMessageTool(this, scope.agent.id),
+            interruptAgentTool(this, scope.agent.id),
+        ],
     };
 
-    /**
-     * Keep the last thing the model said, for as long as the run that said it. The run store is
-     * the right place: it exists only while the agent is working, a crash mid-run leaves a note
-     * the resumed run can still read, and a finished run leaves nothing behind.
-     */
-    readonly onEventTransact = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-        event: AgentBasePersistedEvent,
-    ): Promise<void> => {
-        if (event.type !== "text_end") return;
-        const text = event.block.text.trim();
-        if (text === "") return;
-        await scope.runKV.write(ctx, LAST_TEXT_KEY, text);
+    /** The collection every collaborator is created in and every message is delivered through. */
+    readonly beforeStart = (_ctx: Context, agents: AgentSystemRef): AgentModuleHooks => {
+        this.#agents = agents;
+        return this.#hooks;
     };
 
     /**
@@ -188,11 +208,11 @@ export class CollaborationModule implements AgentModule {
      * leaving the run recorded as unfinished, so the report is made again the next time it settles
      * rather than being lost.
      */
-    readonly afterAgentSettledTransact = async (
+    async #afterAgentSettledTransact(
         ctx: Context,
         scope: AgentModuleScope,
         settlement: AgentBaseSettlement,
-    ): Promise<void> => {
+    ): Promise<void> {
         const agents = this.#requireAgents();
         const parent = await agents.parentOf(ctx, scope.agent.id);
         if (parent === null) return;
@@ -224,17 +244,7 @@ export class CollaborationModule implements AgentModule {
                 },
             },
         );
-    };
-
-    /**
-     * The tool surface is fixed for one collection's models, so a model sees the same capabilities
-     * on every turn and provider prompt caching still applies.
-     */
-    readonly tools = (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => [
-        createAgentTool(this, scope.agent.id, this.#requireAgents().models),
-        sendMessageTool(this, scope.agent.id),
-        interruptAgentTool(this, scope.agent.id),
-    ];
+    }
 
     /**
      * Put one message in an agent's inbox.

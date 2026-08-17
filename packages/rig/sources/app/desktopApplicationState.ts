@@ -32,12 +32,8 @@ export async function desktopApplicationContentHash(
         "packages/rig/package.json",
         "packages/rig/scripts",
         "packages/rig/sources",
-        "packages/rig-execution/package.json",
-        "packages/rig-execution/sources",
         "packages/happy-providers/package.json",
         "packages/happy-providers/sources",
-        "packages/rig-codemode-codex/package.json",
-        "packages/rig-codemode-codex/sources",
         "packages/happy-plugins/package.json",
         "packages/happy-plugins/sources",
     ]);

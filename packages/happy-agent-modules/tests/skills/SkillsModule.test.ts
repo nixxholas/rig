@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import { SkillsModule } from "../../sources/skills/index.js";
 import { FakeCompute } from "../compute/support/FakeCompute.js";
+import { resolveModuleHooks } from "../support/moduleHooks.js";
 
 const ctx = createRootContext().named("skills-module-test");
 const agentId = "agent-a";
@@ -69,7 +70,8 @@ describe("SkillsModule", () => {
             content: expect.stringContaining("Package instructions."),
             name: "review",
         });
-        expect(await module.instructions(ctx, scope)).toContain(
+        const hooks = await resolveModuleHooks(ctx, module);
+        expect(await hooks.instructions!(ctx, scope)).toContain(
             "<description>Package review.</description>",
         );
         const firstPage = await module.list(ctx, agentId, { limit: 1 });
@@ -109,7 +111,8 @@ describe("SkillsModule", () => {
             );
         }
         const module = moduleFor(compute);
-        const instructions = await module.instructions(ctx, scope);
+        const hooks = await resolveModuleHooks(ctx, module);
+        const instructions = await hooks.instructions!(ctx, scope);
         expect(instructions.length).toBeLessThanOrEqual(100_000);
         expect(instructions).toContain("<available_skills>");
         expect(instructions).toContain("</available_skills>");
@@ -127,7 +130,8 @@ describe("SkillsModule", () => {
     it("exposes skill tools and rejects malformed compute boundaries", async () => {
         const compute = new FakeCompute();
         const module = moduleFor(compute);
-        expect((await module.tools(ctx, scope)).map((tool) => tool.name)).toEqual([
+        const hooks = await resolveModuleHooks(ctx, module);
+        expect((await hooks.tools!(ctx, scope)).map((tool) => tool.name)).toEqual([
             "list_skills",
             "read_skill",
         ]);
@@ -210,7 +214,8 @@ describe("SkillsModule", () => {
         });
         expect(reads).toEqual(["agent-a:external"]);
 
-        const readTool = (await module.tools(ctx, scope)).find(
+        const hooks = await resolveModuleHooks(ctx, module);
+        const readTool = (await hooks.tools!(ctx, scope)).find(
             (tool) => tool.name === "read_skill",
         );
         if (readTool === undefined) throw new Error("Expected read_skill.");
@@ -238,7 +243,8 @@ describe("SkillsModule", () => {
         await expect(module.read(ctx, agentId, { name: "external" })).resolves.toMatchObject({
             content: "External body.",
         });
-        await expect(module.tools(ctx, scope)).resolves.toHaveLength(2);
+        const hooks = await resolveModuleHooks(ctx, module);
+        await expect(hooks.tools!(ctx, scope)).resolves.toHaveLength(2);
     });
 
     it("does not recurse into dot-directories or node_modules", async () => {

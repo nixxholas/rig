@@ -1,25 +1,12 @@
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import type { Context } from "@steve.kite/stdlib";
-import type { LoadedHappyAgent } from "../agent/loadHappyAgent.js";
 
 import { readValidatedBody } from "./body.js";
 import { AgentHttpError, sendJson } from "./errors.js";
 import { createRouteGroup, type AgentHttpRouteGroup } from "./router.js";
-import { defaultRigPresence, type RigPresenceConfiguration } from "./rigProtocol.js";
 
 const exact = { additionalProperties: false } as const;
 const emptyArray = Type.Array(Type.Never(), { maxItems: 0 });
-const presenceSummarySchema = Type.Object(
-    {
-        answerWaitMs: Type.Union([Type.Integer({ minimum: 0 }), Type.Null()]),
-        emoji: Type.String({ minLength: 1 }),
-        id: Type.String({ minLength: 1 }),
-        prompt: Type.String({ minLength: 1 }),
-        title: Type.String({ minLength: 1 }),
-    },
-    exact,
-);
 const sessionTerminalHeartbeatSchema = Type.Object(
     {
         connectionId: Type.String({ minLength: 1, maxLength: 128 }),
@@ -134,21 +121,7 @@ export const unavailableHappyCloudResponseSchema = Type.Object(
 );
 
 export const emptyProviderUsageResponseSchema = Type.Object({ providers: emptyArray }, exact);
-export const emptySecretsResponseSchema = Type.Object({ secrets: emptyArray }, exact);
 export const emptyExternalToolCallsResponseSchema = Type.Object({ calls: emptyArray }, exact);
-export const defaultPresenceResponseSchema = Type.Object(
-    {
-        presence: Type.Object(
-            {
-                presence: presenceSummarySchema,
-                presences: Type.Array(presenceSummarySchema, { minItems: 1 }),
-                since: Type.Integer({ minimum: 0 }),
-            },
-            exact,
-        ),
-    },
-    exact,
-);
 
 const SHARING_IDENTITY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
@@ -157,7 +130,6 @@ export function createCompatibilitySnapshots(
     cursor: string,
     options: {
         readonly p2pName?: string;
-        readonly presence?: RigPresenceConfiguration;
     } = {},
 ) {
     const denied = { changedAt: 0, consent: "denied" } as const;
@@ -196,12 +168,8 @@ export function createCompatibilitySnapshots(
             plugins: [],
             version: "empty",
         }),
-        presence: validateSnapshot(defaultPresenceResponseSchema, {
-            presence: defaultRigPresence(Date.now(), options.presence),
-        }),
         profiles: validateSnapshot(emptyProfilesResponseSchema, { profiles: [] }),
         providerUsage: validateSnapshot(emptyProviderUsageResponseSchema, { providers: [] }),
-        secrets: validateSnapshot(emptySecretsResponseSchema, { secrets: [] }),
         sharing: validateSnapshot(unavailableSharingResponseSchema, {
             connection: "disconnected",
             contacts: [],
@@ -232,8 +200,6 @@ export function createCompatibilityRoutes(): AgentHttpRouteGroup {
         readRoute("/v0/onboarding", "onboarding"),
         readRoute("/v0/happy-cloud/status", "happyCloud"),
         readRoute("/v0/provider-usage", "providerUsage"),
-        readRoute("/v0/presence", "presence"),
-        readRoute("/v0/secrets", "secrets"),
         readRoute("/v0/external-tool-calls", "externalToolCalls"),
         readRoute("/v0/sessions/:sessionId/external-tool-calls", "externalToolCalls"),
         {
@@ -274,51 +240,6 @@ export function createCompatibilityRoutes(): AgentHttpRouteGroup {
     ]);
 }
 
-export async function readLiveRigPresence(
-    ctx: Context,
-    agent: LoadedHappyAgent,
-): Promise<Static<typeof defaultPresenceResponseSchema>> {
-    const [current, definitions] = await Promise.all([
-        agent.modules.presence.read(ctx),
-        agent.modules.presence.listPresences(ctx),
-    ]);
-    const presences = definitions.map((definition) => ({
-        answerWaitMs: definition.answerWaitMs,
-        emoji: definition.emoji,
-        id: definition.id,
-        prompt: definition.prompt || "The user is at the keyboard.",
-        title: definition.title,
-    }));
-    const fallback = presences.find((presence) => presence.id === "online") ??
-        presences[0] ?? {
-            answerWaitMs: null,
-            emoji: "🟢",
-            id: "online",
-            prompt: "The user is at the keyboard.",
-            title: "Online",
-        };
-    const currentPresence =
-        current === undefined
-            ? fallback
-            : {
-                  answerWaitMs: current.answerWaitMs,
-                  emoji: current.emoji,
-                  id: current.presenceId,
-                  prompt: current.prompt || "The user is at the keyboard.",
-                  title: current.title,
-              };
-    return validateSnapshot(defaultPresenceResponseSchema, {
-        presence: {
-            presence: currentPresence,
-            presences: presences.length === 0 ? [fallback] : presences,
-            since: Math.max(
-                0,
-                Math.trunc(current?.effectiveFrom ?? current?.changesAt ?? Date.now()),
-            ),
-        },
-    });
-}
-
 function readRoute(
     path: string,
     snapshot: keyof CompatibilitySnapshots,
@@ -326,18 +247,13 @@ function readRoute(
     return {
         method: "GET",
         path,
-        handle: async ({ ctx, dependencies, response }) => {
-            if (snapshot === "presence") {
-                sendJson(response, 200, await readLiveRigPresence(ctx, dependencies.agent));
-                return;
-            }
+        handle: async ({ dependencies, response }) => {
             const snapshots = createCompatibilitySnapshots(
                 dependencies.agent.modules.events.cursor(),
                 {
                     p2pName:
                         dependencies.configuration?.p2pName ??
                         dependencies.agent.configuration.values.p2p.name,
-                    presence: dependencies.agent.configuration.values.presence,
                 },
             );
             sendJson(response, 200, snapshots[snapshot]);

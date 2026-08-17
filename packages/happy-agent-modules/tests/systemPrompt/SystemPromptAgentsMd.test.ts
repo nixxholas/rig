@@ -1,4 +1,4 @@
-import { AgentKV } from "@slopus/happy-agent-base";
+import { AgentKV, type AgentModuleHooks } from "@slopus/happy-agent-base";
 import { createRootContext } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
@@ -13,14 +13,20 @@ import {
 } from "../../sources/systemPrompt/index.js";
 import { FakeCompute } from "../compute/support/FakeCompute.js";
 import { InMemoryPersistence } from "../support/InMemoryPersistence.js";
+import { resolveModuleHooks } from "../support/moduleHooks.js";
 
 const ctx = createRootContext().named("agents-md-module-test");
 const scope = { agent: { id: "agent-a" } } as never;
+const turnStart = { loopId: "loop", turnId: "turn", contextTokens: undefined };
 
-function moduleFor(compute: FakeCompute): SystemPromptModule {
-    return new SystemPromptModule({
+async function moduleFor(
+    compute: FakeCompute,
+): Promise<{ readonly module: SystemPromptModule; readonly hooks: AgentModuleHooks }> {
+    const module = new SystemPromptModule({
         compute: { resolve: async () => compute },
     });
+    const hooks = await resolveModuleHooks(ctx, module);
+    return { module, hooks };
 }
 
 describe("SystemPromptModule AGENTS.md instructions", () => {
@@ -58,7 +64,7 @@ describe("SystemPromptModule AGENTS.md instructions", () => {
         compute.write("/workspace/AGENTS.md", "Use the project conventions.");
         compute.write("/workspace/packages/AGENTS.md", "Use package conventions.");
         compute.write("/workspace/other/AGENTS.md", "Not applicable.");
-        const module = moduleFor(compute);
+        const { module, hooks } = await moduleFor(compute);
 
         expect(module.name).toBe("system-prompt");
         expect("migrations" in module).toBe(false);
@@ -75,7 +81,7 @@ describe("SystemPromptModule AGENTS.md instructions", () => {
                 },
             ],
         });
-        const instructions = await module.instructions(ctx, scope);
+        const instructions = await hooks.instructions!(ctx, scope);
         expect(instructions).toContain("# AGENTS.md instructions for /workspace");
         expect(instructions).toContain("# AGENTS.md instructions for /workspace/packages");
         expect(instructions).not.toContain("Not applicable.");
@@ -93,6 +99,7 @@ describe("SystemPromptModule AGENTS.md instructions", () => {
                 read: async () => "Use concise answers.",
             },
         });
+        const hooks = await resolveModuleHooks(ctx, module);
 
         const snapshot = await module.readAgentsMd(ctx, "agent-a");
         expect(snapshot).toMatchObject({
@@ -105,7 +112,7 @@ describe("SystemPromptModule AGENTS.md instructions", () => {
                 text: "Never expose credentials.",
             },
         });
-        const instructions = await module.instructions(ctx, scope);
+        const instructions = await hooks.instructions!(ctx, scope);
         expect(instructions).toContain(AGENTS_MD_SPEC);
         expect(instructions.indexOf(AGENTS_MD_SPEC)).toBeLessThan(
             instructions.indexOf("# Global AGENTS.md instructions"),
@@ -130,12 +137,13 @@ describe("SystemPromptModule AGENTS.md instructions", () => {
                 },
             },
         });
+        const hooks = await resolveModuleHooks(ctx, module);
 
-        await expect(module.instructions(ctx, scope)).resolves.toContain(
+        await expect(hooks.instructions!(ctx, scope)).resolves.toContain(
             "First global instruction.",
         );
         content = "Updated global instruction.";
-        await expect(module.instructions(ctx, scope)).resolves.toContain(
+        await expect(hooks.instructions!(ctx, scope)).resolves.toContain(
             "Updated global instruction.",
         );
         expect(reads).toBe(2);
@@ -145,12 +153,12 @@ describe("SystemPromptModule AGENTS.md instructions", () => {
         const compute = new FakeCompute("/workspace");
         compute.directories.add("/workspace/.git");
         compute.write("/workspace/AGENTS.md", "x".repeat(MAX_AGENTS_MD_DOCUMENT_BYTES + 1));
-        const module = moduleFor(compute);
+        const { module, hooks } = await moduleFor(compute);
 
         const snapshot = await module.readAgentsMd(ctx, "agent-a");
         expect(snapshot?.truncated).toBe(true);
         expect(snapshot?.documents[0]?.truncated).toBe(true);
-        const instructions = await module.instructions(ctx, scope);
+        const instructions = await hooks.instructions!(ctx, scope);
         expect(new TextEncoder().encode(instructions).byteLength).toBeLessThanOrEqual(
             MAX_SYSTEM_PROMPT_OUTPUT_BYTES,
         );
@@ -169,7 +177,7 @@ describe("SystemPromptModule AGENTS.md instructions", () => {
                 throw readFailure;
             },
         });
-        const module = moduleFor(compute);
+        const { module } = await moduleFor(compute);
 
         const snapshot = await module.readAgentsMd(ctx, "agent-a");
 
@@ -192,7 +200,7 @@ describe("SystemPromptModule AGENTS.md instructions", () => {
                 throw readFailure;
             },
         });
-        const module = moduleFor(compute);
+        const { module } = await moduleFor(compute);
 
         await expect(module.readAgentsMd(ctx, "agent-a")).rejects.toBe(readFailure);
     });
@@ -208,7 +216,7 @@ describe("SystemPromptModule AGENTS.md instructions", () => {
             compute.write(`${directory}/AGENTS.md`, `Instruction ${String(index)}.`);
         }
         compute.write(`${directories.at(-1)}/AGENTS.md`, "Deeper instructions after a gap.");
-        const module = moduleFor(compute);
+        const { module } = await moduleFor(compute);
 
         const snapshot = await module.readAgentsMd(ctx, "agent-a");
 
@@ -227,11 +235,12 @@ describe("SystemPromptModule AGENTS.md instructions", () => {
                 read: async () => "g".repeat(MAX_AGENTS_MD_GLOBAL_BYTES + 1),
             },
         });
+        const hooks = await resolveModuleHooks(ctx, module);
 
         const snapshot = await module.readAgentsMd(ctx, "agent-a");
         expect(snapshot?.truncated).toBe(true);
         expect(snapshot?.global?.truncated).toBe(true);
-        await expect(module.instructions(ctx, scope)).resolves.toContain("truncated");
+        await expect(hooks.instructions!(ctx, scope)).resolves.toContain("truncated");
     });
 
     it("drops a partial Unicode code point at the global byte boundary", async () => {
@@ -270,13 +279,13 @@ describe("SystemPromptModule AGENTS.md instructions", () => {
         const compute = new FakeCompute("/workspace");
         compute.directories.add("/workspace/.git");
         compute.write("/workspace/AGENTS.md", "First instructions.");
-        const module = moduleFor(compute);
+        const { hooks } = await moduleFor(compute);
         const kv = new AgentKV(new InMemoryPersistence(), "agent.");
         const persistentScope = { agent: { id: "agent-a" }, kv } as never;
 
-        await module.instructions(ctx, persistentScope);
+        await hooks.instructions!(ctx, persistentScope);
         compute.write("/workspace/AGENTS.md", "Replacement instructions.");
-        const replacement = await module.beforeTurn(ctx, persistentScope);
+        const replacement = await hooks.beforeTurn!(ctx, persistentScope, turnStart);
         expect(replacement).toHaveLength(1);
         const replacementAction = replacement?.[0];
         if (replacementAction?.type !== "steer" || replacementAction.id === undefined) {
@@ -287,10 +296,10 @@ describe("SystemPromptModule AGENTS.md instructions", () => {
                 "These AGENTS.md instructions replace all previously provided",
             ),
         });
-        const liveInstructions = await module.instructions(ctx, persistentScope);
+        const liveInstructions = await hooks.instructions!(ctx, persistentScope);
         expect(liveInstructions).toContain("Replacement instructions.");
         expect(liveInstructions).not.toContain("First instructions.");
-        await module.messageAcceptedTransact(ctx, persistentScope, {
+        await hooks.messageAcceptedTransact!(ctx, persistentScope, {
             id: replacementAction.id,
             kind: "steering",
             message: replacementAction.message,
@@ -298,10 +307,10 @@ describe("SystemPromptModule AGENTS.md instructions", () => {
                 ? {}
                 : { metadata: replacementAction.metadata }),
         });
-        await expect(module.beforeTurn(ctx, persistentScope)).resolves.toBeUndefined();
+        await expect(hooks.beforeTurn!(ctx, persistentScope, turnStart)).resolves.toBeUndefined();
 
         compute.files.delete("/workspace/AGENTS.md");
-        const removal = await module.beforeTurn(ctx, persistentScope);
+        const removal = await hooks.beforeTurn!(ctx, persistentScope, turnStart);
         expect(removal?.[0]).toMatchObject({
             type: "steer",
             message: {
@@ -316,19 +325,19 @@ describe("SystemPromptModule AGENTS.md instructions", () => {
         const compute = new FakeCompute("/workspace");
         compute.directories.add("/workspace/.git");
         compute.write("/workspace/AGENTS.md", "Version A.");
-        const module = moduleFor(compute);
+        const { hooks } = await moduleFor(compute);
         const kv = new AgentKV(new InMemoryPersistence(), "agent.");
         const persistentScope = { agent: { id: "agent-a" }, kv } as never;
 
-        await module.instructions(ctx, persistentScope);
+        await hooks.instructions!(ctx, persistentScope);
         compute.write("/workspace/AGENTS.md", "Version B.");
-        const replacement = await module.beforeTurn(ctx, persistentScope);
+        const replacement = await hooks.beforeTurn!(ctx, persistentScope, turnStart);
         const replacementAction = replacement?.[0];
         if (replacementAction?.type !== "steer") {
             throw new Error("Expected a steering replacement notice.");
         }
 
-        await module.messageAcceptedTransact(ctx, persistentScope, {
+        await hooks.messageAcceptedTransact!(ctx, persistentScope, {
             id: "externalmessage",
             kind: "steering",
             message: replacementAction.message,
@@ -337,7 +346,7 @@ describe("SystemPromptModule AGENTS.md instructions", () => {
                 : { metadata: replacementAction.metadata }),
         });
 
-        const retry = await module.beforeTurn(ctx, persistentScope);
+        const retry = await hooks.beforeTurn!(ctx, persistentScope, turnStart);
         expect(retry?.[0]).toMatchObject({
             type: "steer",
             id: replacementAction.id,
@@ -348,13 +357,13 @@ describe("SystemPromptModule AGENTS.md instructions", () => {
         const compute = new FakeCompute("/workspace");
         compute.directories.add("/workspace/.git");
         compute.write("/workspace/AGENTS.md", "Version A.");
-        const module = moduleFor(compute);
+        const { hooks } = await moduleFor(compute);
         const kv = new AgentKV(new InMemoryPersistence(), "agent.");
         const persistentScope = { agent: { id: "agent-a" }, kv } as never;
 
-        await module.instructions(ctx, persistentScope);
+        await hooks.instructions!(ctx, persistentScope);
         compute.files.delete("/workspace/AGENTS.md");
-        const removal = await module.beforeTurn(ctx, persistentScope);
+        const removal = await hooks.beforeTurn!(ctx, persistentScope, turnStart);
         const removalAction = removal?.[0];
         if (removalAction?.type !== "steer") {
             throw new Error("Expected a steering removal notice.");
@@ -363,7 +372,7 @@ describe("SystemPromptModule AGENTS.md instructions", () => {
             throw new Error("Expected the removal notice to have an ID.");
         }
 
-        await module.messageAcceptedTransact(ctx, persistentScope, {
+        await hooks.messageAcceptedTransact!(ctx, persistentScope, {
             id: removalAction.id,
             kind: "steering",
             message: {
@@ -373,7 +382,7 @@ describe("SystemPromptModule AGENTS.md instructions", () => {
             ...(removalAction.metadata === undefined ? {} : { metadata: removalAction.metadata }),
         });
 
-        const retry = await module.beforeTurn(ctx, persistentScope);
+        const retry = await hooks.beforeTurn!(ctx, persistentScope, turnStart);
         expect(retry?.[0]).toMatchObject({
             type: "steer",
             id: removalAction.id,
@@ -385,12 +394,12 @@ describe("SystemPromptModule AGENTS.md instructions", () => {
         const compute = new FakeCompute("/workspace");
         compute.directories.add("/workspace/.git");
         compute.write("/workspace/AGENTS.md", "Version A.");
-        const module = moduleFor(compute);
+        const { hooks } = await moduleFor(compute);
         const kv = new AgentKV(new InMemoryPersistence(), "agent.");
         const persistentScope = { agent: { id: "agent-a" }, kv } as never;
 
         const nextNotice = async () => {
-            const action = (await module.beforeTurn(ctx, persistentScope))?.[0];
+            const action = (await hooks.beforeTurn!(ctx, persistentScope, turnStart))?.[0];
             if (action?.type !== "steer") {
                 throw new Error("Expected an AGENTS.md steering notice.");
             }
@@ -403,7 +412,7 @@ describe("SystemPromptModule AGENTS.md instructions", () => {
             if (action.id === undefined) {
                 throw new Error("Expected the AGENTS.md notice to have an ID.");
             }
-            await module.messageAcceptedTransact(ctx, persistentScope, {
+            await hooks.messageAcceptedTransact!(ctx, persistentScope, {
                 id: action.id,
                 kind: "steering",
                 message: action.message,
@@ -411,7 +420,7 @@ describe("SystemPromptModule AGENTS.md instructions", () => {
             });
         };
 
-        await module.instructions(ctx, persistentScope);
+        await hooks.instructions!(ctx, persistentScope);
 
         compute.write("/workspace/AGENTS.md", "Version B.");
         const firstVersionB = await nextNotice();
@@ -437,27 +446,27 @@ describe("SystemPromptModule AGENTS.md instructions", () => {
         const compute = new FakeCompute("/workspace");
         compute.directories.add("/workspace/.git");
         compute.write("/workspace/AGENTS.md", "Version A.");
-        const module = moduleFor(compute);
+        const { hooks } = await moduleFor(compute);
         const kv = new AgentKV(new InMemoryPersistence(), "agent.");
         const persistentScope = { agent: { id: "agent-a" }, kv } as never;
 
-        await module.instructions(ctx, persistentScope);
+        await hooks.instructions!(ctx, persistentScope);
         compute.write("/workspace/AGENTS.md", "Version B.");
-        const versionB = (await module.beforeTurn(ctx, persistentScope))?.[0];
+        const versionB = (await hooks.beforeTurn!(ctx, persistentScope, turnStart))?.[0];
         if (versionB?.type !== "steer" || versionB.id === undefined) {
             throw new Error("Expected a version B steering notice with an ID.");
         }
 
         compute.write("/workspace/AGENTS.md", "Version A.");
-        await expect(module.beforeTurn(ctx, persistentScope)).resolves.toBeUndefined();
-        await module.messageAcceptedTransact(ctx, persistentScope, {
+        await expect(hooks.beforeTurn!(ctx, persistentScope, turnStart)).resolves.toBeUndefined();
+        await hooks.messageAcceptedTransact!(ctx, persistentScope, {
             id: versionB.id,
             kind: "steering",
             message: versionB.message,
             ...(versionB.metadata === undefined ? {} : { metadata: versionB.metadata }),
         });
 
-        const correction = await module.beforeTurn(ctx, persistentScope);
+        const correction = await hooks.beforeTurn!(ctx, persistentScope, turnStart);
         expect(correction?.[0]).toMatchObject({
             type: "steer",
             message: {
@@ -470,11 +479,11 @@ describe("SystemPromptModule AGENTS.md instructions", () => {
         const compute = new FakeCompute("/workspace");
         compute.directories.add("/workspace/.git");
         compute.write("/workspace/AGENTS.md", "Version A.");
-        const module = moduleFor(compute);
+        const { hooks } = await moduleFor(compute);
         const persistence = new InMemoryPersistence();
         const kv = new AgentKV(persistence, "agent.");
         const baselineScope = { agent: { id: "agent-a" }, kv } as never;
-        await module.instructions(ctx, baselineScope);
+        await hooks.instructions!(ctx, baselineScope);
 
         compute.write("/workspace/AGENTS.md", "Version B.");
         const versionBScope = {
@@ -482,17 +491,17 @@ describe("SystemPromptModule AGENTS.md instructions", () => {
             kv,
             runKV: new AgentKV(persistence, "run-b."),
         } as never;
-        const versionBActions = await module.beforeTurn(ctx, versionBScope);
+        const versionBActions = await hooks.beforeTurn!(ctx, versionBScope, turnStart);
         const versionBAction = versionBActions?.[0];
         if (versionBAction?.type !== "steer" || versionBAction.id === undefined) {
             throw new Error("Expected a version B replacement notice.");
         }
 
         compute.write("/workspace/AGENTS.md", "Version C.");
-        const versionBPrompt = await module.instructions(ctx, versionBScope);
+        const versionBPrompt = await hooks.instructions!(ctx, versionBScope);
         expect(versionBPrompt).toContain("Version B.");
         expect(versionBPrompt).not.toContain("Version C.");
-        await module.messageAcceptedTransact(ctx, versionBScope, {
+        await hooks.messageAcceptedTransact!(ctx, versionBScope, {
             id: versionBAction.id,
             kind: "steering",
             message: versionBAction.message,
@@ -504,7 +513,7 @@ describe("SystemPromptModule AGENTS.md instructions", () => {
             kv,
             runKV: new AgentKV(persistence, "run-c."),
         } as never;
-        const versionCActions = await module.beforeTurn(ctx, versionCScope);
+        const versionCActions = await hooks.beforeTurn!(ctx, versionCScope, turnStart);
         expect(versionCActions?.[0]).toMatchObject({
             type: "steer",
             message: {
@@ -513,9 +522,9 @@ describe("SystemPromptModule AGENTS.md instructions", () => {
         });
     });
 
-    it("exposes no tools and rejects malformed compute boundaries", () => {
+    it("exposes no tools and rejects malformed compute boundaries", async () => {
         const compute = new FakeCompute();
-        const module = moduleFor(compute);
+        const { module } = await moduleFor(compute);
         expect("tools" in module).toBe(false);
         expect(() => new SystemPromptModule({ compute: {} as never })).toThrow(
             "System prompt module options are invalid",

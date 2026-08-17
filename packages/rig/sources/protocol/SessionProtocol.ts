@@ -5,10 +5,41 @@ import type {
     AgentLoopEvent,
     AgentSnapshot,
     ContentBlock,
-} from "../agent/index.js";
-import type { AgentMessage, Message, SystemMessage, UserMessage } from "../agent/types.js";
+    AgentMessage,
+    BashSessionActivity,
+    BashSessionSnapshot,
+    ChangeGoalStatusRequest,
+    CreateGoalRequest,
+    DockerExecutionConfig,
+    DurableSkillDefinition,
+    EnvironmentSecretRegistration,
+    EnvironmentSecretUpdate,
+    ExternalToolCall,
+    ExternalToolCallResolution,
+    ExternalToolDefinition,
+    McpServerSummary,
+    Message,
+    Model,
+    PermissionMode,
+    ProviderError,
+    ResolveExternalToolCallResponse,
+    ScheduledMessage,
+    SecretAttachmentScope,
+    SecretReference,
+    ServiceTier,
+    SessionExecutionEnvironment,
+    SessionGoal,
+    SessionTask,
+    StopReason,
+    SystemMessage,
+    Usage,
+    UserInputRequest,
+    UserInputResponse,
+    UserMessage,
+    WorkflowRun,
+    WorkflowRunUpdate,
+} from "./ClientProtocolTypes.js";
 import type { Attachment } from "./Attachment.js";
-import type { Model, ProviderError, ServiceTier, StopReason, Usage } from "@slopus/rig-execution";
 import {
     MAX_INFERENCE_MAX_RETRIES,
     type SessionEvent as ProviderSessionEvent,
@@ -16,31 +47,8 @@ import {
     type ProviderQuota,
     type ProviderUsage,
 } from "@slopus/happy-providers";
-import type { PermissionMode } from "../permissions/index.js";
-import type { UserInputRequest, UserInputResponse } from "../user-input/index.js";
-import type { McpServerSummary } from "../mcp/index.js";
-import type { SessionTask } from "../tasks/index.js";
-import type { WorkflowRun, WorkflowRunUpdate } from "../workflows/index.js";
-import type { ChangeGoalStatusRequest, CreateGoalRequest, SessionGoal } from "../goals/index.js";
 import type { EventId } from "./EventId.js";
 import type { GitChangeSnapshot, PresenceSnapshot } from "./ProjectProtocol.js";
-import type { DockerExecutionConfig } from "../execution/DockerExecutionConfig.js";
-import type { SessionExecutionEnvironment } from "../execution/SessionExecutionEnvironment.js";
-import type { BashSessionActivity, BashSessionSnapshot } from "../agent/context/BashContext.js";
-import type {
-    EnvironmentSecretRegistration,
-    EnvironmentSecretUpdate,
-    SecretAttachmentScope,
-    SecretReference,
-} from "../secrets/index.js";
-import type {
-    ExternalToolCall,
-    ExternalToolCallResolution,
-    ExternalToolDefinition,
-    ResolveExternalToolCallResponse,
-} from "../external-tools/index.js";
-import type { DurableSkillDefinition } from "../external-skills/index.js";
-import type { ScheduledMessage } from "../scheduling/index.js";
 import { p2pInstanceIdSchema } from "./P2pIdentityProtocol.js";
 import { p2pCredentialVisibilitySchema } from "./P2pCredentialProtocol.js";
 import { rigProfileIdentitySchema } from "./ProfileProtocol.js";
@@ -193,7 +201,7 @@ export interface SessionUnreadState {
 
 export type SessionTitleStatus = "idle" | "generating" | "ready" | "error";
 
-export type { SessionExecutionEnvironment } from "../execution/SessionExecutionEnvironment.js";
+export type { SessionExecutionEnvironment } from "./ClientProtocolTypes.js";
 
 export type SessionInterruptionReason = "crash" | "shutdown";
 
@@ -767,11 +775,6 @@ export interface UpdateSessionRequest {
     mutationId?: string;
 }
 
-export interface ChangePermissionModeRequest {
-    permissionMode: PermissionMode;
-    mutationId?: string;
-}
-
 /**
  * Longest composer draft the daemon stores and mirrors. Drafts are held in one
  * session row and broadcast on every change, so they need an explicit bound.
@@ -983,6 +986,10 @@ export interface SubmitMessageRequest {
     /** Provider for `modelId`. Inferred from the model when omitted. */
     providerId?: string;
     /**
+     * Permission mode for this and subsequent runs. Applied when this message's run starts.
+     */
+    permissionMode?: PermissionMode;
+    /**
      * Fast mode for this and subsequent runs. Null turns it off; omitting it changes nothing.
      * Applied when this message's run starts.
      */
@@ -1102,23 +1109,6 @@ export interface SteerMessageRequest extends SubmitMessageRequest {
 }
 export interface SteerMessageResponse extends SubmitMessageResponse {
     delivery: "run" | "steer";
-}
-
-export interface ChangeModelRequest {
-    effort?: string;
-    modelId: string;
-    providerId?: string;
-    mutationId?: string;
-}
-
-export interface ChangeEffortRequest {
-    effort?: string;
-    mutationId?: string;
-}
-
-export interface ChangeServiceTierRequest {
-    serviceTier?: ServiceTier;
-    mutationId?: string;
 }
 
 export interface AbortRunResponse {

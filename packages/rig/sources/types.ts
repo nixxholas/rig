@@ -1,7 +1,5 @@
 export type {
     AttachSecretRequest,
-    ChangeEffortRequest,
-    ChangePermissionModeRequest,
     CreateSessionRequest,
     CreateSessionResponse,
     GetDaemonConfigResponse,
@@ -48,12 +46,12 @@ export type {
     WriteProjectFileRequest,
     WriteProjectFileResponse,
 } from "./protocol/ProjectFileProtocol.js";
-export type { DurableSkillDefinition } from "./external-skills/types.js";
 export type {
+    DurableSkillDefinition,
     ExternalToolCall,
     ExternalToolCallResolution,
     ExternalToolDefinition,
-} from "./external-tools/types.js";
+} from "./protocol/ClientProtocolTypes.js";
 export type {
     CreateRemoteTerminalRequest,
     RemoteTerminalColorScheme,

@@ -1,15 +1,17 @@
 import { readFile } from "node:fs/promises";
 
-import { parseConfigToml } from "./parseConfigToml.js";
+import { parseConfigTomlWithUnknownSettings } from "./parseConfigToml.js";
 import type { ConfigSource } from "./types.js";
 
 export async function readConfigFile(path: string): Promise<ConfigSource> {
     try {
         const source = await readFile(path, "utf8");
+        const parsed = parseConfigTomlWithUnknownSettings(source);
         return {
             exists: true,
             path,
-            values: parseConfigToml(source),
+            unknownSettings: parsed.unknownSettings,
+            values: parsed.values,
         };
     } catch (error) {
         if (
@@ -21,6 +23,7 @@ export async function readConfigFile(path: string): Promise<ConfigSource> {
             return {
                 exists: false,
                 path,
+                unknownSettings: [],
                 values: {},
             };
         }

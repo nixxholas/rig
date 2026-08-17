@@ -108,14 +108,13 @@ its public methods, and its storage and event contracts.
 
 ### Work
 
-| Module                                     | What it adds                                                                                                         |
-| ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------- |
-| [Goal](sources/goal/README.md)             | One durable long-running objective per agent, kept moving until complete, blocked, paused, or cleared.               |
-| [Tasks](sources/tasks/README.md)           | A durable task list with dependencies, priority, ordering, and acyclicity validation.                                |
-| [Scheduling](sources/scheduling/README.md) | Durable waits an agent can take, and messages it asks to be delivered to itself later.                               |
-| [Workflows](sources/workflows/README.md)   | Launch, inspect, wait for, resume, cancel, and read bounded logs from host-owned workflows.                          |
-| [Worklets](sources/worklets/README.md)     | Background compute installed from a folder, versioned and revertible, with a data folder that outlives every update. |
-| [Usage](sources/usage/README.md)           | Advisory token and timing accounting for one agent and its tree, which never fails a turn.                           |
+| Module                                     | What it adds                                                                                           |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------ |
+| [Goal](sources/goal/README.md)             | One durable long-running objective per agent, kept moving until complete, blocked, paused, or cleared. |
+| [Tasks](sources/tasks/README.md)           | A durable task list with dependencies, priority, ordering, and acyclicity validation.                  |
+| [Scheduling](sources/scheduling/README.md) | Durable waits an agent can take, and messages it asks to be delivered to itself later.                 |
+| [Workflows](sources/workflows/README.md)   | Launch, inspect, wait for, resume, cancel, and read bounded logs from host-owned workflows.            |
+| [Usage](sources/usage/README.md)           | Advisory token and timing accounting for one agent and its tree, which never fails a turn.             |
 
 ### People and other agents
 
@@ -132,15 +131,13 @@ its public methods, and its storage and event contracts.
 | ------------------------------------------ | ----------------------------------------------------------------------------------------------- |
 | [Projects](sources/projects/README.md)     | Repositories registered on demand, with bounded settings and durable rename and archival.       |
 | [Workspaces](sources/workspaces/README.md) | Isolated workspaces created, inspected, transferred, and archived through a host manager.       |
-| [Applets](sources/applets/README.md)       | Import, version, inspect, revert, and remove host-managed applets and their assets.             |
-| [Slots](sources/slots/README.md)           | Durable named values for Happy's fixed UI slots, with ordering and bounded paging.              |
 | [Secrets](sources/secrets/README.md)       | Safe secret metadata, attachments, and a host-only resolver that never shows the model a value. |
 
 ### Storage ownership
 
-Sixteen modules own tables through their own migrations: applets, goal, happy, history, mcp,
-presence, projects, scheduling, secrets, slots, tasks, usage, user input, workflows, worklets, and
-workspaces. Eight own no tables: collaboration, compute, image generation, model switch,
+Thirteen modules own tables through their own migrations: goal, happy, history, mcp, presence,
+projects, scheduling, secrets, tasks, usage, user input, workflows, and workspaces. Eight own no
+tables: collaboration, compute, image generation, model switch,
 permissions, search, skills, and system prompt. Compute and system prompt use Agent KV only, and
 collaboration's migrations exist only to retire the tables it used to keep.
 
@@ -159,11 +156,8 @@ Modules that reach outside the database require the host to supply that reach. F
 | MCP              | `McpHost`                                                                      |
 | Scheduling       | `SchedulingScheduler`                                                          |
 | Search           | `SearchBackend`                                                                |
-| Slots            | `SlotPublisher`, `SlotScopeResolver`                                           |
 | User input       | `UserInputBroker`                                                              |
 | Workflows        | `WorkflowRuntime`                                                              |
-| Worklets         | `WorkletRuntime`, install root                                                 |
-| Applets          | Root directory                                                                 |
 | Compute          | Compute provider (defaults to the published host provider)                     |
 | Permissions      | `PermissionReviewer` (optional; without it Auto cannot review)                 |
 | Secrets          | `SecretResolver` (optional; without it values cannot be resolved)              |
@@ -274,12 +268,6 @@ carry `agentCount` and bounded accumulated `logs` with a `logsTruncated` flag, a
 cancelled without stopping the workflow through an optional runtime signal, the overuse warning is
 back, and the legacy status vocabulary is projected alongside the new one.
 
-**Worklets** — the largest single gap in the package. Worklet-declared tools are not first-class
-agent tools, there is no `worklet.json` manifest identity or permission model, no disk or network
-enforcement, no required README/DEVELOPMENT/icon, no workspace boundary on the source path, no
-review requirement on install, update, revert, or uninstall, and `worklet_list` lost its inline
-status. No runtime is implemented anywhere in the new stack yet.
-
 **Usage** — after a compaction, current context is omitted rather than estimated, because Agent Base
 exposes no approximate post-compaction figure; it reappears exact on the next measurement.
 `get_agent_tree_usage` exists with default-deny authorization, current-context fullness is reported,
@@ -325,15 +313,6 @@ and `expectedVersion`.
 archive and transfer are reviewed in Auto with destructive descriptions and no full-access
 elevation, and `list_workspaces` includes archived rows by default again. Reconciling a transitional
 state to a terminal one is the host's responsibility.
-
-**Applets** — one deliberate difference: an applet keeps at most 100 versions, where legacy kept
-them unbounded. Icon guarantees, path confinement, session-filesystem imports through an injected
-reader, full catalog metadata, scope enforcement, launch-context tokens, per-applet mutation
-serialization, and Auto-permission posture are all restored.
-
-**Slots** — plugin-authored entries and their cleanup are gone, and mutation ownership is stricter
-than legacy's open model with no override. Combined scope-context list filtering was lost, and
-`remove_slot` no longer returns the removed entry.
 
 **Secrets** — no path from an attached secret into a running command, which is legacy's whole point.
 The catalog, attachment, and host-only resolution all work, but no compute shell tool has a

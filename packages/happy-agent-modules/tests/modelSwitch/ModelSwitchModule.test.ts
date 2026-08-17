@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { ModelSwitchModule } from "../../sources/modelSwitch/ModelSwitchModule.js";
 import { agentWorld } from "../support/agentWorld.js";
 import { providersOf, sharedKV, textTurn, user } from "../support/fixtures.js";
+import { resolveModuleRuntime } from "../support/moduleHooks.js";
 import { ScriptedProvider } from "../support/ScriptedProvider.js";
 
 const ctx = createRootContext().named("happy-agent-modules-model-switch");
@@ -20,7 +21,7 @@ async function modelSwitchAgent(agentId: string, script: SessionEvent[][]) {
         provider: "scripted",
         persistence: world.storage.persistence(agentId),
         sharedKV: sharedKV(),
-        modules: [new ModelSwitchModule()],
+        modules: [await resolveModuleRuntime(ctx, new ModelSwitchModule())],
     });
     return { agent, provider };
 }

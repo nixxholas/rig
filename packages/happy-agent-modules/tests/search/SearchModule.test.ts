@@ -15,6 +15,7 @@ import {
 } from "../../sources/search/Search.js";
 import type { SearchBackend } from "../../sources/search/SearchBackend.js";
 import { SearchModule } from "../../sources/search/SearchModule.js";
+import { resolveModuleHooks } from "../support/moduleHooks.js";
 
 const ctx = createRootContext().named("happy-agent-modules-search");
 const AGENT_ID = "agent-one";
@@ -149,7 +150,8 @@ describe("SearchModule", () => {
             },
         ]);
 
-        const tools = search.tools(ctx, scope(AGENT_ID));
+        const hooks = await resolveModuleHooks(ctx, search);
+        const tools = await hooks.tools!(ctx, scope(AGENT_ID));
         expect(tools.map((tool) => tool.name)).toEqual([
             "web_fetch",
             "gemini_web_search",

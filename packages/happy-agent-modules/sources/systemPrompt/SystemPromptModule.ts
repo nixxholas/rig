@@ -4,6 +4,7 @@ import {
     type AgentBaseAcceptedMessage,
     type AgentModule,
     type AgentModuleAction,
+    type AgentModuleHooks,
     type AgentModuleScope,
 } from "@slopus/happy-agent-base";
 import { Type, type Static } from "@sinclair/typebox";
@@ -181,7 +182,7 @@ export class SystemPromptModule implements AgentModule {
         return await this.#agentsMd.readFormatted(ctx, agentId);
     }
 
-    readonly instructions = async (ctx: Context, scope: AgentModuleScope): Promise<string> => {
+    async #instructions(ctx: Context, scope: AgentModuleScope): Promise<string> {
         const prompt = this.promptFor({
             model: scope.agent.model,
             ...(scope.agent.providerKind === undefined
@@ -198,6 +199,7 @@ export class SystemPromptModule implements AgentModule {
                 assembleEnvironmentPrompt({
                     environment,
                     availableModels: this.#availableModels,
+                    currentModel: scope.agent.model,
                 }),
             );
         }
@@ -214,19 +216,26 @@ export class SystemPromptModule implements AgentModule {
             throw new Error("The system prompt exceeds the configured output bound.");
         }
         return fullPrompt;
+    }
+
+    readonly #hooks: AgentModuleHooks = {
+        instructions: (ctx: Context, scope: AgentModuleScope): Promise<string> =>
+            this.#instructions(ctx, scope),
+
+        beforeTurn: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+        ): Promise<readonly AgentModuleAction[] | undefined> =>
+            await this.#agentsMd.beforeTurn(ctx, scope),
+
+        messageAcceptedTransact: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+            accepted: AgentBaseAcceptedMessage,
+        ): Promise<void> => await this.#agentsMd.messageAcceptedTransact(ctx, scope, accepted),
     };
 
-    readonly beforeTurn = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-    ): Promise<readonly AgentModuleAction[] | undefined> =>
-        await this.#agentsMd.beforeTurn(ctx, scope);
-
-    readonly messageAcceptedTransact = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-        accepted: AgentBaseAcceptedMessage,
-    ): Promise<void> => await this.#agentsMd.messageAcceptedTransact(ctx, scope, accepted);
+    readonly beforeStart = (): AgentModuleHooks => this.#hooks;
 }
 
 function invalidModuleOptionError(value: unknown): Error {

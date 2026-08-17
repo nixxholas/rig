@@ -1,11 +1,5 @@
 import { describe, expect, it } from "vitest";
 
-// The daemon's own fold, imported so this library's live application can be
-// compared against it directly. It is a test-only import; nothing from the
-// daemon reaches the bundle.
-import { buildTimeline } from "../../rig/sources/timeline/buildTimeline.js";
-import type { TimelineAgentSource } from "../../rig/sources/timeline/TimelineSource.js";
-import type { SessionEvent as DaemonSessionEvent } from "../../rig/sources/protocol/index.js";
 import { TimelineStore } from "@/TimelineStore.js";
 import type { GetTimelineResponse, GlobalEvent, TimelineAgent } from "@/protocol.js";
 
@@ -249,54 +243,6 @@ describe("TimelineStore", () => {
         expect(store.agents()[0]!.children[0]!.spans).toHaveLength(2);
     });
 
-    it("arrives at the same chart the daemon would have folded", () => {
-        // The daemon folds durable history at load; this library folds the live
-        // stream. They must agree, or a chart would change the moment it is
-        // reloaded.
-        const events = [
-            lifecycle("message_submitted", MINUTE, { runId: "run-1" }),
-            lifecycle("run_started", MINUTE, { runId: "run-1" }),
-            lifecycle("user_input_requested", 2 * MINUTE, { questions: [], requestId: "ask-1" }),
-            lifecycle("user_input_resolved", 3 * MINUTE, {
-                requestId: "ask-1",
-                status: "answered",
-            }),
-            lifecycle("user_input_requested", 3 * MINUTE, {
-                questions: [],
-                requestId: "ask-2",
-            }),
-            lifecycle("user_input_detached", 3.5 * MINUTE, {
-                presenceId: "away",
-                reason: "away",
-                requestId: "ask-2",
-            }),
-            lifecycle("run_finished", 4 * MINUTE, { runId: "run-1", stopReason: "stop" }),
-            lifecycle("message_submitted", 9 * MINUTE, { runId: "run-2" }),
-            lifecycle("run_started", 9 * MINUTE, { runId: "run-2" }),
-            lifecycle("run_error", 11 * MINUTE, { runId: "run-2" }),
-        ];
-        const source: TimelineAgentSource = {
-            agentId: "agent-1",
-            archived: false,
-            createdAt: 0,
-            depth: 0,
-            modelId: "model",
-            scope: { kind: "project", projectId: "p1" },
-            providerId: "codex",
-            sessionId: "s",
-            type: "primary",
-            working: false,
-        };
-
-        const store = new TimelineStore({ kind: "session", sessionId: "s" });
-        store.applySnapshot(
-            snapshot([agent({ sessionId: "s", spans: [{ kind: "waiting", startedAt: 0 }] })]),
-        );
-        for (const durable of events) store.apply(durable as unknown as GlobalEvent);
-
-        const folded = buildTimeline([source], events as unknown as DaemonSessionEvent[]);
-        expect(store.agents()[0]!.spans).toEqual(folded[0]!.spans);
-    });
 });
 
 function snapshot(agents: readonly TimelineAgent[]): GetTimelineResponse {
@@ -337,8 +283,4 @@ function event(type: string, createdAt: number, data: unknown, sessionId = "s"):
         sessionId,
         type,
     } as unknown as GlobalEvent;
-}
-
-function lifecycle(type: string, createdAt: number, data: unknown): GlobalEvent {
-    return event(type, createdAt, data, "s");
 }

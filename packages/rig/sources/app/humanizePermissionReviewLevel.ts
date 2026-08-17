@@ -1,4 +1,4 @@
-import type { AutoPermissionRisk, AutoPermissionUserAuthorization } from "../permissions/index.js";
+import type { AutoPermissionRisk, AutoPermissionUserAuthorization } from "../protocol/index.js";
 
 export function humanizePermissionReviewLevel(
     level: AutoPermissionRisk | AutoPermissionUserAuthorization,

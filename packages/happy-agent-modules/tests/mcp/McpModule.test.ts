@@ -16,6 +16,7 @@ import {
     humanizeMcpName,
     normalizeMcpName,
 } from "../../sources/mcp/index.js";
+import { resolveModuleHooks } from "../support/moduleHooks.js";
 
 const ctx = createRootContext().named("mcp-module-test");
 
@@ -69,12 +70,13 @@ describe("McpModule", () => {
         const module = new McpModule({
             host: host({ listServers }),
         });
+        const hooks = await resolveModuleHooks(ctx, module);
 
         const page = await module.listServerPage(ctx, "agent-a", {}, "auto");
         expect(page.servers[0]?.name).toBe("deployment_service");
         expect(listServers).toHaveBeenCalledWith(ctx, "agent-a", "auto", { limit: 50 });
 
-        const tools = await module.tools(ctx, {
+        const tools = await hooks.tools!(ctx, {
             agent: { id: "agent-a", permissionMode: "auto" },
         } as never);
         expect(tools.map((candidate) => candidate.name)).toContain(
@@ -89,7 +91,8 @@ describe("McpModule", () => {
 
     it("declares dynamic calls as reviewed regardless of readOnlyHint", async () => {
         const module = new McpModule({ host: host() });
-        const tools = await module.tools(ctx, {
+        const hooks = await resolveModuleHooks(ctx, module);
+        const tools = await hooks.tools!(ctx, {
             agent: { id: "agent-a", permissionMode: "auto" },
         } as never);
         const call = tools.find((candidate) => candidate.name === "call_mcp_tool");
@@ -122,8 +125,9 @@ describe("McpModule", () => {
                         : { tools: [tool("status")] },
             }),
         });
+        const hooks = await resolveModuleHooks(ctx, module);
 
-        const tools = await module.tools(ctx, {
+        const tools = await hooks.tools!(ctx, {
             agent: { id: "agent-a", permissionMode: "auto" },
         } as never);
         const names = tools.map((candidate) => candidate.name);
@@ -169,8 +173,9 @@ describe("McpModule", () => {
                         : { tools: [tool("run")] },
             }),
         });
+        const hooks = await resolveModuleHooks(ctx, module);
 
-        const tools = await module.tools(ctx, {
+        const tools = await hooks.tools!(ctx, {
             agent: { id: "agent-a", permissionMode: "auto" },
         } as never);
         const names = tools.map((candidate) => candidate.name);
@@ -207,7 +212,8 @@ describe("McpModule", () => {
                 }),
             }),
         });
-        const tools = await module.tools(ctx, {
+        const hooks = await resolveModuleHooks(ctx, module);
+        const tools = await hooks.tools!(ctx, {
             agent: { id: "agent-a", permissionMode: "auto" },
         } as never);
         const dynamic = tools.find((candidate) => candidate.name === "call_mcp_tool");
@@ -351,7 +357,8 @@ describe("McpModule", () => {
                 callTool: async () => applicationError,
             }),
         });
-        const tools = await module.tools(ctx, {
+        const hooks = await resolveModuleHooks(ctx, module);
+        const tools = await hooks.tools!(ctx, {
             agent: { id: "agent-a", permissionMode: "auto" },
         } as never);
         const direct = tools.find(

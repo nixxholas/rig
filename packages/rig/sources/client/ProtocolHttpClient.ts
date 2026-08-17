@@ -15,10 +15,6 @@ import type {
     BroadcastMessageRequest,
     BroadcastMessageResponse,
     AnswerUserInputRequest,
-    ChangeEffortRequest,
-    ChangeModelRequest,
-    ChangePermissionModeRequest,
-    ChangeServiceTierRequest,
     CancelScheduledMessageResponse,
     ChangeSessionGoalStatusRequest,
     CompactSessionResponse,
@@ -40,6 +36,7 @@ import type {
     ListProviderUsageResponse,
     GlobalStreamHello,
     HealthResponse,
+    RigDaemonInstallationDiscovery,
     P2pStatus,
     CreateP2pInvitationResponse,
     JoinP2pInvitationResponse,
@@ -95,6 +92,7 @@ import type {
     RegisterSecretRequest,
     RegisterSecretResponse,
     SearchFilesResponse,
+    SecretAttachmentScope,
     SecretSessionResponse,
     SessionEvent,
     SessionStreamHello,
@@ -131,8 +129,8 @@ import type {
     WriteProjectFileRequest,
     WriteProjectFileResponse,
     WriteDocumentRequest,
+    ExternalToolCall,
 } from "../protocol/index.js";
-import type { SecretAttachmentScope } from "../secrets/index.js";
 import { EventStreamHttpError } from "./EventStreamHttpError.js";
 import { ProtocolHttpError } from "./ProtocolHttpError.js";
 import type {
@@ -143,7 +141,6 @@ import type {
     RemoteTerminalResponse,
     ResizeRemoteTerminalRequest,
 } from "../terminal/index.js";
-import type { ExternalToolCall } from "../external-tools/index.js";
 import { connectRemoteTerminalWebSocket } from "./connectRemoteTerminalWebSocket.js";
 import { RemoteTerminalAttachment } from "./RemoteTerminalAttachment.js";
 import { RemoteTerminalClientReplica } from "./RemoteTerminalClientReplica.js";
@@ -329,39 +326,6 @@ export class ProtocolHttpClient {
         );
     }
 
-    changeModel(
-        sessionId: string,
-        request: ChangeModelRequest,
-    ): Promise<{ session: ProtocolSession }> {
-        return this.#requestJson(
-            "PATCH",
-            `/sessions/${encodeURIComponent(sessionId)}/model`,
-            request,
-        );
-    }
-
-    changeEffort(
-        sessionId: string,
-        request: ChangeEffortRequest,
-    ): Promise<{ session: ProtocolSession }> {
-        return this.#requestJson(
-            "PATCH",
-            `/sessions/${encodeURIComponent(sessionId)}/effort`,
-            request,
-        );
-    }
-
-    changePermissionMode(
-        sessionId: string,
-        request: ChangePermissionModeRequest,
-    ): Promise<{ session: ProtocolSession }> {
-        return this.#requestJson(
-            "PATCH",
-            `/sessions/${encodeURIComponent(sessionId)}/permissions`,
-            request,
-        );
-    }
-
     setSessionDraft(
         sessionId: string,
         request: SetSessionDraftRequest,
@@ -369,17 +333,6 @@ export class ProtocolHttpClient {
         return this.#requestJson(
             "PUT",
             `/sessions/${encodeURIComponent(sessionId)}/draft`,
-            request,
-        );
-    }
-
-    changeServiceTier(
-        sessionId: string,
-        request: ChangeServiceTierRequest,
-    ): Promise<{ session: ProtocolSession }> {
-        return this.#requestJson(
-            "PATCH",
-            `/sessions/${encodeURIComponent(sessionId)}/service-tier`,
             request,
         );
     }
@@ -614,6 +567,10 @@ export class ProtocolHttpClient {
 
     health(): Promise<HealthResponse> {
         return this.#requestJson("GET", "/health");
+    }
+
+    installation(): Promise<RigDaemonInstallationDiscovery> {
+        return this.#requestJson("GET", "/installation");
     }
 
     models(): Promise<ListModelsResponse> {

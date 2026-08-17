@@ -76,7 +76,10 @@ to change the module's composition rules. Both fields must be non-blank.
 
 Rendered only when Agent Base carries an environment, and validated against
 `agentEnvironmentSchema` before use. It states the primary working directory, platform, shell (the
-line is omitted entirely when the shell is blank), and OS version, then the standing host guidance
+line is omitted entirely when the shell is blank), OS version, and the current model — the display
+name from the catalog when the model ID matches a route, and always the model ID itself, but never
+the effort or speed; the line is omitted when the agent has not selected a model yet — then the
+standing host guidance
 that belongs with them: the `.context/` scratch directory and its gitignore expectation, the fact
 that the user sees only the last message before the agent stops, and that a workspace and a Git
 worktree are the same thing.

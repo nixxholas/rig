@@ -9,6 +9,7 @@ import type {
     AgentBaseTurn,
     AgentBaseTurnStart,
     AgentModule,
+    AgentModuleHooks,
     AgentModuleScope,
 } from "@slopus/happy-agent-base";
 import {
@@ -185,106 +186,102 @@ export class ObservationModule implements AgentModule {
         }
     }
 
-    readonly beforeAgentLoop = (
-        ctx: Context,
-        scope: AgentModuleScope,
-        loop: AgentBaseLoop,
-    ): void => {
-        withLogContext(ctx, { agentId: scope.agent.id, loopId: loop.loopId }).log.info(
-            "The agent started a run.",
-        );
+    readonly #hooks: AgentModuleHooks = {
+        beforeAgentLoop: (ctx: Context, scope: AgentModuleScope, loop: AgentBaseLoop): void => {
+            withLogContext(ctx, { agentId: scope.agent.id, loopId: loop.loopId }).log.info(
+                "The agent started a run.",
+            );
+        },
+
+        beforeTurn: (
+            ctx: Context,
+            scope: AgentModuleScope,
+            turn: AgentBaseTurnStart,
+        ): undefined => {
+            withLogContext(ctx, {
+                agentId: scope.agent.id,
+                turnId: turn.turnId,
+                ...(turn.contextTokens === undefined ? {} : { contextTokens: turn.contextTokens }),
+            }).log.debug("The agent started a turn.");
+            return undefined;
+        },
+
+        afterTurn: (ctx: Context, scope: AgentModuleScope, turn: AgentBaseTurn): undefined => {
+            withLogContext(ctx, {
+                agentId: scope.agent.id,
+                turnId: turn.turnId,
+            }).log.debug(
+                turn.aborted ? "The agent's turn was cancelled." : "The agent finished a turn.",
+            );
+            return undefined;
+        },
+
+        afterInference: (
+            ctx: Context,
+            scope: AgentModuleScope,
+            inference: AgentBaseInference,
+        ): void => {
+            const inferenceCtx = withLogContext(ctx, {
+                agentId: scope.agent.id,
+                inferenceId: inference.inferenceId,
+                ...(inference.state === undefined ? {} : { state: inference.state }),
+                ...(inference.tokens === undefined
+                    ? {}
+                    : {
+                          inputTokens: inference.tokens.input,
+                          outputTokens: inference.tokens.output,
+                      }),
+            });
+            if (inference.errorMessage === undefined) {
+                inferenceCtx.log.debug("The model answered.");
+                return;
+            }
+            inferenceCtx.log.warn("The model did not answer:", inference.errorMessage);
+        },
+
+        afterToolCall: (
+            ctx: Context,
+            scope: AgentModuleScope,
+            outcome: AgentBaseToolOutcome,
+        ): void => {
+            const callCtx = withLogContext(ctx, {
+                agentId: scope.agent.id,
+                callId: outcome.callId,
+                tool: outcome.tool.name,
+            });
+            callCtx.log.debug(
+                outcome.isError
+                    ? `The ${outcome.tool.name} tool reported a failure.`
+                    : `The ${outcome.tool.name} tool finished.`,
+            );
+        },
+
+        afterCompaction: (
+            ctx: Context,
+            scope: AgentModuleScope,
+            compaction: AgentBaseCompaction,
+        ): void => {
+            withLogContext(ctx, {
+                agentId: scope.agent.id,
+                compactionId: compaction.compactionId,
+                outcome: compaction.result.status,
+            }).log.info(COMPACTION_MESSAGES[compaction.result.status]);
+        },
+
+        afterAgentSettled: (
+            ctx: Context,
+            scope: AgentModuleScope,
+            settlement: AgentBaseSettlement,
+        ): void => {
+            withLogContext(ctx, {
+                agentId: scope.agent.id,
+                loopId: settlement.loopId,
+                settlementId: settlement.settlementId,
+            }).log.info("The agent has nothing left to do.");
+        },
     };
 
-    readonly beforeTurn = (
-        ctx: Context,
-        scope: AgentModuleScope,
-        turn: AgentBaseTurnStart,
-    ): undefined => {
-        withLogContext(ctx, {
-            agentId: scope.agent.id,
-            turnId: turn.turnId,
-            ...(turn.contextTokens === undefined ? {} : { contextTokens: turn.contextTokens }),
-        }).log.debug("The agent started a turn.");
-        return undefined;
-    };
-
-    readonly afterTurn = (
-        ctx: Context,
-        scope: AgentModuleScope,
-        turn: AgentBaseTurn,
-    ): undefined => {
-        withLogContext(ctx, {
-            agentId: scope.agent.id,
-            turnId: turn.turnId,
-        }).log.debug(
-            turn.aborted ? "The agent's turn was cancelled." : "The agent finished a turn.",
-        );
-        return undefined;
-    };
-
-    readonly afterInference = (
-        ctx: Context,
-        scope: AgentModuleScope,
-        inference: AgentBaseInference,
-    ): void => {
-        const inferenceCtx = withLogContext(ctx, {
-            agentId: scope.agent.id,
-            inferenceId: inference.inferenceId,
-            ...(inference.state === undefined ? {} : { state: inference.state }),
-            ...(inference.tokens === undefined
-                ? {}
-                : {
-                      inputTokens: inference.tokens.input,
-                      outputTokens: inference.tokens.output,
-                  }),
-        });
-        if (inference.errorMessage === undefined) {
-            inferenceCtx.log.debug("The model answered.");
-            return;
-        }
-        inferenceCtx.log.warn("The model did not answer:", inference.errorMessage);
-    };
-
-    readonly afterToolCall = (
-        ctx: Context,
-        scope: AgentModuleScope,
-        outcome: AgentBaseToolOutcome,
-    ): void => {
-        const callCtx = withLogContext(ctx, {
-            agentId: scope.agent.id,
-            callId: outcome.callId,
-            tool: outcome.tool.name,
-        });
-        callCtx.log.debug(
-            outcome.isError
-                ? `The ${outcome.tool.name} tool reported a failure.`
-                : `The ${outcome.tool.name} tool finished.`,
-        );
-    };
-
-    readonly afterCompaction = (
-        ctx: Context,
-        scope: AgentModuleScope,
-        compaction: AgentBaseCompaction,
-    ): void => {
-        withLogContext(ctx, {
-            agentId: scope.agent.id,
-            compactionId: compaction.compactionId,
-            outcome: compaction.result.status,
-        }).log.info(COMPACTION_MESSAGES[compaction.result.status]);
-    };
-
-    readonly afterAgentSettled = (
-        ctx: Context,
-        scope: AgentModuleScope,
-        settlement: AgentBaseSettlement,
-    ): void => {
-        withLogContext(ctx, {
-            agentId: scope.agent.id,
-            loopId: settlement.loopId,
-            settlementId: settlement.settlementId,
-        }).log.info("The agent has nothing left to do.");
-    };
+    readonly beforeStart = (): AgentModuleHooks => this.#hooks;
 }
 
 /** What each compaction outcome is called, in the words a person reading the log would use. */

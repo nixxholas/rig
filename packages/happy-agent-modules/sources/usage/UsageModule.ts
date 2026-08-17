@@ -8,6 +8,7 @@ import {
     type AgentBaseTurn,
     type AgentBaseTurnStart,
     type AgentModule,
+    type AgentModuleHooks,
     type AgentModuleScope,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
@@ -368,12 +369,6 @@ export class UsageModule implements AgentModule {
         return await this.resetAll(ctx);
     }
 
-    /** The provider-neutral usage tool available to every agent. */
-    readonly tools = (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => [
-        getUsageTool(this, scope.agent.id),
-        getAgentTreeUsageTool(this, scope.agent.id),
-    ];
-
     /** Render a bounded subtree snapshot for a model-facing tool result. */
     formatAgentTreeUsageForModel(
         tree: UsageAgentTree,
@@ -511,42 +506,6 @@ export class UsageModule implements AgentModule {
         if (compact.length <= maxCharacters) return compact;
         return ["Usage:", `- group ${summary.cursor}`, compactFooter].join("\n");
     }
-
-    /** Persist the inference start time in Base's current transaction. */
-    readonly beforeInferenceTransact = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-        _inference: AgentBaseInferenceStart,
-    ): Promise<void> => {
-        await this.#beginObservation(ctx, scope, "inference");
-    };
-
-    /** Persist the turn start time in Base's current transaction. */
-    readonly beforeTurnTransact = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-        _turn: AgentBaseTurnStart,
-    ): Promise<void> => {
-        await this.#beginObservation(ctx, scope, "turn");
-    };
-
-    /** Record provider-measured tokens inside Base's inference completion transaction. */
-    readonly afterInferenceTransact = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-        inference: AgentBaseInference,
-    ): Promise<void> => {
-        await this.#finishInference(ctx, scope, inference);
-    };
-
-    /** Record turn timing inside Base's turn completion transaction. */
-    readonly afterTurnTransact = async (
-        ctx: Context,
-        scope: AgentModuleScope,
-        turn: AgentBaseTurn,
-    ): Promise<void> => {
-        await this.#finishTurn(ctx, scope, turn);
-    };
 
     async #beginObservation(
         ctx: Context,
@@ -764,6 +723,52 @@ export class UsageModule implements AgentModule {
             throw new Error("Usage collection access is not available to an agent context.");
         }
     }
+
+    readonly #hooks: AgentModuleHooks = {
+        /** The provider-neutral usage tool available to every agent. */
+        tools: (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => [
+            getUsageTool(this, scope.agent.id),
+            getAgentTreeUsageTool(this, scope.agent.id),
+        ],
+
+        /** Persist the inference start time in Base's current transaction. */
+        beforeInferenceTransact: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+            _inference: AgentBaseInferenceStart,
+        ): Promise<void> => {
+            await this.#beginObservation(ctx, scope, "inference");
+        },
+
+        /** Persist the turn start time in Base's current transaction. */
+        beforeTurnTransact: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+            _turn: AgentBaseTurnStart,
+        ): Promise<void> => {
+            await this.#beginObservation(ctx, scope, "turn");
+        },
+
+        /** Record provider-measured tokens inside Base's inference completion transaction. */
+        afterInferenceTransact: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+            inference: AgentBaseInference,
+        ): Promise<void> => {
+            await this.#finishInference(ctx, scope, inference);
+        },
+
+        /** Record turn timing inside Base's turn completion transaction. */
+        afterTurnTransact: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+            turn: AgentBaseTurn,
+        ): Promise<void> => {
+            await this.#finishTurn(ctx, scope, turn);
+        },
+    };
+
+    readonly beforeStart = (): AgentModuleHooks => this.#hooks;
 }
 
 function validateOptions(options: unknown): UsageModuleOptions {
