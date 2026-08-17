@@ -15,7 +15,7 @@ import {
     type AppendEventInput,
 } from "./types.js";
 
-const MAX_EVENT_PAYLOAD_BYTES = 2 * 1_024 * 1_024;
+const MAX_EVENT_PAYLOAD_BYTES = 5 * 1_024 * 1_024;
 
 const eventRowSchema = Type.Object(
     {
@@ -213,7 +213,7 @@ function serializePayload(payload: unknown): string {
         throw new Error("The agent event payload must be JSON serializable.");
     }
     if (encoded === undefined || Buffer.byteLength(encoded, "utf8") > MAX_EVENT_PAYLOAD_BYTES) {
-        throw new Error("The agent event payload exceeds the 2 MiB durable limit.");
+        throw new Error("The agent event payload exceeds the 5 MiB durable limit.");
     }
     return encoded;
 }

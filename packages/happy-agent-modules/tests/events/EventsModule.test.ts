@@ -489,10 +489,10 @@ describe("EventsModule", () => {
             ).rejects.toThrow("JSON serializable");
             await expect(
                 events.record(database.context, {
-                    payload: { text: "x".repeat(2 * 1_024 * 1_024) },
+                    payload: { text: "x".repeat(5 * 1_024 * 1_024) },
                     type: "test.oversized",
                 }),
-            ).rejects.toThrow("exceeds the 2 MiB durable limit");
+            ).rejects.toThrow("exceeds the 5 MiB durable limit");
             expect(events.replay(events.originCursor())?.events).toEqual([]);
         } finally {
             database.close();
@@ -1037,7 +1037,7 @@ describe("EventsModule", () => {
         await database.ready;
         try {
             const oversizedPayload = JSON.stringify({
-                text: "x".repeat(2 * 1_024 * 1_024),
+                text: "x".repeat(5 * 1_024 * 1_024),
             });
             await agentDatabaseRun(
                 database.database,
@@ -1057,7 +1057,7 @@ describe("EventsModule", () => {
                     )`,
             );
             await expect(events.beforeStart?.(database.context)).rejects.toThrow(
-                "exceeds the 2 MiB durable limit",
+                "exceeds the 5 MiB durable limit",
             );
         } finally {
             database.close();
