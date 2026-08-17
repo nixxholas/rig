@@ -23,6 +23,7 @@ import { ScriptedProvider, type ScriptedSession } from "./gym/ScriptedProvider.j
 class RecordingSpan implements TraceSpan {
     ended = false;
     exception: unknown;
+    readonly attributes: Record<string, unknown> = {};
 
     constructor(
         readonly name: string,
@@ -35,6 +36,10 @@ class RecordingSpan implements TraceSpan {
 
     recordException(error: unknown): void {
         this.exception = error;
+    }
+
+    setAttributes(attributes: Readonly<Record<string, unknown>>): void {
+        Object.assign(this.attributes, attributes);
     }
 }
 
@@ -125,6 +130,47 @@ describe("agent tracing", () => {
         expect(tracer.spans.every((span) => span.ended)).toBe(true);
     });
 
+    it("attributes every agent span without recording conversation content", async () => {
+        const tracer = new RecordingTracer();
+        const ctx = tracingContext(tracer);
+        const agent = await AgentBase.create(ctx, {
+            id: "test-agent",
+            providers: providersOf(new ScriptedProvider([textTurn("hello")])),
+            provider: "scripted",
+            model: "scripted-model",
+            effort: "low",
+            serviceTier: "priority",
+            permissionMode: "read_only",
+            persistence: new InMemoryPersistence(),
+        });
+
+        await agent.send(ctx, user("private prompt"), { await: true });
+        await agent.waitForIdle();
+        await agent.close();
+
+        const agentSpans = tracer.spans.filter((span) => span.name.startsWith("agent."));
+        expect(agentSpans).not.toHaveLength(0);
+        for (const span of agentSpans) {
+            expect(span.attributes).toMatchObject({
+                "agent.id": "test-agent",
+                "agent.provider": "scripted",
+                "agent.model": "scripted-model",
+                "agent.effort": "low",
+                "agent.service_tier": "priority",
+                "agent.permission_mode": "read_only",
+            });
+            expect(JSON.stringify(span.attributes)).not.toContain("private prompt");
+        }
+        const turn = agentSpans.find((span) => span.name === "agent.turn");
+        const inference = agentSpans.find((span) => span.name === "agent.inference");
+        expect(turn?.attributes["agent.loop.id"]).toEqual(expect.any(String));
+        expect(inference?.attributes).toMatchObject({
+            "agent.loop.id": turn?.attributes["agent.loop.id"],
+            "agent.turn.id": expect.any(String),
+            "agent.inference.id": expect.any(String),
+        });
+    });
+
     it("gives every call of a tool batch its own span inside the batch's own", async () => {
         const tracer = new RecordingTracer();
         const ctx = tracingContext(tracer);
@@ -149,6 +195,12 @@ describe("agent tracing", () => {
         expect(
             observed.filter((name) => name === "agent.run > agent.turn > agent.tools > agent.tool"),
         ).toHaveLength(2);
+        expect(
+            tracer.spans
+                .filter((span) => span.name === "agent.tool")
+                .map((span) => span.attributes["agent.tool.name"])
+                .sort(),
+        ).toEqual(["first", "second"]);
         expect(
             observed.filter((name) => name === "agent.run > agent.turn > agent.inference"),
         ).toHaveLength(2);

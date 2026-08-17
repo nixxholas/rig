@@ -80,6 +80,7 @@ import type { AgentBaseState } from "./AgentBaseState.js";
 import { AgentProviders } from "./AgentProviders.js";
 import type { AgentModuleAction } from "./AgentModuleAction.js";
 import type { AnyAgentTool } from "./AgentTool.js";
+import { setAgentSpanAttributes, type AgentSpanAttributes } from "./AgentSpanAttributes.js";
 
 /** Race winner when an abort interrupts a wait on the stream or a running tool. */
 const ABORTED = Symbol("aborted");
@@ -791,6 +792,35 @@ export class AgentBase {
             serviceTier: this.#serviceTier,
             permissionMode: this.#permissionMode,
         };
+    }
+
+    /**
+     * Open agent work with the selection that governs it, so every operation in a trace can be
+     * attributed without recording prompts, arguments, or provider response content.
+     */
+    #span<Result>(
+        ctx: Context,
+        name: string,
+        attributes: AgentSpanAttributes,
+        work: (ctx: Context) => Result | PromiseLike<Result>,
+    ): Promise<Awaited<Result>> {
+        const selection = this.#selection();
+        return Promise.resolve(
+            ctx.span(name, (spanCtx) => {
+                setAgentSpanAttributes(spanCtx, {
+                    "agent.id": selection.id,
+                    "agent.provider": selection.provider,
+                    "agent.permission_mode": selection.permissionMode,
+                    ...(selection.model === undefined ? {} : { "agent.model": selection.model }),
+                    ...(selection.effort === undefined ? {} : { "agent.effort": selection.effort }),
+                    ...(selection.serviceTier === undefined
+                        ? {}
+                        : { "agent.service_tier": selection.serviceTier }),
+                    ...attributes,
+                });
+                return work(spanCtx);
+            }),
+        );
     }
 
     /**
@@ -1648,7 +1678,7 @@ export class AgentBase {
         // whole of it runs on. Everything below is handed that context rather than reading a
         // scope back off the agent, so each turn, inference, tool call, and hook is placed in
         // the run it actually belongs to even while another agent is running alongside it.
-        await this.#ctx.span("agent.run", (ctx) => this.#runTurns(ctx));
+        await this.#span(this.#ctx, "agent.run", {}, (ctx) => this.#runTurns(ctx));
     }
 
     /** The run itself, on the context of the span the whole of it belongs to. */
@@ -1656,6 +1686,7 @@ export class AgentBase {
         if (this.#pending?.stage === "settlement") {
             this.#loopId ??= createId();
             this.#settlementId ??= createId();
+            setAgentSpanAttributes(ctx, { "agent.loop.id": this.#loopId });
             await this.#settleDurably(ctx, {
                 loopId: this.#loopId,
                 settlementId: this.#settlementId,
@@ -1667,6 +1698,7 @@ export class AgentBase {
         do {
             this.#loopId ??= createId();
             const loop: AgentBaseLoop = { loopId: this.#loopId };
+            setAgentSpanAttributes(ctx, { "agent.loop.id": loop.loopId });
             // The abort scope opens before the loop hook, not just before the turn. An abort
             // owns everything the run does — its opening hook as much as its inference — so a
             // run cancelled while it is still starting up never reaches the model at all.
@@ -1684,8 +1716,11 @@ export class AgentBase {
             );
             await this.#invokeHook(ctx, this.#hooks.beforeAgentLoop, loop);
             do {
-                const outcome = await ctx.span("agent.turn", (turnCtx) =>
-                    this.#runTurn(turnCtx, loop, abort),
+                const outcome = await this.#span(
+                    ctx,
+                    "agent.turn",
+                    { "agent.loop.id": loop.loopId },
+                    (turnCtx) => this.#runTurn(turnCtx, loop, abort),
                 );
                 if (outcome === "blocked") return;
                 if (outcome === "stop") break;
@@ -1728,6 +1763,7 @@ export class AgentBase {
         this.#turnAborted = false;
         this.#durableWorkBlocked = false;
         this.#turnId ??= createId();
+        setAgentSpanAttributes(ctx, { "agent.turn.id": this.#turnId });
         // Claimed before any awaiting, so a request raised while the turn is still starting up
         // survives into another turn instead of being cleared by it. The redundant turn this can
         // cost is cheap: an empty queue drains without any inference.
@@ -1803,7 +1839,15 @@ export class AgentBase {
      * resumed at all.
      */
     async #settleDurably(ctx: Context, settlement: AgentBaseSettlement): Promise<void> {
-        await ctx.span("agent.settle", (settleCtx) => this.#settleRecord(settleCtx, settlement));
+        await this.#span(
+            ctx,
+            "agent.settle",
+            {
+                "agent.loop.id": settlement.loopId,
+                "agent.settlement.id": settlement.settlementId,
+            },
+            (settleCtx) => this.#settleRecord(settleCtx, settlement),
+        );
     }
 
     /** The settlement itself, on the context of the span it belongs to. */
@@ -2130,7 +2174,7 @@ export class AgentBase {
                 await this.#consumeInjections(ctx);
                 // Nothing to answer — a start() on an idle history, or the queues ran dry.
                 if (!this.#noticeAwaitingResponse && !injected && !needsInference) break;
-                const response = await ctx.span("agent.inference", (inferenceCtx) =>
+                const response = await this.#span(ctx, "agent.inference", {}, (inferenceCtx) =>
                     this.#requestInference(inferenceCtx, abortPromise),
                 );
                 // A cancellation arrived before the request was made, so the turn cycles rather
@@ -2247,6 +2291,11 @@ export class AgentBase {
         };
         this.#loopId = inferenceStart.loopId;
         this.#turnId = inferenceStart.turnId;
+        setAgentSpanAttributes(ctx, {
+            "agent.loop.id": inferenceStart.loopId,
+            "agent.turn.id": inferenceStart.turnId,
+            "agent.inference.id": inferenceStart.inferenceId,
+        });
         await this.#enterStage(
             ctx,
             "inference",
@@ -2389,7 +2438,7 @@ export class AgentBase {
      */
     async #runCompaction(ctx: Context, signal: AbortSignal): Promise<void> {
         if (this.#compaction === undefined) return;
-        await ctx.span("agent.compaction", (compactionCtx) =>
+        await this.#span(ctx, "agent.compaction", {}, (compactionCtx) =>
             this.#compactHistory(compactionCtx, signal),
         );
     }
@@ -2412,6 +2461,11 @@ export class AgentBase {
             };
             this.#loopId = compactionStart.loopId;
             this.#turnId = compactionStart.turnId;
+            setAgentSpanAttributes(ctx, {
+                "agent.loop.id": compactionStart.loopId,
+                "agent.turn.id": compactionStart.turnId,
+                "agent.compaction.id": compactionStart.compactionId,
+            });
             await this.#invokeHook(ctx, this.#hooks.beforeCompaction, compactionStart);
             // Provider compaction is this turn's work, so it runs on this turn's lifetime: an
             // abort reaches the provider operation itself rather than waiting for it to finish
@@ -3069,8 +3123,11 @@ export class AgentBase {
         signal: AbortSignal,
         abortPromise: Promise<typeof ABORTED>,
     ): Promise<boolean> {
-        return await ctx.span("agent.tools", (batchCtx) =>
-            this.#dispatchToolBatch(batchCtx, entries, resume, signal, abortPromise),
+        return await this.#span(
+            ctx,
+            "agent.tools",
+            { "agent.tool.count": entries.length, "agent.tool.resume": resume },
+            (batchCtx) => this.#dispatchToolBatch(batchCtx, entries, resume, signal, abortPromise),
         );
     }
 
@@ -3197,11 +3254,21 @@ export class AgentBase {
                     // The call's own span hangs off the batch's. Every call in the batch runs at
                     // the same time, so each opens its span from the batch's context and carries
                     // its own from there.
-                    const execution = ctx.span("agent.tool", (toolCtx) =>
-                        this.#executeToolCall(
-                            withLifetime(this.#workContext(toolCtx), toolLifetime),
-                            entry,
-                        ),
+                    const execution = this.#span(
+                        ctx,
+                        "agent.tool",
+                        {
+                            "agent.tool.id": entry.id,
+                            "agent.tool.name": entry.call.name,
+                            ...(entry.call.namespace === undefined
+                                ? {}
+                                : { "agent.tool.namespace": entry.call.namespace }),
+                        },
+                        (toolCtx) =>
+                            this.#executeToolCall(
+                                withLifetime(this.#workContext(toolCtx), toolLifetime),
+                                entry,
+                            ),
                     );
                     running.push(execution);
                     outcome = await Promise.race([execution, abortPromise, this.#closingTools()]);
