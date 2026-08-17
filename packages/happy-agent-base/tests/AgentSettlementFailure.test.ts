@@ -1,3 +1,4 @@
+import type { SessionEvent } from "@slopus/happy-providers";
 import { createRootContext, type Context } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
@@ -14,8 +15,8 @@ import { ScriptedProvider } from "./gym/ScriptedProvider.js";
 const ctx = createRootContext().named("happy-agent-base-settlement-failure");
 
 /** A response the provider refuses to give, the way a usage limit arrives. */
-function errorTurn(message: string) {
-    return [{ type: "done", state: "error", kind: "billing_error", message }] as const;
+function errorTurn(message: string): SessionEvent[] {
+    return [{ type: "done", state: "error", kind: "billing_error", message }];
 }
 
 /** A store that accepts the conversation but refuses the note explaining why a turn failed. */
