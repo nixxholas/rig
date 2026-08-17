@@ -123,19 +123,12 @@ export function system(text: string): SessionSystemMessage {
     return { role: "system", content: [{ type: "text", text }] };
 }
 
-/**
- * A message one collaborating agent addresses to another.
- *
- * Built against the `@slopus/happy-providers` release this package compiles with. Its shape
- * changes when the portable agent message ships; nothing here reads its fields.
- */
-export function agentMessage(header: string): SessionAgentMessage {
+/** A message one collaborating agent addresses to another. */
+export function agentMessage(text: string): SessionAgentMessage {
     return {
         role: "agent",
-        author: "author-agent",
-        recipient: "recipient-agent",
-        header,
-        encryptedContent: `encrypted:${header}`,
+        author: { id: "agt_author", description: "the author" },
+        content: [{ type: "text", text }],
     };
 }
 
