@@ -146,8 +146,8 @@ describe("core loop consistency gaps", () => {
             ) {
                 // Calling send during action A races an external writer against the action
                 // batch; the database transaction must still keep A and B contiguous.
-                externalSend = persistence.outsideTransaction(
-                    () => agent.send(ctx, external, { await: true }),
+                externalSend = persistence.outsideTransaction(() =>
+                    agent.send(ctx, external, { await: true }),
                 );
             }
         };

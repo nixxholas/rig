@@ -1,7 +1,11 @@
 import { traceSpan, type Context } from "@steve.kite/stdlib";
 
 /** Values that OpenTelemetry accepts as one span attribute. */
-export type AgentSpanAttributeValue = string | number | boolean | readonly (string | number | boolean)[];
+export type AgentSpanAttributeValue =
+    | string
+    | number
+    | boolean
+    | readonly (string | number | boolean)[];
 
 /** Attributes Agent Base adds to the span currently carried by a context. */
 export type AgentSpanAttributes = Readonly<Record<string, AgentSpanAttributeValue>>;
