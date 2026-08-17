@@ -42,6 +42,7 @@ import {
     TasksModule,
     UsageModule,
     UserInputModule,
+    WorkflowsModule,
     WorkspacesModule,
     boundSecurityFileText,
     createComputeModules,
@@ -106,6 +107,7 @@ export interface HappyAgentModules {
     readonly tasks: TasksModule;
     readonly usage: UsageModule;
     readonly userInput: UserInputModule;
+    readonly workflows: WorkflowsModule;
     readonly workspaces: WorkspacesModule;
 }
 
@@ -385,8 +387,12 @@ export async function startHappyAgent(
         // Gemini is not one of the accounts a chat runs on, so its search reads a key from the
         // environment rather than from a configured provider.
         const gemini = process.env.GEMINI_API_KEY?.trim() || undefined;
+
+        // A workflow starts its agents through collaboration, so it needs that very module rather
+        // than one of its own.
+        const collaboration = new CollaborationModule();
         const modules: HappyAgentModules = {
-            collaboration: new CollaborationModule(),
+            collaboration,
             compute: compute.computeModule,
             config,
             conversations,
@@ -451,6 +457,17 @@ export async function startHappyAgent(
                     },
                 },
             }),
+            workflows: new WorkflowsModule({
+                enabled: configuration.values.features.workflows,
+                collaboration,
+                compute: {
+                    resolve: async (resolveCtx, agentId) =>
+                        await compute.computeModule.resolve(resolveCtx, agentId),
+                },
+                // A run outlives the tool call that started it, so it lives on the application root
+                // rather than on the turn that launched it, with the database attached.
+                runContext: withDatabase(hostRoot.named("workflow-run")),
+            }),
             workspaces,
         };
 
@@ -475,6 +492,8 @@ export async function startHappyAgent(
             modules.workspaces,
             modules.secrets,
             modules.collaboration,
+            // Workflows start their agents through collaboration, so collaboration comes first.
+            modules.workflows,
             modules.scheduling,
             modules.userInput,
             modules.search,

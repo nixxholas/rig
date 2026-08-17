@@ -112,7 +112,7 @@ describe("Happy Agent Rig compatibility", () => {
                 subagents: [],
                 tasks: [],
                 workflows: [],
-                workflowsEnabled: false,
+                workflowsEnabled: true,
             },
         });
         await expect(connection.client.listFolders()).resolves.toEqual({

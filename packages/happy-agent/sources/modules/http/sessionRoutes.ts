@@ -284,7 +284,7 @@ export function createSessionRoutes(): AgentHttpRouteGroup {
             path: "/v0/sessions",
             handle: async ({ ctx, dependencies, request, response }) => {
                 const body = await readValidatedBody(request, createSessionSchema);
-                if (body.workflowsEnabled === true) refuseWorkflows();
+                if (body.workflowsEnabled === true) assertWorkflowsEnabled(dependencies.agent);
                 checkAgentSelection(dependencies.agent.system.models, requestedSelection(body));
                 const conversation = dependencies.agent.modules.conversations;
                 const existing =
@@ -841,8 +841,18 @@ function createMutationRoutes(): AgentHttpRouteGroup["routes"] {
         {
             method: "POST",
             path: "/v0/sessions/:sessionId/workflows/:runId/stop",
-            handle: async () => {
-                refuseWorkflows();
+            handle: async ({ ctx, dependencies, request, response, url }) => {
+                assertWorkflowsEnabled(dependencies.agent);
+                await readValidatedBody(request, workflowStopSchema);
+                const session = await requireSession(ctx, dependencies, sessionId(url));
+                // Stopping is settled by the run's own identity, so a client that retries the call
+                // gets the run it already cancelled back rather than a second cancellation.
+                const run = await dependencies.agent.modules.workflows.cancel(
+                    ctx,
+                    session.agentId,
+                    lastPathPart(url),
+                );
+                sendJson(response, 200, { workflow: run });
             },
         },
         {
@@ -1054,7 +1064,7 @@ async function sessionResponse(
         subagents: [],
         tasks,
         workflows: [],
-        workflowsEnabled: false,
+        workflowsEnabled: dependencies.agent.configuration.values.features.workflows,
     };
 }
 
@@ -1066,9 +1076,10 @@ function configuredMcpServers(): readonly {
     return [];
 }
 
-/** Workflows need a runtime this agent does not host, so a session never runs one. */
-function refuseWorkflows(): never {
-    throw new AgentHttpError(501, "Workflows are not available in this agent.");
+function assertWorkflowsEnabled(agent: StartedHappyAgent): void {
+    if (!agent.configuration.values.features.workflows) {
+        throw new AgentHttpError(503, "Workflows are turned off in this agent's settings.");
+    }
 }
 
 export async function sessionSummary(

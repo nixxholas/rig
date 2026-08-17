@@ -57,11 +57,13 @@ await daemon.close();
 `startHappyAgent` returns only what a host actually needs: the modules, the Agent System, the
 storage and database, and the resolved providers and model catalog.
 
-Every module that would reach another service is disabled here: there is no collaboration host, no
-Happy app bridge, no MCP, and no workflow or worklet runtime. Search and image generation stay,
-because each asks the configured accounts directly rather than a host: an image is generated on a
-Codex account and written into the shared generated-files folder. Folders still provide storage,
-compute, AGENTS.md, skills, and generated media.
+Only the modules that would have to reach an outside service are left out: there is no Happy app
+bridge, no MCP, and no worklet runtime. Everything else runs here, because each module does its own
+work rather than delegating to a host — search and image generation ask the configured accounts
+directly, an image is written into the shared generated-files folder, and a workflow runs its script
+here and starts its agents through the collaboration module. Workflows follow the `features.workflows`
+setting, and their routes answer `503` when it is off. Folders still provide storage, compute,
+AGENTS.md, skills, and generated media.
 
 The resolved `daemon.configuration.paths` is the authoritative immutable layout. A custom
 `<parent>/.happy` always uses `<parent>/Happy` as its public home; callers do not provide

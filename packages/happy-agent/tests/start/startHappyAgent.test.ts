@@ -43,6 +43,7 @@ describe("startHappyAgent", () => {
             "tasks",
             "usage",
             "userInput",
+            "workflows",
             "workspaces",
         ]);
         expect(first.provider).toBe("codex");
@@ -70,11 +71,13 @@ describe("startHappyAgent", () => {
     it("has no module that would need a host integration", async () => {
         const agent = await start(await createHappyHome());
         const names = Object.keys(agent.modules);
-        for (const absent of ["happy", "mcp", "workflows"]) {
+        for (const absent of ["happy", "mcp"]) {
             expect(names).not.toContain(absent);
         }
         // Image generation asks no host for anything: it reads the configured Codex account itself.
         expect(agent.modules.imageGeneration.accountCount).toBe(1);
+        // Workflows run here too, on the collaboration module rather than an injected runtime.
+        expect(agent.modules.workflows.name).toBe("workflows");
         // Everything the daemon serves over its socket comes from the same start, with no host.
         expect(typeof agent.background).toBe("function");
         expect(agent.gitTracker).toBeDefined();
