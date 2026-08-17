@@ -540,7 +540,6 @@ function unavailableIntegrations(): HappyAgentIntegrations {
             notify: async () => ({ accepted: false }),
             setStatus: async () => ({ accepted: false }),
         },
-        imageGeneration: { generate: unavailable },
         mcp: {
             callTool: unavailable,
             getPrompt: unavailable,

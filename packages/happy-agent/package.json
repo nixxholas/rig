@@ -35,7 +35,7 @@
         "@slopus/happy-agent-base": "npm:@slopus/happy-agent-base@0.0.20",
         "@slopus/happy-agent-compute": "npm:@slopus/happy-agent-compute@0.1.6",
         "@slopus/happy-agent-modules": "workspace:*",
-        "@slopus/happy-providers": "workspace:*",
+        "@slopus/happy-providers": "0.0.10",
         "@steve.kite/stdlib": "0.0.12",
         "deunicode": "1.0.7",
         "drizzle-orm": "^0.45.2",

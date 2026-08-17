@@ -117,6 +117,19 @@ Work that only consumes the package — a new feature, a new caller, a new packa
 
 Always use `pnpm` for this project. Do not use `npm`, `npx`, or `yarn` for installs, scripts, dependency changes, or lockfile updates unless the user explicitly asks for a different package manager.
 
+## Published SDK dependencies
+
+`@slopus/happy-providers`, `@slopus/happy-agent-base`, and `@slopus/happy-agent-compute` are always
+consumed from their published npm versions, even though their sources live in this repository. Every
+package that depends on one of them pins the published version. Never change such a dependency to
+`workspace:*`, and never add a new one as a workspace link.
+
+Every package must resolve the same published version of each of these, because pnpm gives a
+`workspace:*` link and a version pin two separate copies of the same package. Two copies mean two
+copies of every class, so `instanceof` fails across the seam and errors thrown by one copy are not
+recognized by the other. When a dependency must be upgraded, upgrade it in every package that
+declares it, in the same change.
+
 ## Runtime validation
 
 Use TypeBox schemas for every runtime type validation. Derive TypeScript types from those schemas

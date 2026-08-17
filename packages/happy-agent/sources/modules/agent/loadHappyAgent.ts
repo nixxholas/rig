@@ -32,6 +32,7 @@ import {
     CollaborationModule,
     ComputeModule,
     EventsModule,
+    GeminiModule,
     GoalModule,
     HappyModule,
     HistoryModule,
@@ -59,7 +60,6 @@ import {
     type EventsModuleOptions,
     type HappyHost,
     type HostCompute,
-    type ImageGenerator,
     type McpHost,
     type PermissionReviewer,
     type SecretResolver,
@@ -140,7 +140,6 @@ const effectiveSelectionSchema = Type.Object(
 );
 export interface HappyAgentIntegrations {
     readonly happy: HappyHost;
-    readonly imageGeneration: ImageGenerator;
     readonly mcp: McpHost;
     readonly workflows: WorkflowRuntime;
     readonly permissionReviewer?: PermissionReviewer;
@@ -173,6 +172,8 @@ export interface HappyAgentModuleCollection {
     readonly conversations: ConversationModule;
     readonly compute: ComputeModule;
     readonly events: EventsModule;
+    /** Present only when a Gemini API key is configured; Gemini is not an account a chat runs on. */
+    readonly gemini?: GeminiModule;
     readonly goal: GoalModule;
     readonly happy: HappyModule;
     readonly history: HistoryModule;
@@ -348,6 +349,7 @@ export async function loadHappyAgent(
             modules.userInput,
             modules.workflows,
             modules.imageGeneration,
+            ...(modules.gemini === undefined ? [] : [modules.gemini]),
             modules.search,
             modules.happy,
             modules.mcp,
@@ -770,9 +772,20 @@ async function createModules(
         happy: new HappyModule({ host: integrations.happy }),
         history,
         imageGeneration: new ImageGenerationModule({
-            generator: integrations.imageGeneration,
-            outputDirectory: configuration.paths.generatedPath,
+            config: configModule,
+            providers: autoOptions.providers,
         }),
+        ...(geminiApiKey === undefined
+            ? {}
+            : {
+                  gemini: new GeminiModule({
+                      apiKey: geminiApiKey,
+                      compute: {
+                          resolve: async (ctx, agentId) =>
+                              await compute.computeModule.resolve(ctx, agentId),
+                      },
+                  }),
+              }),
         mcp: new McpModule({ host: integrations.mcp }),
         modelSwitch: new ModelSwitchModule({ history }),
         permissions,

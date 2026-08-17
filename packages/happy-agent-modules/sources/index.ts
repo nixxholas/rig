@@ -565,6 +565,20 @@ export { grokWebSearchTool } from "./search/tools/grok_web_search.js";
 export { grokXSearchTool } from "./search/tools/grok_x_search.js";
 export { webFetchTool } from "./search/tools/web_fetch.js";
 
+// Gemini: image generation, music generation, and questions about local media files.
+export {
+    GeminiModule,
+    geminiModuleOptionsSchema,
+    type GeminiConnection,
+    type GeminiGeneratedMedia,
+    type GeminiMediaInput,
+    type GeminiMediaInputType,
+    type GeminiModuleOptions,
+} from "./gemini/index.js";
+export { geminiAnalyzeMediaTool } from "./gemini/tools/gemini_analyze_media.js";
+export { geminiGenerateImageTool } from "./gemini/tools/gemini_imagegen.js";
+export { geminiGenerateMusicTool } from "./gemini/tools/gemini_generate_music.js";
+
 // Workspaces: host-owned worktree/Git references, bounded catalogs, and
 // cursor-addressable detail.
 export * from "./workspaces/index.js";

@@ -1,82 +1,66 @@
 # Image generation
 
-Image generation is the provider-neutral prompt-to-file capability. A host-owned
-`ImageGenerator` returns bounded image bytes and metadata; this module validates the response,
-writes it to a real file, and records the resulting operation and asset in the agent's catalog.
+One prompt becomes one PNG. The module owns the whole path itself — which account to ask, the
+request, the validation of what comes back, and the file it publishes — so it needs nothing beyond
+the accounts already configured and the configuration that names the generated-files folder.
 
 ```ts
-import { Agent } from "@slopus/happy-agent-base";
-import { ImageGenerationModule } from "@slopus/happy-agent-modules";
+import { ConfigModule, ImageGenerationModule } from "@slopus/happy-agent-modules";
 
-const imageGeneration = new ImageGenerationModule({
-    generator: hostGenerator,
-    // outputDirectory defaults to `~/Happy/Generated`.
-});
-const agent = await Agent.create(ctx, { ...options, modules: [imageGeneration] });
+const config = await ConfigModule.load();
+const imageGeneration = new ImageGenerationModule({ config, providers });
 ```
 
-One module instance serves every agent. Each agent's catalog is taken from its
-`AgentModuleScope.kv` and scoped under `"catalog"`.
+## The tool
 
-## Tool
+Every model receives one tool, **`codex_imagegen`**, carrying the guidance Codex models were
+trained on. The name is Codex's because the capability is — images are generated on Codex accounts
+— and because Codex models cannot be given a plain `imagegen`: the Responses API reserves that name
+and the `image_gen` namespace for its own built-in image tool and rejects the whole request when a
+definition under either differs from the built-in one. Every other family reads the same guidance
+rather than a second surface that would have to be kept in step with this one. It also accepts an
+explicit `null` for an unused image selector, which Codex models emit in place of omitting the
+field.
 
-The module uses Rig's provider-facing names over one provider-neutral host boundary:
+It takes a prompt, and for an edit either up to five `referenced_image_paths` or
+`num_last_images_to_include` — never both. It is `durable: false`, because a generation is billed
+work that cannot safely be repeated, requires Auto or Full access, and always asks for review;
+elevation is requested only when the call names a local path to read.
 
-- Codex and Bedrock OpenAI/GPT agents receive **`codex_imagegen`**.
-- Claude, Grok, and other model families receive **`imagegen`**.
+## Accounts
 
-Both accept a bounded prompt. For edits they accept either up to five
-`referenced_image_paths` or `num_last_images_to_include`, never both. The host receives the active
-provider ID as its preferred route, so a single generator integration can select and fall back
-across configured image providers. The tool:
+```text
+                    codex_imagegen
+                          |
+                          v
+              this chat's own Codex account
+                          |
+                          | definitive account refusal only
+                          v
+             remaining accounts in round-robin order
+                          |
+                          v
+              ~/Happy/Generated/<tool-call>.png
+```
 
-- is `durable: false`, because generation may perform billed external work and cannot safely be
-  retried after an interrupted process;
-- uses the stable cuid2 `call.id` supplied by Agent Base as its operation ID;
-- never exposes an operation ID in its model-facing input; and
-- returns bounded metadata including the operation ID, asset ID, media type, and absolute file
-  path.
+Codex cloud accounts supply the capability; Bedrock does not. A definitive refusal — signed out,
+out of credit, not entitled — moves to the next account. A transport failure or a malformed answer
+stops there, because the first request may already have been billed.
 
-Image tools require Auto or Full access and request Auto review because generation crosses the
-external provider and generated-files boundaries.
+## Images an edit is built from
 
-The tool does not maintain call-scoped state, request fingerprints, receipts, or replay handling.
-Calling the module twice with the same operation ID is a conflict, not a request to replay a
-previous result.
+`referenced_image_paths` are read straight off this machine, as `~`-relative, absolute, or
+working-directory-relative paths. Each image is measured before it is read, then decoded and
+normalized under a 32 MiB aggregate source bound and a 48 MiB encoded-request bound.
 
-## Host API
+`num_last_images_to_include` uses the last few images the agent was actually shown: images a person
+attached, and images this module generated. They are held in memory for the length of the process,
+newest five per agent, because nothing else keeps the bytes — the durable history records that an
+image existed, not what was in it.
 
-`ImageGenerationModule` exposes:
+## The finished image
 
-- `generate(ctx, agentId, input)` — trims and validates the prompt, invokes the configured
-  generator, writes the file, and records either the completed or failed status. A host may pass
-  `input.operationId`; otherwise `idFactory` allocates one.
-- `status(ctx, agentId, operationId)` — reads one recorded status.
-- `read(ctx, agentId, assetId)` — reads bounded asset metadata.
-- `remove(ctx, agentId, assetId)` — removes the catalog record and then deletes the file
-  best-effort.
-- `formatForModel(status, maxCharacters?)` — renders the same bounded text used by the tool.
-
-A generated success and a generated failure each use exactly one catalog transaction. The
-transaction rejects an already-recorded operation ID, writes the status and asset index when
-applicable, and runs `listener.onEventTransactional`. `listener.onEvent` runs after commit.
-
-Generation events are
-`{ type: "image_generation_changed", eventId, at, agentId, operationId, operation }`; removal
-events are `{ type: "image_removed", eventId, at, agentId, assetId }`.
-
-## Storage and files
-
-Completed generations write:
-
-- `operation.<operationId>` — the full `ImageGenerationStatus`;
-- `asset.<assetId>` — the operation ID owning that asset.
-
-Failed generations write only the operation status. There is no call-scoped Agent KV state.
-
-Generated bytes are bounded before reaching the filesystem. The module writes to a temporary
-file and atomically renames it into place, so readers do not observe partial output. If writing
-the catalog fails, the published file is removed best-effort. Asset IDs and filenames use fresh
-UUIDs, and the extension comes from the validated `image/...` media type.
-
-The output directory defaults to `~/Happy/Generated`.
+What comes back is proven to be a real PNG — base64, signature, and a decoder that can read the
+picture — before it becomes a file. It is written under a temporary name and published by rename,
+so a reader never sees a partial image, and the model is handed both the path and the image itself
+so it can decide whether to iterate.
