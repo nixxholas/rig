@@ -921,10 +921,7 @@ export class HistoryModule implements AgentModule {
          * failure therefore rolls settlement back and leaves the pending blocks for the next
          * restart.
          */
-        afterAgentSettledTransact: async (
-            ctx: Context,
-            scope: AgentModuleScope,
-        ): Promise<void> => {
+        afterAgentSettledTransact: async (ctx: Context, scope: AgentModuleScope): Promise<void> => {
             const blocks = await this.#pendingBlocks(ctx, scope);
             if (blocks.length === 0) return;
             await this.#append(ctx, scope.agent.id, {

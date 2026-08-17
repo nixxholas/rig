@@ -90,10 +90,7 @@ export function createWorkspaceRoutes(options: WorkspaceRouteOptions): AgentHttp
                 );
                 await requireProject(ctx, projectId);
                 const body = await readValidatedBody(request, createWorkspaceSchema);
-                if (
-                    body.identity !== undefined &&
-                    body.identity !== options.agent.agent.id
-                ) {
+                if (body.identity !== undefined && body.identity !== options.agent.agent.id) {
                     throw new AgentHttpError(
                         403,
                         "The workspace identity does not match this agent.",

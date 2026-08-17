@@ -34,9 +34,10 @@ export function moduleDatabase(
         return { rows: statement.all(...params) };
     });
     const context = withAgentDatabase(createRootContext().named(name), database);
-    const ready = Promise.all(migrations.map(([, migrate]) => migrate(context, database))).then(
-        () => undefined,
-    );
+    // Ordered, exactly as Agent Base applies them: a later migration may depend on an earlier one.
+    const ready = (async () => {
+        for (const [, migrate] of migrations) await migrate(context, database);
+    })();
     return {
         database,
         context,

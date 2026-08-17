@@ -55,35 +55,24 @@ Settings are a bounded object, not arbitrary JSON: an optional
 
 ## Tools
 
-- `list_projects` lists projects in their independent main-list order in
-  bounded cursor pages.
-- `get_project` reads one project.
-- `create_project` registers a folder path and display name.
-- `ensure_project` registers a folder exactly once, converges on the row that
-  folder already has, and restores it when it was archived. It returns
-  `{ created: true }` only when it created the row.
-- `rename_project` changes a display name with an optional `expectedVersion`
-  guard and marks the name as user-chosen.
-- `archive_project` records archival.
-- `restore_project` brings an archived project back.
-- `reorder_project` moves a project in the independent main project list.
-- `set_project_avatar` stores normalized, bounded avatar metadata.
-- `clear_project_avatar` removes avatar metadata; host-owned bytes remain a
-  host concern.
-- `get_project_settings` reads the bounded settings for one project.
-- `update_project_settings` replaces them with an optional `expectedVersion`
-  guard and returns the current project version.
+One tool, `list_projects`, which lists projects in their independent main-list
+order in bounded cursor pages. It is durable and provider-neutral, and it never
+reviews in Auto mode.
 
-All tools are durable and provider-neutral. Mutation tools set
-`transactional: true`; Agent Base commits their returned result with the
-catalog or settings change.
+Registering, renaming, archiving, reordering, and the avatar and settings
+writes are the host's to make through the public API below; a model changes the
+catalog only by asking the person.
 
-`archive_project` is the one tool that reviews in Auto mode, because archival
-is what sets host cleanup in motion: `describeAutoPermissionAction` says that
-the project's managed folder and every workspace worktree cut from it will be
-deleted, and that archival stands even if that cleanup fails. Review is not
-elevation — the tool does not ask for Full access, because the write it makes
-never leaves the database.
+The tool exists only when both are true:
+
+- `crossWorkspace` is on. The catalog spans every project on the machine, so
+  reading it is exactly what looking outside the current project means, and the
+  user's `features.cross_workspace` setting decides whether it is offered.
+- The agent is somebody's own conversation. A subagent works inside the task it
+  was handed and is given no view of the catalog.
+
+When the tool is absent, a model has no project tools at all rather than a tool
+that fails when it is called.
 
 ## Public API
 

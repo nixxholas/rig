@@ -17,7 +17,7 @@ import {
     type SchedulingScheduledMessage,
     type SchedulingWaitRecord,
 } from "./Scheduling.js";
-import type { SchedulingStore } from "./SchedulingStore.js";
+import { schedulingPendingQuerySchema, type SchedulingStore } from "./SchedulingStore.js";
 
 /** Tables owned by SchedulingModule. Keys are intentionally append-only module migrations. */
 export const schedulingMigrations: readonly AgentModuleMigration[] = [
@@ -94,21 +94,24 @@ export const schedulingMigrations: readonly AgentModuleMigration[] = [
             await agentDatabaseRun(database, sql`DROP TABLE IF EXISTS happy_scheduling_proofs`);
         },
     ],
+    [
+        // Recovery reads the pending messages of every agent in due order, which the per-sender and
+        // per-target indexes cannot serve.
+        "004-scheduling-due-index",
+        async (_ctx, database) => {
+            await agentDatabaseRun(
+                database,
+                sql`CREATE INDEX IF NOT EXISTS happy_scheduling_schedules_due
+                    ON happy_scheduling_schedules(status, due_at, id)`,
+            );
+        },
+    ],
 ];
 
 export function createSqliteSchedulingStorage<
     Database extends AgentDatabase = AgentDatabase,
 >(): SchedulingStore {
     const dbFor = (ctx: Context): Database => ctx.db as Database;
-    const parse = (value: unknown, label: string): unknown => {
-        if (typeof value !== "string") throw new Error(`Scheduling ${label} is not JSON text.`);
-        try {
-            return JSON.parse(value) as unknown;
-        } catch {
-            throw new Error(`Scheduling ${label} contains invalid JSON.`);
-        }
-    };
-    const text = (value: unknown): string => JSON.stringify(value);
     const readWait = async (
         ctx: Context,
         agentId: string,
@@ -130,7 +133,7 @@ export function createSqliteSchedulingStorage<
         await agentDatabaseRun(
             dbFor(ctx),
             sql`INSERT INTO happy_scheduling_waits (id, agent_id, record_json)
-                VALUES (${wait.id}, ${wait.agentId}, ${text(wait)})
+                VALUES (${wait.id}, ${wait.agentId}, ${JSON.stringify(wait)})
                 ON CONFLICT(id) DO UPDATE SET
                     agent_id = excluded.agent_id,
                     record_json = excluded.record_json`,
@@ -138,22 +141,13 @@ export function createSqliteSchedulingStorage<
     };
     const readSchedule = async (
         ctx: Context,
-        agentId: string,
         id: string,
     ): Promise<SchedulingScheduledMessage | undefined> => {
         const rows = await agentDatabaseRows<ScheduleRow>(
             dbFor(ctx),
-            sql`SELECT schedule_json FROM happy_scheduling_schedules
-                WHERE id = ${id}
-                  AND (sender_agent_id = ${agentId} OR target_agent_id = ${agentId})
-                LIMIT 1`,
+            sql`SELECT schedule_json FROM happy_scheduling_schedules WHERE id = ${id} LIMIT 1`,
         );
-        if (rows[0] === undefined) return undefined;
-        const schedule = parse(rows[0].schedule_json, "scheduled message");
-        if (!Value.Check(schedulingScheduledMessageSchema, schedule)) {
-            throw new Error("Scheduling database returned an invalid scheduled message.");
-        }
-        return schedule as SchedulingScheduledMessage;
+        return rows[0] === undefined ? undefined : scheduleOf(rows[0]);
     };
     const writeSchedule = async (
         ctx: Context,
@@ -165,7 +159,7 @@ export function createSqliteSchedulingStorage<
                 (id, sender_agent_id, target_agent_id, due_at, status, schedule_json)
                 VALUES (
                     ${schedule.id}, ${schedule.senderAgentId}, ${schedule.targetAgentId},
-                    ${schedule.dueAt}, ${schedule.status}, ${text(schedule)}
+                    ${schedule.dueAt}, ${schedule.status}, ${JSON.stringify(schedule)}
                 )
                 ON CONFLICT(id) DO UPDATE SET
                     sender_agent_id = excluded.sender_agent_id,
@@ -177,7 +171,6 @@ export function createSqliteSchedulingStorage<
     };
     const listSchedules = async (
         ctx: Context,
-        _agentId: string,
         query: SchedulingSchedulePageQuery,
     ): Promise<SchedulingSchedulePage> => {
         if (!Value.Check(schedulingSchedulePageQuerySchema, query)) {
@@ -201,13 +194,7 @@ export function createSqliteSchedulingStorage<
                 ORDER BY due_at, id
                 LIMIT ${limit + 1} OFFSET ${offset}`,
         );
-        const schedules = rows.slice(0, limit).map((row) => {
-            const schedule = parse(row.schedule_json, "scheduled message");
-            if (!Value.Check(schedulingScheduledMessageSchema, schedule)) {
-                throw new Error("Scheduling database returned an invalid scheduled message.");
-            }
-            return schedule as SchedulingScheduledMessage;
-        });
+        const schedules = rows.slice(0, limit).map(scheduleOf);
         return {
             schedules,
             limit,
@@ -215,12 +202,31 @@ export function createSqliteSchedulingStorage<
             ...(rows.length > limit ? { nextCursor: String(offset + schedules.length) } : {}),
         };
     };
+    const listPendingSchedules = async (
+        ctx: Context,
+        query: { readonly limit: number; readonly afterDueAt?: number },
+    ): Promise<SchedulingScheduledMessage[]> => {
+        if (!Value.Check(schedulingPendingQuerySchema, query)) {
+            throw new Error("Scheduling pending query is invalid.");
+        }
+        const after =
+            query.afterDueAt === undefined ? sql`` : sql` AND due_at > ${query.afterDueAt}`;
+        const rows = await agentDatabaseRows<ScheduleRow>(
+            dbFor(ctx),
+            sql`SELECT schedule_json FROM happy_scheduling_schedules
+                WHERE status = 'pending'${after}
+                ORDER BY due_at, id
+                LIMIT ${query.limit}`,
+        );
+        return rows.map(scheduleOf);
+    };
     return {
         readWait,
         writeWait,
         readSchedule,
         writeSchedule,
         listSchedules,
+        listPendingSchedules,
     };
 }
 
@@ -230,6 +236,23 @@ interface WaitRow {
 
 interface ScheduleRow {
     readonly schedule_json: string;
+}
+
+function scheduleOf(row: ScheduleRow): SchedulingScheduledMessage {
+    const schedule = parse(row.schedule_json, "scheduled message");
+    if (!Value.Check(schedulingScheduledMessageSchema, schedule)) {
+        throw new Error("Scheduling database returned an invalid scheduled message.");
+    }
+    return schedule as SchedulingScheduledMessage;
+}
+
+function parse(value: unknown, label: string): unknown {
+    if (typeof value !== "string") throw new Error(`Scheduling ${label} is not JSON text.`);
+    try {
+        return JSON.parse(value) as unknown;
+    } catch {
+        throw new Error(`Scheduling ${label} contains invalid JSON.`);
+    }
 }
 
 function cursorOffset(cursor: string | undefined): number {

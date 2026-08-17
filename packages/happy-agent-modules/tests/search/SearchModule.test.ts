@@ -1,130 +1,50 @@
 import { Value } from "@sinclair/typebox/value";
-import type { AgentModuleScope } from "@slopus/happy-agent-base";
-import { createRootContext, type Context } from "@steve.kite/stdlib";
+import type { AgentModel, AgentModuleScope, AgentProviders } from "@slopus/happy-agent-base";
+import { createRootContext } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
 import {
     MAX_FETCH_URL_LENGTH,
-    MAX_SEARCH_RESULT_URL_LENGTH,
-    fetchResultSchema,
-    searchCursorSchema,
+    searchAnswerSchema,
+    searchProviderRequestSchema,
     type FetchResult,
-    type SearchPage,
-    type SearchProviderRequest,
-    type SearchQuery,
+    type SearchAnswer,
 } from "../../sources/search/Search.js";
-import type { SearchBackend } from "../../sources/search/SearchBackend.js";
-import { SearchModule } from "../../sources/search/SearchModule.js";
+import { SearchModule, type SearchModuleOptions } from "../../sources/search/SearchModule.js";
 import { resolveModuleHooks } from "../support/moduleHooks.js";
 
 const ctx = createRootContext().named("happy-agent-modules-search");
 const AGENT_ID = "agent-one";
 
-class ClassBackedSearchBackend implements SearchBackend {
-    readonly #searchCalls: Array<{
-        readonly ctx: Context;
-        readonly agentId: string;
-        readonly query: SearchQuery;
-    }> = [];
-    readonly #fetchCalls: Array<{
-        readonly ctx: Context;
-        readonly agentId: string;
-        readonly url: string;
-        readonly maxCharacters: number | undefined;
-    }> = [];
-    readonly #providerSearchCalls: Array<{
-        readonly ctx: Context;
-        readonly agentId: string;
-        readonly request: SearchProviderRequest;
-    }> = [];
-    #searchPage: SearchPage = {
-        query: "rig",
-        results: [
-            {
-                id: "one",
-                title: "One",
-                url: "https://example.test/one",
-                snippet: "First result",
-            },
-        ],
-    };
-    #fetchResult: FetchResult = {
-        url: "https://example.test/one",
-        content: "Fetched content",
-        truncated: false,
-    };
-
-    get searchCalls() {
-        return this.#searchCalls;
-    }
-
-    get fetchCalls() {
-        return this.#fetchCalls;
-    }
-
-    get providerSearchCalls() {
-        return this.#providerSearchCalls;
-    }
-
-    get searchPage(): SearchPage {
-        return this.#searchPage;
-    }
-
-    set searchPage(value: SearchPage) {
-        this.#searchPage = value;
-    }
-
-    get fetchResult(): FetchResult {
-        return this.#fetchResult;
-    }
-
-    set fetchResult(value: FetchResult) {
-        this.#fetchResult = value;
-    }
-
-    async search(callCtx: Context, agentId: string, query: SearchQuery): Promise<SearchPage> {
-        this.#searchCalls.push({ ctx: callCtx, agentId, query });
-        return this.#searchPage;
-    }
-
-    async searchProvider(
-        callCtx: Context,
-        agentId: string,
-        request: SearchProviderRequest,
-    ): Promise<SearchPage> {
-        this.#providerSearchCalls.push({ ctx: callCtx, agentId, request });
-        return { ...this.#searchPage, query: request.query };
-    }
-
-    async fetch(
-        callCtx: Context,
-        agentId: string,
-        input: {
-            readonly url: string;
-            readonly maxCharacters?: number;
-        },
-    ): Promise<FetchResult> {
-        this.#fetchCalls.push({
-            ctx: callCtx,
-            agentId,
-            url: input.url,
-            maxCharacters: input.maxCharacters,
-        });
-        return this.#fetchResult;
-    }
+/**
+ * Every account the person configured, as the module reads it. The module only ever asks which
+ * accounts exist and what vendor each one is, so this is the whole surface a test has to stand in
+ * for.
+ */
+function providers(accounts: Readonly<Record<string, string>> = {}): AgentProviders {
+    return {
+        ids: Object.keys(accounts),
+        typeOf: (id: string) => accounts[id] ?? null,
+    } as unknown as AgentProviders;
 }
 
-function module(
-    backend: SearchBackend = new ClassBackedSearchBackend(),
-    overrides: Partial<{
-        maxResults: number;
-        maxCharacters: number;
-        maxOutputCharacters: number;
-    }> = {},
-): SearchModule {
+function models(accounts: Readonly<Record<string, string>> = {}): AgentModel[] {
+    return Object.keys(accounts).map((providerId) => ({
+        providerId,
+        id: `${providerId}-model`,
+        name: `${providerId} model`,
+        effortLevels: ["medium"],
+        defaultEffort: "medium",
+    })) as AgentModel[];
+}
+
+function module(options: Partial<SearchModuleOptions> = {}): SearchModule {
+    const accounts = { codex: "codex", claude: "claude" };
     return new SearchModule({
-        backend,
-        ...overrides,
+        providers: providers(accounts),
+        models: models(accounts),
+        currentProviderId: "codex",
+        ...options,
     });
 }
 
@@ -132,26 +52,25 @@ function scope(agentId: string): AgentModuleScope {
     return { agent: { id: agentId } } as AgentModuleScope;
 }
 
+function answer(overrides: Partial<SearchAnswer> = {}): SearchAnswer {
+    return {
+        provider: "codex",
+        query: "rig",
+        answer: "Rig is a coding agent.",
+        sources: [{ title: "Rig", url: "https://example.test/rig" }],
+        durationMs: 12,
+        ...overrides,
+    };
+}
+
+async function toolsFor(search: SearchModule) {
+    const hooks = await resolveModuleHooks(ctx, search);
+    return await hooks.tools!(ctx, scope(AGENT_ID));
+}
+
 describe("SearchModule", () => {
-    it("keeps public APIs and common tools on one class-backed scoped backend", async () => {
-        const backend = new ClassBackedSearchBackend();
-        const search = module(backend);
-
-        const page = await search.search(ctx, AGENT_ID, {
-            query: "  rig  ",
-            limit: 10,
-        });
-        expect(page.query).toBe("rig");
-        expect(backend.searchCalls).toEqual([
-            {
-                ctx,
-                agentId: AGENT_ID,
-                query: { query: "rig", limit: 10 },
-            },
-        ]);
-
-        const hooks = await resolveModuleHooks(ctx, search);
-        const tools = await hooks.tools!(ctx, scope(AGENT_ID));
+    it("exposes every vendor tool with explicit Auto network permissions", async () => {
+        const tools = await toolsFor(module());
         expect(tools.map((tool) => tool.name)).toEqual([
             "web_fetch",
             "gemini_web_search",
@@ -161,363 +80,203 @@ describe("SearchModule", () => {
             "grok_web_search",
             "grok_x_search",
         ]);
-        await tools[3]!.execute(
-            ctx,
-            { query: "rig", domains: ["example.test"], provider_id: "codex-one" },
-            undefined as never,
-        );
-        await tools[0]!.execute(ctx, { url: "https://example.test/one" }, undefined as never);
-        expect(backend.providerSearchCalls.at(-1)).toMatchObject({
-            agentId: AGENT_ID,
-            request: {
-                provider: "codex",
-                providerId: "codex-one",
-                allowedDomains: ["example.test"],
-                query: "rig",
-            },
-        });
-        expect(backend.fetchCalls.at(-1)?.agentId).toBe(AGENT_ID);
-        expect(tools.every((tool) => tool.requiresAutoOrFullAccess === true)).toBe(true);
+        expect(new Set(tools.map((tool) => tool.name)).size).toBe(tools.length);
+        for (const tool of tools) {
+            expect(tool.durable).toBe(false);
+            expect(tool.transactional).not.toBe(true);
+            expect(tool.requiresAutoOrFullAccess).toBe(true);
+            expect(tool.shouldReviewInAutoMode({}, ctx)).toBe(true);
+            expect(tool.shouldRunInFullAccessInAutoMode).toBeUndefined();
+            expect(tool.description).toBeTruthy();
+            expect(tool.describeAutoPermissionAction?.({ query: "rig" } as never, ctx)).toContain(
+                "external",
+            );
+            expect(tool.returnType).toBeDefined();
+        }
     });
 
-    it("normalizes fetch URLs and requires exact backend identity", async () => {
-        const backend = new ClassBackedSearchBackend();
-        const search = module(backend);
-        backend.fetchResult = {
-            url: "https://example.test/path",
-            content: "Fetched content",
-            truncated: false,
-        };
+    it("says which vendor has no configured account instead of searching nowhere", async () => {
+        const tools = await toolsFor(module());
+        const byName = new Map(tools.map((tool) => [tool.name, tool]));
 
-        const fetched = await search.fetch(ctx, AGENT_ID, {
-            url: "  HTTPS://EXAMPLE.TEST/path  ",
-        });
-        expect(fetched.url).toBe("https://example.test/path");
-        expect(backend.fetchCalls.at(-1)).toMatchObject({
-            ctx,
-            agentId: AGENT_ID,
-            url: "https://example.test/path",
-        });
-
-        backend.fetchResult = {
-            ...backend.fetchResult,
-            url: "https://example.test/other",
-        };
         await expect(
-            search.fetch(ctx, AGENT_ID, { url: "https://example.test/path" }),
-        ).rejects.toThrow("different normalized URL");
-        await expect(search.fetch(ctx, AGENT_ID, { url: "file:///tmp/example" })).rejects.toThrow(
-            "http or https",
-        );
+            byName.get("grok_web_search")!.execute(ctx, { query: "rig" }, undefined as never),
+        ).rejects.toThrow("No Grok account is configured");
+        await expect(
+            byName.get("bedrock_web_search")!.execute(ctx, { query: "rig" }, undefined as never),
+        ).rejects.toThrow("No Bedrock account is configured");
+        await expect(
+            byName.get("gemini_web_search")!.execute(ctx, { query: "rig" }, undefined as never),
+        ).rejects.toThrow("GEMINI_API_KEY");
     });
 
-    it("bounds backend pages, fetch content, and model output", async () => {
-        const backend = new ClassBackedSearchBackend();
-        backend.searchPage = {
-            query: "rig",
-            results: [
-                {
-                    id: "one",
-                    title: "Result one",
-                    url: "https://example.test/one",
-                },
-                {
-                    id: "two",
-                    title: "Result two",
-                    url: "https://example.test/two",
-                },
-                {
-                    id: "three",
-                    title: "Result three",
-                    url: "https://example.test/three",
-                },
-            ],
-        };
-        backend.fetchResult = {
-            url: "https://example.test/",
-            content: "x".repeat(5_000),
-            truncated: false,
-        };
-        const search = module(backend, {
-            maxResults: 2,
-            maxCharacters: 1_000,
-            maxOutputCharacters: 256,
-        });
+    it("names the account a vendor search was asked for when that account does not exist", async () => {
+        const tools = await toolsFor(module());
+        const codex = tools.find((tool) => tool.name === "codex_web_search")!;
 
-        await expect(search.search(ctx, AGENT_ID, { query: "rig" })).rejects.toThrow(
-            "more results",
-        );
-        const fetched = await search.fetch(ctx, AGENT_ID, {
-            url: "https://example.test",
-            maxCharacters: 1_000,
-        });
-        expect(fetched.content).toHaveLength(1_000);
-        expect(fetched.truncated).toBe(true);
-        expect(Value.Check(fetchResultSchema, fetched)).toBe(true);
-
-        const output = search.formatFetchForModel(fetched);
-        expect(output.length).toBeLessThanOrEqual(256);
+        await expect(
+            codex.execute(ctx, { query: "rig", provider_id: "not-configured" }, undefined as never),
+        ).rejects.toThrow('Unknown Codex account "not-configured"');
     });
 
-    it("uses output-aware page size and keeps every returned identity visible", async () => {
-        const backend = new ClassBackedSearchBackend();
-        backend.searchPage = {
-            query: "rig",
-            results: [
-                {
-                    id: "identity-one",
-                    title: "x".repeat(2_000),
-                    url: "https://example.test/one",
-                    snippet: "y".repeat(10_000),
-                },
-            ],
-            nextCursor: 1,
-        };
-        const search = module(backend, {
-            maxResults: 50,
-            maxOutputCharacters: 256,
-        });
+    it("rejects a routed request before it reaches a vendor", async () => {
+        const search = module();
 
-        const page = await search.search(ctx, AGENT_ID, {
-            query: "rig",
-            limit: 50,
-        });
-        expect(backend.searchCalls.at(-1)?.query.limit).toBe(1);
-        const output = search.formatSearchForModel(page);
+        await expect(
+            search.providerSearch(ctx, AGENT_ID, {
+                provider: "codex",
+                query: "rig",
+                allowedDomains: ["allowed.test"],
+                blockedDomains: ["blocked.test"],
+            }),
+        ).rejects.toThrow("cannot allow and block domains");
+        await expect(
+            search.providerSearch(ctx, AGENT_ID, { provider: "codex", query: "   " }),
+        ).rejects.toThrow("cannot be empty");
+        await expect(
+            search.providerSearch(ctx, AGENT_ID, {
+                provider: "nowhere",
+                query: "rig",
+            } as never),
+        ).rejects.toThrow("Invalid provider search request");
+        await expect(
+            search.providerSearch(ctx, " spaced ", { provider: "codex", query: "rig" }),
+        ).rejects.toThrow("agent identity is invalid");
+    });
+
+    it("rejects a fetch destination that is not a plain web address", async () => {
+        const search = module();
+        for (const url of [
+            "file:///tmp/example",
+            "javascript:alert(1)",
+            "ftp://example.test/rig",
+        ]) {
+            await expect(
+                search.fetch(ctx, AGENT_ID, { url }),
+                `unsupported destination ${url}`,
+            ).rejects.toThrow();
+        }
+    });
+
+    it("rejects a fetch URL that is malformed or past the documented length bound", async () => {
+        const search = module();
+        const prefix = "https://example.test/";
+        const tooLong = `${prefix}${"x".repeat(MAX_FETCH_URL_LENGTH)}`;
+
+        await expect(search.fetch(ctx, AGENT_ID, { url: tooLong })).rejects.toThrow();
+        await expect(search.fetch(ctx, AGENT_ID, { url: "not a url" })).rejects.toThrow();
+    });
+
+    it("renders a vendor answer with its sources, and keeps every URL whole under pressure", () => {
+        const search = module({ maxOutputCharacters: 256 });
+        const output = search.formatSearchAnswerForModel(
+            answer({
+                answer: "x".repeat(5_000),
+                sources: [
+                    { title: "First", url: "https://example.test/one" },
+                    { title: "Second", url: "https://example.test/two" },
+                ],
+            }),
+        );
+
         expect(output.length).toBeLessThanOrEqual(256);
+        expect(output).toContain("[Answer truncated.]");
         expect(output).toContain("https://example.test/one");
-        expect(output).toContain("next_cursor=1");
+        expect(output).toContain("https://example.test/two");
     });
 
-    it("keeps a legal maximum URL actionable at the minimum search output budget", async () => {
-        const backend = new ClassBackedSearchBackend();
-        const prefix = "https://example.test/";
-        const url = `${prefix}${"x".repeat(MAX_SEARCH_RESULT_URL_LENGTH - prefix.length)}`;
-        backend.searchPage = {
-            query: "rig",
-            results: [
-                {
-                    title: "Result",
-                    url,
-                },
-            ],
-            nextCursor: 1,
-        };
-        const search = module(backend, {
-            maxResults: 50,
-            maxOutputCharacters: 256,
-        });
+    it("counts the sources that did not fit rather than writing half of one", () => {
+        const search = module({ maxOutputCharacters: 256 });
+        const many = Array.from({ length: 20 }, (_unused, index) => ({
+            title: `Source ${String(index)}`,
+            url: `https://example.test/${"path".repeat(8)}/${String(index)}`,
+        }));
 
-        const page = await search.search(ctx, AGENT_ID, { query: "rig", limit: 50 });
-        expect(backend.searchCalls.at(-1)?.query.limit).toBe(1);
-        const output = search.formatSearchForModel(page);
+        const output = search.formatSearchAnswerForModel(answer({ sources: many }));
         expect(output.length).toBeLessThanOrEqual(256);
-        expect(output.startsWith(url)).toBe(true);
-        expect(output).toContain(url);
-        expect(output).toContain("next_cursor=1");
+        expect(output).toMatch(/\[\d+ more sources? omitted\.\]/u);
+        for (const line of output.split("\n")) {
+            if (!line.startsWith("https://")) continue;
+            expect(many.some((source) => line.startsWith(source.url))).toBe(true);
+        }
     });
 
-    it("puts the exact fetch URL first while bounding title, content, and truncation", () => {
-        const backend = new ClassBackedSearchBackend();
-        const prefix = "https://example.test/";
-        const url = `${prefix}${"x".repeat(MAX_FETCH_URL_LENGTH - prefix.length)}`;
-        const search = module(backend, { maxOutputCharacters: 256 });
+    it("refuses to format an answer it cannot stand behind", () => {
+        const search = module();
+        expect(() => search.formatSearchAnswerForModel({ ...answer(), answer: "" })).toThrow(
+            "invalid search answer",
+        );
+        expect(() =>
+            search.formatSearchAnswerForModel({ ...answer(), unknown: true } as never),
+        ).toThrow("invalid search answer");
+    });
 
-        const output = search.formatFetchForModel({
-            url,
-            title: "A page title",
-            content: "content ".repeat(500),
+    it("bounds fetch output and marks what was cut", () => {
+        const search = module({ maxOutputCharacters: 256 });
+        const result: FetchResult = {
+            url: "https://example.test/",
+            title: "Title",
+            content: "x".repeat(5_000),
             truncated: true,
-        });
-        expect(output.slice(0, url.length)).toBe(url);
-        expect(output.startsWith(`${url}\n`)).toBe(true);
-        expect(output).toContain("A page title");
-        expect(output).toContain("[Content truncated.]");
+        };
+
+        const output = search.formatFetchForModel(result);
         expect(output.length).toBeLessThanOrEqual(256);
+        expect(output.startsWith("https://example.test/")).toBe(true);
+        expect(output).toContain("[Content truncated.]");
     });
 
-    it("rejects malformed and semantically invalid backend responses", async () => {
-        const backend = new ClassBackedSearchBackend();
-        const search = module(backend);
+    it("lets every vendor search tool render its answer and cited sources", async () => {
+        const search = module({ maxOutputCharacters: 256 });
+        const tools = await toolsFor(search);
+        const result = answer();
+        for (const tool of tools.filter((candidate) => candidate.name !== "web_fetch")) {
+            expect(Value.Check(tool.returnType, result)).toBe(true);
+            const blocks = tool.toLLM(result);
+            expect(blocks).toHaveLength(1);
+            expect(blocks[0]).toMatchObject({
+                type: "text",
+                text: expect.stringContaining("https://example.test/rig"),
+            });
+            expect((blocks[0] as { text: string }).text).toContain("Rig is a coding agent.");
+        }
 
-        backend.searchPage = {
-            query: "other",
-            results: [],
-        };
-        await expect(search.search(ctx, AGENT_ID, { query: "rig" })).rejects.toThrow(
-            "different query",
-        );
-
-        backend.searchPage = {
-            query: "rig",
-            results: [
-                {
-                    id: "same",
-                    title: "One",
-                    url: "https://example.test/one",
-                },
-                {
-                    id: "same",
-                    title: "Two",
-                    url: "https://example.test/two",
-                },
-            ],
-        };
-        await expect(search.search(ctx, AGENT_ID, { query: "rig" })).rejects.toThrow(
-            "duplicate result identities",
-        );
-
-        backend.searchPage = {
-            query: "rig",
-            results: [{ bad: true }],
-        } as never;
-        await expect(search.search(ctx, AGENT_ID, { query: "rig" })).rejects.toThrow(
-            "invalid result page",
-        );
-
-        backend.fetchResult = {
-            url: "https://example.test",
-            content: "ok",
+        const fetch = tools.find((tool) => tool.name === "web_fetch")!;
+        const fetched: FetchResult = {
+            url: "https://example.test/rig",
+            content: "content",
             truncated: false,
-            unexpected: true,
-        } as never;
-        await expect(search.fetch(ctx, AGENT_ID, { url: "https://example.test" })).rejects.toThrow(
-            "invalid fetch result",
-        );
-    });
-
-    it("requires canonical HTTP(S) result URLs and rejects canonical duplicates", async () => {
-        const backend = new ClassBackedSearchBackend();
-        const search = module(backend);
-        const invalidUrls = ["not-a-url", "javascript:alert(1)", "file:///tmp/example"];
-        for (const url of invalidUrls) {
-            backend.searchPage = {
-                query: "rig",
-                results: [{ title: "Invalid", url }],
-                nextCursor: 1,
-            };
-            await expect(search.search(ctx, AGENT_ID, { query: "rig" })).rejects.toThrow(
-                "invalid result URL",
-            );
-        }
-
-        const nonCanonicalUrls = [
-            " https://example.test/path ",
-            "HTTPS://EXAMPLE.TEST/path",
-            "https://example.test:443/path",
-            "https://example.test/./path",
-        ];
-        for (const url of nonCanonicalUrls) {
-            backend.searchPage = {
-                query: "rig",
-                results: [{ title: "Non-canonical", url }],
-                nextCursor: 1,
-            };
-            await expect(search.search(ctx, AGENT_ID, { query: "rig" })).rejects.toThrow(
-                "non-canonical result URL",
-            );
-        }
-
-        backend.searchPage = {
-            query: "rig",
-            results: [
-                {
-                    id: "one",
-                    title: "One",
-                    url: "https://example.test/path",
-                },
-                {
-                    id: "two",
-                    title: "Two",
-                    url: "https://example.test/path",
-                },
-            ],
-            nextCursor: 2,
         };
-        await expect(search.search(ctx, AGENT_ID, { query: "rig" })).rejects.toThrow(
-            "duplicate result identities",
-        );
-    });
-
-    it("uses bounded numeric offsets and requires exact cursor progress", async () => {
-        expect(Value.Check(searchCursorSchema, 0)).toBe(true);
-        expect(Value.Check(searchCursorSchema, -1)).toBe(false);
-        expect(Value.Check(searchCursorSchema, "0")).toBe(false);
-
-        const backend = new ClassBackedSearchBackend();
-        backend.searchPage = {
-            query: "rig",
-            results: [
-                {
-                    title: "One",
-                    url: "https://example.test/one",
-                },
-            ],
-            nextCursor: 5,
-        };
-        const search = module(backend);
-        await expect(searchWithCursor(search, 4)).resolves.toMatchObject({
-            nextCursor: 5,
+        expect(Value.Check(fetch.returnType, fetched)).toBe(true);
+        expect(fetch.toLLM(fetched)[0]).toMatchObject({
+            type: "text",
+            text: expect.stringContaining("https://example.test/rig"),
         });
-
-        backend.searchPage = {
-            ...backend.searchPage,
-            nextCursor: 6,
-        };
-        await expect(searchWithCursor(search, 4)).rejects.toThrow("returned result count");
     });
 
-    it("rejects invalid bounds, stalls, skips, and non-terminal empty continuations", async () => {
-        const backend = new ClassBackedSearchBackend();
-        expect(() => module(backend, { maxResults: 0 })).toThrow("options are invalid");
-        expect(() => module(backend, { maxResults: 51 })).toThrow("options are invalid");
-        expect(() => module(backend, { maxCharacters: 999 })).toThrow("options are invalid");
-        expect(() => module(backend, { maxOutputCharacters: 255 })).toThrow("options are invalid");
+    it("allows only legal routed request and answer shapes", () => {
+        expect(
+            Value.Check(searchProviderRequestSchema, {
+                provider: "codex",
+                query: "rig",
+                providerId: "account",
+                latest: true,
+            }),
+        ).toBe(true);
+        // A vendor search is not paginated, so a page-shaped request is not a request at all.
+        expect(
+            Value.Check(searchProviderRequestSchema, { provider: "codex", query: "rig", limit: 1 }),
+        ).toBe(false);
+        expect(
+            Value.Check(searchProviderRequestSchema, { provider: "not-a-provider", query: "rig" }),
+        ).toBe(false);
+        expect(Value.Check(searchAnswerSchema, answer())).toBe(true);
+        expect(Value.Check(searchAnswerSchema, { ...answer(), unknown: true })).toBe(false);
+        expect(Value.Check(searchAnswerSchema, { ...answer(), durationMs: -1 })).toBe(false);
+    });
 
-        backend.searchPage = {
-            query: "rig",
-            results: [
-                {
-                    id: "one",
-                    title: "One",
-                    url: "https://example.test/one",
-                },
-            ],
-            nextCursor: 4,
-        };
-        await expect(searchWithCursor(module(backend), 4)).rejects.toThrow("non-advancing cursor");
-
-        backend.searchPage = {
-            ...backend.searchPage,
-            nextCursor: 3,
-        };
-        await expect(searchWithCursor(module(backend), 4)).rejects.toThrow("non-advancing cursor");
-
-        backend.searchPage = {
-            ...backend.searchPage,
-            nextCursor: 6,
-        };
-        await expect(searchWithCursor(module(backend), 4)).rejects.toThrow("returned result count");
-
-        backend.searchPage = {
-            query: "rig",
-            results: [],
-            nextCursor: 5,
-        };
-        await expect(searchWithCursor(module(backend), 4)).rejects.toThrow(
-            "without returning a result",
-        );
-
-        backend.searchPage = {
-            query: "rig",
-            results: [],
-        };
-        await expect(searchWithCursor(module(backend), 4)).resolves.toMatchObject({
-            results: [],
-        });
+    it("refuses options it cannot run a search with", () => {
+        expect(() => new SearchModule({ models: [] } as never)).toThrow("options are invalid");
+        expect(() => module({ maxOutputCharacters: 1 })).toThrow("options are invalid");
     });
 });
-
-async function searchWithCursor(search: SearchModule, cursor: number): Promise<SearchPage> {
-    return await search.search(ctx, AGENT_ID, { query: "rig", cursor });
-}

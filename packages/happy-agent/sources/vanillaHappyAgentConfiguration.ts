@@ -55,14 +55,16 @@ export function createVanillaHappyAgentConfiguration(
     options: { readonly filterModels?: boolean } = {},
 ): VanillaHappyAgentConfiguration {
     validateCredentialIsolation(configuration);
+    const models =
+        options.filterModels === false
+            ? VANILLA_MODELS
+            : filterConfiguredModels(configuredCatalogModels(configuration), configuration);
+    const providers = createVanillaProviders(configuration);
     return {
-        integrations: createVanillaIntegrations(configuration),
-        models:
-            options.filterModels === false
-                ? VANILLA_MODELS
-                : filterConfiguredModels(configuredCatalogModels(configuration), configuration),
+        integrations: createVanillaIntegrations(),
+        models,
         provider: configuration?.values.defaults.providerId ?? "codex",
-        providers: createVanillaProviders(configuration),
+        providers,
     };
 }
 
@@ -529,9 +531,7 @@ async function createConfiguredProvider(
     });
 }
 
-function createVanillaIntegrations(
-    configuration?: HappyAgentConfiguration,
-): HappyAgentIntegrations {
+function createVanillaIntegrations(): HappyAgentIntegrations {
     const unavailable = async () => {
         throw new Error("This integration is unavailable in the vanilla local host.");
     };
@@ -551,25 +551,6 @@ function createVanillaIntegrations(
             listTools: async () => ({ tools: [] }),
             readResource: unavailable,
         },
-        scheduling: {
-            cancel: unavailable,
-            reportDelivery: unavailable,
-            schedule: unavailable,
-            startWait: unavailable,
-            wait: unavailable,
-        },
-        search: {
-            fetch: async (_ctx: unknown, _agentId: string, input: { readonly url: string }) => ({
-                content: "",
-                truncated: false,
-                url: input.url,
-            }),
-            search: async (_ctx: unknown, _agentId: string, query: { readonly query: string }) => ({
-                query: query.query,
-                results: [],
-            }),
-        },
-        userInput: { wait: unavailable },
         workflows: {
             cancel: unavailable,
             launch: unavailable,

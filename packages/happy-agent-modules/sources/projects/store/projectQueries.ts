@@ -42,9 +42,7 @@ export function createProjectQueries(): Pick<
             const projects = rows.slice(0, limit).map(projectFromRow);
             return {
                 projects,
-                ...(rows.length > limit
-                    ? { nextCursor: String(offset + projects.length) }
-                    : {}),
+                ...(rows.length > limit ? { nextCursor: String(offset + projects.length) } : {}),
             };
         },
         get: async (ctx, _agentId, projectId) => await readProject(databaseFor(ctx), projectId),

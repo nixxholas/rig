@@ -5,12 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { listGitWorkingTreeFiles } from "../../sources/modules/git/listGitWorkingTreeFiles.js";
 import { readGitFileAtRevision } from "../../sources/modules/git/readGitFileAtRevision.js";
-import {
-    cleanupRoots,
-    commitFile,
-    createRepository,
-    createRoot,
-} from "./helpers.js";
+import { cleanupRoots, commitFile, createRepository, createRoot } from "./helpers.js";
 
 afterEach(cleanupRoots);
 

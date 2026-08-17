@@ -1,5 +1,4 @@
 export * from "./Search.js";
-export * from "./SearchBackend.js";
 export * from "./SearchModule.js";
 export { bedrockWebSearchTool } from "./tools/bedrock_web_search.js";
 export { claudeWebSearchTool } from "./tools/claude_web_search.js";

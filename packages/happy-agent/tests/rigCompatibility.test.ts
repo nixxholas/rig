@@ -551,13 +551,6 @@ function unavailableIntegrations(): HappyAgentIntegrations {
             listTools: async () => ({ tools: [] }),
             readResource: unavailable,
         },
-        scheduling: {
-            cancel: unavailable,
-            reportDelivery: unavailable,
-            schedule: unavailable,
-            startWait: unavailable,
-            wait: unavailable,
-        },
         search: {
             fetch: async (_ctx, _agentId, input) => ({
                 content: "",

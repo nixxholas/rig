@@ -2,7 +2,7 @@
 
 A workspace is one place a session actually works: a branch, a folder, a base it came from, and a
 lifecycle that says whether it is usable yet. The module owns that catalog and its migrations in the
-Agent Base database, and it owns the *decisions* — which name, which branch, which folder key, which
+Agent Base database, and it owns the _decisions_ — which name, which branch, which folder key, which
 status. It never runs Git. A host does the worktree and filesystem work and reports back through
 narrow optional hooks.
 
@@ -37,27 +37,27 @@ still surfaced.
 ## The record
 
 Every field below is present on every row. `branch`, `storageKey`, `path`, and `kind` are mandatory
-in the schema *and* `NOT NULL` in the table, because software downstream of this module now depends
+in the schema _and_ `NOT NULL` in the table, because software downstream of this module now depends
 on a workspace being able to answer "which branch?" and "which folder?" without a null check.
 
-| Field | Meaning |
-| --- | --- |
-| `id`, `ownerAgentId`, `projectRef` | Identity and ownership. |
-| `name`, `nameConfigured` | Display name, and whether a person chose it. An inherited name may be replaced silently; a configured one may not. |
-| `branch` | The Git branch, mandatory. Derived as `worktree/<kebab-name>` unless a caller supplies one. |
-| `storageKey` | The kebab-case folder key, mandatory and unique within the project. |
-| `kind` | `"git_worktree"` or `"directory"`. |
-| `path` | The absolute filesystem path, mandatory and globally unique. |
-| `baseRef`, `baseCommit` | What the workspace was cut from, and the exact commit if known. |
-| `gitCommonDir` | The shared `.git` directory a worktree belongs to, for cleanup. |
-| `presence` | `"present"` or `"missing"` — whether the folder is still on disk. A reservation starts `missing`, because the durable row is written before anything touches the disk. |
-| `status` | `initializing`, `ready`, `failed`, `archiving`, or `archived`. There is no `active`. |
-| `orderKey` | A fractional order key; lexicographic order is list order. New reservations lead the list. |
-| `version` | An integer bumped on every durable change, and the token for optimistic concurrency. |
-| `creatorSessionId` | The session that asked for it, if any. |
-| `gitAhead`, `gitBehind`, `gitDetached`, `gitHead`, `gitUpstream` | Host-reported Git facts. |
-| `initializationAttempt`, `initializationError` | How many times setup has been tried, and why the last try failed. |
-| `createdAt`, `updatedAt`, `archivedAt` | Timestamps; `updatedAt` is forced to advance on every change. |
+| Field                                                            | Meaning                                                                                                                                                                |
+| ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`, `ownerAgentId`, `projectRef`                               | Identity and ownership.                                                                                                                                                |
+| `name`, `nameConfigured`                                         | Display name, and whether a person chose it. An inherited name may be replaced silently; a configured one may not.                                                     |
+| `branch`                                                         | The Git branch, mandatory. Derived as `worktree/<kebab-name>` unless a caller supplies one.                                                                            |
+| `storageKey`                                                     | The kebab-case folder key, mandatory and unique within the project.                                                                                                    |
+| `kind`                                                           | `"git_worktree"` or `"directory"`.                                                                                                                                     |
+| `path`                                                           | The absolute filesystem path, mandatory and globally unique.                                                                                                           |
+| `baseRef`, `baseCommit`                                          | What the workspace was cut from, and the exact commit if known.                                                                                                        |
+| `gitCommonDir`                                                   | The shared `.git` directory a worktree belongs to, for cleanup.                                                                                                        |
+| `presence`                                                       | `"present"` or `"missing"` — whether the folder is still on disk. A reservation starts `missing`, because the durable row is written before anything touches the disk. |
+| `status`                                                         | `initializing`, `ready`, `failed`, `archiving`, or `archived`. There is no `active`.                                                                                   |
+| `orderKey`                                                       | A fractional order key; lexicographic order is list order. New reservations lead the list.                                                                             |
+| `version`                                                        | An integer bumped on every durable change, and the token for optimistic concurrency.                                                                                   |
+| `creatorSessionId`                                               | The session that asked for it, if any.                                                                                                                                 |
+| `gitAhead`, `gitBehind`, `gitDetached`, `gitHead`, `gitUpstream` | Host-reported Git facts.                                                                                                                                               |
+| `initializationAttempt`, `initializationError`                   | How many times setup has been tried, and why the last try failed.                                                                                                      |
+| `createdAt`, `updatedAt`, `archivedAt`                           | Timestamps; `updatedAt` is forced to advance on every change.                                                                                                          |
 
 ## Lifecycle
 

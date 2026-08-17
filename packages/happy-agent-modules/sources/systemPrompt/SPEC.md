@@ -161,7 +161,7 @@ Agent Base's permanent deduplication would silently swallow the second announcem
 was reverted and changed again.
 
 **Committing only what was delivered.** `messageAcceptedTransact` advances the fingerprint only
-when Agent Base durably accepted *that exact notice*, and it checks all of it: the message is
+when Agent Base durably accepted _that exact notice_, and it checks all of it: the message is
 steering, its ID is the pending notice's ID, it is hidden, it is a single user text part, the text
 matches the removal notice exactly or begins with the replacement prefix and hashes to the
 fingerprint being claimed, the pending record still names this transition, and the currently
@@ -179,23 +179,23 @@ different turn's system prompt.
 Every bound exists so that live, host-controlled, or filesystem-controlled content cannot turn a
 valid turn into a permanent failure.
 
-| Bound                              | Value        |
-| ---------------------------------- | ------------ |
-| Whole system prompt output         | 1,000,000 B  |
-| Available-models section, rendered | 512,000 B    |
-| Available-models routes            | 1,000        |
-| Available-model field length       | 256 chars    |
-| Identity name                      | 128 chars    |
-| Identity prompt                    | 4,096 chars  |
-| Model ID in a selection            | 256 chars    |
-| AGENTS.md chain, rendered          | 300,000 chars|
-| One AGENTS.md document             | 64 KiB       |
-| All AGENTS.md documents            | 256 KiB      |
-| AGENTS.md document count           | 32           |
-| `AGENTS_SECURITY.md`               | 32 KiB       |
-| Global `AGENTS.md`                 | 256 KiB      |
-| Path length                        | 4,096 chars  |
-| Agent ID                           | 256 chars    |
+| Bound                              | Value         |
+| ---------------------------------- | ------------- |
+| Whole system prompt output         | 1,000,000 B   |
+| Available-models section, rendered | 512,000 B     |
+| Available-models routes            | 1,000         |
+| Available-model field length       | 256 chars     |
+| Identity name                      | 128 chars     |
+| Identity prompt                    | 4,096 chars   |
+| Model ID in a selection            | 256 chars     |
+| AGENTS.md chain, rendered          | 300,000 chars |
+| One AGENTS.md document             | 64 KiB        |
+| All AGENTS.md documents            | 256 KiB       |
+| AGENTS.md document count           | 32            |
+| `AGENTS_SECURITY.md`               | 32 KiB        |
+| Global `AGENTS.md`                 | 256 KiB       |
+| Path length                        | 4,096 chars   |
+| Agent ID                           | 256 chars     |
 
 The catalog bound is enforced at **construction**, where a bad value is a startup error rather than
 a per-turn one. The instruction chain is bounded twice: once at 300,000 characters while formatting,

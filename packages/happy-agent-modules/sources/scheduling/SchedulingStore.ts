@@ -3,9 +3,8 @@ import { Value } from "@sinclair/typebox/value";
 import type { Context } from "@steve.kite/stdlib";
 
 import {
+    MAX_SCHEDULING_PAGE_SIZE,
     schedulingAgentIdSchema,
-    schedulingCancelInputSchema,
-    schedulingDeliveryOutcomeRequestSchema,
     schedulingMessageIdSchema,
     schedulingSchedulePageQuerySchema,
     schedulingSchedulePageSchema,
@@ -13,12 +12,10 @@ import {
     schedulingTimestampSchema,
     schedulingWaitRecordSchema,
     schedulingWaitResultSchema,
-    schedulingWaitSettlementSchema,
-    type SchedulingCancelInput,
+    type SchedulingSchedulePage,
     type SchedulingScheduledMessage,
     type SchedulingWaitRecord,
     type SchedulingWaitResult,
-    type SchedulingWaitSettlement,
 } from "./Scheduling.js";
 
 export const schedulingContextSchema = Type.Unsafe<Context>(
@@ -27,54 +24,13 @@ export const schedulingContextSchema = Type.Unsafe<Context>(
 
 const voidPromiseSchema = Type.Promise(Type.Void());
 
-export const schedulingWaitClaimRequestSchema = Type.Object(
-    {
-        id: schedulingMessageIdSchema,
-        agentId: schedulingAgentIdSchema,
-        kind: Type.Union([Type.Literal("wait"), Type.Literal("wait_until")]),
-        dueAt: schedulingTimestampSchema,
-        startedAt: schedulingTimestampSchema,
-    },
-    { additionalProperties: false },
-);
+/** How many pending messages one recovery pass arms, so a large catalog cannot flood startup. */
+export const MAX_SCHEDULING_RECOVERY_BATCH = 1_000;
 
-export const schedulingScheduleRequestSchema = Type.Object(
+export const schedulingPendingQuerySchema = Type.Object(
     {
-        id: schedulingMessageIdSchema,
-        senderAgentId: schedulingAgentIdSchema,
-        targetAgentId: schedulingAgentIdSchema,
-        message: Type.String({ minLength: 1, maxLength: 50_000 }),
-        dueAt: schedulingTimestampSchema,
-    },
-    { additionalProperties: false },
-);
-
-export const schedulingSchedulerSchema = Type.Object(
-    {
-        startWait: Type.Function(
-            [schedulingContextSchema, schedulingAgentIdSchema, schedulingWaitClaimRequestSchema],
-            Type.Promise(schedulingWaitRecordSchema),
-        ),
-        wait: Type.Function(
-            [schedulingContextSchema, schedulingAgentIdSchema, schedulingMessageIdSchema],
-            Type.Promise(schedulingWaitSettlementSchema),
-        ),
-        schedule: Type.Function(
-            [schedulingContextSchema, schedulingAgentIdSchema, schedulingScheduleRequestSchema],
-            Type.Promise(schedulingScheduledMessageSchema),
-        ),
-        cancel: Type.Function(
-            [schedulingContextSchema, schedulingAgentIdSchema, schedulingCancelInputSchema],
-            Type.Promise(schedulingScheduledMessageSchema),
-        ),
-        reportDelivery: Type.Function(
-            [
-                schedulingContextSchema,
-                schedulingAgentIdSchema,
-                schedulingDeliveryOutcomeRequestSchema,
-            ],
-            Type.Promise(schedulingScheduledMessageSchema),
-        ),
+        limit: Type.Integer({ minimum: 1, maximum: MAX_SCHEDULING_RECOVERY_BATCH }),
+        afterDueAt: Type.Optional(schedulingTimestampSchema),
     },
     { additionalProperties: false },
 );
@@ -90,7 +46,7 @@ export const schedulingStoreSchema = Type.Object(
             voidPromiseSchema,
         ),
         readSchedule: Type.Function(
-            [schedulingContextSchema, schedulingAgentIdSchema, schedulingMessageIdSchema],
+            [schedulingContextSchema, schedulingMessageIdSchema],
             Type.Promise(Type.Union([schedulingScheduledMessageSchema, Type.Undefined()])),
         ),
         writeSchedule: Type.Function(
@@ -98,31 +54,27 @@ export const schedulingStoreSchema = Type.Object(
             voidPromiseSchema,
         ),
         listSchedules: Type.Function(
-            [schedulingContextSchema, schedulingAgentIdSchema, schedulingSchedulePageQuerySchema],
+            [schedulingContextSchema, schedulingSchedulePageQuerySchema],
             Type.Promise(schedulingSchedulePageSchema),
+        ),
+        listPendingSchedules: Type.Function(
+            [schedulingContextSchema, schedulingPendingQuerySchema],
+            Type.Promise(
+                Type.Array(schedulingScheduledMessageSchema, {
+                    maxItems: MAX_SCHEDULING_RECOVERY_BATCH,
+                }),
+            ),
         ),
     },
     { additionalProperties: false },
 );
 
 export type SchedulingStore = Static<typeof schedulingStoreSchema>;
-
-export type SchedulingWaitClaimRequest = Static<typeof schedulingWaitClaimRequestSchema>;
-export type SchedulingScheduleRequest = Static<typeof schedulingScheduleRequestSchema>;
-export type SchedulingDeliveryOutcomeRequest = Static<
-    typeof schedulingDeliveryOutcomeRequestSchema
->;
-export type SchedulingScheduler = Static<typeof schedulingSchedulerSchema>;
+export type SchedulingPendingQuery = Static<typeof schedulingPendingQuerySchema>;
 
 export function assertSchedulingStore(value: unknown): asserts value is SchedulingStore {
     if (!Value.Check(schedulingStoreSchema, value)) {
         throw new Error("Scheduling module received an invalid internal storage adapter.");
-    }
-}
-
-export function assertSchedulingScheduler(value: unknown): asserts value is SchedulingScheduler {
-    if (!Value.Check(schedulingSchedulerSchema, value)) {
-        throw new Error("Scheduling module received an invalid host scheduler.");
     }
 }
 
@@ -186,36 +138,34 @@ export function assertSchedulingScheduledMessage(
 
 export function assertSchedulingWaitResult(value: unknown): asserts value is SchedulingWaitResult {
     if (!Value.Check(schedulingWaitResultSchema, value)) {
-        throw new Error("Scheduling host returned an invalid wait result.");
+        throw new Error("Scheduling produced an invalid wait result.");
     }
     const result = value as SchedulingWaitResult;
     if (
         result.endedAt < result.startedAt ||
         result.elapsedMs !== result.endedAt - result.startedAt
     ) {
-        throw new Error("Scheduling host returned an untruthful elapsed duration.");
+        throw new Error("Scheduling produced an untruthful elapsed duration.");
     }
     if (result.outcome === "elapsed" && result.endedAt < result.dueAt) {
         throw new Error("An elapsed wait ended before its requested due time.");
     }
 }
 
-export function assertSchedulingCancelInput(
+export function assertSchedulingPage(
     value: unknown,
-): asserts value is SchedulingCancelInput {
-    if (!Value.Check(schedulingCancelInputSchema, value)) {
-        throw new Error("Scheduling cancellation input is invalid.");
+    requestedLimit: number,
+): asserts value is SchedulingSchedulePage {
+    if (!Value.Check(schedulingSchedulePageSchema, value)) {
+        throw new Error("Scheduling store returned an invalid schedule page.");
     }
-}
-
-export function assertSchedulingSettlement(
-    value: unknown,
-): asserts value is SchedulingWaitSettlement {
-    if (!Value.Check(schedulingWaitSettlementSchema, value)) {
-        throw new Error("Scheduling host returned an invalid wait settlement.");
+    const page = value as SchedulingSchedulePage;
+    if (
+        page.limit > Math.min(requestedLimit, MAX_SCHEDULING_PAGE_SIZE) ||
+        page.schedules.length > page.limit
+    ) {
+        throw new Error("Scheduling store returned more records than requested.");
     }
-    if (Value.Check(schedulingWaitRecordSchema, value)) assertSchedulingWaitRecord(value);
-    else assertSchedulingWaitResult(value);
 }
 
 export function assertSchedulingVoid(value: unknown, label: string): asserts value is void {

@@ -102,11 +102,7 @@ export {
     type WorkspaceStorageKey,
     type WorkspaceVersion,
 } from "./Workspace.js";
-export {
-    workspaceBranchName,
-    workspaceNameKey,
-    workspaceStorageKey,
-} from "./WorkspaceIdentity.js";
+export { workspaceBranchName, workspaceNameKey, workspaceStorageKey } from "./WorkspaceIdentity.js";
 export {
     workspaceContextSchema,
     workspaceEventIdSchema,

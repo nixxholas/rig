@@ -1,7 +1,11 @@
 import { Value } from "@sinclair/typebox/value";
 import { afterCommit, type Context } from "@steve.kite/stdlib";
 
-import { workspaceTimestampSchema, type Workspace, type WorkspaceMutationOperation } from "./Workspace.js";
+import {
+    workspaceTimestampSchema,
+    type Workspace,
+    type WorkspaceMutationOperation,
+} from "./Workspace.js";
 import { assertWorkspaceOwner, assertWorkspaceRecord } from "./WorkspaceAccess.js";
 import {
     workspaceEventIdSchema,
@@ -86,7 +90,15 @@ export class WorkspaceMutations {
         ) => WorkspaceEventPayload | undefined,
     ): Promise<Workspace> {
         return (
-            await this.runResult(ctx, agentId, operation, operationId, workspaceId, perform, describe)
+            await this.runResult(
+                ctx,
+                agentId,
+                operation,
+                operationId,
+                workspaceId,
+                perform,
+                describe,
+            )
         ).workspace;
     }
 

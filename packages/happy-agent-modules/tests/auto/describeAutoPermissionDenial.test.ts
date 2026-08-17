@@ -25,7 +25,10 @@ describe("describeAutoPermissionDenial", () => {
 
     it("frames a timeout as unproven rather than unsafe", () => {
         expect(
-            describeAutoPermissionDenial("delete the vault", { ...rejected, denialKind: "timed_out" }),
+            describeAutoPermissionDenial("delete the vault", {
+                ...rejected,
+                denialKind: "timed_out",
+            }),
         ).toBe(
             "The automatic permission review did not finish in time, so delete the vault was not performed. " +
                 "The action is unproven rather than unsafe, so do not treat the timeout by itself as a " +

@@ -7,13 +7,7 @@ import { createGitWorktree } from "../../sources/modules/git/createGitWorktree.j
 import { isGitWorktreeAt } from "../../sources/modules/git/isGitWorktreeAt.js";
 import { readGitCommonDir } from "../../sources/modules/git/readGitCommonDir.js";
 import { removeGitWorktree } from "../../sources/modules/git/removeGitWorktree.js";
-import {
-    cleanupRoots,
-    commitFile,
-    createRepository,
-    createRoot,
-    gitRunner,
-} from "./helpers.js";
+import { cleanupRoots, commitFile, createRepository, createRoot, gitRunner } from "./helpers.js";
 
 afterEach(cleanupRoots);
 

@@ -1,145 +1,63 @@
 import { Type, type Static } from "@sinclair/typebox";
 
-/**
- * Scheduling deliberately keeps its identities independent from Collaboration. Hosts may use
- * whatever stable identity namespace they prefer; these bounds merely keep records and model
- * output finite.
- */
 export const MAX_SCHEDULING_TIMESTAMP = 8_640_000_000_000_000;
-export const MAX_SCHEDULING_ID_LENGTH = 128;
 export const MAX_SCHEDULING_MESSAGE_LENGTH = 50_000;
 export const MAX_SCHEDULING_FAILURE_LENGTH = 2_000;
 export const MAX_SCHEDULING_DURATION_TEXT_LENGTH = 256;
 export const MAX_SCHEDULING_PAGE_SIZE = 100;
 export const MAX_SCHEDULING_CURSOR_LENGTH = 512;
-export const MAX_SCHEDULING_DETAIL_PAGE_SIZE = 4_096;
 
-const identityPattern = "^[A-Za-z0-9][A-Za-z0-9._:-]*$";
+/**
+ * Scheduling identities are cuid2s because a scheduled message is delivered into the recipient's
+ * inbox under its own ID. Agent Base accepts a message once per identity, so the delivery of a
+ * given scheduled message is idempotent by construction: a redelivery after a crash is recognised
+ * as the same message rather than queued a second time.
+ */
+export const schedulingIdSchema = Type.String({
+    minLength: 2,
+    maxLength: 32,
+    pattern: "^[a-z][a-z0-9]*$",
+});
+export const schedulingAgentIdSchema = schedulingIdSchema;
+export const schedulingWaitIdSchema = schedulingIdSchema;
+export const schedulingMessageIdSchema = schedulingIdSchema;
+export const schedulingEventIdSchema = schedulingIdSchema;
 
-export const schedulingAgentIdSchema = Type.String({
-    minLength: 1,
-    maxLength: MAX_SCHEDULING_ID_LENGTH,
-    pattern: identityPattern,
-});
-export const schedulingWaitIdSchema = Type.String({
-    minLength: 1,
-    maxLength: MAX_SCHEDULING_ID_LENGTH,
-    pattern: identityPattern,
-});
-export const schedulingMessageIdSchema = Type.String({
-    minLength: 1,
-    maxLength: MAX_SCHEDULING_ID_LENGTH,
-    pattern: identityPattern,
-});
-export const schedulingEventIdSchema = Type.String({
-    minLength: 1,
-    maxLength: MAX_SCHEDULING_ID_LENGTH,
-    pattern: identityPattern,
-});
 export const schedulingTimestampSchema = Type.Integer({
     minimum: 0,
     maximum: MAX_SCHEDULING_TIMESTAMP,
 });
 
-const durationValueSchema = Type.Number({
-    minimum: 0,
-    maximum: MAX_SCHEDULING_TIMESTAMP,
-});
+const durationValueSchema = Type.Number({ minimum: 0, maximum: MAX_SCHEDULING_TIMESTAMP });
 const durationTextSchema = Type.String({
     minLength: 1,
     maxLength: MAX_SCHEDULING_DURATION_TEXT_LENGTH,
 });
 
 /**
- * The duration accepts the compact object form used by the module API as well as the human
- * duration forms accepted by the legacy scheduling tools. Compound fields are intentionally
- * represented as a union whose variants each require at least one unit.
+ * A duration is either human text the model can write directly — `90 seconds`, `1h 30m` — or the
+ * discrete unit fields, of which at least one must be present.
  */
 export const schedulingDurationSchema = Type.Union([
     durationTextSchema,
     Type.Object(
         {
-            unit: Type.Union([Type.Literal("seconds"), Type.Literal("second")]),
-            value: durationValueSchema,
-        },
-        { additionalProperties: false },
-    ),
-    Type.Object(
-        {
-            unit: Type.Union([Type.Literal("minutes"), Type.Literal("minute")]),
-            value: durationValueSchema,
-        },
-        { additionalProperties: false },
-    ),
-    Type.Object(
-        {
-            unit: Type.Union([Type.Literal("hours"), Type.Literal("hour")]),
-            value: durationValueSchema,
-        },
-        { additionalProperties: false },
-    ),
-    Type.Object(
-        {
-            unit: Type.Union([Type.Literal("days"), Type.Literal("day")]),
-            value: durationValueSchema,
-        },
-        { additionalProperties: false },
-    ),
-    Type.Object(
-        {
-            duration: durationTextSchema,
-        },
-        { additionalProperties: false },
-    ),
-    Type.Object(
-        {
-            seconds: durationValueSchema,
+            seconds: Type.Optional(durationValueSchema),
             minutes: Type.Optional(durationValueSchema),
             hours: Type.Optional(durationValueSchema),
             days: Type.Optional(durationValueSchema),
         },
-        { additionalProperties: false },
-    ),
-    Type.Object(
-        {
-            seconds: Type.Optional(durationValueSchema),
-            minutes: durationValueSchema,
-            hours: Type.Optional(durationValueSchema),
-            days: Type.Optional(durationValueSchema),
-        },
-        { additionalProperties: false },
-    ),
-    Type.Object(
-        {
-            seconds: Type.Optional(durationValueSchema),
-            minutes: Type.Optional(durationValueSchema),
-            hours: durationValueSchema,
-            days: Type.Optional(durationValueSchema),
-        },
-        { additionalProperties: false },
-    ),
-    Type.Object(
-        {
-            seconds: Type.Optional(durationValueSchema),
-            minutes: Type.Optional(durationValueSchema),
-            hours: Type.Optional(durationValueSchema),
-            days: durationValueSchema,
-        },
-        { additionalProperties: false },
+        { additionalProperties: false, minProperties: 1 },
     ),
 ]);
 
 /**
- * An instant may be an ISO 8601 or RFC 2822 string, or a Unix timestamp in seconds or
- * milliseconds. Semantic validation normalizes all accepted forms to a bounded millisecond
- * timestamp.
+ * An instant is an ISO 8601 or RFC 2822 date, or a Unix timestamp in seconds or milliseconds.
+ * Every accepted form normalizes to a bounded millisecond timestamp.
  */
 export const schedulingInstantSchema = Type.Union([
     Type.String({ minLength: 1, maxLength: 128 }),
-    Type.Number({
-        minimum: -MAX_SCHEDULING_TIMESTAMP,
-        maximum: MAX_SCHEDULING_TIMESTAMP,
-    }),
+    Type.Number({ minimum: -MAX_SCHEDULING_TIMESTAMP, maximum: MAX_SCHEDULING_TIMESTAMP }),
 ]);
 
 export const schedulingWaitKindSchema = Type.Union([
@@ -156,63 +74,17 @@ export const schedulingWaitOutcomeSchema = Type.Union([
     Type.Literal("interrupted"),
 ]);
 
-const waitInputIdentity = {
-    id: Type.Optional(schedulingWaitIdSchema),
-};
-
-export const schedulingWaitInputSchema = Type.Union([
-    Type.Object(
-        {
-            ...waitInputIdentity,
-            duration: schedulingDurationSchema,
-        },
-        { additionalProperties: false },
-    ),
-    Type.Object(
-        {
-            ...waitInputIdentity,
-            seconds: durationValueSchema,
-            minutes: Type.Optional(durationValueSchema),
-            hours: Type.Optional(durationValueSchema),
-            days: Type.Optional(durationValueSchema),
-        },
-        { additionalProperties: false },
-    ),
-    Type.Object(
-        {
-            ...waitInputIdentity,
-            seconds: Type.Optional(durationValueSchema),
-            minutes: durationValueSchema,
-            hours: Type.Optional(durationValueSchema),
-            days: Type.Optional(durationValueSchema),
-        },
-        { additionalProperties: false },
-    ),
-    Type.Object(
-        {
-            ...waitInputIdentity,
-            seconds: Type.Optional(durationValueSchema),
-            minutes: Type.Optional(durationValueSchema),
-            hours: durationValueSchema,
-            days: Type.Optional(durationValueSchema),
-        },
-        { additionalProperties: false },
-    ),
-    Type.Object(
-        {
-            ...waitInputIdentity,
-            seconds: Type.Optional(durationValueSchema),
-            minutes: Type.Optional(durationValueSchema),
-            hours: Type.Optional(durationValueSchema),
-            days: durationValueSchema,
-        },
-        { additionalProperties: false },
-    ),
-]);
+export const schedulingWaitInputSchema = Type.Object(
+    {
+        id: Type.Optional(schedulingWaitIdSchema),
+        duration: schedulingDurationSchema,
+    },
+    { additionalProperties: false },
+);
 
 export const schedulingWaitUntilInputSchema = Type.Object(
     {
-        ...waitInputIdentity,
+        id: Type.Optional(schedulingWaitIdSchema),
         at: schedulingInstantSchema,
     },
     { additionalProperties: false },
@@ -233,10 +105,7 @@ const waitRecordCommon = {
 };
 
 export const schedulingWaitingRecordSchema = Type.Object(
-    {
-        ...waitRecordCommon,
-        status: Type.Literal("waiting"),
-    },
+    { ...waitRecordCommon, status: Type.Literal("waiting") },
     { additionalProperties: false },
 );
 
@@ -247,17 +116,11 @@ const terminalWaitRecordCommon = {
 };
 
 export const schedulingElapsedRecordSchema = Type.Object(
-    {
-        ...terminalWaitRecordCommon,
-        status: Type.Literal("elapsed"),
-    },
+    { ...terminalWaitRecordCommon, status: Type.Literal("elapsed") },
     { additionalProperties: false },
 );
 export const schedulingInterruptedRecordSchema = Type.Object(
-    {
-        ...terminalWaitRecordCommon,
-        status: Type.Literal("interrupted"),
-    },
+    { ...terminalWaitRecordCommon, status: Type.Literal("interrupted") },
     { additionalProperties: false },
 );
 export const schedulingWaitRecordSchema = Type.Union([
@@ -280,12 +143,6 @@ export const schedulingWaitResultSchema = Type.Object(
     { additionalProperties: false },
 );
 
-export const schedulingWaitSettlementSchema = Type.Union([
-    schedulingWaitResultSchema,
-    schedulingElapsedRecordSchema,
-    schedulingInterruptedRecordSchema,
-]);
-
 export const schedulingScheduleStatusSchema = Type.Union([
     Type.Literal("pending"),
     Type.Literal("delivered"),
@@ -307,7 +164,6 @@ export const schedulingScheduledMessageSchema = Type.Object(
         failure: Type.Optional(
             Type.String({ minLength: 1, maxLength: MAX_SCHEDULING_FAILURE_LENGTH }),
         ),
-        deliveryAttempts: Type.Optional(Type.Integer({ minimum: 0, maximum: 1_000 })),
     },
     { additionalProperties: false },
 );
@@ -333,7 +189,7 @@ export const schedulingScheduleInputSchema = Type.Union([
     ),
 ]);
 
-/** Model-facing scheduling uses the legacy snake_case recipient field and omits durable identity. */
+/** The model addresses a recipient by Agent ID and never supplies a durable record identity. */
 export const schedulingScheduleToolInputSchema = Type.Union([
     Type.Object(
         {
@@ -354,12 +210,9 @@ export const schedulingScheduleToolInputSchema = Type.Union([
 ]);
 
 export const schedulingCancelInputSchema = Type.Object(
-    {
-        scheduleId: schedulingMessageIdSchema,
-    },
+    { scheduleId: schedulingMessageIdSchema },
     { additionalProperties: false },
 );
-export const schedulingCancelToolInputSchema = schedulingCancelInputSchema;
 
 export const schedulingSchedulePageQuerySchema = Type.Object(
     {
@@ -401,54 +254,6 @@ export const schedulingSchedulePageSchema = Type.Object(
     { additionalProperties: false },
 );
 
-export const schedulingScheduleDetailQuerySchema = Type.Object(
-    {
-        detailOffset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1_000_000 })),
-        detailLimit: Type.Optional(
-            Type.Integer({ minimum: 1, maximum: MAX_SCHEDULING_DETAIL_PAGE_SIZE }),
-        ),
-    },
-    { additionalProperties: false },
-);
-
-export const schedulingScheduleDetailPageSchema = Type.Object(
-    {
-        schedule: Type.Union([schedulingScheduledMessageSchema, Type.Null()]),
-        detail: Type.String({ maxLength: 1_000_000 }),
-        detailOffset: Type.Integer({ minimum: 0, maximum: 1_000_000 }),
-        detailTotal: Type.Integer({ minimum: 0, maximum: 1_000_000 }),
-        nextDetailOffset: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000_000 })),
-    },
-    { additionalProperties: false },
-);
-
-const schedulingDeliveredOutcomeFields = {
-    scheduleId: schedulingMessageIdSchema,
-    status: Type.Literal("delivered"),
-    deliveredAt: Type.Optional(schedulingTimestampSchema),
-};
-const schedulingUndeliveredOutcomeFields = {
-    scheduleId: schedulingMessageIdSchema,
-    status: Type.Literal("undelivered"),
-    failure: Type.String({ minLength: 1, maxLength: MAX_SCHEDULING_FAILURE_LENGTH }),
-};
-
-/**
- * Delivery outcomes are intentionally a discriminated union. A successful delivery cannot also
- * carry a failure, and an undelivered message must retain bounded failure detail.
- */
-export const schedulingDeliveryOutcomeInputSchema = Type.Union([
-    Type.Object(schedulingDeliveredOutcomeFields, { additionalProperties: false }),
-    Type.Object(schedulingUndeliveredOutcomeFields, { additionalProperties: false }),
-]);
-
-export const schedulingDeliveryOutcomeRequestSchema = schedulingDeliveryOutcomeInputSchema;
-
-// Naming aliases keep the host-facing surface discoverable without introducing a second schema.
-export const schedulingMessageSchema = schedulingScheduledMessageSchema;
-export const schedulingMessagePageSchema = schedulingSchedulePageSchema;
-export const schedulingMessagePageQuerySchema = schedulingSchedulePageQuerySchema;
-
 export type SchedulingAgentId = Static<typeof schedulingAgentIdSchema>;
 export type SchedulingWaitId = Static<typeof schedulingWaitIdSchema>;
 export type SchedulingMessageId = Static<typeof schedulingMessageIdSchema>;
@@ -463,22 +268,13 @@ export type SchedulingWaitToolInput = Static<typeof schedulingWaitToolInputSchem
 export type SchedulingWaitUntilInput = Static<typeof schedulingWaitUntilInputSchema>;
 export type SchedulingWaitUntilToolInput = Static<typeof schedulingWaitUntilToolInputSchema>;
 export type SchedulingWaitRecord = Static<typeof schedulingWaitRecordSchema>;
+export type SchedulingWaitingRecord = Static<typeof schedulingWaitingRecordSchema>;
 export type SchedulingWaitResult = Static<typeof schedulingWaitResultSchema>;
-export type SchedulingWaitSettlement = Static<typeof schedulingWaitSettlementSchema>;
 export type SchedulingScheduleStatus = Static<typeof schedulingScheduleStatusSchema>;
 export type SchedulingScheduledMessage = Static<typeof schedulingScheduledMessageSchema>;
-export type SchedulingMessage = SchedulingScheduledMessage;
 export type SchedulingScheduleInput = Static<typeof schedulingScheduleInputSchema>;
 export type SchedulingScheduleToolInput = Static<typeof schedulingScheduleToolInputSchema>;
 export type SchedulingCancelInput = Static<typeof schedulingCancelInputSchema>;
 export type SchedulingSchedulePageQuery = Static<typeof schedulingSchedulePageQuerySchema>;
 export type SchedulingScheduleToolPageQuery = Static<typeof schedulingScheduleToolPageQuerySchema>;
 export type SchedulingSchedulePage = Static<typeof schedulingSchedulePageSchema>;
-export type SchedulingMessagePage = SchedulingSchedulePage;
-export type SchedulingMessagePageQuery = SchedulingSchedulePageQuery;
-export type SchedulingScheduleDetailQuery = Static<typeof schedulingScheduleDetailQuerySchema>;
-export type SchedulingScheduleDetailPage = Static<typeof schedulingScheduleDetailPageSchema>;
-export type SchedulingDeliveryOutcomeInput = Static<typeof schedulingDeliveryOutcomeInputSchema>;
-export type SchedulingDeliveryOutcomeRequest = Static<
-    typeof schedulingDeliveryOutcomeRequestSchema
->;

@@ -81,7 +81,7 @@ The master plans still name `@slopus/happy-agent-features` and have not been upd
    `UserInputEvent.js`. A reader cannot tell which one a call site means.
 5. **Over-validation of trusted, locally constructed contracts.** `validateOptions`
    (`UserInputModule.ts:1417-1475`) builds a `methodView` reflection proxy so it can run
-   `Value.Check` over `Type.Function` members of the host-supplied broker, presence policy,
+   `Value.Check` over `Type.Function` members of the host-supplied presence policy,
    authorization, and listener — shapes TypeScript already guarantees at the call site. `#store` is
    worse: it is created by the module's own `createSqliteUserInputStorage()`
    (`UserInputModule.ts:203`), and every result is still re-parsed through `assertUserInputRequest`,
@@ -126,8 +126,8 @@ The master plans still name `@slopus/happy-agent-features` and have not been upd
   early if it is already terminal (`answer`, `cancel`, `complete`, `#settlePending` — lines
   300-305, 336-338, 359-364, 546-548), so a duplicate answer or a racing timeout cannot overwrite a
   committed outcome.
-- **No transaction is held across the wait.** `wait` reads, releases, waits through the broker
-  outside any transaction, then opens a short transaction to settle
+- **No transaction is held across the wait.** `wait` reads, releases, parks outside any
+  transaction until the settling transaction commits, then opens a short transaction to settle
   (`UserInputModule.ts:275-287`, `638-781`), with the timer `unref`'d (line 691) and the presence
   subscription cleaned up in `finally` (772-780). Presence changes rearm the deadline while waiting
   rather than being sampled once — a capability v1 did not have.
@@ -137,3 +137,13 @@ The master plans still name `@slopus/happy-agent-features` and have not been upd
   (lines 586-611) run the transactional listener inside the transaction, register the post-commit
   listener through `afterCommit`, and contain both listener and error-reporter failures — plan 21's
   two-callback event shape, implemented.
+
+## Open coverage gap
+
+Removing the wait broker also removed the only observable way to assert, from a test, that `wait`
+moves itself outside a caller's already-open transaction: the old `it.fails` marker in
+`UserInputWaitPresenceAndConcurrency.test.ts` depended on a host `wait` recording the context it
+was handed. The deficiency it recorded is unchanged — a wait started inside a caller transaction
+still cannot be woken, because `afterCommit` fires only when that outermost transaction commits —
+but nothing tests it now. A rewrite needs a bounded, hang-proof way to observe the open
+transaction.

@@ -1,52 +1,42 @@
 import {
+    agentDatabase,
+    withAgentDatabase,
     type AgentModule,
     type AgentModuleHooks,
     type AgentModuleScope,
+    type AgentSystemRef,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import { afterCommit, type Context } from "@steve.kite/stdlib";
+import { afterCommit, detach, type Context } from "@steve.kite/stdlib";
 
+import { senderAgentIdMetadata } from "../auto/messageOrigin.js";
 import {
-    MAX_SCHEDULING_DETAIL_PAGE_SIZE,
+    MAX_SCHEDULING_FAILURE_LENGTH,
     MAX_SCHEDULING_MESSAGE_LENGTH,
     MAX_SCHEDULING_PAGE_SIZE,
     MAX_SCHEDULING_TIMESTAMP,
     schedulingAgentIdSchema,
     schedulingCancelInputSchema,
-    schedulingDeliveryOutcomeInputSchema,
-    schedulingDurationSchema,
     schedulingEventIdSchema,
-    schedulingInstantSchema,
     schedulingMessageIdSchema,
-    schedulingScheduleDetailPageSchema,
-    schedulingScheduleDetailQuerySchema,
     schedulingScheduleInputSchema,
     schedulingSchedulePageQuerySchema,
-    schedulingSchedulePageSchema,
     schedulingScheduledMessageSchema,
     schedulingTimestampSchema,
     schedulingWaitInputSchema,
-    schedulingWaitRecordSchema,
-    schedulingWaitResultSchema,
     schedulingWaitUntilInputSchema,
     type SchedulingCancelInput,
-    type SchedulingDeliveryOutcomeInput,
-    type SchedulingDuration,
-    type SchedulingInstant,
-    type SchedulingScheduleDetailPage,
-    type SchedulingScheduleDetailQuery,
     type SchedulingScheduleInput,
     type SchedulingSchedulePage,
     type SchedulingSchedulePageQuery,
-    type SchedulingScheduleToolInput,
     type SchedulingScheduledMessage,
     type SchedulingWaitInput,
     type SchedulingWaitRecord,
     type SchedulingWaitResult,
-    type SchedulingWaitSettlement,
     type SchedulingWaitUntilInput,
+    type SchedulingWaitingRecord,
 } from "./Scheduling.js";
 import {
     schedulingEventSchema,
@@ -55,16 +45,25 @@ import {
     type SchedulingModuleListener,
 } from "./SchedulingEvent.js";
 import {
+    assertSchedulingPage,
     assertSchedulingScheduledMessage,
-    assertSchedulingSettlement,
     assertSchedulingWaitRecord,
     assertSchedulingWaitResult,
     assertSchedulingVoid,
+    MAX_SCHEDULING_RECOVERY_BATCH,
     schedulingContextSchema,
-    schedulingSchedulerSchema,
-    type SchedulingScheduler,
     type SchedulingStore,
 } from "./SchedulingStore.js";
+import { SchedulingSuspensions } from "./SchedulingSuspensions.js";
+import {
+    assertSchedulingTimers,
+    nodeSchedulingTimers,
+    SchedulingAlarm,
+    schedulingTimersSchema,
+    type SchedulingTimers,
+} from "./SchedulingTimers.js";
+import { cancellationText, schedulePageText, scheduleText, waitText } from "./schedulingFormat.js";
+import { durationMilliseconds, humanDuration, instantMilliseconds } from "./schedulingTime.js";
 import { createSqliteSchedulingStorage, schedulingMigrations } from "./SqliteSchedulingStorage.js";
 import { cancelScheduledMessageTool } from "./tools/cancel_scheduled_message.js";
 import { listScheduledMessagesTool } from "./tools/list_scheduled_messages.js";
@@ -72,57 +71,15 @@ import { scheduleMessageTool } from "./tools/schedule_message.js";
 import { waitTool } from "./tools/wait.js";
 import { waitUntilTool } from "./tools/wait_until.js";
 
-const DEFAULT_MAX_WAIT_DURATION = 24 * 60 * 60 * 1_000;
-const DEFAULT_MAX_SCHEDULE_HORIZON = 24 * 60 * 60 * 1_000;
-const MAX_CONFIGURED_WAIT_DURATION = 24 * 60 * 60 * 1_000;
-const MAX_CONFIGURED_SCHEDULE_HORIZON = MAX_SCHEDULING_TIMESTAMP;
-const MAX_SETTLEMENT_CLOCK_DRIFT = 60 * 1_000;
+const DAY = 24 * 60 * 60 * 1_000;
+const DEFAULT_MAX_WAIT_DURATION = DAY;
+const DEFAULT_MAX_SCHEDULE_HORIZON = DAY;
 const DEFAULT_PAGE_SIZE = 50;
 const DEFAULT_OUTPUT_CHARACTERS = 8_000;
-const DEFAULT_MAX_MESSAGE_LENGTH = MAX_SCHEDULING_MESSAGE_LENGTH;
 
-export const schedulingIdFactorySchema = Type.Function(
-    [schedulingContextSchema, schedulingAgentIdSchema],
-    Type.Union([schedulingMessageIdSchema, Type.Promise(schedulingMessageIdSchema)]),
-);
-export const schedulingEventIdFactorySchema = Type.Function(
-    [schedulingContextSchema, schedulingAgentIdSchema],
-    Type.Union([schedulingEventIdSchema, Type.Promise(schedulingEventIdSchema)]),
-);
-export const schedulingClockSchema = Type.Function(
-    [schedulingContextSchema, schedulingAgentIdSchema],
-    schedulingTimestampSchema,
-);
-
-export const schedulingAuthorizationActionSchema = Type.Union([
-    Type.Literal("read"),
-    Type.Literal("list"),
-    Type.Literal("schedule"),
-    Type.Literal("cancel"),
-    Type.Literal("delivery"),
-]);
-const authorizationFunctionSchema = Type.Function(
-    [
-        schedulingContextSchema,
-        schedulingAgentIdSchema,
-        schedulingAgentIdSchema,
-        schedulingAuthorizationActionSchema,
-    ],
-    Type.Union([Type.Boolean(), Type.Promise(Type.Boolean())]),
-);
-export const schedulingAuthorizationSchema = Type.Union([
-    authorizationFunctionSchema,
-    Type.Object({ authorize: authorizationFunctionSchema }, { additionalProperties: false }),
-]);
-
-const schedulePolicyFunctionSchema = Type.Function(
-    [schedulingContextSchema, schedulingAgentIdSchema],
-    Type.Union([Type.Boolean(), Type.Promise(Type.Boolean())]),
-);
-export const schedulingMessagePolicySchema = Type.Union([
-    schedulePolicyFunctionSchema,
-    Type.Object({ canSchedule: schedulePolicyFunctionSchema }, { additionalProperties: false }),
-]);
+export const schedulingIdFactorySchema = Type.Function([], schedulingMessageIdSchema);
+export const schedulingEventIdFactorySchema = Type.Function([], schedulingEventIdSchema);
+export const schedulingClockSchema = Type.Function([], schedulingTimestampSchema);
 
 export const schedulingPostCommitErrorSchema = Type.Function(
     [schedulingContextSchema, schedulingEventSchema, Type.Unknown()],
@@ -131,18 +88,14 @@ export const schedulingPostCommitErrorSchema = Type.Function(
 
 export const schedulingModuleOptionsSchema = Type.Object(
     {
-        scheduler: schedulingSchedulerSchema,
-        authorization: Type.Optional(schedulingAuthorizationSchema),
-        scheduleMessagePolicy: Type.Optional(schedulingMessagePolicySchema),
+        clock: Type.Optional(schedulingClockSchema),
+        timers: Type.Optional(schedulingTimersSchema),
         idFactory: Type.Optional(schedulingIdFactorySchema),
         eventIdFactory: Type.Optional(schedulingEventIdFactorySchema),
-        clock: Type.Optional(schedulingClockSchema),
         listener: Type.Optional(schedulingModuleListenerSchema),
-        maxWaitDuration: Type.Optional(
-            Type.Integer({ minimum: 0, maximum: MAX_CONFIGURED_WAIT_DURATION }),
-        ),
+        maxWaitDuration: Type.Optional(Type.Integer({ minimum: 0, maximum: DAY })),
         maxScheduleHorizon: Type.Optional(
-            Type.Integer({ minimum: 0, maximum: MAX_CONFIGURED_SCHEDULE_HORIZON }),
+            Type.Integer({ minimum: 0, maximum: MAX_SCHEDULING_TIMESTAMP }),
         ),
         maxPageSize: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_SCHEDULING_PAGE_SIZE })),
         maxOutputCharacters: Type.Optional(Type.Integer({ minimum: 256, maximum: 100_000 })),
@@ -155,21 +108,30 @@ export const schedulingModuleOptionsSchema = Type.Object(
 );
 
 export type SchedulingModuleOptions = Static<typeof schedulingModuleOptionsSchema>;
-export type SchedulingAuthorizationAction = Static<typeof schedulingAuthorizationActionSchema>;
-export type SchedulingAuthorization = Static<typeof schedulingAuthorizationSchema>;
-export type SchedulingMessagePolicy = Static<typeof schedulingMessagePolicySchema>;
 
+/**
+ * Waiting, and messages that arrive later.
+ *
+ * Scheduling keeps its own time. Nothing outside it holds the alarms, decides when a message is
+ * due, or performs the delivery: the module writes a durable row, arms its own timer, and when
+ * that timer fires it puts the message in the recipient's inbox itself through the agent
+ * collection. A restart re-arms every pending row from the table, which is the only place the
+ * work is really recorded — the timers are just this process's memory of it.
+ *
+ * A wait is the same idea seen from the other side. The row says what is being waited for and
+ * until when; the suspension holding the tool call is ephemeral. Any message into the agent's
+ * chat ends the wait early, and the model is told how much time really passed rather than how
+ * much it asked for.
+ */
 export class SchedulingModule implements AgentModule {
     readonly name = "scheduling";
     readonly migrations = schedulingMigrations;
 
     readonly #store: SchedulingStore;
-    readonly #scheduler: SchedulingScheduler;
-    readonly #authorization: SchedulingAuthorization | undefined;
-    readonly #scheduleMessagePolicy: SchedulingMessagePolicy | undefined;
-    readonly #idFactory: NonNullable<SchedulingModuleOptions["idFactory"]>;
-    readonly #eventIdFactory: NonNullable<SchedulingModuleOptions["eventIdFactory"]>;
-    readonly #clock: NonNullable<SchedulingModuleOptions["clock"]>;
+    readonly #timers: SchedulingTimers;
+    readonly #clock: () => number;
+    readonly #idFactory: () => string;
+    readonly #eventIdFactory: () => string;
     readonly #listener: SchedulingModuleListener | undefined;
     readonly #onPostCommitError: SchedulingModuleOptions["onPostCommitError"];
     readonly #maxWaitDuration: number;
@@ -177,99 +139,247 @@ export class SchedulingModule implements AgentModule {
     readonly #maxPageSize: number;
     readonly #maxOutputCharacters: number;
     readonly #maxMessageLength: number;
+    readonly #suspensions: SchedulingSuspensions;
 
-    constructor(options: SchedulingModuleOptions) {
+    /** Live alarms for pending messages, and the deliveries currently in flight. */
+    readonly #alarms = new Map<string, SchedulingAlarm>();
+    readonly #delivering = new Set<string>();
+
+    #agents: AgentSystemRef | undefined;
+    #deliveryCtx: Context | undefined;
+
+    constructor(options: SchedulingModuleOptions = {}) {
         const validated = validateOptions(options);
         this.#store = createSqliteSchedulingStorage();
-        this.#scheduler = validated.scheduler;
-        this.#authorization = validated.authorization;
-        this.#scheduleMessagePolicy = validated.scheduleMessagePolicy;
-        this.#idFactory =
-            validated.idFactory ??
-            (() => `s${globalThis.crypto.randomUUID().replaceAll("-", "").slice(0, 31)}`);
-        this.#eventIdFactory =
-            validated.eventIdFactory ??
-            (() => `e${globalThis.crypto.randomUUID().replaceAll("-", "").slice(0, 31)}`);
+        this.#timers = validated.timers ?? nodeSchedulingTimers;
+        assertSchedulingTimers(this.#timers);
         this.#clock = validated.clock ?? (() => Date.now());
+        this.#idFactory = validated.idFactory ?? (() => randomSchedulingId());
+        this.#eventIdFactory = validated.eventIdFactory ?? (() => randomSchedulingId());
         this.#listener = validated.listener;
         this.#onPostCommitError = validated.onPostCommitError;
         this.#maxWaitDuration = validated.maxWaitDuration ?? DEFAULT_MAX_WAIT_DURATION;
         this.#maxScheduleHorizon = validated.maxScheduleHorizon ?? DEFAULT_MAX_SCHEDULE_HORIZON;
         this.#maxPageSize = validated.maxPageSize ?? DEFAULT_PAGE_SIZE;
         this.#maxOutputCharacters = validated.maxOutputCharacters ?? DEFAULT_OUTPUT_CHARACTERS;
-        this.#maxMessageLength = validated.maxMessageLength ?? DEFAULT_MAX_MESSAGE_LENGTH;
+        this.#maxMessageLength = validated.maxMessageLength ?? MAX_SCHEDULING_MESSAGE_LENGTH;
+        this.#suspensions = new SchedulingSuspensions(this.#timers, () => this.#now());
     }
 
+    /**
+     * Take the agent collection, then re-arm everything the last process left pending.
+     *
+     * Delivery outlives the call that scheduled it, so it runs on a context of the module's own
+     * derived here rather than on a tool call's, which is gone long before the message is due.
+     */
+    readonly beforeStart = async (
+        ctx: Context,
+        agents: AgentSystemRef,
+    ): Promise<AgentModuleHooks> => {
+        this.#agents = agents;
+        // Detaching drops the database along with the caller's lifetime, and delivery needs it
+        // for the rest of the process's life, so it is carried onto the module's own context.
+        const database = agentDatabase(ctx);
+        if (database === undefined) {
+            throw new Error("Scheduling was started without an agent database.");
+        }
+        this.#deliveryCtx = withAgentDatabase(detach(ctx).named("scheduling"), database);
+        await this.#recoverPending(ctx);
+        return this.#hooks;
+    };
+
     readonly #hooks: AgentModuleHooks = {
-        tools: async (
-            ctx: Context,
-            scope: AgentModuleScope,
-        ): Promise<readonly AnyAgentTool[]> => {
+        tools: async (ctx: Context, scope: AgentModuleScope): Promise<readonly AnyAgentTool[]> => {
             this.#assertAgentId(scope.agent.id, "tool agent");
             const tools: AnyAgentTool[] = [
                 waitTool(this, scope.agent.id),
                 waitUntilTool(this, scope.agent.id),
-                cancelScheduledMessageTool(this, scope.agent.id),
-                listScheduledMessagesTool(this, scope.agent.id),
             ];
-            if (await this.#maySchedule(ctx, scope.agent.id)) {
-                tools.splice(2, 0, scheduleMessageTool(this, scope.agent.id));
+            // A subagent answers whoever created it and then stops; a message it scheduled would
+            // arrive for an agent that is no longer anyone's correspondent.
+            if ((await this.#requireAgents().parentOf(ctx, scope.agent.id)) === null) {
+                tools.push(
+                    scheduleMessageTool(this, scope.agent.id),
+                    listScheduledMessagesTool(this, scope.agent.id),
+                    cancelScheduledMessageTool(this, scope.agent.id),
+                );
             }
             return tools;
         },
+        // A message this agent has taken into its conversation is the plainest possible proof that
+        // it is no longer idle, so any wait it is still holding ends here.
+        messageAccepted: (_ctx: Context, scope: AgentModuleScope): void => {
+            this.#suspensions.interrupt(scope.agent.id);
+        },
     };
 
-    readonly beforeStart = (): AgentModuleHooks => this.#hooks;
-
+    /** Pause an agent for a bounded duration. */
     async wait(
         ctx: Context,
         agentId: string,
         input: SchedulingWaitInput,
     ): Promise<SchedulingWaitResult> {
-        return await this.#wait(ctx, agentId, input, "wait");
+        this.#assertInput(schedulingWaitInputSchema, input, "wait input");
+        return await this.#wait(ctx, agentId, input.id, "wait", (startedAt) =>
+            this.#dueFromDuration(startedAt, durationMilliseconds(input.duration)),
+        );
     }
 
+    /** Pause an agent until a bounded date, resolving immediately for a date already past. */
     async waitUntil(
         ctx: Context,
         agentId: string,
         input: SchedulingWaitUntilInput,
     ): Promise<SchedulingWaitResult> {
-        return await this.#wait(ctx, agentId, input, "wait_until");
+        this.#assertInput(schedulingWaitUntilInputSchema, input, "wait until input");
+        return await this.#wait(ctx, agentId, input.id, "wait_until", (startedAt) =>
+            this.#dueFromInstant(startedAt, instantMilliseconds(input.at)),
+        );
     }
 
+    /**
+     * End every wait this agent is holding, because something has arrived for it.
+     *
+     * Rig calls this when a person submits or steers a message into a session: a queued message
+     * does not reach the agent's conversation until its current turn ends, and its current turn is
+     * exactly what the wait is holding open.
+     */
+    interruptWaits(_ctx: Context, agentId: string): void {
+        this.#assertAgentId(agentId, "acting agent");
+        this.#suspensions.interrupt(agentId);
+    }
+
+    /** Promise a message to any agent whose ID the sender knows, including itself. */
     async schedule(
         ctx: Context,
         agentId: string,
         input: SchedulingScheduleInput,
     ): Promise<SchedulingScheduledMessage> {
-        return await this.#schedule(ctx, agentId, input);
+        this.#assertAgentId(agentId, "acting agent");
+        this.#assertInput(schedulingScheduleInputSchema, input, "schedule message");
+        if (input.message.length > this.#maxMessageLength) {
+            throw new Error(
+                `A scheduled message cannot exceed ${this.#maxMessageLength} characters.`,
+            );
+        }
+        const targetAgentId = input.targetAgentId ?? agentId;
+        this.#assertAgentId(targetAgentId, "target agent");
+        const schedule = await ctx.inTx(async (txCtx) => {
+            const id = input.id ?? this.#newId();
+            const existing = await this.#readSchedule(txCtx, id);
+            if (existing !== undefined) {
+                // The same durable tool call, running a second time after a restart.
+                if (
+                    existing.senderAgentId !== agentId ||
+                    existing.targetAgentId !== targetAgentId ||
+                    existing.message !== input.message
+                ) {
+                    throw new Error(`Scheduled message "${id}" already exists.`);
+                }
+                return existing;
+            }
+            const now = this.#now();
+            const dueAt =
+                "in" in input
+                    ? this.#dueFromDuration(
+                          now,
+                          durationMilliseconds(input.in),
+                          this.#maxScheduleHorizon,
+                      )
+                    : this.#dueFromInstant(
+                          now,
+                          instantMilliseconds(input.at),
+                          this.#maxScheduleHorizon,
+                      );
+            const created: SchedulingScheduledMessage = {
+                id,
+                senderAgentId: agentId,
+                targetAgentId,
+                message: input.message,
+                dueAt,
+                status: "pending",
+                createdAt: now,
+                updatedAt: now,
+            };
+            await this.#writeSchedule(txCtx, created);
+            await this.#announce(
+                txCtx,
+                this.#event({
+                    type: "message_scheduled",
+                    agentId,
+                    schedule: created,
+                }),
+            );
+            afterCommit(txCtx, () => {
+                this.#arm(created);
+            });
+            return created;
+        });
+        return structuredClone(schedule);
     }
 
+    /** Withdraw a message the sender promised, if it has not already left. */
     async cancelSchedule(
         ctx: Context,
         agentId: string,
-        input: SchedulingCancelInput | string,
+        input: SchedulingCancelInput,
     ): Promise<SchedulingScheduledMessage> {
-        const normalized = typeof input === "string" ? { scheduleId: input } : input;
-        return await this.#cancelSchedule(ctx, agentId, normalized);
+        this.#assertAgentId(agentId, "acting agent");
+        this.#assertInput(schedulingCancelInputSchema, input, "schedule cancellation");
+        return await ctx.inTx(async (txCtx) => {
+            const before = await this.#readRequiredSchedule(txCtx, input.scheduleId);
+            if (before.senderAgentId !== agentId) {
+                throw new Error(`Scheduled message "${input.scheduleId}" does not exist.`);
+            }
+            if (before.status !== "pending") return structuredClone(before);
+            const cancelled: SchedulingScheduledMessage = {
+                ...before,
+                status: "cancelled",
+                updatedAt: this.#now(),
+            };
+            await this.#writeSchedule(txCtx, cancelled);
+            await this.#announce(
+                txCtx,
+                this.#event({
+                    type: "scheduled_message_cancelled",
+                    agentId,
+                    schedule: cancelled,
+                }),
+            );
+            afterCommit(txCtx, () => {
+                this.#disarm(cancelled.id);
+            });
+            return structuredClone(cancelled);
+        });
     }
 
+    /** One bounded page of the messages this agent promised, in due order. */
     async listSchedulePage(
         ctx: Context,
         agentId: string,
         query: SchedulingSchedulePageQuery = {},
     ): Promise<SchedulingSchedulePage> {
-        return await this.#listSchedulePage(ctx, agentId, query);
+        this.#assertAgentId(agentId, "acting agent");
+        this.#assertInput(schedulingSchedulePageQuerySchema, query, "schedule page query");
+        const limit = Math.min(query.limit ?? this.#maxPageSize, this.#maxPageSize);
+        return await ctx.inTx(async (txCtx) => {
+            const page = await this.#store.listSchedules(txCtx, {
+                ...query,
+                limit,
+                senderAgentId: agentId,
+            });
+            assertSchedulingPage(page, limit);
+            for (const schedule of page.schedules) {
+                assertSchedulingScheduledMessage(schedule);
+                if (schedule.senderAgentId !== agentId) {
+                    throw new Error("Scheduling returned a message belonging to another agent.");
+                }
+            }
+            return structuredClone(page);
+        });
     }
 
-    async listSchedule(
-        ctx: Context,
-        agentId: string,
-        query: SchedulingSchedulePageQuery = {},
-    ): Promise<readonly SchedulingScheduledMessage[]> {
-        return (await this.listSchedulePage(ctx, agentId, query)).schedules;
-    }
-
+    /** One scheduled message, readable by the agent that sent it and the agent it is for. */
     async getSchedule(
         ctx: Context,
         agentId: string,
@@ -278,377 +388,241 @@ export class SchedulingModule implements AgentModule {
         this.#assertAgentId(agentId, "acting agent");
         this.#assertId(scheduleId, "schedule");
         return await ctx.inTx(async (txCtx) => {
-            const schedule = await this.#readSchedule(txCtx, agentId, scheduleId);
+            const schedule = await this.#readSchedule(txCtx, scheduleId);
             if (schedule === undefined) return undefined;
-            await this.#authorize(txCtx, agentId, schedule.senderAgentId, "read");
+            if (schedule.senderAgentId !== agentId && schedule.targetAgentId !== agentId) {
+                return undefined;
+            }
             return structuredClone(schedule);
         });
     }
 
-    async getSchedulePage(
-        ctx: Context,
-        agentId: string,
-        scheduleId: string,
-        query: SchedulingScheduleDetailQuery = {},
-    ): Promise<SchedulingScheduleDetailPage> {
-        this.#assertInput(schedulingScheduleDetailQuerySchema, query, "schedule detail query");
-        const schedule = await this.getSchedule(ctx, agentId, scheduleId);
-        if (schedule === undefined) {
-            return { schedule: null, detail: "", detailOffset: 0, detailTotal: 0 };
-        }
-        const detail = scheduleDetailText(schedule);
-        const offset = query.detailOffset ?? 0;
-        const limit = query.detailLimit ?? MAX_SCHEDULING_DETAIL_PAGE_SIZE;
-        if (offset > detail.length) {
-            throw new Error("Schedule detail offset exceeds the available detail.");
-        }
-        return this.#fitDetailPage({
-            schedule,
-            detail: detail.slice(offset, offset + limit),
-            detailOffset: offset,
-            detailTotal: detail.length,
-            ...(offset + limit < detail.length ? { nextDetailOffset: offset + limit } : {}),
-        });
-    }
-
-    async reportDeliveryOutcome(
-        ctx: Context,
-        agentId: string,
-        input: SchedulingDeliveryOutcomeInput,
-    ): Promise<SchedulingScheduledMessage> {
-        this.#assertAgentId(agentId, "acting agent");
-        this.#assertInput(schedulingDeliveryOutcomeInputSchema, input, "delivery outcome");
-        const before = await ctx.inTx(async (txCtx) => {
-            const before = await this.#readRequiredSchedule(txCtx, agentId, input.scheduleId);
-            await this.#authorize(txCtx, agentId, before.senderAgentId, "delivery");
-            return structuredClone(before);
-        });
-        if (before.status !== "pending") return before;
-        const raw = await this.#scheduler.reportDelivery(ctx, agentId, input);
-        assertSchedulingScheduledMessage(raw);
-        this.#assertScheduleTransition(raw, before, input.status, input);
-        return await ctx.inTx(async (txCtx) => {
-            const current = await this.#readRequiredSchedule(txCtx, agentId, input.scheduleId);
-            if (current.status !== "pending") {
-                if (!sameSchedule(current, raw)) {
-                    throw new Error("Delivery outcome retry disagrees with durable state.");
-                }
-                return current;
-            }
-            this.#assertScheduleTransition(raw, current, input.status, input);
-            await this.#writeSchedule(txCtx, raw);
-            const event = await this.#event(txCtx, {
-                type: "scheduled_message_delivery_outcome",
-                agentId,
-                schedule: raw,
-            });
-            await this.#announce(txCtx, event);
-            return structuredClone(raw);
-        });
+    /** Drop every live alarm and wake every suspended wait, for a process that is shutting down. */
+    stop(): void {
+        for (const id of [...this.#alarms.keys()]) this.#disarm(id);
+        this.#suspensions.interruptAll();
     }
 
     formatWaitForModel(result: SchedulingWaitResult): string {
         assertSchedulingWaitResult(result);
-        const elapsed = humanDuration(result.elapsedMs);
-        return result.outcome === "interrupted"
-            ? `Wait ${result.waitId} was interrupted; ${elapsed} actually elapsed.`
-            : `Wait ${result.waitId} elapsed after ${elapsed}.`;
+        return waitText(result);
     }
 
     formatScheduleForModel(schedule: SchedulingScheduledMessage): string {
         assertSchedulingScheduledMessage(schedule);
-        const compact = `Scheduled message ${schedule.id} is ${scheduleStatusLabel(
-            schedule.status,
-        )}; due ${new Date(schedule.dueAt).toISOString()}.`;
-        if (compact.length <= this.#maxOutputCharacters) return compact;
-        const minimum = `${schedule.id} | ${scheduleStatusLabel(schedule.status)}`;
-        if (minimum.length <= this.#maxOutputCharacters) return minimum;
-        throw new Error("Scheduled message identity cannot fit the model-output bound.");
+        return scheduleText(schedule);
     }
 
     formatCancellationForModel(schedule: SchedulingScheduledMessage): string {
         assertSchedulingScheduledMessage(schedule);
-        return `Scheduled message ${schedule.id} is now ${scheduleStatusLabel(schedule.status)}.`;
+        return cancellationText(schedule);
     }
 
     formatSchedulePageForModel(page: SchedulingSchedulePage): string {
-        if (!Value.Check(schedulingSchedulePageSchema, page)) {
-            throw new Error("Cannot format an invalid schedule page.");
-        }
-        const visible = this.#fitSchedulePage(page, String(inferSchedulePageStart(page)));
-        if (visible.schedules.length === 0) return "No scheduled messages.";
-        return this.#schedulePageText(visible);
+        assertSchedulingPage(page, MAX_SCHEDULING_PAGE_SIZE);
+        return schedulePageText(page, this.#maxOutputCharacters).text;
     }
 
-    formatScheduleDetailPageForModel(
-        page: SchedulingScheduleDetailPage | SchedulingScheduledMessage,
-    ): string {
-        const detailPage = Value.Check(schedulingScheduleDetailPageSchema, page)
-            ? page
-            : Value.Check(schedulingScheduledMessageSchema, page)
-              ? this.#fitDetailPage({
-                    schedule: page,
-                    detail: scheduleDetailText(page),
-                    detailOffset: 0,
-                    detailTotal: scheduleDetailText(page).length,
-                })
-              : undefined;
-        if (detailPage === undefined) throw new Error("Cannot format an invalid schedule detail.");
-        if (detailPage.schedule === null) return "That scheduled message does not exist.";
-        return `${detailPage.schedule.id} | ${scheduleStatusLabel(
-            detailPage.schedule.status,
-        )}\n${detailPage.detail}${
-            detailPage.nextDetailOffset === undefined
-                ? ""
-                : `\nMore detail starts at offset ${detailPage.nextDetailOffset}.`
-        }`;
-    }
-
-    formatForModel(
-        result:
-            | SchedulingWaitResult
-            | SchedulingScheduledMessage
-            | SchedulingSchedulePage
-            | SchedulingScheduleDetailPage,
-    ): string {
-        if (Value.Check(schedulingWaitResultSchema, result)) return this.formatWaitForModel(result);
-        if (Value.Check(schedulingSchedulePageSchema, result)) {
-            return this.formatSchedulePageForModel(result);
-        }
-        if (Value.Check(schedulingScheduleDetailPageSchema, result)) {
-            return this.formatScheduleDetailPageForModel(result);
-        }
-        return this.formatScheduleForModel(result as SchedulingScheduledMessage);
-    }
-
-    async #schedule(
-        ctx: Context,
-        agentId: string,
-        input: SchedulingScheduleInput,
-    ): Promise<SchedulingScheduledMessage> {
-        this.#assertAgentId(agentId, "acting agent");
-        this.#assertInput(schedulingScheduleInputSchema, input, "schedule message");
-        if (input.message.length > this.#maxMessageLength) {
-            throw new Error(`Scheduled message exceeds ${this.#maxMessageLength} characters.`);
-        }
-        await this.#mayScheduleOrThrow(ctx, agentId);
-        const targetAgentId = input.targetAgentId ?? agentId;
-        this.#assertAgentId(targetAgentId, "target agent");
-        await this.#authorize(ctx, agentId, targetAgentId, "schedule");
-        const request = await ctx.inTx(async (txCtx) => {
-            const id = input.id ?? (await this.#newIdentity(txCtx, agentId));
-            this.#assertId(id, "schedule");
-            if ((await this.#readSchedule(txCtx, agentId, id)) !== undefined) {
-                throw new Error(`Scheduled message "${id}" already exists.`);
-            }
-            const dueAt = this.#dueAtFromSchedule(this.#now(txCtx, agentId), input);
-            return {
-                id,
-                senderAgentId: agentId,
-                targetAgentId,
-                message: input.message,
-                dueAt,
-            };
-        });
-        const raw = await this.#scheduler.schedule(ctx, agentId, request);
-        assertSchedulingScheduledMessage(raw);
-        this.#assertScheduleRequest(
-            raw,
-            request.id,
-            agentId,
-            targetAgentId,
-            input.message,
-            request.dueAt,
-        );
-        if (raw.status !== "pending") {
-            throw new Error("Scheduling scheduler returned a non-pending new message.");
-        }
-        return await ctx.inTx(async (txCtx) => {
-            const existing = await this.#readSchedule(txCtx, agentId, request.id);
-            if (existing !== undefined) {
-                if (!sameSchedule(existing, raw)) {
-                    throw new Error("Scheduled message retry disagrees with durable state.");
-                }
-                return existing;
-            }
-            await this.#writeSchedule(txCtx, raw);
-            const event = await this.#event(txCtx, {
-                type: "message_scheduled",
-                agentId,
-                schedule: raw,
-            });
-            await this.#announce(txCtx, event);
-            return structuredClone(raw);
-        });
-    }
-
-    async #cancelSchedule(
-        ctx: Context,
-        agentId: string,
-        input: SchedulingCancelInput,
-    ): Promise<SchedulingScheduledMessage> {
-        this.#assertAgentId(agentId, "acting agent");
-        this.#assertInput(schedulingCancelInputSchema, input, "schedule cancellation");
-        const before = await ctx.inTx(async (txCtx) => {
-            const before = await this.#readRequiredSchedule(txCtx, agentId, input.scheduleId);
-            await this.#authorize(txCtx, agentId, before.senderAgentId, "cancel");
-            return structuredClone(before);
-        });
-        if (before.status !== "pending") return before;
-        const raw = await this.#scheduler.cancel(ctx, agentId, input);
-        assertSchedulingScheduledMessage(raw);
-        this.#assertScheduleTransition(raw, before, "cancelled");
-        return await ctx.inTx(async (txCtx) => {
-            const current = await this.#readRequiredSchedule(txCtx, agentId, input.scheduleId);
-            if (current.status !== "pending") {
-                if (!sameSchedule(current, raw)) {
-                    throw new Error("Schedule cancellation retry disagrees with durable state.");
-                }
-                return current;
-            }
-            this.#assertScheduleTransition(raw, current, "cancelled");
-            await this.#writeSchedule(txCtx, raw);
-            const event = await this.#event(txCtx, {
-                type: "scheduled_message_cancelled",
-                agentId,
-                schedule: raw,
-            });
-            await this.#announce(txCtx, event);
-            return structuredClone(raw);
-        });
-    }
-
-    async #listSchedulePage(
-        ctx: Context,
-        agentId: string,
-        query: SchedulingSchedulePageQuery,
-    ): Promise<SchedulingSchedulePage> {
-        this.#assertAgentId(agentId, "acting agent");
-        this.#assertInput(schedulingSchedulePageQuerySchema, query, "schedule page query");
-        const limit = query.limit ?? this.#maxPageSize;
-        if (limit > this.#maxPageSize) {
-            throw new Error(`Schedule page limit cannot exceed ${this.#maxPageSize}.`);
-        }
-        const senderAgentId = query.senderAgentId ?? agentId;
-        await this.#authorize(ctx, agentId, senderAgentId, "list");
-        return await ctx.inTx(async (txCtx) => {
-            const page = await this.#store.listSchedules(txCtx, agentId, {
-                ...query,
-                limit,
-                senderAgentId,
-            });
-            if (!Value.Check(schedulingSchedulePageSchema, page)) {
-                throw new Error("Scheduling store returned an invalid schedule page.");
-            }
-            this.#assertPage(page, query.cursor, limit);
-            for (const schedule of page.schedules) {
-                assertSchedulingScheduledMessage(schedule);
-                if (schedule.senderAgentId !== senderAgentId) {
-                    throw new Error(
-                        "Scheduling page returned a message outside the sender filter.",
-                    );
-                }
-            }
-            return structuredClone(this.#fitSchedulePage(page, query.cursor));
-        });
-    }
-
+    /**
+     * Claim the durable wait, hold the tool call outside every transaction, then settle it.
+     *
+     * The two transactions are deliberately short and the suspension sits between them: a wait may
+     * last a day, and no database write lock survives one.
+     */
     async #wait(
         ctx: Context,
         agentId: string,
-        input: SchedulingWaitInput | SchedulingWaitUntilInput,
+        requestedId: string | undefined,
         kind: "wait" | "wait_until",
+        dueAtFrom: (startedAt: number) => number,
     ): Promise<SchedulingWaitResult> {
         this.#assertAgentId(agentId, "acting agent");
-        this.#assertInput(
-            kind === "wait" ? schedulingWaitInputSchema : schedulingWaitUntilInputSchema,
-            input,
-            `${kind} input`,
-        );
-        const id = input.id ?? (await this.#newIdentity(ctx, agentId));
+        const id = requestedId ?? this.#newId();
         this.#assertId(id, "wait");
-        const planned = await ctx.inTx(async (txCtx) => {
+        const claimed = await ctx.inTx(async (txCtx) => {
             const existing = await this.#readWait(txCtx, agentId, id);
             if (existing !== undefined) {
                 if (existing.kind !== kind) {
-                    throw new Error("Scheduling wait identity belongs to another wait kind.");
+                    throw new Error("That wait identity belongs to another kind of wait.");
                 }
-                return { existing: structuredClone(existing) } as const;
+                return structuredClone(existing);
             }
-            const startedAt = this.#now(txCtx, agentId);
-            const dueAt =
-                "at" in input
-                    ? this.#dueAtFromInstant(startedAt, input.at)
-                    : "duration" in input
-                      ? this.#dueAtFromDuration(startedAt, input.duration)
-                      : this.#dueAtFromDuration(startedAt, durationFromWaitInput(input));
-            return {
-                request: {
-                    id,
-                    agentId,
-                    kind,
-                    dueAt,
-                    startedAt,
-                },
-            } as const;
-        });
-        let claimed: SchedulingWaitRecord;
-        if ("existing" in planned) {
-            if (planned.existing.status !== "waiting") {
-                return resultFromWait(planned.existing);
-            }
-            claimed = planned.existing;
-        } else {
-            const raw = await this.#scheduler.startWait(ctx, agentId, planned.request);
-            assertSchedulingWaitRecord(raw);
-            this.#assertWaitRequest(
-                raw,
-                agentId,
+            const startedAt = this.#now();
+            const claimed: SchedulingWaitingRecord = {
                 id,
+                agentId,
                 kind,
-                planned.request.dueAt,
-                planned.request.startedAt,
+                status: "waiting",
+                dueAt: dueAtFrom(startedAt),
+                createdAt: startedAt,
+                updatedAt: startedAt,
+                startedAt,
+            };
+            await this.#writeWait(txCtx, claimed);
+            await this.#announce(
+                txCtx,
+                this.#event({ type: "wait_started", agentId, wait: claimed }),
             );
-            if (raw.status !== "waiting") {
-                throw new Error("Scheduling scheduler returned a terminal wait while claiming.");
-            }
-            claimed = await ctx.inTx(async (txCtx) => {
-                const existing = await this.#readWait(txCtx, agentId, id);
-                if (existing !== undefined) return existing;
-                await this.#writeWait(txCtx, raw);
-                const event = await this.#event(txCtx, {
-                    type: "wait_started",
-                    agentId,
-                    wait: raw,
-                });
-                await this.#announce(txCtx, event);
-                return structuredClone(raw);
-            });
-        }
-        assertSchedulingWaitRecord(claimed);
-        const settlement = await this.#scheduler.wait(ctx, agentId, id);
-        assertSchedulingSettlement(settlement);
+            return claimed;
+        });
+        if (claimed.status !== "waiting") return waitResult(claimed);
+        const outcome = await this.#suspensions.suspend(agentId, claimed.dueAt, ctx.lifetime);
         return await ctx.inTx(async (txCtx) => {
             const before = await this.#readRequiredWait(txCtx, agentId, id);
-            if (before.status !== "waiting") {
-                return resultFromWait(before);
-            }
-            const terminal = terminalWaitFromSettlement(
-                before,
-                settlement,
-                this.#now(txCtx, agentId),
+            if (before.status !== "waiting") return waitResult(before);
+            const finishedAt =
+                outcome === "elapsed"
+                    ? Math.max(this.#now(), before.dueAt)
+                    : Math.max(this.#now(), before.startedAt);
+            const settled: SchedulingWaitRecord = {
+                ...before,
+                status: outcome,
+                updatedAt: finishedAt,
+                finishedAt,
+                elapsedMs: finishedAt - before.startedAt,
+            };
+            await this.#writeWait(txCtx, settled);
+            const result = waitResult(settled);
+            await this.#announce(
+                txCtx,
+                this.#event({
+                    type: "wait_finished",
+                    agentId,
+                    wait: settled,
+                    result,
+                }),
             );
-            await this.#writeWait(txCtx, terminal);
-            const result = resultFromWait(terminal);
-            const event = await this.#event(txCtx, {
-                type: "wait_finished",
-                agentId,
-                wait: terminal,
-                result,
-            });
-            await this.#announce(txCtx, event);
             return result;
         });
+    }
+
+    /** Re-arm every message the previous process left pending, oldest due time first. */
+    async #recoverPending(ctx: Context): Promise<void> {
+        let afterDueAt: number | undefined;
+        for (;;) {
+            const pending = await ctx.inTx(
+                async (txCtx) =>
+                    await this.#store.listPendingSchedules(txCtx, {
+                        limit: MAX_SCHEDULING_RECOVERY_BATCH,
+                        ...(afterDueAt === undefined ? {} : { afterDueAt }),
+                    }),
+            );
+            for (const schedule of pending) {
+                assertSchedulingScheduledMessage(schedule);
+                this.#arm(schedule);
+            }
+            const last = pending.at(-1);
+            if (last === undefined || pending.length < MAX_SCHEDULING_RECOVERY_BATCH) return;
+            // Paging by due time skips the remainder of a shared millisecond rather than looping
+            // on it forever; those few are re-armed by the next start.
+            afterDueAt = last.dueAt;
+        }
+    }
+
+    /** Hold one alarm per pending message, replacing any alarm already held for it. */
+    #arm(schedule: SchedulingScheduledMessage): void {
+        this.#disarm(schedule.id);
+        if (schedule.status !== "pending") return;
+        this.#alarms.set(
+            schedule.id,
+            new SchedulingAlarm(
+                this.#timers,
+                () => this.#now(),
+                schedule.dueAt,
+                () => {
+                    this.#alarms.delete(schedule.id);
+                    void this.#deliver(schedule.id);
+                },
+            ),
+        );
+    }
+
+    #disarm(scheduleId: string): void {
+        this.#alarms.get(scheduleId)?.cancel();
+        this.#alarms.delete(scheduleId);
+    }
+
+    /**
+     * Put a due message in its recipient's inbox, then record what became of it.
+     *
+     * The delivery itself happens outside every transaction, because a database cannot roll a
+     * message back out of an agent's conversation. It is safe to repeat: Agent Base accepts a
+     * given message ID once, so a redelivery after a crash is recognised rather than duplicated.
+     */
+    async #deliver(scheduleId: string): Promise<void> {
+        if (this.#delivering.has(scheduleId)) return;
+        this.#delivering.add(scheduleId);
+        const ctx = this.#requireDeliveryContext();
+        try {
+            const due = await ctx.inTx(
+                async (txCtx) => await this.#readSchedule(txCtx, scheduleId),
+            );
+            if (due === undefined || due.status !== "pending") return;
+            if (this.#now() < due.dueAt) {
+                this.#arm(due);
+                return;
+            }
+            const failure = await this.#send(ctx, due);
+            await ctx.inTx(async (txCtx) => {
+                const before = await this.#readSchedule(txCtx, scheduleId);
+                if (before === undefined || before.status !== "pending") return;
+                const at = Math.max(this.#now(), before.dueAt);
+                const settled: SchedulingScheduledMessage =
+                    failure === undefined
+                        ? { ...before, status: "delivered", updatedAt: at, deliveredAt: at }
+                        : { ...before, status: "undelivered", updatedAt: at, failure };
+                await this.#writeSchedule(txCtx, settled);
+                await this.#announce(
+                    txCtx,
+                    this.#event({
+                        type: "scheduled_message_delivery_outcome",
+                        agentId: settled.senderAgentId,
+                        schedule: settled,
+                    }),
+                );
+            });
+            // The message is in the recipient's conversation now, so a wait it is holding is over.
+            if (failure === undefined) this.#suspensions.interrupt(due.targetAgentId);
+        } catch (error: unknown) {
+            ctx.log.error(
+                { error, scheduleId },
+                "A scheduled message could not be settled after delivery.",
+            );
+        } finally {
+            this.#delivering.delete(scheduleId);
+        }
+    }
+
+    /** Hand the message over, and return why it did not arrive when it did not. */
+    async #send(ctx: Context, schedule: SchedulingScheduledMessage): Promise<string | undefined> {
+        const introduction =
+            schedule.senderAgentId === schedule.targetAgentId
+                ? "A message you scheduled for now:"
+                : `A message agent ${schedule.senderAgentId} scheduled for now:`;
+        try {
+            await this.#requireAgents().send(
+                ctx,
+                schedule.targetAgentId,
+                {
+                    role: "user",
+                    content: [{ type: "text", text: `${introduction}\n\n${schedule.message}` }],
+                },
+                {
+                    id: schedule.id,
+                    metadata: {
+                        scheduling: {
+                            scheduleId: schedule.id,
+                            senderAgentId: schedule.senderAgentId,
+                            targetAgentId: schedule.targetAgentId,
+                        },
+                        ...senderAgentIdMetadata(schedule.senderAgentId),
+                    },
+                },
+            );
+            return undefined;
+        } catch (error: unknown) {
+            return boundedFailure(error);
+        }
     }
 
     async #readWait(
@@ -662,7 +636,7 @@ export class SchedulingModule implements AgentModule {
         if (wait.id !== id || wait.agentId !== agentId) {
             throw new Error("Scheduling store returned a different durable wait identity.");
         }
-        return structuredClone(wait);
+        return wait;
     }
 
     async #readRequiredWait(
@@ -671,7 +645,7 @@ export class SchedulingModule implements AgentModule {
         id: string,
     ): Promise<SchedulingWaitRecord> {
         const wait = await this.#readWait(ctx, agentId, id);
-        if (wait === undefined) throw new Error(`Scheduling wait "${id}" does not exist.`);
+        if (wait === undefined) throw new Error("That durable wait no longer exists.");
         return wait;
     }
 
@@ -680,26 +654,18 @@ export class SchedulingModule implements AgentModule {
         await this.#store.writeWait(ctx, structuredClone(wait));
     }
 
-    async #readSchedule(
-        ctx: Context,
-        agentId: string,
-        id: string,
-    ): Promise<SchedulingScheduledMessage | undefined> {
-        const schedule = await this.#store.readSchedule(ctx, agentId, id);
+    async #readSchedule(ctx: Context, id: string): Promise<SchedulingScheduledMessage | undefined> {
+        const schedule = await this.#store.readSchedule(ctx, id);
         if (schedule === undefined) return undefined;
         assertSchedulingScheduledMessage(schedule);
         if (schedule.id !== id) {
             throw new Error("Scheduling store returned a different scheduled message identity.");
         }
-        return structuredClone(schedule);
+        return schedule;
     }
 
-    async #readRequiredSchedule(
-        ctx: Context,
-        agentId: string,
-        id: string,
-    ): Promise<SchedulingScheduledMessage> {
-        const schedule = await this.#readSchedule(ctx, agentId, id);
+    async #readRequiredSchedule(ctx: Context, id: string): Promise<SchedulingScheduledMessage> {
+        const schedule = await this.#readSchedule(ctx, id);
         if (schedule === undefined) throw new Error(`Scheduled message "${id}" does not exist.`);
         return schedule;
     }
@@ -709,35 +675,12 @@ export class SchedulingModule implements AgentModule {
         await this.#store.writeSchedule(ctx, structuredClone(schedule));
     }
 
-    async #event(
-        ctx: Context,
-        payload:
-            | {
-                  readonly type: "wait_started";
-                  readonly agentId: string;
-                  readonly wait: SchedulingWaitRecord;
-              }
-            | {
-                  readonly type: "wait_finished";
-                  readonly agentId: string;
-                  readonly wait: SchedulingWaitRecord;
-                  readonly result: SchedulingWaitResult;
-              }
-            | {
-                  readonly type:
-                      | "message_scheduled"
-                      | "scheduled_message_cancelled"
-                      | "scheduled_message_delivery_outcome";
-                  readonly agentId: string;
-                  readonly schedule: SchedulingScheduledMessage;
-              },
-    ): Promise<SchedulingEvent> {
-        const raw = this.#eventIdFactory(ctx, payload.agentId);
-        const eventId = raw instanceof Promise ? await raw : raw;
+    #event(payload: SchedulingEventPayload): SchedulingEvent {
+        const eventId = this.#eventIdFactory();
         if (!Value.Check(schedulingEventIdSchema, eventId)) {
             throw new Error("Scheduling event identity factory returned an invalid ID.");
         }
-        const event = { ...payload, eventId, at: this.#now(ctx, payload.agentId) };
+        const event = { ...payload, eventId, at: this.#now() };
         if (!Value.Check(schedulingEventSchema, event)) {
             throw new Error("Scheduling module created an invalid event.");
         }
@@ -768,7 +711,7 @@ export class SchedulingModule implements AgentModule {
             try {
                 const handler = this.#onPostCommitError;
                 if (handler !== undefined) {
-                    const result = handler(ctx, event, safeError(error));
+                    const result = handler(ctx, event, boundedFailure(error));
                     assertSchedulingVoid(
                         result instanceof Promise ? await result : result,
                         "post-commit error handler",
@@ -780,292 +723,95 @@ export class SchedulingModule implements AgentModule {
         }
     }
 
-    async #maySchedule(ctx: Context, agentId: string): Promise<boolean> {
-        if (this.#scheduleMessagePolicy === undefined) return false;
-        const owner = this.#scheduleMessagePolicy;
-        const policy = typeof owner === "function" ? owner : owner.canSchedule;
-        const raw = policy.call(typeof owner === "function" ? undefined : owner, ctx, agentId);
-        const allowed = raw instanceof Promise ? await raw : raw;
-        if (typeof allowed !== "boolean") {
-            throw new Error("Scheduling message policy returned a non-boolean result.");
+    #dueFromDuration(now: number, amount: number, horizon = this.#maxWaitDuration): number {
+        if (amount > horizon) {
+            throw new Error(`That is longer than the ${humanDuration(horizon)} limit.`);
         }
-        return allowed;
+        return this.#dueAt(now + amount);
     }
 
-    async #mayScheduleOrThrow(ctx: Context, agentId: string): Promise<void> {
-        if (!(await this.#maySchedule(ctx, agentId))) {
-            throw new Error(`Agent "${agentId}" is not allowed to schedule messages.`);
+    #dueFromInstant(now: number, requested: number, horizon = this.#maxWaitDuration): number {
+        const dueAt = Math.max(now, requested);
+        if (dueAt - now > horizon) {
+            throw new Error(`That is further away than the ${humanDuration(horizon)} limit.`);
         }
+        return this.#dueAt(dueAt);
     }
 
-    async #authorize(
-        ctx: Context,
-        actingAgentId: string,
-        targetAgentId: string,
-        action: SchedulingAuthorizationAction,
-    ): Promise<void> {
-        if (actingAgentId === targetAgentId) return;
-        if (this.#authorization === undefined) {
-            throw new Error(
-                `Agent "${actingAgentId}" is not authorized to ${action} scheduling data for "${targetAgentId}".`,
-            );
+    #dueAt(value: number): number {
+        if (!Value.Check(schedulingTimestampSchema, value)) {
+            throw new Error("That resolves to a time scheduling cannot represent.");
         }
-        const owner = this.#authorization;
-        const policy = typeof owner === "function" ? owner : owner.authorize;
-        const raw = policy.call(
-            typeof owner === "function" ? undefined : owner,
-            ctx,
-            actingAgentId,
-            targetAgentId,
-            action,
-        );
-        const allowed = raw instanceof Promise ? await raw : raw;
-        if (typeof allowed !== "boolean" || !allowed) {
-            throw new Error(
-                `Agent "${actingAgentId}" is not authorized to ${action} scheduling data for "${targetAgentId}".`,
-            );
-        }
+        return value;
     }
 
-    async #newIdentity(ctx: Context, agentId: string): Promise<string> {
-        const raw = this.#idFactory(ctx, agentId);
-        const id = raw instanceof Promise ? await raw : raw;
+    #now(): number {
+        const now = this.#clock();
+        if (!Value.Check(schedulingTimestampSchema, now)) {
+            throw new Error("The scheduling clock returned an invalid time.");
+        }
+        return now;
+    }
+
+    #newId(): string {
+        const id = this.#idFactory();
         if (!Value.Check(schedulingMessageIdSchema, id)) {
             throw new Error("Scheduling identity factory returned an invalid identity.");
         }
         return id;
     }
 
-    #now(ctx: Context, agentId: string): number {
-        const now = this.#clock(ctx, agentId);
-        if (!Value.Check(schedulingTimestampSchema, now)) {
-            throw new Error("Scheduling clock value is invalid.");
+    #requireAgents(): AgentSystemRef {
+        if (this.#agents === undefined) {
+            throw new Error("Scheduling has not been started by an agent system yet.");
         }
-        return now;
+        return this.#agents;
     }
 
-    #dueAtFromSchedule(now: number, input: SchedulingScheduleInput): number {
-        return "in" in input
-            ? this.#dueAtFromDuration(now, input.in, this.#maxScheduleHorizon)
-            : this.#dueAtFromInstant(now, input.at, this.#maxScheduleHorizon);
-    }
-
-    #dueAtFromDuration(
-        now: number,
-        duration: SchedulingDuration,
-        horizon = this.#maxWaitDuration,
-    ): number {
-        if (!Value.Check(schedulingDurationSchema, duration)) {
-            throw new Error("Scheduling duration is invalid.");
+    #requireDeliveryContext(): Context {
+        if (this.#deliveryCtx === undefined) {
+            throw new Error("Scheduling has not been started by an agent system yet.");
         }
-        const amount = durationMilliseconds(duration);
-        if (!Number.isSafeInteger(amount) || amount < 0) {
-            throw new Error(
-                "Scheduling duration must resolve to a finite whole number of milliseconds.",
-            );
-        }
-        if (amount > horizon) {
-            throw new Error(`Scheduling duration cannot exceed ${humanDuration(horizon)}.`);
-        }
-        const dueAt = now + amount;
-        if (!Value.Check(schedulingTimestampSchema, dueAt)) {
-            throw new Error("Scheduling due time is invalid.");
-        }
-        return dueAt;
-    }
-
-    #dueAtFromInstant(
-        now: number,
-        instant: SchedulingInstant,
-        horizon = this.#maxWaitDuration,
-    ): number {
-        if (!Value.Check(schedulingInstantSchema, instant)) {
-            throw new Error("Scheduling time is invalid.");
-        }
-        const requestedDueAt = schedulingInstantMilliseconds(instant);
-        if (!Number.isSafeInteger(requestedDueAt)) {
-            throw new Error("Scheduling due time is invalid.");
-        }
-        const dueAt = Math.max(now, requestedDueAt);
-        if (dueAt - now > horizon) {
-            throw new Error(`Scheduling time cannot be more than ${humanDuration(horizon)} away.`);
-        }
-        if (!Value.Check(schedulingTimestampSchema, dueAt)) {
-            throw new Error("Scheduling due time is invalid.");
-        }
-        return dueAt;
-    }
-
-    #assertWaitRequest(
-        wait: SchedulingWaitRecord,
-        agentId: string,
-        id: string,
-        kind: "wait" | "wait_until",
-        dueAt: number,
-        startedAt: number,
-    ): void {
-        assertSchedulingWaitRecord(wait);
-        if (
-            wait.id !== id ||
-            wait.agentId !== agentId ||
-            wait.kind !== kind ||
-            wait.dueAt !== dueAt ||
-            wait.startedAt !== startedAt
-        ) {
-            throw new Error("Scheduling durable wait does not match the requested wait.");
-        }
-    }
-
-    #assertScheduleRequest(
-        schedule: SchedulingScheduledMessage,
-        id: string,
-        senderAgentId: string,
-        targetAgentId: string,
-        message: string,
-        dueAt: number,
-    ): void {
-        assertSchedulingScheduledMessage(schedule);
-        if (
-            schedule.id !== id ||
-            schedule.senderAgentId !== senderAgentId ||
-            schedule.targetAgentId !== targetAgentId ||
-            schedule.message !== message ||
-            schedule.dueAt !== dueAt
-        ) {
-            throw new Error("Scheduled message does not match the requested message.");
-        }
-        if (schedule.dueAt - schedule.createdAt > this.#maxScheduleHorizon) {
-            throw new Error("Scheduled message exceeds the configured horizon.");
-        }
-    }
-
-    #assertScheduleTransition(
-        after: SchedulingScheduledMessage,
-        before: SchedulingScheduledMessage,
-        status: "cancelled" | "delivered" | "undelivered",
-        request?: SchedulingDeliveryOutcomeInput,
-    ): void {
-        this.#assertScheduleRequest(
-            after,
-            before.id,
-            before.senderAgentId,
-            before.targetAgentId,
-            before.message,
-            before.dueAt,
-        );
-        if (before.status !== "pending" || after.status !== status) {
-            throw new Error("Scheduling mutation did not perform the requested transition.");
-        }
-        if (request?.status === "undelivered" && after.failure !== request.failure) {
-            throw new Error("Scheduling delivery result changed its failure detail.");
-        }
-    }
-
-    #assertPage(
-        page: SchedulingSchedulePage,
-        requestedCursor: string | undefined,
-        requestedLimit: number,
-    ): void {
-        if (page.limit > requestedLimit || page.schedules.length > page.limit) {
-            throw new Error("Scheduling store returned more records than requested.");
-        }
-        const start = parseCursor(requestedCursor);
-        if (
-            page.nextCursor !== undefined &&
-            parseCursor(page.nextCursor) !== start + page.schedules.length
-        ) {
-            throw new Error("Scheduling page cursor did not advance by visible records.");
-        }
-    }
-
-    #fitSchedulePage(
-        page: SchedulingSchedulePage,
-        requestedCursor?: string,
-    ): SchedulingSchedulePage {
-        if (page.schedules.length === 0) return structuredClone(page);
-        const start = parseCursor(requestedCursor);
-        const visible: SchedulingScheduledMessage[] = [];
-        for (const schedule of page.schedules) {
-            const candidate = [...visible, schedule];
-            if (
-                this.#schedulePageText({
-                    schedules: candidate,
-                    limit: candidate.length,
-                    ...(candidate.length < page.schedules.length || page.nextCursor !== undefined
-                        ? { nextCursor: String(start + candidate.length) }
-                        : {}),
-                    ...(page.previousCursor === undefined
-                        ? {}
-                        : { previousCursor: page.previousCursor }),
-                }).length > this.#maxOutputCharacters
-            ) {
-                break;
-            }
-            visible.push(schedule);
-        }
-        if (visible.length === 0) {
-            throw new Error("Schedule page cannot fit one complete message identity.");
-        }
-        return {
-            schedules: visible,
-            limit: visible.length,
-            ...(visible.length < page.schedules.length || page.nextCursor !== undefined
-                ? { nextCursor: String(start + visible.length) }
-                : {}),
-            ...(page.previousCursor === undefined ? {} : { previousCursor: page.previousCursor }),
-        };
-    }
-
-    #schedulePageText(page: SchedulingSchedulePage): string {
-        return `${page.schedules
-            .map(
-                (schedule) =>
-                    `${schedule.id} | ${scheduleStatusLabel(schedule.status)} | due ${new Date(
-                        schedule.dueAt,
-                    ).toISOString()}`,
-            )
-            .join("\n")}${
-            page.previousCursor === undefined
-                ? ""
-                : `\nEarlier scheduled messages start at cursor ${page.previousCursor}.`
-        }${
-            page.nextCursor === undefined
-                ? ""
-                : `\nMore scheduled messages start at cursor ${page.nextCursor}.`
-        }`;
-    }
-
-    #fitDetailPage(page: SchedulingScheduleDetailPage): SchedulingScheduleDetailPage {
-        if (page.schedule === null) return page;
-        const overhead =
-            `${page.schedule.id} | ${scheduleStatusLabel(page.schedule.status)}\n`.length + 64;
-        const available = Math.max(0, this.#maxOutputCharacters - overhead);
-        const detail = page.detail.slice(0, available);
-        return {
-            ...page,
-            detail,
-            ...(page.detailOffset + detail.length < page.detailTotal
-                ? { nextDetailOffset: page.detailOffset + detail.length }
-                : {}),
-        };
+        return this.#deliveryCtx;
     }
 
     #assertAgentId(value: unknown, label: string): asserts value is string {
         if (!Value.Check(schedulingAgentIdSchema, value)) {
-            throw new Error(`Scheduling ${label} ID is invalid.`);
+            throw new Error(`The ${label} ID is not a valid agent identity.`);
         }
     }
 
     #assertId(value: unknown, label: string): asserts value is string {
         if (!Value.Check(schedulingMessageIdSchema, value)) {
-            throw new Error(`Scheduling ${label} ID is invalid.`);
+            throw new Error(`The ${label} ID is not a valid scheduling identity.`);
         }
     }
 
     #assertInput(schema: TSchema, value: unknown, label: string): void {
-        if (!Value.Check(schema, value)) throw new Error(`Scheduling ${label} is invalid.`);
+        if (!Value.Check(schema, value)) throw new Error(`The ${label} is invalid.`);
     }
 }
+
+type SchedulingEventPayload =
+    | {
+          readonly type: "wait_started";
+          readonly agentId: string;
+          readonly wait: SchedulingWaitRecord;
+      }
+    | {
+          readonly type: "wait_finished";
+          readonly agentId: string;
+          readonly wait: SchedulingWaitRecord;
+          readonly result: SchedulingWaitResult;
+      }
+    | {
+          readonly type:
+              | "message_scheduled"
+              | "scheduled_message_cancelled"
+              | "scheduled_message_delivery_outcome";
+          readonly agentId: string;
+          readonly schedule: SchedulingScheduledMessage;
+      };
 
 export function assertSchedulingModuleOptions(
     value: unknown,
@@ -1080,34 +826,12 @@ function validateOptions(value: unknown): SchedulingModuleOptions {
     const source = value as Record<string, unknown>;
     const view = {
         ...source,
-        scheduler: methodView(source.scheduler, [
-            "startWait",
-            "wait",
-            "schedule",
-            "cancel",
-            "reportDelivery",
-        ]),
-        ...(source.authorization === undefined
+        ...(source.timers === undefined
             ? {}
-            : {
-                  authorization:
-                      typeof source.authorization === "function"
-                          ? source.authorization
-                          : methodView(source.authorization, ["authorize"]),
-              }),
-        ...(source.scheduleMessagePolicy === undefined
-            ? {}
-            : {
-                  scheduleMessagePolicy:
-                      typeof source.scheduleMessagePolicy === "function"
-                          ? source.scheduleMessagePolicy
-                          : methodView(source.scheduleMessagePolicy, ["canSchedule"]),
-              }),
+            : { timers: methodView(source.timers, ["start", "stop"]) }),
         ...(source.listener === undefined
             ? {}
-            : {
-                  listener: methodView(source.listener, ["onEventTransactional", "onEvent"]),
-              }),
+            : { listener: methodView(source.listener, ["onEventTransactional", "onEvent"]) }),
     };
     if (!Value.Check(schedulingModuleOptionsSchema, view)) {
         throw new Error("Scheduling module options are invalid.");
@@ -1115,6 +839,7 @@ function validateOptions(value: unknown): SchedulingModuleOptions {
     return value as SchedulingModuleOptions;
 }
 
+/** A class instance keeps its methods on a prototype, which a TypeBox object check cannot see. */
 function methodView(value: unknown, keys: readonly string[]): unknown {
     if (typeof value !== "object" || value === null) return value;
     const prototype = Object.getPrototypeOf(value);
@@ -1123,9 +848,9 @@ function methodView(value: unknown, keys: readonly string[]): unknown {
     return Object.fromEntries(keys.map((key) => [key, source[key]]));
 }
 
-function resultFromWait(wait: SchedulingWaitRecord): SchedulingWaitResult {
-    if (wait.status === "waiting") throw new Error("Waiting durable wait has no final result.");
-    return {
+function waitResult(wait: SchedulingWaitRecord): SchedulingWaitResult {
+    if (wait.status === "waiting") throw new Error("A waiting record has no final result.");
+    const result: SchedulingWaitResult = {
         waitId: wait.id,
         agentId: wait.agentId,
         outcome: wait.status,
@@ -1135,256 +860,36 @@ function resultFromWait(wait: SchedulingWaitRecord): SchedulingWaitResult {
         endedAt: wait.finishedAt,
         elapsedMs: wait.elapsedMs,
     };
-}
-
-function terminalWaitFromSettlement(
-    before: SchedulingWaitRecord,
-    settlement: SchedulingWaitSettlement,
-    finishedAt: number,
-): SchedulingWaitRecord {
-    const result = Value.Check(schedulingWaitResultSchema, settlement)
-        ? (settlement as SchedulingWaitResult)
-        : resultFromWait(settlement as SchedulingWaitRecord);
     assertSchedulingWaitResult(result);
-    if (
-        result.waitId !== before.id ||
-        result.agentId !== before.agentId ||
-        result.kind !== before.kind ||
-        result.dueAt !== before.dueAt ||
-        result.startedAt !== before.startedAt
-    ) {
-        throw new Error("Scheduling wait settlement belongs to another durable wait.");
-    }
-    const drift = finishedAt - result.endedAt;
-    if (drift < 0 || drift > MAX_SETTLEMENT_CLOCK_DRIFT) {
-        throw new Error("Scheduling wait settlement is outside the scheduling clock window.");
-    }
-    const terminal: SchedulingWaitRecord = {
-        ...before,
-        status: result.outcome,
-        updatedAt: finishedAt,
-        finishedAt,
-        elapsedMs: finishedAt - before.startedAt,
-    };
-    assertSchedulingWaitRecord(terminal);
-    return terminal;
+    return result;
 }
 
-function durationFromWaitInput(input: SchedulingWaitInput): SchedulingDuration {
-    if ("duration" in input) return input.duration;
-    if ("seconds" in input && input.seconds !== undefined) {
-        return {
-            seconds: input.seconds,
-            ...(input.minutes === undefined ? {} : { minutes: input.minutes }),
-            ...(input.hours === undefined ? {} : { hours: input.hours }),
-            ...(input.days === undefined ? {} : { days: input.days }),
-        };
-    }
-    if ("minutes" in input && input.minutes !== undefined) {
-        return {
-            ...(input.seconds === undefined ? {} : { seconds: input.seconds }),
-            minutes: input.minutes,
-            ...(input.hours === undefined ? {} : { hours: input.hours }),
-            ...(input.days === undefined ? {} : { days: input.days }),
-        };
-    }
-    if ("hours" in input && input.hours !== undefined) {
-        return {
-            ...(input.seconds === undefined ? {} : { seconds: input.seconds }),
-            ...(input.minutes === undefined ? {} : { minutes: input.minutes }),
-            hours: input.hours,
-            ...(input.days === undefined ? {} : { days: input.days }),
-        };
-    }
-    if ("days" in input && input.days !== undefined) {
-        return {
-            ...(input.seconds === undefined ? {} : { seconds: input.seconds }),
-            ...(input.minutes === undefined ? {} : { minutes: input.minutes }),
-            ...(input.hours === undefined ? {} : { hours: input.hours }),
-            days: input.days,
-        };
-    }
-    throw new Error("Provide a duration in seconds, minutes, hours, days, or duration text.");
+/** A cuid2-shaped identity, which is what Agent Base accepts as a message ID. */
+function randomSchedulingId(): string {
+    const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
+    const bytes = globalThis.crypto.getRandomValues(new Uint8Array(23));
+    let id = "s";
+    for (const byte of bytes) id += alphabet[byte % alphabet.length];
+    return id;
 }
 
-function durationMilliseconds(duration: SchedulingDuration): number {
-    if (typeof duration === "string") return parseDurationText(duration);
-    if ("duration" in duration) return parseDurationText(duration.duration);
-    if ("unit" in duration) {
-        const unit = duration.unit.replace(/s$/u, "");
-        return duration.value * durationMultiplier(unit);
+function boundedFailure(error: unknown): string {
+    let message: string;
+    try {
+        message =
+            error instanceof Error
+                ? error.message
+                : typeof error === "string"
+                  ? error
+                  : String(error);
+    } catch {
+        message = "";
     }
-    return (
-        (duration.seconds ?? 0) * 1_000 +
-        (duration.minutes ?? 0) * 60_000 +
-        (duration.hours ?? 0) * 3_600_000 +
-        (duration.days ?? 0) * 86_400_000
-    );
-}
-
-function durationMultiplier(unit: string): number {
-    switch (unit) {
-        case "second":
-            return 1_000;
-        case "minute":
-            return 60_000;
-        case "hour":
-            return 3_600_000;
-        case "day":
-            return 86_400_000;
-        default:
-            throw new Error("Scheduling duration unit is invalid.");
-    }
-}
-
-function parseDurationText(value: string): number {
-    const normalized = value.trim().toLowerCase();
-    if (normalized.length === 0) throw new Error("Provide a duration.");
-    const units: Readonly<Record<string, number>> = {
-        d: 86_400_000,
-        day: 86_400_000,
-        days: 86_400_000,
-        h: 3_600_000,
-        hour: 3_600_000,
-        hours: 3_600_000,
-        m: 60_000,
-        min: 60_000,
-        mins: 60_000,
-        minute: 60_000,
-        minutes: 60_000,
-        s: 1_000,
-        sec: 1_000,
-        secs: 1_000,
-        second: 1_000,
-        seconds: 1_000,
-    };
-    let total = 0;
-    let matchedThrough = 0;
-    const pattern = /(\d+(?:\.\d+)?)\s*([a-z]+)/gu;
-    for (const match of normalized.matchAll(pattern)) {
-        const between = normalized.slice(matchedThrough, match.index).trim();
-        if (between.length > 0 && between !== ",") {
-            throw new Error(
-                `The duration could not be understood near ${JSON.stringify(between)}.`,
-            );
-        }
-        const multiplier = units[match[2] ?? ""];
-        if (multiplier === undefined) {
-            throw new Error(`Unknown duration unit ${JSON.stringify(match[2] ?? "")}.`);
-        }
-        total += Number(match[1]) * multiplier;
-        matchedThrough = (match.index ?? 0) + match[0].length;
-    }
-    if (matchedThrough === 0 || normalized.slice(matchedThrough).trim().length > 0) {
-        throw new Error(
-            "The duration could not be understood. Examples: 90 seconds, 2 hours, 1h 30m.",
-        );
-    }
-    return total;
-}
-
-function schedulingInstantMilliseconds(value: SchedulingInstant): number {
-    if (typeof value === "number") return unixTimestampMilliseconds(value);
-    const trimmed = value.trim();
-    if (trimmed.length === 0) throw new Error("Provide a scheduled date.");
-    if (/^[+-]?\d+(?:\.\d+)?$/u.test(trimmed)) {
-        return unixTimestampMilliseconds(Number(trimmed));
-    }
-    const parsed = Date.parse(trimmed);
-    if (!Number.isFinite(parsed)) {
-        throw new Error(
-            "The date could not be understood. Use ISO 8601, RFC 2822, or a Unix timestamp.",
-        );
-    }
-    return parsed;
-}
-
-function unixTimestampMilliseconds(value: number): number {
-    if (!Number.isFinite(value)) throw new Error("The scheduled date must be finite.");
-    const milliseconds = value < 1_000_000_000_000 ? value * 1_000 : value;
-    if (!Number.isSafeInteger(milliseconds)) {
-        throw new Error("The scheduled date must resolve to a whole millisecond timestamp.");
-    }
-    return milliseconds;
-}
-
-function scheduleDetailText(schedule: SchedulingScheduledMessage): string {
-    return [
-        `Message ID: ${schedule.id}`,
-        `Sender agent: ${schedule.senderAgentId}`,
-        `Target agent: ${schedule.targetAgentId}`,
-        `Status: ${scheduleStatusLabel(schedule.status)}`,
-        `Due at: ${new Date(schedule.dueAt).toISOString()}`,
-        `Message: ${schedule.message}`,
-        `Created at: ${new Date(schedule.createdAt).toISOString()}`,
-        `Updated at: ${new Date(schedule.updatedAt).toISOString()}`,
-        ...(schedule.deliveredAt === undefined
-            ? []
-            : [`Delivered at: ${new Date(schedule.deliveredAt).toISOString()}`]),
-        ...(schedule.failure === undefined ? [] : [`Failure: ${schedule.failure}`]),
-    ].join("\n");
-}
-
-function humanDuration(milliseconds: number): string {
-    if (milliseconds < 1_000) return `${milliseconds} milliseconds`;
-    if (milliseconds < 60_000) return quantity(milliseconds / 1_000, "second");
-    if (milliseconds < 3_600_000) return quantity(milliseconds / 60_000, "minute");
-    if (milliseconds < 86_400_000) return quantity(milliseconds / 3_600_000, "hour");
-    return quantity(milliseconds / 86_400_000, "day");
-}
-
-function quantity(value: number, unit: string): string {
-    const shown = Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/0+$/u, "");
-    return `${shown} ${Number(shown) === 1 ? unit : `${unit}s`}`;
-}
-
-function scheduleStatusLabel(status: SchedulingScheduledMessage["status"]): string {
-    switch (status) {
-        case "pending":
-            return "waiting to be delivered";
-        case "delivered":
-            return "delivered successfully";
-        case "undelivered":
-            return "not delivered";
-        case "cancelled":
-            return "cancelled before delivery";
-    }
-}
-
-function parseCursor(cursor: string | undefined): number {
-    if (cursor === undefined) return 0;
-    const value = Number(cursor);
-    if (!Number.isSafeInteger(value) || value < 0 || String(value) !== cursor) {
-        throw new Error("Scheduling cursor is not a bounded integer.");
-    }
-    return value;
-}
-
-function inferSchedulePageStart(page: SchedulingSchedulePage): number {
-    if (page.nextCursor !== undefined) {
-        return parseCursor(page.nextCursor) - page.schedules.length;
-    }
-    if (page.previousCursor !== undefined) {
-        return parseCursor(page.previousCursor) + page.limit;
-    }
-    return 0;
+    return message.slice(0, MAX_SCHEDULING_FAILURE_LENGTH) || "The delivery failed.";
 }
 
 function deepFreeze<ValueType>(value: ValueType): ValueType {
     if (value === null || typeof value !== "object" || Object.isFrozen(value)) return value;
     for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
     return Object.freeze(value);
-}
-
-function safeError(error: unknown): string {
-    const message =
-        error instanceof Error ? error.message : typeof error === "string" ? error : String(error);
-    return message.slice(0, 512) || "Unknown scheduling observer error.";
-}
-
-function sameSchedule(
-    left: SchedulingScheduledMessage,
-    right: SchedulingScheduledMessage,
-): boolean {
-    return JSON.stringify(left) === JSON.stringify(right);
 }

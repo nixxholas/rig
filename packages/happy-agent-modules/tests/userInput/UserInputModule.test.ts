@@ -20,31 +20,7 @@ const askInput = {
     context: "The choice changes the implementation.",
 } as const;
 
-class TestBroker {
-    readonly calls: string[] = [];
-    readonly options: Array<{ readonly timeoutAt?: number }> = [];
-    #waiters = new Map<string, (request: UserInputTerminalRequest) => void>();
-
-    async wait(
-        _ctx: Context,
-        _agentId: string,
-        requestId: string,
-        options?: { readonly timeoutAt?: number },
-    ): Promise<UserInputTerminalRequest> {
-        this.calls.push("wait");
-        this.options.push(options ?? {});
-        return await new Promise((resolve) => this.#waiters.set(requestId, resolve));
-    }
-
-    settle(request: UserInputTerminalRequest): void {
-        const resolve = this.#waiters.get(request.id);
-        this.#waiters.delete(request.id);
-        resolve?.(structuredClone(request));
-    }
-}
-
 function createModule(
-    broker: TestBroker,
     options: {
         readonly listener?: {
             readonly onEventTransactional?: (ctx: Context, event: UserInputEvent) => Promise<void>;
@@ -68,7 +44,6 @@ function createModule(
     let eventIndex = 0;
     let now = 100;
     return new UserInputModule({
-        broker,
         idFactory: () => `request-${String(++requestIndex)}`,
         eventIdFactory: () => `event-${String(++eventIndex)}`,
         clock: () => ++now,
@@ -81,7 +56,7 @@ describe("UserInputModule", () => {
         const database = moduleDatabase(userInputMigrations, "user-input-resume");
         await database.ready;
         try {
-            const module = createModule(new TestBroker());
+            const module = createModule();
             const created = await module.ask(database.context, agentId, askInput, "stable-request");
             const resumed = await module.ask(database.context, agentId, askInput, "stable-request");
 
@@ -104,8 +79,7 @@ describe("UserInputModule", () => {
         const database = moduleDatabase(userInputMigrations, "user-input-tool-wait");
         await database.ready;
         try {
-            const broker = new TestBroker();
-            const module = createModule(broker);
+            const module = createModule();
             const tool = requestUserInputTool(module, agentId);
             expect(tool.durable).toBe(false);
             expect(tool.transactional).toBeUndefined();
@@ -114,13 +88,14 @@ describe("UserInputModule", () => {
                 providerCallId: "provider-call",
             } as never);
 
-            await vi.waitFor(() => expect(broker.calls).toEqual(["wait"]));
+            await vi.waitFor(async () => {
+                expect(await module.get(database.context, agentId, "provider-call")).toBeDefined();
+            });
             const settled = await module.answer(database.context, agentId, {
                 requestId: "provider-call",
                 answer: "Use the first option.",
             });
             if (settled.status !== "answered") throw new Error("expected an answer");
-            broker.settle(settled);
 
             await expect(running).resolves.toMatchObject({
                 id: "provider-call",
@@ -135,8 +110,7 @@ describe("UserInputModule", () => {
         const database = moduleDatabase(userInputMigrations, "user-input-away");
         await database.ready;
         try {
-            const broker = new TestBroker();
-            const module = createModule(broker, { presence: { isAvailable: () => false } });
+            const module = createModule({ presence: { isAvailable: () => false } });
             const tool = requestUserInputTool(module, agentId);
 
             await expect(
@@ -145,7 +119,6 @@ describe("UserInputModule", () => {
                     providerCallId: "away-call",
                 } as never),
             ).resolves.toMatchObject({ id: "away-call", status: "away" });
-            expect(broker.calls).toEqual([]);
         } finally {
             database.close();
         }
@@ -156,7 +129,7 @@ describe("UserInputModule", () => {
         await database.ready;
         try {
             const order: string[] = [];
-            const module = createModule(new TestBroker(), {
+            const module = createModule({
                 listener: {
                     onEventTransactional: async (ctx) => {
                         order.push(ctx.db === database.database ? "wrong" : "transactional");
@@ -178,7 +151,7 @@ describe("UserInputModule", () => {
         const database = moduleDatabase(userInputMigrations, "user-input-auth");
         await database.ready;
         try {
-            const module = createModule(new TestBroker());
+            const module = createModule();
             const request = await module.ask(
                 database.context,
                 agentId,
@@ -204,7 +177,7 @@ describe("UserInputModule", () => {
         const database = moduleDatabase(userInputMigrations, "user-input-cancel-tool");
         await database.ready;
         try {
-            const module = createModule(new TestBroker());
+            const module = createModule();
             const hooks = await resolveModuleHooks(database.context, module);
             const tools = await hooks.tools!(database.context, {
                 agent: { id: agentId },
@@ -226,8 +199,7 @@ describe("UserInputModule", () => {
         const database = moduleDatabase(userInputMigrations, "user-input-batch");
         await database.ready;
         try {
-            const broker = new TestBroker();
-            const module = createModule(broker);
+            const module = createModule();
             const waiting = requestUserInputTool(module, agentId).execute(
                 database.context,
                 {
@@ -261,21 +233,22 @@ describe("UserInputModule", () => {
                 },
                 { id: "internal-batch-call", providerCallId: "batch-call" } as never,
             );
-            await vi.waitFor(() => expect(broker.calls).toEqual(["wait"]));
+            await vi.waitFor(async () => {
+                expect(await module.get(database.context, agentId, "batch-call")).toBeDefined();
+            });
             const request = await module.get(database.context, agentId, "batch-call");
             if (request === undefined) throw new Error("expected batch request");
             expect(request.questions?.map((question) => question.header)).toEqual([
                 "Scope",
                 "Rollout",
             ]);
-            const answered = await module.answer(database.context, agentId, {
+            await module.answer(database.context, agentId, {
                 requestId: request.id,
                 answers: {
                     scope: "Small",
                     rollout: "Yes",
                 },
             });
-            broker.settle(answered as UserInputTerminalRequest);
             await expect(waiting).resolves.toMatchObject({
                 id: "batch-call",
                 status: "answered",
@@ -286,12 +259,11 @@ describe("UserInputModule", () => {
         }
     });
 
-    it("passes the auto-resolution deadline to the external wait broker", async () => {
+    it("records the auto-resolution window on the request it waits on", async () => {
         const database = moduleDatabase(userInputMigrations, "user-input-auto-resolution");
         await database.ready;
         try {
-            const broker = new TestBroker();
-            const module = createModule(broker);
+            const module = createModule();
             const waiting = requestUserInputTool(module, agentId).execute(
                 database.context,
                 {
@@ -304,19 +276,22 @@ describe("UserInputModule", () => {
                 },
                 { id: "internal-auto-call", providerCallId: "auto-call" } as never,
             );
-            await vi.waitFor(() => expect(broker.options[0]?.timeoutAt).toBe(60_101));
-            const answered = await module.answer(database.context, agentId, {
+            await vi.waitFor(async () => {
+                expect(await module.get(database.context, agentId, "auto-call")).toMatchObject({
+                    autoResolutionMs: 60_000,
+                });
+            });
+            await module.answer(database.context, agentId, {
                 requestId: "auto-call",
                 answer: "Yes",
             });
-            broker.settle(answered as UserInputTerminalRequest);
             await expect(waiting).resolves.toMatchObject({ status: "answered" });
         } finally {
             database.close();
         }
     });
 
-    it("re-evaluates a live presence change while the broker wait is in flight", async () => {
+    it("re-evaluates a live presence change while a wait is in flight", async () => {
         const database = moduleDatabase(userInputMigrations, "user-input-presence-change");
         await database.ready;
         try {
@@ -329,8 +304,7 @@ describe("UserInputModule", () => {
             const listeners = new Set<
                 (ctx: Context, state: UserInputPresenceState | undefined) => void
             >();
-            const broker = new TestBroker();
-            const module = createModule(broker, {
+            const module = createModule({
                 presence: {
                     state: () => current,
                     subscribe: (_ctx, _agentId, callback) => {
@@ -341,7 +315,7 @@ describe("UserInputModule", () => {
             });
             const request = await module.ask(database.context, agentId, askInput, "presence-call");
             const waiting = module.wait(database.context, agentId, request.id);
-            await vi.waitFor(() => expect(broker.calls).toEqual(["wait"]));
+            await vi.waitFor(() => expect(listeners.size).toBe(1));
             current = {
                 answerWaitMs: 0,
                 title: "Away",

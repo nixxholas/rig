@@ -11,11 +11,10 @@ export function listScheduledMessagesTool(scheduling: SchedulingModule, agentId:
     return defineAgentTool({
         name: "list_scheduled_messages",
         description:
-            "List this agent's scheduled messages in bounded cursor-paged results. Every returned ID remains complete and actionable.",
+            "List the messages you have scheduled, soonest first, one bounded page at a time. Every ID shown is complete and can be cancelled.",
         parameters: schedulingScheduleToolPageQuerySchema,
         returnType: schedulingSchedulePageSchema,
         durable: true,
-        transactional: true,
         shouldReviewInAutoMode: () => false,
         execute: async (ctx, input: SchedulingScheduleToolPageQuery) =>
             await scheduling.listSchedulePage(ctx, agentId, input),

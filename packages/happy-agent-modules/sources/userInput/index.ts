@@ -126,12 +126,9 @@ export {
     assertUserInputVoidResult,
     userInputAuthorizationActionSchema,
     userInputAuthorizationSchema,
-    userInputBrokerSchema,
     userInputPresencePolicySchema,
-    userInputBrokerWaitOptionsSchema,
     type UserInputAuthorization,
     type UserInputAuthorizationAction,
-    type UserInputBroker,
     type UserInputPresencePolicy,
 } from "./UserInputStore.js";
 export { requestUserInputTool } from "./tools/request_user_input.js";

@@ -1,7 +1,7 @@
 import { defineAgentTool } from "@slopus/happy-agent-base";
 import { Type, type Static } from "@sinclair/typebox";
 
-import { searchPageSchema } from "../Search.js";
+import { searchAnswerSchema } from "../Search.js";
 import type { SearchModule } from "../SearchModule.js";
 
 const inputSchema = Type.Object(
@@ -20,9 +20,9 @@ export function geminiWebSearchTool(search: SearchModule, agentId: string) {
     return defineAgentTool({
         name: "gemini_web_search",
         description:
-            "Search the live web through Gemini grounding and return bounded cited sources.",
+            "Search the live web through Gemini grounding and return its answer with the sources it cited.",
         parameters: inputSchema,
-        returnType: searchPageSchema,
+        returnType: searchAnswerSchema,
         durable: false,
         requiresAutoOrFullAccess: true,
         shouldReviewInAutoMode: () => true,
@@ -40,6 +40,6 @@ export function geminiWebSearchTool(search: SearchModule, agentId: string) {
                     : { blockedDomains: input.blocked_domains }),
                 ...(input.provider_id === undefined ? {} : { providerId: input.provider_id }),
             }),
-        toLLM: (page) => [{ type: "text", text: search.formatSearchForModel(page) }],
+        toLLM: (answer) => [{ type: "text", text: search.formatSearchAnswerForModel(answer) }],
     });
 }

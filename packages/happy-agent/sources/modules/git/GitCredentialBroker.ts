@@ -60,10 +60,7 @@ export function redactGitAuthenticationText(
         );
         if (match?.[1] === undefined) continue;
         const capability = /\/([a-f0-9]{64})\/$/u.exec(match[1])?.[1];
-        redacted = redacted.replaceAll(
-            match[1],
-            "http://127.0.0.1/[Rig Git authentication]/",
-        );
+        redacted = redacted.replaceAll(match[1], "http://127.0.0.1/[Rig Git authentication]/");
         if (capability !== undefined) {
             redacted = redacted.replaceAll(capability, "[Rig Git authentication]");
         }
@@ -237,7 +234,8 @@ export class GitCredentialBroker {
                 token: authorized.record.token,
             });
         } catch {
-            if (!response.headersSent) sendError(response, 502, "The Git host could not be reached.");
+            if (!response.headersSent)
+                sendError(response, 502, "The Git host could not be reached.");
             else response.destroy();
         } finally {
             this.#activeRequests -= 1;

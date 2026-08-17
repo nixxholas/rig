@@ -164,6 +164,10 @@ function textEnd(text: string) {
     return { type: "text_end", block: { type: "text", text } } as never;
 }
 
+function errorDone(message: string) {
+    return { type: "done", state: "error", kind: "internal_error", message } as never;
+}
+
 function settlement(settlementId: string) {
     return { loopId: "loop", settlementId } as never;
 }
@@ -625,6 +629,51 @@ describe("collaboration", () => {
         // No text_end ever arrived — an interrupted turn, or one that was told no action was
         // needed. There is no answer to pass on, and announcing the silence would tell the
         // creator something it already knows.
+        await hooks.afterAgentSettledTransact!(ctx, scope, settlement("s1"));
+
+        expect(collection.delivered).toHaveLength(1);
+    });
+
+    it("reports why a collaborator stopped when it failed before answering", async () => {
+        const collection = new Collection();
+        const { module, hooks, ctx } = await started(collection);
+        await module.createAgent(ctx, "parent", TASK, "child");
+        const scope = runScope("child");
+
+        // A provider error ends the run without a single text_end. Nothing waits for a
+        // collaborator, so a silent settlement here would leave the creator expecting an answer
+        // that can never arrive.
+        await hooks.onEvent!(ctx, scope, errorDone("You've hit your Codex usage limit."));
+        await hooks.afterAgentSettledTransact!(ctx, scope, settlement("s1"));
+
+        expect(collection.delivered).toHaveLength(2);
+        expect(collection.delivered[1]!.text).toBe(
+            "Collaborator child stopped without answering. It failed with, verbatim.\n\nYou've hit your Codex usage limit.",
+        );
+    });
+
+    it("reports what a collaborator said when it recovered from an earlier failure", async () => {
+        const collection = new Collection();
+        const { module, hooks, ctx } = await started(collection);
+        await module.createAgent(ctx, "parent", TASK, "child");
+        const scope = runScope("child");
+
+        await hooks.onEvent!(ctx, scope, errorDone("Temporary overload."));
+        await hooks.onEventTransact!(ctx, scope, textEnd("Final answer."));
+        await hooks.afterAgentSettledTransact!(ctx, scope, settlement("s1"));
+
+        expect(collection.delivered[1]!.text).toContain("Final answer.");
+        expect(collection.delivered[1]!.text).not.toContain("Temporary overload.");
+    });
+
+    it("keeps silence silent when a run ends without an answer and without a failure", async () => {
+        const collection = new Collection();
+        const { module, hooks, ctx } = await started(collection);
+        await module.createAgent(ctx, "parent", TASK, "child");
+        const scope = runScope("child");
+
+        // A cancelled run is not a failed one: it was interrupted on purpose.
+        await hooks.onEvent!(ctx, scope, { type: "done", state: "cancelled" } as never);
         await hooks.afterAgentSettledTransact!(ctx, scope, settlement("s1"));
 
         expect(collection.delivered).toHaveLength(1);

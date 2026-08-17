@@ -41,10 +41,7 @@ import {
 import { createPermissionReviewInstructions } from "./impl/createPermissionReviewInstructions.js";
 import { createPermissionReviewPrompt } from "./impl/createPermissionReviewPrompt.js";
 import { readAutoSecurityPolicy } from "./impl/readAutoSecurityPolicy.js";
-import {
-    reviewerModelForAgent,
-    type AutoReviewerRoute,
-} from "./impl/reviewerModelForAgent.js";
+import { reviewerModelForAgent, type AutoReviewerRoute } from "./impl/reviewerModelForAgent.js";
 import { buildAutoReviewCatalog } from "./impl/buildAutoReviewCatalog.js";
 import { reviewerAgentId } from "./impl/reviewerAgentId.js";
 import { convertGuardianReview } from "./impl/convertGuardianReview.js";
@@ -208,8 +205,10 @@ export class AutoModule implements AgentModule {
 
     /** The only member handed to `PermissionsModule`. */
     readonly reviewer: PermissionReviewer = {
-        review: (ctx: Context, request: PermissionReviewRequest): Promise<PermissionReviewDecision> =>
-            this.#review(ctx, request),
+        review: (
+            ctx: Context,
+            request: PermissionReviewRequest,
+        ): Promise<PermissionReviewDecision> => this.#review(ctx, request),
     };
 
     constructor(options: AutoModuleOptions) {
@@ -293,10 +292,7 @@ export class AutoModule implements AgentModule {
             // or an agent payload is runtime-generated, so it contributes no evidence rather
             // than evidence the reviewer might read as something the person said.
             if (accepted.message.role !== "user") return;
-            const entry = userMessageEvidence(
-                accepted.message,
-                accepted.metadata as never,
-            );
+            const entry = userMessageEvidence(accepted.message, accepted.metadata as never);
             if (entry === undefined) return;
             await this.#appendEvidence(ctx, scope.agent.id, () => entry);
         },
@@ -330,15 +326,16 @@ export class AutoModule implements AgentModule {
                 scope.agent.id,
                 result.callId,
             );
-            const toolName =
-                this.#callTools.get(callKey(scope.agent.id, result.callId)) ?? "tool";
+            const toolName = this.#callTools.get(callKey(scope.agent.id, result.callId)) ?? "tool";
             this.#callTools.delete(callKey(scope.agent.id, result.callId));
             await this.#appendEvidence(ctx, scope.agent.id, () =>
                 toolResultEvidence({
                     toolName,
                     content: result.content,
                     isError: result.isError === true,
-                    ...(answer === undefined ? {} : { trustedUserAnswer: trustedAnswerText(answer) }),
+                    ...(answer === undefined
+                        ? {}
+                        : { trustedUserAnswer: trustedAnswerText(answer) }),
                 }),
             );
         },
@@ -361,10 +358,7 @@ export class AutoModule implements AgentModule {
         },
 
         /** A compaction erased the conversation the evidence described; start a new generation. */
-        historyErasedTransact: async (
-            ctx: Context,
-            scope: AgentModuleScope,
-        ): Promise<void> => {
+        historyErasedTransact: async (ctx: Context, scope: AgentModuleScope): Promise<void> => {
             await this.#evidence.bumpGeneration(this.#databaseOf(ctx), scope.agent.id);
         },
 
@@ -580,9 +574,7 @@ export class AutoModule implements AgentModule {
             .config(this.#options.lifetimeContext, reviewerId)
             .catch(() => undefined);
         if (existing !== undefined) {
-            await system
-                .delete(this.#options.lifetimeContext, reviewerId)
-                .catch(() => undefined);
+            await system.delete(this.#options.lifetimeContext, reviewerId).catch(() => undefined);
         }
     }
 
@@ -644,7 +636,12 @@ export class AutoModule implements AgentModule {
     async #appendEvidence(
         ctx: Context,
         agentId: string,
-        build: () => { category: "message" | "tool"; entry: AutoTranscriptMessage; trustedUserEvidence: boolean; trustedUserEvidenceTruncated: boolean },
+        build: () => {
+            category: "message" | "tool";
+            entry: AutoTranscriptMessage;
+            trustedUserEvidence: boolean;
+            trustedUserEvidenceTruncated: boolean;
+        },
     ): Promise<void> {
         const database = this.#databaseOf(ctx);
         try {

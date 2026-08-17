@@ -30,6 +30,14 @@ export async function resolveModuleHooks<
     return (await module.beforeStart?.(ctx, agents as AgentSystemRef<Database>)) ?? {};
 }
 
+/**
+ * An agent collection where every agent is a person's own conversation rather than a subagent.
+ * It is enough for a module that only asks who an agent's parent is.
+ */
+export function primaryAgents<Database extends AgentDatabase = AgentDatabase>() {
+    return { parentOf: () => Promise.resolve(null) } as unknown as AgentSystemRef<Database>;
+}
+
 /** The same resolution, shaped as the runtime record `Agent.create` accepts. */
 export async function resolveModuleRuntime<
     Tool extends AnyAgentTool = AnyAgentTool,

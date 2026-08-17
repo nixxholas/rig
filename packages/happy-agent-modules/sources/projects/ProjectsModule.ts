@@ -2,6 +2,7 @@ import {
     type AgentModule,
     type AgentModuleHooks,
     type AgentModuleScope,
+    type AgentSystemRef,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
 import { computePermissions } from "@slopus/happy-agent-compute";
@@ -105,20 +106,7 @@ import {
     sameJson,
 } from "./ProjectTransition.js";
 import { folderProjectName, HOME_PROJECT_NAME } from "./projectIdentity.js";
-import {
-    archiveProjectTool,
-    clearProjectAvatarTool,
-    createProjectTool,
-    ensureProjectTool,
-    getProjectSettingsTool,
-    getProjectTool,
-    listProjectsTool,
-    reorderProjectTool,
-    renameProjectTool,
-    restoreProjectTool,
-    setProjectAvatarTool,
-    updateProjectSettingsTool,
-} from "./tools/index.js";
+import { listProjectsTool } from "./tools/index.js";
 
 const DEFAULT_PAGE_SIZE = 50;
 const DEFAULT_OUTPUT_CHARACTERS = 12_000;
@@ -188,6 +176,11 @@ const projectMaxOutputSchema = Type.Integer({
 
 export const projectModuleOptionsSchema = Type.Object(
     {
+        /**
+         * Whether this machine's whole project catalog is visible to the model. Looking beyond the
+         * session's own project is off unless the user turned it on, so it defaults to false.
+         */
+        crossWorkspace: Type.Optional(Type.Boolean()),
         authorization: Type.Optional(projectAuthorizationSchema),
         avatarAssetReader: Type.Optional(projectAvatarAssetReaderSchema),
         compute: Type.Optional(projectComputeResolverSchema),
@@ -218,10 +211,13 @@ export class ProjectsModule implements AgentModule {
     readonly #clock: NonNullable<ProjectModuleOptions["clock"]>;
     readonly #maxPageSize: number;
     readonly #maxOutputCharacters: number;
+    readonly #crossWorkspace: boolean;
+    #agents: AgentSystemRef | undefined;
 
     constructor(options: ProjectModuleOptions) {
         assertProjectModuleOptions(options);
         this.#store = createProjectStore();
+        this.#crossWorkspace = options.crossWorkspace ?? false;
         this.#compute = options.compute;
         this.#avatarAssetReader = options.avatarAssetReader;
         this.#idFactory =
@@ -244,26 +240,25 @@ export class ProjectsModule implements AgentModule {
     }
 
     readonly #hooks: AgentModuleHooks = {
-        tools: (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => {
+        tools: async (ctx: Context, scope: AgentModuleScope): Promise<readonly AnyAgentTool[]> => {
             this.#assertAgentId(scope.agent.id);
-            return [
-                listProjectsTool(this, scope.agent.id),
-                getProjectTool(this, scope.agent.id),
-                createProjectTool(this, scope.agent.id),
-                ensureProjectTool(this, scope.agent.id),
-                renameProjectTool(this, scope.agent.id),
-                archiveProjectTool(this, scope.agent.id),
-                restoreProjectTool(this, scope.agent.id),
-                reorderProjectTool(this, scope.agent.id),
-                setProjectAvatarTool(this, scope.agent.id),
-                clearProjectAvatarTool(this, scope.agent.id),
-                getProjectSettingsTool(this, scope.agent.id),
-                updateProjectSettingsTool(this, scope.agent.id),
-            ];
+            // The catalog spans every project on the machine, which is exactly what looking
+            // outside the current one means, so the user's setting decides whether it exists at
+            // all. A subagent works inside the task it was handed and never gets it.
+            if (!this.#crossWorkspace) return [];
+            const agents = this.#agents;
+            if (agents === undefined) {
+                throw new Error("The projects module was asked for tools before it started.");
+            }
+            if ((await agents.parentOf(ctx, scope.agent.id)) !== null) return [];
+            return [listProjectsTool(this, scope.agent.id)];
         },
     };
 
-    readonly beforeStart = (): AgentModuleHooks => this.#hooks;
+    readonly beforeStart = (_ctx: Context, agents: AgentSystemRef): AgentModuleHooks => {
+        this.#agents = agents;
+        return this.#hooks;
+    };
 
     async list(ctx: Context, agentId: string, query: ProjectPageQuery = {}): Promise<ProjectPage> {
         this.#assertAgentId(agentId);
@@ -290,7 +285,9 @@ export class ProjectsModule implements AgentModule {
                 normalized.includeArchived !== true &&
                 project.status === "archived"
             ) {
-                throw new Error("The project page returned an archived row that was not asked for.");
+                throw new Error(
+                    "The project page returned an archived row that was not asked for.",
+                );
             }
             await this.#mutations.authorize(ctx, agentId, project.ownerAgentId, "list");
         }
@@ -345,7 +342,10 @@ export class ProjectsModule implements AgentModule {
             changeable: [],
             event: (after) => ({ type: "project_created", agentId, project: after }),
             run: async (txCtx) => {
-                if ((await this.#mutations.findByPath(txCtx, agentId, normalized.repositoryRef)) !== undefined) {
+                if (
+                    (await this.#mutations.findByPath(txCtx, agentId, normalized.repositoryRef)) !==
+                    undefined
+                ) {
                     throw new Error(
                         `The folder "${normalized.repositoryRef}" is already a project. Use ensure_project instead.`,
                     );
@@ -616,7 +616,11 @@ export class ProjectsModule implements AgentModule {
         return await ctx.inTx(async (txCtx) => {
             const before = await this.#mutations.getRequired(txCtx, agentId, normalized.projectId);
             await this.#mutations.authorize(txCtx, agentId, before.ownerAgentId, "settings_update");
-            const beforeSettings = await this.#mutations.readSettings(txCtx, agentId, normalized.projectId);
+            const beforeSettings = await this.#mutations.readSettings(
+                txCtx,
+                agentId,
+                normalized.projectId,
+            );
             const raw = await requirePromise(
                 this.#store.updateSettings(txCtx, agentId, normalized),
                 "Project store update settings",
@@ -627,7 +631,11 @@ export class ProjectsModule implements AgentModule {
             }
             assertProjectSettings(raw.settings);
             const after = await this.#mutations.getRequired(txCtx, agentId, normalized.projectId);
-            const afterSettings = await this.#mutations.readSettings(txCtx, agentId, normalized.projectId);
+            const afterSettings = await this.#mutations.readSettings(
+                txCtx,
+                agentId,
+                normalized.projectId,
+            );
             if (!sameJson(afterSettings, normalized.settings)) {
                 throw new Error("The stored settings do not match the ones that were requested.");
             }
@@ -784,19 +792,14 @@ export class ProjectsModule implements AgentModule {
         agentId: string,
         projectId: string,
     ): Promise<Project> {
-        return await this.#changeState(
-            ctx,
-            agentId,
-            projectId,
-            "initialization_ready",
-            (project) =>
-                project.initializationStatus === "initializing"
-                    ? {
-                          initializationStatus: "ready",
-                          initializationAttempt: nextAttempt(project),
-                          initializationError: null,
-                      }
-                    : undefined,
+        return await this.#changeState(ctx, agentId, projectId, "initialization_ready", (project) =>
+            project.initializationStatus === "initializing"
+                ? {
+                      initializationStatus: "ready",
+                      initializationAttempt: nextAttempt(project),
+                      initializationError: null,
+                  }
+                : undefined,
         );
     }
 
@@ -1055,4 +1058,3 @@ function requireProjectFromResult(result: ProjectStoreMutationResult): Project {
     assertProject(result.project);
     return structuredClone(result.project);
 }
-

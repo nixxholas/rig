@@ -39,9 +39,7 @@ function createAgentDescription(models: readonly AgentModel[]): string {
     const available = models.map(
         (model) =>
             `- ${model.providerId} + ${model.id} (${model.name}; effort: ${model.effortLevels.join(", ")}${
-                model.serviceTiers === undefined
-                    ? ""
-                    : `; tiers: ${model.serviceTiers.join(", ")}`
+                model.serviceTiers === undefined ? "" : `; tiers: ${model.serviceTiers.join(", ")}`
             })`,
     );
     return [

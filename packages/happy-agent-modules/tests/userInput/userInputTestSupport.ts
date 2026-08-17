@@ -1,5 +1,3 @@
-import type { Context } from "@steve.kite/stdlib";
-
 import {
     UserInputModule,
     type UserInputModuleOptions,
@@ -9,50 +7,8 @@ import type {
     UserInputEvent,
     UserInputPresenceState,
     UserInputRequest,
-    UserInputTerminalRequest,
 } from "../../sources/userInput/index.js";
 import { moduleDatabase, type ModuleDatabase } from "../support/moduleDatabase.js";
-
-export class UserInputTestBroker {
-    readonly calls: string[] = [];
-    readonly contexts: Context[] = [];
-    readonly options: Array<{ readonly timeoutAt?: number }> = [];
-    readonly #waiters = new Map<
-        string,
-        {
-            readonly resolve: (request: UserInputTerminalRequest) => void;
-            readonly reject: (error: unknown) => void;
-        }
-    >();
-
-    async wait(
-        ctx: Context,
-        _agentId: string,
-        requestId: string,
-        options?: { readonly timeoutAt?: number },
-    ): Promise<UserInputTerminalRequest> {
-        this.calls.push(requestId);
-        this.contexts.push(ctx);
-        this.options.push(options ?? {});
-        return await new Promise<UserInputTerminalRequest>((resolve, reject) => {
-            this.#waiters.set(requestId, { resolve, reject });
-        });
-    }
-
-    settle(request: UserInputTerminalRequest): void {
-        const waiter = this.#waiters.get(request.id);
-        if (waiter === undefined) throw new Error(`No waiter for ${request.id}`);
-        this.#waiters.delete(request.id);
-        waiter.resolve(structuredClone(request));
-    }
-
-    reject(requestId: string, error: unknown): void {
-        const waiter = this.#waiters.get(requestId);
-        if (waiter === undefined) throw new Error(`No waiter for ${requestId}`);
-        this.#waiters.delete(requestId);
-        waiter.reject(error);
-    }
-}
 
 export interface UserInputTestOptions {
     readonly listener?: UserInputModuleOptions["listener"];
@@ -74,15 +30,11 @@ export interface UserInputTestOptions {
     readonly maxDetailPageCharacters?: number;
 }
 
-export function createUserInputModule(
-    broker: UserInputTestBroker,
-    options: UserInputTestOptions = {},
-): UserInputModule {
+export function createUserInputModule(options: UserInputTestOptions = {}): UserInputModule {
     let requestIndex = 0;
     let eventIndex = 0;
     let now = 100;
     return new UserInputModule({
-        broker,
         idFactory: () => `request-${String(++requestIndex)}`,
         eventIdFactory: () => `event-${String(++eventIndex)}`,
         clock: () => ++now,

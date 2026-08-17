@@ -54,9 +54,7 @@ export async function readAutoSecurityPolicy(readers: {
     ]);
     const policies = [
         ...(globalPolicy === undefined ? [] : [`${GLOBAL_SECURITY_HEADING}\n\n${globalPolicy}`]),
-        ...(projectPolicy === undefined
-            ? []
-            : [`${PROJECT_SECURITY_HEADING}\n\n${projectPolicy}`]),
+        ...(projectPolicy === undefined ? [] : [`${PROJECT_SECURITY_HEADING}\n\n${projectPolicy}`]),
     ];
     return policies.length === 0 ? undefined : policies.join("\n\n");
 }

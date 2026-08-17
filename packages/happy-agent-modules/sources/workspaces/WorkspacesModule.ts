@@ -2,6 +2,7 @@ import {
     type AgentModule,
     type AgentModuleHooks,
     type AgentModuleScope,
+    type AgentSystemRef,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
 import { Type, type Static } from "@sinclair/typebox";
@@ -41,10 +42,7 @@ import {
     type WorkspaceReserveInput,
     type WorkspaceSetBranchInput,
 } from "./Workspace.js";
-import {
-    authorizeWorkspaceAccess,
-    assertWorkspaceRecord,
-} from "./WorkspaceAccess.js";
+import { authorizeWorkspaceAccess, assertWorkspaceRecord } from "./WorkspaceAccess.js";
 import {
     workspaceBranchMetadataSchema,
     type WorkspaceBranchMetadata,
@@ -214,6 +212,7 @@ export class WorkspacesModule implements AgentModule {
     readonly #onHostError: WorkspaceModuleOptions["onHostError"];
     readonly #cleanupContext: Context | undefined;
     readonly #cleanupTasks = new Set<Promise<void>>();
+    #agents: AgentSystemRef | undefined;
 
     constructor(options: WorkspaceModuleOptions) {
         assertWorkspaceModuleOptions(options);
@@ -247,9 +246,16 @@ export class WorkspacesModule implements AgentModule {
     }
 
     readonly #hooks: AgentModuleHooks = {
-        tools: (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => {
+        tools: async (ctx: Context, scope: AgentModuleScope): Promise<readonly AnyAgentTool[]> => {
             this.#assertAgentId(scope.agent.id);
             if (!this.#enabled) return [];
+            const agents = this.#agents;
+            if (agents === undefined) {
+                throw new Error("The workspaces module was asked for tools before it started.");
+            }
+            // Workspaces belong to the conversation a person is having. A subagent is one pair of
+            // hands inside the task it was given, and stays in the workspace it was started in.
+            if ((await agents.parentOf(ctx, scope.agent.id)) !== null) return [];
             return [
                 createWorkspaceTool(this, scope.agent.id),
                 listWorkspacesTool(this, scope.agent.id),
@@ -262,7 +268,10 @@ export class WorkspacesModule implements AgentModule {
         },
     };
 
-    readonly beforeStart = (): AgentModuleHooks => this.#hooks;
+    readonly beforeStart = (_ctx: Context, agents: AgentSystemRef): AgentModuleHooks => {
+        this.#agents = agents;
+        return this.#hooks;
+    };
 
     /**
      * Reserves one workspace: a name, folder key, and branch nothing else has taken, recorded
@@ -585,11 +594,7 @@ export class WorkspacesModule implements AgentModule {
     }
 
     /** Moves a workspace in the main list, placing it after another one or at the top. */
-    async reorder(
-        ctx: Context,
-        agentId: string,
-        input: WorkspaceReorderInput,
-    ): Promise<Workspace> {
+    async reorder(ctx: Context, agentId: string, input: WorkspaceReorderInput): Promise<Workspace> {
         this.#assertEnabled();
         this.#assertAgentId(agentId);
         this.#assertInput(workspaceReorderInputSchema, input, "workspace reorder");

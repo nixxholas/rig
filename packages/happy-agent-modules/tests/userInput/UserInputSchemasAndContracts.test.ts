@@ -35,7 +35,7 @@ import {
     userInputTerminalRequestSchema,
     type UserInputRequest,
 } from "../../sources/userInput/index.js";
-import { createUserInputModule, UserInputTestBroker } from "./userInputTestSupport.js";
+import { createUserInputModule } from "./userInputTestSupport.js";
 
 const agentId = "agent-one";
 
@@ -323,38 +323,25 @@ describe("UserInput runtime schemas and contracts", () => {
         expect(Value.Check(userInputTerminalRequestSchema, answered)).toBe(true);
     });
 
-    it("requires a broker and rejects malformed module options at construction", () => {
-        expect(
-            Value.Check(userInputModuleOptionsSchema, {
-                broker: { wait: async () => terminalAnswered() },
-            }),
-        ).toBe(true);
-        expect(Value.Check(userInputModuleOptionsSchema, {})).toBe(false);
-        expect(
-            Value.Check(userInputModuleOptionsSchema, {
-                broker: { wait: async () => terminalAnswered() },
-                unknown: true,
-            }),
-        ).toBe(false);
-        expect(() => new UserInputModule({} as never)).toThrow("options");
+    it("needs no host collaborator and rejects malformed module options at construction", () => {
+        expect(Value.Check(userInputModuleOptionsSchema, {})).toBe(true);
+        expect(Value.Check(userInputModuleOptionsSchema, { unknown: true })).toBe(false);
+        expect(() => new UserInputModule(undefined as never)).toThrow("options");
         expect(
             () =>
                 new UserInputModule({
-                    broker: new UserInputTestBroker(),
                     maxPageSize: 0,
                 } as never),
         ).toThrow("options");
         expect(
             () =>
                 new UserInputModule({
-                    broker: new UserInputTestBroker(),
                     maxOutputCharacters: 255,
                 } as never),
         ).toThrow("options");
         expect(
             () =>
                 new UserInputModule({
-                    broker: new UserInputTestBroker(),
                     maxQuestionCharacters: MAX_USER_INPUT_QUESTION_CHARACTERS + 1,
                 } as never),
         ).toThrow("options");
@@ -407,7 +394,7 @@ describe("UserInput runtime schemas and contracts", () => {
     });
 
     it("exposes both common tools with closed parameters and no Auto review", () => {
-        const module = createUserInputModule(new UserInputTestBroker());
+        const module = createUserInputModule();
         const requestTool = requestUserInputTool(module, agentId);
         const cancelTool = cancelAskTool(module, agentId);
 

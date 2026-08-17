@@ -62,10 +62,7 @@ import {
     type ImageGenerator,
     type McpHost,
     type PermissionReviewer,
-    type SchedulingScheduler,
-    type SearchBackend,
     type SecretResolver,
-    type UserInputBroker,
     type WorkflowRuntime,
     type PresenceModuleOptions,
 } from "@slopus/happy-agent-modules";
@@ -145,9 +142,6 @@ export interface HappyAgentIntegrations {
     readonly happy: HappyHost;
     readonly imageGeneration: ImageGenerator;
     readonly mcp: McpHost;
-    readonly scheduling: SchedulingScheduler;
-    readonly search: SearchBackend;
-    readonly userInput: UserInputBroker;
     readonly workflows: WorkflowRuntime;
     readonly permissionReviewer?: PermissionReviewer;
     readonly secretResolver?: SecretResolver;
@@ -414,9 +408,7 @@ export async function loadHappyAgent(
             resolveGitSecret: (kind) =>
                 kind === "github" ? localGithubToken(process.env) : undefined,
             resolveProfile: async (profileId) =>
-                profileId === LOCAL_PROJECT_PROFILE_ID
-                    ? await localGitProfile(agentId)
-                    : undefined,
+                profileId === LOCAL_PROJECT_PROFILE_ID ? await localGitProfile(agentId) : undefined,
             rootContext: hostRoot,
             settings: configuration.values.workspace,
             // Avatar bytes are content a person chose and expects to survive a restart, so they
@@ -589,6 +581,9 @@ async function createModules(
     },
 ): Promise<CreatedHappyAgentModules> {
     const { configuration } = configModule;
+    // Gemini is not one of the accounts a chat runs on, so its search reads a key from the
+    // environment rather than from a configured provider.
+    const geminiApiKey = process.env.GEMINI_API_KEY?.trim() || undefined;
     // The catalogs and their host need each other: a workspace reservation asks Git which branches
     // are taken, and the host reads and writes through the very modules built here. The host is
     // also keyed by the root agent, which does not exist until after these modules are assembled.
@@ -783,13 +778,20 @@ async function createModules(
         permissions,
         presence,
         projects: new ProjectsModule({
+            crossWorkspace: configuration.values.features.crossWorkspace,
             avatarAssetReader: {
                 read: async (avatarCtx, agentId, hash) =>
                     await hostService().avatarAssetReader.read(avatarCtx, agentId, hash),
             },
         }),
-        scheduling: new SchedulingModule({ scheduler: integrations.scheduling }),
-        search: new SearchModule({ backend: integrations.search }),
+        scheduling: new SchedulingModule(),
+        search: new SearchModule({
+            providers: autoOptions.providers,
+            models,
+            currentProviderId: autoOptions.provider,
+            bedrockSearchModels: bedrockSearchModels(configuration),
+            ...(geminiApiKey === undefined ? {} : { geminiApiKey }),
+        }),
         secrets: new SecretsModule(
             integrations.secretResolver === undefined
                 ? {}
@@ -800,7 +802,6 @@ async function createModules(
         tasks: new TasksModule({}),
         usage: new UsageModule({}),
         userInput: new UserInputModule({
-            broker: integrations.userInput,
             presence: presence.userInputPolicy,
             // Only a genuine human answer to an interactive request becomes trusted evidence for a
             // later permission review. Provenance is decided by the actor: a human answers through
@@ -822,13 +823,30 @@ async function createModules(
                             type: "user_input_answered",
                             agentId: event.request.askingAgentId,
                             requestId: event.requestId,
-                            answer: JSON.stringify(
-                                event.request.answers ?? event.request.answer,
-                            ),
+                            answer: JSON.stringify(event.request.answers ?? event.request.answer),
                         });
                     } catch {
                         // Fail-safe: an unrecorded answer stays untrusted, which under-authorizes
                         // rather than over-authorizes. Never let it break saving the human's answer.
+                    }
+                },
+                // A client learns about a question, and about how it ended, from the event journal
+                // it already streams. Publishing after the transition has committed is what keeps
+                // the client from ever showing a question the database does not hold. A journal
+                // failure is reported rather than thrown: the module has already woken its wait.
+                onEvent: async (listenerCtx, event) => {
+                    try {
+                        await eventsModule.record(listenerCtx, {
+                            agentId: event.request.askingAgentId,
+                            type: "user_input.event",
+                            payload: event,
+                        });
+                    } catch (error: unknown) {
+                        listenerCtx.log.warn(
+                            "Failed to record a user input event in the event journal.",
+                            { agentId: event.request.askingAgentId, type: event.type },
+                            error,
+                        );
                     }
                 },
             },
@@ -1129,4 +1147,14 @@ function assertLoaderInput(options: LoadHappyAgentOptions): void {
     if (!Value.Check(effectiveSelectionSchema, options.effectiveSelection)) {
         throw new Error("The Happy agent effective selection is invalid.");
     }
+}
+
+/** Bedrock serves its hosted index from particular models, so an account may name its own. */
+function bedrockSearchModels(configuration: HappyAgentConfiguration): Record<string, string> {
+    const models: Record<string, string> = {};
+    for (const [id, provider] of Object.entries(configuration.values.providers)) {
+        if (provider.enabled === false || provider.type !== "bedrock") continue;
+        if (provider.searchModelId !== undefined) models[id] = provider.searchModelId;
+    }
+    return models;
 }

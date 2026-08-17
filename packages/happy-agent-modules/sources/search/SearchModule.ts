@@ -1,7 +1,9 @@
 import {
+    type AgentModel,
     type AgentModule,
     type AgentModuleHooks,
     type AgentModuleScope,
+    type AgentProviders,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
 import { Type, type Static } from "@sinclair/typebox";
@@ -13,20 +15,23 @@ import {
     fetchResultSchema,
     MAX_FETCH_CONTENT_CHARACTERS,
     MAX_FETCH_URL_LENGTH,
-    MAX_SEARCH_CURSOR,
-    MAX_SEARCH_RESULT_URL_LENGTH,
-    MAX_SEARCH_RESULTS_PER_PAGE,
     searchAgentIdSchema,
-    searchPageSchema,
+    searchAnswerSchema,
     searchProviderRequestSchema,
-    searchQuerySchema,
     type FetchInput,
     type FetchResult,
-    type SearchPage,
+    type SearchAnswer,
     type SearchProviderRequest,
-    type SearchQuery,
 } from "./Search.js";
-import { searchBackendSchema, type SearchBackend } from "./SearchBackend.js";
+import { bedrockWebSearch } from "./impl/bedrockWebSearch.js";
+import { claudeWebSearch } from "./impl/claudeWebSearch.js";
+import { codexWebSearch } from "./impl/codexWebSearch.js";
+import { geminiWebSearch } from "./impl/geminiWebSearch.js";
+import { grokWebSearch } from "./impl/grokWebSearch.js";
+import { grokXSearch } from "./impl/grokXSearch.js";
+import { resolveSearchRoutes } from "./impl/SearchRoute.js";
+import type { VendorSearchContext } from "./impl/VendorSearchContext.js";
+import { fetchWebPage } from "./impl/webFetch/fetchWebPage.js";
 import { bedrockWebSearchTool } from "./tools/bedrock_web_search.js";
 import { claudeWebSearchTool } from "./tools/claude_web_search.js";
 import { codexWebSearchTool } from "./tools/codex_web_search.js";
@@ -35,24 +40,42 @@ import { grokWebSearchTool } from "./tools/grok_web_search.js";
 import { grokXSearchTool } from "./tools/grok_x_search.js";
 import { webFetchTool } from "./tools/web_fetch.js";
 
-const DEFAULT_MAX_RESULTS = 10;
 const DEFAULT_MAX_CHARACTERS = 40_000;
 const DEFAULT_MAX_OUTPUT_CHARACTERS = 12_000;
 const MIN_MAX_OUTPUT_CHARACTERS = 256;
 const MAX_MAX_OUTPUT_CHARACTERS = 100_000;
-const NEXT_CURSOR_OUTPUT_PREFIX = "\nnext_cursor=";
-const NO_RESULTS_OUTPUT = "No search results.";
 const FETCH_TRUNCATION_MARKER = "\n[Content truncated.]";
+const ANSWER_TRUNCATION_MARKER = "\n[Answer truncated.]";
+const SOURCES_HEADING = "\n\nSources:\n";
+
+const providersSchema = Type.Unsafe<AgentProviders>(
+    Type.Object({}, { additionalProperties: true }),
+);
+const agentModelSchema = Type.Unsafe<AgentModel>(
+    Type.Object(
+        {
+            providerId: Type.String({ minLength: 1 }),
+            id: Type.String({ minLength: 1 }),
+            name: Type.String(),
+            effortLevels: Type.Array(Type.String()),
+            defaultEffort: Type.String(),
+        },
+        { additionalProperties: true },
+    ),
+);
 
 const searchModuleOptionsSchema = Type.Object(
     {
-        backend: searchBackendSchema,
-        maxResults: Type.Optional(
-            Type.Integer({
-                minimum: 1,
-                maximum: MAX_SEARCH_RESULTS_PER_PAGE,
-            }),
-        ),
+        /** The accounts a vendor search may run on, and the credentials that reach them. */
+        providers: providersSchema,
+        /** The catalog the routes are drawn from; a vendor search uses its provider's first model. */
+        models: Type.Unsafe<readonly AgentModel[]>(Type.Array(agentModelSchema)),
+        /** The account this chat itself runs on, preferred whenever it serves the asked vendor. */
+        currentProviderId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+        /** Bedrock serves its hosted index from particular models, so an account may name its own. */
+        bedrockSearchModels: Type.Optional(Type.Record(Type.String(), Type.String())),
+        /** Gemini answers over its own HTTP API rather than through a configured chat provider. */
+        geminiApiKey: Type.Optional(Type.String({ minLength: 1 })),
         maxCharacters: Type.Optional(
             Type.Integer({
                 minimum: 1_000,
@@ -72,54 +95,37 @@ const searchModuleOptionsSchema = Type.Object(
 export { searchModuleOptionsSchema };
 export type SearchModuleOptions = Static<typeof searchModuleOptionsSchema>;
 
-/** Provider-neutral search and fetch over a host-owned boundary. */
+/**
+ * Web search and page fetch, run by the module itself.
+ *
+ * Each vendor tool spends one bounded call on that vendor's own search, on an account the person
+ * already configured, and comes back with the answer it wrote and the sources it cited. Nothing
+ * is delegated to a host: the module owns the routing, the inference, and the fetch.
+ */
 export class SearchModule implements AgentModule {
     readonly name = "search";
-    readonly #backend: SearchBackend;
-    readonly #maxResults: number;
+    readonly #search: VendorSearchContext;
     readonly #maxCharacters: number;
     readonly #maxOutputCharacters: number;
 
     constructor(options: SearchModuleOptions) {
-        const checkedOptions = runtimeOptions(options);
-        if (!Value.Check(searchModuleOptionsSchema, checkedOptions)) {
+        if (!Value.Check(searchModuleOptionsSchema, options)) {
             throw new Error("Search module options are invalid.");
         }
-        this.#backend = options.backend;
-        this.#maxResults = options.maxResults ?? DEFAULT_MAX_RESULTS;
+        this.#search = {
+            providers: options.providers,
+            routes: resolveSearchRoutes(options),
+            ...(options.geminiApiKey === undefined ? {} : { geminiApiKey: options.geminiApiKey }),
+        };
         this.#maxCharacters = options.maxCharacters ?? DEFAULT_MAX_CHARACTERS;
         this.#maxOutputCharacters = options.maxOutputCharacters ?? DEFAULT_MAX_OUTPUT_CHARACTERS;
-    }
-
-    async search(ctx: Context, agentId: string, query: SearchQuery): Promise<SearchPage> {
-        assertAgentId(agentId);
-        const normalizedQuery = normalizeQuery(query);
-        const limit = Math.min(
-            normalizedQuery.limit ?? this.#maxResults,
-            this.#maxResults,
-            this.#maxModelVisibleResults(),
-        );
-        const normalized: SearchQuery = {
-            query: normalizedQuery.query,
-            limit,
-            ...(normalizedQuery.cursor === undefined ? {} : { cursor: normalizedQuery.cursor }),
-        };
-        const page = await this.#backend.search(ctx, agentId, normalized);
-        assertSearchPage(page, normalized);
-        /*
-         * The formatter is deliberately part of the module boundary.  A backend page whose
-         * identities cannot all be shown within the configured model budget is rejected rather
-         * than silently advancing its cursor past records the model cannot name.
-         */
-        this.formatSearchForModel(page);
-        return page;
     }
 
     async providerSearch(
         ctx: Context,
         agentId: string,
         request: SearchProviderRequest,
-    ): Promise<SearchPage> {
+    ): Promise<SearchAnswer> {
         assertAgentId(agentId);
         if (!Value.Check(searchProviderRequestSchema, request)) {
             throw new Error("Invalid provider search request.");
@@ -134,15 +140,9 @@ export class SearchModule implements AgentModule {
         }
         const query = request.query.trim();
         if (query.length === 0) throw new Error("Search query cannot be empty.");
-        const limit = Math.min(
-            request.limit ?? this.#maxResults,
-            this.#maxResults,
-            this.#maxModelVisibleResults(),
-        );
         const normalized: SearchProviderRequest = {
             provider: request.provider,
             query,
-            limit,
             ...(request.providerId === undefined ? {} : { providerId: request.providerId }),
             ...(request.allowedDomains === undefined
                 ? {}
@@ -151,22 +151,19 @@ export class SearchModule implements AgentModule {
                 ? {}
                 : { blockedDomains: [...request.blockedDomains] }),
             ...(request.latest === undefined ? {} : { latest: request.latest }),
-            ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
         };
-        const page =
-            this.#backend.searchProvider === undefined
-                ? await this.#backend.search(ctx, agentId, {
-                      query: normalized.query,
-                      limit,
-                      ...(normalized.cursor === undefined ? {} : { cursor: normalized.cursor }),
-                  })
-                : await this.#backend.searchProvider(ctx, agentId, normalized);
-        assertSearchPage(page, normalized);
-        this.formatSearchForModel(page);
-        return page;
+        const answer = await vendorSearch(ctx, this.#search, normalized);
+        assertSearchAnswer(answer, normalized);
+        /*
+         * The formatter is part of the module boundary.  An answer whose sources cannot all be
+         * shown within the configured model budget is still returned, but formatting is proven
+         * here so a tool can never be handed something it cannot render.
+         */
+        this.formatSearchAnswerForModel(answer);
+        return answer;
     }
 
-    async fetch(ctx: Context, agentId: string, input: FetchInput): Promise<FetchResult> {
+    async fetch(_ctx: Context, agentId: string, input: FetchInput): Promise<FetchResult> {
         assertAgentId(agentId);
         const normalizedInput = normalizeFetchInput(input);
         const requestedCharacters = Math.min(
@@ -177,12 +174,12 @@ export class SearchModule implements AgentModule {
             url: normalizedInput.url,
             maxCharacters: requestedCharacters,
         };
-        const result = await this.#backend.fetch(ctx, agentId, normalized);
+        const result = await fetchWebPage(normalized);
         if (!Value.Check(fetchResultSchema, result)) {
-            throw new Error("Search backend returned an invalid fetch result.");
+            throw new Error("The fetched page could not be represented as a fetch result.");
         }
         if (result.url !== normalized.url) {
-            throw new Error("Search backend returned content for a different normalized URL.");
+            throw new Error("The fetch returned content for a different normalized URL.");
         }
         if (result.content.length <= requestedCharacters) return result;
         return {
@@ -206,36 +203,49 @@ export class SearchModule implements AgentModule {
 
     readonly beforeStart = (): AgentModuleHooks => this.#hooks;
 
-    formatSearchForModel(page: SearchPage): string {
-        if (!Value.Check(searchPageSchema, page)) {
-            throw new Error("Cannot format an invalid search result page.");
+    /**
+     * The vendor's answer first, then the sources it cited.
+     *
+     * The answer is what the model asked for, so it leads and keeps at least half of the output
+     * budget. Sources follow as complete URLs; a URL is never cut to make room, and sources that
+     * do not fit are counted rather than half-written.
+     */
+    formatSearchAnswerForModel(answer: SearchAnswer): string {
+        if (!Value.Check(searchAnswerSchema, answer)) {
+            throw new Error("Cannot format an invalid search answer.");
         }
-        assertUniqueResultIdentities(page);
-
-        const continuation =
-            page.nextCursor !== undefined ? `${NEXT_CURSOR_OUTPUT_PREFIX}${page.nextCursor}` : "";
+        const sourcesBudget = Math.floor(this.#maxOutputCharacters / 2);
+        const rows: string[] = [];
+        for (const source of answer.sources) {
+            const remaining = answer.sources.length - rows.length - 1;
+            if (sourcesBlock([...rows, source.url], remaining).length > sourcesBudget) break;
+            rows.push(source.url);
+        }
+        const omitted = answer.sources.length - rows.length;
+        let sources = rows.length === 0 && omitted > 0 ? "" : sourcesBlock(rows, omitted);
+        const answerBudget = this.#maxOutputCharacters - sources.length;
+        const text =
+            answer.answer.length <= answerBudget
+                ? answer.answer
+                : answerBudget > ANSWER_TRUNCATION_MARKER.length
+                  ? `${answer.answer.slice(0, answerBudget - ANSWER_TRUNCATION_MARKER.length)}${ANSWER_TRUNCATION_MARKER}`
+                  : "";
 
         /*
-         * URL is the action identity.  Start with URL-only rows so every returned record remains
-         * actionable under the output bound, then opportunistically add titles when they fit.
-         * Never truncate or remove a URL to make room for optional metadata.
+         * Titles are optional detail.  Add them one at a time only while the whole output still
+         * fits, so a long title can never displace a URL the model needs.
          */
-        const rows = page.results.map((result) => result.url);
-        let output = rows.length === 0 ? NO_RESULTS_OUTPUT : `${rows.join("\n")}${continuation}`;
-        if (output.length > this.#maxOutputCharacters) {
-            throw new Error("Search result URLs cannot fit within the model output limit.");
-        }
-        for (let index = 0; index < page.results.length; index += 1) {
-            const result = page.results[index]!;
+        for (let index = 0; index < rows.length; index += 1) {
+            const source = answer.sources[index]!;
             const candidateRows = [...rows];
-            candidateRows[index] = `${result.url} — ${result.title}`;
-            const candidate = `${candidateRows.join("\n")}${continuation}`;
-            if (candidate.length <= this.#maxOutputCharacters) {
+            candidateRows[index] = `${source.url} — ${source.title}`;
+            const candidate = sourcesBlock(candidateRows, omitted);
+            if (text.length + candidate.length <= this.#maxOutputCharacters) {
                 rows[index] = candidateRows[index]!;
-                output = candidate;
+                sources = candidate;
             }
         }
-        return output;
+        return `${text}${sources}`;
     }
 
     formatFetchForModel(result: FetchResult): string {
@@ -293,52 +303,64 @@ export class SearchModule implements AgentModule {
         }
         return output;
     }
+}
 
-    #maxModelVisibleResults(): number {
-        /*
-         * Reserve enough room for the longest legal continuation cursor and one complete URL per
-         * result.  This bound is computed before the host call, so a backend cannot advance past
-         * records that the model cannot name.
-         */
-        const continuationBudget =
-            NEXT_CURSOR_OUTPUT_PREFIX.length + String(MAX_SEARCH_CURSOR).length;
-        const rowBudget = MAX_SEARCH_RESULT_URL_LENGTH + 1;
-        const available = this.#maxOutputCharacters - continuationBudget;
-        const byOutput = Math.floor((available + 1) / rowBudget);
-        return Math.max(1, Math.min(MAX_SEARCH_RESULTS_PER_PAGE, byOutput));
+/** One vendor, one search. Each vendor searches in its own way, so each has its own function. */
+async function vendorSearch(
+    ctx: Context,
+    search: VendorSearchContext,
+    request: SearchProviderRequest,
+): Promise<SearchAnswer> {
+    switch (request.provider) {
+        case "bedrock":
+            return await bedrockWebSearch(ctx, search, request);
+        case "claude":
+            return await claudeWebSearch(ctx, search, request);
+        case "codex":
+            return await codexWebSearch(ctx, search, request);
+        case "gemini":
+            return await geminiWebSearch(ctx, search, request);
+        case "grok":
+            return await grokWebSearch(ctx, search, request);
+        case "grok-x":
+            return await grokXSearch(ctx, search, request);
     }
 }
 
-function runtimeOptions(options: SearchModuleOptions): SearchModuleOptions {
-    /*
-     * TypeBox's closed object check inspects enumerable properties.  Host adapters are often
-     * class instances with prototype methods, so materialize only the class surface while
-     * retaining enumerable extras for the closed-schema rejection.
-     */
-    return {
-        ...options,
-        backend: {
-            ...options.backend,
-            search: options.backend.search,
-            fetch: options.backend.fetch,
-            ...(options.backend.searchProvider === undefined
-                ? {}
-                : { searchProvider: options.backend.searchProvider }),
-        },
-    };
+/** The cited-sources tail of a formatted answer, with a count of whatever did not fit. */
+function sourcesBlock(rows: readonly string[], omitted: number): string {
+    if (rows.length === 0 && omitted === 0) return "";
+    const note =
+        omitted === 0
+            ? ""
+            : `${rows.length === 0 ? "" : "\n"}[${omitted} more source${omitted === 1 ? "" : "s"} omitted.]`;
+    return `${SOURCES_HEADING}${rows.join("\n")}${note}`;
 }
 
-function normalizeQuery(query: SearchQuery): SearchQuery {
-    if (!Value.Check(searchQuerySchema, query)) {
-        throw new Error("Invalid search query.");
+function assertSearchAnswer(
+    answer: unknown,
+    request: SearchProviderRequest,
+): asserts answer is SearchAnswer {
+    if (!Value.Check(searchAnswerSchema, answer)) {
+        throw new Error("The vendor search produced an invalid answer.");
     }
-    const text = query.query.trim();
-    if (text.length === 0) throw new Error("Search query cannot be empty.");
-    return {
-        query: text,
-        ...(query.limit === undefined ? {} : { limit: query.limit }),
-        ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
-    };
+    if (answer.provider !== request.provider) {
+        throw new Error("The vendor search answered as a different provider.");
+    }
+    if (answer.query !== request.query) {
+        throw new Error("The vendor search returned an answer for a different query.");
+    }
+    if (!Number.isFinite(answer.durationMs)) {
+        throw new Error("The vendor search reported an invalid search duration.");
+    }
+    const urls = new Set<string>();
+    for (const source of answer.sources) {
+        const canonical = canonicalSearchResultUrl(source.url);
+        if (urls.has(canonical)) {
+            throw new Error("The vendor search returned duplicate answer sources.");
+        }
+        urls.add(canonical);
+    }
 }
 
 function normalizeFetchInput(input: FetchInput): FetchInput {
@@ -376,72 +398,15 @@ function assertAgentId(agentId: string): void {
     }
 }
 
-function assertSearchPage(page: unknown, request: SearchQuery): asserts page is SearchPage {
-    if (!Value.Check(searchPageSchema, page)) {
-        throw new Error("Search backend returned an invalid result page.");
-    }
-    if (page.query !== request.query) {
-        throw new Error("Search backend returned a page for a different query.");
-    }
-    if (page.results.length > (request.limit ?? MAX_SEARCH_RESULTS_PER_PAGE)) {
-        throw new Error("Search backend returned more results than requested.");
-    }
-    assertUniqueResultIdentities(page);
-    for (const result of page.results) {
-        if (result.id !== undefined && result.id.trim() !== result.id) {
-            throw new Error("Search backend returned an invalid result identity.");
-        }
-        if (result.score !== undefined && !Number.isFinite(result.score)) {
-            throw new Error("Search backend returned an invalid result score.");
-        }
-    }
-    if (page.nextCursor !== undefined) {
-        if (page.results.length === 0) {
-            throw new Error("Search backend advanced the cursor without returning a result.");
-        }
-        assertCursorAdvances(request.cursor ?? 0, page.nextCursor, page.results.length);
-    }
-}
-
-function assertUniqueResultIdentities(page: SearchPage): void {
-    const urls = new Set<string>();
-    const ids = new Set<string>();
-    for (const result of page.results) {
-        const canonicalUrl = canonicalSearchResultUrl(result.url);
-        if (urls.has(canonicalUrl)) {
-            throw new Error("Search backend returned duplicate result identities.");
-        }
-        urls.add(canonicalUrl);
-        if (result.id !== undefined) {
-            if (ids.has(result.id)) {
-                throw new Error("Search backend returned duplicate result identities.");
-            }
-            ids.add(result.id);
-        }
-    }
-}
-
 function canonicalSearchResultUrl(value: string): string {
     let normalized: string;
     try {
         normalized = normalizeFetchUrl(value);
     } catch {
-        throw new Error("Search backend returned an invalid result URL.");
+        throw new Error("The vendor search returned an invalid source URL.");
     }
     if (normalized !== value) {
-        throw new Error("Search backend returned a non-canonical result URL.");
+        throw new Error("The vendor search returned a non-canonical source URL.");
     }
     return normalized;
-}
-
-function assertCursorAdvances(requested: number, next: number, visibleCount: number): void {
-    if (next <= requested) {
-        throw new Error("Search backend returned a non-advancing cursor.");
-    }
-    const expected = requested + visibleCount;
-    if (next !== expected) {
-        throw new Error(
-            "Search backend returned a cursor that does not match the returned result count.",
-        );
-    }
 }

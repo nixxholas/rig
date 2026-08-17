@@ -24,7 +24,12 @@ export async function detectProjectDefaultBranch(
             ...(signal === undefined ? {} : { signal }),
         });
 
-    const originHead = await read(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]);
+    const originHead = await read([
+        "symbolic-ref",
+        "--quiet",
+        "--short",
+        "refs/remotes/origin/HEAD",
+    ]);
     if (originHead !== undefined && originHead.startsWith("origin/")) {
         return originHead.slice("origin/".length);
     }

@@ -43,21 +43,21 @@ Two further identities hang off the row:
 
 ## 3. What a row holds
 
-| Field | Meaning |
-| --- | --- |
-| `presence` | `present` or `missing` — whether the folder is on disk |
-| `initializationStatus` | `initializing`, `ready`, or `failed` |
-| `initializationAttempt` | how many attempts have been made, saturating at 1,000,000 |
-| `initializationError` | a bounded readable message, present **only** while `failed` |
-| `nameSource` | `folder`, `user`, or `remote` |
-| `defaultBranch` | the trunk workspaces are cut from; decided once |
-| `worktreeSupport` | `supported`, `unsupported`, or `unknown` |
-| `worktreeUnsupportedReason` | present **only** while `unsupported` |
-| `remoteSource` | `{kind:"github", repository}` or `{kind:"git", url}` for a folder still to be cloned |
-| `requiredSecretKind` | the credential kind a retry needs — never the secret itself |
-| `gitAhead`/`gitBehind`/`gitDetached`/`gitBranch`/`gitHead`/`gitUpstream` | the last Git facts a host reported |
-| `status`, `orderKey`, `version`, `avatar`, `description` | catalog state |
-| `createdAt`, `updatedAt`, `archivedAt` | timestamps |
+| Field                                                                    | Meaning                                                                              |
+| ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
+| `presence`                                                               | `present` or `missing` — whether the folder is on disk                               |
+| `initializationStatus`                                                   | `initializing`, `ready`, or `failed`                                                 |
+| `initializationAttempt`                                                  | how many attempts have been made, saturating at 1,000,000                            |
+| `initializationError`                                                    | a bounded readable message, present **only** while `failed`                          |
+| `nameSource`                                                             | `folder`, `user`, or `remote`                                                        |
+| `defaultBranch`                                                          | the trunk workspaces are cut from; decided once                                      |
+| `worktreeSupport`                                                        | `supported`, `unsupported`, or `unknown`                                             |
+| `worktreeUnsupportedReason`                                              | present **only** while `unsupported`                                                 |
+| `remoteSource`                                                           | `{kind:"github", repository}` or `{kind:"git", url}` for a folder still to be cloned |
+| `requiredSecretKind`                                                     | the credential kind a retry needs — never the secret itself                          |
+| `gitAhead`/`gitBehind`/`gitDetached`/`gitBranch`/`gitHead`/`gitUpstream` | the last Git facts a host reported                                                   |
+| `status`, `orderKey`, `version`, `avatar`, `description`                 | catalog state                                                                        |
+| `createdAt`, `updatedAt`, `archivedAt`                                   | timestamps                                                                           |
 
 Three of these are worth stating as rules rather than fields.
 
@@ -114,7 +114,7 @@ sequence: read, authorize, write, reread, compare, and emit only on a real chang
 `assertProjectTransition` is where the catalog states its own rules about change.
 
 - **Immutable forever**: `id`, `ownerAgentId`, `repositoryRef`, `kind`, `storageKey`,
-  `createdAt`. No operation rewrites what a project *is*.
+  `createdAt`. No operation rewrites what a project _is_.
 - **Named per operation**: every mutation declares the fields it may touch, and a field that
   moved outside that set is an error. A rename may move `name` and `nameSource`; a reorder may
   move `orderKey`; a lifecycle write may move only the fifteen host-reported state fields.
@@ -180,17 +180,17 @@ Every lifecycle operation is a host telling the catalog what it observed or did.
 through one internal `#changeState`, emit one `project_state_changed` event carrying the reason,
 and share one rule: **write only when something actually changed.**
 
-| Operation | What it records | When it does nothing |
-| --- | --- | --- |
-| `applyProbe` | presence, worktree support, optionally Git facts | — |
-| `applyGitFacts` | branch, head, upstream, divergence | — |
-| `setDefaultBranch` | the trunk | a default branch is already recorded |
-| `adoptRemoteName` | the remote's name | `nameSource` is not `folder` |
-| `markCloneReady` | the folder now exists | the project is not `initializing` |
-| `markInitializationReady` | setup succeeded | the project is not `initializing` |
-| `markInitializationFailed` | setup failed, with a bounded reason | the project is not `initializing` |
-| `retryInitialization` | back to `initializing` | the project is not `failed` |
-| `refresh` | back to `initializing` for another attempt | the project is `home` |
+| Operation                  | What it records                                  | When it does nothing                 |
+| -------------------------- | ------------------------------------------------ | ------------------------------------ |
+| `applyProbe`               | presence, worktree support, optionally Git facts | —                                    |
+| `applyGitFacts`            | branch, head, upstream, divergence               | —                                    |
+| `setDefaultBranch`         | the trunk                                        | a default branch is already recorded |
+| `adoptRemoteName`          | the remote's name                                | `nameSource` is not `folder`         |
+| `markCloneReady`           | the folder now exists                            | the project is not `initializing`    |
+| `markInitializationReady`  | setup succeeded                                  | the project is not `initializing`    |
+| `markInitializationFailed` | setup failed, with a bounded reason              | the project is not `initializing`    |
+| `retryInitialization`      | back to `initializing`                           | the project is not `failed`          |
+| `refresh`                  | back to `initializing` for another attempt       | the project is `home`                |
 
 When the observation matches what is already stored, or a guard says the change does not apply,
 the operation returns the existing row untouched: no version bump, no event, no listener call.
@@ -272,7 +272,7 @@ error rather than a silently empty answer.
 
 All model-facing text is written out in plain English rather than as stored identifiers — "Still
 being set up", "This project cannot create Git worktrees: …", "New workspaces run in Docker using
-the *image* image". `formatProjectForModel`, `formatPageForModel`, and `formatSettingsForModel`
+the _image_ image". `formatProjectForModel`, `formatPageForModel`, and `formatSettingsForModel`
 are public so a host renders exactly the same text the tools do. Over-long text is truncated with
 an ellipsis.
 
@@ -296,12 +296,12 @@ The module owns two tables, `happy_agent_module_projects` and
 stable and human-readable so an upgrade can append migrations without borrowing Rig's application
 schema. Database work goes through `ctx.db`; multi-step mutations compose with `ctx.inTx`.
 
-| Migration | What it does |
-| --- | --- |
-| `001-projects-catalog` | the original catalog, settings, and the receipt/proof tables |
-| `002-drop-project-idempotency-tables` | drops receipts and proofs — Agent Base owns durable completion |
-| `003-project-order-version-avatar` | adds `order_key`, `version`, `avatar_json`, backfills order from `rowid` |
-| `004-project-folder-record` | **drops and recreates both tables** as the folder record |
+| Migration                             | What it does                                                             |
+| ------------------------------------- | ------------------------------------------------------------------------ |
+| `001-projects-catalog`                | the original catalog, settings, and the receipt/proof tables             |
+| `002-drop-project-idempotency-tables` | drops receipts and proofs — Agent Base owns durable completion           |
+| `003-project-order-version-avatar`    | adds `order_key`, `version`, `avatar_json`, backfills order from `rowid` |
+| `004-project-folder-record`           | **drops and recreates both tables** as the folder record                 |
 
 `004` is destructive on purpose. A project became a real folder with a kind, a storage key,
 presence, initialization state, and cached Git facts; an opaque repository reference cannot be
@@ -318,28 +318,28 @@ best-effort object.
 
 ## 16. Bounds
 
-| Bound | Value |
-| --- | --- |
-| Folder path | 4,096 chars |
-| Project ID / agent ID | 96 chars |
-| Storage key | 64 chars (48 before a collision suffix) |
-| Display name | 500 chars |
-| Description | 2,000 chars |
-| Error detail | 500 chars |
-| Git ref | 512 chars |
-| Git divergence | 1,000,000 |
-| Initialization attempts | 1,000,000 |
-| Order key | 128 chars, 20 digits in practice |
-| Avatar hash | 64 hex chars |
-| Avatar URL | 2,048 chars |
-| Avatar dimension | 16,384 px |
-| Avatar bytes | 8 MiB |
-| Remote URL | 2,048 chars |
-| Docker image | 512 chars |
-| Timestamp | ≤ 1 January 2200 |
-| Page size | 100 max, 50 default |
-| Cursor | 16 chars |
-| Model output | 12,000 chars default, 256–100,000 configurable |
+| Bound                   | Value                                          |
+| ----------------------- | ---------------------------------------------- |
+| Folder path             | 4,096 chars                                    |
+| Project ID / agent ID   | 96 chars                                       |
+| Storage key             | 64 chars (48 before a collision suffix)        |
+| Display name            | 500 chars                                      |
+| Description             | 2,000 chars                                    |
+| Error detail            | 500 chars                                      |
+| Git ref                 | 512 chars                                      |
+| Git divergence          | 1,000,000                                      |
+| Initialization attempts | 1,000,000                                      |
+| Order key               | 128 chars, 20 digits in practice               |
+| Avatar hash             | 64 hex chars                                   |
+| Avatar URL              | 2,048 chars                                    |
+| Avatar dimension        | 16,384 px                                      |
+| Avatar bytes            | 8 MiB                                          |
+| Remote URL              | 2,048 chars                                    |
+| Docker image            | 512 chars                                      |
+| Timestamp               | ≤ 1 January 2200                               |
+| Page size               | 100 max, 50 default                            |
+| Cursor                  | 16 chars                                       |
+| Model output            | 12,000 chars default, 256–100,000 configurable |
 
 ## 17. Public surface
 

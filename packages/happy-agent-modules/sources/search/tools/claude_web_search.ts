@@ -1,7 +1,7 @@
 import { defineAgentTool } from "@slopus/happy-agent-base";
 import { Type, type Static } from "@sinclair/typebox";
 
-import { searchPageSchema } from "../Search.js";
+import { searchAnswerSchema } from "../Search.js";
 import type { SearchModule } from "../SearchModule.js";
 
 const inputSchema = Type.Object(
@@ -22,7 +22,7 @@ export function claudeWebSearchTool(search: SearchModule, agentId: string) {
         description:
             "Search the current web through Claude. Use it for recent facts and documentation, and cite returned sources.",
         parameters: inputSchema,
-        returnType: searchPageSchema,
+        returnType: searchAnswerSchema,
         durable: false,
         requiresAutoOrFullAccess: true,
         shouldReviewInAutoMode: () => true,
@@ -40,6 +40,6 @@ export function claudeWebSearchTool(search: SearchModule, agentId: string) {
                     : { blockedDomains: input.blocked_domains }),
                 ...(input.provider_id === undefined ? {} : { providerId: input.provider_id }),
             }),
-        toLLM: (page) => [{ type: "text", text: search.formatSearchForModel(page) }],
+        toLLM: (answer) => [{ type: "text", text: search.formatSearchAnswerForModel(answer) }],
     });
 }

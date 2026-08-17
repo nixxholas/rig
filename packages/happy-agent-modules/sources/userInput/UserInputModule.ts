@@ -66,11 +66,9 @@ import {
     assertUserInputPage,
     assertUserInputVoidResult,
     userInputAuthorizationSchema,
-    userInputBrokerSchema,
     userInputPresencePolicySchema,
     type UserInputAuthorization,
     type UserInputAuthorizationAction,
-    type UserInputBroker,
     type UserInputPresencePolicy,
     type UserInputStore,
 } from "./UserInputStore.js";
@@ -106,7 +104,6 @@ export const userInputClockSchema = Type.Function(
 
 export const userInputModuleOptionsSchema = Type.Object(
     {
-        broker: userInputBrokerSchema,
         presence: Type.Optional(userInputPresencePolicySchema),
         authorization: Type.Optional(userInputAuthorizationSchema),
         idFactory: Type.Optional(userInputIdFactorySchema),
@@ -180,7 +177,8 @@ export class UserInputModule implements AgentModule {
     readonly migrations = userInputMigrations;
 
     readonly #store: UserInputStore;
-    readonly #broker: UserInputBroker;
+    /** In-flight waits, woken by the settling transaction once it commits. */
+    readonly #waiters = new Map<string, Set<(request: UserInputRequest) => void>>();
     readonly #presence: UserInputPresencePolicy | undefined;
     readonly #authorization: UserInputAuthorization | undefined;
     readonly #idFactory: NonNullable<UserInputModuleOptions["idFactory"]>;
@@ -202,7 +200,6 @@ export class UserInputModule implements AgentModule {
     constructor(options: UserInputModuleOptions) {
         const validated = validateOptions(options);
         this.#store = createSqliteUserInputStorage();
-        this.#broker = validated.broker;
         this.#presence = validated.presence;
         this.#authorization = validated.authorization;
         this.#idFactory =
@@ -597,7 +594,44 @@ export class UserInputModule implements AgentModule {
             this.#listener?.onEventTransactional?.(ctx, frozen),
             "User input transactional listener",
         );
-        afterCommit(ctx, (postCommitCtx) => this.#notifyPostCommit(postCommitCtx, frozen));
+        afterCommit(ctx, (postCommitCtx) => {
+            this.#wakeWaiters(frozen.request);
+            return this.#notifyPostCommit(postCommitCtx, frozen);
+        });
+    }
+
+    /**
+     * Hands the committed outcome to every wait parked on this request. Callers settle a request
+     * by calling answer/cancel/complete on this module; nothing else has to relay the result.
+     */
+    #wakeWaiters(request: UserInputRequest): void {
+        if (!isUserInputTerminal(request)) return;
+        const waiters = this.#waiters.get(request.id);
+        if (waiters === undefined) return;
+        this.#waiters.delete(request.id);
+        for (const resolve of waiters) resolve(request);
+    }
+
+    #watchSettlement(requestId: string): {
+        readonly promise: Promise<UserInputRequest>;
+        readonly release: () => void;
+    } {
+        let resolve!: (request: UserInputRequest) => void;
+        const promise = new Promise<UserInputRequest>((settle) => {
+            resolve = settle;
+        });
+        const waiters = this.#waiters.get(requestId) ?? new Set();
+        waiters.add(resolve);
+        this.#waiters.set(requestId, waiters);
+        return {
+            promise,
+            release: (): void => {
+                const current = this.#waiters.get(requestId);
+                if (current === undefined) return;
+                current.delete(resolve);
+                if (current.size === 0) this.#waiters.delete(requestId);
+            },
+        };
     }
 
     async #notifyPostCommit(ctx: Context, event: UserInputEvent): Promise<void> {
@@ -726,6 +760,9 @@ export class UserInputModule implements AgentModule {
                     : undefined,
             );
         };
+        // Registered before anything is awaited so a settlement that commits while this wait is
+        // still arming its timers cannot slip past unnoticed.
+        const watch = this.#watchSettlement(requestId);
         try {
             rearm(presence);
             if (this.#presence !== undefined) {
@@ -759,26 +796,22 @@ export class UserInputModule implements AgentModule {
                     if (typeof returned === "function") unsubscribe = returned;
                 }
             }
-            const requestDeadline = this.#requestDeadline(request);
-            const waitedPromise = this.#broker.wait(
-                ctx,
-                agentId,
-                requestId,
-                requestDeadline === undefined ? undefined : { timeoutAt: requestDeadline },
-            );
-            const result = await Promise.race([waitedPromise, timeout]);
+            // A settlement committed before this wait registered is only visible in storage.
+            const alreadySettled = await this.#readRequest(ctx, requestId);
+            if (alreadySettled !== undefined && isUserInputTerminal(alreadySettled)) {
+                return alreadySettled;
+            }
+            const result = await Promise.race([watch.promise, timeout]);
             if ("outcome" in result) {
                 return await ctx.inTx((txCtx) =>
                     this.#settlePending(txCtx, agentId, requestId, result),
                 );
             }
             this.#assertRequest(result);
-            if (!isUserInputTerminal(result)) {
-                throw new Error("User input broker returned a pending request.");
-            }
             return structuredClone(result);
         } finally {
             settled = true;
+            watch.release();
             clearTimer();
             try {
                 unsubscribe?.();
@@ -1427,10 +1460,7 @@ function validateOptions(options: unknown): UserInputModuleOptions {
         throw new Error("User input module options are invalid.");
     }
     const source = options as Record<string, unknown>;
-    const view: Record<string, unknown> = {
-        ...source,
-        broker: methodView(source.broker, ["wait"]),
-    };
+    const view: Record<string, unknown> = { ...source };
     if (source.presence !== undefined) {
         view.presence = methodView(source.presence, [
             "isAvailable",

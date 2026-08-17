@@ -55,23 +55,25 @@ export async function probeProjectRepository(
                 : "This folder is not a Git repository.",
         };
     }
-    if (
-        (await realPath(compute, topLevel)) !== (await realPath(compute, options.path))
-    ) {
+    if ((await realPath(compute, topLevel)) !== (await realPath(compute, options.path))) {
         return {
             presence: "present",
             worktreeSupport: "unsupported",
-            worktreeUnsupportedReason: "This folder is inside a Git repository but is not its root.",
+            worktreeUnsupportedReason:
+                "This folder is inside a Git repository but is not its root.",
         };
     }
     const facts = await readProjectGitFacts(read);
     // A repository with no commits has nothing to branch from yet.
-    const unsupportedReason = facts.head === undefined ? "This repository has no commits yet." : undefined;
+    const unsupportedReason =
+        facts.head === undefined ? "This repository has no commits yet." : undefined;
     return {
         facts,
         presence: "present",
         worktreeSupport: unsupportedReason === undefined ? "supported" : "unsupported",
-        ...(unsupportedReason === undefined ? {} : { worktreeUnsupportedReason: unsupportedReason }),
+        ...(unsupportedReason === undefined
+            ? {}
+            : { worktreeUnsupportedReason: unsupportedReason }),
     };
 }
 

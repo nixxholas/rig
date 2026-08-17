@@ -1,38 +1,15 @@
 import type { Context } from "@steve.kite/stdlib";
 import { describe, expect, it, vi } from "vitest";
 
-import {
-    UserInputModule,
-    type UserInputPresenceState,
-    type UserInputTerminalRequest,
-} from "../../sources/userInput/index.js";
+import { UserInputModule, type UserInputPresenceState } from "../../sources/userInput/index.js";
 import {
     createUserInputDatabase,
     createUserInputModule,
     onlinePresence,
     singularAsk,
-    UserInputTestBroker,
 } from "./userInputTestSupport.js";
 
 const agentId = "agent-one";
-
-function terminalAnswer(
-    requestId: string,
-    overrides: Partial<UserInputTerminalRequest> = {},
-): UserInputTerminalRequest {
-    return {
-        id: requestId,
-        askingAgentId: agentId,
-        question: "Which option should I use?",
-        context: "The choice changes the implementation.",
-        status: "answered",
-        answer: "The first option.",
-        answeredAt: 110,
-        createdAt: 100,
-        updatedAt: 110,
-        ...overrides,
-    } as UserInputTerminalRequest;
-}
 
 let serializedHostWork: Promise<void> = Promise.resolve();
 
@@ -46,9 +23,8 @@ function enqueue<T>(operation: () => Promise<T>): Promise<T> {
 }
 
 describe("UserInput waits, presence, and concurrency", () => {
-    it("passes a root context to the broker and never holds a transaction open during a wait", async () => {
-        const broker = new UserInputTestBroker();
-        const module = createUserInputModule(broker);
+    it("wakes a parked wait with the outcome a direct answer committed", async () => {
+        const module = createUserInputModule();
         const database = createUserInputDatabase(module, "user-input-wait-context");
         await database.ready;
         try {
@@ -59,123 +35,42 @@ describe("UserInput waits, presence, and concurrency", () => {
                 "wait-context",
             );
             const waiting = module.wait(database.context, agentId, request.id);
-            await vi.waitFor(() => expect(broker.calls).toEqual([request.id]));
-            expect(broker.contexts[0]?.db).toBe(database.context.db);
-
+            // Answering on the same database is only possible because the wait holds no
+            // transaction open, and nothing but this call is needed to end the wait.
             const answered = await module.answer(database.context, agentId, {
                 requestId: request.id,
                 answer: "Use the first option.",
             });
-            broker.settle(answered as UserInputTerminalRequest);
-            await expect(waiting).resolves.toMatchObject({
-                id: request.id,
-                status: "answered",
-            });
+            await expect(waiting).resolves.toEqual(answered);
         } finally {
             database.close();
         }
     });
 
-    it.fails("moves a broker wait outside an already-open caller transaction", async () => {
-        let seenContext: Context | undefined;
-        const broker = {
-            async wait(ctx: Context): Promise<UserInputTerminalRequest> {
-                seenContext = ctx;
-                throw new Error("stop waiting");
-            },
-        };
-        const module = new UserInputModule({
-            broker,
-            idFactory: () => "transaction-wait",
-            eventIdFactory: () => "event",
-            clock: () => 100,
-        });
-        const database = createUserInputDatabase(module, "user-input-wait-in-transaction");
+    it("returns the committed outcome to a wait that starts after the answer", async () => {
+        const module = createUserInputModule();
+        const database = createUserInputDatabase(module, "user-input-wait-after-answer");
         await database.ready;
         try {
-            const request = await module.ask(
-                database.context,
-                agentId,
-                singularAsk(),
-                "transaction-wait",
-            );
-            await database.context.inTx(async (txCtx) => {
-                await expect(module.wait(txCtx, agentId, request.id)).rejects.toThrow(
-                    "stop waiting",
-                );
-                expect(seenContext?.db).toBe(database.context.db);
+            const request = await module.ask(database.context, agentId, singularAsk(), "late-wait");
+            const answered = await module.answer(database.context, agentId, {
+                requestId: request.id,
+                answer: "Answered before anyone waited.",
             });
+            await expect(module.wait(database.context, agentId, request.id)).resolves.toEqual(
+                answered,
+            );
         } finally {
             database.close();
         }
     });
 
-    it("rejects a broker result that is pending or disagrees with authoritative storage", async () => {
-        const pendingBroker = {
-            async wait(): Promise<unknown> {
-                return {
-                    id: "pending-result",
-                    askingAgentId: agentId,
-                    question: "Question",
-                    context: "Context",
-                    status: "pending",
-                    createdAt: 100,
-                    updatedAt: 100,
-                };
-            },
-        };
-        const pendingModule = new UserInputModule({
-            broker: pendingBroker as never,
-            idFactory: () => "pending-result",
-            eventIdFactory: () => "event",
-            clock: () => 100,
-        });
-        const pendingDatabase = createUserInputDatabase(pendingModule, "user-input-broker-pending");
-        await pendingDatabase.ready;
-        try {
-            await pendingModule.ask(
-                pendingDatabase.context,
-                agentId,
-                singularAsk(),
-                "pending-result",
-            );
-            await expect(
-                pendingModule.wait(pendingDatabase.context, agentId, "pending-result"),
-            ).rejects.toThrow("pending request");
-        } finally {
-            pendingDatabase.close();
-        }
-
-        const staleBroker = new UserInputTestBroker();
-        const staleModule = createUserInputModule(staleBroker);
-        const staleDatabase = createUserInputDatabase(staleModule, "user-input-broker-stale");
-        await staleDatabase.ready;
-        try {
-            const request = await staleModule.ask(
-                staleDatabase.context,
-                agentId,
-                singularAsk(),
-                "stale-result",
-            );
-            const waiting = staleModule.wait(staleDatabase.context, agentId, request.id);
-            await vi.waitFor(() => expect(staleBroker.calls).toEqual([request.id]));
-            staleBroker.settle(terminalAnswer(request.id));
-            await expect(waiting).rejects.toThrow("authoritative storage");
-            await expect(
-                staleModule.get(staleDatabase.context, agentId, request.id),
-            ).resolves.toMatchObject({ status: "pending" });
-        } finally {
-            staleDatabase.close();
-        }
-    });
-
-    it("cleans up presence subscriptions when the external broker rejects", async () => {
+    it("cleans up presence subscriptions when a wait ends with an error", async () => {
         let callback:
             | ((ctx: Context, state: UserInputPresenceState | undefined) => void)
             | undefined;
         let unsubscribed = 0;
-        const broker = new UserInputTestBroker();
-        const module = createUserInputModule(broker, {
+        const module = createUserInputModule({
             presence: {
                 state: () => onlinePresence(),
                 subscribe: (_ctx, _agentId, next) => {
@@ -186,26 +81,28 @@ describe("UserInput waits, presence, and concurrency", () => {
                 },
             },
         });
-        const database = createUserInputDatabase(module, "user-input-broker-rejection");
+        const database = createUserInputDatabase(module, "user-input-wait-rejection");
         await database.ready;
         try {
             const request = await module.ask(database.context, agentId, singularAsk(), "rejected");
             const waiting = module.wait(database.context, agentId, request.id);
-            await vi.waitFor(() => expect(broker.calls).toEqual([request.id]));
-            expect(callback).toBeDefined();
-            broker.reject(request.id, new Error("broker disconnected"));
-            await expect(waiting).rejects.toThrow("broker disconnected");
+            await vi.waitFor(() => expect(callback).toBeDefined());
+            await callback?.(database.context, {
+                answerWaitMs: -1,
+                title: "Bad",
+                emoji: "!",
+                prompt: "",
+            } as never);
+            await expect(waiting).rejects.toThrow("presence state");
             expect(unsubscribed).toBe(1);
         } finally {
             database.close();
         }
     });
 
-    it("settles immediate away and expired deadline outcomes without calling the broker", async () => {
+    it("settles immediate away and expired deadline outcomes without parking a wait", async () => {
         let now = 100;
-        const awayBroker = new UserInputTestBroker();
         const awayModule = new UserInputModule({
-            broker: awayBroker,
             idFactory: () => "away-request",
             eventIdFactory: () => "event-away",
             clock: () => now,
@@ -234,14 +131,11 @@ describe("UserInput waits, presence, and concurrency", () => {
                 presence: { title: "Away" },
                 waitedMs: 0,
             });
-            expect(awayBroker.calls).toEqual([]);
         } finally {
             awayDatabase.close();
         }
 
-        const deadlineBroker = new UserInputTestBroker();
         const deadlineModule = new UserInputModule({
-            broker: deadlineBroker,
             idFactory: () => "expired-request",
             eventIdFactory: () => "event-expired",
             clock: () => now,
@@ -266,7 +160,6 @@ describe("UserInput waits, presence, and concurrency", () => {
                 deadlineAt: 150,
                 timedOutAt: 200,
             });
-            expect(deadlineBroker.calls).toEqual([]);
         } finally {
             deadlineDatabase.close();
         }
@@ -278,8 +171,7 @@ describe("UserInput waits, presence, and concurrency", () => {
             | ((ctx: Context, state: UserInputPresenceState | undefined) => void)
             | undefined;
         let unsubscribed = 0;
-        const broker = new UserInputTestBroker();
-        const module = createUserInputModule(broker, {
+        const module = createUserInputModule({
             presence: {
                 state: () => current,
                 subscribe: (_ctx, _agentId, next) => {
@@ -295,7 +187,7 @@ describe("UserInput waits, presence, and concurrency", () => {
         try {
             const request = await module.ask(database.context, agentId, singularAsk(), "live-away");
             const waiting = module.wait(database.context, agentId, request.id);
-            await vi.waitFor(() => expect(broker.calls).toEqual([request.id]));
+            await vi.waitFor(() => expect(callback).toBeDefined());
             current = onlinePresence({
                 answerWaitMs: 0,
                 title: "Away",
@@ -317,9 +209,7 @@ describe("UserInput waits, presence, and concurrency", () => {
     it.fails("times out at the earlier presence deadline when the request has a later explicit deadline", async () => {
         vi.useFakeTimers();
         let now = 100;
-        const broker = new UserInputTestBroker();
         const module = new UserInputModule({
-            broker,
             idFactory: () => "presence-deadline",
             eventIdFactory: () => "presence-event",
             clock: () => now,
@@ -345,7 +235,6 @@ describe("UserInput waits, presence, and concurrency", () => {
                 (value) => ({ status: "resolved" as const, value }),
                 (error: unknown) => ({ status: "rejected" as const, error }),
             );
-            await vi.waitFor(() => expect(broker.calls).toEqual([request.id]));
             await vi.advanceTimersByTimeAsync(10);
             const result = await waiting;
             expect(result).toMatchObject({
@@ -365,7 +254,7 @@ describe("UserInput waits, presence, and concurrency", () => {
         let callback:
             | ((ctx: Context, state: UserInputPresenceState | undefined) => void)
             | undefined;
-        const invalidCleanupModule = createUserInputModule(new UserInputTestBroker(), {
+        const invalidCleanupModule = createUserInputModule({
             presence: {
                 state: () => onlinePresence(),
                 subscribe: (_ctx, _agentId, next) => {
@@ -393,12 +282,14 @@ describe("UserInput waits, presence, and concurrency", () => {
             invalidCleanupDatabase.close();
         }
 
-        const broker = new UserInputTestBroker();
-        const malformedModule = createUserInputModule(broker, {
+        let malformedCallback:
+            | ((ctx: Context, state: UserInputPresenceState | undefined) => void)
+            | undefined;
+        const malformedModule = createUserInputModule({
             presence: {
                 state: () => onlinePresence(),
                 subscribe: (_ctx, _agentId, next) => {
-                    callback = next;
+                    malformedCallback = next;
                 },
             },
         });
@@ -415,8 +306,8 @@ describe("UserInput waits, presence, and concurrency", () => {
                 "invalid-presence",
             );
             const waiting = malformedModule.wait(malformedDatabase.context, agentId, request.id);
-            await vi.waitFor(() => expect(broker.calls).toEqual([request.id]));
-            await callback?.(malformedDatabase.context, {
+            await vi.waitFor(() => expect(malformedCallback).toBeDefined());
+            await malformedCallback?.(malformedDatabase.context, {
                 answerWaitMs: -1,
                 title: "Bad",
                 emoji: "!",
@@ -429,7 +320,7 @@ describe("UserInput waits, presence, and concurrency", () => {
     });
 
     it("serializes concurrent answer and cancellation mutations to one terminal result", async () => {
-        const module = createUserInputModule(new UserInputTestBroker());
+        const module = createUserInputModule();
         const database = createUserInputDatabase(module, "user-input-concurrency");
         await database.ready;
         try {
@@ -459,7 +350,7 @@ describe("UserInput waits, presence, and concurrency", () => {
     });
 
     it("keeps concurrent identical ask retries idempotent and rejects divergent input", async () => {
-        const module = createUserInputModule(new UserInputTestBroker());
+        const module = createUserInputModule();
         const database = createUserInputDatabase(module, "user-input-ask-concurrency");
         await database.ready;
         try {
@@ -476,31 +367,6 @@ describe("UserInput waits, presence, and concurrency", () => {
                     "same-id",
                 ),
             ).rejects.toThrow("different input");
-        } finally {
-            database.close();
-        }
-    });
-
-    it("allows an external broker to return a terminal answer only after durable storage agrees", async () => {
-        const broker = new UserInputTestBroker();
-        const module = createUserInputModule(broker);
-        const database = createUserInputDatabase(module, "user-input-broker-answer");
-        await database.ready;
-        try {
-            const request = await module.ask(
-                database.context,
-                agentId,
-                singularAsk(),
-                "broker-answer",
-            );
-            const waiting = module.wait(database.context, agentId, request.id);
-            await vi.waitFor(() => expect(broker.calls).toEqual([request.id]));
-            const answered = await module.answer(database.context, agentId, {
-                requestId: request.id,
-                answer: "The answer.",
-            });
-            broker.settle(answered as UserInputTerminalRequest);
-            await expect(waiting).resolves.toEqual(answered);
         } finally {
             database.close();
         }

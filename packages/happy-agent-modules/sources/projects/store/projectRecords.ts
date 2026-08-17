@@ -23,10 +23,7 @@ export async function readProject(
     return row === undefined ? undefined : projectFromRow(row);
 }
 
-export async function requireProject(
-    database: AgentDatabase,
-    projectId: string,
-): Promise<Project> {
+export async function requireProject(database: AgentDatabase, projectId: string): Promise<Project> {
     const project = await readProject(database, projectId);
     if (project === undefined) throw new Error(`Project "${projectId}" was not found.`);
     return project;
@@ -146,10 +143,7 @@ export function assertExpectedProjectVersion(
 }
 
 /** Writes a complete new project row and its empty settings row. */
-export async function insertProjectRow(
-    database: AgentDatabase,
-    project: Project,
-): Promise<void> {
+export async function insertProjectRow(database: AgentDatabase, project: Project): Promise<void> {
     await agentDatabaseRun(
         database,
         sql`INSERT INTO ${sql.raw(PROJECTS_TABLE)} (

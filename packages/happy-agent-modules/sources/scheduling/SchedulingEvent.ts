@@ -17,9 +17,9 @@ const eventEnvelope = {
 };
 
 /**
- * Delivery outcome is included here even though delivery itself remains host-owned. A host reports
- * that outcome through the module's structural delivery operation, which gives observers one
- * stable event stream for scheduling state.
+ * Everything scheduling does to a durable record, as one stream. Delivery belongs to the module
+ * itself, so what became of a message is announced here alongside its scheduling and cancellation
+ * rather than being reported back to the module by a host.
  */
 export const schedulingEventSchema = Type.Union([
     Type.Object(

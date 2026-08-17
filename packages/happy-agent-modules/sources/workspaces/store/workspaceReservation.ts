@@ -1,11 +1,7 @@
 import type { AgentDatabase } from "@slopus/happy-agent-base";
 import { Value } from "@sinclair/typebox/value";
 
-import {
-    workspacePathSchema,
-    type Workspace,
-    type WorkspaceReserveHooks,
-} from "../Workspace.js";
+import { workspacePathSchema, type Workspace, type WorkspaceReserveHooks } from "../Workspace.js";
 import {
     workspaceBranchName,
     workspaceNameKey,
@@ -180,14 +176,10 @@ export function assertReservationStillMeans(
         throw new Error("That workspace ID already names a workspace with a different base.");
     }
     if (input.baseCommit !== undefined && existing.baseCommit !== input.baseCommit) {
-        throw new Error(
-            "That workspace ID already names a workspace cut from a different commit.",
-        );
+        throw new Error("That workspace ID already names a workspace cut from a different commit.");
     }
     if (input.gitCommonDir !== undefined && existing.gitCommonDir !== input.gitCommonDir) {
-        throw new Error(
-            "That workspace ID already names a workspace in another Git directory.",
-        );
+        throw new Error("That workspace ID already names a workspace in another Git directory.");
     }
     if (
         input.creatorSessionId !== undefined &&

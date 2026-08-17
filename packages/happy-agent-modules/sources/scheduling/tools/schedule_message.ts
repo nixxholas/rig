@@ -22,7 +22,7 @@ export function scheduleMessageTool(scheduling: SchedulingModule, agentId: strin
     return defineAgentTool({
         name: "schedule_message",
         description:
-            "Schedule a message to any known agent, including yourself, at a future time. Use ISO 8601, RFC 2822, or a Unix timestamp for at, or use a duration. The host owns durable delivery.",
+            "Send a message at a future time to any agent whose ID you know, including yourself. Give the time as a duration in `in`, or as a date in `at` written as ISO 8601, RFC 2822, or a Unix timestamp. The message is kept and delivered even if this session restarts first.",
         parameters: scheduleMessageToolParametersSchema,
         returnType: schedulingScheduledMessageSchema,
         durable: true,

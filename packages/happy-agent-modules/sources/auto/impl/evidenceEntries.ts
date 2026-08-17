@@ -1,7 +1,4 @@
-import type {
-    AgentMessageMetadata,
-    AgentBaseToolOutcome,
-} from "@slopus/happy-agent-base";
+import type { AgentMessageMetadata, AgentBaseToolOutcome } from "@slopus/happy-agent-base";
 import type { SessionOutputBlock, SessionUserMessage } from "@slopus/happy-providers";
 
 import type { AutoEvidenceEntry } from "../AutoReviewTranscript.js";
@@ -124,9 +121,7 @@ function untrustedAgentEntry(
     return { category, entry, trustedUserEvidence: false, trustedUserEvidenceTruncated: false };
 }
 
-function inputBlocks(
-    content: SessionUserMessage["content"],
-): AutoTranscriptMessage["blocks"] {
+function inputBlocks(content: SessionUserMessage["content"]): AutoTranscriptMessage["blocks"] {
     return content.map((block) =>
         block.type === "text"
             ? { type: "text" as const, text: block.text }

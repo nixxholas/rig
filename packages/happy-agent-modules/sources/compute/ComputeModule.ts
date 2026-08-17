@@ -256,10 +256,7 @@ export class ComputeModule implements AgentModule {
             return compute === undefined ? "" : computeInstructionsForVendor(vendorFor(scope));
         },
 
-        tools: async (
-            ctx: Context,
-            scope: AgentModuleScope,
-        ): Promise<readonly AnyAgentTool[]> => {
+        tools: async (ctx: Context, scope: AgentModuleScope): Promise<readonly AnyAgentTool[]> => {
             const compute = await this.resolve(ctx, scope.agent.id);
             if (compute === undefined) return [];
             const reads = new FileReadLog(scope.kv, this.#readLocks, scope.agent.id);

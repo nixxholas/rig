@@ -1,10 +1,7 @@
 import type { Context } from "@steve.kite/stdlib";
 
 import type { Workspace } from "./Workspace.js";
-import type {
-    WorkspaceAuthorization,
-    WorkspaceAuthorizationAction,
-} from "./WorkspaceStore.js";
+import type { WorkspaceAuthorization, WorkspaceAuthorizationAction } from "./WorkspaceStore.js";
 import { isPromiseLike } from "./workspaceRuntime.js";
 
 /**

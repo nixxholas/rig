@@ -6,13 +6,7 @@ import {
     gitWatchTargets,
     watchGitRepositoryChanges,
 } from "../../sources/modules/git/watchGitRepositoryChanges.js";
-import {
-    cleanupRoots,
-    commitFile,
-    createRepository,
-    git,
-    gitRunner,
-} from "./helpers.js";
+import { cleanupRoots, commitFile, createRepository, git, gitRunner } from "./helpers.js";
 
 const disposers: (() => void)[] = [];
 afterEach(async () => {

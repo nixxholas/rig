@@ -1,7 +1,7 @@
 import { defineAgentTool } from "@slopus/happy-agent-base";
 import { Type, type Static } from "@sinclair/typebox";
 
-import { searchPageSchema } from "../Search.js";
+import { searchAnswerSchema } from "../Search.js";
 import type { SearchModule } from "../SearchModule.js";
 
 const inputSchema = Type.Object(
@@ -21,7 +21,7 @@ export function grokWebSearchTool(search: SearchModule, agentId: string) {
         description:
             "Search published web pages through Grok. Use Grok X search for posts and social reaction.",
         parameters: inputSchema,
-        returnType: searchPageSchema,
+        returnType: searchAnswerSchema,
         durable: false,
         requiresAutoOrFullAccess: true,
         shouldReviewInAutoMode: () => true,
@@ -36,6 +36,6 @@ export function grokWebSearchTool(search: SearchModule, agentId: string) {
                     : { allowedDomains: input.include_domains }),
                 ...(input.provider_id === undefined ? {} : { providerId: input.provider_id }),
             }),
-        toLLM: (page) => [{ type: "text", text: search.formatSearchForModel(page) }],
+        toLLM: (answer) => [{ type: "text", text: search.formatSearchAnswerForModel(answer) }],
     });
 }

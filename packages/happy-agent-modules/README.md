@@ -67,15 +67,15 @@ model-facing wrapper over the method a host would call.
 - **Events** arrive twice: `onEventTransactional` inside the committing transaction, and `onEvent`
   after the host's outermost commit via stdlib `afterCommit`. A post-commit listener failure is
   reported, never converted into a failed tool call.
-- **External things** — sockets, processes, credentials, clocks, schedulers, brokers, catalogs — are
-  injected as narrow TypeBox-validated structural contracts. No module opens a database, spawns a
-  process, or resolves a path on its own.
+- **External things** — sockets, processes, credentials, brokers, catalogs — are injected as narrow
+  TypeBox-validated structural contracts. No module opens a database, spawns a process, or resolves
+  a path on its own. Time is different: a capability that is nothing but time, such as scheduling,
+  owns its own clock and timers rather than delegating them to the host.
 - **Isolation.** A module imports neither Rig nor another module. Where two capabilities must meet,
   the host injects the seam (`ModelSwitchModule` takes a `HistoryReader`; `UserInputModule` takes an
   optional presence check).
 
-[GUIDELINES.md](./GUIDELINES.md) is the full normative rule set and the first thing to read before
-writing or changing a module. [PLAN.md](./PLAN.md) records the migration this package exists to
+[PLAN.md](./PLAN.md) records the migration this package exists to
 serve. [NICE_TO_HAVE.md](./NICE_TO_HAVE.md) records Agent Base improvements that would make modules
 smaller — none of them are blockers, and none may be worked around inside a module.
 

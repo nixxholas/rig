@@ -11,6 +11,13 @@ export * as compute from "@slopus/happy-agent-compute";
 export * from "./main.js";
 export * from "./modules/index.js";
 export {
+    startHappyAgent,
+    type HappyAgentModules,
+    type StartedHappyAgent,
+    type StartHappyAgentOptions,
+} from "./start/startHappyAgent.js";
+export { agentModels, agentProviders, defaultAgentProvider } from "./start/agentCatalog.js";
+export {
     applyEffectiveAgentSelection,
     createVanillaHappyAgentConfiguration,
     resolveEffectiveAgentSelection,

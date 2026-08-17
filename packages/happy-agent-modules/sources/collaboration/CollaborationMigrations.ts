@@ -23,10 +23,19 @@ export const collaborationMigrations: readonly AgentModuleMigration[] = [
     [
         "004-collaboration-storage-removed",
         async (_ctx, database) => {
-            await agentDatabaseRun(database, sql`DROP TABLE IF EXISTS happy_collaboration_obligations`);
-            await agentDatabaseRun(database, sql`DROP TABLE IF EXISTS happy_collaboration_messages`);
+            await agentDatabaseRun(
+                database,
+                sql`DROP TABLE IF EXISTS happy_collaboration_obligations`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`DROP TABLE IF EXISTS happy_collaboration_messages`,
+            );
             await agentDatabaseRun(database, sql`DROP TABLE IF EXISTS happy_collaboration_agents`);
-            await agentDatabaseRun(database, sql`DROP TABLE IF EXISTS happy_collaboration_receipts`);
+            await agentDatabaseRun(
+                database,
+                sql`DROP TABLE IF EXISTS happy_collaboration_receipts`,
+            );
         },
     ],
 ];

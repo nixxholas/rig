@@ -106,10 +106,7 @@ export const projectStorageKeySchema = Type.String({
 export const projectKindSchema = Type.Union([Type.Literal("home"), Type.Literal("regular")]);
 
 /** Whether the folder backing the project still exists on the host. */
-export const projectPresenceSchema = Type.Union([
-    Type.Literal("present"),
-    Type.Literal("missing"),
-]);
+export const projectPresenceSchema = Type.Union([Type.Literal("present"), Type.Literal("missing")]);
 
 export const projectInitializationStatusSchema = Type.Union([
     Type.Literal("initializing"),

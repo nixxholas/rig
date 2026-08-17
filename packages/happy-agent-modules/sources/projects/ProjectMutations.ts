@@ -132,7 +132,10 @@ export class ProjectMutations {
                 }
             }
             if (raw.changed) {
-                await this.observe(txCtx, await this.newEvent(txCtx, agentId, spec.event(after, before)));
+                await this.observe(
+                    txCtx,
+                    await this.newEvent(txCtx, agentId, spec.event(after, before)),
+                );
             }
             return structuredClone(raw);
         });
@@ -144,13 +147,7 @@ export class ProjectMutations {
         ownerAgentId: string,
         action: ProjectAuthorizationAction,
     ): Promise<void> {
-        await authorizeProjectAccess(
-            ctx,
-            this.#authorization,
-            actingAgentId,
-            ownerAgentId,
-            action,
-        );
+        await authorizeProjectAccess(ctx, this.#authorization, actingAgentId, ownerAgentId, action);
     }
 
     async getOptional(
@@ -195,11 +192,7 @@ export class ProjectMutations {
         return structuredClone(raw);
     }
 
-    async readSettings(
-        ctx: Context,
-        agentId: string,
-        projectId: string,
-    ): Promise<ProjectSettings> {
+    async readSettings(ctx: Context, agentId: string, projectId: string): Promise<ProjectSettings> {
         const raw = await requirePromise(
             this.#store.readSettings(ctx, agentId, projectId),
             "Project store read settings",

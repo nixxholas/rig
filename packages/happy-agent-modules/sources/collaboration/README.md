@@ -3,7 +3,7 @@
 Lets one agent put another to work.
 
 ```ts
-new CollaborationModule()
+new CollaborationModule();
 ```
 
 There is nothing to configure and nothing to inject. The module reaches the rest of the runtime
@@ -67,15 +67,32 @@ The parser change looks correct, but it drops the trailing newline case.
 
 A run that said nothing reports nothing. A collaborator interrupted mid-sentence, or told that no
 action is needed, has no answer to pass on, and announcing its silence would only tell the creator
-something it already knows. The message is tagged
+something it already knows.
+
+A run that _failed_ is not silent, though. It stopped for a reason, and that reason is reported in
+place of the answer:
+
+```
+Collaborator b7c1 stopped without answering. It failed with, verbatim.
+
+You've hit your Codex usage limit on the ChatGPT Pro plan. Try again at Aug 19, 2026, 11:30 PM.
+```
+
+Nothing waits for a collaborator, so a failure that reported nothing would leave its creator
+expecting an answer that can never arrive. The reason is also what decides whether to retry, to send
+the work to a different model, or to give up, and the creator can discover it no other way. The
+failure is noted from the terminal error event while the run is still in progress, so a run that
+recovers and goes on to speak reports what it said rather than what it survived.
+
+The message is tagged
 `collaboration.kind = "subagent_report"` with the collaborator's `fromAgentId`, which is what a
 presentation layer keys on to render it as a notice rather than as an agent talking. It is sent
 under the settlement's own identity, so a retried report is the same message rather than a second
 one.
 
-The last thing the model said is kept in the **run store** while the run is in progress — the one
-piece of state this module keeps. That store exists only for the duration of a run and is erased by
-the transaction that settles it.
+The last thing the model said, and why it stopped answering, are kept in the **run store** while the
+run is in progress — the only state this module keeps. That store exists only for the duration of a
+run and is erased by the transaction that settles it.
 
 Reading it and delivering the report both happen inside that settling transaction, which is what
 makes the report reliable. `send` composes with an outer storage transaction: the queue entry is
@@ -119,11 +136,11 @@ own — so whatever shows a person their agents names it the same way it names e
 
 ## Tools
 
-| Tool | Effect |
-| --- | --- |
-| `create_agent` | Creates a collaborator and delivers its opening task. |
+| Tool                 | Effect                                                          |
+| -------------------- | --------------------------------------------------------------- |
+| `create_agent`       | Creates a collaborator and delivers its opening task.           |
 | `send_agent_message` | Delivers one message to a collaborator, or back to its creator. |
-| `interrupt_agent` | Signals cancellation of a collaborator's current turn. |
+| `interrupt_agent`    | Signals cancellation of a collaborator's current turn.          |
 
 `interrupt_agent` is reviewed in Auto mode; the other two are not.
 

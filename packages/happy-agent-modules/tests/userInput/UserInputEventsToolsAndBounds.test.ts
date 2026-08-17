@@ -15,7 +15,6 @@ import {
     createUserInputDatabase,
     createUserInputModule,
     singularAsk,
-    UserInputTestBroker,
 } from "./userInputTestSupport.js";
 
 const agentId = "agent-one";
@@ -24,7 +23,7 @@ describe("UserInput events, tools, and output bounds", () => {
     it("delivers one stable deeply frozen event through outer afterCommit", async () => {
         let transactional: UserInputEvent | undefined;
         let postCommit: UserInputEvent | undefined;
-        const module = createUserInputModule(new UserInputTestBroker(), {
+        const module = createUserInputModule({
             listener: {
                 onEventTransactional: (_ctx, event) => {
                     transactional = event;
@@ -78,7 +77,7 @@ describe("UserInput events, tools, and output bounds", () => {
     it("publishes no post-commit event or durable row after outer rollback", async () => {
         const transactional: string[] = [];
         const postCommit: string[] = [];
-        const module = createUserInputModule(new UserInputTestBroker(), {
+        const module = createUserInputModule({
             listener: {
                 onEventTransactional: (_ctx, event) => {
                     transactional.push(event.type);
@@ -108,7 +107,7 @@ describe("UserInput events, tools, and output bounds", () => {
     });
 
     it("rolls back durable state when a transactional listener fails", async () => {
-        const module = createUserInputModule(new UserInputTestBroker(), {
+        const module = createUserInputModule({
             listener: {
                 onEventTransactional: () => {
                     throw new Error("transactional listener failed");
@@ -139,7 +138,7 @@ describe("UserInput events, tools, and output bounds", () => {
                 throw new Error("primitive conversion failed");
             },
         };
-        const module = createUserInputModule(new UserInputTestBroker(), {
+        const module = createUserInputModule({
             listener: {
                 onEvent: () => {
                     throw hostile;
@@ -171,23 +170,7 @@ describe("UserInput events, tools, and output bounds", () => {
         }
     });
 
-    it("preserves owning this for class-backed broker, listener, and authorization adapters", async () => {
-        class Broker {
-            readonly calls: string[] = [];
-            answer:
-                | ((ctx: Context, requestId: string) => Promise<UserInputTerminalRequest>)
-                | undefined;
-
-            async wait(
-                ctx: Context,
-                _agentId: string,
-                requestId: string,
-            ): Promise<UserInputTerminalRequest> {
-                this.calls.push(requestId);
-                if (this.answer === undefined) throw new Error("missing answer callback");
-                return await this.answer(ctx, requestId);
-            }
-        }
+    it("preserves owning this for class-backed listener and authorization adapters", async () => {
         class Listener {
             readonly events: string[] = [];
 
@@ -212,22 +195,15 @@ describe("UserInput events, tools, and output bounds", () => {
                 return true;
             }
         }
-        const broker = new Broker();
         const listener = new Listener();
         const authorization = new Authorization();
         const module = new UserInputModule({
-            broker,
             listener,
             authorization,
             idFactory: () => "class-request",
             eventIdFactory: () => "class-event",
             clock: () => 100,
         });
-        broker.answer = async (ctx, requestId) =>
-            (await module.answer(ctx, agentId, {
-                requestId,
-                answer: "Use it.",
-            })) as UserInputTerminalRequest;
         const database = createUserInputDatabase(module, "user-input-class-adapters");
         await database.ready;
         try {
@@ -237,10 +213,12 @@ describe("UserInput events, tools, and output bounds", () => {
                 singularAsk(),
                 "class-request",
             );
-            await expect(module.wait(database.context, agentId, request.id)).resolves.toMatchObject(
-                { status: "answered" },
-            );
-            expect(broker.calls).toEqual(["class-request"]);
+            const waiting = module.wait(database.context, agentId, request.id);
+            await module.answer(database.context, agentId, {
+                requestId: request.id,
+                answer: "Use it.",
+            });
+            await expect(waiting).resolves.toMatchObject({ status: "answered" });
             expect(listener.events).toEqual([
                 "tx:user_input_requested",
                 "post:user_input_requested",
@@ -254,7 +232,7 @@ describe("UserInput events, tools, and output bounds", () => {
     });
 
     it.fails("keeps model-facing output bounded while retaining request identity and continuation", () => {
-        const module = createUserInputModule(new UserInputTestBroker(), {
+        const module = createUserInputModule({
             maxOutputCharacters: 256,
         });
         const request = {
@@ -298,8 +276,7 @@ describe("UserInput events, tools, and output bounds", () => {
     });
 
     it("uses provider call IDs for request identity and supports detail reads through the same tool", async () => {
-        const broker = new UserInputTestBroker();
-        const module = createUserInputModule(broker);
+        const module = createUserInputModule();
         const database = createUserInputDatabase(module, "user-input-tools");
         await database.ready;
         try {
@@ -317,12 +294,15 @@ describe("UserInput events, tools, and output bounds", () => {
                     providerCallId: "provider-call-id",
                 } as never,
             );
-            await vi.waitFor(() => expect(broker.calls).toEqual(["provider-call-id"]));
-            const answered = await module.answer(database.context, agentId, {
+            await vi.waitFor(async () => {
+                expect(
+                    await module.get(database.context, agentId, "provider-call-id"),
+                ).toBeDefined();
+            });
+            await module.answer(database.context, agentId, {
                 requestId: "provider-call-id",
                 answer: "Proceed.",
             });
-            broker.settle(answered as UserInputTerminalRequest);
             await expect(running).resolves.toMatchObject({
                 id: "provider-call-id",
                 status: "answered",
@@ -370,7 +350,6 @@ describe("UserInput events, tools, and output bounds", () => {
 
     it("rejects invalid injected IDs, clocks, and answer/output bounds before writing", async () => {
         const badId = new UserInputModule({
-            broker: new UserInputTestBroker(),
             idFactory: () => "",
             eventIdFactory: () => "event",
             clock: () => 100,
@@ -389,7 +368,6 @@ describe("UserInput events, tools, and output bounds", () => {
         }
 
         const badClock = new UserInputModule({
-            broker: new UserInputTestBroker(),
             idFactory: () => "bad-clock",
             eventIdFactory: () => "event",
             clock: () => -1,
@@ -404,7 +382,7 @@ describe("UserInput events, tools, and output bounds", () => {
             badClockDatabase.close();
         }
 
-        const bounded = createUserInputModule(new UserInputTestBroker(), {
+        const bounded = createUserInputModule({
             maxAnswerCharacters: 4,
             maxCancelReasonCharacters: 4,
             maxContextCharacters: 4,

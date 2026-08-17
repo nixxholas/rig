@@ -220,15 +220,4 @@ export {
     projectStorageKey,
     uniqueProjectStorageKey,
 } from "./projectIdentity.js";
-export { archiveProjectTool } from "./tools/archive_project.js";
-export { clearProjectAvatarTool } from "./tools/clear_project_avatar.js";
-export { createProjectTool } from "./tools/create_project.js";
-export { ensureProjectTool } from "./tools/ensure_project.js";
-export { getProjectSettingsTool } from "./tools/get_project_settings.js";
-export { getProjectTool } from "./tools/get_project.js";
 export { listProjectsTool } from "./tools/list_projects.js";
-export { reorderProjectTool } from "./tools/reorder_project.js";
-export { renameProjectTool } from "./tools/rename_project.js";
-export { restoreProjectTool } from "./tools/restore_project.js";
-export { setProjectAvatarTool } from "./tools/set_project_avatar.js";
-export { updateProjectSettingsTool } from "./tools/update_project_settings.js";

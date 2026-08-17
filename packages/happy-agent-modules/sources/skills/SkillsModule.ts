@@ -175,10 +175,7 @@ export class SkillsModule implements AgentModule {
             return entries.length === 0 ? "" : formatInstructions(entries);
         },
 
-        tools: async (
-            ctx: Context,
-            scope: AgentModuleScope,
-        ): Promise<readonly AnyAgentTool[]> => {
+        tools: async (ctx: Context, scope: AgentModuleScope): Promise<readonly AnyAgentTool[]> => {
             const durableSkillsConfigured = hasDurableSkills(this.#skillRoots);
             if (
                 (await this.#compute.resolve(ctx, scope.agent.id)) === undefined &&

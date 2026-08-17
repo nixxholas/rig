@@ -1,10 +1,8 @@
 import { Type, type Static } from "@sinclair/typebox";
+import type { Context } from "@steve.kite/stdlib";
 
 export const MAX_SEARCH_AGENT_ID_LENGTH = 256;
 export const MAX_SEARCH_QUERY_LENGTH = 20_000;
-/** The largest zero-based result offset accepted by the search boundary. */
-export const MAX_SEARCH_CURSOR = 1_000_000;
-export const MAX_SEARCH_RESULT_ID_LENGTH = 128;
 export const MAX_SEARCH_RESULT_TITLE_LENGTH = 2_000;
 /*
  * Search and fetch output must keep an actionable URL intact even when the model
@@ -13,10 +11,9 @@ export const MAX_SEARCH_RESULT_TITLE_LENGTH = 2_000;
  * continuation or truncation marker.
  */
 export const MAX_SEARCH_RESULT_URL_LENGTH = 200;
-export const MAX_SEARCH_RESULT_SNIPPET_LENGTH = 10_000;
-export const MAX_SEARCH_RESULT_SOURCE_LENGTH = 512;
-export const MAX_SEARCH_RESULT_PUBLISHED_AT_LENGTH = 128;
-export const MAX_SEARCH_RESULTS_PER_PAGE = 50;
+/** A vendor search answers in prose; the bound keeps one answer from filling a whole context. */
+export const MAX_SEARCH_ANSWER_LENGTH = 100_000;
+export const MAX_SEARCH_ANSWER_SOURCES = 100;
 export const MAX_FETCH_URL_LENGTH = 200;
 export const MAX_FETCH_TITLE_LENGTH = 2_000;
 export const MAX_FETCH_CONTENT_TYPE_LENGTH = 256;
@@ -26,51 +23,10 @@ export const searchAgentIdSchema = Type.String({
     minLength: 1,
     maxLength: MAX_SEARCH_AGENT_ID_LENGTH,
 });
-const searchTextSchema = Type.String({
+export const searchTextSchema = Type.String({
     minLength: 1,
     maxLength: MAX_SEARCH_QUERY_LENGTH,
 });
-/** A cursor is a bounded, zero-based offset into the result set. */
-export const searchCursorSchema = Type.Integer({
-    minimum: 0,
-    maximum: MAX_SEARCH_CURSOR,
-});
-
-export const searchResultSchema = Type.Object(
-    {
-        id: Type.Optional(
-            Type.String({
-                minLength: 1,
-                maxLength: MAX_SEARCH_RESULT_ID_LENGTH,
-            }),
-        ),
-        title: Type.String({
-            minLength: 1,
-            maxLength: MAX_SEARCH_RESULT_TITLE_LENGTH,
-        }),
-        url: Type.String({
-            minLength: 1,
-            maxLength: MAX_SEARCH_RESULT_URL_LENGTH,
-        }),
-        snippet: Type.Optional(Type.String({ maxLength: MAX_SEARCH_RESULT_SNIPPET_LENGTH })),
-        source: Type.Optional(Type.String({ maxLength: MAX_SEARCH_RESULT_SOURCE_LENGTH })),
-        publishedAt: Type.Optional(
-            Type.String({ maxLength: MAX_SEARCH_RESULT_PUBLISHED_AT_LENGTH }),
-        ),
-        score: Type.Optional(Type.Number()),
-    },
-    { additionalProperties: false },
-);
-
-export const searchQuerySchema = Type.Object(
-    {
-        query: searchTextSchema,
-        limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })),
-        cursor: Type.Optional(searchCursorSchema),
-    },
-    { additionalProperties: false },
-);
-
 export const searchProviderSchema = Type.Union([
     Type.Literal("bedrock"),
     Type.Literal("claude"),
@@ -102,19 +58,31 @@ export const searchProviderRequestSchema = Type.Object(
         allowedDomains: Type.Optional(Type.Array(searchDomainSchema, { maxItems: 100 })),
         blockedDomains: Type.Optional(Type.Array(searchDomainSchema, { maxItems: 100 })),
         latest: Type.Optional(Type.Boolean()),
-        limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })),
-        cursor: Type.Optional(searchCursorSchema),
     },
     { additionalProperties: false },
 );
 
-export const searchPageSchema = Type.Object(
+/** One page or post the vendor cited while answering. */
+export const searchSourceSchema = Type.Object(
     {
+        title: Type.String({ minLength: 1, maxLength: MAX_SEARCH_RESULT_TITLE_LENGTH }),
+        url: Type.String({ minLength: 1, maxLength: MAX_SEARCH_RESULT_URL_LENGTH }),
+    },
+    { additionalProperties: false },
+);
+
+/**
+ * What a vendor search comes back with: the vendor's own written answer and the sources it
+ * cited. A vendor searches, reads, and synthesizes on its own side, so the useful result is the
+ * answer rather than a list of links Rig would have to read again.
+ */
+export const searchAnswerSchema = Type.Object(
+    {
+        provider: searchProviderSchema,
         query: searchTextSchema,
-        results: Type.Array(searchResultSchema, {
-            maxItems: MAX_SEARCH_RESULTS_PER_PAGE,
-        }),
-        nextCursor: Type.Optional(searchCursorSchema),
+        answer: Type.String({ minLength: 1, maxLength: MAX_SEARCH_ANSWER_LENGTH }),
+        sources: Type.Array(searchSourceSchema, { maxItems: MAX_SEARCH_ANSWER_SOURCES }),
+        durationMs: Type.Number({ minimum: 0 }),
     },
     { additionalProperties: false },
 );
@@ -140,10 +108,17 @@ export const fetchResultSchema = Type.Object(
     { additionalProperties: false },
 );
 
-export type SearchResult = Static<typeof searchResultSchema>;
-export type SearchQuery = Static<typeof searchQuerySchema>;
 export type SearchProvider = Static<typeof searchProviderSchema>;
 export type SearchProviderRequest = Static<typeof searchProviderRequestSchema>;
-export type SearchPage = Static<typeof searchPageSchema>;
+export type SearchSource = Static<typeof searchSourceSchema>;
+export type SearchAnswer = Static<typeof searchAnswerSchema>;
 export type FetchInput = Static<typeof fetchInputSchema>;
 export type FetchResult = Static<typeof fetchResultSchema>;
+
+/*
+ * Context is an extension-bearing runtime object whose enumerable string surface is empty.
+ * Keep the schema closed while preserving the real Context type.
+ */
+export const searchContextSchema = Type.Unsafe<Context>(
+    Type.Object({}, { additionalProperties: false }),
+);

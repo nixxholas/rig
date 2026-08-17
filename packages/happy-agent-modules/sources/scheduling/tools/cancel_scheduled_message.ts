@@ -2,7 +2,7 @@ import { defineAgentTool } from "@slopus/happy-agent-base";
 
 import type { SchedulingModule } from "../SchedulingModule.js";
 import {
-    schedulingCancelToolInputSchema,
+    schedulingCancelInputSchema,
     schedulingScheduledMessageSchema,
     type SchedulingCancelInput,
 } from "../Scheduling.js";
@@ -11,8 +11,8 @@ export function cancelScheduledMessageTool(scheduling: SchedulingModule, agentId
     return defineAgentTool({
         name: "cancel_scheduled_message",
         description:
-            "Cancel one of this agent's scheduled messages by ID. Delivery races are settled by the host transaction.",
-        parameters: schedulingCancelToolInputSchema,
+            "Withdraw a message you scheduled, by ID. A message already delivered stays delivered.",
+        parameters: schedulingCancelInputSchema,
         returnType: schedulingScheduledMessageSchema,
         durable: true,
         shouldReviewInAutoMode: () => false,

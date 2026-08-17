@@ -95,7 +95,12 @@ export class AutoReviewRuntimeModule implements AgentModule {
     takeCapture(reviewerAgentId: string): AutoReviewCapture {
         const state = this.#state.get(reviewerAgentId);
         if (state === undefined) {
-            return { entries: [], usage: { ...EMPTY_USAGE }, inferred: false, doneState: undefined };
+            return {
+                entries: [],
+                usage: { ...EMPTY_USAGE },
+                inferred: false,
+                doneState: undefined,
+            };
         }
         return {
             entries: state.entries,

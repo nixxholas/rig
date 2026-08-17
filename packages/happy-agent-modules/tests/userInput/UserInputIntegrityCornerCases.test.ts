@@ -15,14 +15,13 @@ import {
     createUserInputModule,
     onlinePresence,
     singularAsk,
-    UserInputTestBroker,
 } from "./userInputTestSupport.js";
 
 const agentId = "agent-one";
 
 describe("UserInput persistence and boundary integrity", () => {
     it.fails("rejects a row whose denormalized agent column disagrees with its JSON", async () => {
-        const module = createUserInputModule(new UserInputTestBroker());
+        const module = createUserInputModule();
         const database = createUserInputDatabase(module, "user-input-column-integrity");
         await database.ready;
         try {
@@ -47,7 +46,7 @@ describe("UserInput persistence and boundary integrity", () => {
     });
 
     it.fails("rejects an answered batch whose primary answer disagrees with its answer map", async () => {
-        const module = createUserInputModule(new UserInputTestBroker());
+        const module = createUserInputModule();
         const database = createUserInputDatabase(module, "user-input-batch-answer-integrity");
         await database.ready;
         try {
@@ -100,9 +99,7 @@ describe("UserInput persistence and boundary integrity", () => {
 
     it.fails("passes the transaction-derived context to clocks during settlement", async () => {
         const seen: Context[] = [];
-        const broker = new UserInputTestBroker();
         const module = new UserInputModule({
-            broker,
             idFactory: () => "clock-context",
             eventIdFactory: () => "clock-event",
             clock: (ctx) => {
@@ -130,9 +127,8 @@ describe("UserInput persistence and boundary integrity", () => {
         }
     });
 
-    it.fails("does not call the external broker after a synchronous presence-away subscription callback", async () => {
-        const broker = new UserInputTestBroker();
-        const module = createUserInputModule(broker, {
+    it("settles away on a synchronous presence-away subscription callback", async () => {
+        const module = createUserInputModule({
             presence: {
                 state: () => onlinePresence(),
                 subscribe: (ctx, _agentId, callback) => {
@@ -157,7 +153,6 @@ describe("UserInput persistence and boundary integrity", () => {
             await expect(module.wait(database.context, agentId, request.id)).resolves.toMatchObject(
                 { status: "away" },
             );
-            expect(broker.calls).toEqual([]);
         } finally {
             database.close();
         }
@@ -187,7 +182,7 @@ describe("UserInput persistence and boundary integrity", () => {
     });
 
     it.fails("rejects a request whose valid per-field inputs exceed the total detail bound", async () => {
-        const module = createUserInputModule(new UserInputTestBroker());
+        const module = createUserInputModule();
         const database = createUserInputDatabase(module, "user-input-detail-total-bound");
         await database.ready;
         try {
@@ -216,7 +211,6 @@ describe("UserInput persistence and boundary integrity", () => {
 
     it("rejects invalid event IDs before committing a request", async () => {
         const module = new UserInputModule({
-            broker: new UserInputTestBroker(),
             idFactory: () => "invalid-event-id-request",
             eventIdFactory: () => "",
             clock: () => 100,
@@ -236,7 +230,7 @@ describe("UserInput persistence and boundary integrity", () => {
     });
 
     it("rejects non-boolean authorization results without exposing the request", async () => {
-        const module = createUserInputModule(new UserInputTestBroker(), {
+        const module = createUserInputModule({
             authorization: {
                 authorize: () => "yes" as never,
             },
@@ -252,40 +246,6 @@ describe("UserInput persistence and boundary integrity", () => {
             );
             await expect(module.get(database.context, "other-agent", request.id)).rejects.toThrow(
                 "non-boolean",
-            );
-        } finally {
-            database.close();
-        }
-    });
-
-    it("accepts a broker terminal request only when all terminal fields remain schema-valid", async () => {
-        const terminalBroker = {
-            async wait(): Promise<UserInputTerminalRequest> {
-                return {
-                    id: "schema-terminal",
-                    askingAgentId: agentId,
-                    question: "Question",
-                    context: "Context",
-                    status: "answered",
-                    answer: "Answer",
-                    createdAt: 100,
-                    updatedAt: 100,
-                    answeredAt: 100,
-                };
-            },
-        };
-        const module = new UserInputModule({
-            broker: terminalBroker,
-            idFactory: () => "schema-terminal",
-            eventIdFactory: () => "event",
-            clock: () => 100,
-        });
-        const database = createUserInputDatabase(module, "user-input-terminal-schema");
-        await database.ready;
-        try {
-            await module.ask(database.context, agentId, singularAsk(), "schema-terminal");
-            await expect(module.wait(database.context, agentId, "schema-terminal")).rejects.toThrow(
-                "authoritative storage",
             );
         } finally {
             database.close();

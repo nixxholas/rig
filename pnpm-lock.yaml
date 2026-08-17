@@ -269,6 +269,9 @@ importers:
       '@opentelemetry/semantic-conventions':
         specifier: ^1.43.0
         version: 1.43.0
+      '@paralleldrive/cuid2':
+        specifier: ^3.3.0
+        version: 3.3.0
       '@sinclair/typebox':
         specifier: ^0.34.49
         version: 0.34.49
@@ -290,6 +293,9 @@ importers:
       smol-toml:
         specifier: ^1.7.0
         version: 1.7.0
+      turndown:
+        specifier: ^7.2.4
+        version: 7.2.4
     devDependencies:
       '@slopus/happy-agent-base':
         specifier: npm:@slopus/happy-agent-base@0.0.19
@@ -297,6 +303,9 @@ importers:
       '@types/node':
         specifier: ^24.0.10
         version: 24.13.3
+      '@types/turndown':
+        specifier: ^5.0.5
+        version: 5.0.6
       typescript:
         specifier: ^7.0.2
         version: 7.0.2
@@ -2037,6 +2046,9 @@ packages:
 
   '@types/ssh2@1.15.5':
     resolution: {integrity: sha512-N1ASjp/nXH3ovBHddRJpli4ozpk6UdDYIX4RJWFa9L1YKnzdhTlVmiGHm4DZnj/jLbqZpes4aeR30EFGQtvhQQ==}
+
+  '@types/turndown@5.0.6':
+    resolution: {integrity: sha512-ru00MoyeeouE5BX4gRL+6m/BsDfbRayOskWqUvh7CLGW+UXxHQItqALa38kKnOiZPqJrtzJUgAC2+F0rL1S4Pg==}
 
   '@types/ws@8.18.1':
     resolution: {integrity: sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==}
@@ -5200,6 +5212,8 @@ snapshots:
   '@types/ssh2@1.15.5':
     dependencies:
       '@types/node': 18.19.130
+
+  '@types/turndown@5.0.6': {}
 
   '@types/ws@8.18.1':
     dependencies:

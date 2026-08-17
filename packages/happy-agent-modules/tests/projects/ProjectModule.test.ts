@@ -16,15 +16,6 @@ import {
     projectSettingsSchema,
     projectSettingsUpdateInputSchema,
     ProjectsModule,
-    archiveProjectTool,
-    clearProjectAvatarTool,
-    createProjectTool,
-    ensureProjectTool,
-    reorderProjectTool,
-    renameProjectTool,
-    restoreProjectTool,
-    setProjectAvatarTool,
-    updateProjectSettingsTool,
 } from "../../sources/projects/index.js";
 import { writeGuardedProject } from "../../sources/projects/store/projectRecords.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
@@ -129,41 +120,17 @@ describe("ProjectsModule", () => {
         ).toBe(false);
     });
 
-    it("marks every durable catalog mutation tool transactional", () => {
-        const projects = new ProjectsModule({});
-        const tools = [
-            createProjectTool(projects, "agent-a"),
-            ensureProjectTool(projects, "agent-a"),
-            renameProjectTool(projects, "agent-a"),
-            archiveProjectTool(projects, "agent-a"),
-            restoreProjectTool(projects, "agent-a"),
-            reorderProjectTool(projects, "agent-a"),
-            setProjectAvatarTool(projects, "agent-a"),
-            clearProjectAvatarTool(projects, "agent-a"),
-            updateProjectSettingsTool(projects, "agent-a"),
-        ];
-
-        expect(tools.every((tool) => tool.durable === true && tool.transactional === true)).toBe(
-            true,
-        );
+    it("offers the catalog only when the user asked for cross-workspace work", async () => {
+        expect(await projectToolNames(new ProjectsModule({}), "agent-a")).toEqual([]);
+        expect(
+            await projectToolNames(new ProjectsModule({ crossWorkspace: true }), "agent-a"),
+        ).toEqual(["list_projects"]);
     });
 
-    it("reviews archival in Auto mode and discloses the host cleanup it starts", () => {
-        const projects = new ProjectsModule({});
-        const archive = archiveProjectTool(projects, "agent-a");
-        const rename = renameProjectTool(projects, "agent-a");
-        const context = { agent: { id: "agent-a" } } as never;
-
-        expect(archive.shouldReviewInAutoMode({ projectId: "project-1" }, context)).toBe(true);
-        const disclosure = archive.describeAutoPermissionAction!({ projectId: "project-1" }, context);
-        expect(disclosure).toContain("project-1");
-        expect(disclosure).toContain("folder");
-        expect(disclosure).toContain("worktree");
-        // Reviewing archival must not drag the call into Full access.
-        expect("shouldRunInFullAccessInAutoMode" in archive).toBe(false);
-        expect(rename.shouldReviewInAutoMode({ projectId: "project-1", name: "N" }, context)).toBe(
-            false,
-        );
+    it("keeps the catalog out of a subagent", async () => {
+        expect(
+            await projectToolNames(new ProjectsModule({ crossWorkspace: true }), "subagent-a"),
+        ).toEqual([]);
     });
 
     it("uses the context transaction for direct catalog mutations", async () => {
@@ -201,9 +168,9 @@ describe("ProjectsModule", () => {
                 nameSource: "user",
                 status: "archived",
             });
-            expect(
-                await projects.readSettings(database.context, "agent-a", created.id),
-            ).toEqual({ defaultWorkspaceCompute: { type: "local" } });
+            expect(await projects.readSettings(database.context, "agent-a", created.id)).toEqual({
+                defaultWorkspaceCompute: { type: "local" },
+            });
         } finally {
             database.close();
         }
@@ -282,11 +249,7 @@ describe("ProjectsModule", () => {
                 presence: "present",
             });
             // Nothing sets the home directory up, so a refresh is a no-op.
-            const refreshed = await projects.refresh(
-                database.context,
-                "agent-a",
-                home.project.id,
-            );
+            const refreshed = await projects.refresh(database.context, "agent-a", home.project.id);
             expect(refreshed).toEqual(home.project);
         } finally {
             database.close();
@@ -404,11 +367,7 @@ describe("ProjectsModule", () => {
                 initializationAttempt: 0,
             });
 
-            const landed = await projects.markCloneReady(
-                database.context,
-                "agent-a",
-                cloned.id,
-            );
+            const landed = await projects.markCloneReady(database.context, "agent-a", cloned.id);
             expect(landed.presence).toBe("present");
 
             const failed = await projects.markInitializationFailed(database.context, "agent-a", {
@@ -447,9 +406,9 @@ describe("ProjectsModule", () => {
                 initializationAttempt: 2,
             });
             expect(ready.initializationError).toBeUndefined();
-            expect(
-                await projects.markCloneReady(database.context, "agent-a", cloned.id),
-            ).toEqual(ready);
+            expect(await projects.markCloneReady(database.context, "agent-a", cloned.id)).toEqual(
+                ready,
+            );
 
             const refreshed = await projects.refresh(database.context, "agent-a", cloned.id);
             expect(refreshed).toMatchObject({
@@ -914,6 +873,20 @@ async function migratedProjectDatabase(name: string) {
         await migrate(database.context, database.database);
     }
     return database;
+}
+
+/** The tools this module hands one agent. `subagent-a` is the only agent here with a parent. */
+async function projectToolNames(
+    projects: ProjectsModule,
+    agentId: string,
+): Promise<readonly string[]> {
+    const agents = {
+        parentOf: (_ctx: unknown, id: string) =>
+            Promise.resolve(id === "subagent-a" ? "agent-a" : null),
+    } as never;
+    const hooks = projects.beforeStart(undefined as never, agents);
+    const tools = await hooks.tools!(undefined as never, { agent: { id: agentId } } as never);
+    return tools.map((tool) => tool.name);
 }
 
 async function projectIds(

@@ -11,10 +11,7 @@ import {
 } from "./projectRecords.js";
 
 /** Archival, restoration, and the host-reported state a project accumulates. */
-export function createProjectLifecycle(): Pick<
-    ProjectStore,
-    "archive" | "restore" | "applyState"
-> {
+export function createProjectLifecycle(): Pick<ProjectStore, "archive" | "restore" | "applyState"> {
     return {
         archive: async (ctx, actingAgentId, input) => {
             const database = databaseFor(ctx);
@@ -159,7 +156,12 @@ function withStateChanges(project: Project, changes: ProjectStateChanges): Proje
 
 function setOptional(
     project: Project,
-    field: "worktreeUnsupportedReason" | "initializationError" | "gitBranch" | "gitHead" | "gitUpstream",
+    field:
+        | "worktreeUnsupportedReason"
+        | "initializationError"
+        | "gitBranch"
+        | "gitHead"
+        | "gitUpstream",
     value: string | null,
 ): void {
     if (value === null) {

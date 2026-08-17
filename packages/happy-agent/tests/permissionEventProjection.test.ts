@@ -176,8 +176,7 @@ describe("projectSessionEvent for permission events", () => {
                 consecutiveRefusals: 3,
                 recentRefusals: 3,
                 recentWindowLength: 3,
-                reason:
-                    "Automatic permission review refused too many actions in this turn (3 in a row, 3 of the last 3), so the turn was stopped. Tell the user what you were trying to do and why it kept being refused.",
+                reason: "Automatic permission review refused too many actions in this turn (3 in a row, 3 of the last 3), so the turn was stopped. Tell the user what you were trying to do and why it kept being refused.",
             }),
             SESSION_ID,
         );

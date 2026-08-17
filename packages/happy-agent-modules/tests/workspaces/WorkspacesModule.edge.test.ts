@@ -15,6 +15,7 @@ import {
     WorkspacesModule,
 } from "../../sources/workspaces/index.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
+import { primaryAgents } from "../support/moduleHooks.js";
 
 function workspaceDatabase(name: string): ReturnType<typeof moduleDatabase> {
     const database = moduleDatabase([], name);
@@ -944,11 +945,34 @@ describe("WorkspacesModule edge contracts", () => {
         await database.ready;
         try {
             const workspaces = new WorkspacesModule({ enabled: false, host: HOST });
-            const hooks = await workspaces.beforeStart();
-            expect(hooks.tools?.(database.context, { agent: { id: "agent-a" } } as never)).toEqual(
-                [],
-            );
+            const hooks = workspaces.beforeStart(database.context, primaryAgents());
+            expect(
+                await hooks.tools?.(database.context, { agent: { id: "agent-a" } } as never),
+            ).toEqual([]);
             await expect(workspaces.list(database.context, "agent-a")).rejects.toThrow(/disabled/i);
+        } finally {
+            database.close();
+        }
+    });
+
+    it("gives workspace tools to a person's own conversation and not to a subagent", async () => {
+        const database = workspaceDatabase("workspaces-subagent-edge");
+        await database.ready;
+        try {
+            const workspaces = new WorkspacesModule({ host: HOST });
+            const agents = {
+                parentOf: (_ctx: unknown, agentId: string) =>
+                    Promise.resolve(agentId === "subagent-a" ? "agent-a" : null),
+            } as never;
+            const hooks = workspaces.beforeStart(database.context, agents);
+
+            const primary = await hooks.tools?.(database.context, {
+                agent: { id: "agent-a" },
+            } as never);
+            expect(primary?.map((tool) => tool.name)).toContain("list_workspaces");
+            expect(
+                await hooks.tools?.(database.context, { agent: { id: "subagent-a" } } as never),
+            ).toEqual([]);
         } finally {
             database.close();
         }

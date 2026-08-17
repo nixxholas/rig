@@ -2,21 +2,24 @@
 
 `UserInputModule` gives an agent one common `request_user_input` tool for asking a human a
 question and waiting for the answer. The module owns its request table in the Agent Base database.
-A host supplies only a narrow external wait broker.
+Nothing external mediates a wait: whoever has the answer calls `answer`, `cancel`, or `complete`
+on this module, and the settling transaction wakes every wait parked on that request once it
+commits.
 
 ```ts
 import { UserInputModule } from "@slopus/happy-agent-modules";
 
 const userInput = new UserInputModule({
-    broker, // external durable wait broker
     presence, // optional { state(ctx, agentId), subscribe(ctx, agentId, callback) }
 });
 ```
 
 Each create and settlement transition uses `ctx.inTx`; storage reads and writes the database facade
 on `ctx.db`. stdlib `afterCommit(ctx, callback)` registers post-commit event delivery against the
-outermost Agent Base transaction. The broker's `wait` method may suspend across daemon restarts;
-UserInputModule never holds a database transaction open while it waits.
+outermost Agent Base transaction, which is also where a parked wait is handed its committed
+outcome. UserInputModule never holds a database transaction open while it waits. A wait registers
+itself before it reads, then re-reads storage once, so a settlement that commits first is never
+missed; a wait started in a later process finds the terminal request already stored.
 
 Requests contain one to four related questions, each with an optional short header and labeled
 choices, plus bounded Markdown context. They have a discriminated outcome: `pending`, `answered`,
@@ -25,11 +28,11 @@ labels plus text; batched requests settle with one answer map. Answer, cancellat
 away transitions are single-settlement operations.
 
 The `request_user_input` and `cancel_ask` tools never enter Auto-mode review. The request tool is
-non-durable because its external wait can outlive a tool execution. It accepts an optional
+non-durable because its wait can outlive a tool execution. It accepts an optional
 `autoResolutionMs` window from 60 to 240 seconds for questions where the model may continue with
 its best judgement. `cancel_ask` accepts `requestId` (and the legacy `ask_id` spelling) plus an
 optional reason. Agent Base's stable call ID is the request ID. The tool creates or resumes that
-request in one transaction, then waits through the broker outside a transaction. After a terminal
+request in one transaction, then waits outside a transaction. After a terminal
 result, the same tool can read bounded detail pages by request ID and cursor so long answers remain
 available to the model.
 

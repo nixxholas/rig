@@ -13,9 +13,7 @@ export const MAX_WORKSPACE_DETAIL_PAGE_SIZE = 1_024;
 export const workspaceDetailQuerySchema = Type.Object(
     {
         cursor: Type.Optional(workspaceCursorSchema),
-        limit: Type.Optional(
-            Type.Integer({ minimum: 1, maximum: MAX_WORKSPACE_DETAIL_PAGE_SIZE }),
-        ),
+        limit: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_WORKSPACE_DETAIL_PAGE_SIZE })),
     },
     { additionalProperties: false },
 );

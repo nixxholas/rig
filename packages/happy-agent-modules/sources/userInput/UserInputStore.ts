@@ -97,29 +97,6 @@ export const userInputAuthorizationSchema = Type.Object(
     { additionalProperties: false },
 );
 
-/** Narrow view of the internal storage contract; long waits are delegated to UserInputBroker. */
-export const userInputBrokerWaitOptionsSchema = Type.Object(
-    {
-        timeoutAt: Type.Optional(userInputTimestampSchema),
-    },
-    { additionalProperties: false },
-);
-
-export const userInputBrokerSchema = Type.Object(
-    {
-        wait: Type.Function(
-            [
-                userInputContextSchema,
-                userInputAgentIdSchema,
-                userInputRequestIdSchema,
-                Type.Optional(userInputBrokerWaitOptionsSchema),
-            ],
-            Type.Promise(userInputTerminalRequestSchema),
-        ),
-    },
-    { additionalProperties: false },
-);
-
 /** Internal SQL adapter contract used by UserInputModule's module-owned tables. */
 export const userInputStoreSchema = Type.Object(
     {
@@ -142,7 +119,6 @@ export const userInputStoreSchema = Type.Object(
 export type UserInputPresencePolicy = Static<typeof userInputPresencePolicySchema>;
 export type UserInputAuthorizationAction = Static<typeof userInputAuthorizationActionSchema>;
 export type UserInputAuthorization = Static<typeof userInputAuthorizationSchema>;
-export type UserInputBroker = Static<typeof userInputBrokerSchema>;
 export type UserInputStore = Static<typeof userInputStoreSchema>;
 
 export function assertUserInputPage(value: unknown): asserts value is UserInputPage {

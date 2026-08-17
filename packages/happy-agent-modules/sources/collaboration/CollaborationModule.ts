@@ -10,6 +10,7 @@ import {
     type AgentSystemRef,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
+import { isSessionErrorDone, type SessionEvent } from "@slopus/happy-providers";
 import { type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type { Context } from "@steve.kite/stdlib";
@@ -71,8 +72,10 @@ export class CollaborationModule implements AgentModule {
         const selection = this.#validateSelection(agents.models, input);
 
         // A durable tool call may be retried after the collaborator was created but before the
-        // result was recorded. An identity the collection already knows is that retry, so only the
-        // half that did not finish is redone; `send` settles the rest by message ID.
+        // result was recorded. An identity this agent already created is that retry, so only the
+        // half that did not finish is redone; `send` settles the rest by message ID. An identity
+        // belonging to anyone else is a different agent that happens to hold the ID, and treating
+        // it as a retry would hand this creator's task to a stranger.
         if ((await agents.config(ctx, agentId)) === undefined) {
             const created = await agents.create(ctx, childConfig(ctx, input.title), {
                 id: agentId,
@@ -81,6 +84,8 @@ export class CollaborationModule implements AgentModule {
             if (created.id !== agentId) {
                 throw new Error("Agent Base did not preserve the requested collaborator ID.");
             }
+        } else if ((await agents.parentOf(ctx, agentId)) !== actingAgentId) {
+            throw new Error(`Agent "${agentId}" already exists.`);
         }
         await this.#deliver(ctx, actingAgentId, agentId, input.text, agentId, selection);
         return { agentId };
@@ -99,14 +104,7 @@ export class CollaborationModule implements AgentModule {
         this.#assert(collaborationAgentIdSchema, actingAgentId, "acting agent ID");
         this.#assert(collaborationSendInputSchema, input, "send message");
         await this.#authorize(ctx, actingAgentId, input.toAgentId, "send to");
-        await this.#deliver(
-            ctx,
-            actingAgentId,
-            input.toAgentId,
-            input.text,
-            messageId,
-            undefined,
-        );
+        await this.#deliver(ctx, actingAgentId, input.toAgentId, input.text, messageId, undefined);
     }
 
     /**
@@ -151,6 +149,26 @@ export class CollaborationModule implements AgentModule {
                 );
             }
             return lines.join("\n");
+        },
+
+        /**
+         * Keep why a run failed, beside what it said, for as long as that run.
+         *
+         * A collaborator that never reaches an answer still owes its creator one. Nothing waits for
+         * a collaborator, so a run that ends in a provider error — a usage limit, an expired
+         * credential, a model that refused to answer — would otherwise settle in silence and leave
+         * the creator waiting for a reply that can never arrive. The note is kept in the run store
+         * so the settling transaction can report it exactly the way it reports an answer, and a
+         * failure the run recovers from is superseded by whatever the model goes on to say.
+         */
+        onEvent: async (ctx: Context, scope: AgentModuleScope, event: SessionEvent) => {
+            if (!isSessionErrorDone(event)) return;
+            const message = event.message.trim();
+            await scope.runKV.write(
+                ctx,
+                LAST_ERROR_KEY,
+                message === "" ? "The model did not answer." : message,
+            );
         },
 
         /**
@@ -217,18 +235,27 @@ export class CollaborationModule implements AgentModule {
         const parent = await agents.parentOf(ctx, scope.agent.id);
         if (parent === null) return;
         const said = await scope.runKV.read(ctx, LAST_TEXT_KEY);
-        if (typeof said !== "string") return;
+        // Whitespace is not an answer. The note is written trimmed, so a blank one can only come
+        // from a store this run does not control, and reporting it would put an empty quotation in
+        // the creator's conversation.
+        const answer = typeof said === "string" ? said.trim() : "";
+        // An answer is what the creator asked for; a failure is why it is not coming. A run that
+        // recovered from an error and went on to speak reports what it said, not what it survived.
+        const report =
+            answer === ""
+                ? await this.#failureReport(ctx, scope)
+                : answerReport(scope.agent.id, answer);
+        if (report === undefined) return;
         await agents.send(
             ctx,
             parent,
             {
-                role: "user",
-                content: [
-                    {
-                        type: "text",
-                        text: `Collaborator ${scope.agent.id} finished working. Its answer follows, verbatim.\n\n${said}`,
-                    },
-                ],
+                role: "agent",
+                author: {
+                    id: scope.agent.id,
+                    description: `Collaborator ${scope.agent.id}`,
+                },
+                content: [{ type: "text", text: report }],
             },
             {
                 // The settlement has one identity, so a retried report is the same message rather
@@ -244,6 +271,23 @@ export class CollaborationModule implements AgentModule {
                 },
             },
         );
+    }
+
+    /**
+     * Why this run has no answer, phrased for the creator, or nothing when it simply had none.
+     *
+     * Silence and failure are not the same thing. A collaborator that was interrupted, or that was
+     * told no action was needed, has nothing to add and announcing that would only tell its creator
+     * what it already knows. A collaborator that hit a usage limit or lost its credentials has
+     * stopped for a reason its creator cannot otherwise discover, and which decides whether the
+     * work should be retried, sent elsewhere, or abandoned.
+     */
+    async #failureReport(ctx: Context, scope: AgentModuleScope): Promise<string | undefined> {
+        const failure = await scope.runKV.read(ctx, LAST_ERROR_KEY);
+        if (typeof failure !== "string") return undefined;
+        const reason = failure.trim();
+        if (reason === "") return undefined;
+        return `Collaborator ${scope.agent.id} stopped without answering. It failed with, verbatim.\n\n${reason}`;
     }
 
     /**
@@ -265,7 +309,8 @@ export class CollaborationModule implements AgentModule {
             ctx,
             toAgentId,
             {
-                role: "user",
+                role: "agent",
+                author: { id: fromAgentId, description: `Agent ${fromAgentId}` },
                 content: [{ type: "text", text: `Message from agent ${fromAgentId}:\n\n${text}` }],
             },
             {
@@ -376,6 +421,14 @@ export class CollaborationModule implements AgentModule {
 
 /** Where a run keeps the last thing its model said, until the run ends. */
 const LAST_TEXT_KEY = "lastText";
+
+/** Where a run keeps why its model stopped answering, until the run ends. */
+const LAST_ERROR_KEY = "lastError";
+
+/** How a collaborator's answer reaches its creator. */
+function answerReport(agentId: string, answer: string): string {
+    return `Collaborator ${agentId} finished working. Its answer follows, verbatim.\n\n${answer}`;
+}
 
 /**
  * A collaborator works on the same machine and with the same modules as whoever created it, and

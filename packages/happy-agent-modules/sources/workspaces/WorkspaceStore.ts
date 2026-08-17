@@ -373,10 +373,7 @@ export const workspaceHostArchiveSchema = Type.Object(
     { additionalProperties: false },
 );
 
-const workspaceHostAvailabilitySchema = Type.Union([
-    Type.Boolean(),
-    Type.Promise(Type.Boolean()),
-]);
+const workspaceHostAvailabilitySchema = Type.Union([Type.Boolean(), Type.Promise(Type.Boolean())]);
 
 /**
  * The host's side of a workspace. Reservation stays inside the module — it is a durable decision
@@ -534,20 +531,26 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
 
         rename: async (ctx, actingAgentId, input, operation) => {
             const siblings = await readProjectWorkspacesFor(ctx.db, input.workspaceId);
-            return await update(ctx, actingAgentId, input.workspaceId, operation, async (before) => {
-                assertExpectedVersion(
-                    before,
-                    input.expectedVersion,
-                    "The workspace changed before it could be renamed.",
-                );
-                if (isSettled(before)) return undefined;
-                const named = await renameTo(before, input.name, siblings, host);
-                // A person naming a workspace settles the question: a first chat never renames it
-                // again, even when the name it chose happens to match.
-                return named === undefined && before.nameConfigured
-                    ? undefined
-                    : { ...(named ?? before), nameConfigured: true };
-            });
+            return await update(
+                ctx,
+                actingAgentId,
+                input.workspaceId,
+                operation,
+                async (before) => {
+                    assertExpectedVersion(
+                        before,
+                        input.expectedVersion,
+                        "The workspace changed before it could be renamed.",
+                    );
+                    if (isSettled(before)) return undefined;
+                    const named = await renameTo(before, input.name, siblings, host);
+                    // A person naming a workspace settles the question: a first chat never renames it
+                    // again, even when the name it chose happens to match.
+                    return named === undefined && before.nameConfigured
+                        ? undefined
+                        : { ...(named ?? before), nameConfigured: true };
+                },
+            );
         },
 
         inheritName: async (ctx, actingAgentId, input, operation) => {
@@ -623,9 +626,7 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
                 .filter((row) => row.id !== input.workspaceId)
                 .sort(byOrder);
             const afterIndex =
-                input.afterId === null
-                    ? -1
-                    : ordered.findIndex((row) => row.id === input.afterId);
+                input.afterId === null ? -1 : ordered.findIndex((row) => row.id === input.afterId);
             if (input.afterId !== null && afterIndex === -1) {
                 throw new Error("The workspace to place after was not found in the project.");
             }

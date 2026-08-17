@@ -255,9 +255,8 @@ One task, however many hands, is one workspace.
 
 The workspace tools appear only in a **primary session** (never in a subagent)
 and only when `features.workspaces` is enabled — it is on by default.
-`list_projects`, and passing `project_id` to the listing tools, additionally
-require `features.cross_workspace`; when it is off, the tools say so and name the
-setting.
+`list_projects` additionally requires `features.cross_workspace`; when that is
+off, the tool is not offered at all rather than failing when it is called.
 
 Relevant configuration keys:
 

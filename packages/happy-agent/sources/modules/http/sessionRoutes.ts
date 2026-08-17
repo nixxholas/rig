@@ -12,7 +12,7 @@ import {
 import {
     eventIdSchema,
     permissionEventSchema,
-    userInputAnswerSchema,
+    userInputEventSchema,
     type AgentEvent,
     type PermissionEvent,
     type PermissionReviewTranscript,
@@ -35,6 +35,11 @@ import { AgentHttpError, sendJson, serializeJson } from "./errors.js";
 import { createRouteGroup, type AgentHttpRouteGroup } from "./router.js";
 import { createRigModelCatalog, type RigModelCatalog } from "./rigProtocol.js";
 import { createSseWriter } from "./sseWriter.js";
+import {
+    userInputAnswerForModule,
+    userInputAnswersForProtocol,
+    userInputRequestForProtocol,
+} from "./userInputProtocol.js";
 import {
     mergeAgentMessageOptions,
     resolveAgentMessageSelection,
@@ -198,7 +203,14 @@ const secretSchema = Type.Object(
 );
 const userInputSchema = Type.Object(
     {
-        answer: Type.Optional(userInputAnswerSchema),
+        // The values a person chose or typed, for each question the client showed them.
+        answers: Type.Optional(
+            Type.Record(
+                Type.String({ minLength: 1, maxLength: 256 }),
+                Type.Array(Type.String({ maxLength: 8_192 }), { maxItems: 32 }),
+                { maxProperties: 8 },
+            ),
+        ),
         cancel: Type.Optional(Type.Boolean()),
         mutationId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
         reason: Type.Optional(Type.String({ maxLength: 4_096 })),
@@ -834,15 +846,7 @@ function createMutationRoutes(): AgentHttpRouteGroup["routes"] {
                               reason: body.reason ?? "Cancelled by client.",
                               requestId,
                           })
-                        : body.answer === undefined
-                          ? (() => {
-                                throw new AgentHttpError(400, "An answer is required.");
-                            })()
-                          : await dependencies.agent.modules.userInput.answer(
-                                ctx,
-                                session.agentId,
-                                { answer: body.answer, requestId },
-                            );
+                        : await answerUserInput(ctx, dependencies, session, requestId, body);
                 sendJson(response, 200, {
                     request: result,
                     session: await sessionResponse(ctx, dependencies, session),
@@ -1003,6 +1007,38 @@ async function requireSession(
     return session;
 }
 
+/**
+ * Record what a person answered.
+ *
+ * The client sends the values it displayed, so the stored question is read first and the values
+ * are interpreted against the choices that question actually offered. An answer that says nothing
+ * is a bad request rather than a stored empty outcome.
+ */
+async function answerUserInput(
+    ctx: import("@steve.kite/stdlib").Context,
+    dependencies: LoadedSessionDependencies,
+    session: ConversationRecord,
+    requestId: string,
+    body: { readonly answers?: Readonly<Record<string, readonly string[]>> },
+): Promise<unknown> {
+    const userInput = dependencies.agent.modules.userInput;
+    if (body.answers === undefined) throw new AgentHttpError(400, "An answer is required.");
+    const request = await userInput.get(ctx, session.agentId, requestId);
+    if (request === undefined) {
+        throw new AgentHttpError(404, `Question "${requestId}" was not found.`);
+    }
+    let input;
+    try {
+        input = userInputAnswerForModule(request, body.answers);
+    } catch (error: unknown) {
+        throw new AgentHttpError(
+            400,
+            error instanceof Error ? error.message : "The answer could not be read.",
+        );
+    }
+    return await userInput.answer(ctx, session.agentId, input);
+}
+
 async function sessionResponse(
     ctx: import("@steve.kite/stdlib").Context,
     dependencies: LoadedSessionDependencies,
@@ -1019,23 +1055,7 @@ async function sessionResponse(
         await dependencies.agent.modules.userInput.list(ctx, session.agentId, {
             status: "pending",
         })
-    ).map((request) => ({
-        ...(request.deadlineAt === undefined
-            ? {}
-            : {
-                  autoResolutionMs: Math.max(0, request.deadlineAt - request.createdAt),
-              }),
-        questions: [
-            {
-                header: "Question",
-                id: request.id,
-                multiSelect: request.options?.multiSelect ?? false,
-                options: request.options?.choices ?? [],
-                question: request.question,
-            },
-        ],
-        requestId: request.id,
-    }));
+    ).map(userInputRequestForProtocol);
     return {
         ...sessionSummaryValue(session, catalog, dependencies.agent.effectiveSelection),
         activity: activityFor(session, agent.active),
@@ -1348,6 +1368,9 @@ async function sendMessage(
     } catch (cause) {
         throw new Error("Agent Base rejected the session message.", { cause });
     }
+    // A queued message does not reach the conversation until the current turn ends, and a wait is
+    // precisely a turn held open. Someone writing into the chat is what ends it.
+    dependencies.agent.modules.scheduling.interruptWaits(ctx, session.agentId);
     await persistSessionSelection(
         ctx,
         dependencies,
@@ -1441,6 +1464,7 @@ async function steerMessage(
         messageFromBody(body),
         options,
     );
+    dependencies.agent.modules.scheduling.interruptWaits(ctx, session.agentId);
     await persistSessionSelection(
         ctx,
         dependencies,
@@ -1989,7 +2013,53 @@ export function projectSessionEvent(
     if (event.type === "permission.event") {
         return projectPermissionEvent(payload, base);
     }
+    if (event.type === "user_input.event") {
+        return projectUserInputEvent(payload, base);
+    }
     return undefined;
+}
+
+/**
+ * Turn one recorded user-input event into the row a client shows.
+ *
+ * A pending question becomes the question itself, so a client that joins the stream late still
+ * puts it on screen. Every terminal outcome resolves it: an answer carries the values back for
+ * the client that did not send them, and a cancellation, an away outcome, or a timeout simply
+ * withdraws the question, because none of them leaves anything for a person to answer.
+ */
+function projectUserInputEvent(
+    payload: UnknownRecord,
+    base: {
+        readonly createdAt: number;
+        readonly id: string;
+        readonly sessionId: string;
+        readonly worktreeSupport: string;
+    },
+): Record<string, unknown> | undefined {
+    if (!Value.Check(userInputEventSchema, payload)) return undefined;
+    if (payload.type === "user_input_requested") {
+        return {
+            ...base,
+            data: userInputRequestForProtocol(payload.request),
+            type: "user_input_requested",
+        };
+    }
+    if (payload.type === "user_input_answered") {
+        return {
+            ...base,
+            data: {
+                answers: userInputAnswersForProtocol(payload.request),
+                requestId: payload.requestId,
+                status: "answered",
+            },
+            type: "user_input_resolved",
+        };
+    }
+    return {
+        ...base,
+        data: { requestId: payload.requestId, status: "cancelled" },
+        type: "user_input_resolved",
+    };
 }
 
 /**

@@ -81,15 +81,15 @@ reconstructable stream assembly.
 
 ## Module contract
 
-Every module follows [GUIDELINES.md](./GUIDELINES.md).
-
-In particular:
+Every module follows the package [README.md](./README.md) and these rules:
 
 - one shared module instance serves an `AgentSystem`;
 - per-agent state lives in module `AgentKV`;
 - in-progress durable state lives in `runKV`;
 - collection state lives in `sharedKV` or module-owned tables;
-- no module owns a database, path, file, timer, process, or network client;
+- no module owns a database, path, file, process, or network client;
+- a module whose whole capability is time — scheduling — owns its timers and
+  fires its own work, rather than delegating them to a host scheduler;
 - no module imports Rig or another module;
 - cross-module behavior is injected through a small structural interface;
 - constructor options, public inputs, store results, and persisted values use
@@ -495,7 +495,8 @@ composition in `debt/`.
 
 Each module is one independently reviewable unit:
 
-1. A Luna Max implementation agent reads `GUIDELINES.md` completely.
+1. A Luna Max implementation agent reads this plan and the package `README.md`
+   completely.
 2. It changes only the module, focused tests, and its narrow Rig adapter.
 3. It runs focused typecheck and tests.
 4. A distinct Luna Max agent reviews architecture, transactions, bounds,

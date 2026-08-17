@@ -170,9 +170,7 @@ export const permissionReviewTranscriptSchema = Type.Object(
     { additionalProperties: false },
 );
 
-export type PermissionReviewTranscriptEntry = Static<
-    typeof permissionReviewTranscriptEntrySchema
->;
+export type PermissionReviewTranscriptEntry = Static<typeof permissionReviewTranscriptEntrySchema>;
 export type PermissionReviewUsage = Static<typeof permissionReviewUsageSchema>;
 export type PermissionReviewTranscript = Static<typeof permissionReviewTranscriptSchema>;
 

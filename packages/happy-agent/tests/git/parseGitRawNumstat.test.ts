@@ -5,12 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { parseGitRawNumstat } from "../../sources/modules/git/parseGitRawNumstat.js";
 import { runScanGit } from "../../sources/modules/git/runScanGit.js";
-import {
-    cleanupRoots,
-    commitFile,
-    createRepository,
-    git,
-} from "./helpers.js";
+import { cleanupRoots, commitFile, createRepository, git } from "./helpers.js";
 
 afterEach(cleanupRoots);
 

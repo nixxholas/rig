@@ -189,10 +189,7 @@ describe("HistoryModule durability", () => {
 
             const page = await history.read(database.context, "agent-a");
             expect(
-                page.messages.map((record) => [
-                    record.message.role,
-                    record.message.senderAgentId,
-                ]),
+                page.messages.map((record) => [record.message.role, record.message.senderAgentId]),
             ).toEqual([
                 ["user", undefined],
                 ["agent", "agent-b"],

@@ -14,15 +14,13 @@ import {
     createUserInputDatabase,
     createUserInputModule,
     singularAsk,
-    UserInputTestBroker,
 } from "./userInputTestSupport.js";
 
 const agentId = "agent-one";
 
 describe("UserInput durable lifecycle and persistence", () => {
     it("survives a fresh module instance and protects stored input from caller mutation", async () => {
-        const broker = new UserInputTestBroker();
-        const first = createUserInputModule(broker);
+        const first = createUserInputModule();
         const database = createUserInputDatabase(first, "user-input-reload");
         await database.ready;
         try {
@@ -41,7 +39,7 @@ describe("UserInput durable lifecycle and persistence", () => {
             input.context = "mutated after ask";
             if (input.options !== undefined) input.options.choices[0]!.label = "Mutated";
 
-            const second = createUserInputModule(new UserInputTestBroker());
+            const second = createUserInputModule();
             const resumed = await second.ask(
                 database.context,
                 agentId,
@@ -68,7 +66,7 @@ describe("UserInput durable lifecycle and persistence", () => {
     });
 
     it.fails("treats semantically identical option objects as the same retry", async () => {
-        const module = createUserInputModule(new UserInputTestBroker());
+        const module = createUserInputModule();
         const database = createUserInputDatabase(module, "user-input-retry-key-order");
         await database.ready;
         try {
@@ -106,7 +104,7 @@ describe("UserInput durable lifecycle and persistence", () => {
     });
 
     it("answers singular and batched requests with validated structured payloads", async () => {
-        const module = createUserInputModule(new UserInputTestBroker());
+        const module = createUserInputModule();
         const database = createUserInputDatabase(module, "user-input-answers");
         await database.ready;
         try {
@@ -194,7 +192,6 @@ describe("UserInput durable lifecycle and persistence", () => {
     it("settles cancellation, explicit away, and explicit timeout exactly once", async () => {
         let now = 100;
         const module = new UserInputModule({
-            broker: new UserInputTestBroker(),
             idFactory: () => "unused",
             eventIdFactory: () => "event",
             clock: () => now,
@@ -270,7 +267,7 @@ describe("UserInput durable lifecycle and persistence", () => {
     });
 
     it("lists pending and terminal requests with bounded forward and backward cursors", async () => {
-        const module = createUserInputModule(new UserInputTestBroker(), {
+        const module = createUserInputModule({
             maxPageSize: 2,
         });
         const database = createUserInputDatabase(module, "user-input-list-pages");
@@ -324,7 +321,7 @@ describe("UserInput durable lifecycle and persistence", () => {
     });
 
     it("returns cursor-addressable bounded detail and validates aliases", async () => {
-        const module = createUserInputModule(new UserInputTestBroker(), {
+        const module = createUserInputModule({
             maxDetailPageCharacters: 20,
             maxOutputCharacters: 512,
         });
@@ -380,7 +377,7 @@ describe("UserInput durable lifecycle and persistence", () => {
     });
 
     it.fails("rejects malformed persisted JSON and mismatched row identities on every read path", async () => {
-        const module = createUserInputModule(new UserInputTestBroker());
+        const module = createUserInputModule();
         const database = createUserInputDatabase(module, "user-input-malformed-store");
         await database.ready;
         try {
@@ -419,7 +416,7 @@ describe("UserInput durable lifecycle and persistence", () => {
     });
 
     it("enforces default cross-agent denial and action-specific injected authorization", async () => {
-        const denied = createUserInputModule(new UserInputTestBroker());
+        const denied = createUserInputModule();
         const database = createUserInputDatabase(denied, "user-input-denied");
         await database.ready;
         try {
@@ -458,7 +455,7 @@ describe("UserInput durable lifecycle and persistence", () => {
         }
 
         const actions: string[] = [];
-        const allowed = createUserInputModule(new UserInputTestBroker(), {
+        const allowed = createUserInputModule({
             authorization: {
                 authorize: async (_ctx, acting, asking, action) => {
                     actions.push(`${acting}:${asking}:${action}`);

@@ -12,7 +12,7 @@ import {
     WorkspacesModule,
 } from "../../sources/workspaces/index.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
-import { resolveModuleHooks } from "../support/moduleHooks.js";
+import { primaryAgents, resolveModuleHooks } from "../support/moduleHooks.js";
 
 /**
  * Migrations are ordered, and the fourth one replaces the table the first one created. The shared
@@ -125,16 +125,12 @@ describe("WorkspacesModule", () => {
         await database.ready;
 
         try {
-            const { created, workspace } = await workspaces.reserve(
-                database.context,
-                "agent-a",
-                {
-                    id: "workspace-1",
-                    operationId: "reserve-1",
-                    projectRef: "acme",
-                    name: "Retry policy rewrite",
-                },
-            );
+            const { created, workspace } = await workspaces.reserve(database.context, "agent-a", {
+                id: "workspace-1",
+                operationId: "reserve-1",
+                projectRef: "acme",
+                name: "Retry policy rewrite",
+            });
 
             expect(created).toBe(true);
             expect(workspace).toMatchObject({
@@ -187,8 +183,7 @@ describe("WorkspacesModule", () => {
                 {
                     isStorageKeyUnavailable: (key) => key === "cache-warmup",
                     isBranchUnavailable: (branch) =>
-                        branch === "worktree/cache-warmup" ||
-                        branch === "worktree/cache-warmup-2",
+                        branch === "worktree/cache-warmup" || branch === "worktree/cache-warmup-2",
                     pathForStorageKey: (key) => `/managed/acme/${key}`,
                 },
             );
@@ -266,18 +261,14 @@ describe("WorkspacesModule", () => {
                 name: "Retry policy",
             });
 
-            const initialized = await workspaces.recordInitialization(
-                database.context,
-                "agent-a",
-                {
-                    workspaceId: workspace.id,
-                    facts: {
-                        baseCommit: "abc123",
-                        baseRef: "origin/main",
-                        gitCommonDir: "/repo/.git",
-                    },
+            const initialized = await workspaces.recordInitialization(database.context, "agent-a", {
+                workspaceId: workspace.id,
+                facts: {
+                    baseCommit: "abc123",
+                    baseRef: "origin/main",
+                    gitCommonDir: "/repo/.git",
                 },
-            );
+            });
             expect(initialized).toMatchObject({
                 baseCommit: "abc123",
                 baseRef: "origin/main",
@@ -333,11 +324,10 @@ describe("WorkspacesModule", () => {
                 projectRef: "acme",
                 name: "Retry policy",
             });
-            const failed = await workspaces.markInitializationFailed(
-                database.context,
-                "agent-a",
-                { workspaceId: workspace.id, error: "git worktree add refused the branch." },
-            );
+            const failed = await workspaces.markInitializationFailed(database.context, "agent-a", {
+                workspaceId: workspace.id,
+                error: "git worktree add refused the branch.",
+            });
             expect(failed).toMatchObject({
                 status: "failed",
                 initializationAttempt: 2,
@@ -440,17 +430,17 @@ describe("WorkspacesModule", () => {
                 });
             }
             // Each reservation goes to the top, so the newest workspace leads the list.
-            expect((await workspaces.list(database.context, "agent-a")).map((row) => row.id)).toEqual(
-                ["workspace-3", "workspace-2", "workspace-1"],
-            );
+            expect(
+                (await workspaces.list(database.context, "agent-a")).map((row) => row.id),
+            ).toEqual(["workspace-3", "workspace-2", "workspace-1"]);
 
             const moved = await workspaces.reorder(database.context, "agent-a", {
                 workspaceId: "workspace-3",
                 afterId: "workspace-2",
             });
-            expect((await workspaces.list(database.context, "agent-a")).map((row) => row.id)).toEqual(
-                ["workspace-2", "workspace-3", "workspace-1"],
-            );
+            expect(
+                (await workspaces.list(database.context, "agent-a")).map((row) => row.id),
+            ).toEqual(["workspace-2", "workspace-3", "workspace-1"]);
 
             const top = await workspaces.reorder(database.context, "agent-a", {
                 workspaceId: "workspace-1",
@@ -458,9 +448,9 @@ describe("WorkspacesModule", () => {
                 expectedVersion: 1,
             });
             expect(top.version).toBe(2);
-            expect((await workspaces.list(database.context, "agent-a")).map((row) => row.id)).toEqual(
-                ["workspace-1", "workspace-2", "workspace-3"],
-            );
+            expect(
+                (await workspaces.list(database.context, "agent-a")).map((row) => row.id),
+            ).toEqual(["workspace-1", "workspace-2", "workspace-3"]);
 
             await expect(
                 workspaces.reorder(database.context, "agent-a", {
@@ -511,11 +501,7 @@ describe("WorkspacesModule", () => {
                 projectRef: "acme",
                 name: "Retry policy",
             });
-            const archived = await workspaces.archive(
-                database.context,
-                "agent-a",
-                workspace.id,
-            );
+            const archived = await workspaces.archive(database.context, "agent-a", workspace.id);
 
             // The decision is durable and answered while the host is still removing the folder.
             expect(archived.status).toBe("archiving");
@@ -677,7 +663,7 @@ describe("WorkspacesModule", () => {
         });
         const database = workspaceDatabase("workspaces-tool-commit-test");
         await database.ready;
-        const hooks = await resolveModuleHooks(database.context, workspaces);
+        const hooks = await resolveModuleHooks(database.context, workspaces, primaryAgents());
 
         try {
             const call = (id: string) =>
@@ -792,7 +778,7 @@ describe("WorkspacesModule", () => {
         const workspaces = new WorkspacesModule({ host: HOST });
         const database = workspaceDatabase("workspaces-review-test");
         await database.ready;
-        const hooks = await resolveModuleHooks(database.context, workspaces);
+        const hooks = await resolveModuleHooks(database.context, workspaces, primaryAgents());
 
         try {
             const scope = {
@@ -1071,9 +1057,9 @@ describe("WorkspacesModule", () => {
                 (await workspaces.list(database.context, "agent-a")).map((row) => row.id),
             ).toEqual(["workspace-2"]);
             expect(
-                (
-                    await workspaces.list(database.context, "agent-a", { includeArchived: true })
-                ).map((row) => row.id),
+                (await workspaces.list(database.context, "agent-a", { includeArchived: true })).map(
+                    (row) => row.id,
+                ),
             ).toEqual(["workspace-2", "workspace-1"]);
         } finally {
             database.close();
@@ -1223,8 +1209,8 @@ describe("WorkspacesModule", () => {
         expect(Value.Check(workspaceSchema, { ...ROW, path: "/tmp/project-1/workspace" })).toBe(
             true,
         );
-        expect(
-            Value.Check(workspaceSchema, { ...ROW, path: "C:\\Users\\rig\\workspace" }),
-        ).toBe(true);
+        expect(Value.Check(workspaceSchema, { ...ROW, path: "C:\\Users\\rig\\workspace" })).toBe(
+            true,
+        );
     });
 });

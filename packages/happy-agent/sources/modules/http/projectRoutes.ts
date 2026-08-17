@@ -103,13 +103,9 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
                         path: body.path,
                         ...(body.projectId === undefined ? {} : { projectId: body.projectId }),
                     });
-                    await recordProjectEvent(
-                        ctx,
-                        options.agent,
-                        registered.id,
-                        "project.created",
-                        { project: await toProject(ctx, registered) },
-                    );
+                    await recordProjectEvent(ctx, options.agent, registered.id, "project.created", {
+                        project: await toProject(ctx, registered),
+                    });
                     return registered;
                 });
                 sendJson(response, 200, { project: await toProject(ctx, project) });
@@ -161,12 +157,7 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
                 const expectedVersion = await expectVersion(ctx, request, projectId);
                 const body = await readValidatedBody(request, renameProjectSchema);
                 const project = await mutate(ctx, projectId, expectedVersion, async () => {
-                    return await projects.renameProject(
-                        ctx,
-                        projectId,
-                        body.name,
-                        expectedVersion,
-                    );
+                    return await projects.renameProject(ctx, projectId, body.name, expectedVersion);
                 });
                 await recordProjectEvent(ctx, options.agent, projectId, "project.updated", {
                     ...(body.mutationId === undefined ? {} : { mutationId: body.mutationId }),
@@ -289,13 +280,7 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
                 const expectedVersion = await expectVersion(ctx, request, projectId);
                 const bytes = await readImageBody(request);
                 const project = await mutate(ctx, projectId, expectedVersion, async () => {
-                    return await projects.setAvatar(
-                        ctx,
-                        projectId,
-                        "user",
-                        bytes,
-                        expectedVersion,
-                    );
+                    return await projects.setAvatar(ctx, projectId, "user", bytes, expectedVersion);
                 });
                 await recordProjectEvent(ctx, options.agent, projectId, "project.updated", {
                     project: await toProject(ctx, project),

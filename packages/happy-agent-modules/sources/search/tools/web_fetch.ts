@@ -3,12 +3,11 @@ import { defineAgentTool } from "@slopus/happy-agent-base";
 import type { SearchModule } from "../SearchModule.js";
 import { fetchInputSchema, fetchResultSchema, type FetchInput } from "../Search.js";
 
-/** Common provider-neutral fetch tool over the configured search backend. */
+/** Common provider-neutral fetch tool: one public page, returned as bounded readable text. */
 export function webFetchTool(search: SearchModule, agentId: string) {
     return defineAgentTool({
         name: "web_fetch",
-        description:
-            "Fetch bounded text from one result URL through the configured search backend.",
+        description: "Fetch one web page and read it as bounded text. HTML comes back as markdown.",
         parameters: fetchInputSchema,
         returnType: fetchResultSchema,
         durable: false,
