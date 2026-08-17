@@ -858,17 +858,16 @@ function createMutationRoutes(): AgentHttpRouteGroup["routes"] {
             path: "/v0/sessions/:sessionId/workflows/:runId/stop",
             handle: async ({ ctx, dependencies, request, response, url }) => {
                 assertWorkflowsEnabled(dependencies.agent);
-                const body = await readValidatedBody(request, workflowStopSchema);
+                await readValidatedBody(request, workflowStopSchema);
                 const session = await requireSession(ctx, dependencies, sessionId(url));
-                const result = await dependencies.agent.modules.workflows.cancel(
+                // Stopping is settled by the run's own identity, so a client that retries the call
+                // gets the run it already cancelled back rather than a second cancellation.
+                const run = await dependencies.agent.modules.workflows.cancel(
                     ctx,
                     session.agentId,
-                    {
-                        id: lastPathPart(url),
-                        operationId: body.mutationId ?? `http-${Date.now()}`,
-                    },
+                    lastPathPart(url),
                 );
-                sendJson(response, 200, { workflow: result.run });
+                sendJson(response, 200, { workflow: run });
             },
         },
         {

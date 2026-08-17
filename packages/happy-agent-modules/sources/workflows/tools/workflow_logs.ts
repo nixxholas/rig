@@ -1,5 +1,6 @@
 import { Type, type Static } from "@sinclair/typebox";
 import { defineAgentTool } from "@slopus/happy-agent-base";
+
 import { workflowLogPageSchema, workflowLogQuerySchema } from "../Workflow.js";
 import type { WorkflowsModule } from "../WorkflowsModule.js";
 
@@ -18,7 +19,7 @@ export function workflowLogsTool(module: WorkflowsModule, agentId: string) {
     return defineAgentTool({
         name: "workflow_logs",
         description:
-            "Read a bounded page of workflow logs. Use from=end for the latest page and prev/next cursors to traverse both directions.",
+            "Read a workflow's progress notes, a page at a time. Ask from=end for the latest notes, and follow the cursor a page reports to read further back.",
         parameters: workflowLogsToolParametersSchema,
         returnType: workflowLogPageSchema,
         durable: true,
@@ -26,11 +27,6 @@ export function workflowLogsTool(module: WorkflowsModule, agentId: string) {
         shouldReviewInAutoMode: () => false,
         execute: async (ctx, { input }: WorkflowLogsToolParameters) =>
             await module.logs(ctx, agentId, input),
-        toLLM: (page) => [
-            {
-                type: "text",
-                text: module.formatLogsForModel(page),
-            },
-        ],
+        toLLM: (page) => [{ type: "text", text: module.formatLogsForModel(page) }],
     });
 }

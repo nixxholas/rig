@@ -17,38 +17,25 @@ export const workflowPostCommitErrorSchema = Type.String({
     pattern: "^[^\\u0000]*$",
 });
 
-export const workflowEventSchema = Type.Union([
-    Type.Object(
-        {
-            type: Type.Literal("workflow_started"),
-            agentId: workflowAgentIdSchema,
-            eventId: workflowEventIdSchema,
-            at: workflowTimestampSchema,
-            run: workflowRunSchema,
-        },
-        { additionalProperties: false },
-    ),
-    Type.Object(
-        {
-            type: Type.Literal("workflow_updated"),
-            agentId: workflowAgentIdSchema,
-            eventId: workflowEventIdSchema,
-            at: workflowTimestampSchema,
-            run: workflowRunSchema,
-        },
-        { additionalProperties: false },
-    ),
-    Type.Object(
-        {
-            type: Type.Literal("workflow_cancelled"),
-            agentId: workflowAgentIdSchema,
-            eventId: workflowEventIdSchema,
-            at: workflowTimestampSchema,
-            run: workflowRunSchema,
-        },
-        { additionalProperties: false },
-    ),
-]);
+/**
+ * What happened to a run, for anything showing a person its progress. A workflow changes on its
+ * own for as long as it runs, so the interesting moments are that it began, that it moved, and
+ * that it stopped for good.
+ */
+export const workflowEventSchema = Type.Object(
+    {
+        type: Type.Union([
+            Type.Literal("workflow_started"),
+            Type.Literal("workflow_updated"),
+            Type.Literal("workflow_finished"),
+        ]),
+        agentId: workflowAgentIdSchema,
+        eventId: workflowEventIdSchema,
+        at: workflowTimestampSchema,
+        run: workflowRunSchema,
+    },
+    { additionalProperties: false },
+);
 
 export type WorkflowEvent = Static<typeof workflowEventSchema>;
 export type WorkflowPostCommitError = Static<typeof workflowPostCommitErrorSchema>;

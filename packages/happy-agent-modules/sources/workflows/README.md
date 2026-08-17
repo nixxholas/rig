@@ -1,71 +1,61 @@
 # Workflows
 
-Workflows lets an agent start and inspect work performed by a host runtime. The module owns the
-durable run catalog, bounded reads, lifecycle validation, and model-facing formatting. The host
-runtime owns execution, processes, files, queues, and permissions.
+A workflow is a Python script that decides which agents to run and in what order. The module runs
+that script itself, inside a `@pydantic/monty` sandbox with no filesystem, shell, environment or
+network of its own, and starts every agent the script asks for as an ordinary collaborator. There
+is no host runtime behind it: execution, checkpointing, and the durable run catalog all live here.
 
 ```ts
 const workflows = new WorkflowsModule({
-    runtime: hostWorkflowRuntime,
+    runContext: backgroundLifetime,
+    collaboration,
+    compute: { resolve: async (ctx, agentId) => await computeModule.resolve(ctx, agentId) },
 });
 ```
 
-`runtime` implements `launch`, `cancel`, `resume`, and `wait`. Database operations use the root or
-active transaction facade from `ctx.db`; short persistence steps compose through `ctx.inTx(...)`.
-Optional factories control public operation and event IDs; optional listeners observe lifecycle
-events. `wait` receives the calling context's optional lifetime signal so a host broker can stop
-waiting without cancelling the workflow itself.
+`runContext` is where a run lives once the tool call that started it has returned — a workflow
+outlives its turn, so it cannot be owned by that turn's context. `collaboration` is the module that
+starts the agents. `compute` is optional and used for one thing only: reading a script the model
+named by path. Optional `clock`, `eventIdFactory`, `collaboratorIdFactory`, `listener`, the page and
+log bounds, and `onPostCommitError` behave as in the other modules.
 
-`run_workflow` accepts either a named host workflow (`workflow` plus bounded string `input`) or
-exactly one bounded `script`/`scriptPath`. Script launches also accept bounded JSON `args`, an
-optional `name` and `description`, and `resumeFromRunId`; the host runtime owns reading the path,
-script execution, checkpoint reuse, agent orchestration, and concurrency. Inline scripts are capped
-at 524,288 characters, arguments are finite-depth JSON capped at 65,536 encoded bytes, and a
-script may request at most 1,000 agents through the host contract.
+## How a run executes
 
-## Durable tool completion
+The script's `agent`, `parallel` and `pipeline` externals block until their agent has finished. The
+sandbox is checkpointed and unloaded at every external-call boundary and freshly restored
+afterwards, so model thinking time does not consume the script's own execution budget, and the
+checkpoint is written to the database as it is taken.
 
-The module does not maintain an idempotency ledger. There are no workflow fingerprints, receipts,
-mutation proofs, or call-scoped operation records.
+An agent call creates a collaborator with `reportToCreator: false` and workflow metadata naming the
+run and the call index. That flag is what keeps a 200-agent workflow from putting 200 messages into
+the calling agent's chat: the workflow collects the answer itself, through its own
+`onEventTransact`, `onEvent` and `afterAgentSettledTransact` hooks. The answer is recorded in the
+settling transaction, before anything in memory is told about it, so it survives a restart.
 
-`run_workflow`, `cancel_workflow`, and `resume_workflow` pass the stable Agent Base `call.id`
-directly to the runtime as `operationId`. The host operation runs outside a database transaction;
-the module then stores its returned run in a short transaction. These tools are non-durable because
-an interrupted host operation cannot be atomically committed with its durable tool result.
+Inline scripts are capped at 524,288 characters, arguments are finite-depth JSON capped at 65,536
+encoded bytes, and a run may start at most 1,000 agents.
 
-`wait_workflow` is likewise non-durable and never holds a database transaction while waiting on
-the host broker. Once the broker returns, the module opens one short transaction that persists the
-terminal run.
+## Pausing and resuming
 
-The bounded database-only read tools are durable and `transactional: true`, so Agent Base owns
-their single transaction and commits their returned result normally.
-
-Public `launch`, `cancel`, and `resume` calls may supply `operationId`; otherwise `idFactory`
-generates one. Reusing an existing launch ID is a conflict, not a module replay path.
+A run whose process stopped is paused, not lost. `afterStart` finds every run still marked running
+by a process that is gone and marks it `paused`. `resume_workflow` continues it from its last
+durable checkpoint and reuses the agent answers already stored, so a resumed run does not pay for
+the same agent twice. `resumeFromRunId` does the same across runs, for a script that has not
+changed.
 
 ## Tools
 
-- `run_workflow` starts one named workflow.
+- `run_workflow` starts a workflow from `script` or `scriptPath`.
 - `list_workflows` returns a bounded page of runs.
 - `workflow_status` reads one run.
 - `cancel_workflow` cancels a non-terminal run.
-- `resume_workflow` resumes a paused run.
-- `wait_workflow` waits for a terminal or unavailable result.
-- `workflow_logs` returns a bounded page of log lines.
+- `resume_workflow` continues a paused run.
+- `wait_workflow` waits for a run to settle.
+- `workflow_logs` returns a bounded page of the notes a script wrote.
 
-Every tool is scoped to `scope.agent.id`. Inputs, runtime results, persisted results, pagination,
-and lifecycle transitions are validated before they reach the model.
-
-Status and wait results always include a bounded `agentCount`, accumulated `logs`, a
-`logsTruncated` marker, and `legacyStatus` (`completed`, `error`, `running`, or `stopped`) beside
-the richer lifecycle status. Runtime adapters from the first module release may omit these
-observations; the module reports bounded empty values in that case. Model-facing summaries include
-an explicit truncation marker when the output budget cannot show every log line.
-
-Cancelling a wait only aborts the broker wait. It never calls workflow cancellation, and the
-workflow remains available through status/log reads. Published Agent Base 0.0.7 has no
-`steerable` or `interruptionMessage` tool fields, so the host must present any preferred
-provider-specific interruption wording outside this module.
+Every tool is scoped to `scope.agent.id`. An inline script is text the model already holds, so
+starting one crosses no boundary and Auto does not review it. A `scriptPath` is a file on the
+machine, so it is described, reviewed and elevated exactly like any other filesystem read.
 
 ## Persistence and migrations
 
@@ -73,10 +63,13 @@ The current tables are:
 
 - `happy_agent_module_workflow_runs`
 - `happy_agent_module_workflow_logs`
+- `happy_agent_module_workflow_checkpoints`
+- `happy_agent_module_workflow_agent_calls`
+- `happy_agent_module_workflow_launches`
 
-Migration `001-workflows-runs` remains immutable. Migration
-`002-workflows-drop-replay-evidence` removes the obsolete receipt and proof tables introduced by
-the first migration.
+Migrations `001-workflows-runs` and `002-workflows-drop-replay-evidence` remain immutable.
+`003-workflows-execution` adds the checkpoint, agent-call and launch tables this module needs to
+run and resume a script itself.
 
 Transactional listeners run inside the mutation transaction. Post-commit listeners are advisory:
 their failures are bounded and reported through `onPostCommitError` without changing the already

@@ -1,23 +1,27 @@
+import { Type, type Static } from "@sinclair/typebox";
 import { defineAgentTool } from "@slopus/happy-agent-base";
 
-import {
-    workflowMutationToolInputSchema,
-    workflowMutationResultSchema,
-    type WorkflowMutationToolInput,
-} from "../Workflow.js";
+import { workflowIdSchema, workflowRunSchema } from "../Workflow.js";
 import type { WorkflowsModule } from "../WorkflowsModule.js";
+
+const resumeWorkflowParametersSchema = Type.Object(
+    { id: workflowIdSchema },
+    { additionalProperties: false },
+);
+
+type ResumeWorkflowParameters = Static<typeof resumeWorkflowParametersSchema>;
 
 export function resumeWorkflowTool(module: WorkflowsModule, agentId: string) {
     return defineAgentTool({
         name: "resume_workflow",
         description:
-            "Resume one paused host-managed workflow run. A running run is an unchanged no-op.",
-        parameters: workflowMutationToolInputSchema,
-        returnType: workflowMutationResultSchema,
+            "Continue a paused workflow from its last checkpoint. Every agent that already answered is reused rather than paid for again. A workflow that is already running is left alone.",
+        parameters: resumeWorkflowParametersSchema,
+        returnType: workflowRunSchema,
         durable: false,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, input: WorkflowMutationToolInput, call) =>
-            await module.resumeForTool(ctx, agentId, input, call.id),
-        toLLM: (result) => [{ type: "text", text: module.formatRunForModel(result.run) }],
+        execute: async (ctx, { id }: ResumeWorkflowParameters) =>
+            await module.resume(ctx, agentId, id),
+        toLLM: (run) => [{ type: "text", text: module.formatRunForModel(run) }],
     });
 }

@@ -1,207 +1,52 @@
-import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import type { Context } from "@steve.kite/stdlib";
 
 import {
-    workflowAgentIdSchema,
-    workflowIdSchema,
-    workflowLegacyStatusFor,
-    workflowLaunchRequestSchema,
     workflowLogPageSchema,
-    workflowLogQuerySchema,
-    workflowMutationRequestSchema,
-    workflowMutationResultSchema,
-    workflowObservedRunSchema,
-    workflowPageQuerySchema,
     workflowPageSchema,
     workflowRunSchema,
     type WorkflowLogPage,
-    type WorkflowMutationResult,
     type WorkflowPage,
-    type WorkflowObservedRun,
     type WorkflowRun,
 } from "./Workflow.js";
 
-const workflowAbortSignalSchema = Type.Unsafe<AbortSignal>(
-    Type.Object(
-        {
-            aborted: Type.Boolean(),
-            addEventListener: Type.Function([], Type.Any()),
-        },
-        { additionalProperties: true },
-    ),
-);
-
-/** External runner capability. Durable run state is owned by WorkflowsModule. */
-export const workflowRuntimeSchema = Type.Object(
-    {
-        launch: Type.Function(
-            [
-                Type.Unsafe<Context>(Type.Object({}, { additionalProperties: false })),
-                workflowAgentIdSchema,
-                workflowLaunchRequestSchema,
-            ],
-            Type.Promise(workflowRunSchema),
-        ),
-        cancel: Type.Function(
-            [
-                Type.Unsafe<Context>(Type.Object({}, { additionalProperties: false })),
-                workflowAgentIdSchema,
-                workflowMutationRequestSchema,
-            ],
-            Type.Promise(workflowMutationResultSchema),
-        ),
-        resume: Type.Function(
-            [
-                Type.Unsafe<Context>(Type.Object({}, { additionalProperties: false })),
-                workflowAgentIdSchema,
-                workflowMutationRequestSchema,
-            ],
-            Type.Promise(workflowMutationResultSchema),
-        ),
-        wait: Type.Function(
-            [
-                Type.Unsafe<Context>(Type.Object({}, { additionalProperties: false })),
-                workflowAgentIdSchema,
-                workflowIdSchema,
-                Type.Optional(workflowAbortSignalSchema),
-            ],
-            Type.Promise(workflowRunSchema),
-        ),
-    },
-    { additionalProperties: false },
-);
-
-/** Module-owned workflow database surface plus the external runner capability. */
-export const workflowStoreSchema = Type.Object(
-    {
-        launch: Type.Function(
-            [
-                Type.Unsafe<Context>(Type.Object({}, { additionalProperties: false })),
-                workflowAgentIdSchema,
-                workflowLaunchRequestSchema,
-            ],
-            Type.Promise(workflowRunSchema),
-        ),
-        get: Type.Function(
-            [
-                Type.Unsafe<Context>(Type.Object({}, { additionalProperties: false })),
-                workflowAgentIdSchema,
-                workflowIdSchema,
-            ],
-            Type.Promise(Type.Union([workflowRunSchema, Type.Undefined()])),
-        ),
-        list: Type.Function(
-            [
-                Type.Unsafe<Context>(Type.Object({}, { additionalProperties: false })),
-                workflowAgentIdSchema,
-                workflowPageQuerySchema,
-            ],
-            Type.Promise(workflowPageSchema),
-        ),
-        cancel: Type.Function(
-            [
-                Type.Unsafe<Context>(Type.Object({}, { additionalProperties: false })),
-                workflowAgentIdSchema,
-                workflowMutationRequestSchema,
-            ],
-            Type.Promise(workflowMutationResultSchema),
-        ),
-        resume: Type.Function(
-            [
-                Type.Unsafe<Context>(Type.Object({}, { additionalProperties: false })),
-                workflowAgentIdSchema,
-                workflowMutationRequestSchema,
-            ],
-            Type.Promise(workflowMutationResultSchema),
-        ),
-        wait: Type.Function(
-            [
-                Type.Unsafe<Context>(Type.Object({}, { additionalProperties: false })),
-                workflowAgentIdSchema,
-                workflowIdSchema,
-            ],
-            Type.Promise(workflowRunSchema),
-        ),
-        save: Type.Function(
-            [
-                Type.Unsafe<Context>(Type.Object({}, { additionalProperties: false })),
-                workflowRunSchema,
-            ],
-            Type.Promise(Type.Void()),
-        ),
-        logs: Type.Function(
-            [
-                Type.Unsafe<Context>(Type.Object({}, { additionalProperties: false })),
-                workflowAgentIdSchema,
-                workflowLogQuerySchema,
-            ],
-            Type.Promise(workflowLogPageSchema),
-        ),
-    },
-    { additionalProperties: false },
-);
-
-export type WorkflowStore = Static<typeof workflowStoreSchema>;
-export type WorkflowRuntime = Static<typeof workflowRuntimeSchema>;
-
+/**
+ * A stored run has to obey its own timeline, and nothing in the schema says so: a run cannot start
+ * before it was created, pause in the future, or finish at a moment other than its last update.
+ * These are checked where a row is read, because a database that outlives the code is the one
+ * place a run can arrive in a shape this module never wrote.
+ */
 export function assertWorkflowRun(value: unknown): asserts value is WorkflowRun {
     if (!Value.Check(workflowRunSchema, value)) {
-        throw new Error("Workflow store returned an invalid run.");
+        throw new Error("A stored workflow run is not a valid run.");
     }
     if (value.updatedAt < value.createdAt) {
-        throw new Error("Workflow store returned a run with invalid timestamp ordering.");
+        throw new Error("A stored workflow run was updated before it was created.");
     }
-    if (
-        value.legacyStatus !== undefined &&
-        value.legacyStatus !== workflowLegacyStatusFor(value.status)
-    ) {
-        throw new Error("Workflow store returned an invalid legacy workflow status.");
-    }
-    if ("startedAt" in value && value.startedAt !== undefined) {
-        if (value.startedAt < value.createdAt || value.startedAt > value.updatedAt) {
-            throw new Error("Workflow store returned a run with invalid start time.");
-        }
+    if (value.startedAt < value.createdAt || value.startedAt > value.updatedAt) {
+        throw new Error("A stored workflow run started outside its own lifetime.");
     }
     if (value.status === "paused" && value.pausedAt !== value.updatedAt) {
-        throw new Error("Workflow store returned a paused run with invalid pause time.");
+        throw new Error("A stored paused workflow run did not pause when it was last updated.");
     }
     if (
         (value.status === "completed" ||
             value.status === "failed" ||
-            value.status === "cancelled" ||
-            value.status === "unavailable") &&
+            value.status === "cancelled") &&
         value.finishedAt !== value.updatedAt
     ) {
-        throw new Error("Workflow store returned a terminal run with invalid finish time.");
+        throw new Error("A stored finished workflow run did not finish when it was last updated.");
     }
-}
-
-export function assertWorkflowObservedRun(value: unknown): asserts value is WorkflowObservedRun {
-    if (!Value.Check(workflowObservedRunSchema, value)) {
-        throw new Error("Workflow module returned an incomplete workflow observation.");
-    }
-    assertWorkflowRun(value);
 }
 
 export function assertWorkflowPage(value: unknown): asserts value is WorkflowPage {
     if (!Value.Check(workflowPageSchema, value)) {
-        throw new Error("Workflow store returned an invalid page.");
+        throw new Error("A workflow page was assembled in an invalid shape.");
     }
     for (const run of value.runs) assertWorkflowRun(run);
 }
 
 export function assertWorkflowLogPage(value: unknown): asserts value is WorkflowLogPage {
     if (!Value.Check(workflowLogPageSchema, value)) {
-        throw new Error("Workflow store returned an invalid log page.");
+        throw new Error("A workflow log page was assembled in an invalid shape.");
     }
-}
-
-export function assertWorkflowMutationResult(
-    value: unknown,
-): asserts value is WorkflowMutationResult {
-    if (!Value.Check(workflowMutationResultSchema, value)) {
-        throw new Error("Workflow store returned an invalid mutation result.");
-    }
-    assertWorkflowRun(value.run);
 }

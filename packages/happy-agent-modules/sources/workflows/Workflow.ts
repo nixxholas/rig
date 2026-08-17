@@ -9,7 +9,6 @@ import { Type, type Static, type TSchema } from "@sinclair/typebox";
 export const MAX_WORKFLOW_ID_LENGTH = 96;
 export const MAX_WORKFLOW_AGENT_ID_LENGTH = 256;
 export const MAX_WORKFLOW_NAME_LENGTH = 96;
-export const MAX_WORKFLOW_INPUT_LENGTH = 20_000;
 export const MAX_WORKFLOW_SCRIPT_LENGTH = 524_288;
 export const MAX_WORKFLOW_SCRIPT_PATH_LENGTH = 4_096;
 export const MAX_WORKFLOW_DESCRIPTION_LENGTH = 1_000;
@@ -46,16 +45,12 @@ export const workflowNameSchema = Type.String({
     pattern: "^[^\\u0000\\r\\n]+$",
 });
 
-export const workflowInputSchema = Type.String({
-    maxLength: MAX_WORKFLOW_INPUT_LENGTH,
-});
-
-/** A saved Python workflow source. The host runtime is responsible for reading and executing it. */
+/** A sandboxed Python workflow source, run by this module rather than by anything outside it. */
 export const workflowScriptSchema = Type.String({
     maxLength: MAX_WORKFLOW_SCRIPT_LENGTH,
 });
 
-/** A host-resolved path to a saved Python workflow source. */
+/** A path to a saved Python workflow source, read through the agent's own filesystem boundary. */
 export const workflowScriptPathSchema = Type.String({
     minLength: 1,
     maxLength: MAX_WORKFLOW_SCRIPT_PATH_LENGTH,
@@ -105,69 +100,50 @@ export const workflowAccumulatedLogSchema = Type.String({
     maxLength: MAX_WORKFLOW_LOG_LINE_LENGTH,
 });
 
+/**
+ * Where a run is in its life.
+ *
+ * `paused` is what a run left behind by a stopped process becomes: the script's own state was
+ * checkpointed at its last agent call, so the work is not lost and `resume_workflow` continues it.
+ */
 export const workflowStatusSchema = Type.Union([
-    Type.Literal("queued"),
     Type.Literal("running"),
     Type.Literal("paused"),
     Type.Literal("completed"),
     Type.Literal("failed"),
     Type.Literal("cancelled"),
-    Type.Literal("unavailable"),
 ]);
-
-/** Legacy status vocabulary retained as an explicit compatibility projection. */
-export const workflowLegacyStatusSchema = Type.Union([
-    Type.Literal("completed"),
-    Type.Literal("error"),
-    Type.Literal("running"),
-    Type.Literal("stopped"),
-]);
-
-export type WorkflowLegacyStatus = Static<typeof workflowLegacyStatusSchema>;
 
 export const workflowTimestampSchema = Type.Integer({
     minimum: 0,
     maximum: Number.MAX_SAFE_INTEGER,
 });
 
+const workflowOutputSchema = Type.String({ maxLength: MAX_WORKFLOW_OUTPUT_CHARACTERS });
+const workflowErrorSchema = Type.String({ maxLength: MAX_WORKFLOW_ERROR_LENGTH });
+
 const workflowRunFields = {
     id: workflowIdSchema,
     agentId: workflowAgentIdSchema,
     workflow: workflowNameSchema,
-    input: Type.Optional(workflowInputSchema),
+    description: workflowDescriptionSchema,
+    /** How the script names what it is doing right now, from its last `phase(...)` call. */
+    phase: Type.Optional(workflowNameSchema),
+    /** How many agents the run has started, which is what makes a workflow expensive. */
+    agentCount: workflowAgentCountSchema,
+    /** The tail of the run's progress notes, bounded so a status read stays a status read. */
+    logs: Type.Array(workflowAccumulatedLogSchema, { maxItems: MAX_WORKFLOW_LOG_LINES }),
+    /** Whether older progress notes exist that `workflow_logs` can page through. */
+    logsTruncated: Type.Boolean(),
     createdAt: workflowTimestampSchema,
     updatedAt: workflowTimestampSchema,
-    /**
-     * Runtime adapters from the first module release may omit these fields. WorkflowsModule
-     * normalizes omitted values to bounded empty observations before returning them to callers.
-     */
-    agentCount: Type.Optional(workflowAgentCountSchema),
-    logs: Type.Optional(
-        Type.Array(workflowAccumulatedLogSchema, { maxItems: MAX_WORKFLOW_LOG_LINES }),
-    ),
-    logsTruncated: Type.Optional(Type.Boolean()),
-    legacyStatus: Type.Optional(workflowLegacyStatusSchema),
+    startedAt: workflowTimestampSchema,
 };
-const workflowStartedAtSchema = workflowTimestampSchema;
-const workflowPausedAtSchema = workflowTimestampSchema;
-const workflowFinishedAtSchema = workflowTimestampSchema;
-const workflowOutputSchema = Type.String({ maxLength: MAX_WORKFLOW_OUTPUT_CHARACTERS });
-const workflowErrorSchema = Type.String({ maxLength: MAX_WORKFLOW_ERROR_LENGTH });
-
-export const workflowQueuedRunSchema = Type.Object(
-    {
-        ...workflowRunFields,
-        status: Type.Literal("queued"),
-    },
-    { additionalProperties: false },
-);
 
 export const workflowRunningRunSchema = Type.Object(
     {
         ...workflowRunFields,
         status: Type.Literal("running"),
-        startedAt: workflowStartedAtSchema,
-        output: Type.Optional(workflowOutputSchema),
     },
     { additionalProperties: false },
 );
@@ -176,9 +152,7 @@ export const workflowPausedRunSchema = Type.Object(
     {
         ...workflowRunFields,
         status: Type.Literal("paused"),
-        startedAt: workflowStartedAtSchema,
-        pausedAt: workflowPausedAtSchema,
-        output: Type.Optional(workflowOutputSchema),
+        pausedAt: workflowTimestampSchema,
     },
     { additionalProperties: false },
 );
@@ -187,9 +161,8 @@ export const workflowCompletedRunSchema = Type.Object(
     {
         ...workflowRunFields,
         status: Type.Literal("completed"),
-        startedAt: workflowStartedAtSchema,
-        finishedAt: workflowFinishedAtSchema,
-        output: Type.Optional(workflowOutputSchema),
+        finishedAt: workflowTimestampSchema,
+        output: workflowOutputSchema,
     },
     { additionalProperties: false },
 );
@@ -198,9 +171,7 @@ export const workflowFailedRunSchema = Type.Object(
     {
         ...workflowRunFields,
         status: Type.Literal("failed"),
-        startedAt: workflowStartedAtSchema,
-        finishedAt: workflowFinishedAtSchema,
-        output: Type.Optional(workflowOutputSchema),
+        finishedAt: workflowTimestampSchema,
         error: workflowErrorSchema,
     },
     { additionalProperties: false },
@@ -210,175 +181,52 @@ export const workflowCancelledRunSchema = Type.Object(
     {
         ...workflowRunFields,
         status: Type.Literal("cancelled"),
-        startedAt: Type.Optional(workflowStartedAtSchema),
-        finishedAt: workflowFinishedAtSchema,
-        output: Type.Optional(workflowOutputSchema),
-    },
-    { additionalProperties: false },
-);
-
-export const workflowUnavailableRunSchema = Type.Object(
-    {
-        ...workflowRunFields,
-        status: Type.Literal("unavailable"),
-        startedAt: Type.Optional(workflowStartedAtSchema),
-        finishedAt: workflowFinishedAtSchema,
-        output: Type.Optional(workflowOutputSchema),
-        error: Type.Optional(workflowErrorSchema),
+        finishedAt: workflowTimestampSchema,
     },
     { additionalProperties: false },
 );
 
 /** Exact status-specific persisted workflow state. */
 export const workflowRunSchema = Type.Union([
-    workflowQueuedRunSchema,
     workflowRunningRunSchema,
     workflowPausedRunSchema,
     workflowCompletedRunSchema,
     workflowFailedRunSchema,
     workflowCancelledRunSchema,
-    workflowUnavailableRunSchema,
 ]);
 
-/**
- * Canonical observation returned by WorkflowsModule after it fills omitted runtime observations.
- * The runtime contract stays backward-compatible, while status and wait callers always receive
- * the agent count, bounded accumulated logs, truncation marker, and legacy status projection.
- */
-export const workflowObservedRunSchema = Type.Intersect([
-    workflowRunSchema,
-    Type.Object(
-        {
-            agentCount: workflowAgentCountSchema,
-            logs: Type.Array(workflowAccumulatedLogSchema, { maxItems: MAX_WORKFLOW_LOG_LINES }),
-            logsTruncated: Type.Boolean(),
-            legacyStatus: workflowLegacyStatusSchema,
-        },
-        { additionalProperties: true },
-    ),
-]);
-
-const workflowLaunchScriptFields = {
+const workflowLaunchFields = {
     args: Type.Optional(workflowArgsSchema),
     description: Type.Optional(workflowDescriptionSchema),
     name: Type.Optional(workflowNameSchema),
     resumeFromRunId: Type.Optional(workflowIdSchema),
 };
 
-const workflowNamedLaunchInputSchema = Type.Object(
-    {
-        workflow: workflowNameSchema,
-        input: Type.Optional(workflowInputSchema),
-        operationId: Type.Optional(workflowIdSchema),
-    },
-    { additionalProperties: false },
-);
-
-const workflowScriptLaunchInputSchema = Type.Object(
-    {
-        ...workflowLaunchScriptFields,
-        script: workflowScriptSchema,
-    },
-    { additionalProperties: false },
-);
-
-const workflowScriptPathLaunchInputSchema = Type.Object(
-    {
-        ...workflowLaunchScriptFields,
-        scriptPath: workflowScriptPathSchema,
-    },
-    { additionalProperties: false },
-);
-
-/**
- * Launch input accepted by the public module API. A named host workflow is kept for runtimes that
- * already provide orchestration; script and scriptPath are the legacy-compatible orchestration
- * forms and are normalized to a host workflow name before launch.
- */
+/** Start a workflow from an inline script, or from one saved on disk. Exactly one of the two. */
 export const workflowLaunchInputSchema = Type.Union([
-    workflowNamedLaunchInputSchema,
     Type.Object(
+        { ...workflowLaunchFields, script: workflowScriptSchema },
         {
-            ...workflowLaunchScriptFields,
-            script: workflowScriptSchema,
-            operationId: Type.Optional(workflowIdSchema),
+            additionalProperties: false,
         },
-        { additionalProperties: false },
     ),
     Type.Object(
+        { ...workflowLaunchFields, scriptPath: workflowScriptPathSchema },
         {
-            ...workflowLaunchScriptFields,
-            scriptPath: workflowScriptPathSchema,
-            operationId: Type.Optional(workflowIdSchema),
+            additionalProperties: false,
         },
-        { additionalProperties: false },
     ),
 ]);
 
-/** Exact normalized launch request sent to the host runner. */
-export const workflowLaunchRequestSchema = Type.Union([
-    Type.Object(
-        {
-            workflow: workflowNameSchema,
-            input: Type.Optional(workflowInputSchema),
-            operationId: workflowIdSchema,
-        },
-        { additionalProperties: false },
-    ),
-    Type.Object(
-        {
-            workflow: workflowNameSchema,
-            input: Type.Optional(workflowInputSchema),
-            ...workflowLaunchScriptFields,
-            script: workflowScriptSchema,
-            operationId: workflowIdSchema,
-        },
-        { additionalProperties: false },
-    ),
-    Type.Object(
-        {
-            workflow: workflowNameSchema,
-            input: Type.Optional(workflowInputSchema),
-            ...workflowLaunchScriptFields,
-            scriptPath: workflowScriptPathSchema,
-            operationId: workflowIdSchema,
-        },
-        { additionalProperties: false },
-    ),
-]);
-
-export const workflowLaunchToolInputSchema = Type.Union([
-    Type.Object(
-        {
-            workflow: workflowNameSchema,
-            input: Type.Optional(workflowInputSchema),
-        },
-        { additionalProperties: false },
-    ),
-    workflowScriptLaunchInputSchema,
-    workflowScriptPathLaunchInputSchema,
-]);
-
-export const workflowMutationInputSchema = Type.Object(
+/** One launch after defaulting: the name, the description, and the source to actually run. */
+export const workflowLaunchRequestSchema = Type.Object(
     {
         id: workflowIdSchema,
-        operationId: Type.Optional(workflowIdSchema),
-    },
-    { additionalProperties: false },
-);
-
-/** Exact normalized mutation request sent to the host runner. */
-export const workflowMutationRequestSchema = Type.Object(
-    {
-        id: workflowIdSchema,
-        operationId: workflowIdSchema,
-    },
-    { additionalProperties: false },
-);
-
-export const workflowMutationToolInputSchema = Type.Object(
-    {
-        id: workflowIdSchema,
+        workflow: workflowNameSchema,
+        description: workflowDescriptionSchema,
+        script: workflowScriptSchema,
+        args: Type.Optional(workflowArgsSchema),
+        resumeFromRunId: Type.Optional(workflowIdSchema),
     },
     { additionalProperties: false },
 );
@@ -469,20 +317,9 @@ export const workflowLogPageSchema = Type.Object(
     { additionalProperties: false },
 );
 
-export const workflowMutationResultSchema = Type.Object(
-    {
-        agentId: workflowAgentIdSchema,
-        operationId: workflowIdSchema,
-        run: workflowRunSchema,
-        changed: Type.Boolean(),
-    },
-    { additionalProperties: false },
-);
-
 export type WorkflowId = Static<typeof workflowIdSchema>;
 export type WorkflowAgentId = Static<typeof workflowAgentIdSchema>;
 export type WorkflowName = Static<typeof workflowNameSchema>;
-export type WorkflowInput = Static<typeof workflowInputSchema>;
 export type WorkflowScript = Static<typeof workflowScriptSchema>;
 export type WorkflowScriptPath = Static<typeof workflowScriptPathSchema>;
 export type WorkflowDescription = Static<typeof workflowDescriptionSchema>;
@@ -490,22 +327,14 @@ export type WorkflowArgs = Static<typeof workflowArgsSchema>;
 export type WorkflowStatus = Static<typeof workflowStatusSchema>;
 export type WorkflowAgentCount = Static<typeof workflowAgentCountSchema>;
 export type WorkflowAccumulatedLog = Static<typeof workflowAccumulatedLogSchema>;
-export type WorkflowQueuedRun = Static<typeof workflowQueuedRunSchema>;
 export type WorkflowRunningRun = Static<typeof workflowRunningRunSchema>;
 export type WorkflowPausedRun = Static<typeof workflowPausedRunSchema>;
 export type WorkflowCompletedRun = Static<typeof workflowCompletedRunSchema>;
 export type WorkflowFailedRun = Static<typeof workflowFailedRunSchema>;
 export type WorkflowCancelledRun = Static<typeof workflowCancelledRunSchema>;
-export type WorkflowUnavailableRun = Static<typeof workflowUnavailableRunSchema>;
 export type WorkflowRun = Static<typeof workflowRunSchema>;
-export type WorkflowObservedRun = Static<typeof workflowObservedRunSchema>;
 export type WorkflowLaunchInput = Static<typeof workflowLaunchInputSchema>;
 export type WorkflowLaunchRequest = Static<typeof workflowLaunchRequestSchema>;
-export type WorkflowLaunchToolInput = Static<typeof workflowLaunchToolInputSchema>;
-export type WorkflowMutationInput = Static<typeof workflowMutationInputSchema>;
-export type WorkflowMutationRequest = Static<typeof workflowMutationRequestSchema>;
-export type WorkflowMutationToolInput = Static<typeof workflowMutationToolInputSchema>;
-export type WorkflowMutationResult = Static<typeof workflowMutationResultSchema>;
 export type WorkflowCursor = Static<typeof workflowCursorSchema>;
 export type WorkflowPageFrom = Static<typeof workflowPageFromSchema>;
 export type WorkflowPageQuery = Static<typeof workflowPageQuerySchema>;
@@ -514,19 +343,23 @@ export type WorkflowLogQuery = Static<typeof workflowLogQuerySchema>;
 export type WorkflowLogLine = Static<typeof workflowLogLineSchema>;
 export type WorkflowLogPage = Static<typeof workflowLogPageSchema>;
 
-/** Project the richer lifecycle into the four statuses used by the legacy workflow tools. */
-export function workflowLegacyStatusFor(status: WorkflowStatus): WorkflowLegacyStatus {
+/** Whether a run has stopped for good, so nothing more will happen to it. */
+export function isWorkflowTerminalStatus(status: WorkflowStatus): boolean {
+    return status === "completed" || status === "failed" || status === "cancelled";
+}
+
+/** How a run reads to a person: a sentence rather than an enum value. */
+export function describeWorkflowStatus(status: WorkflowStatus): string {
     switch (status) {
+        case "running":
+            return "running";
+        case "paused":
+            return "paused, and can be resumed";
         case "completed":
             return "completed";
         case "failed":
-        case "unavailable":
-            return "error";
+            return "failed";
         case "cancelled":
-            return "stopped";
-        case "queued":
-        case "running":
-        case "paused":
-            return "running";
+            return "cancelled";
     }
 }

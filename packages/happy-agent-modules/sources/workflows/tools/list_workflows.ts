@@ -19,7 +19,7 @@ export function listWorkflowsTool(module: WorkflowsModule, agentId: string) {
     return defineAgentTool({
         name: "list_workflows",
         description:
-            "List a bounded page of host-managed workflow runs. Use from=end for the latest page and prev/next cursors to traverse both directions.",
+            "List this agent's workflows, a page at a time. Ask from=end for the most recent page, and follow the cursor a page reports to read further.",
         parameters: listWorkflowsToolParametersSchema,
         returnType: workflowPageSchema,
         durable: true,
@@ -27,11 +27,6 @@ export function listWorkflowsTool(module: WorkflowsModule, agentId: string) {
         shouldReviewInAutoMode: () => false,
         execute: async (ctx, { input }: ListWorkflowsToolParameters) =>
             await module.list(ctx, agentId, input),
-        toLLM: (page) => [
-            {
-                type: "text",
-                text: module.formatPageForModel(page),
-            },
-        ],
+        toLLM: (page) => [{ type: "text", text: module.formatPageForModel(page) }],
     });
 }

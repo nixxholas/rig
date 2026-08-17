@@ -550,12 +550,6 @@ function createVanillaIntegrations(): HappyAgentIntegrations {
             listTools: async () => ({ tools: [] }),
             readResource: unavailable,
         },
-        workflows: {
-            cancel: unavailable,
-            launch: unavailable,
-            resume: unavailable,
-            wait: unavailable,
-        },
     } as unknown as HappyAgentIntegrations;
 }
 

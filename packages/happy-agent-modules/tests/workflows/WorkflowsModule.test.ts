@@ -1,572 +1,476 @@
-import { sql } from "drizzle-orm";
-import { agentDatabaseRows } from "@slopus/happy-agent-base";
-import { Value } from "@sinclair/typebox/value";
-import { withLifetime } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
-import * as WorkflowExports from "../../sources/workflows/index.js";
 import {
-    WorkflowsModule,
-    workflowModuleOptionsSchema,
-} from "../../sources/workflows/WorkflowsModule.js";
-import {
-    workflowLaunchToolInputSchema,
-    workflowMutationResultSchema,
-    workflowRunSchema,
-    type WorkflowLaunchRequest,
-    type WorkflowMutationRequest,
-    type WorkflowMutationResult,
-    type WorkflowRun,
-} from "../../sources/workflows/Workflow.js";
-import type { WorkflowRuntime } from "../../sources/workflows/WorkflowStore.js";
-import { moduleDatabase } from "../support/moduleDatabase.js";
-import { resolveModuleHooks } from "../support/moduleHooks.js";
+    agentOptions,
+    agentRequest,
+    workflowWorld,
+    WORKFLOW_MODEL,
+    WORKFLOW_OWNER,
+} from "./support/workflowWorld.js";
 
-const OWNER = "agent-1";
+/** Monty loads and runs a real interpreter, so a run is slower than an ordinary unit test. */
+const RUN_TIMEOUT = 30_000;
 
-function run(
-    id: string,
-    status: WorkflowRun["status"] = "queued",
-    overrides: {
-        readonly agentId?: string;
-        readonly workflow?: string;
-        readonly input?: string;
-        readonly createdAt?: number;
-        readonly updatedAt?: number;
-        readonly startedAt?: number;
-    } = {},
-): WorkflowRun {
-    const createdAt = overrides.createdAt ?? 1;
-    const common = {
-        id,
-        agentId: overrides.agentId ?? OWNER,
-        workflow: overrides.workflow ?? "demo",
-        ...(overrides.input === undefined ? {} : { input: overrides.input }),
-        createdAt,
-    };
-    if (status === "queued") {
-        return { ...common, status, updatedAt: overrides.updatedAt ?? createdAt };
-    }
-    const startedAt = overrides.startedAt ?? createdAt;
-    if (status === "running") {
-        return { ...common, status, startedAt, updatedAt: overrides.updatedAt ?? startedAt };
-    }
-    if (status === "paused") {
-        const updatedAt = overrides.updatedAt ?? 2;
-        return { ...common, status, startedAt, pausedAt: updatedAt, updatedAt };
-    }
-    const updatedAt = overrides.updatedAt ?? 2;
-    if (status === "completed") {
-        return { ...common, status, startedAt, finishedAt: updatedAt, updatedAt };
-    }
-    if (status === "failed") {
-        return {
-            ...common,
-            status,
-            startedAt,
-            finishedAt: updatedAt,
-            error: "failed",
-            updatedAt,
-        };
-    }
-    if (status === "cancelled") {
-        return { ...common, status, finishedAt: updatedAt, updatedAt };
-    }
-    return { ...common, status, finishedAt: updatedAt, updatedAt };
-}
-
-async function workflowTest(name: string) {
-    const runtimeRuns = new Map<string, WorkflowRun>();
-    const launchRequests: WorkflowLaunchRequest[] = [];
-    const mutationRequests: WorkflowMutationRequest[] = [];
-    const runtimeDatabases: unknown[] = [];
-    let database!: ReturnType<typeof moduleDatabase>;
-
-    const runtime: WorkflowRuntime = {
-        launch: async (ctx, agentId, request) => {
-            runtimeDatabases.push(ctx.db);
-            launchRequests.push(structuredClone(request));
-            const created = run(request.operationId, "queued", {
-                agentId,
-                workflow: request.workflow,
-                ...(request.input === undefined ? {} : { input: request.input }),
-            });
-            runtimeRuns.set(created.id, created);
-            return created;
-        },
-        cancel: async (ctx, agentId, request) => {
-            runtimeDatabases.push(ctx.db);
-            mutationRequests.push(structuredClone(request));
-            const current = runtimeRuns.get(request.id);
-            if (current === undefined) throw new Error("runtime run missing");
-            const cancelled = run(current.id, "cancelled", {
-                agentId,
-                workflow: current.workflow,
-                ...(current.input === undefined ? {} : { input: current.input }),
-                createdAt: current.createdAt,
-                updatedAt: current.updatedAt + 1,
-            });
-            runtimeRuns.set(cancelled.id, cancelled);
-            return {
-                agentId,
-                operationId: request.operationId,
-                run: cancelled,
-                changed: true,
-            };
-        },
-        resume: async (ctx, agentId, request) => {
-            runtimeDatabases.push(ctx.db);
-            mutationRequests.push(structuredClone(request));
-            const current = runtimeRuns.get(request.id);
-            if (current?.status !== "paused") throw new Error("runtime run is not paused");
-            const resumed = run(current.id, "running", {
-                agentId,
-                workflow: current.workflow,
-                ...(current.input === undefined ? {} : { input: current.input }),
-                createdAt: current.createdAt,
-                startedAt: current.startedAt,
-                updatedAt: current.updatedAt + 1,
-            });
-            runtimeRuns.set(resumed.id, resumed);
-            return {
-                agentId,
-                operationId: request.operationId,
-                run: resumed,
-                changed: true,
-            };
-        },
-        wait: async (ctx, agentId, id) => {
-            runtimeDatabases.push(ctx.db);
-            return runtimeRuns.get(id) ?? run(id, "unavailable", { agentId });
-        },
-    };
-    const module = new WorkflowsModule({
-        runtime,
-        idFactory: () => "public-operation",
-        eventIdFactory: () => "event-1",
-        clock: () => 10,
-    });
-    database = moduleDatabase(module.migrations, name);
-    await database.ready;
-    const hooks = await resolveModuleHooks(database.context, module);
-    return {
-        database,
-        module,
-        hooks,
-        runtimeRuns,
-        launchRequests,
-        mutationRequests,
-        runtimeDatabases,
-    };
-}
-
-function toolCall(id: string): never {
-    return {
-        id,
-        providerCallId: `provider-${id}`,
-    } as never;
-}
-
-describe("WorkflowsModule", () => {
-    it("exports the current workflow surface without replay schemas", () => {
-        expect(WorkflowExports.WorkflowsModule).toBe(WorkflowsModule);
-        expect(WorkflowExports.workflowModuleOptionsSchema).toBe(workflowModuleOptionsSchema);
-        expect(WorkflowExports.workflowRunSchema).toBe(workflowRunSchema);
-        expect(WorkflowExports.workflowObservedRunSchema).toBeDefined();
-        expect(WorkflowExports.workflowMutationResultSchema).toBe(workflowMutationResultSchema);
-        expect("workflowCallOperationSchema" in WorkflowExports).toBe(false);
-        expect("workflowOperationReceiptSchema" in WorkflowExports).toBe(false);
-        expect("workflowMutationProofSchema" in WorkflowExports).toBe(false);
-        expect(
-            Value.Check(workflowModuleOptionsSchema, {
-                runtime: {
-                    launch: async () => run("run"),
-                    cancel: async () => ({
-                        agentId: OWNER,
-                        operationId: "operation",
-                        run: run("run"),
-                        changed: false,
-                    }),
-                    resume: async () => ({
-                        agentId: OWNER,
-                        operationId: "operation",
-                        run: run("run"),
-                        changed: false,
-                    }),
-                    wait: async () => run("run", "completed"),
-                },
-            }),
-        ).toBe(true);
-    });
-
-    it("adds a forward migration that drops the obsolete receipt and proof tables", async () => {
-        const test = await workflowTest("workflow-migrations");
-        try {
-            expect(test.module.migrations.map(([key]) => key)).toEqual([
-                "001-workflows-runs",
-                "002-workflows-drop-replay-evidence",
-            ]);
-            await test.module.migrations[1]![1](test.database.context, test.database.database);
-            const tables = await agentDatabaseRows<{ name: string }>(
-                test.database.database,
-                sql`SELECT name FROM sqlite_master
-                    WHERE type = 'table' AND name LIKE 'happy_agent_module_workflow_%'
-                    ORDER BY name`,
-            );
-            expect(tables.map(({ name }) => name)).toEqual([
-                "happy_agent_module_workflow_logs",
-                "happy_agent_module_workflow_runs",
-            ]);
-        } finally {
-            test.database.close();
-        }
-    });
-
-    it("uses call.id as the launch identity without a custom tool commit", async () => {
-        const test = await workflowTest("workflow-launch-tool");
-        try {
-            const tools = await test.hooks.tools!(test.database.context, {
-                agent: { id: OWNER },
-            } as never);
-            const tool = tools.find(({ name }) => name === "run_workflow");
-            expect(tool).toBeDefined();
-            const result = await tool!.execute(
-                test.database.context,
-                { input: { workflow: "demo", input: "one\r\ntwo" } },
-                toolCall("call-cuid2"),
-            );
-
-            expect(result.id).toBe("call-cuid2");
-            expect(test.launchRequests).toEqual([
-                { workflow: "demo", input: "one\ntwo", operationId: "call-cuid2" },
-            ]);
-            expect(test.runtimeDatabases).toEqual([test.database.database]);
-            await expect(
-                test.module.status(test.database.context, OWNER, "call-cuid2"),
-            ).resolves.toEqual(result);
-        } finally {
-            test.database.close();
-        }
-    });
-
-    it("accepts bounded script orchestration inputs and forwards them to the host", async () => {
-        const test = await workflowTest("workflow-script-launch");
-        try {
-            const tools = await test.hooks.tools!(test.database.context, {
-                agent: { id: OWNER },
-            } as never);
-            const tool = tools.find(({ name }) => name === "run_workflow");
-            expect(tool).toBeDefined();
-            await tool!.execute(
-                test.database.context,
-                {
-                    input: {
-                        script: "print('review')\r\n",
-                        args: { files: ["a.ts", "b.ts"] },
-                        name: "review",
-                        description: "Review changed files",
-                        resumeFromRunId: "prior-run",
+describe("workflow execution", () => {
+    it(
+        "completes a script that starts no agents and keeps what it returned",
+        async () => {
+            const world = await workflowWorld("workflows-plain-script");
+            try {
+                await world.module.launch(
+                    world.ctx,
+                    WORKFLOW_OWNER,
+                    {
+                        script: '"Report on " + args["topic"]',
+                        args: { topic: "birds" },
+                        name: "report",
                     },
-                },
-                toolCall("script-call"),
-            );
+                    "run-plain",
+                );
+                await world.module.whenRunsSettle();
 
-            expect(test.launchRequests).toEqual([
-                {
-                    workflow: "review",
-                    script: "print('review')\n",
-                    args: { files: ["a.ts", "b.ts"] },
-                    name: "review",
-                    description: "Review changed files",
-                    resumeFromRunId: "prior-run",
-                    operationId: "script-call",
-                },
-            ]);
-            expect(
-                Value.Check(workflowLaunchToolInputSchema, {
-                    scriptPath: "workflows/review.py",
-                    args: null,
-                }),
-            ).toBe(true);
-            expect(
-                Value.Check(workflowLaunchToolInputSchema, {
-                    script: "one",
-                    scriptPath: "two.py",
-                }),
-            ).toBe(false);
-        } finally {
-            test.database.close();
-        }
-    });
-
-    it("includes accumulated logs, agent count, and a legacy status projection", async () => {
-        const test = await workflowTest("workflow-observations");
-        try {
-            await test.module.launch(test.database.context, OWNER, {
-                workflow: "demo",
-                operationId: "run-1",
-            });
-            test.runtimeRuns.set("run-1", {
-                ...run("run-1", "completed", { updatedAt: 3, startedAt: 1 }),
-                agentCount: 3,
-                logs: ["phase one", "phase two"],
-                logsTruncated: false,
-            });
-
-            const result = await test.module.wait(test.database.context, OWNER, "run-1");
-            expect(result).toMatchObject({
-                agentCount: 3,
-                logs: ["phase one", "phase two"],
-                logsTruncated: false,
-                legacyStatus: "completed",
-            });
-            await expect(
-                test.module.status(test.database.context, OWNER, "run-1"),
-            ).resolves.toMatchObject({
-                agentCount: 3,
-                logs: ["phase one", "phase two"],
-                legacyStatus: "completed",
-            });
-            expect(test.module.formatRunForModel(result)).toContain("agent_count: 3");
-            expect(test.module.formatRunForModel(result)).toContain("phase one");
-        } finally {
-            test.database.close();
-        }
-    });
-
-    it("marks model-facing accumulated logs when the character budget truncates them", async () => {
-        const test = await workflowTest("workflow-log-formatting");
-        try {
-            const text = test.module.formatRunForModel({
-                ...run("run-1", "completed", { updatedAt: 2 }),
-                agentCount: 2,
-                logs: Array.from({ length: 10 }, () => "x".repeat(4_000)),
-            });
-            expect(text.length).toBeLessThanOrEqual(12_000);
-            expect(text).toContain("logs_truncated: true");
-        } finally {
-            test.database.close();
-        }
-    });
-
-    it("cancels only the wait when the calling lifetime is aborted", async () => {
-        let release!: (value: WorkflowRun) => void;
-        let receivedSignal: AbortSignal | undefined;
-        const module = new WorkflowsModule({
-            runtime: {
-                launch: async () => run("unused"),
-                cancel: async () => ({
-                    agentId: OWNER,
-                    operationId: "cancel",
-                    run: run("run-1", "cancelled", { updatedAt: 2 }),
-                    changed: true,
-                }),
-                resume: async () => ({
-                    agentId: OWNER,
-                    operationId: "resume",
-                    run: run("run-1", "running"),
-                    changed: true,
-                }),
-                wait: async (_ctx, _agentId, _id, signal) => {
-                    receivedSignal = signal;
-                    return await new Promise<WorkflowRun>((resolve) => {
-                        release = resolve;
-                    });
-                },
-            },
-        });
-        const database = moduleDatabase(module.migrations, "workflow-wait-cancel");
-        await database.ready;
-        const controller = new AbortController();
-        try {
-            const pending = module.wait(
-                withLifetime(database.context, controller.signal),
-                OWNER,
-                "run-1",
-            );
-            await Promise.resolve();
-            controller.abort();
-            await expect(pending).rejects.toThrow(
-                "Workflow wait was cancelled; the workflow continues running in the background.",
-            );
-            expect(receivedSignal).toBe(controller.signal);
-            release(run("run-1", "completed", { updatedAt: 2 }));
-        } finally {
-            database.close();
-        }
-    });
-
-    it("marks database reads transactional and host-runtime tools non-durable", async () => {
-        const test = await workflowTest("workflow-tool-contracts");
-        try {
-            const tools = await test.hooks.tools!(test.database.context, {
-                agent: { id: OWNER },
-            } as never);
-            for (const name of ["list_workflows", "workflow_status", "workflow_logs"]) {
-                const tool = tools.find((candidate) => candidate.name === name);
-                expect(tool).toMatchObject({ durable: true, transactional: true });
+                const run = await world.module.status(world.ctx, WORKFLOW_OWNER, "run-plain");
+                expect(run?.status).toBe("completed");
+                expect(run).toMatchObject({
+                    workflow: "report",
+                    description: "Run report",
+                    agentCount: 0,
+                    output: "Report on birds",
+                });
+                expect(world.collaborators.started).toHaveLength(0);
+            } finally {
+                world.close();
             }
-            for (const name of [
-                "run_workflow",
-                "cancel_workflow",
-                "resume_workflow",
-                "wait_workflow",
-            ]) {
-                const tool = tools.find((candidate) => candidate.name === name);
-                expect(tool).toMatchObject({ durable: false });
-                expect(tool?.transactional).toBeUndefined();
+        },
+        RUN_TIMEOUT,
+    );
+
+    it(
+        "starts one collaborator the workflow reads itself and hands the script its answer",
+        async () => {
+            const world = await workflowWorld("workflows-single-agent");
+            try {
+                await world.module.launch(
+                    world.ctx,
+                    WORKFLOW_OWNER,
+                    { script: `agent("Review the parser.", ${agentOptions("Review")})` },
+                    "run-one",
+                );
+                const [collaborator] = await world.collaborators.waitFor(1);
+                await world.answer(collaborator!, "The parser is fine.");
+                await world.module.whenRunsSettle();
+
+                expect(collaborator).toMatchObject({
+                    actingAgentId: WORKFLOW_OWNER,
+                    input: {
+                        title: "Review",
+                        model: WORKFLOW_MODEL,
+                        effort: "medium",
+                        text: "Review the parser.",
+                    },
+                    options: {
+                        // The workflow collects the answer itself, so nothing is reported into
+                        // the calling agent's conversation.
+                        reportToCreator: false,
+                        metadata: { workflow: { runId: "run-one", callIndex: 0 } },
+                    },
+                });
+                const run = await world.module.status(world.ctx, WORKFLOW_OWNER, "run-one");
+                expect(run?.status).toBe("completed");
+                expect(run).toMatchObject({ agentCount: 1, output: "The parser is fine." });
+            } finally {
+                world.close();
             }
-            expect(
-                tools.find((candidate) => candidate.name === "run_workflow")?.description,
-            ).toContain("Only use this when the user explicitly asks");
-            expect(
-                tools.find((candidate) => candidate.name === "wait_workflow")?.description,
-            ).toContain("only this wait is cancelled");
-        } finally {
-            test.database.close();
-        }
-    });
+        },
+        RUN_TIMEOUT,
+    );
 
-    it("uses call.id for cancellation without holding a runtime transaction", async () => {
-        const test = await workflowTest("workflow-cancel-tool");
-        try {
-            await test.module.launch(test.database.context, OWNER, {
-                workflow: "demo",
-                operationId: "run-1",
-            });
-            const tools = await test.hooks.tools!(test.database.context, {
-                agent: { id: OWNER },
-            } as never);
-            const tool = tools.find(({ name }) => name === "cancel_workflow");
-            const result = await tool!.execute(
-                test.database.context,
-                { id: "run-1" },
-                toolCall("cancel-cuid2"),
-            );
+    it(
+        "ignores an agent that is not one of its own",
+        async () => {
+            const world = await workflowWorld("workflows-foreign-agent");
+            try {
+                await world.module.launch(
+                    world.ctx,
+                    WORKFLOW_OWNER,
+                    { script: `agent("Review the parser.", ${agentOptions("Review")})` },
+                    "run-foreign",
+                );
+                const [collaborator] = await world.collaborators.waitFor(1);
 
-            expect(result).toMatchObject({
-                agentId: OWNER,
-                operationId: "cancel-cuid2",
-                changed: true,
-                run: { id: "run-1", status: "cancelled" },
-            });
-            expect(test.mutationRequests).toEqual([{ id: "run-1", operationId: "cancel-cuid2" }]);
-            expect(test.runtimeDatabases.at(-1)).toBe(test.database.database);
-        } finally {
-            test.database.close();
-        }
-    });
+                // An ordinary collaborator settling says nothing about a workflow, whatever it
+                // last said, so the run is still waiting for the agent it actually started.
+                await world.answer(
+                    { ...collaborator!, agentId: "stranger", options: {} },
+                    "Nothing to do with the workflow.",
+                );
+                expect(
+                    (await world.module.status(world.ctx, WORKFLOW_OWNER, "run-foreign"))?.status,
+                ).toBe("running");
 
-    it("does not replay duplicate public operation IDs", async () => {
-        const test = await workflowTest("workflow-no-replay");
-        try {
-            await test.module.launch(test.database.context, OWNER, {
-                workflow: "demo",
-                operationId: "run-1",
-            });
-            await expect(
-                test.module.launch(test.database.context, OWNER, {
-                    workflow: "demo",
-                    operationId: "run-1",
-                }),
-            ).rejects.toThrow('Workflow run "run-1" already exists.');
-            expect(test.launchRequests).toHaveLength(1);
-        } finally {
-            test.database.close();
-        }
-    });
+                await world.answer(collaborator!, "The parser is fine.");
+                await world.module.whenRunsSettle();
+                expect(
+                    await world.module.status(world.ctx, WORKFLOW_OWNER, "run-foreign"),
+                ).toMatchObject({ status: "completed", output: "The parser is fine." });
+            } finally {
+                world.close();
+            }
+        },
+        RUN_TIMEOUT,
+    );
 
-    it("waits outside a transaction, then persists the completion", async () => {
-        const test = await workflowTest("workflow-wait-tool");
-        try {
-            await test.module.launch(test.database.context, OWNER, {
-                workflow: "demo",
-                operationId: "run-1",
-            });
-            test.runtimeRuns.set(
-                "run-1",
-                run("run-1", "completed", { updatedAt: 3, startedAt: 1 }),
-            );
-            const tools = await test.hooks.tools!(test.database.context, {
-                agent: { id: OWNER },
-            } as never);
-            const tool = tools.find(({ name }) => name === "wait_workflow");
-            const result = await tool!.execute(
-                test.database.context,
-                { id: "run-1" },
-                toolCall("wait-cuid2"),
-            );
+    it(
+        "keeps parallel results in input order however the agents finish",
+        async () => {
+            const world = await workflowWorld("workflows-parallel");
+            try {
+                await world.module.launch(
+                    world.ctx,
+                    WORKFLOW_OWNER,
+                    {
+                        script: [
+                            "parallel([",
+                            `    ${agentRequest("one", "Check one.")},`,
+                            `    ${agentRequest("two", "Check two.")},`,
+                            `    ${agentRequest("three", "Check three.")},`,
+                            "])",
+                        ].join("\n"),
+                    },
+                    "run-parallel",
+                );
+                const started = await world.collaborators.waitFor(3);
+                expect(started.map((collaborator) => collaborator.input.title)).toEqual([
+                    "one",
+                    "two",
+                    "three",
+                ]);
 
-            expect(result.status).toBe("completed");
-            expect(test.runtimeDatabases.at(-1)).toBe(test.database.database);
-            await expect(
-                test.module.status(test.database.context, OWNER, "run-1"),
-            ).resolves.toEqual(result);
+                await world.answer(started[2]!, "Third answer.");
+                await world.answer(started[0]!, "First answer.");
+                await world.answer(started[1]!, "Second answer.");
+                await world.module.whenRunsSettle();
 
-            const unavailable = await test.module.wait(test.database.context, OWNER, "missing-run");
-            expect(unavailable.status).toBe("unavailable");
-            await expect(
-                test.module.status(test.database.context, OWNER, "missing-run"),
-            ).resolves.toEqual(unavailable);
-        } finally {
-            test.database.close();
-        }
-    });
+                const run = await world.module.status(world.ctx, WORKFLOW_OWNER, "run-parallel");
+                expect(run?.status).toBe("completed");
+                expect(run?.agentCount).toBe(3);
+                expect(JSON.parse(run?.status === "completed" ? run.output : "")).toEqual([
+                    "First answer.",
+                    "Second answer.",
+                    "Third answer.",
+                ]);
+            } finally {
+                world.close();
+            }
+        },
+        RUN_TIMEOUT,
+    );
 
-    it("keeps bounded reads and model formatting", async () => {
-        const test = await workflowTest("workflow-reads");
-        try {
-            await test.module.launch(test.database.context, OWNER, {
-                workflow: "demo",
-                operationId: "run-1",
-            });
-            const page = await test.module.list(test.database.context, OWNER, {
-                cursor: 0,
-                limit: 10,
-            });
-            expect(page.runs.map(({ id }) => id)).toEqual(["run-1"]);
-            expect(test.module.formatPageForModel(page)).toBe("run-1: demo [queued]");
-            expect(test.module.formatRunForModel(page.runs[0]!)).toContain("status: queued");
-            await expect(
-                test.module.logs(test.database.context, OWNER, { id: "run-1" }),
-            ).resolves.toMatchObject({
-                agentId: OWNER,
-                id: "run-1",
-                lines: [],
-            });
-        } finally {
-            test.database.close();
-        }
-    });
+    it(
+        "carries every item through a pipeline stage and keeps the results in item order",
+        async () => {
+            const world = await workflowWorld("workflows-pipeline");
+            try {
+                await world.module.launch(
+                    world.ctx,
+                    WORKFLOW_OWNER,
+                    {
+                        script: [
+                            'pipeline(["alpha", "beta"], [',
+                            `    ${agentRequest("improve", "Improve it.")},`,
+                            "])",
+                        ].join("\n"),
+                    },
+                    "run-pipeline",
+                );
+                const started = await world.collaborators.waitFor(2);
+                const forItem = (item: string) => {
+                    const found = started.find((collaborator) =>
+                        collaborator.input.text.includes(`\n${item}\n`),
+                    );
+                    if (found === undefined) throw new Error(`Expected the agent for ${item}.`);
+                    return found;
+                };
+                expect(forItem("alpha").input.text).toContain("Original item (1/2):");
+                expect(forItem("beta").input.text).toContain("Original item (2/2):");
 
-    it("validates runtime ownership before committing state", async () => {
-        let database!: ReturnType<typeof moduleDatabase>;
-        const module = new WorkflowsModule({
-            runtime: {
-                launch: async (_ctx, _agentId, request) =>
-                    run(request.operationId, "queued", { agentId: "another-agent" }),
-                cancel: async () => {
-                    throw new Error("unused");
-                },
-                resume: async () => {
-                    throw new Error("unused");
-                },
-                wait: async (_ctx, _agentId, id) =>
-                    run(id, "unavailable", { agentId: "another-agent" }),
-            },
-        });
-        database = moduleDatabase(module.migrations, "workflow-ownership");
-        await database.ready;
-        try {
-            await expect(
-                module.launch(database.context, OWNER, {
-                    workflow: "demo",
-                    operationId: "run-1",
-                }),
-            ).rejects.toThrow("unrelated launch");
-            await expect(module.status(database.context, OWNER, "run-1")).resolves.toBeUndefined();
-        } finally {
-            database.close();
-        }
-    });
+                await world.answer(forItem("beta"), "Beta improved.");
+                await world.answer(forItem("alpha"), "Alpha improved.");
+                await world.module.whenRunsSettle();
+
+                const run = await world.module.status(world.ctx, WORKFLOW_OWNER, "run-pipeline");
+                expect(run?.status).toBe("completed");
+                expect(JSON.parse(run?.status === "completed" ? run.output : "")).toEqual([
+                    "Alpha improved.",
+                    "Beta improved.",
+                ]);
+            } finally {
+                world.close();
+            }
+        },
+        RUN_TIMEOUT,
+    );
+
+    it(
+        "refuses to start a second run under an identity it already used",
+        async () => {
+            const world = await workflowWorld("workflows-duplicate-id");
+            try {
+                await world.module.launch(
+                    world.ctx,
+                    WORKFLOW_OWNER,
+                    { script: '"once"' },
+                    "run-twice",
+                );
+                await world.module.whenRunsSettle();
+
+                await expect(
+                    world.module.launch(
+                        world.ctx,
+                        WORKFLOW_OWNER,
+                        { script: '"again"' },
+                        "run-twice",
+                    ),
+                ).rejects.toThrow('Workflow run "run-twice" already exists.');
+            } finally {
+                world.close();
+            }
+        },
+        RUN_TIMEOUT,
+    );
+
+    it(
+        "fails a run when the agent it is waiting for stops without answering",
+        async () => {
+            const world = await workflowWorld("workflows-agent-failure");
+            try {
+                await world.module.launch(
+                    world.ctx,
+                    WORKFLOW_OWNER,
+                    { script: `agent("Review the parser.", ${agentOptions("Review")})` },
+                    "run-agent-failure",
+                );
+                const [collaborator] = await world.collaborators.waitFor(1);
+                await world.fail(collaborator!, "The provider refused the request.");
+                await world.module.whenRunsSettle();
+
+                const run = await world.module.status(
+                    world.ctx,
+                    WORKFLOW_OWNER,
+                    "run-agent-failure",
+                );
+                expect(run?.status).toBe("failed");
+                expect(run).toMatchObject({ error: "The provider refused the request." });
+            } finally {
+                world.close();
+            }
+        },
+        RUN_TIMEOUT,
+    );
+
+    it(
+        "fails a run whose script cannot run, and says what went wrong",
+        async () => {
+            const world = await workflowWorld("workflows-script-failure");
+            try {
+                await world.module.launch(
+                    world.ctx,
+                    WORKFLOW_OWNER,
+                    { script: 'agent("Review.", {"model": "", "effort": "medium"})' },
+                    "run-script-failure",
+                );
+                await world.module.whenRunsSettle();
+
+                const run = await world.module.status(
+                    world.ctx,
+                    WORKFLOW_OWNER,
+                    "run-script-failure",
+                );
+                expect(run?.status).toBe("failed");
+                expect(run?.status === "failed" ? run.error : "").toContain(
+                    "Agent options must be a dictionary",
+                );
+                expect(world.collaborators.started).toHaveLength(0);
+            } finally {
+                world.close();
+            }
+        },
+        RUN_TIMEOUT,
+    );
+
+    it(
+        "cancels a run that is waiting on an agent, and leaves a finished run alone",
+        async () => {
+            const world = await workflowWorld("workflows-cancel");
+            try {
+                await world.module.launch(
+                    world.ctx,
+                    WORKFLOW_OWNER,
+                    { script: `agent("Review the parser.", ${agentOptions("Review")})` },
+                    "run-cancel",
+                );
+                await world.collaborators.waitFor(1);
+
+                const cancelled = await world.module.cancel(
+                    world.ctx,
+                    WORKFLOW_OWNER,
+                    "run-cancel",
+                );
+                expect(cancelled.status).toBe("cancelled");
+                // The agent it was waiting on is a separate session that would keep spending, so
+                // stopping the script has to stop it too.
+                expect(world.collaborators.interrupted).toEqual([
+                    world.collaborators.started[0]?.agentId,
+                ]);
+                await world.module.whenRunsSettle();
+
+                const stored = await world.module.status(world.ctx, WORKFLOW_OWNER, "run-cancel");
+                expect(stored).toEqual(cancelled);
+
+                const again = await world.module.cancel(world.ctx, WORKFLOW_OWNER, "run-cancel");
+                expect(again).toEqual(cancelled);
+                // A run that was already cancelled has nobody left to stop.
+                expect(world.collaborators.interrupted).toHaveLength(1);
+            } finally {
+                world.close();
+            }
+        },
+        RUN_TIMEOUT,
+    );
+
+    it(
+        "returns the settled run to whoever waited for it",
+        async () => {
+            const world = await workflowWorld("workflows-wait");
+            try {
+                await world.module.launch(
+                    world.ctx,
+                    WORKFLOW_OWNER,
+                    { script: `agent("Review the parser.", ${agentOptions("Review")})` },
+                    "run-wait",
+                );
+                const waiting = world.module.wait(world.ctx, WORKFLOW_OWNER, "run-wait");
+                const [collaborator] = await world.collaborators.waitFor(1);
+                await world.answer(collaborator!, "Waited for this.");
+
+                const run = await waiting;
+                expect(run.status).toBe("completed");
+                expect(run).toMatchObject({ output: "Waited for this." });
+            } finally {
+                world.close();
+            }
+        },
+        RUN_TIMEOUT,
+    );
+
+    it(
+        "pauses only the runs no process is executing any more",
+        async () => {
+            const world = await workflowWorld("workflows-abandoned");
+            try {
+                await world.module.launch(
+                    world.ctx,
+                    WORKFLOW_OWNER,
+                    { script: `agent("Review the parser.", ${agentOptions("Review")})` },
+                    "run-abandoned",
+                );
+                await world.collaborators.waitFor(1);
+
+                // This process is still executing the run, so its own start leaves it alone.
+                await world.hooks.afterStart?.(world.ctx, undefined as never);
+                expect(
+                    (await world.module.status(world.ctx, WORKFLOW_OWNER, "run-abandoned"))?.status,
+                ).toBe("running");
+
+                const restarted = await world.restart();
+                await restarted.hooks.afterStart?.(restarted.ctx, undefined as never);
+
+                const paused = await restarted.module.status(
+                    restarted.ctx,
+                    WORKFLOW_OWNER,
+                    "run-abandoned",
+                );
+                expect(paused?.status).toBe("paused");
+                expect(paused).toMatchObject({ agentCount: 1, workflow: "dynamic-workflow" });
+            } finally {
+                world.close();
+            }
+        },
+        RUN_TIMEOUT,
+    );
+
+    it(
+        "pauses a run its process left behind, then resumes it without paying for answered agents again",
+        async () => {
+            const world = await workflowWorld("workflows-resume");
+            try {
+                const script = [
+                    "answers = parallel([",
+                    `    ${agentRequest("one", "Check one.")},`,
+                    `    ${agentRequest("two", "Check two.")},`,
+                    "])",
+                    `summary = agent("Summarize: " + answers[0] + " " + answers[1], ${agentOptions("summary")})`,
+                    '{"answers": answers, "summary": summary}',
+                ].join("\n");
+                await world.module.launch(
+                    world.ctx,
+                    WORKFLOW_OWNER,
+                    { script, name: "review" },
+                    "run-resume",
+                );
+                const started = await world.collaborators.waitFor(2);
+                await world.answer(started[0]!, "First answer.");
+
+                // The process stops here: the second agent is still working, so its run is left
+                // marked running with one answered call and a checkpoint behind it.
+                const restarted = await world.restart();
+                await restarted.hooks.afterStart?.(restarted.ctx, undefined as never);
+
+                const paused = await restarted.module.status(
+                    restarted.ctx,
+                    WORKFLOW_OWNER,
+                    "run-resume",
+                );
+                expect(paused?.status).toBe("paused");
+                expect(paused?.status === "paused" ? paused.pausedAt : undefined).toBe(
+                    paused?.updatedAt,
+                );
+
+                const resumed = await restarted.module.resume(
+                    restarted.ctx,
+                    WORKFLOW_OWNER,
+                    "run-resume",
+                );
+                expect(resumed.status).toBe("running");
+
+                const second = await restarted.collaborators.byTitle("two");
+                await restarted.answer(second, "Second answer.");
+                const summary = await restarted.collaborators.byTitle("summary");
+                await restarted.answer(summary, "Both checks passed.");
+                await restarted.module.whenRunsSettle();
+
+                // The agent that already answered is not started again; only the call that was
+                // still outstanding and the one after it are.
+                expect(
+                    restarted.collaborators.started.map((collaborator) => collaborator.input.title),
+                ).toEqual(["two", "summary"]);
+                expect(summary.input.text).toContain("First answer. Second answer.");
+
+                const run = await restarted.module.status(
+                    restarted.ctx,
+                    WORKFLOW_OWNER,
+                    "run-resume",
+                );
+                expect(run?.status).toBe("completed");
+                expect(JSON.parse(run?.status === "completed" ? run.output : "")).toEqual({
+                    answers: ["First answer.", "Second answer."],
+                    summary: "Both checks passed.",
+                });
+                expect(run?.logs).toContain("Reused one from the previous run.");
+            } finally {
+                world.close();
+            }
+        },
+        RUN_TIMEOUT,
+    );
 });

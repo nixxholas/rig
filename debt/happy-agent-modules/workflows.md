@@ -4,6 +4,14 @@ Reviewed: 2026-08-15. Scope: `packages/happy-agent-modules/sources/workflows/` a
 Rig's v1 workflow surface (`packages/rig/sources/tools/workflows/`,
 `packages/rig/sources/workflows/`), against root `AGENTS.md` and master plans 00, 16, 20, 21.
 
+> **Update, 2026-08-17.** The module was rewritten to execute workflows itself, as v1 did: the
+> `WorkflowRuntime` injection is gone, `@pydantic/monty` is back, and agents are started through
+> the collaboration module. This addresses findings 1, 2, 4, 6, 7 and the "generalized past its
+> implementation", "review and elevation lost" and "invented lifecycle states" entries below —
+> `paused` now has a producer, `workflow_logs` has a write path, and `run_workflow` reviews and
+> elevates a `scriptPath` again. `toUI` is still missing, and the v1 tool-name collisions remain
+> until the v1 surface is removed. The review below is kept as the record of what was wrong.
+
 ## Summary
 
 `WorkflowsModule` is ~2,000 lines implementing seven tools — `run_workflow`, `list_workflows`,

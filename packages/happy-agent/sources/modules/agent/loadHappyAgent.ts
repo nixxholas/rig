@@ -63,7 +63,6 @@ import {
     type McpHost,
     type PermissionReviewer,
     type SecretResolver,
-    type WorkflowRuntime,
     type PresenceModuleOptions,
 } from "@slopus/happy-agent-modules";
 import { sql } from "drizzle-orm";
@@ -141,7 +140,6 @@ const effectiveSelectionSchema = Type.Object(
 export interface HappyAgentIntegrations {
     readonly happy: HappyHost;
     readonly mcp: McpHost;
-    readonly workflows: WorkflowRuntime;
     readonly permissionReviewer?: PermissionReviewer;
     readonly secretResolver?: SecretResolver;
     /**
@@ -306,6 +304,7 @@ export async function loadHappyAgent(
         const built = await createModules(
             autoLifetime,
             backgroundDatabase(hostRoot.named("workspace-folder-cleanup")),
+            backgroundDatabase(hostRoot.named("workflow-runs")),
             options.configModule,
             options.observation,
             options.integrations,
@@ -570,6 +569,7 @@ interface CreatedHappyAgentModules {
 async function createModules(
     autoLifetime: Context,
     workspaceCleanupLifetime: Context,
+    workflowRunLifetime: Context,
     configModule: ConfigModule,
     observation: ObservationModule,
     integrations: HappyAgentIntegrations,
@@ -761,10 +761,13 @@ async function createModules(
             }
         },
     });
+    // Workflows start their agents as ordinary collaborators, so the two modules share one
+    // instance rather than the workflow runner growing a spawning path of its own.
+    const collaboration = new CollaborationModule();
     const modules: HappyAgentModuleCollection = {
         config: configModule,
         observation,
-        collaboration: new CollaborationModule(),
+        collaboration,
         conversations,
         compute: compute.computeModule,
         events: eventsModule,
@@ -866,7 +869,13 @@ async function createModules(
         }),
         workflows: new WorkflowsModule({
             enabled: configuration.values.features.workflows,
-            runtime: integrations.workflows,
+            // A run outlives the tool call that started it, so it lives on the loader's background
+            // root, and the agents it asks for are ordinary collaborators.
+            runContext: workflowRunLifetime,
+            collaboration,
+            compute: {
+                resolve: async (ctx, agentId) => await compute.computeModule.resolve(ctx, agentId),
+            },
         }),
         workspaces: new WorkspacesModule({
             // Removing a workspace's folder is the consequence of an archive that has already been

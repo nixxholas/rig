@@ -1,3 +1,4 @@
+import { agentMetadataSchema } from "@slopus/happy-agent-base";
 import { Type, type Static } from "@sinclair/typebox";
 
 /** IDs used by the collaboration tools and by Agent Base. */
@@ -70,6 +71,23 @@ export const collaborationAgentSelectionSchema = Type.Object(
     { additionalProperties: false },
 );
 
+/**
+ * Why a collaborator is being created, in the terms only its creating code knows. `create_agent`
+ * supplies none of this: a model asking for a collaborator gets the ordinary one.
+ *
+ * `reportToCreator` is what a module orchestrating agents of its own turns off. Reporting exists
+ * because nothing waits for a collaborator, so its creator would otherwise never hear the answer.
+ * Code that does collect the answer itself has no such gap, and a report would only put a hundred
+ * notices in a person's conversation about work they asked one question about.
+ */
+export const collaborationCreateOptionsSchema = Type.Object(
+    {
+        reportToCreator: Type.Optional(Type.Boolean()),
+        metadata: Type.Optional(agentMetadataSchema),
+    },
+    { additionalProperties: false },
+);
+
 /** Send text to a collaborator this agent can already reach. */
 export const collaborationSendInputSchema = Type.Object(
     {
@@ -92,5 +110,6 @@ export type CollaborationEffort = Static<typeof collaborationEffortSchema>;
 export type CollaborationServiceTier = Static<typeof collaborationServiceTierSchema>;
 export type CollaborationAgentSelection = Static<typeof collaborationAgentSelectionSchema>;
 export type CollaborationCreateInput = Static<typeof collaborationCreateInputSchema>;
+export type CollaborationCreateOptions = Static<typeof collaborationCreateOptionsSchema>;
 export type CollaborationSendInput = Static<typeof collaborationSendInputSchema>;
 export type CollaborationCreateResult = Static<typeof collaborationCreateResultSchema>;

@@ -625,11 +625,5 @@ function unavailableIntegrations(): HappyAgentIntegrations {
             search: async (_ctx, _agentId, query) => ({ query: query.query, results: [] }),
         },
         userInput: { wait: unavailable },
-        workflows: {
-            cancel: unavailable,
-            launch: unavailable,
-            resume: unavailable,
-            wait: unavailable,
-        },
     } as unknown as HappyAgentIntegrations;
 }

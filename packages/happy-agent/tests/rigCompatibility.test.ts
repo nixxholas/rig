@@ -562,12 +562,6 @@ function unavailableIntegrations(): HappyAgentIntegrations {
             }),
         },
         userInput: { wait: unavailable },
-        workflows: {
-            cancel: unavailable,
-            launch: unavailable,
-            resume: unavailable,
-            wait: unavailable,
-        },
     } as unknown as HappyAgentIntegrations;
 }
 

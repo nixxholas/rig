@@ -3,6 +3,7 @@ import {
     type AgentBasePersistedEvent,
     type AgentBaseSettlement,
     type AgentConfig,
+    type AgentMetadata,
     type AgentModel,
     type AgentModule,
     type AgentModuleHooks,
@@ -18,9 +19,11 @@ import { senderAgentIdMetadata } from "../auto/messageOrigin.js";
 import {
     collaborationAgentIdSchema,
     collaborationCreateInputSchema,
+    collaborationCreateOptionsSchema,
     collaborationSendInputSchema,
     type CollaborationAgentSelection,
     type CollaborationCreateInput,
+    type CollaborationCreateOptions,
     type CollaborationCreateResult,
     type CollaborationSendInput,
 } from "./CollaborationAgent.js";
@@ -63,10 +66,12 @@ export class CollaborationModule implements AgentModule {
         actingAgentId: string,
         input: CollaborationCreateInput,
         agentId: string,
+        options: CollaborationCreateOptions = {},
     ): Promise<CollaborationCreateResult> {
         this.#assert(collaborationAgentIdSchema, actingAgentId, "acting agent ID");
         this.#assert(collaborationAgentIdSchema, agentId, "collaborator ID");
         this.#assert(collaborationCreateInputSchema, input, "create agent");
+        this.#assert(collaborationCreateOptionsSchema, options, "create agent options");
         const agents = this.#requireAgents();
         const selection = this.#validateSelection(agents.models, input);
 
@@ -76,7 +81,11 @@ export class CollaborationModule implements AgentModule {
         // belonging to anyone else is a different agent that happens to hold the ID, and treating
         // it as a retry would hand this creator's task to a stranger.
         if ((await agents.config(ctx, agentId)) === undefined) {
-            const created = await agents.create(ctx, childConfig(ctx, input.title), {
+            // The creating call does not always run on the creator's own turn — a workflow starts
+            // collaborators from its own background context, which carries no agent configuration —
+            // so fall back to what the creator was stored with.
+            const parent = agentConfig(ctx) ?? (await agents.config(ctx, actingAgentId));
+            const created = await agents.create(ctx, childConfig(parent, input.title, options), {
                 id: agentId,
                 parent: actingAgentId,
             });
@@ -210,6 +219,7 @@ export class CollaborationModule implements AgentModule {
         scope: AgentModuleScope,
         settlement: AgentBaseSettlement,
     ): Promise<void> {
+        if (!reportsToCreator(scope.agent.metadata)) return;
         const agents = this.#requireAgents();
         const parent = await agents.parentOf(ctx, scope.agent.id);
         if (parent === null) return;
@@ -414,13 +424,40 @@ function failureReport(agentId: string, error: string | undefined): string | und
 /**
  * A collaborator works on the same machine and with the same modules as whoever created it, and
  * carries the title that call gave it in the agent's real metadata rather than in a record of
- * collaboration's own.
+ * collaboration's own. Metadata the creating code adds travels the same way, and a creator that
+ * collects the answer itself records that here so the settlement knows not to report it twice.
  */
-function childConfig(ctx: Context, title: string): AgentConfig {
-    const parent = agentConfig(ctx);
+function childConfig(
+    parent: AgentConfig | undefined,
+    title: string,
+    options: CollaborationCreateOptions,
+): AgentConfig {
     return {
         ...(parent?.environment === undefined ? {} : { environment: parent.environment }),
         ...(parent?.modules === undefined ? {} : { modules: parent.modules }),
-        metadata: { title },
+        metadata: {
+            ...options.metadata,
+            title,
+            ...(options.reportToCreator === false
+                ? { collaboration: { reportToCreator: false } }
+                : {}),
+        },
     };
+}
+
+/**
+ * Whether this agent's answer is still owed to whoever created it. Only a creator that collects
+ * the answer another way turns this off, and it says so in the agent's own metadata, so the
+ * decision survives a restart that forgets everything the creating call held in memory.
+ */
+function reportsToCreator(metadata: AgentMetadata | undefined): boolean {
+    const collaboration = metadata?.["collaboration"];
+    if (
+        collaboration === null ||
+        typeof collaboration !== "object" ||
+        Array.isArray(collaboration)
+    ) {
+        return true;
+    }
+    return collaboration["reportToCreator"] !== false;
 }
