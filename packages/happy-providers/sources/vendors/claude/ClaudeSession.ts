@@ -496,7 +496,7 @@ export class ClaudeSession extends BaseSession {
                         : { structuredOutput: options.structuredOutput }),
                     tools,
                     ...(this.userAgent === undefined ? {} : { userAgent: this.userAgent }),
-                    callTool: (name) => toolBridge.execute(name),
+                    callTool: (toolUseId) => toolBridge.execute(toolUseId),
                 });
                 if (replayableMessageCount > 1) {
                     delete sdkOptions.sessionId;
@@ -641,10 +641,7 @@ export class ClaudeSession extends BaseSession {
                             nativeServer || serverToolNames.has(event.content_block.name);
                         if (!server) {
                             sawToolCall = true;
-                            this.activeToolBridge?.register(
-                                event.content_block.id,
-                                event.content_block.name,
-                            );
+                            this.activeToolBridge?.register(event.content_block.id);
                         }
                         activeTools.set(event.index, {
                             callId: event.content_block.id,

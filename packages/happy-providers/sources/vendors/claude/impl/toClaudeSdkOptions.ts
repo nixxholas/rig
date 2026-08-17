@@ -6,6 +6,7 @@ import {
     type CallToolResult,
 } from "@modelcontextprotocol/sdk/types.js";
 import { Type } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
 
 import type { SessionContext } from "@/core/SessionContext.js";
 import type { SessionReasoningEffort, SessionStructuredOutput } from "@/core/SessionRunRequest.js";
@@ -32,7 +33,7 @@ export function toClaudeSdkOptions(options: {
     tools: readonly SessionTool[];
     userAgent?: string;
     compaction?: boolean;
-    callTool?: (name: string) => Promise<CallToolResult>;
+    callTool?: (toolUseId: string) => Promise<CallToolResult>;
     registerAbortCleanup?: (cleanup: () => void) => void;
 }): ClaudeSdkOptions {
     const clientTools = options.tools.filter((tool) => tool.server === undefined);
@@ -129,7 +130,7 @@ function credentialEnvironment(credential: ClaudeCredential): NodeJS.ProcessEnv 
 
 function createClaudeMcpServer(
     tools: readonly SessionTool[],
-    callTool?: (name: string) => Promise<CallToolResult>,
+    callTool?: (toolUseId: string) => Promise<CallToolResult>,
 ) {
     const instance = new McpServer(
         {
@@ -143,20 +144,39 @@ function createClaudeMcpServer(
     instance.server.setRequestHandler(ListToolsRequestSchema, async () => ({
         tools: tools.map(toClaudeMcpToolDefinition),
     }));
-    instance.server.setRequestHandler(CallToolRequestSchema, async (request) =>
-        callTool === undefined
-            ? {
-                  content: [{ type: "text", text: "Tool execution is handled by Rig." }],
-                  isError: true,
-              }
-            : callTool(request.params.name),
-    );
+    instance.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+        if (callTool === undefined) {
+            return {
+                content: [{ type: "text", text: "Tool execution is handled by Rig." }],
+                isError: true,
+            };
+        }
+        if (!Value.Check(claudeToolCallMetaSchema, request.params._meta)) {
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: "Claude Code did not identify which tool call this invocation answers.",
+                    },
+                ],
+                isError: true,
+            };
+        }
+        return callTool(request.params._meta["claudecode/toolUseId"]);
+    });
     return {
         type: "sdk" as const,
         name: RIG_MCP_SERVER_NAME,
         instance,
     };
 }
+
+// Claude Code stamps every MCP tools/call with the originating tool_use block ID, which is the
+// same callId Rig streams on toolcall_start. Rig pins the SDK, so the stamp is required: an
+// invocation without it cannot be paired with a streamed call and is refused outright.
+const claudeToolCallMetaSchema = Type.Object({
+    "claudecode/toolUseId": Type.String({ minLength: 1 }),
+});
 
 export function claudeSdkBuiltInToolNames(tools: readonly SessionTool[]): string[] {
     return [
