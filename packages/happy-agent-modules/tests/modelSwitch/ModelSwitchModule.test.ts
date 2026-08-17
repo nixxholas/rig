@@ -74,4 +74,21 @@ describe("ModelSwitchModule", () => {
         expect(notices[0]).toContain("openai/gpt-5.6-sol");
         expect(notices[0]).toContain("anthropic/opus-5");
     });
+
+    it("does not add a notice when the provider keeps a compatible model family", async () => {
+        const { agent, provider } = await modelSwitchAgent("compatible-agent", [
+            textTurn("hello"),
+            textTurn("still here"),
+        ]);
+
+        await agent.send(ctx, user("hi"), { await: true, model: "openai/gpt-5.6-sol" });
+        await agent.waitForIdle();
+        await agent.send(ctx, user("carry on"), { await: true, model: "openai/gpt-5.4" });
+        await agent.waitForIdle();
+        await agent.close();
+
+        expect(switchNotices(provider)).toEqual([]);
+        expect(provider.sessions).toHaveLength(2);
+        expect(provider.sessions[1]?.requests[0]?.context.messages).toContainEqual(user("hi"));
+    });
 });

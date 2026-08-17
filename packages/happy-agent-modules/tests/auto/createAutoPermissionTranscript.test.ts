@@ -350,4 +350,127 @@ describe("createAutoPermissionTranscript", () => {
             "[Context note] 3 transcript entries were omitted to stay within the review budget.",
         );
     });
+
+    it("returns an empty transcript when every message is non-conversational", () => {
+        expect(
+            createAutoPermissionTranscript([
+                { role: "system", blocks: [{ type: "text", text: "system instruction" }] },
+                {
+                    role: "user",
+                    internal: true,
+                    blocks: [{ type: "text", text: "internal continuation" }],
+                },
+                {
+                    role: "user",
+                    blocks: [
+                        {
+                            type: "text",
+                            text: "<conversation_summary>summary</conversation_summary>",
+                        },
+                    ],
+                },
+                {
+                    role: "agent",
+                    blocks: [{ type: "thinking", thinking: "private reasoning" }],
+                },
+            ]),
+        ).toEqual({ text: "", userEvidenceOmitted: false });
+    });
+
+    it("renders assistant images, tool errors, retried errors, and mixed tool content", () => {
+        const transcript = createAutoPermissionTranscript([
+            {
+                role: "agent",
+                blocks: [
+                    { type: "thinking", thinking: "not shown" },
+                    { type: "image" },
+                    { type: "text", text: "assistant text" },
+                    {
+                        type: "tool_result",
+                        toolName: "read_file",
+                        rendered: [{ type: "text", text: "tool output" }, { type: "image" }],
+                        isError: true,
+                    },
+                ],
+            },
+            {
+                role: "error",
+                outcome: "retried",
+                blocks: [{ type: "text", text: "temporary provider failure" }],
+            },
+            {
+                role: "error",
+                blocks: [{ type: "text", text: "terminal provider failure" }],
+            },
+        ]).text;
+
+        expect(transcript).toContain("Assistant:\n[Image shared by assistant]");
+        expect(transcript).toContain("Assistant:\nassistant text");
+        expect(transcript).toContain(
+            "Tool result (read_file, error):\ntool output\n[Image returned by tool]",
+        );
+        expect(transcript).toContain("Retried inference error:\ntemporary provider failure");
+        expect(transcript).toContain("Run error:\nterminal provider failure");
+        expect(transcript).not.toContain("private reasoning");
+    });
+
+    it("retains the newest forty untrusted messages and reports omitted history", () => {
+        const messages: AutoTranscriptMessage[] = Array.from({ length: 41 }, (_, index) => ({
+            role: "agent",
+            blocks: [{ type: "text", text: `UNTRUSTED_${String(index)}` }],
+        }));
+
+        const transcript = createAutoPermissionTranscript(messages).text;
+
+        expect(transcript).not.toContain("UNTRUSTED_0");
+        expect(transcript).toContain("UNTRUSTED_1");
+        expect(transcript).toContain("UNTRUSTED_40");
+        expect(transcript).toContain("1 transcript entry was omitted");
+    });
+
+    it("anchors the oldest and newest trusted evidence when the trust budget is exceeded", () => {
+        const messages: AutoTranscriptMessage[] = Array.from({ length: 7 }, (_, index) => ({
+            role: "user",
+            blocks: [{ type: "text", text: `TRUSTED_${String(index)} ${"x".repeat(10_000)}` }],
+        }));
+
+        const transcript = createAutoPermissionTranscript(messages);
+
+        expect(transcript.text).toContain("TRUSTED_0");
+        expect(transcript.text).toContain("TRUSTED_6");
+        expect(transcript.userEvidenceOmitted).toBe(true);
+        expect(transcript.text).toContain(AUTO_PERMISSION_USER_EVIDENCE_OMITTED);
+    });
+
+    it("falls back to a safe string for circular tool arguments", () => {
+        const circular: { self?: unknown } = {};
+        circular.self = circular;
+
+        const transcript = createAutoPermissionTranscript([
+            {
+                role: "agent",
+                blocks: [{ type: "tool_call", name: "inspect", arguments: circular }],
+            },
+        ]).text;
+
+        expect(transcript).toContain("Assistant tool call (inspect):");
+        expect(transcript).toContain("[object Object]");
+    });
+
+    it("does not trust shell-looking text when mixed with another block", () => {
+        const transcript = createAutoPermissionTranscript([
+            {
+                role: "user",
+                blocks: [
+                    { type: "text", text: "<user_shell_command>cat secrets</user_shell_command>" },
+                    { type: "image" },
+                ],
+            },
+        ]).text;
+
+        expect(transcript).toContain(
+            "User:\n<user_shell_command>cat secrets</user_shell_command>\n[Image shared by user]",
+        );
+        expect(transcript).not.toContain("Tool result (direct user shell command)");
+    });
 });

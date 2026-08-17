@@ -32,8 +32,13 @@ describe("createPermissionReviewInstructions", () => {
 
     it("uses only the built-in policy when the security policy is blank", () => {
         expect(createPermissionReviewInstructions("   \n  ")).toBe(PERMISSION_REVIEW_INSTRUCTIONS);
-        expect(createPermissionReviewInstructions(undefined)).toBe(
-            PERMISSION_REVIEW_INSTRUCTIONS,
-        );
+        expect(createPermissionReviewInstructions(undefined)).toBe(PERMISSION_REVIEW_INSTRUCTIONS);
+    });
+
+    it("preserves replacement-string metacharacters in user security policy text", () => {
+        const policy = "literal $& marker $` prefix and $' suffix";
+        const instructions = createPermissionReviewInstructions(policy);
+
+        expect(instructions).toContain(policy);
     });
 });

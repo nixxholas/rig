@@ -14,7 +14,11 @@ function typeOfFrom(
     return (providerId) => kinds[providerId] ?? null;
 }
 
-function find(catalog: readonly AgentModel[], providerId: string, id: string): AgentModel | undefined {
+function find(
+    catalog: readonly AgentModel[],
+    providerId: string,
+    id: string,
+): AgentModel | undefined {
     return catalog.find((entry) => entry.providerId === providerId && entry.id === id);
 }
 
@@ -73,5 +77,32 @@ describe("buildAutoReviewCatalog", () => {
             typeOf: typeOfFrom({}),
         });
         expect(catalog).toHaveLength(1);
+    });
+
+    it("asks for each provider compatibility type once even when routes repeat", () => {
+        const calls: string[] = [];
+        const catalog = buildAutoReviewCatalog({
+            models: [model("codex", "openai/one"), model("codex", "openai/two")],
+            typeOf: (providerId) => {
+                calls.push(providerId);
+                return "codex";
+            },
+        });
+
+        expect(calls).toEqual(["codex"]);
+        expect(
+            catalog.filter(
+                (entry) => entry.providerId === "codex" && entry.id === "openai/codex-auto-review",
+            ),
+        ).toHaveLength(1);
+    });
+
+    it("does not add reviewer routes for a provider whose type resolver returns null", () => {
+        const catalog = buildAutoReviewCatalog({
+            models: [model("unknown", "model")],
+            typeOf: () => null,
+        });
+
+        expect(catalog.map((entry) => entry.id)).toEqual(["model"]);
     });
 });

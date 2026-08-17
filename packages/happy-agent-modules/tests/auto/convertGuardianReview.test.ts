@@ -88,4 +88,32 @@ describe("convertGuardianReview", () => {
         expect(decision.transcript).toEqual(transcript);
         expect(decision.userEvidenceOmitted).toBe(true);
     });
+
+    it("carries incomplete user evidence through denied decisions too", () => {
+        const decision = convertGuardianReview({
+            text: guardian("deny", {
+                risk_level: "high",
+                user_authorization: "unknown",
+                rationale: "The scope is not authorized.",
+            }),
+            userEvidenceOmitted: true,
+        });
+
+        expect(decision).toMatchObject({
+            outcome: "denied",
+            userEvidenceOmitted: true,
+            risk: "high",
+            userAuthorization: "unknown",
+        });
+    });
+
+    it("omits optional metadata when the review did not produce it", () => {
+        const decision = convertGuardianReview({
+            text: guardian("allow"),
+            userEvidenceOmitted: false,
+        });
+
+        expect(decision).not.toHaveProperty("transcript");
+        expect(decision).not.toHaveProperty("userEvidenceOmitted");
+    });
 });

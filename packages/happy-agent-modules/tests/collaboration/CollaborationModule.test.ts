@@ -9,7 +9,12 @@ import {
 import { createRootContext, type Context } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
-import { CollaborationModule } from "../../sources/collaboration/index.js";
+import {
+    CollaborationModule,
+    createAgentTool,
+    interruptAgentTool,
+    sendMessageTool,
+} from "../../sources/collaboration/index.js";
 import { resolveModuleHooks } from "../support/moduleHooks.js";
 
 const MODELS: readonly AgentModel[] = [
@@ -53,6 +58,10 @@ class Collection {
     readonly created: Array<{ readonly id: string; readonly parent: string | null }> = [];
     readonly delivered: Delivery[] = [];
     readonly aborted: string[] = [];
+    createReturnId: string | undefined;
+    sendReturnId: string | undefined;
+    sendFailure: Error | undefined;
+    abortFailure: Error | undefined;
 
     readonly models = MODELS;
 
@@ -86,7 +95,7 @@ class Collection {
         this.configs.set(id, config);
         this.parents.set(id, options.parent ?? null);
         this.created.push({ id, parent: options.parent ?? null });
-        return { id };
+        return { id: this.createReturnId ?? id };
     }
 
     async send(
@@ -95,15 +104,21 @@ class Collection {
         message: { readonly content: readonly { readonly text: string }[] },
         options: Record<string, unknown>,
     ): Promise<AgentMessageAcceptance> {
+        if (this.sendFailure !== undefined) throw this.sendFailure;
         this.delivered.push({
             toAgentId: agentId,
             text: message.content[0]!.text,
             options,
         });
-        return { id: options.id as string, delivery: "send", accepted: "created" };
+        return {
+            id: this.sendReturnId ?? (options.id as string),
+            delivery: "send",
+            accepted: "created",
+        };
     }
 
     async abort(_ctx: Context, agentId: string): Promise<void> {
+        if (this.abortFailure !== undefined) throw this.abortFailure;
         this.aborted.push(agentId);
     }
 
@@ -151,6 +166,15 @@ function textEnd(text: string) {
 
 function settlement(settlementId: string) {
     return { loopId: "loop", settlementId } as never;
+}
+
+function toolCall(id: string) {
+    return {
+        id,
+        providerCallId: `${id}-provider`,
+        kv: undefined,
+        commit: async (_ctx: Context, result: unknown) => result,
+    } as never;
 }
 
 const TASK = {
@@ -240,6 +264,17 @@ describe("collaboration", () => {
         );
     });
 
+    it("marks an ordinary delivery with its sender and both endpoints", async () => {
+        const collection = new Collection();
+        const { module, hooks, ctx } = await started(collection);
+        await module.createAgent(ctx, "parent", TASK, "child");
+
+        expect(collection.delivered[0]!.options.metadata).toEqual({
+            collaboration: { fromAgentId: "parent", toAgentId: "child" },
+            senderAgentId: "parent",
+        });
+    });
+
     it("delivers under the durable tool call's own identity", async () => {
         const collection = new Collection();
         const { module, hooks, ctx } = await started(collection);
@@ -260,6 +295,65 @@ describe("collaboration", () => {
         // Creating again would throw; the retry recognises the identity the collection already
         // holds and only redoes delivery, which Agent Base settles by message ID.
         expect(collection.created).toHaveLength(1);
+    });
+
+    it("does not treat an existing unrelated identity as a retry", async () => {
+        const collection = new Collection();
+        collection.seed("child", "other");
+        const { module, hooks, ctx } = await started(collection);
+
+        await expect(module.createAgent(ctx, "parent", TASK, "child")).rejects.toThrow(
+            'Agent "child" already exists.',
+        );
+        expect(collection.delivered).toHaveLength(0);
+    });
+
+    it("propagates a collaborator creation identity mismatch without delivering its task", async () => {
+        const collection = new Collection();
+        collection.createReturnId = "different";
+        const { module, hooks, ctx } = await started(collection);
+
+        await expect(module.createAgent(ctx, "parent", TASK, "child")).rejects.toThrow(
+            "did not preserve the requested collaborator ID",
+        );
+        expect(collection.created).toEqual([{ id: "child", parent: "parent" }]);
+        expect(collection.delivered).toHaveLength(0);
+    });
+
+    it("propagates a message identity mismatch after the delivery attempt", async () => {
+        const collection = new Collection();
+        collection.seed("child", "parent");
+        collection.sendReturnId = "different";
+        const { module, hooks, ctx } = await started(collection);
+
+        await expect(
+            module.sendMessage(ctx, "parent", { toAgentId: "child", text: "Again." }, "m2"),
+        ).rejects.toThrow("did not preserve the requested message ID");
+        expect(collection.delivered).toHaveLength(1);
+    });
+
+    it("does not hide a recipient send failure", async () => {
+        const collection = new Collection();
+        collection.seed("child", "parent");
+        collection.sendFailure = new Error("recipient storage unavailable");
+        const { module, hooks, ctx } = await started(collection);
+
+        await expect(
+            module.sendMessage(ctx, "parent", { toAgentId: "child", text: "Again." }, "m2"),
+        ).rejects.toThrow("recipient storage unavailable");
+        expect(collection.delivered).toHaveLength(0);
+    });
+
+    it("does not hide an interrupt failure", async () => {
+        const collection = new Collection();
+        collection.seed("child", "parent");
+        collection.abortFailure = new Error("abort unavailable");
+        const { module, hooks, ctx } = await started(collection);
+
+        await expect(module.interruptAgent(ctx, "parent", "child")).rejects.toThrow(
+            "abort unavailable",
+        );
+        expect(collection.aborted).toHaveLength(0);
     });
 
     it("refuses a model the collection does not offer", async () => {
@@ -309,6 +403,75 @@ describe("collaboration", () => {
         ).rejects.toThrow('Service tier "priority" is not available');
     });
 
+    it("omits provider when an unambiguous model does not need one", async () => {
+        const collection = new Collection();
+        const { module, hooks, ctx } = await started(collection);
+
+        await module.createAgent(ctx, "parent", TASK, "child");
+
+        expect(collection.delivered[0]!.options).toMatchObject({
+            model: "gpt-5.6-sol",
+            effort: "high",
+        });
+        expect(collection.delivered[0]!.options).not.toHaveProperty("provider");
+    });
+
+    it("refuses a provider that does not expose the requested model", async () => {
+        const collection = new Collection();
+        const { module, hooks, ctx } = await started(collection);
+
+        await expect(
+            module.createAgent(ctx, "parent", { ...TASK, provider: "claude" }, "child"),
+        ).rejects.toThrow('Model "gpt-5.6-sol" is not available from provider "claude".');
+        expect(collection.created).toHaveLength(0);
+        expect(collection.delivered).toHaveLength(0);
+    });
+
+    it("rejects malformed public inputs without touching the agent collection", async () => {
+        const collection = new Collection();
+        const { module, hooks, ctx } = await started(collection);
+
+        await expect(module.createAgent(ctx, "PARENT", TASK, "child")).rejects.toThrow(
+            "Invalid collaboration acting agent ID.",
+        );
+        await expect(module.createAgent(ctx, "parent", TASK, "Child")).rejects.toThrow(
+            "Invalid collaboration collaborator ID.",
+        );
+        await expect(
+            module.createAgent(ctx, "parent", { ...TASK, text: "" }, "child"),
+        ).rejects.toThrow("Invalid collaboration create agent.");
+        await expect(
+            module.createAgent(ctx, "parent", { ...TASK, unexpected: true } as never, "child"),
+        ).rejects.toThrow("Invalid collaboration create agent.");
+
+        expect(collection.created).toHaveLength(0);
+        expect(collection.delivered).toHaveLength(0);
+    });
+
+    it("rejects malformed message and interrupt inputs before authorization", async () => {
+        const collection = new Collection();
+        const { module, hooks, ctx } = await started(collection);
+
+        await expect(
+            module.sendMessage(ctx, "PARENT", { toAgentId: "child", text: "Hi." }, "m1"),
+        ).rejects.toThrow("Invalid collaboration acting agent ID.");
+        await expect(
+            module.sendMessage(ctx, "parent", { toAgentId: "C", text: "Hi." }, "m1"),
+        ).rejects.toThrow("Invalid collaboration send message.");
+        await expect(
+            module.sendMessage(ctx, "parent", { toAgentId: "child", text: "" }, "m1"),
+        ).rejects.toThrow("Invalid collaboration send message.");
+        await expect(module.interruptAgent(ctx, "PARENT", "child")).rejects.toThrow(
+            "Invalid collaboration acting agent ID.",
+        );
+        await expect(module.interruptAgent(ctx, "parent", "C")).rejects.toThrow(
+            "Invalid collaboration target agent ID.",
+        );
+
+        expect(collection.delivered).toHaveLength(0);
+        expect(collection.aborted).toHaveLength(0);
+    });
+
     it("lets a collaborator answer the agent that created it", async () => {
         const collection = new Collection();
         const { module, hooks, ctx } = await started(collection);
@@ -331,6 +494,22 @@ describe("collaboration", () => {
         await expect(
             module.sendMessage(ctx, "child", { toAgentId: "stranger", text: "Hello." }, "m1"),
         ).rejects.toThrow('Agent "child" is not authorized to send to agent "stranger".');
+    });
+
+    it("refuses sibling and grandchild messages because authorization is direct ancestry only", async () => {
+        const collection = new Collection();
+        collection.seed("sibling", "parent");
+        collection.seed("grandchild", "sibling");
+        const { module, hooks, ctx } = await started(collection);
+        await module.createAgent(ctx, "parent", TASK, "child");
+
+        await expect(
+            module.sendMessage(ctx, "child", { toAgentId: "sibling", text: "Hello." }, "m1"),
+        ).rejects.toThrow("is not authorized to send");
+        await expect(
+            module.sendMessage(ctx, "parent", { toAgentId: "grandchild", text: "Hello." }, "m2"),
+        ).rejects.toThrow("is not authorized to send");
+        expect(collection.delivered).toHaveLength(1);
     });
 
     it("interrupts a collaborator it created", async () => {
@@ -379,6 +558,21 @@ describe("collaboration", () => {
         } as never);
 
         expect(instructions).toContain("Collaborators you created: child.");
+    });
+
+    it("includes both creator and collaborator addresses in deterministic instruction order", async () => {
+        const collection = new Collection();
+        collection.seed("sibling", "parent");
+        const { module, hooks, ctx } = await started(collection);
+        await module.createAgent(ctx, "parent", TASK, "child");
+
+        const instructions = await hooks.instructions!(ctx, {
+            agent: { id: "parent" },
+        } as never);
+
+        expect(instructions).toBe(
+            "Collaborators you created: sibling, child. Each reports back on its own when it finishes; nothing waits for them.",
+        );
     });
 
     it("says nothing to an agent with no collaborators at all", async () => {
@@ -471,6 +665,166 @@ describe("collaboration", () => {
 
         expect(collection.delivered[1]!.text).toContain("Final answer.");
         expect(collection.delivered[1]!.text).not.toContain("Thinking out loud.");
+    });
+
+    it("trims a completed text block and ignores unrelated persisted events", async () => {
+        const collection = new Collection();
+        const { module, hooks, ctx } = await started(collection);
+        await module.createAgent(ctx, "parent", TASK, "child");
+        const scope = runScope("child");
+
+        await hooks.onEventTransact!(ctx, scope, {
+            type: "text_delta",
+            delta: "ignored",
+        } as never);
+        await hooks.onEventTransact!(ctx, scope, textEnd(" \n  Final answer with padding. \t "));
+        await hooks.afterAgentSettledTransact!(ctx, scope, settlement("s1"));
+
+        expect(collection.delivered[1]!.text).toContain("Final answer with padding.");
+        expect(collection.delivered[1]!.text).not.toContain("padding. \t");
+    });
+
+    it("does not report a non-string or blank run-store value", async () => {
+        const collection = new Collection();
+        const { module, hooks, ctx } = await started(collection);
+        await module.createAgent(ctx, "parent", TASK, "child");
+
+        const nonString = {
+            agent: { id: "child" },
+            runKV: { read: async () => 123 },
+        } as never;
+        await hooks.afterAgentSettledTransact!(ctx, nonString, settlement("s1"));
+        expect(collection.delivered).toHaveLength(1);
+
+        const blank = {
+            agent: { id: "child" },
+            runKV: { read: async () => " \n\t " },
+        } as never;
+        await expect(
+            hooks.afterAgentSettledTransact!(ctx, blank, settlement("s2")),
+        ).resolves.toBeUndefined();
+        expect(collection.delivered).toHaveLength(1);
+    });
+
+    it("does not read run state for an agent with no creator", async () => {
+        const collection = new Collection();
+        const { module, hooks, ctx } = await started(collection);
+        let reads = 0;
+        const scope = {
+            agent: { id: "root" },
+            runKV: {
+                read: async () => {
+                    reads += 1;
+                    throw new Error("run state should not be read");
+                },
+            },
+        } as never;
+
+        await hooks.afterAgentSettledTransact!(ctx, scope, settlement("s1"));
+
+        expect(reads).toBe(0);
+        expect(collection.delivered).toHaveLength(0);
+    });
+
+    it("propagates a failure delivering a settlement report", async () => {
+        const collection = new Collection();
+        const { module, hooks, ctx } = await started(collection);
+        await module.createAgent(ctx, "parent", TASK, "child");
+        const scope = runScope("child");
+        await hooks.onEventTransact!(ctx, scope, textEnd("Done."));
+        collection.sendFailure = new Error("parent inbox unavailable");
+
+        await expect(
+            hooks.afterAgentSettledTransact!(ctx, scope, settlement("s1")),
+        ).rejects.toThrow("parent inbox unavailable");
+    });
+
+    it("exposes the fixed three-tool surface with the intended durability and review policy", async () => {
+        const collection = new Collection();
+        const { module, hooks, ctx } = await started(collection);
+        const tools = await hooks.tools!(ctx, { agent: { id: "parent" } } as never);
+
+        expect(tools.map((tool) => tool.name)).toEqual([
+            "create_agent",
+            "send_agent_message",
+            "interrupt_agent",
+        ]);
+        expect(tools.map((tool) => tool.durable)).toEqual([true, true, false]);
+        expect(tools.map((tool) => tool.requiresAutoOrFullAccess)).toEqual([
+            undefined,
+            undefined,
+            undefined,
+        ]);
+    });
+
+    it("describes the offered model/provider pairs without a dynamic capacity lookup", () => {
+        const module = new CollaborationModule();
+        const create = createAgentTool(module, "parent", MODELS);
+        const empty = createAgentTool(module, "parent", []);
+
+        expect(create.description).toContain("codex + gpt-5.6-sol");
+        expect(create.description).toContain("claude + opus-5");
+        expect(create.description).toContain("tiers: priority");
+        expect(empty.description).not.toContain("Available model/provider pairs:");
+    });
+
+    it("keeps send and create routine while interrupt remains reviewable", async () => {
+        const collection = new Collection();
+        const { module, hooks, ctx } = await started(collection);
+        const create = createAgentTool(module, "parent", MODELS);
+        const send = sendMessageTool(module, "parent");
+        const interrupt = interruptAgentTool(module, "parent");
+
+        expect(create.shouldReviewInAutoMode(TASK, ctx)).toBe(false);
+        expect(send.shouldReviewInAutoMode({ toAgentId: "child", text: "Hi." }, ctx)).toBe(false);
+        expect(interrupt.shouldReviewInAutoMode({ targetAgentId: "child" }, ctx)).toBe(true);
+        expect(interrupt.shouldRunInFullAccessInAutoMode).toBeUndefined();
+        expect(interrupt.describeAutoPermissionAction!({ targetAgentId: "child" }, ctx)).toContain(
+            '"child"',
+        );
+    });
+
+    it("routes tool execution through the public operations and renders complete model results", async () => {
+        const collection = new Collection();
+        const { module, hooks, ctx } = await started(collection);
+        const create = createAgentTool(module, "parent", MODELS);
+        const send = sendMessageTool(module, "parent");
+        const interrupt = interruptAgentTool(module, "parent");
+
+        await expect(create.execute(ctx, TASK, toolCall("created"))).resolves.toEqual({
+            agentId: "created",
+        });
+        await expect(
+            send.execute(ctx, { toAgentId: "created", text: "Follow up." }, toolCall("message")),
+        ).resolves.toBeUndefined();
+        await expect(
+            interrupt.execute(ctx, { targetAgentId: "created" }, toolCall("interrupt")),
+        ).resolves.toBeUndefined();
+
+        expect(collection.created).toEqual([{ id: "created", parent: "parent" }]);
+        expect(collection.delivered.map(({ options }) => options.id)).toEqual([
+            "created",
+            "message",
+        ]);
+        expect(collection.aborted).toEqual(["created"]);
+        expect(create.toLLM({ agentId: "created" })).toEqual([
+            {
+                type: "text",
+                text: "Created collaborator created and sent it the task. Anything it has to say will arrive as a message; nothing is waiting on it.",
+            },
+        ]);
+        expect(send.toLLM(undefined)).toEqual([
+            {
+                type: "text",
+                text: "Message delivered. Any answer arrives as a message; carry on with other work in the meantime.",
+            },
+        ]);
+        expect(interrupt.toLLM(undefined)).toEqual([
+            {
+                type: "text",
+                text: "Asked the collaborator to stop its current turn. It stops when it notices, and remains available for follow-up work.",
+            },
+        ]);
     });
 
     it("declares only the retirement of the schema it used to keep", () => {

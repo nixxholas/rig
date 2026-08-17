@@ -30,18 +30,15 @@ describe("reviewerModelForAgent", () => {
         ];
 
         expect(
-            reviewerModelForAgent({ models, active: active("codex", "openai/gpt-5.6-sol", "medium") }),
+            reviewerModelForAgent({
+                models,
+                active: active("codex", "openai/gpt-5.6-sol", "medium"),
+            }),
         ).toEqual({ providerId: "codex", modelId: "openai/codex-auto-review", effort: "low" });
     });
 
     it("selects_sonnet_for_opus_and_fable_on_the_same_provider", () => {
-        const sonnetLevels: SessionReasoningEffort[] = [
-            "off",
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-        ];
+        const sonnetLevels: SessionReasoningEffort[] = ["off", "low", "medium", "high", "xhigh"];
         const models = [
             model("claude", "anthropic/opus-5", sonnetLevels, "medium"),
             model("claude", "anthropic/fable-5", sonnetLevels, "medium"),
@@ -64,7 +61,10 @@ describe("reviewerModelForAgent", () => {
         ];
 
         expect(
-            reviewerModelForAgent({ models, active: active("codex", "openai/gpt-5.6-sol", "medium") }).modelId,
+            reviewerModelForAgent({
+                models,
+                active: active("codex", "openai/gpt-5.6-sol", "medium"),
+            }).modelId,
         ).toBe("openai/codex-auto-review");
     });
 
@@ -75,7 +75,8 @@ describe("reviewerModelForAgent", () => {
         ];
 
         expect(
-            reviewerModelForAgent({ models, active: active("codex", "anthropic/opus-5", "medium") }).modelId,
+            reviewerModelForAgent({ models, active: active("codex", "anthropic/opus-5", "medium") })
+                .modelId,
         ).toBe("openai/codex-auto-review");
     });
 
@@ -96,7 +97,10 @@ describe("reviewerModelForAgent", () => {
         // so the reviewer keeps the active provider/model/effort exactly as v1's final fallback.
         const grok = [model("grok", "xai/grok-4.5", ["low", "medium", "high"], "high")];
         expect(
-            reviewerModelForAgent({ models: grok, active: active("grok", "xai/grok-4.5", "medium") }),
+            reviewerModelForAgent({
+                models: grok,
+                active: active("grok", "xai/grok-4.5", "medium"),
+            }),
         ).toEqual({ providerId: "grok", modelId: "xai/grok-4.5", effort: "medium" });
     });
 
@@ -109,5 +113,41 @@ describe("reviewerModelForAgent", () => {
                 active: active("bedrock", "openai/unknown", "low"),
             }),
         ).toThrow();
+    });
+
+    it("never borrows a hidden route from another provider", () => {
+        const models = [
+            model("other", "openai/codex-auto-review", ["low", "medium"], "low"),
+            model("active", "openai/gpt-5.6-sol", ["low", "medium"], "medium"),
+        ];
+
+        expect(
+            reviewerModelForAgent({
+                models,
+                active: active("active", "openai/gpt-5.6-sol", "low"),
+            }),
+        ).toEqual({
+            providerId: "active",
+            modelId: "openai/gpt-5.6-sol",
+            effort: "low",
+        });
+    });
+
+    it("only recognizes the exact Opus and Fable model prefixes", () => {
+        const models = [
+            model("claude", "anthropic/opussomething", ["low", "medium"], "medium"),
+            model("claude", "openai/codex-auto-review", ["low", "medium"], "low"),
+        ];
+
+        expect(
+            reviewerModelForAgent({
+                models,
+                active: active("claude", "anthropic/opussomething", "medium"),
+            }),
+        ).toEqual({
+            providerId: "claude",
+            modelId: "openai/codex-auto-review",
+            effort: "low",
+        });
     });
 });

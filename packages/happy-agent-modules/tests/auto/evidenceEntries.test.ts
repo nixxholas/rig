@@ -58,8 +58,33 @@ describe("userMessageEvidence", () => {
         expect(entry?.trustedUserEvidence).toBe(false);
     });
 
+    it("recognizes shell context after leading whitespace", () => {
+        const entry = userMessageEvidence(
+            userText(" \n\t<user_shell_command>cat secrets</user_shell_command>"),
+            metadata({ messageOrigin: "user" }),
+        );
+
+        expect(entry).toMatchObject({
+            category: "tool",
+            trustedUserEvidence: false,
+            entry: { role: "user", blocks: [{ type: "text" }] },
+        });
+    });
+
+    it("keeps agent attribution untrusted even when it is accompanied by a user marker", () => {
+        const entry = userMessageEvidence(
+            userText("agent-generated content"),
+            metadata({ messageOrigin: "agent", senderAgentId: "agent-2" }),
+        );
+
+        expect(entry?.trustedUserEvidence).toBe(false);
+        expect(entry?.entry.provenance).toBe("agent");
+    });
+
     it("drops a message hidden from the user", () => {
-        expect(userMessageEvidence(userText("secret"), metadata({ hideFromUser: true }))).toBeUndefined();
+        expect(
+            userMessageEvidence(userText("secret"), metadata({ hideFromUser: true })),
+        ).toBeUndefined();
     });
 });
 
@@ -86,6 +111,15 @@ describe("assistant evidence", () => {
     it("keeps unparseable tool-call arguments as the raw string", () => {
         const entry = assistantToolCallEvidence("run", "not json");
         expect(entry.entry.blocks[0]).toMatchObject({ arguments: "not json" });
+    });
+
+    it("preserves valid JSON scalar and null arguments", () => {
+        expect(assistantToolCallEvidence("run", "null").entry.blocks[0]).toMatchObject({
+            arguments: null,
+        });
+        expect(assistantToolCallEvidence("run", '"text"').entry.blocks[0]).toMatchObject({
+            arguments: "text",
+        });
     });
 });
 
@@ -117,6 +151,40 @@ describe("toolResultEvidence", () => {
         expect(entry.entry.blocks[0]).toMatchObject({
             trustedUserEvidence: [{ type: "text", text: "yes, go ahead" }],
         });
+    });
+
+    it("preserves image blocks and does not mutate a caller-owned answer array", () => {
+        const answer = [{ type: "text" as const, text: "yes" }];
+        const entry = toolResultEvidence({
+            toolName: "ask_user",
+            content: [
+                { type: "image", data: "opaque", mimeType: "image/png" },
+                { type: "text", text: "rendered" },
+            ],
+            isError: true,
+            trustedUserAnswer: answer,
+        });
+
+        expect(entry.entry.blocks[0]).toMatchObject({
+            type: "tool_result",
+            rendered: [{ type: "image" }, { type: "text", text: "rendered" }],
+            trustedUserEvidence: [{ type: "text", text: "yes" }],
+            isError: true,
+        });
+        expect(answer).toEqual([{ type: "text", text: "yes" }]);
+    });
+
+    it("keeps an empty trusted answer distinct from an ordinary tool result", () => {
+        const entry = toolResultEvidence({
+            toolName: "ask_user",
+            content: [],
+            isError: false,
+            trustedUserAnswer: [],
+        });
+
+        expect(entry.category).toBe("message");
+        expect(entry.trustedUserEvidence).toBe(true);
+        expect(entry.entry.blocks[0]).toMatchObject({ trustedUserEvidence: [] });
     });
 });
 

@@ -1,4 +1,4 @@
-import type { AgentSystemRef } from "@slopus/happy-agent-base";
+import type { AgentMessageMetadata, AgentSystemRef } from "@slopus/happy-agent-base";
 import type { Context } from "@steve.kite/stdlib";
 
 /** One message Goal asked the collection to deliver to wake an agent. */
@@ -6,6 +6,7 @@ export interface RecordedWake {
     readonly agentId: string;
     readonly id: string | undefined;
     readonly text: string;
+    readonly metadata: AgentMessageMetadata | undefined;
 }
 
 export interface RecordingAgents {
@@ -44,14 +45,19 @@ export function recordingAgents(intercept?: InterceptWake): RecordingAgents {
             ctx: Context,
             agentId: string,
             message: RecordedMessage,
-            options?: { readonly id?: string },
+            options?: { readonly id?: string; readonly metadata?: AgentMessageMetadata },
         ): Promise<void> => {
             const text = message.content
                 .map((block) =>
                     block.type === "text" && typeof block.text === "string" ? block.text : "",
                 )
                 .join("");
-            const wake = { agentId, id: options?.id, text };
+            const wake = {
+                agentId,
+                id: options?.id,
+                metadata: options?.metadata,
+                text,
+            };
             if (intercept === undefined) {
                 record(wake);
                 return Promise.resolve();

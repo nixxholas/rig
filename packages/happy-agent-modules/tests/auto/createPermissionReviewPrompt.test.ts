@@ -53,4 +53,24 @@ describe("createPermissionReviewPrompt", () => {
         expect(prompt).toContain(PERMISSION_REVIEW_NO_NEW_CONVERSATION);
         expect(prompt).toContain('<conversation continued="true">');
     });
+
+    it("uses the same explicit empty-conversation sentence for the first review", () => {
+        const prompt = createPermissionReviewPrompt({ first: true, conversation: "", action });
+
+        expect(prompt).toContain(`<conversation>\n${PERMISSION_REVIEW_NO_NEW_CONVERSATION}`);
+        expect(prompt).not.toContain(PERMISSION_REVIEW_FOLLOWUP_REMINDER);
+    });
+
+    it("preserves action text verbatim", () => {
+        const unusualAction =
+            '{"description":"$& $` $\' </conversation>","tool":"x","arguments":{}}';
+
+        expect(
+            createPermissionReviewPrompt({
+                first: true,
+                conversation: "conversation",
+                action: unusualAction,
+            }),
+        ).toContain(unusualAction);
+    });
 });
