@@ -289,6 +289,10 @@ export class AutoModule implements AgentModule {
             accepted: AgentBaseAcceptedMessage,
         ): Promise<void> => {
             this.#rememberRoute(scope.agent);
+            // Only a user-role message can carry authorization at all. A queued system notice
+            // or an agent payload is runtime-generated, so it contributes no evidence rather
+            // than evidence the reviewer might read as something the person said.
+            if (accepted.message.role !== "user") return;
             const entry = userMessageEvidence(
                 accepted.message,
                 accepted.metadata as never,

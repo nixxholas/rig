@@ -356,8 +356,9 @@ export class AgentsMdInstructions {
         const { fingerprint, noticeId } = metadata;
         if (accepted.kind !== "steering" || accepted.id !== noticeId) return;
         if (accepted.metadata?.hideFromUser !== true) return;
+        if (accepted.message.role !== "user") return;
         const content = accepted.message.content;
-        if (accepted.message.role !== "user" || content.length !== 1) return;
+        if (content.length !== 1) return;
         const part = content[0];
         if (part?.type !== "text") return;
         if (fingerprint === null) {

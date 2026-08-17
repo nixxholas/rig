@@ -854,9 +854,16 @@ export class HistoryModule implements AgentModule {
         ): Promise<void> => {
             const fromUser = isUserOriginMetadata(accepted.metadata);
             const sender = fromUser ? undefined : senderAgentIdOf(accepted.metadata);
+            // A message from another agent may carry the reasoning that agent exposed. It is
+            // recorded as thinking, the way this module records any other reasoning; reasoning
+            // that is only an opaque provider payload has nothing to show and is left out.
+            const blocks = accepted.message.content.flatMap((block): HistoryBlock[] => {
+                if (block.type !== "reasoning") return [toHistoryOutputBlock(block)];
+                return block.text === undefined ? [] : [{ type: "thinking", thinking: block.text }];
+            });
             await this.#append(ctx, scope.agent.id, {
                 at: Date.now(),
-                blocks: accepted.message.content.map(toHistoryOutputBlock),
+                blocks,
                 recordId: createRecordId(),
                 role: fromUser ? "user" : "agent",
                 ...(sender === undefined ? {} : { senderAgentId: sender }),
