@@ -3,12 +3,16 @@ import {
     type AgentModuleScope,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
+import { computePermissions } from "@slopus/happy-agent-compute";
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { type Context } from "@steve.kite/stdlib";
 
+import type { HostCompute } from "../compute/ComputeModule.js";
+
 import {
     MAX_PROJECT_AVATAR_BYTES,
+    MAX_PROJECT_ERROR_LENGTH,
     MAX_PROJECT_INITIALIZATION_ATTEMPTS,
     projectAdoptRemoteNameInputSchema,
     projectAgentIdSchema,
@@ -44,6 +48,16 @@ import {
     type ProjectSetAvatarInput,
     type ProjectSetDefaultBranchInput,
 } from "./Project.js";
+import {
+    projectComputeResolverSchema,
+    requireProjectCompute,
+    type ProjectComputeResolver,
+} from "./ProjectCompute.js";
+import { detectProjectDefaultBranch } from "./impl/detectProjectDefaultBranch.js";
+import { probeProjectRepository } from "./impl/probeProjectRepository.js";
+import { remoteProjectName } from "./impl/remoteProjectName.js";
+import { readProjectGit } from "./impl/runProjectGit.js";
+import { selectProjectRemoteUrl } from "./impl/selectProjectRemoteUrl.js";
 import { ProjectMutations } from "./ProjectMutations.js";
 import {
     fitProjectPage,
@@ -76,6 +90,7 @@ import {
     assertProjectStoreMutationResult,
     createProjectStore,
     projectAuthorizationSchema,
+    type ProjectAuthorizationAction,
     type ProjectEnsureResult,
     type ProjectStateChanges,
     type ProjectSettingsUpdateResult,
@@ -174,6 +189,7 @@ export const projectModuleOptionsSchema = Type.Object(
     {
         authorization: Type.Optional(projectAuthorizationSchema),
         avatarAssetReader: Type.Optional(projectAvatarAssetReaderSchema),
+        compute: Type.Optional(projectComputeResolverSchema),
         idFactory: Type.Optional(projectIdFactorySchema),
         eventIdFactory: Type.Optional(projectEventIdFactorySchema),
         clock: Type.Optional(projectClockSchema),
@@ -194,6 +210,7 @@ export class ProjectsModule implements AgentModule {
 
     readonly #store: ProjectStore;
     readonly #mutations: ProjectMutations;
+    readonly #compute: ProjectComputeResolver | undefined;
     readonly #avatarAssetReader: ProjectModuleOptions["avatarAssetReader"];
     readonly #idFactory: NonNullable<ProjectModuleOptions["idFactory"]>;
     readonly #eventIdFactory: NonNullable<ProjectModuleOptions["eventIdFactory"]>;
@@ -204,6 +221,7 @@ export class ProjectsModule implements AgentModule {
     constructor(options: ProjectModuleOptions) {
         assertProjectModuleOptions(options);
         this.#store = createProjectStore();
+        this.#compute = options.compute;
         this.#avatarAssetReader = options.avatarAssetReader;
         this.#idFactory =
             options.idFactory ??
@@ -631,6 +649,55 @@ export class ProjectsModule implements AgentModule {
         });
     }
 
+    /**
+     * Looks at the project folder and records what it found: whether it is still there, whether a
+     * workspace can be cut from it, and where its Git state stands.
+     */
+    async probe(ctx: Context, agentId: string, projectId: string): Promise<Project> {
+        const { compute, project } = await this.#lookAt(ctx, agentId, projectId, "update_state");
+        const probe = await probeProjectRepository(ctx, compute, {
+            isHome: project.kind === "home",
+            path: project.repositoryRef,
+        });
+        return await this.applyProbe(ctx, agentId, {
+            projectId,
+            presence: probe.presence,
+            worktreeSupport: probe.worktreeSupport,
+            ...(probe.worktreeUnsupportedReason === undefined
+                ? {}
+                : { worktreeUnsupportedReason: boundedReason(probe.worktreeUnsupportedReason) }),
+            ...(probe.facts === undefined ? {} : { git: probe.facts }),
+        });
+    }
+
+    /**
+     * Decides the trunk from the repository itself. Git resolves upward from a folder, so this
+     * only asks when the folder is a repository root: a plain directory inside somebody else's
+     * repository must not inherit their branch.
+     */
+    async resolveDefaultBranch(ctx: Context, agentId: string, projectId: string): Promise<Project> {
+        const { compute, project } = await this.#lookAt(ctx, agentId, projectId, "update_state");
+        if (project.defaultBranch !== undefined) return project;
+        if (!(await this.#isRepositoryRoot(ctx, compute, project))) return project;
+        const branch = await detectProjectDefaultBranch(ctx, compute, project.repositoryRef);
+        if (branch === undefined) return project;
+        return await this.setDefaultBranch(ctx, agentId, { projectId, branch });
+    }
+
+    /**
+     * Takes the name the remote repository gives itself. A name a person chose is left alone, and
+     * so is a folder that is not a repository root or has no usable remote.
+     */
+    async resolveRemoteName(ctx: Context, agentId: string, projectId: string): Promise<Project> {
+        const { compute, project } = await this.#lookAt(ctx, agentId, projectId, "update_state");
+        if (project.nameSource !== "folder") return project;
+        if (!(await this.#isRepositoryRoot(ctx, compute, project))) return project;
+        const remote = await selectProjectRemoteUrl(ctx, compute, project.repositoryRef);
+        const name = remote === undefined ? undefined : remoteProjectName(remote);
+        if (name === undefined) return project;
+        return await this.adoptRemoteName(ctx, agentId, { projectId, name });
+    }
+
     /** Records what a host probe of the project folder observed. */
     async applyProbe(ctx: Context, agentId: string, input: ProjectProbeInput): Promise<Project> {
         this.#assertInput(projectProbeInputSchema, input, "probe");
@@ -793,6 +860,43 @@ export class ProjectsModule implements AgentModule {
         return formatSettingsForModel(projectId, settings, this.#maxOutputCharacters);
     }
 
+    /** The project and the machine it lives on, with the acting agent already authorized. */
+    async #lookAt(
+        ctx: Context,
+        agentId: string,
+        projectId: string,
+        action: ProjectAuthorizationAction,
+    ): Promise<{ compute: HostCompute; project: Project }> {
+        this.#assertAgentId(agentId);
+        this.#assertId(projectId);
+        const project = await this.#mutations.getRequired(ctx, agentId, projectId);
+        await this.#mutations.authorize(ctx, agentId, project.ownerAgentId, action);
+        return {
+            compute: await requireProjectCompute(ctx, this.#compute, agentId),
+            project,
+        };
+    }
+
+    /**
+     * Whether Git considers this exact folder a repository root, rather than somewhere inside one.
+     */
+    async #isRepositoryRoot(
+        ctx: Context,
+        compute: HostCompute,
+        project: Project,
+    ): Promise<boolean> {
+        if (project.kind === "home") return false;
+        const topLevel = await readProjectGit(ctx, compute, project.repositoryRef, [
+            "rev-parse",
+            "--show-toplevel",
+        ]);
+        if (topLevel === undefined) return false;
+        return (
+            (await realProjectPath(compute, topLevel)) ===
+            (await realProjectPath(compute, project.repositoryRef))
+        );
+    }
+
     async #changeState(
         ctx: Context,
         agentId: string,
@@ -904,6 +1008,24 @@ export function assertProjectAvatarAsset(value: unknown): asserts value is Proje
     if (!Value.Check(projectAvatarAssetSchema, value)) {
         throw new Error("The project avatar asset is invalid.");
     }
+}
+
+/** A folder's real path, so two spellings of the same directory compare equal. */
+async function realProjectPath(compute: HostCompute, path: string): Promise<string> {
+    try {
+        return await compute.fs.realpath(computePermissions("read_only"), path);
+    } catch {
+        return path;
+    }
+}
+
+/** Fits an observed reason into the one bounded sentence a project row keeps. */
+function boundedReason(reason: string): string {
+    const text = reason.trim().replace(/\s+/gu, " ");
+    if (text.length === 0) return "No reason was recorded.";
+    return text.length <= MAX_PROJECT_ERROR_LENGTH
+        ? text
+        : `${text.slice(0, MAX_PROJECT_ERROR_LENGTH - 1)}…`;
 }
 
 function gitChanges(git: ProjectGitFacts): ProjectStateChanges {
