@@ -1807,6 +1807,11 @@ export class AgentBase {
             blocked = (await this.#runLoops(ctx)) === "blocked";
         } catch (error: unknown) {
             this.#runFailure = error instanceof Error ? error.message : String(error);
+            // The request that opened this run is answered by the failure, however badly. Left
+            // standing, it would start the run again the moment this one settles, and whatever
+            // made the run throw would make the next one throw too — for ever, without anything
+            // in between ever reaching the model.
+            this.#turnRequested = false;
         }
         // A run that could not settle a staged tool result is the one exception: it must leave
         // its pending state exactly as it found it, for the next attempt to finish.
