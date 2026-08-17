@@ -46,14 +46,14 @@
         "turndown": "^7.2.4"
     },
     "devDependencies": {
-        "@slopus/happy-agent-base": "npm:@slopus/happy-agent-base@0.0.19",
+        "@slopus/happy-agent-base": "npm:@slopus/happy-agent-base@0.0.20",
         "@types/node": "^24.0.10",
         "@types/turndown": "^5.0.5",
         "typescript": "^7.0.2",
         "vitest": "^3.2.4"
     },
     "peerDependencies": {
-        "@slopus/happy-agent-base": "0.0.19"
+        "@slopus/happy-agent-base": "0.0.20"
     },
     "engines": {
         "node": ">=22.19.0"

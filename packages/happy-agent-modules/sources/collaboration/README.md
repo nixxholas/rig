@@ -81,8 +81,10 @@ You've hit your Codex usage limit on the ChatGPT Pro plan. Try again at Aug 19, 
 Nothing waits for a collaborator, so a failure that reported nothing would leave its creator
 expecting an answer that can never arrive. The reason is also what decides whether to retry, to send
 the work to a different model, or to give up, and the creator can discover it no other way. The
-failure is noted from the terminal error event while the run is still in progress, so a run that
-recovers and goes on to speak reports what it said rather than what it survived.
+reason comes from the settlement itself: every run settles, failed ones included, and the settlement
+carries the failure that ended the run — including one thrown out of the loop, which the
+conversation could never record. A run that recovers and goes on to speak settles without a failure,
+so it reports what it said rather than what it survived.
 
 The message is tagged
 `collaboration.kind = "subagent_report"` with the collaborator's `fromAgentId`, which is what a
@@ -90,9 +92,9 @@ presentation layer keys on to render it as a notice rather than as an agent talk
 under the settlement's own identity, so a retried report is the same message rather than a second
 one.
 
-The last thing the model said, and why it stopped answering, are kept in the **run store** while the
-run is in progress — the only state this module keeps. That store exists only for the duration of a
-run and is erased by the transaction that settles it.
+The last thing the model said is kept in the **run store** while the run is in progress — the only
+state this module keeps. That store exists only for the duration of a run and is erased by the
+transaction that settles it.
 
 Reading it and delivering the report both happen inside that settling transaction, which is what
 makes the report reliable. `send` composes with an outer storage transaction: the queue entry is

@@ -164,12 +164,8 @@ function textEnd(text: string) {
     return { type: "text_end", block: { type: "text", text } } as never;
 }
 
-function errorDone(message: string) {
-    return { type: "done", state: "error", kind: "internal_error", message } as never;
-}
-
-function settlement(settlementId: string) {
-    return { loopId: "loop", settlementId } as never;
+function settlement(settlementId: string, error?: string) {
+    return { loopId: "loop", settlementId, ...(error === undefined ? {} : { error }) } as never;
 }
 
 function toolCall(id: string) {
@@ -640,11 +636,14 @@ describe("collaboration", () => {
         await module.createAgent(ctx, "parent", TASK, "child");
         const scope = runScope("child");
 
-        // A provider error ends the run without a single text_end. Nothing waits for a
-        // collaborator, so a silent settlement here would leave the creator expecting an answer
-        // that can never arrive.
-        await hooks.onEvent!(ctx, scope, errorDone("You've hit your Codex usage limit."));
-        await hooks.afterAgentSettledTransact!(ctx, scope, settlement("s1"));
+        // A provider error ends the run without a single text_end, and the settlement carries why.
+        // Nothing waits for a collaborator, so a silent settlement here would leave the creator
+        // expecting an answer that can never arrive.
+        await hooks.afterAgentSettledTransact!(
+            ctx,
+            scope,
+            settlement("s1", "You've hit your Codex usage limit."),
+        );
 
         expect(collection.delivered).toHaveLength(2);
         expect(collection.delivered[1]!.text).toBe(
@@ -658,12 +657,24 @@ describe("collaboration", () => {
         await module.createAgent(ctx, "parent", TASK, "child");
         const scope = runScope("child");
 
-        await hooks.onEvent!(ctx, scope, errorDone("Temporary overload."));
+        // A run that recovered settles without a failure, whatever it survived on the way.
         await hooks.onEventTransact!(ctx, scope, textEnd("Final answer."));
         await hooks.afterAgentSettledTransact!(ctx, scope, settlement("s1"));
 
         expect(collection.delivered[1]!.text).toContain("Final answer.");
-        expect(collection.delivered[1]!.text).not.toContain("Temporary overload.");
+    });
+
+    it("says why a run stopped even when the failure had no words of its own", async () => {
+        const collection = new Collection();
+        const { module, hooks, ctx } = await started(collection);
+        await module.createAgent(ctx, "parent", TASK, "child");
+        const scope = runScope("child");
+
+        await hooks.afterAgentSettledTransact!(ctx, scope, settlement("s1", "   "));
+
+        expect(collection.delivered[1]!.text).toBe(
+            "Collaborator child stopped without answering. It failed with, verbatim.\n\nThe model did not answer.",
+        );
     });
 
     it("keeps silence silent when a run ends without an answer and without a failure", async () => {
@@ -672,8 +683,8 @@ describe("collaboration", () => {
         await module.createAgent(ctx, "parent", TASK, "child");
         const scope = runScope("child");
 
-        // A cancelled run is not a failed one: it was interrupted on purpose.
-        await hooks.onEvent!(ctx, scope, { type: "done", state: "cancelled" } as never);
+        // A cancelled run is not a failed one: it was interrupted on purpose, so it settles
+        // without a failure.
         await hooks.afterAgentSettledTransact!(ctx, scope, settlement("s1"));
 
         expect(collection.delivered).toHaveLength(1);
