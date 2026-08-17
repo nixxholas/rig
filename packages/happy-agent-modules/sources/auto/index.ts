@@ -12,8 +12,11 @@
 export {
     AGENT_MESSAGE_ORIGIN_METADATA,
     MESSAGE_ORIGIN_METADATA_KEY,
+    SENDER_AGENT_ID_METADATA_KEY,
     USER_MESSAGE_ORIGIN_METADATA,
     isUserOriginMetadata,
+    senderAgentIdMetadata,
+    senderAgentIdOf,
 } from "./messageOrigin.js";
 
 export {

@@ -12,6 +12,14 @@ Discussion notes that support or contextualize master plans must live only in
 `master-plans/notes/`. Do not create these notes in the `master-plans/` root,
 in another documentation directory, or anywhere else in the repository.
 
+## Module specs: SPEC.md and SPEC_LEARNINGS.md
+
+A module may carry a `SPEC.md` and a `SPEC_LEARNINGS.md` beside it. When working on a specific module, always read that module's `SPEC.md` and `SPEC_LEARNINGS.md` in full before making changes.
+
+`SPEC.md` is always written by direct human input. Never create, edit, or delete a `SPEC.md` yourself; it records what the human dictated, exactly as they dictated it.
+
+`SPEC_LEARNINGS.md` lives alongside its `SPEC.md` and is populated with human feedback on implementations of the spec. Models must always write learnings there as they arise, and must keep the document nice and tidy and on point — consolidate, prune, and rewrite for clarity rather than appending noise. When a learning reveals something critical that the spec itself should say, propose the change to `SPEC.md` to the user instead of editing it.
+
 ## Product direction
 
 Build the best combined coding-agent experience from Codex and Claude Code, with a strong focus on simplicity, thoughtful defaults, and a polished user experience. Prioritize important, widely useful workflows over obscure features or exhaustive parity.

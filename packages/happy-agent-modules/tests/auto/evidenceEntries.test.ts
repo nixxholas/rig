@@ -20,14 +20,23 @@ function metadata(fields: Record<string, unknown>): AgentMessageMetadata {
 }
 
 describe("userMessageEvidence", () => {
-    it("classifies an ordinary human message as trusted message evidence", () => {
-        const entry = userMessageEvidence(userText("please edit the file"), undefined);
+    it("classifies a stamped human message as trusted message evidence", () => {
+        const entry = userMessageEvidence(
+            userText("please edit the file"),
+            metadata({ messageOrigin: "user" }),
+        );
         expect(entry).toMatchObject({
             category: "message",
             trustedUserEvidence: true,
             entry: { role: "user", blocks: [{ type: "text", text: "please edit the file" }] },
         });
         expect(entry?.entry.provenance).toBeUndefined();
+    });
+
+    it("never trusts an unstamped message, so trust cannot be inferred from missing metadata", () => {
+        const entry = userMessageEvidence(userText("please edit the file"), undefined);
+        expect(entry?.trustedUserEvidence).toBe(false);
+        expect(entry?.entry.provenance).toBe("agent");
     });
 
     it("marks a collaboration message untrusted with agent provenance", () => {

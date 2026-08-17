@@ -1,4 +1,6 @@
 import type { AgentMessageMetadata } from "@slopus/happy-agent-base";
+import { Type } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
 
 /**
  * The provenance marker that decides whether a user-role message may ever be trusted as human
@@ -43,4 +45,39 @@ export function isUserOriginMetadata(metadata: AgentMessageMetadata | undefined)
             MESSAGE_ORIGIN_METADATA_KEY
         ] === "user"
     );
+}
+
+/**
+ * The metadata key naming the specific agent that sent a system-generated message: a goal
+ * continuation names the agent driving itself, a collaboration delivery names the sending
+ * collaborator. This is attribution, never authorization — a sender ID grants nothing, and the
+ * permission reviewer must not read it as trust.
+ */
+export const SENDER_AGENT_ID_METADATA_KEY = "senderAgentId";
+
+const senderAgentIdSchema = Type.String({
+    minLength: 1,
+    maxLength: 256,
+    pattern: "^[^\\u0000\\r\\n]+$",
+});
+
+/** Stamp the specific sending agent on a system-generated message's metadata. */
+export function senderAgentIdMetadata(agentId: string): {
+    readonly [SENDER_AGENT_ID_METADATA_KEY]: string;
+} {
+    if (!Value.Check(senderAgentIdSchema, agentId)) {
+        throw new Error("The sender agent ID is not a valid metadata value.");
+    }
+    return Object.freeze({ [SENDER_AGENT_ID_METADATA_KEY]: agentId });
+}
+
+/**
+ * The specific sending agent this message's metadata names, or undefined when it names none or
+ * carries something that is not a plausible agent identity.
+ */
+export function senderAgentIdOf(metadata: AgentMessageMetadata | undefined): string | undefined {
+    const value = (metadata as { readonly [SENDER_AGENT_ID_METADATA_KEY]?: unknown } | undefined)?.[
+        SENDER_AGENT_ID_METADATA_KEY
+    ];
+    return Value.Check(senderAgentIdSchema, value) ? value : undefined;
 }

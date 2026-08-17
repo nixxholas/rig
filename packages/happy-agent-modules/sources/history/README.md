@@ -10,6 +10,17 @@ The module writes as the agent works: every accepted user message, every complet
 response, every tool result, and every failed inference, from inside the transactions that commit
 that work, so the record and the thing recorded become durable together.
 
+The record keeps who actually sent each incoming message. Provider input shapes only have user
+and assistant roles, so goal continuations, collaboration deliveries, and other system-generated
+messages all reach the model wearing the user role; the history records them under their real
+sender instead. A message the host positively stamped as an end-user submission (the same
+`messageOrigin` provenance metadata the automatic permission reviewer trusts) is recorded as
+`role: "user"`; everything else, including an unstamped message, is recorded as `role: "agent"`,
+with `senderAgentId` naming the specific sending agent when its metadata named one — the
+collaboration module names the sending collaborator, and a goal continuation names the agent
+driving itself. This fails closed: a forgetful path under-attributes rather than a synthetic
+message being recorded as the person.
+
 ```ts
 import { Agent } from "@slopus/happy-agent-base";
 import { HistoryModule } from "@slopus/happy-agent-modules";
@@ -18,10 +29,10 @@ const history = new HistoryModule();
 const agent = await Agent.create(ctx, { ...options, modules: [history] });
 ```
 
-`HistoryModuleOptions` also accepts `resolveTarget`, a callback the host provides to let one
-agent's history tool read another agent's history (self-access always works without it). The
-callback receives either a Stable Agent ID or a canonical session-tree path and should report
-not-found and ambiguous-path errors itself. `listAgents` supplies the bounded session-tree
+Any agent may read any agent's history. `HistoryModuleOptions` accepts `resolveTarget`, a
+callback the host provides to map canonical session-tree paths to Agent IDs (it may raise its
+own ambiguous-path error); a target the host does not recognize is read as a raw Agent ID, and a
+target that exists nowhere simply has an empty archive. `listAgents` supplies the bounded session-tree
 summaries returned with every tool response; without it, self-history still reports the current
 agent with its archive count. `toolDisplay` optionally supplies the one-line summary that the host
 would show for a tool result. When it is absent, lifecycle recording uses a bounded generic
@@ -36,7 +47,7 @@ history as advisory; a store failure is then swallowed and the record is dropped
 ### `read_agent_history`
 
 The only tool the module exposes. It reads or searches the durable history for the calling agent,
-or for another agent when `target` is given and `resolveTarget` (or self-access) allows it.
+or for any other agent when `target` is given — history is readable by every agent.
 Reading changes nothing and reaches nothing outside the agent's own store, so the tool is
 `durable: true`, `transactional: true`, and `shouldReviewInAutoMode` always returns `false` —
 there is nothing to review. Agent Base owns the page-read and result transaction.
@@ -52,11 +63,12 @@ Arguments:
   100, capped at `MAX_HISTORY_PAGE_SIZE` (500).
 - `query` — case-insensitive text search over the whole stored message: text, thinking, tool
   names, tool arguments, and tool output — not just what a bounded rendering would show.
-- `roles` — restrict to up to four of `"user"`, `"assistant"`, `"error"`, `"system"`.
+- `roles` — restrict to up to five of `"user"`, `"agent"`, `"assistant"`, `"error"`, `"system"`.
 - `include_tools` — include simplified tool calls and truncated tool results in the rendering.
   Defaults to `true`; it never changes what `query` searches.
 - `target` — a Stable Agent ID or canonical session-tree path such as `/root/audit`. Omitted means
-  the caller; paths are resolved by the host and may be rejected as missing or ambiguous.
+  the caller; paths are resolved by the host, and a value the host does not recognize is read as a
+  raw Agent ID.
 
 The response always includes `agents`, the bounded session-tree roster with `agent_id`,
 `description`, `message_count`, `path`, and `status`, so a model can discover targets before
@@ -85,10 +97,11 @@ tool calls, and tool results), let the model size what it did and did not see wi
 - `listAgents(ctx, requesterAgentId, targetAgentId?): Promise<HistoryAgentSummaries>` — the bounded
   related-agent roster supplied by the host, or a self/target fallback when no roster adapter is
   configured.
-- `resolveTarget(ctx, requesterAgentId, requestedTarget): Promise<string | undefined>` — the
-  access check behind the tool's `target` argument. Requesting one's own ID always resolves;
-  anything else, including a canonical path, is delegated to the constructor's `resolveTarget`, or
-  refused when none was given.
+- `resolveTarget(ctx, requesterAgentId, requestedTarget): Promise<string>` — the resolution behind
+  the tool's `target` argument. Requesting one's own ID always resolves; anything else is offered
+  to the constructor's `resolveTarget` (which maps canonical paths and may raise its own
+  ambiguous-path error), and a target it does not map is used as a raw Agent ID as long as it is a
+  well-formed one.
 
 The module also implements the `AgentModule` lifecycle hooks that do the recording:
 `onEventTransact` (buffers each completed text/thinking/tool-call block), `messageAcceptedTransact`

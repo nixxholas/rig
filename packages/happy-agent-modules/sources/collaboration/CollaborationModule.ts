@@ -13,6 +13,7 @@ import { type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type { Context } from "@steve.kite/stdlib";
 
+import { senderAgentIdMetadata } from "../auto/messageOrigin.js";
 import {
     collaborationAgentIdSchema,
     collaborationCreateInputSchema,
@@ -219,6 +220,7 @@ export class CollaborationModule implements AgentModule {
                         fromAgentId: scope.agent.id,
                         toAgentId: parent,
                     },
+                    ...senderAgentIdMetadata(scope.agent.id),
                 },
             },
         );
@@ -258,7 +260,10 @@ export class CollaborationModule implements AgentModule {
             },
             {
                 id: messageId,
-                metadata: { collaboration: { fromAgentId, toAgentId } },
+                metadata: {
+                    collaboration: { fromAgentId, toAgentId },
+                    ...senderAgentIdMetadata(fromAgentId),
+                },
                 ...(selection === undefined
                     ? {}
                     : {

@@ -50,8 +50,17 @@ export const historyTimestampSchema = Type.Integer({
     maximum: MAX_HISTORY_POSITION,
 });
 
-/** Who a recorded message came from. The four roles a reader may filter on. */
+/**
+ * Who a recorded message came from. The five roles a reader may filter on.
+ *
+ * Provider input shapes only have user and assistant roles, so goal continuations, collaboration
+ * hand-offs, and other system-generated messages all reach the model wearing the user role. The
+ * history records who actually sent them: `"user"` is a message the person actually submitted,
+ * and `"agent"` is one an agent or the system generated on its behalf, whatever role the
+ * provider saw.
+ */
 export const historyRoleSchema = Type.Union([
+    Type.Literal("agent"),
     Type.Literal("assistant"),
     Type.Literal("error"),
     Type.Literal("system"),
@@ -165,6 +174,12 @@ export type HistoryBlock = Static<typeof historyBlockSchema>;
 
 const historyMessageFields = {
     role: historyRoleSchema,
+    /**
+     * The specific agent that sent an agent-role message, when its metadata named the sender —
+     * a collaboration delivery names the collaborator, a goal continuation names the agent
+     * driving itself. Absent when the sender did not identify itself, and on every other role.
+     */
+    senderAgentId: Type.Optional(historyAgentIdSchema),
     blocks: Type.Array(historyBlockSchema, { maxItems: MAX_HISTORY_BLOCKS_PER_MESSAGE }),
     /** Stable identity for this archive record. Reuse is a storage conflict. */
     recordId: historyRecordIdSchema,

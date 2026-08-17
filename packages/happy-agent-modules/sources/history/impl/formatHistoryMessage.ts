@@ -24,7 +24,9 @@ export function formatHistoryMessage(
         message.provider === undefined
             ? ""
             : ` (${message.provider}${message.model === undefined ? "" : `, ${message.model}`})`;
-    const lines = [`${position}. ${message.role.toLocaleUpperCase()}${attribution}`];
+    // An agent-role message names its specific sender when the sender identified itself.
+    const sender = message.senderAgentId === undefined ? "" : ` (${message.senderAgentId})`;
+    const lines = [`${position}. ${message.role.toLocaleUpperCase()}${sender}${attribution}`];
     for (const block of message.blocks) {
         if (block.type === "text") {
             lines.push(`Text: ${truncate(block.text, textLimit)}`);

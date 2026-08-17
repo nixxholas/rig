@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
+import {
+    AGENT_MESSAGE_ORIGIN_METADATA,
+    USER_MESSAGE_ORIGIN_METADATA,
+    senderAgentIdMetadata,
+} from "../../sources/auto/messageOrigin.js";
 import { HistoryModule } from "../../sources/history/HistoryModule.js";
+import { formatHistoryMessage } from "../../sources/history/impl/formatHistoryMessage.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
 
 describe("HistoryModule durability", () => {
@@ -108,6 +114,95 @@ describe("HistoryModule durability", () => {
                 target: "agent-b",
                 total_messages: 1,
             });
+        } finally {
+            database.close();
+        }
+    });
+
+    it("reads another agent's history by raw Agent ID without a host resolver", async () => {
+        const history = new HistoryModule();
+        const database = moduleDatabase(history.migrations, "history-open-read-test");
+        await database.ready;
+
+        try {
+            await history.record(database.context, "agent-b", {
+                at: 123,
+                blocks: [{ text: "Someone else's record.", type: "text" }],
+                recordId: "history-record-open",
+                role: "assistant",
+            });
+            const scope = {
+                agent: { id: "agent-a" },
+            } as Parameters<HistoryModule["tools"]>[1];
+            const [tool] = history.tools(database.context, scope);
+            const result = await tool!.execute(database.context, { target: "agent-b" }, {
+                id: "call-history-open",
+                providerCallId: "provider-history-open",
+                kv: {},
+            } as never);
+
+            expect(result).toMatchObject({
+                target: "agent-b",
+                total_messages: 1,
+            });
+            expect((result as { history: string }).history).toContain("Someone else's record.");
+        } finally {
+            database.close();
+        }
+    });
+
+    it("records who sent each accepted incoming message", async () => {
+        const history = new HistoryModule();
+        const database = moduleDatabase(history.migrations, "history-origin-test");
+        await database.ready;
+
+        const scope = {
+            agent: { id: "agent-a" },
+        } as Parameters<HistoryModule["messageAcceptedTransact"]>[1];
+
+        try {
+            await history.messageAcceptedTransact(database.context, scope, {
+                id: "accepted-user",
+                kind: "send",
+                message: { role: "user", content: [{ text: "Please deploy.", type: "text" }] },
+                metadata: { ...USER_MESSAGE_ORIGIN_METADATA },
+            });
+            await history.messageAcceptedTransact(database.context, scope, {
+                id: "accepted-agent",
+                kind: "send",
+                message: { role: "user", content: [{ text: "Audit finished.", type: "text" }] },
+                metadata: {
+                    ...AGENT_MESSAGE_ORIGIN_METADATA,
+                    ...senderAgentIdMetadata("agent-b"),
+                },
+            });
+            await history.messageAcceptedTransact(database.context, scope, {
+                id: "accepted-unstamped",
+                kind: "steering",
+                message: { role: "user", content: [{ text: "Unstamped.", type: "text" }] },
+            });
+
+            const page = await history.read(database.context, "agent-a");
+            expect(
+                page.messages.map((record) => [
+                    record.message.role,
+                    record.message.senderAgentId,
+                ]),
+            ).toEqual([
+                ["user", undefined],
+                ["agent", "agent-b"],
+                ["agent", undefined],
+            ]);
+
+            const human = page.messages[0]!.message;
+            const synthetic = page.messages[1]!.message;
+            expect(formatHistoryMessage(human, 1)).toContain("1. USER\n");
+            expect(formatHistoryMessage(synthetic, 2)).toContain("2. AGENT (agent-b)");
+
+            const filtered = await history.read(database.context, "agent-a", {
+                roles: ["agent"],
+            });
+            expect(filtered.matchedMessages).toBe(2);
         } finally {
             database.close();
         }

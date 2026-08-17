@@ -78,20 +78,21 @@ describe("AutoReviewEvidenceStore", () => {
         expect(entries[0]?.blocks[0]).toEqual({ type: "text", text: "gen-one" });
     });
 
-    it("round-trips a recorded human answer and upserts on the same call id", async () => {
+    it("upserts a recorded human answer and consumes it exactly once", async () => {
         const first: AutoTranscriptMessage = { role: "user", blocks: [{ type: "text", text: "yes" }] };
         await store.recordUserAnswer(db.database, AGENT, "call-1", first);
-        expect(await store.readUserAnswer(db.database, AGENT, "call-1")).toEqual(first);
 
         const revised: AutoTranscriptMessage = {
             role: "user",
             blocks: [{ type: "text", text: "actually no" }],
         };
         await store.recordUserAnswer(db.database, AGENT, "call-1", revised);
-        expect(await store.readUserAnswer(db.database, AGENT, "call-1")).toEqual(revised);
+        expect(await store.consumeUserAnswer(db.database, AGENT, "call-1")).toEqual(revised);
+        // Consumed once: a later result reusing the same call id finds nothing to trust.
+        expect(await store.consumeUserAnswer(db.database, AGENT, "call-1")).toBeUndefined();
     });
 
     it("returns undefined for an unrecorded answer", async () => {
-        expect(await store.readUserAnswer(db.database, AGENT, "missing")).toBeUndefined();
+        expect(await store.consumeUserAnswer(db.database, AGENT, "missing")).toBeUndefined();
     });
 });

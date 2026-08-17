@@ -68,7 +68,7 @@ export function readAgentHistoryTool(history: HistoryModule, agentId: string) {
     return defineAgentTool({
         name: "read_agent_history",
         description:
-            "Read or search the durable low-level history for this agent or an authorized related agent in its session tree. The response lists the available agents with their stable IDs, descriptions, paths, message counts, and statuses. Use a stable Agent ID or canonical path such as /root/audit for target; the host resolves paths and reports not-found or ambiguous paths. Use this to investigate prior requests, decisions, reasoning, tool activity, and subagent work after a model change or whenever earlier context matters. This is not a user-facing chat export. Search examines stored block content, but each response is simplified and capped at 80,000 characters: provider-hidden reasoning is unavailable, only exposed thinking is readable, tool calls are summarized, tool outputs are truncated, and images are represented only by metadata. A requested message limit may therefore return fewer messages; continue with next_cursor or previous_cursor.",
+            "Read or search the durable low-level history of any agent. The response lists the known related agents with their stable IDs, descriptions, paths, message counts, and statuses, but target is not limited to them: any stable Agent ID may be read, and a canonical session-tree path such as /root/audit is resolved by the host when it knows one. Use this to investigate prior requests, decisions, reasoning, tool activity, and subagent work after a model change or whenever earlier context matters. This is not a user-facing chat export. Search examines stored block content, but each response is simplified and capped at 80,000 characters: provider-hidden reasoning is unavailable, only exposed thinking is readable, tool calls are summarized, tool outputs are truncated, and images are represented only by metadata. A requested message limit may therefore return fewer messages; continue with next_cursor or previous_cursor.",
         parameters: Type.Object({
             cursor: Type.Optional(
                 Type.Integer({
@@ -119,13 +119,15 @@ export function readAgentHistoryTool(history: HistoryModule, agentId: string) {
                 Type.Array(
                     Type.Union([
                         Type.Literal("user"),
+                        Type.Literal("agent"),
                         Type.Literal("assistant"),
                         Type.Literal("error"),
                         Type.Literal("system"),
                     ]),
                     {
-                        description: "Return only messages with one of these roles.",
-                        maxItems: 4,
+                        description:
+                            'Return only messages with one of these roles. "user" is a message the person actually sent; "agent" is a system-generated message such as a goal continuation or another agent\'s delivery.',
+                        maxItems: 5,
                         minItems: 1,
                         uniqueItems: true,
                     },
@@ -195,11 +197,6 @@ export function readAgentHistoryTool(history: HistoryModule, agentId: string) {
                       ? "end"
                       : args.from;
             const target = await history.resolveTarget(ctx, agentId, args.target ?? agentId);
-            if (target === undefined) {
-                throw new Error(
-                    "History access is limited to the current agent unless the host authorizes a related target.",
-                );
-            }
             const agents = await history.listAgents(ctx, agentId, target);
             if (!agents.some((agent) => agent.agentId === target)) {
                 throw new Error("The history agent roster did not include the resolved target.");

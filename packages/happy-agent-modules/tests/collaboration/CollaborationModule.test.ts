@@ -412,6 +412,7 @@ describe("collaboration", () => {
                 fromAgentId: "child",
                 toAgentId: "parent",
             },
+            senderAgentId: "child",
         });
     });
 

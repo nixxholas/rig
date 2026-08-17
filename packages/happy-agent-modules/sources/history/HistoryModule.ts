@@ -23,6 +23,7 @@ import {
     type AgentModuleMigration,
 } from "@slopus/happy-agent-base";
 
+import { isUserOriginMetadata, senderAgentIdOf } from "../auto/messageOrigin.js";
 import {
     historyBlockSchema,
     historyMessageSchema,
@@ -360,8 +361,19 @@ export class HistoryModule implements AgentModule {
                 }
                 ids.add(summary.agentId);
             }
-            if (!ids.has(requesterAgentId) || !ids.has(targetAgentId)) {
-                throw new Error("The history agent roster omitted a requested agent.");
+            if (!ids.has(requesterAgentId)) {
+                throw new Error("The history agent roster omitted the requesting agent.");
+            }
+            // Any agent may be read, so a target outside the host's roster is still described,
+            // from its own archive count, rather than refused.
+            if (!ids.has(targetAgentId)) {
+                const stats = await readHistoryStats(txCtx.db, sql`agent_id = ${targetAgentId}`);
+                snapshot.push({
+                    agentId: targetAgentId,
+                    messageCount: stats.messages,
+                    path: targetAgentId,
+                    status: "unknown",
+                });
             }
             snapshot.sort(
                 (left, right) =>
@@ -377,15 +389,17 @@ export class HistoryModule implements AgentModule {
     ];
 
     /**
-     * Resolve a tool target while keeping self-access available without host wiring. A host may
-     * resolve either an Agent ID or a canonical session-tree path and should raise its own
-     * not-found or ambiguous-path error before returning.
+     * Resolve a tool target. Any agent may read any agent's history: the host resolver, when one
+     * is configured, only maps canonical session-tree paths to Agent IDs and may raise its own
+     * ambiguous-path error; a target it does not recognize is read as a raw Agent ID. A target
+     * that exists nowhere simply has an empty archive — reading grants nothing and reaches
+     * nothing outside the collection's own store.
      */
     async resolveTarget(
         ctx: Context,
         requesterAgentId: string,
         requestedTarget: string,
-    ): Promise<string | undefined> {
+    ): Promise<string> {
         if (
             !Value.Check(historyAgentIdSchema, requesterAgentId) ||
             !Value.Check(historyAgentTargetSchema, requestedTarget)
@@ -397,10 +411,13 @@ export class HistoryModule implements AgentModule {
         if (resolved !== undefined && !Value.Check(historyAgentIdSchema, resolved)) {
             throw new Error("The history target resolver returned an invalid agent ID.");
         }
-        if (resolved === undefined && this.#resolveTarget !== undefined) {
-            throw new Error(`Agent '${requestedTarget}' was not found in the session tree.`);
+        if (resolved !== undefined) return resolved;
+        if (!Value.Check(historyAgentIdSchema, requestedTarget)) {
+            throw new Error(
+                `Target '${requestedTarget}' is not an Agent ID and no session-tree path matched it.`,
+            );
         }
-        return resolved;
+        return requestedTarget;
     }
 
     /**
@@ -418,17 +435,28 @@ export class HistoryModule implements AgentModule {
         return this.#appendPendingBlock(ctx, scope, toHistoryBlock(event));
     };
 
-    /** Record an accepted user message beside the Agent Base message transaction. */
+    /**
+     * Record an accepted incoming message beside the Agent Base message transaction. Who sent it
+     * is recorded from the message's provenance metadata while it still exists: only a message
+     * the host positively stamped as an end-user submission is recorded as `role: "user"`, and
+     * everything else — a goal continuation, a collaboration delivery, an unstamped message — is
+     * recorded as `role: "agent"`, naming the specific sender when the metadata named one. This
+     * fails closed: a forgetful path under-attributes rather than a synthetic message
+     * impersonating the person.
+     */
     readonly messageAcceptedTransact = async (
         ctx: Context,
         scope: AgentModuleScope,
         accepted: AgentBaseAcceptedMessage,
     ): Promise<void> => {
+        const fromUser = isUserOriginMetadata(accepted.metadata);
+        const sender = fromUser ? undefined : senderAgentIdOf(accepted.metadata);
         await this.#append(ctx, scope.agent.id, {
             at: Date.now(),
             blocks: accepted.message.content.map(toHistoryOutputBlock),
             recordId: createRecordId(),
-            role: "user",
+            role: fromUser ? "user" : "agent",
+            ...(sender === undefined ? {} : { senderAgentId: sender }),
         });
     };
 
