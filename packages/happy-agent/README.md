@@ -58,9 +58,10 @@ await daemon.close();
 storage and database, and the resolved providers and model catalog.
 
 Every module that would reach another service is disabled here: there is no collaboration host, no
-Happy app bridge, no MCP, no image generation, and no workflow or worklet runtime. Search is served
-only where an enabled provider offers it. Folders still provide storage, compute, AGENTS.md,
-skills, and generated media.
+Happy app bridge, no MCP, and no workflow or worklet runtime. Search and image generation stay,
+because each asks the configured accounts directly rather than a host: an image is generated on a
+Codex account and written into the shared generated-files folder. Folders still provide storage,
+compute, AGENTS.md, skills, and generated media.
 
 The resolved `daemon.configuration.paths` is the authoritative immutable layout. A custom
 `<parent>/.happy` always uses `<parent>/Happy` as its public home; callers do not provide

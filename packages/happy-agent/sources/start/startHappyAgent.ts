@@ -28,6 +28,7 @@ import {
     EventsModule,
     GoalModule,
     HistoryModule,
+    ImageGenerationModule,
     ModelSwitchModule,
     ObservationModule,
     PermissionsModule,
@@ -91,6 +92,7 @@ export interface HappyAgentModules {
     readonly events: EventsModule;
     readonly goal: GoalModule;
     readonly history: HistoryModule;
+    readonly imageGeneration: ImageGenerationModule;
     readonly modelSwitch: ModelSwitchModule;
     readonly observation: ObservationModule;
     readonly permissions: PermissionsModule;
@@ -391,6 +393,7 @@ export async function startHappyAgent(
             events,
             goal: new GoalModule({}),
             history,
+            imageGeneration: new ImageGenerationModule({ config, providers }),
             modelSwitch: new ModelSwitchModule({ history }),
             observation,
             permissions,
@@ -475,6 +478,7 @@ export async function startHappyAgent(
             modules.scheduling,
             modules.userInput,
             modules.search,
+            modules.imageGeneration,
             modules.skills,
             modules.compute,
             modules.events,

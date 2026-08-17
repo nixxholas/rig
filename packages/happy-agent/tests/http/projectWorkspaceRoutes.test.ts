@@ -278,11 +278,17 @@ describe("project and workspace routes over the daemon socket", () => {
         })
             .png()
             .toBuffer();
-        const beforeAvatar = await fixture.call("GET", `/v0/projects/${firstId}`);
+        // The refresh above is still re-deriving this project's Git facts, and each derivation
+        // bumps its version. Wait for it to settle, or the avatar's if-match races it and loses.
+        const beforeAvatar = await waitFor(async () => {
+            const response = await fixture.call("GET", `/v0/projects/${firstId}`);
+            const project = readProject(response.body);
+            return project.initializationStatus === "initializing" ? undefined : project;
+        }, "the refreshed project to finish re-deriving its Git facts");
         const withAvatar = await fixture.call("PUT", `/v0/projects/${firstId}/avatar`, {
             headers: {
                 "content-type": "image/png",
-                "if-match": String(readProject(beforeAvatar.body).version),
+                "if-match": String(beforeAvatar.version),
             },
             raw: image,
         });
