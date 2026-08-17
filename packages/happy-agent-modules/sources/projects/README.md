@@ -3,28 +3,53 @@
 A project is a folder. This module is the catalog of the folders an agent
 works in: what each one is called, whether it is on disk, how far its setup
 got, and what Git last said about it. The module owns those rows, their
-settings, their order, their avatar metadata and its own migrations in the
-Agent Base database. It never resolves a path, runs Git, clones a repository
-or deletes anything; a host does that work and reports the result back here.
+settings, their order, their avatar bytes and its own migrations in the Agent
+Base database — and it does the work those rows describe. Resolving a path,
+importing a folder, cloning a remote, brokering the credential the clone needs,
+probing a repository, deciding the trunk, holding the repository lock, storing
+and collecting avatar bytes: all of it is this module's own. There is no host
+object between the catalog and the disk.
 
 ```ts
 import { ProjectsModule } from "@slopus/happy-agent-modules";
 
-const projects = new ProjectsModule({});
+const projects = new ProjectsModule({ rootContext });
+await projects.open(ctx, agentId);
 ```
+
+`rootContext` is the lifetime the module's own Git and filesystem work runs on:
+a context derived from the application root, carrying the agent database. A
+clone, a project setup, or an avatar sweep outlives the request that started
+it, so none of them run on the caller's context; without a root the catalog
+still records everything it is told but cannot start work of its own.
+`managedProjectsDirectory`, `homeDirectory`, `environment` and `stateDirectory`
+locate that work — where cloned projects live, and where avatar bytes live so
+they survive a restart. `git` and `probeGit` replace the Git surfaces so a test
+can drive the whole lifecycle without Git; `cloneRemote` and
+`gitCredentialBroker` replace the clone boundary and the credential broker.
+`localProfileId` names the one person this copy of Rig acts for when a caller
+names nobody — which machine that is the catalog learns from the agent it was
+opened for. `resolveGitSecret` and `resolveProfile` answer for that person's
+token and Git identity. `onHostError` is told when the module's own Git or
+filesystem work failed after a durable decision was already recorded.
+
+`open(ctx, agentId)` picks up whatever the last run left unfinished — projects
+still being set up, failures worth another try, and stale avatar bytes — and
+`close(ctx)` stops every background lifetime and waits for the ones in flight.
 
 ## The record
 
 `repositoryRef` is the project. It is the canonical absolute folder path, not
 an opaque handle, and it is unique across the catalog: one row per folder. The
 schema enforces that shape: an absolute path with no `.` or `..` segment and no
-control characters, because a path the host has not normalized is not a folder
-this catalog can key on.
+control characters, because an unnormalized path is not a folder this catalog
+can key on.
 
 - `kind` is `"home"` or `"regular"`. The home directory is the single `home`
   project, always named `Home`, always `ready`; nothing initializes it.
-- `storageKey` is a portable kebab-case key, unique across the catalog, for
-  the directories a host manages on the project's behalf.
+- `storageKey` is a portable kebab-case key, unique across the catalog, for the
+  managed directories that belong to the project — its clone, and the folder its
+  workspaces live under.
 - `presence` is `"present"` or `"missing"` — whether the folder is on disk.
 - `initializationStatus` is `"initializing"`, `"ready"` or `"failed"`, with
   `initializationAttempt` counting the attempts and `initializationError`
@@ -41,8 +66,9 @@ this catalog can key on.
   with no credentials embedded in it, so a URL that could only fail later is
   refused when it is recorded instead.
 - `gitAhead`, `gitBehind`, `gitDetached`, `gitBranch`, `gitHead` and
-  `gitUpstream` are the last Git facts a host reported. They are a cache, and
-  the module never derives them itself.
+  `gitUpstream` are what the last Git scan observed. They are a cache of the
+  repository, refreshed by `reconcileGitFacts` and by the live watcher, never
+  the thing a decision is made against.
 
 Alongside those sit `status`, `orderKey`, `version`, `avatar`, `description`
 and the `createdAt`/`updatedAt`/`archivedAt` timestamps. Timestamps are
@@ -60,8 +86,8 @@ order in bounded cursor pages. It is durable and provider-neutral, and it never
 reviews in Auto mode.
 
 Registering, renaming, archiving, reordering, and the avatar and settings
-writes are the host's to make through the public API below; a model changes the
-catalog only by asking the person.
+writes happen through the public API below, on behalf of a person; a model
+changes the catalog only by asking the person.
 
 The tool exists only when both are true:
 
@@ -86,8 +112,29 @@ Reads:
   that ended exactly on the last row returns no `nextCursor`.
 - `get` reads by ID, `getByPath` reads by canonical folder path.
 - `readSettings` returns the bounded settings record.
-- `avatarAsset` reads bounded normalized bytes through the optional host
-  `ProjectAvatarAssetReader`; it returns `undefined` when no reader is given.
+- `avatarAsset` reads bounded normalized bytes from the module's own avatar
+  store, after resolving the owning row and applying the normal same-owner
+  authorization.
+
+Folders, clones and Git — the module's own work:
+
+- `resolvePath` finds the project a folder belongs to, importing the folder as a
+  project if it is new. `register` validates and records one folder;
+  `createRemote` records a project that still has to be cloned and starts the
+  clone. `retryRemoteProjects` picks up the clones a newly available credential
+  unblocks.
+- `scheduleInitialization` carries one project through setup on a background
+  lifetime; `probe`, `resolveDefaultBranch` and `resolveRemoteName` read the
+  repository and fold what they learn back into the row.
+- `runInProjectGitLock` is how every worktree of a project takes the one lock
+  over its shared refs and reflogs — including the workspaces catalog, which
+  takes it through here rather than keeping a second lock over the same
+  repository.
+- `gitForProject` returns the Git surface for a project, carrying the credential
+  its clone needs. `registerGitCredential`, `refreshGitCredential` and
+  `gitAuthentication` manage those credentials, which are never stored in a row.
+- `storeAvatarImage` and `collectAvatarGarbage` own the avatar bytes.
+- `reconcileGitFacts` and `recordGitFacts` refresh the Git cache from a scan.
 
 Registration and catalog edits:
 
@@ -97,7 +144,7 @@ Registration and catalog edits:
 - `rename`, `archive`, `restore`, `reorder`, `setAvatar`, `clearAvatar` and
   `updateSettings` all accept an optional `expectedVersion`.
 
-Lifecycle, all driven by a host reporting what it observed or did:
+Lifecycle, each recording what was observed or done:
 
 - `applyProbe` records presence, worktree support and optionally Git facts.
 - `applyGitFacts` records branch, head, upstream and divergence.
@@ -123,9 +170,9 @@ a catalog that moved underneath it is refused whole rather than left half in
 the new order and half in the old.
 
 `formatProjectForModel`, `formatPageForModel` and `formatSettingsForModel` are
-public so a host can render the same bounded text the tools use.
+public so a caller can render the same bounded text the tools use.
 
-## Host boundary
+## Storage
 
 The module owns the `projects` and `project_settings` tables through its
 ordered Agent Base migrations. Migration `004-project-folder-record` drops and
@@ -149,9 +196,10 @@ event object. Post-commit listener failures are contained and optionally
 reported through `onPostCommitError`. Registration uses stdlib
 `afterCommit(ctx, ...)`.
 
-Authorization defaults to same-owner access only; a host policy may grant
-cross-agent reads or actions. The avatar byte reader is an optional host
-boundary: it receives `(ctx, agentId, hash)` and must return a bounded
-`{ bytes, hash, mediaType }` asset or `undefined`. The module resolves the
-owning catalog row and applies the normal same-owner authorization before
-invoking it. Missing readers degrade to metadata-only avatar support.
+Authorization defaults to same-owner access only; an `authorization` policy may
+grant cross-agent reads or actions.
+
+Avatar bytes live in `stateDirectory`, addressed by the content hash the row
+records, so they survive a restart and so two projects that chose the same image
+share one file. `collectAvatarGarbage` removes the files no row points at any
+more; it runs when the catalog opens.

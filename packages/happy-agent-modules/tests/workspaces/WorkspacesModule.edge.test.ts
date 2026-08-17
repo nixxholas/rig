@@ -1,21 +1,26 @@
+import { mkdir, realpath, symlink } from "node:fs/promises";
+import { join } from "node:path";
+
 import { agentDatabaseRows } from "@slopus/happy-agent-base";
 import { Value } from "@sinclair/typebox/value";
-import { type Context } from "@steve.kite/stdlib";
 import { sql } from "drizzle-orm";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
+import { projectMigrations, ProjectsModule } from "../../sources/projects/index.js";
 import {
     MAX_WORKSPACE_NAME_LENGTH,
     MAX_WORKSPACE_STORAGE_KEY_LENGTH,
     type Workspace,
     type WorkspaceEvent,
-    type WorkspaceHost,
     workspaceBranchSchema,
     workspaceMigrations,
     WorkspacesModule,
 } from "../../sources/workspaces/index.js";
+import { cleanupRoots, commitFile, createRoot, git, gitRunner } from "../git/helpers.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
 import { primaryAgents } from "../support/moduleHooks.js";
+
+afterEach(cleanupRoots);
 
 function workspaceDatabase(name: string): ReturnType<typeof moduleDatabase> {
     const database = moduleDatabase([], name);
@@ -27,11 +32,11 @@ function workspaceDatabase(name: string): ReturnType<typeof moduleDatabase> {
     return { ...database, ready };
 }
 
-const HOST: WorkspaceHost = {
-    pathForStorageKey: (projectRef, storageKey) => `/managed/${projectRef}/${storageKey}`,
-    isBranchUnavailable: () => false,
-    isStorageKeyUnavailable: () => false,
-};
+/**
+ * Where workspace folders are created. A catalog told this decides every path itself, so a test
+ * that never touches the disk still gets the paths the real one would produce.
+ */
+const WORKSPACES_DIRECTORY = "/managed";
 
 let helperWorkspaceCounter = 0;
 
@@ -60,7 +65,7 @@ describe("WorkspacesModule edge contracts", () => {
         await database.ready;
         try {
             const workspaces = new WorkspacesModule({
-                host: HOST,
+                workspacesDirectory: WORKSPACES_DIRECTORY,
                 clock: () => 1234,
                 eventIdFactory: () => "event-clock",
             });
@@ -76,64 +81,25 @@ describe("WorkspacesModule edge contracts", () => {
         }
     });
 
-    it("preserves the receiver when host reservation methods are called", async () => {
-        const database = workspaceDatabase("workspaces-host-receiver-reserve-edge");
-        await database.ready;
-        try {
-            class ReceiverHost {
-                static readonly root = "/receiver-managed";
-
-                get root(): string {
-                    return ReceiverHost.root;
-                }
-
-                pathForStorageKey(this: ReceiverHost, projectRef: string, key: string) {
-                    return `${this.root}/${projectRef}/${key}`;
-                }
-
-                isBranchUnavailable() {
-                    return false;
-                }
-
-                isStorageKeyUnavailable() {
-                    return false;
-                }
-            }
-            const workspaces = new WorkspacesModule({
-                host: new ReceiverHost() as unknown as WorkspaceHost,
-            });
-
-            await expect(
-                workspaces.reserve(database.context, "agent-a", {
-                    id: "workspace-host-receiver",
-                    projectRef: "project-a",
-                    name: "Receiver",
-                }),
-            ).resolves.toMatchObject({
-                path: "/receiver-managed/project-a/receiver",
-            });
-        } finally {
-            database.close();
-        }
-    });
-
-    it("rejects invalid host availability answers instead of coercing them", async () => {
+    it("rejects invalid availability answers instead of coercing them", async () => {
         const database = workspaceDatabase("workspaces-invalid-probe-edge");
         await database.ready;
         try {
             const workspaces = new WorkspacesModule({
-                host: {
-                    ...HOST,
-                    isBranchUnavailable: (() => 0) as never,
-                },
+                workspacesDirectory: WORKSPACES_DIRECTORY,
             });
 
             await expect(
-                workspaces.reserve(database.context, "agent-a", {
-                    id: "workspace-invalid-probe",
-                    projectRef: "project-a",
-                    name: "Invalid probe",
-                }),
+                workspaces.reserve(
+                    database.context,
+                    "agent-a",
+                    {
+                        id: "workspace-invalid-probe",
+                        projectRef: "project-a",
+                        name: "Invalid probe",
+                    },
+                    { isBranchUnavailable: (() => 0) as never },
+                ),
             ).rejects.toThrow(/invalid|boolean/i);
         } finally {
             database.close();
@@ -144,7 +110,7 @@ describe("WorkspacesModule edge contracts", () => {
         const database = workspaceDatabase("workspaces-path-input-edge");
         await database.ready;
         try {
-            const workspaces = new WorkspacesModule({ host: HOST });
+            const workspaces = new WorkspacesModule({ workspacesDirectory: WORKSPACES_DIRECTORY });
             await reserve(workspaces, database, { id: "workspace-path" });
 
             await expect(
@@ -159,7 +125,7 @@ describe("WorkspacesModule edge contracts", () => {
         const database = workspaceDatabase("workspaces-replay-suffix-edge");
         await database.ready;
         try {
-            const workspaces = new WorkspacesModule({ host: HOST });
+            const workspaces = new WorkspacesModule({ workspacesDirectory: WORKSPACES_DIRECTORY });
             await workspaces.reserve(database.context, "agent-a", {
                 id: "workspace-replay-suffix",
                 operationId: "create-replay-suffix",
@@ -184,7 +150,7 @@ describe("WorkspacesModule edge contracts", () => {
         const database = workspaceDatabase("workspaces-replay-settings-edge");
         await database.ready;
         try {
-            const workspaces = new WorkspacesModule({ host: HOST });
+            const workspaces = new WorkspacesModule({ workspacesDirectory: WORKSPACES_DIRECTORY });
             await workspaces.reserve(database.context, "agent-a", {
                 id: "workspace-replay-settings",
                 operationId: "create-replay-settings",
@@ -211,7 +177,7 @@ describe("WorkspacesModule edge contracts", () => {
         const database = workspaceDatabase("workspaces-replay-name-configured-edge");
         await database.ready;
         try {
-            const workspaces = new WorkspacesModule({ host: HOST });
+            const workspaces = new WorkspacesModule({ workspacesDirectory: WORKSPACES_DIRECTORY });
             await workspaces.reserve(database.context, "agent-a", {
                 id: "workspace-replay-name-configured",
                 operationId: "create-replay-name-configured",
@@ -237,7 +203,7 @@ describe("WorkspacesModule edge contracts", () => {
         const database = workspaceDatabase("workspaces-rename-replay-edge");
         await database.ready;
         try {
-            const workspaces = new WorkspacesModule({ host: HOST });
+            const workspaces = new WorkspacesModule({ workspacesDirectory: WORKSPACES_DIRECTORY });
             await reserve(workspaces, database, {
                 id: "workspace-rename-replay",
                 name: "Original",
@@ -272,7 +238,7 @@ describe("WorkspacesModule edge contracts", () => {
         const database = workspaceDatabase("workspaces-max-name-collision-edge");
         await database.ready;
         try {
-            const workspaces = new WorkspacesModule({ host: HOST });
+            const workspaces = new WorkspacesModule({ workspacesDirectory: WORKSPACES_DIRECTORY });
             const name = "A".repeat(MAX_WORKSPACE_NAME_LENGTH);
             await workspaces.reserve(database.context, "agent-a", {
                 id: "workspace-max-name-1",
@@ -295,7 +261,7 @@ describe("WorkspacesModule edge contracts", () => {
         const database = workspaceDatabase("workspaces-max-storage-collision-edge");
         await database.ready;
         try {
-            const workspaces = new WorkspacesModule({ host: HOST });
+            const workspaces = new WorkspacesModule({ workspacesDirectory: WORKSPACES_DIRECTORY });
             const seed = "a".repeat(MAX_WORKSPACE_STORAGE_KEY_LENGTH);
             await workspaces.reserve(database.context, "agent-a", {
                 id: "workspace-max-storage-1",
@@ -327,7 +293,7 @@ describe("WorkspacesModule edge contracts", () => {
         const database = workspaceDatabase("workspaces-malformed-state-edge");
         await database.ready;
         try {
-            const workspaces = new WorkspacesModule({ host: HOST });
+            const workspaces = new WorkspacesModule({ workspacesDirectory: WORKSPACES_DIRECTORY });
             await reserve(workspaces, database, { id: "workspace-malformed" });
             await agentDatabaseRows(
                 database.database,
@@ -352,7 +318,7 @@ describe("WorkspacesModule edge contracts", () => {
         await database.ready;
         try {
             const workspaces = new WorkspacesModule({
-                host: HOST,
+                workspacesDirectory: WORKSPACES_DIRECTORY,
                 listener: {
                     onEventTransactional: (_ctx, event) => {
                         transactional.push(event.type);
@@ -390,7 +356,7 @@ describe("WorkspacesModule edge contracts", () => {
         await database.ready;
         try {
             const workspaces = new WorkspacesModule({
-                host: HOST,
+                workspacesDirectory: WORKSPACES_DIRECTORY,
                 listener: {
                     onEventTransactional: () => {
                         throw new Error("transactional observer failed");
@@ -419,7 +385,7 @@ describe("WorkspacesModule edge contracts", () => {
         await database.ready;
         try {
             const workspaces = new WorkspacesModule({
-                host: HOST,
+                workspacesDirectory: WORKSPACES_DIRECTORY,
                 listener: {
                     onEvent: () => {
                         throw new Error("post-commit observer failed");
@@ -466,7 +432,10 @@ describe("WorkspacesModule edge contracts", () => {
             const database = workspaceDatabase(testCase.name);
             await database.ready;
             try {
-                const workspaces = new WorkspacesModule({ host: HOST, ...testCase.options });
+                const workspaces = new WorkspacesModule({
+                    workspacesDirectory: WORKSPACES_DIRECTORY,
+                    ...testCase.options,
+                });
                 await expect(
                     workspaces.reserve(database.context, "agent-a", {
                         id: testCase.id,
@@ -489,7 +458,7 @@ describe("WorkspacesModule edge contracts", () => {
         await database.ready;
         try {
             const workspaces = new WorkspacesModule({
-                host: HOST,
+                workspacesDirectory: WORKSPACES_DIRECTORY,
                 listener: {
                     onEventTransactional: (_ctx, event) => {
                         events.push(event.type);
@@ -522,7 +491,7 @@ describe("WorkspacesModule edge contracts", () => {
         await database.ready;
         try {
             const workspaces = new WorkspacesModule({
-                host: HOST,
+                workspacesDirectory: WORKSPACES_DIRECTORY,
                 listener: {
                     onEventTransactional: (_ctx, event) => {
                         transactionalEvent = event;
@@ -556,7 +525,7 @@ describe("WorkspacesModule edge contracts", () => {
         await database.ready;
         try {
             const workspaces = new WorkspacesModule({
-                host: HOST,
+                workspacesDirectory: WORKSPACES_DIRECTORY,
                 authorization: (_ctx, actingAgent, ownerAgent, action) =>
                     actingAgent === "agent-b" && ownerAgent === "agent-a" && action === "transfer",
             });
@@ -580,73 +549,42 @@ describe("WorkspacesModule edge contracts", () => {
         }
     });
 
-    it("reconciles compact host transfer receipts with the authoritative workspace row", async () => {
-        const database = workspaceDatabase("workspaces-transfer-receipt-edge");
-        await database.ready;
-        try {
-            const workspaces = new WorkspacesModule({
-                host: {
-                    ...HOST,
-                    transfer: async (_ctx, _agentId, input, operation) => ({
-                        agentId: "agent-a",
-                        operationId: operation.operationId,
-                        changed: true,
-                        state: "transferred" as const,
-                        workspace: {
-                            id:
-                                "targetWorkspaceId" in input
-                                    ? input.targetWorkspaceId
-                                    : input.workspaceId,
-                            projectRef: "project-a",
-                            ownerAgentId: "attacker",
-                            path: "/attacker/secret",
-                        },
-                    }),
-                },
-            });
-            await workspaces.reserve(database.context, "agent-a", {
-                id: "workspace-transfer-receipt",
-                projectRef: "project-a",
-                name: "Transfer receipt",
-            });
-
-            const transferred = await workspaces.transfer(database.context, "agent-a", {
-                targetWorkspaceId: "workspace-transfer-receipt",
-            });
-            expect(transferred).toMatchObject({
-                state: "transferred",
-                workspace: {
-                    id: "workspace-transfer-receipt",
-                    ownerAgentId: "agent-a",
-                    path: "/managed/project-a/transfer-receipt",
-                },
-            });
-        } finally {
-            database.close();
+    it("does not repeat folder cleanup for the same durable archive operation", async () => {
+        const attempts: string[] = [];
+        const root = await realpath(await createRoot("happy-workspaces-archive-replay-"));
+        const projectFolder = join(root, "project-a");
+        await mkdir(projectFolder, { recursive: true });
+        const database = moduleDatabase([], "workspaces-archive-replay-edge");
+        for (const [, migrate] of projectMigrations) {
+            await migrate(database.context, database.database);
         }
-    });
-
-    it("does not repeat an external archive cleanup for the same durable operation", async () => {
-        let cleanupCalls = 0;
-        const database = workspaceDatabase("workspaces-archive-replay-edge");
-        await database.ready;
+        for (const [, migrate] of workspaceMigrations) {
+            await migrate(database.context, database.database);
+        }
+        const projects = new ProjectsModule({});
+        const workspaces = new WorkspacesModule({
+            git: gitRunner,
+            onHostError: (_ctx, workspaceId, operation) => {
+                attempts.push(`${workspaceId}:${operation}`);
+            },
+            projects,
+            rootContext: database.rootContext,
+            workspacesDirectory: join(root, "workspaces"),
+        });
         try {
-            const workspaces = new WorkspacesModule({
-                cleanupContext: database.context,
-                host: {
-                    ...HOST,
-                    archive: async () => {
-                        cleanupCalls += 1;
-                        throw new Error("cleanup unavailable");
-                    },
-                },
-                onHostError: () => undefined,
+            const project = await projects.create(database.context, "agent-a", {
+                id: "project-a",
+                repositoryRef: projectFolder,
+                name: "Project A",
             });
-            await workspaces.reserve(database.context, "agent-a", {
+            const { workspace } = await workspaces.reserve(database.context, "agent-a", {
                 id: "workspace-archive-replay",
-                projectRef: "project-a",
+                projectRef: project.id,
                 name: "Archive replay",
             });
+            // A folder removal that cannot succeed, so every attempt at it is visible.
+            await mkdir(join(root, "workspaces", "project-a"), { recursive: true });
+            await symlink(join(root, "somewhere-else"), workspace.path);
 
             await workspaces.archive(database.context, "agent-a", "workspace-archive-replay", {
                 operationId: "archive-repeat",
@@ -657,42 +595,63 @@ describe("WorkspacesModule edge contracts", () => {
             });
             await workspaces.whenCleanupSettles();
 
-            expect(cleanupCalls).toBe(1);
+            expect(attempts).toEqual(["workspace-archive-replay:archive"]);
         } finally {
+            await workspaces.close(database.context);
             database.close();
         }
     });
 
-    it("keeps the old branch when a host rename fails and reports the host error", async () => {
+    it("keeps the old branch when the Git branch cannot be moved and reports the error", async () => {
         const errors: string[] = [];
+        const root = await createRoot("happy-workspaces-rename-failure-");
         const database = workspaceDatabase("workspaces-host-rename-failure-edge");
         await database.ready;
         try {
             const workspaces = new WorkspacesModule({
-                host: {
-                    ...HOST,
-                    renameBranch: async () => {
-                        throw new Error("branch is locked");
-                    },
-                },
+                git: gitRunner,
                 onHostError: (_ctx, workspaceId, operation, message) => {
                     errors.push(`${workspaceId}:${operation}:${message}`);
                 },
+                workspacesDirectory: join(root, "workspaces"),
             });
-            await reserve(workspaces, database, {
+            const workspace = await reserve(workspaces, database, {
                 id: "workspace-host-rename-failure",
                 name: "Original branch",
+            });
+
+            // A real checkout on the branch the catalog recorded, but sharing its objects with a
+            // repository the catalog was told nothing about.
+            await mkdir(workspace.path, { recursive: true });
+            await git(workspace.path, ["init", "--quiet", `--initial-branch=${workspace.branch}`]);
+            await git(workspace.path, ["config", "user.email", "test@example.com"]);
+            await git(workspace.path, ["config", "user.name", "Test"]);
+            const baseCommit = await commitFile(workspace.path, "base.txt", "base\n");
+            await workspaces.recordInitialization(database.context, "agent-a", {
+                workspaceId: workspace.id,
+                facts: {
+                    baseCommit,
+                    baseRef: "origin/main",
+                    gitCommonDir: join(root, "elsewhere", ".git"),
+                },
+            });
+            await workspaces.markReady(database.context, "agent-a", {
+                workspaceId: workspace.id,
             });
 
             const renamed = await workspaces.rename(database.context, "agent-a", {
                 workspaceId: "workspace-host-rename-failure",
                 name: "New title",
             });
+            // The catalog's own name changed; the branch in Git did not, so the record still says
+            // what the checkout is actually on.
             expect(renamed).toMatchObject({
                 name: "New title",
                 branch: "worktree/original-branch",
             });
-            expect(errors).toEqual(["workspace-host-rename-failure:rename:branch is locked"]);
+            expect(errors).toEqual([
+                "workspace-host-rename-failure:rename:The workspace belongs to an unexpected repository.",
+            ]);
         } finally {
             database.close();
         }
@@ -703,18 +662,7 @@ describe("WorkspacesModule edge contracts", () => {
         await database.ready;
         try {
             const workspaces = new WorkspacesModule({
-                host: {
-                    ...HOST,
-                    branchMetadata: async (_ctx, _agentId, workspaceId) => ({
-                        workspaceId,
-                        branch: "worktree/paged",
-                        head: "abcdef123456",
-                        upstream: "origin/worktree/paged",
-                        ahead: 2,
-                        behind: 1,
-                        detached: false,
-                    }),
-                },
+                workspacesDirectory: WORKSPACES_DIRECTORY,
             });
             await reserve(workspaces, database, {
                 id: "workspace-detail-paging",
@@ -756,82 +704,11 @@ describe("WorkspacesModule edge contracts", () => {
         }
     });
 
-    it("retains receiver binding for host branch rename and archive methods", async () => {
-        const database = workspaceDatabase("workspaces-host-receiver-mutations-edge");
-        await database.ready;
-        try {
-            class ReceiverHost {
-                static readonly calls: string[] = [];
-
-                get calls(): string[] {
-                    return ReceiverHost.calls;
-                }
-
-                pathForStorageKey(_projectRef: string, key: string) {
-                    return `/managed/project-a/${key}`;
-                }
-
-                isBranchUnavailable() {
-                    return false;
-                }
-
-                isStorageKeyUnavailable() {
-                    return false;
-                }
-
-                renameBranch(
-                    this: ReceiverHost,
-                    _ctx: Context,
-                    _agentId: string,
-                    request: { previousBranch: string },
-                ) {
-                    this.calls.push(`rename:${request.previousBranch}`);
-                    return Promise.resolve(request.previousBranch);
-                }
-
-                archive(
-                    this: ReceiverHost,
-                    _ctx: Context,
-                    _agentId: string,
-                    request: { workspaceId: string },
-                ) {
-                    this.calls.push(`archive:${request.workspaceId}`);
-                    return Promise.resolve();
-                }
-            }
-            ReceiverHost.calls.length = 0;
-            const host = new ReceiverHost();
-            const workspaces = new WorkspacesModule({
-                host: host as unknown as WorkspaceHost,
-                cleanupContext: database.context,
-            });
-            await workspaces.reserve(database.context, "agent-a", {
-                id: "workspace-host-mutations",
-                projectRef: "project-a",
-                name: "Original",
-            });
-
-            await workspaces.rename(database.context, "agent-a", {
-                workspaceId: "workspace-host-mutations",
-                name: "Renamed",
-            });
-            await workspaces.archive(database.context, "agent-a", "workspace-host-mutations");
-            await workspaces.whenCleanupSettles();
-
-            expect(ReceiverHost.calls).toEqual([
-                "rename:worktree/original",
-                "archive:workspace-host-mutations",
-            ]);
-        } finally {
-            database.close();
-        }
-    });
-
     it("rebuilds a fresh module instance from the durable catalog", async () => {
         const database = workspaceDatabase("workspaces-restart-edge");
         await database.ready;
         try {
-            const first = new WorkspacesModule({ host: HOST });
+            const first = new WorkspacesModule({ workspacesDirectory: WORKSPACES_DIRECTORY });
             const created = await first.reserve(database.context, "agent-a", {
                 id: "workspace-restart",
                 projectRef: "project-a",
@@ -842,7 +719,7 @@ describe("WorkspacesModule edge contracts", () => {
                 workspaceId: created.workspace.id,
             });
 
-            const second = new WorkspacesModule({ host: HOST });
+            const second = new WorkspacesModule({ workspacesDirectory: WORKSPACES_DIRECTORY });
             await expect(
                 second.get(database.context, "agent-a", "workspace-restart"),
             ).resolves.toMatchObject({
@@ -860,7 +737,7 @@ describe("WorkspacesModule edge contracts", () => {
         const database = workspaceDatabase("workspaces-concurrent-reservations-edge");
         await database.ready;
         try {
-            const workspaces = new WorkspacesModule({ host: HOST });
+            const workspaces = new WorkspacesModule({ workspacesDirectory: WORKSPACES_DIRECTORY });
             const results = await Promise.all(
                 Array.from({ length: 8 }, (_, index) =>
                     workspaces.reserve(database.context, "agent-a", {
@@ -885,11 +762,8 @@ describe("WorkspacesModule edge contracts", () => {
         await database.ready;
         try {
             const workspaces = new WorkspacesModule({
-                host: {
-                    ...HOST,
-                    pathForStorageKey: (_projectRef, key) => `/managed/${"p".repeat(300)}/${key}`,
-                },
                 maxOutputCharacters: 256,
+                workspacesDirectory: WORKSPACES_DIRECTORY,
             });
             const created = await workspaces.reserve(database.context, "agent-a", {
                 id: "i".repeat(96),
@@ -905,36 +779,27 @@ describe("WorkspacesModule edge contracts", () => {
         }
     });
 
-    it("requires an injected host for branch metadata and rejects a mismatched identity", async () => {
+    it("answers branch metadata for a workspace whose folder is not there yet", async () => {
         const database = workspaceDatabase("workspaces-branch-metadata-edge");
         await database.ready;
         try {
-            const noHost = new WorkspacesModule({ host: HOST });
-            await reserve(noHost, database, { id: "workspace-no-branch-host" });
-            await expect(
-                noHost.branchMetadata(database.context, "agent-a", "workspace-no-branch-host"),
-            ).rejects.toThrow(/requires an injected host service/i);
+            const workspaces = new WorkspacesModule({
+                workspacesDirectory: WORKSPACES_DIRECTORY,
+            });
+            const workspace = await reserve(workspaces, database, {
+                id: "workspace-no-branch-folder",
+            });
 
-            const mismatch = new WorkspacesModule({
-                host: {
-                    ...HOST,
-                    branchMetadata: async () => ({
-                        workspaceId: "another-workspace",
-                        branch: "worktree/other",
-                        ahead: 0,
-                        behind: 0,
-                        detached: false,
-                    }),
-                },
-            });
-            await mismatch.reserve(database.context, "agent-a", {
-                id: "workspace-branch-mismatch",
-                projectRef: "project-a",
-                name: "Branch mismatch",
-            });
+            // Nothing has been checked out, so there is no Git to read. The answer describes that
+            // rather than failing or inventing a divergence.
             await expect(
-                mismatch.branchMetadata(database.context, "agent-a", "workspace-branch-mismatch"),
-            ).rejects.toThrow(/another workspace/i);
+                workspaces.branchMetadata(database.context, "agent-a", workspace.id),
+            ).resolves.toEqual({
+                workspaceId: workspace.id,
+                ahead: 0,
+                behind: 0,
+                detached: false,
+            });
         } finally {
             database.close();
         }
@@ -944,7 +809,10 @@ describe("WorkspacesModule edge contracts", () => {
         const database = workspaceDatabase("workspaces-disabled-edge");
         await database.ready;
         try {
-            const workspaces = new WorkspacesModule({ enabled: false, host: HOST });
+            const workspaces = new WorkspacesModule({
+                enabled: false,
+                workspacesDirectory: WORKSPACES_DIRECTORY,
+            });
             const hooks = workspaces.beforeStart(database.context, primaryAgents());
             expect(
                 await hooks.tools?.(database.context, { agent: { id: "agent-a" } } as never),
@@ -959,7 +827,7 @@ describe("WorkspacesModule edge contracts", () => {
         const database = workspaceDatabase("workspaces-subagent-edge");
         await database.ready;
         try {
-            const workspaces = new WorkspacesModule({ host: HOST });
+            const workspaces = new WorkspacesModule({ workspacesDirectory: WORKSPACES_DIRECTORY });
             const agents = {
                 parentOf: (_ctx: unknown, agentId: string) =>
                     Promise.resolve(agentId === "subagent-a" ? "agent-a" : null),
@@ -982,7 +850,7 @@ describe("WorkspacesModule edge contracts", () => {
         const database = workspaceDatabase("workspaces-lifecycle-invariant-edge");
         await database.ready;
         try {
-            const workspaces = new WorkspacesModule({ host: HOST });
+            const workspaces = new WorkspacesModule({ workspacesDirectory: WORKSPACES_DIRECTORY });
             await reserve(workspaces, database, { id: "workspace-invalid-lifecycle" });
             await agentDatabaseRows(
                 database.database,

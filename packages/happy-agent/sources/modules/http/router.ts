@@ -5,7 +5,7 @@ import type { Context } from "@steve.kite/stdlib";
 
 import type { StartedHappyAgent } from "../../start/startHappyAgent.js";
 import type { ProjectFilesModule } from "../files/ProjectFilesModule.js";
-import type { GitModule } from "../git/GitModule.js";
+import type { GitModule } from "@slopus/happy-agent-modules";
 import { AgentHttpError } from "./errors.js";
 
 export type AgentHttpMethod = "DELETE" | "GET" | "PATCH" | "POST" | "PUT";

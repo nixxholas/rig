@@ -12,10 +12,12 @@ import {
 import {
     eventIdSchema,
     permissionEventSchema,
+    ProjectRegistrationError,
     userInputEventSchema,
     type AgentEvent,
     type PermissionEvent,
     type PermissionReviewTranscript,
+    type ResolvedProjectOwnership,
     type UsageSummary,
 } from "@slopus/happy-agent-modules";
 import type { SessionInputBlock, SessionUserMessage } from "@slopus/happy-providers";
@@ -27,8 +29,6 @@ import {
     type ConversationScope,
 } from "../conversations/ConversationModule.js";
 import type { StartedHappyAgent } from "../../start/startHappyAgent.js";
-import { ProjectRegistrationError } from "../projects/ProjectRegistrationError.js";
-import type { ResolvedProjectOwnership } from "../projects/ProjectWorkspaceService.js";
 import { readValidatedBody } from "./body.js";
 import { AgentHttpError, sendJson, serializeJson } from "./errors.js";
 import { createRouteGroup, type AgentHttpRouteGroup } from "./router.js";
@@ -883,15 +883,16 @@ function createMutationRoutes(): AgentHttpRouteGroup["routes"] {
                         "Only a session that is already in a workspace can be moved.",
                     );
                 }
-                const projects = dependencies.agent.projectWorkspaces;
+                const workspaces = dependencies.agent.modules.workspaces;
                 const projectId = session.scope.projectId;
-                // The transfer is the host's state machine: it stages the source workspace's
+                // The transfer is the catalog's state machine: it stages the source workspace's
                 // uncommitted work, restores the target when anything goes wrong, and marks a
                 // target it could not put back as failed so nothing is offered a broken checkout.
                 const { prepared, target } = await transferFailure(
                     async () =>
-                        await projects.prepareSessionTransfer(
+                        await workspaces.prepareSessionTransfer(
                             ctx,
+                            dependencies.agent.rootAgentId,
                             projectId,
                             session.scope.kind === "workspace" ? session.scope.workspaceId : "",
                             body.workspaceId,
@@ -1391,13 +1392,17 @@ async function nameFromFirstMessage(
     const config = await dependencies.agent.system.config(ctx, session.agentId);
     const sessionNamed = config?.metadata?.title !== undefined;
     try {
-        const named = await dependencies.agent.projectWorkspaces.nameFromFirstMessage(ctx, {
-            firstMessage,
-            projectId: session.scope.projectId,
-            ...(session.providerId === undefined ? {} : { providerId: session.providerId }),
-            sessionNamed,
-            workspaceId: session.scope.workspaceId,
-        });
+        const named = await dependencies.agent.modules.workspaces.nameFromFirstMessage(
+            ctx,
+            dependencies.agent.rootAgentId,
+            {
+                firstMessage,
+                projectId: session.scope.projectId,
+                ...(session.providerId === undefined ? {} : { providerId: session.providerId }),
+                sessionNamed,
+                workspaceId: session.scope.workspaceId,
+            },
+        );
         if (named.chat !== undefined && !sessionNamed) {
             await dependencies.agent.system.updateMetadata(ctx, session.agentId, {
                 title: named.chat,
@@ -1657,14 +1662,18 @@ async function resolveSessionOwner(
     dependencies: LoadedSessionDependencies,
     body: CreateSession,
 ): Promise<{ readonly cwd: string; readonly scope: ConversationScope }> {
-    const projects = dependencies.agent.projectWorkspaces;
+    // The workspaces catalog answers for both: a folder that is a workspace resolves to it and its
+    // project, and anything else it hands straight to the projects catalog.
+    const workspaces = dependencies.agent.modules.workspaces;
+    const agentId = dependencies.agent.rootAgentId;
     let owner: ResolvedProjectOwnership;
     try {
         owner =
             body.workspaceId === undefined
-                ? await projects.resolve(ctx, body.cwd, undefined, body.projectId)
-                : await projects.resolveSessionOwnership(
+                ? await workspaces.resolvePath(ctx, agentId, body.cwd, undefined, body.projectId)
+                : await workspaces.resolveSessionOwnership(
                       ctx,
+                      agentId,
                       body.cwd,
                       body.workspaceId,
                       body.projectId,

@@ -15,9 +15,11 @@ import { dirname, join, resolve, sep } from "node:path";
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type { Context } from "@steve.kite/stdlib";
-import type { ProjectsModule, WorkspacesModule } from "@slopus/happy-agent-modules";
-
-import type { GitCommandRunner } from "../projects/ProjectHost.js";
+import type {
+    GitCommandRunner,
+    ProjectsModule,
+    WorkspacesModule,
+} from "@slopus/happy-agent-modules";
 
 const MAX_FILE_BYTES = 44 * 1024 * 1024;
 const MAX_SEARCH_RESULTS = 50;

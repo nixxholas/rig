@@ -2,9 +2,11 @@
 
 A workspace is one place a session actually works: a branch, a folder, a base it came from, and a
 lifecycle that says whether it is usable yet. The module owns that catalog and its migrations in the
-Agent Base database, and it owns the _decisions_ — which name, which branch, which folder key, which
-status. It never runs Git. A host does the worktree and filesystem work and reports back through
-narrow optional hooks.
+Agent Base database, it owns the _decisions_ — which name, which branch, which folder key, which
+status — and it does the Git and filesystem work those decisions imply. Cutting the worktree,
+copying the folder, running the setup commands, replicating the shared files, renaming the branch,
+moving a session between workspaces and removing an archived folder are all this module's own work.
+There is no host object between the catalog and the disk.
 
 The important consequence is ordering: the durable reservation happens **first**, and Git happens
 after. A workspace row exists, with a unique name, storage key, and branch, before anything touches
@@ -13,26 +15,40 @@ crashed creation recoverable rather than a half-made worktree nobody recorded.
 
 ```ts
 import { Agent } from "@slopus/happy-agent-base";
-import { WorkspacesModule } from "@slopus/happy-agent-modules";
+import { ProjectsModule, WorkspacesModule } from "@slopus/happy-agent-modules";
 
-const workspaces = new WorkspacesModule({ host: hostWorkspaceOperations });
-const agent = await Agent.create(ctx, { ...options, modules: [workspaces] });
+const projects = new ProjectsModule({ rootContext });
+const workspaces = new WorkspacesModule({ projects, rootContext });
+const agent = await Agent.create(ctx, { ...options, modules: [projects, workspaces] });
 ```
 
-`host` holds only Git and filesystem concerns: `pathForStorageKey`, `isBranchUnavailable`,
-`isStorageKeyUnavailable`, `renameBranch`, `archive`, `branchMetadata`, and `transfer`. The first
-three are how a reservation finds out what is already taken, and `reserve` refuses to run without
-them: they must come from the host or from the caller's hooks, and either may answer asynchronously.
-The rest are optional, and when one is absent the module falls back to its own catalog behaviour.
-`cleanupContext` is the lifetime folder removal runs on, and is **required** whenever `host.archive`
-is configured, because archival hands cleanup to that lifetime instead of the caller's.
+`projects` is the only other module this one needs, and the dependency is one-way. A workspace is a
+branch of a project's repository, in a folder under that project's key, cut from the trunk that
+project decided on, and every worktree of a project shares one set of refs — so the projects catalog
+owns the folder, the credential and the repository lock, and this catalog takes all three through it.
+Archiving a project archives everything cut from it, which this module arranges by listening to the
+projects catalog's own events inside that transaction rather than by being called back.
+
+`rootContext` is the lifetime the module's Git and filesystem work runs on: a context derived from
+the application root, carrying the agent database. A checkout, a setup command or a folder removal
+outlives the call that asked for it, so it never runs on the caller's context, and without a root the
+catalog still records everything it is told but cannot start work of its own. `workspacesDirectory`,
+`homeDirectory`, `environment` and `settings` locate and configure that work — where folders are
+created, which setup commands and sync paths apply, whether folders are kept on archive. `git` and
+`probeGit` replace the Git surfaces so a test can drive the whole lifecycle without Git.
+`nameGenerator` names a workspace, its branch and its chat from the first thing a person said.
+
 `authorization` lets one agent act on another agent's workspaces (self access is always allowed
-without it); `idFactory`, `eventIdFactory`, and `clock` let a host control identity and time instead
-of `crypto.randomUUID()` and `Date.now()`; `listener` receives every workspace event; `maxPageSize`
-and `maxOutputCharacters` bound paging and model-facing text; `onPostCommitError` is told about a
-listener failure after the durable transaction has already committed; `onHostError` is told when a
-host archive or branch rename throws, so the durable record can stand while the host problem is
-still surfaced.
+without it); `idFactory`, `eventIdFactory`, and `clock` let a caller control identity and time
+instead of `crypto.randomUUID()` and `Date.now()`; `listener` receives every workspace event;
+`maxPageSize` and `maxOutputCharacters` bound paging and model-facing text; `onPostCommitError` is
+told about a listener failure after the durable transaction has already committed; `onHostError` is
+told when the module's own folder removal or branch rename throws, so the durable record can stand
+while the failure is still surfaced.
+
+`open(ctx, agentId)` picks up whatever the last run left unfinished — every workspace still being
+created is carried through to a usable checkout — and `close(ctx)` stops every background lifetime
+and waits for the ones in flight.
 
 ## The record
 
@@ -55,27 +71,28 @@ on a workspace being able to answer "which branch?" and "which folder?" without 
 | `orderKey`                                                       | A fractional order key; lexicographic order is list order. New reservations lead the list.                                                                             |
 | `version`                                                        | An integer bumped on every durable change, and the token for optimistic concurrency.                                                                                   |
 | `creatorSessionId`                                               | The session that asked for it, if any.                                                                                                                                 |
-| `gitAhead`, `gitBehind`, `gitDetached`, `gitHead`, `gitUpstream` | Host-reported Git facts.                                                                                                                                               |
+| `gitAhead`, `gitBehind`, `gitDetached`, `gitHead`, `gitUpstream` | What the last Git scan observed.                                                                                                                                       |
 | `initializationAttempt`, `initializationError`                   | How many times setup has been tried, and why the last try failed.                                                                                                      |
 | `createdAt`, `updatedAt`, `archivedAt`                           | Timestamps; `updatedAt` is forced to advance on every change.                                                                                                          |
 
 ## Lifecycle
 
-`reserve` → host builds the worktree → `recordInitialization` (path, commit, common dir) →
-`markReady`. If setup fails, `markInitializationFailed` records the error and raises
-`initializationAttempt` so a retry is distinguishable from the first try; `markFailed` is the
-terminal form. `applyGitFacts` and `applyProbe` fold in what the host observes later — `applyProbe`
-is ignored unless the workspace is ready, so a probe racing initialization cannot resurrect a row,
-and both are ignored once the workspace is archived, because an observation that was already in
-flight describes a workspace nobody has any more.
+`reserve` → the module cuts the worktree or copies the folder → `recordInitialization` (base commit
+and common dir) → setup commands and the first file replication → `markReady`. If setup fails,
+`markInitializationFailed` records the error and raises `initializationAttempt` so a retry is
+distinguishable from the first try; `markFailed` is the terminal form. `applyGitFacts` and
+`applyProbe` fold in what a later scan observed — `applyProbe` is ignored unless the workspace is
+ready, so a probe racing initialization cannot resurrect a row, and both are ignored once the
+workspace is archived, because an observation that was already in flight describes a workspace nobody
+has any more.
 
 Archival is two steps on purpose. `beginArchive` is the durable decision and moves the row to
-`archiving` immediately, and that is what `archive` returns. Host cleanup does **not** run in the
-caller's lifetime: it is started on `cleanupContext` and `completeArchive` moves the row to
-`archived` when it finishes. A tool call therefore returns as soon as the decision is durable,
-however long a folder takes to delete. If cleanup throws, the workspace stays `archiving` and the
-failure is reported through `onHostError` — **cleanup failure never rolls archival back**. A person
-who archived a workspace does not get it handed back because a folder would not delete.
+`archiving` immediately, and that is what `archive` returns. Folder removal does **not** run in the
+caller's lifetime: it is started on a lifetime named off `rootContext`, and `completeArchive` moves
+the row to `archived` when it finishes. A tool call therefore returns as soon as the decision is
+durable, however long a folder takes to delete. If removal throws, the workspace stays `archiving`
+and the failure is reported through `onHostError` — **cleanup failure never rolls archival back**. A
+person who archived a workspace does not get it handed back because a folder would not delete.
 `whenCleanupSettles()` waits for the removals this module started, for shutdown and for tests.
 
 ## Tools it provides to the model
@@ -86,42 +103,42 @@ who archived a workspace does not get it handed back because a folder would not 
   a retried call after a crash resolves to the same workspace rather than a second one. The input stays minimal on purpose: `name` is a title a person would recognise,
   not a slug or a path, and the module derives the storage key and branch from it.
 - **`rename_workspace`** — `{ workspaceId, name }`. Renames an owned workspace, marks the name as
-  configured, and moves the branch with it when the host can.
+  configured, and moves the Git branch with it.
 - **`list_workspaces`** — `{ projectRef?, includeArchived?, cursor?, limit? }`. A page of the
   calling agent's workspaces in list order, capped at `maxPageSize` (100 by default). Archived
   workspaces are history and are left out unless `includeArchived` is passed.
 - **`get_workspace`** — `{ workspaceId, cursor?, limit? }`. One workspace rendered as a bounded
   detail string, paged so a small output budget cannot silently drop identity or lifecycle fields.
-- **`transfer_workspace`** — `{ targetWorkspaceId }`. Asks the host to move the current
-  agent/session into an existing workspace. The result says whether the move happened
-  (`transferred`) or was deferred (`scheduled`).
+- **`transfer_workspace`** — `{ targetWorkspaceId }`. Moves the current agent/session into an
+  existing workspace. The result says whether the move happened (`transferred`) or was deferred
+  (`scheduled`).
 - **`archive_workspace`** — `{ workspaceId }`. Archives one workspace, with the two-step semantics
   above.
-- **`get_workspace_branch_metadata`** — `{ workspaceId, cursor?, limit? }`. Host-reported Git facts,
-  paged the same way.
+- **`get_workspace_branch_metadata`** — `{ workspaceId, cursor?, limit? }`. The workspace's branch as
+  Git has it right now, paged the same way.
 
 There is deliberately no model tool for `recordInitialization`, `markReady`, `markFailed`,
 `markInitializationFailed`, `setBranch`, `inheritName`, `reorder`, `beginArchive`,
-`completeArchive`, `applyGitFacts`, or `applyProbe`. Those are host lifecycle transitions driven by
-what Git actually did; a model guessing at them would be inventing state.
+`completeArchive`, `applyGitFacts`, or `applyProbe`. Those are lifecycle transitions driven by what
+Git actually did; a model guessing at them would be inventing state.
 
 Governing principles across all seven tools:
 
 - Read, create, and rename tools use `shouldReviewInAutoMode: () => false`. Archive and transfer use
-  `shouldReviewInAutoMode: () => true` and disclose their destructive host-side effects to the Auto
+  `shouldReviewInAutoMode: () => true` and disclose their destructive filesystem effects to the Auto
   reviewer. Neither declares `shouldRunInFullAccessInAutoMode`; review does not grant unsandboxed
   execution.
 - `create_workspace`, `rename_workspace`, and `archive_workspace` are durable transactional tools.
-  `transfer_workspace` is non-durable because it crosses the host boundary and that external effect
-  cannot be committed atomically. The three read tools are non-durable because a current read does
-  not need replay.
+  `transfer_workspace` is non-durable because it moves files on disk and that external effect cannot
+  be committed atomically. The three read tools are non-durable because a current read does not need
+  replay.
 - Every result the store returns is re-validated against its schema and cross-checked against a
   fresh authoritative read before it is trusted. The store's `changed` flag must agree with an
   actual before/after comparison, and a changed row must have advanced its `version`; a mismatch
   throws rather than passing bad state to the model.
 - Every page and detail string is re-clipped to `maxOutputCharacters`, never truncated silently.
 - Ownership is enforced on every read and mutation: acting on another agent's workspace is refused
-  unless the host's `authorization` callback allows the specific action.
+  unless the `authorization` callback allows the specific action.
 
 ### Paging
 
@@ -132,16 +149,37 @@ an opaque string cursor).
 
 ## External functions
 
-All methods take `(ctx, agentId, ...)` and live on `WorkspacesModule`, one instance per host wiring
-— `agentId` is passed explicitly on every call, not bound to the instance.
+All methods take `(ctx, agentId, ...)` and live on `WorkspacesModule` — `agentId` is passed
+explicitly on every call, not bound to the instance.
 
-Creation and naming:
+Building a workspace:
+
+- `createWorkspace(ctx, agentId, projectId, request, creatorSessionId?, options?)` — the whole
+  operation a person asks for. It reserves the workspace against a live snapshot of the project's
+  refs and managed directory, then starts the checkout in the background, so the caller is not held
+  while Git works.
+- `reconcileInitializingWorkspaces(ctx, agentId)` — carries every workspace that is still being
+  created through to a usable checkout. `open` calls it.
+- `removeArchivedWorkspace(ctx, agentId, projectId, workspaceId)` — deletes an archived workspace's
+  folder and moves the row to `archived`.
+- `nameFromFirstMessage(ctx, agentId, request)` — the three names a first message can settle. A
+  workspace or a chat someone has already named is left alone.
+- `resolvePath`, `resolveSessionOwnership` — what owns a directory, and the explicit durable owner of
+  a new session. Both answer with a `ResolvedProjectOwnership`.
+- `validateSessionTransfer`, `prepareSessionTransfer`, `markSessionTransferTargetFailed` — moving a
+  session's files from one workspace into another.
+- `reconcileGitFacts(ctx, agentId)` and
+  `recordGitFacts(ctx, agentId, workspaceId, facts)` — re-derive presence and Git facts, and persist
+  what a live scan observed.
+
+Creation and naming, at the catalog level:
 
 - `reserve(ctx, agentId, input, hooks?): Promise<{ created, workspace }>` — collision-safe
   reservation. `input` requires `projectRef`, and its `path`, when given, must be an absolute
   normalized path. `hooks` carries the caller's predicates (`isBranchUnavailable`,
   `isStorageKeyUnavailable`, `pathForStorageKey`) separately because functions cannot be
-  structured-cloned; all three must be answerable, from hooks or host, or the reservation refuses.
+  structured-cloned; all three must be answerable, from the hooks or from the module's own Git ref
+  snapshot, or the reservation refuses.
   A reservation with no explicit `id` takes its identity from `operationId`, so a tool call retried
   after a crash reserves the same workspace. `created` is the store's authoritative flag, so
   replaying the same workspace ID returns `created: false` with the same row. A replay that
@@ -159,9 +197,9 @@ Lifecycle:
 
 - `recordInitialization`, `markReady`, `markFailed`, `markInitializationFailed`, `applyGitFacts`,
   `applyProbe` — each returns the authoritative `Workspace`.
-- `beginArchive`, `completeArchive`, and `archive` — the last commits the decision, starts host
-  cleanup on `cleanupContext`, and returns the `archiving` row without waiting for it.
-  `whenCleanupSettles()` waits for those removals.
+- `beginArchive`, `completeArchive`, and `archive` — the last commits the decision, starts folder
+  removal on a lifetime named off `rootContext`, and returns the `archiving` row without waiting for
+  it. `whenCleanupSettles()` waits for those removals.
 - `reorder(ctx, agentId, input)` — `{ workspaceId, afterId, expectedVersion? }`; `afterId: null`
   moves a workspace to the top.
 
@@ -178,7 +216,7 @@ Reading:
 - `formatForModel`, `formatPageForModel`, `formatDetailPageForModel`,
   `formatWorkspaceOperationForModel`, `formatWorkspaceForModel`,
   `formatBranchMetadataDetailPageForModel`, `formatBranchMetadataForModel` — the exact rendering
-  each tool's `toLLM` uses, exposed so a host can show the same text outside a tool call.
+  each tool's `toLLM` uses, exposed so a caller can show the same text outside a tool call.
 
 Naming helpers are exported too: `workspaceNameKey`, `workspaceStorageKey`, and
 `workspaceBranchName` derive the collision key, the kebab folder key, and the `worktree/<key>`

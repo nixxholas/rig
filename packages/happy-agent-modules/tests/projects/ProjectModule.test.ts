@@ -1,3 +1,7 @@
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+
 import { sql } from "drizzle-orm";
 import { Value } from "@sinclair/typebox/value";
 import { agentDatabaseRows } from "@slopus/happy-agent-base";
@@ -579,8 +583,9 @@ describe("ProjectsModule", () => {
         }
     });
 
-    it("stores avatar metadata, reads optional host bytes, and clears the avatar", async () => {
+    it("stores avatar metadata, reads the bytes it kept, and clears the avatar", async () => {
         const database = await migratedProjectDatabase("projects-avatar-test");
+        const stateDirectory = await mkdtemp(join(tmpdir(), "rig-project-avatars-"));
         try {
             const hash = "a".repeat(64);
             const avatar = {
@@ -601,6 +606,7 @@ describe("ProjectsModule", () => {
                 idFactory: () => "project-avatar",
                 eventIdFactory: () => "event-avatar",
                 clock: () => 1,
+                stateDirectory,
             });
             const created = await projects.create(database.context, "agent-a", {
                 repositoryRef: "/tmp/projects/avatar",
@@ -612,25 +618,28 @@ describe("ProjectsModule", () => {
                 projectId: created.id,
             });
             expect(updated.avatar).toEqual(avatar);
+            // The catalog records what an avatar is; the picture is a file beside the agent's own
+            // state, and nothing has written one yet.
             await expect(
                 projects.avatarAsset(database.context, "agent-a", hash),
             ).resolves.toBeUndefined();
 
-            const readerProjects = new ProjectsModule({
-                avatarAssetReader: {
-                    read: async (_ctx, _agentId, requestedHash) => ({
-                        bytes: Uint8Array.from([1, 2, 3]),
-                        hash: requestedHash,
-                        mediaType: "image/webp" as const,
-                    }),
-                },
-            });
+            const assetPath = join(
+                stateDirectory,
+                "assets",
+                "project-avatars",
+                hash.slice(0, 2),
+                `${hash}.webp`,
+            );
+            await mkdir(dirname(assetPath), { recursive: true });
+            await writeFile(assetPath, Buffer.from([1, 2, 3]));
+
             await expect(
-                readerProjects.avatarAsset(database.context, "agent-a", hash),
+                projects.avatarAsset(database.context, "agent-a", hash),
             ).resolves.toMatchObject({ hash, mediaType: "image/webp" });
-            await expect(
-                readerProjects.avatarAsset(database.context, "agent-b", hash),
-            ).rejects.toThrow("not authorized");
+            await expect(projects.avatarAsset(database.context, "agent-b", hash)).rejects.toThrow(
+                "not authorized",
+            );
 
             const cleared = await projects.clearAvatar(database.context, "agent-a", {
                 expectedVersion: updated.version,
@@ -639,6 +648,7 @@ describe("ProjectsModule", () => {
             expect(cleared.avatar).toBeUndefined();
         } finally {
             database.close();
+            await rm(stateDirectory, { force: true, recursive: true });
         }
     });
 

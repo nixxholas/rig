@@ -73,7 +73,7 @@ export class ProjectMutations {
     readonly #authorization: ProjectAuthorization | undefined;
     readonly #eventIdFactory: ProjectMutationsOptions["eventIdFactory"];
     readonly #clock: ProjectMutationsOptions["clock"];
-    readonly #listener: ProjectModuleListener | undefined;
+    readonly #listeners: ProjectModuleListener[] = [];
     readonly #onPostCommitError: ProjectMutationsOptions["onPostCommitError"];
 
     constructor(options: ProjectMutationsOptions) {
@@ -81,8 +81,17 @@ export class ProjectMutations {
         this.#authorization = options.authorization;
         this.#eventIdFactory = options.eventIdFactory;
         this.#clock = options.clock;
-        this.#listener = options.listener;
+        if (options.listener !== undefined) this.#listeners.push(options.listener);
         this.#onPostCommitError = options.onPostCommitError;
+    }
+
+    /**
+     * Adds another observer of the catalog. Another module that has to react to a project change —
+     * the workspaces catalog archiving what was cut from an archived project, for instance — asks
+     * for its own place in the fan-out rather than replacing the host's listener.
+     */
+    addListener(listener: ProjectModuleListener): void {
+        this.#listeners.push(listener);
     }
 
     /**
@@ -227,23 +236,25 @@ export class ProjectMutations {
         if (!Value.Check(projectEventSchema, event) || !isDeepFrozen(event)) {
             throw new Error("The project module created an invalid unfrozen event.");
         }
-        const transactional = this.#listener?.onEventTransactional;
-        if (transactional !== undefined) {
-            await transactional.call(this.#listener, ctx, event);
+        for (const listener of this.#listeners) {
+            const transactional = listener.onEventTransactional;
+            if (transactional !== undefined) await transactional.call(listener, ctx, event);
         }
         afterCommit(ctx, (postCommitCtx) => this.#notifyPostCommit(postCommitCtx, event));
     }
 
     async #notifyPostCommit(ctx: Context, event: ProjectEvent): Promise<void> {
-        const listener = this.#listener?.onEvent;
-        if (listener === undefined) return;
-        try {
-            await listener.call(this.#listener, ctx, event);
-        } catch (error: unknown) {
+        for (const listener of this.#listeners) {
+            const notify = listener.onEvent;
+            if (notify === undefined) continue;
             try {
-                await this.#onPostCommitError?.(ctx, event, safeError(error));
-            } catch {
-                // Observer reporting is advisory after durable state has settled.
+                await notify.call(listener, ctx, event);
+            } catch (error: unknown) {
+                try {
+                    await this.#onPostCommitError?.(ctx, event, safeError(error));
+                } catch {
+                    // Observer reporting is advisory after durable state has settled.
+                }
             }
         }
     }

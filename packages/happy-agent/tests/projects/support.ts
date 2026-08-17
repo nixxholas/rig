@@ -7,61 +7,83 @@ import { promisify } from "node:util";
 
 import { withAgentDatabase, type AgentDatabase } from "@slopus/happy-agent-base";
 import {
+    directGitCommandRunner,
     projectMigrations,
     ProjectsModule,
     workspaceMigrations,
     WorkspacesModule,
+    type GitCommandRunner,
+    type WorkspaceFolderSettings,
+    type WorkspaceNameGenerator,
 } from "@slopus/happy-agent-modules";
 import { createRootContext, type Context, type RootContext } from "@steve.kite/stdlib";
 import { drizzle } from "drizzle-orm/sqlite-proxy";
-
-import type { GitCommandRunner } from "../../sources/modules/git/GitCommandRunner.js";
-import { directGitCommandRunner } from "../../sources/modules/git/runGitCommand.js";
-import {
-    ProjectWorkspaceService,
-    type ProjectWorkspaceServiceOptions,
-} from "../../sources/modules/projects/ProjectWorkspaceService.js";
 
 const execFile = promisify(execFileCallback);
 
 export const AGENT_ID = "agent-test";
 
+/** The few things a test wants to change about the pair of catalogs it drives. */
+export interface ProjectCatalogOptions {
+    /** Replaces Git for both catalogs, so a test can hold one command still. */
+    readonly git?: GitCommandRunner;
+    readonly nameGenerator?: WorkspaceNameGenerator;
+    readonly now?: () => number;
+    readonly onWorkspaceHostError?: (
+        workspaceId: string,
+        kind: "archive" | "rename",
+        message: string,
+    ) => void;
+    readonly settings?: WorkspaceFolderSettings;
+}
+
+/**
+ * What a restart may change. A value given as `undefined` drops the override the first run had,
+ * which is how a test asks for the real Git back after holding one command still.
+ */
+export type ProjectCatalogOverrides = {
+    readonly [Key in keyof ProjectCatalogOptions]?: ProjectCatalogOptions[Key] | undefined;
+};
+
+/** One pair of catalogs over one database: what a single run of Rig has. */
+export interface ProjectCatalogs {
+    readonly projects: ProjectsModule;
+    readonly workspaces: WorkspacesModule;
+    readonly open: (ctx: Context) => Promise<void>;
+    readonly close: (ctx: Context) => Promise<void>;
+}
+
 /** The temporary directories one test gets, plus everything it has to take down afterwards. */
-export interface ProjectTestHarness {
+export interface ProjectTestHarness extends ProjectCatalogs {
     readonly agentId: string;
     readonly ctx: Context;
     readonly home: string;
     readonly managedProjects: string;
     readonly managedWorkspaces: string;
-    readonly projects: ProjectsModule;
     readonly root: string;
     readonly rootContext: RootContext;
-    readonly service: ProjectWorkspaceService;
     readonly stateDirectory: string;
-    readonly workspaces: WorkspacesModule;
     readonly dispose: () => Promise<void>;
     /**
-     * Another service over the same catalogs and folders, which is what a restart looks like from
-     * the database's point of view. Everything it starts is taken down with the harness.
+     * Another pair of catalogs over the same database and folders, which is what a restart looks
+     * like from the database's point of view. Everything it starts is taken down with the harness.
      */
-    readonly restart: (
-        overrides?: Partial<ProjectWorkspaceServiceOptions>,
-    ) => ProjectWorkspaceService;
+    readonly restart: (overrides?: ProjectCatalogOverrides) => ProjectCatalogs;
 }
 
 /**
  * A real database, real modules and real folders.
  *
- * Nothing here is a stand-in: the catalogs run their own migrations against SQLite, and the
- * service works on directories under the system temporary folder. Git is the Git on this machine,
- * because the behaviors under test — worktrees, branches, prune — are Git's, not a mock's.
+ * Nothing here is a stand-in: the catalogs run their own migrations against SQLite, and they work
+ * on directories under the system temporary folder. Git is the Git on this machine, because the
+ * behaviors under test — worktrees, branches, prune — are Git's, not a mock's.
  */
 export async function projectTestHarness(
     name: string,
-    overrides: Partial<ProjectWorkspaceServiceOptions> = {},
+    overrides: ProjectCatalogOptions = {},
 ): Promise<ProjectTestHarness> {
     // macOS hands out `/var/...` for a temporary directory but canonicalizes it to `/private/var`,
-    // and the service stores canonical paths. Resolving here keeps the two the same string.
+    // and the catalogs store canonical paths. Resolving here keeps the two the same string.
     const root = await realpath(await mkdtemp(join(tmpdir(), `rig-${name}-`)));
     const home = join(root, "home");
     const managedProjects = join(root, "managed-projects");
@@ -87,55 +109,62 @@ export async function projectTestHarness(
         return { rows: statement.all(...params) };
     }) as unknown as AgentDatabase;
 
-    const rootContext = createRootContext();
-    const ctx = withAgentDatabase(rootContext.named(name), database);
+    // The catalogs start their own background work off this root, so the database has to be on the
+    // root itself rather than on the context of whichever call happened to reach them first.
+    const rootContext = withAgentDatabase(createRootContext(), database) as RootContext;
+    const ctx = rootContext.named(name);
     for (const [, migrate] of projectMigrations) await migrate(ctx, database);
     for (const [, migrate] of workspaceMigrations) await migrate(ctx, database);
 
-    // The catalogs ask the host whether a branch or a folder key is taken and where an avatar's
-    // bytes are, and the host that answers is the newest service. The lazy reference ties the knot.
-    const services: ProjectWorkspaceService[] = [];
-    const current = (): ProjectWorkspaceService | undefined => services[services.length - 1];
-    const projects = new ProjectsModule({
-        avatarAssetReader: {
-            read: async (readCtx, readAgentId, hash) =>
-                await current()?.avatarAssetReader.read(readCtx, readAgentId, hash),
-        },
-    });
-    const workspaces = new WorkspacesModule({
-        host: {
-            pathForStorageKey: (projectRef, storageKey) =>
-                current()?.workspaceCatalogHost.pathForStorageKey(projectRef, storageKey) ??
-                join(managedWorkspaces, projectRef, storageKey),
-            isBranchUnavailable: (projectRef, branch) =>
-                current()?.workspaceCatalogHost.isBranchUnavailable(projectRef, branch) ?? false,
-            isStorageKeyUnavailable: (projectRef, storageKey) =>
-                current()?.workspaceCatalogHost.isStorageKeyUnavailable(projectRef, storageKey) ??
-                false,
-        },
-    });
-
-    const restart = (extra: Partial<ProjectWorkspaceServiceOptions> = {}) => {
-        const created = new ProjectWorkspaceService({
-            agentId: AGENT_ID,
-            extendBackgroundContext: (background) => withAgentDatabase(background, database),
+    const built: ProjectCatalogs[] = [];
+    const create = (extra: ProjectCatalogOverrides = {}): ProjectCatalogs => {
+        const settings: ProjectCatalogOverrides = { ...overrides, ...extra };
+        const projects = new ProjectsModule({
             homeDirectory: home,
             managedProjectsDirectory: managedProjects,
-            projects,
             rootContext,
             stateDirectory,
-            workspaces,
-            workspacesDirectory: managedWorkspaces,
-            ...overrides,
-            ...extra,
+            ...(settings.git === undefined ? {} : { git: settings.git }),
+            ...(settings.now === undefined ? {} : { now: settings.now }),
         });
-        services.push(created);
-        return created;
+        const workspaces = new WorkspacesModule({
+            homeDirectory: home,
+            projects,
+            rootContext,
+            workspacesDirectory: managedWorkspaces,
+            ...(settings.git === undefined ? {} : { git: settings.git }),
+            ...(settings.nameGenerator === undefined
+                ? {}
+                : { nameGenerator: settings.nameGenerator }),
+            ...(settings.settings === undefined ? {} : { settings: settings.settings }),
+            ...(settings.onWorkspaceHostError === undefined
+                ? {}
+                : {
+                      onHostError: (_hostCtx, workspaceId, kind, message) => {
+                          settings.onWorkspaceHostError?.(workspaceId, kind, message);
+                      },
+                  }),
+        });
+        const pair: ProjectCatalogs = {
+            projects,
+            workspaces,
+            open: async (openCtx) => {
+                await projects.open(openCtx, AGENT_ID);
+                await workspaces.open(openCtx, AGENT_ID);
+            },
+            // Workspaces close first: a workspace's cleanup reads the project it was cut from.
+            close: async (closeCtx) => {
+                await workspaces.close(closeCtx);
+                await projects.close(closeCtx);
+            },
+        };
+        built.push(pair);
+        return pair;
     };
-    const service = restart();
+    const current = create();
 
     const dispose = async (): Promise<void> => {
-        for (const created of services) await created.close(ctx);
+        for (const pair of built) await pair.close(ctx);
         sqlite.close();
         await rm(root, { force: true, recursive: true });
     };
@@ -147,13 +176,14 @@ export async function projectTestHarness(
         home,
         managedProjects,
         managedWorkspaces,
-        projects,
-        restart,
+        projects: current.projects,
+        workspaces: current.workspaces,
+        open: current.open,
+        close: current.close,
+        restart: create,
         root,
         rootContext,
-        service,
         stateDirectory,
-        workspaces,
     };
 }
 
@@ -162,7 +192,7 @@ export async function projectTestHarness(
  *
  * An interrupted workspace creation cannot be staged after the fact — the catalog refuses to move
  * a failed workspace back to being created — so it has to be produced the way it really happens:
- * stop Git mid-checkout and take the service down while it is stopped.
+ * stop Git mid-checkout and take the catalogs down while it is stopped.
  */
 export function pausableGit(pauseWhen: (args: readonly string[]) => boolean): {
     readonly runner: GitCommandRunner;
@@ -220,7 +250,7 @@ export async function createGitRepository(path: string): Promise<string> {
     return path;
 }
 
-/** Waits for a condition the service reaches in the background, or gives up with a clear failure. */
+/** Waits for a condition the catalogs reach in the background, or gives up with a clear failure. */
 export async function waitFor<Value>(
     read: () => Promise<Value | undefined>,
     describe: string,

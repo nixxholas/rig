@@ -149,18 +149,21 @@ an existing one.
 Modules that reach outside the database require the host to supply that reach. From
 `HappyAgentIntegrations`:
 
-| Module           | Required from the host                                                         |
-| ---------------- | ------------------------------------------------------------------------------ |
-| Happy            | `HappyHost`                                                                    |
-| Image generation | Provider registry, configuration module                                        |
-| MCP              | `McpHost`                                                                      |
-| Scheduling       | `SchedulingScheduler`                                                          |
-| Search           | `SearchBackend`                                                                |
-| User input       | `UserInputBroker`                                                              |
-| Compute          | Compute provider (defaults to the published host provider)                     |
-| Permissions      | `PermissionReviewer` (optional; without it Auto cannot review)                 |
-| Secrets          | `SecretResolver` (optional; without it values cannot be resolved)              |
-| Workspaces       | `WorkspaceHost` (optional; without it workspace operations report unavailable) |
+| Module           | Required from the host                                            |
+| ---------------- | ----------------------------------------------------------------- |
+| Happy            | `HappyHost`                                                       |
+| Image generation | Provider registry, configuration module                           |
+| MCP              | `McpHost`                                                         |
+| Scheduling       | `SchedulingScheduler`                                             |
+| Search           | `SearchBackend`                                                   |
+| User input       | `UserInputBroker`                                                 |
+| Compute          | Compute provider (defaults to the published host provider)        |
+| Permissions      | `PermissionReviewer` (optional; without it Auto cannot review)    |
+| Secrets          | `SecretResolver` (optional; without it values cannot be resolved) |
+
+Projects and workspaces are not in that table. They reach outside the database more than any other
+module — folders, clones, worktrees, Git — and they do all of it themselves, through the `git`
+module they are given. What they take is other modules and their own settings, never a host object.
 
 ## Design rules
 

@@ -156,9 +156,39 @@ export {
     workspaceIdFactorySchema,
     workspacePostCommitErrorSchema,
     WorkspacesModule,
+    type ResolvedProjectOwnership,
     type WorkspaceModuleOptions,
     type WorkspaceReservation,
 } from "./WorkspacesModule.js";
+export {
+    workspaceEnvironmentSchema,
+    workspaceFolderSettingsOptionSchema,
+    workspaceGitRunnerSchema,
+    workspaceNameGeneratorSchema,
+    workspaceProjectsModuleSchema,
+    workspaceRootContextSchema,
+    type CreateWorkspaceRequest,
+    type WorkspaceCreatorOptions,
+    type WorkspaceNamesFromFirstMessage,
+} from "./WorkspaceProvisioning.js";
+export {
+    generateWorkspaceNames,
+    withPreservedNumericPrefix,
+    workspaceNameKindSchema,
+    type GeneratedWorkspaceNames,
+    type WorkspaceNameGenerator,
+    type WorkspaceNameKind,
+    type WorkspaceNameRequest,
+} from "./impl/generateWorkspaceNames.js";
+export { getManagedWorkspacesDirectory } from "./impl/getManagedWorkspacesDirectory.js";
+export { isPathLexicallyWithin, syncWorkspaceFiles } from "./impl/syncWorkspaceFiles.js";
+export {
+    DEFAULT_WORKSPACE_FOLDER_SETTINGS,
+    PROJECT_CONFIG_FILE_NAMES,
+    loadWorkspaceFolderSettings,
+    workspaceFolderSettingsSchema,
+    type WorkspaceFolderSettings,
+} from "./impl/loadWorkspaceFolderSettings.js";
 export {
     assertWorkspace,
     assertWorkspaceBranchMetadata,
@@ -172,8 +202,6 @@ export {
     orderKeyBetween,
     workspaceAuthorizationActionSchema,
     workspaceAuthorizationSchema,
-    workspaceHostArchiveSchema,
-    workspaceHostRenameBranchSchema,
     workspaceHostSchema,
     workspaceMigrations,
     workspaceMutationRequestSchema,
@@ -195,8 +223,6 @@ export {
     type WorkspaceAuthorization,
     type WorkspaceAuthorizationAction,
     type WorkspaceHost,
-    type WorkspaceHostArchive,
-    type WorkspaceHostRenameBranch,
     type WorkspaceMutationRequest,
     type WorkspaceMutationResult,
     type WorkspaceStore,

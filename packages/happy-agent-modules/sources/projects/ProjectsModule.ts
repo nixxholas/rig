@@ -1,3 +1,8 @@
+import { existsSync } from "node:fs";
+import { mkdir, rename, rm } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { isAbsolute, join } from "node:path";
+
 import {
     type AgentModule,
     type AgentModuleHooks,
@@ -5,12 +10,29 @@ import {
     type AgentSystemRef,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
-import { computePermissions } from "@slopus/happy-agent-compute";
+import { createId } from "@paralleldrive/cuid2";
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import { type Context } from "@steve.kite/stdlib";
+import {
+    mapAsyncLock,
+    type Context,
+    type MapAsyncLock,
+    type RootContext,
+} from "@steve.kite/stdlib";
 
-import type { HostCompute } from "../compute/ComputeModule.js";
+import { cloneRemoteRepository, remoteUrlForSource } from "../git/cloneRemoteRepository.js";
+import { detectGitDefaultBranch } from "../git/detectGitDefaultBranch.js";
+import { GitCredentialBroker, type GitAuthentication } from "../git/GitCredentialBroker.js";
+import type { GitCommandRunner } from "../git/GitCommandRunner.js";
+import { normalizeFuturePath } from "../git/normalizeFuturePath.js";
+import { normalizeProjectCwd } from "../git/normalizeProjectCwd.js";
+import { probeGitRepository, type GitRepositoryProbe } from "../git/probeGitRepository.js";
+import { readGitTopLevel } from "../git/readGitTopLevel.js";
+import { remoteProjectName } from "../git/remoteProjectName.js";
+import { runGitCommandWithEnvironment, directGitCommandRunner } from "../git/runGitCommand.js";
+import { runSandboxedGitCommand } from "../git/runSandboxedGitCommand.js";
+import { selectGitRemoteUrl } from "../git/selectGitRemoteUrl.js";
+import type { GitRepositoryFacts, ProjectCreator } from "../git/types.js";
 
 import {
     MAX_PROJECT_AVATAR_BYTES,
@@ -45,21 +67,42 @@ import {
     type ProjectGitFactsInput,
     type ProjectInitializationFailureInput,
     type ProjectProbeInput,
+    type ProjectRemoteSource,
     type ProjectRenameInput,
     type ProjectReorderInput,
     type ProjectSetAvatarInput,
     type ProjectSetDefaultBranchInput,
 } from "./Project.js";
 import {
-    projectComputeResolverSchema,
-    requireProjectCompute,
-    type ProjectComputeResolver,
-} from "./ProjectCompute.js";
-import { detectProjectDefaultBranch } from "./impl/detectProjectDefaultBranch.js";
-import { probeProjectRepository } from "./impl/probeProjectRepository.js";
-import { remoteProjectName } from "./impl/remoteProjectName.js";
-import { readProjectGit } from "./impl/runProjectGit.js";
-import { selectProjectRemoteUrl } from "./impl/selectProjectRemoteUrl.js";
+    projectCloneRemoteSchema,
+    projectCreatorOptionSchema,
+    projectEnvironmentSchema,
+    projectGitCredentialBrokerSchema,
+    projectGitRunnerSchema,
+    projectHostErrorSchema,
+    projectNowSchema,
+    projectProfileResolverSchema,
+    projectRootContextSchema,
+    projectSecretResolverSchema,
+    type CreateRemoteProjectRequest,
+    type ProjectCreatorOptions,
+    type ProjectCreatorProfile,
+    type RegisterProjectRequest,
+} from "./ProjectProvisioning.js";
+import { ProjectRegistrationError } from "./ProjectRegistrationError.js";
+import { collectProjectAvatarGarbage } from "./impl/collectProjectAvatarGarbage.js";
+import { findHostingAvatar, findRepositoryAvatar } from "./impl/findProjectAvatar.js";
+import { getManagedProjectsDirectory } from "./impl/getManagedProjectsDirectory.js";
+import { MAX_AVATAR_BYTES, normalizeProjectAvatar } from "./impl/normalizeProjectAvatar.js";
+import { ProjectAvatarStore } from "./impl/ProjectAvatarStore.js";
+import {
+    clientChosenId,
+    clientChosenProjectId,
+    validateManagedProjectFolderName,
+    validateProjectName,
+} from "./impl/projectNames.js";
+import { validateRegistrationPath } from "./impl/validateRegistrationPath.js";
+import { projectGitFactsFrom } from "./projectGitFacts.js";
 import { ProjectMutations } from "./ProjectMutations.js";
 import {
     fitProjectPage,
@@ -72,6 +115,7 @@ import {
     projectContextSchema,
     projectEventSchema,
     projectModuleListenerSchema,
+    type ProjectModuleListener,
     type ProjectStateChangeReason,
 } from "./ProjectEvent.js";
 import { projectMigrations } from "./ProjectMigrations.js";
@@ -150,21 +194,6 @@ export const projectPostCommitErrorSchema = Type.Function(
     Type.Union([Type.Void(), Type.Promise(Type.Void())]),
 );
 
-/**
- * Optional host bridge for the bytes behind a catalog avatar. The catalog
- * remains useful without it: project metadata is durable, while asset reads
- * return undefined until a host supplies this bridge.
- */
-export const projectAvatarAssetReaderSchema = Type.Object(
-    {
-        read: Type.Function(
-            [projectContextSchema, projectAgentIdSchema, projectAvatarHashSchema],
-            Type.Promise(Type.Union([projectAvatarAssetSchema, Type.Undefined()])),
-        ),
-    },
-    { additionalProperties: false },
-);
-
 const projectMaxPageSizeSchema = Type.Integer({
     minimum: 1,
     maximum: MAX_PROJECT_PAGE_SIZE,
@@ -182,8 +211,6 @@ export const projectModuleOptionsSchema = Type.Object(
          */
         crossWorkspace: Type.Optional(Type.Boolean()),
         authorization: Type.Optional(projectAuthorizationSchema),
-        avatarAssetReader: Type.Optional(projectAvatarAssetReaderSchema),
-        compute: Type.Optional(projectComputeResolverSchema),
         idFactory: Type.Optional(projectIdFactorySchema),
         eventIdFactory: Type.Optional(projectEventIdFactorySchema),
         clock: Type.Optional(projectClockSchema),
@@ -191,12 +218,46 @@ export const projectModuleOptionsSchema = Type.Object(
         maxPageSize: Type.Optional(projectMaxPageSizeSchema),
         maxOutputCharacters: Type.Optional(projectMaxOutputSchema),
         onPostCommitError: Type.Optional(projectPostCommitErrorSchema),
+
+        /**
+         * The lifetime the catalog's own Git and filesystem work runs on: a context derived from
+         * the application root, carrying the agent database. Cloning a repository, setting a
+         * project up, and collecting stale avatar bytes all outlive the request that started them,
+         * so they never run on the caller's context. Without one the catalog still records
+         * everything it is told; it simply cannot start work of its own.
+         */
+        rootContext: Type.Optional(projectRootContextSchema),
+        /** Replaces both Git surfaces at once, so a test can drive lifecycle without Git. */
+        git: Type.Optional(projectGitRunnerSchema),
+        /** The read-only Git surface used for probing folders. Defaults to a sandboxed runner. */
+        probeGit: Type.Optional(projectGitRunnerSchema),
+        gitCredentialBroker: Type.Optional(projectGitCredentialBrokerSchema),
+        cloneRemote: Type.Optional(projectCloneRemoteSchema),
+        environment: Type.Optional(projectEnvironmentSchema),
+        homeDirectory: Type.Optional(Type.String({ minLength: 1 })),
+        managedProjectsDirectory: Type.Optional(Type.String({ minLength: 1 })),
+        /** Where avatar bytes live. Beside the agent database, so they survive a restart. */
+        stateDirectory: Type.Optional(Type.String({ minLength: 1 })),
+        /**
+         * The one person this copy of Rig acts for, when a caller names nobody.
+         *
+         * Which machine that is is not configured: it is the agent the catalog was opened for, so
+         * only the profile is named here. A catalog that has not been opened has no local person
+         * and asks the caller to say who is acting.
+         */
+        localProfileId: Type.Optional(Type.String({ minLength: 1 })),
+        resolveGitSecret: Type.Optional(projectSecretResolverSchema),
+        resolveProfile: Type.Optional(projectProfileResolverSchema),
+        now: Type.Optional(projectNowSchema),
+        /** Told when the catalog's own Git or filesystem work failed after a durable decision. */
+        onHostError: Type.Optional(projectHostErrorSchema),
     },
     { additionalProperties: false },
 );
 
 export type ProjectModuleOptions = Static<typeof projectModuleOptionsSchema>;
-export type ProjectAvatarAssetReader = Static<typeof projectAvatarAssetReaderSchema>;
+
+const MAX_PROJECT_INITIALIZATION_RETRIES = 3;
 
 export class ProjectsModule implements AgentModule {
     readonly name = "projects";
@@ -204,8 +265,6 @@ export class ProjectsModule implements AgentModule {
 
     readonly #store: ProjectStore;
     readonly #mutations: ProjectMutations;
-    readonly #compute: ProjectComputeResolver | undefined;
-    readonly #avatarAssetReader: ProjectModuleOptions["avatarAssetReader"];
     readonly #idFactory: NonNullable<ProjectModuleOptions["idFactory"]>;
     readonly #eventIdFactory: NonNullable<ProjectModuleOptions["eventIdFactory"]>;
     readonly #clock: NonNullable<ProjectModuleOptions["clock"]>;
@@ -214,12 +273,41 @@ export class ProjectsModule implements AgentModule {
     readonly #crossWorkspace: boolean;
     #agents: AgentSystemRef | undefined;
 
+    // --- The catalog's own Git and filesystem work -------------------------------------------
+
+    readonly #avatars: ProjectAvatarStore;
+    readonly #avatarLocks: MapAsyncLock<string> = mapAsyncLock();
+    readonly #backgroundAbort = new AbortController();
+    readonly #cloneRemote: typeof cloneRemoteRepository;
+    readonly #creators = new Map<string, ProjectCreator>();
+    readonly #environment: NodeJS.ProcessEnv;
+    readonly #git: GitCommandRunner;
+    readonly #gitCredentialBroker: GitCredentialBroker;
+    readonly #hasCustomGit: boolean;
+    readonly #homeDirectory: string;
+    readonly #initializing = new Set<string>();
+    readonly #localProfileId: string | undefined;
+    readonly #managedProjectsDirectory: string;
+    readonly #now: () => number;
+    readonly #onHostError: ProjectModuleOptions["onHostError"];
+    readonly #pendingInitializations: { agentId: string; projectId: string }[] = [];
+    readonly #probeGit: GitCommandRunner;
+    readonly #projectLocks: MapAsyncLock<string> = mapAsyncLock();
+    readonly #resolveGitSecret: ((kind: "github") => string | undefined) | undefined;
+    readonly #resolveProfile: ProjectModuleOptions["resolveProfile"];
+    readonly #rootContext: RootContext | undefined;
+    readonly #stateDirectory: string;
+    readonly #tasks = new Set<Promise<void>>();
+
+    #activeInitializations = 0;
+    #closed = false;
+    /** This machine, learned from the agent the catalog was opened for. */
+    #localInstanceId: string | undefined;
+
     constructor(options: ProjectModuleOptions) {
         assertProjectModuleOptions(options);
         this.#store = createProjectStore();
         this.#crossWorkspace = options.crossWorkspace ?? false;
-        this.#compute = options.compute;
-        this.#avatarAssetReader = options.avatarAssetReader;
         this.#idFactory =
             options.idFactory ??
             ((_ctx: Context, _agentId: string) => globalThis.crypto.randomUUID());
@@ -237,6 +325,40 @@ export class ProjectsModule implements AgentModule {
             listener: options.listener,
             onPostCommitError: options.onPostCommitError,
         });
+
+        this.#rootContext = options.rootContext;
+        this.#environment = options.environment ?? process.env;
+        this.#cloneRemote = options.cloneRemote ?? cloneRemoteRepository;
+        this.#gitCredentialBroker = options.gitCredentialBroker ?? new GitCredentialBroker();
+        this.#hasCustomGit = options.git !== undefined;
+        this.#git = options.git ?? directGitCommandRunner;
+        this.#probeGit = options.probeGit ??
+            options.git ?? {
+                run: async (cwd, args) => {
+                    try {
+                        const stdout = await runSandboxedGitCommand(cwd, args, {
+                            signal: this.#backgroundAbort.signal,
+                        });
+                        return { code: 0, stderr: "", stdout };
+                    } catch (error) {
+                        return { code: 1, stderr: errorToMessage(error), stdout: "" };
+                    }
+                },
+            };
+        this.#homeDirectory = normalizeProjectCwd(options.homeDirectory ?? homedir());
+        this.#localProfileId = options.localProfileId;
+        this.#managedProjectsDirectory = normalizeFuturePath(
+            options.managedProjectsDirectory ??
+                getManagedProjectsDirectory(this.#environment, this.#homeDirectory),
+        );
+        this.#now = options.now ?? Date.now;
+        this.#onHostError = options.onHostError;
+        this.#resolveGitSecret = options.resolveGitSecret;
+        this.#resolveProfile = options.resolveProfile;
+        this.#stateDirectory = normalizeFuturePath(
+            options.stateDirectory ?? join(tmpdir(), `rig-projects-${createId()}`),
+        );
+        this.#avatars = new ProjectAvatarStore(this.#stateDirectory);
     }
 
     readonly #hooks: AgentModuleHooks = {
@@ -259,6 +381,17 @@ export class ProjectsModule implements AgentModule {
         this.#agents = agents;
         return this.#hooks;
     };
+
+    /**
+     * Adds another observer of the catalog, alongside whatever the caller configured.
+     *
+     * Another module that has to react to a project change asks for its own place in the fan-out.
+     * The workspaces catalog uses this to archive what was cut from an archived project inside the
+     * same transaction, which keeps this catalog free of any knowledge of workspaces.
+     */
+    addProjectListener(listener: ProjectModuleListener): void {
+        this.#mutations.addListener(listener);
+    }
 
     async list(ctx: Context, agentId: string, query: ProjectPageQuery = {}): Promise<ProjectPage> {
         this.#assertAgentId(agentId);
@@ -359,7 +492,10 @@ export class ProjectsModule implements AgentModule {
                         ownerAgentId: agentId,
                         repositoryRef: normalized.repositoryRef,
                         kind,
-                        name: kind === "home" ? HOME_PROJECT_NAME : normalized.name,
+                        name:
+                            kind === "home"
+                                ? HOME_PROJECT_NAME
+                                : validateProjectName(normalized.name),
                         nameSource: normalized.nameSource ?? "folder",
                         ...(normalized.description === undefined
                             ? {}
@@ -435,7 +571,10 @@ export class ProjectsModule implements AgentModule {
     async rename(ctx: Context, agentId: string, input: ProjectRenameInput): Promise<Project> {
         this.#assertAgentId(agentId);
         this.#assertInput(projectRenameInputSchema, input, "rename");
-        const normalized = structuredClone(input);
+        // A display name someone typed is trimmed and bounded here, at the boundary it enters the
+        // catalog through. The schema only keeps the column honest; what a person may call a project
+        // is a narrower question, and it has to be the same answer whichever door the name came in.
+        const normalized = { ...structuredClone(input), name: validateProjectName(input.name) };
         const result = await this.#mutations.run(ctx, agentId, {
             action: "rename",
             changeable: ["name", "nameSource"],
@@ -479,6 +618,9 @@ export class ProjectsModule implements AgentModule {
         if (project.status !== "archived") {
             throw new Error("Project archival did not leave the project archived.");
         }
+        // Nobody works in this project any more, so the credential it was cloned with stops being
+        // available to anything that still asks.
+        this.#gitCredentialBroker.revoke(projectId);
         return project;
     }
 
@@ -572,6 +714,11 @@ export class ProjectsModule implements AgentModule {
         if (project.avatar !== undefined) {
             throw new Error("The project still has an avatar after it was cleared.");
         }
+        // Setting the project up again is what looks for a picture, so clearing one asks for that
+        // look rather than leaving the project without an image until something else happens.
+        if (project.kind === "regular") {
+            await this.scheduleInitialization(ctx, agentId, normalized.projectId);
+        }
         return project;
     }
 
@@ -589,9 +736,7 @@ export class ProjectsModule implements AgentModule {
         assertProject(project);
         assertProjectRecord(project);
         await this.#mutations.authorize(ctx, agentId, project.ownerAgentId, "avatar_read");
-        const reader = this.#avatarAssetReader;
-        if (reader === undefined) return undefined;
-        const raw = await reader.read.call(reader, ctx, agentId, hash);
+        const raw = await this.#avatars.read(hash);
         if (raw === undefined) return undefined;
         assertProjectAvatarAsset(raw);
         if (
@@ -599,7 +744,7 @@ export class ProjectsModule implements AgentModule {
             raw.bytes.byteLength > MAX_PROJECT_AVATAR_BYTES ||
             raw.mediaType !== "image/webp"
         ) {
-            throw new Error("The project avatar reader returned an unrelated asset.");
+            throw new Error("The stored project avatar does not match the one asked for.");
         }
         return structuredClone(raw);
     }
@@ -667,20 +812,17 @@ export class ProjectsModule implements AgentModule {
      * workspace can be cut from it, and where its Git state stands.
      */
     async probe(ctx: Context, agentId: string, projectId: string): Promise<Project> {
-        const { compute, project } = await this.#lookAt(ctx, agentId, projectId, "update_state");
-        const probe = await probeProjectRepository(ctx, compute, {
-            isHome: project.kind === "home",
-            path: project.repositoryRef,
-        });
-        return await this.applyProbe(ctx, agentId, {
+        const project = await this.#lookAt(ctx, agentId, projectId, "update_state");
+        return await this.#applyProjectProbe(
+            ctx,
+            agentId,
             projectId,
-            presence: probe.presence,
-            worktreeSupport: probe.worktreeSupport,
-            ...(probe.worktreeUnsupportedReason === undefined
-                ? {}
-                : { worktreeUnsupportedReason: boundedReason(probe.worktreeUnsupportedReason) }),
-            ...(probe.facts === undefined ? {} : { git: probe.facts }),
-        });
+            await probeGitRepository({
+                git: this.#probeGit,
+                isHome: project.kind === "home",
+                path: project.repositoryRef,
+            }),
+        );
     }
 
     /**
@@ -689,10 +831,10 @@ export class ProjectsModule implements AgentModule {
      * repository must not inherit their branch.
      */
     async resolveDefaultBranch(ctx: Context, agentId: string, projectId: string): Promise<Project> {
-        const { compute, project } = await this.#lookAt(ctx, agentId, projectId, "update_state");
+        const project = await this.#lookAt(ctx, agentId, projectId, "update_state");
         if (project.defaultBranch !== undefined) return project;
-        if (!(await this.#isRepositoryRoot(ctx, compute, project))) return project;
-        const branch = await detectProjectDefaultBranch(ctx, compute, project.repositoryRef);
+        if (!(await this.#isRepositoryRoot(project))) return project;
+        const branch = await detectGitDefaultBranch(this.#git, project.repositoryRef);
         if (branch === undefined) return project;
         return await this.setDefaultBranch(ctx, agentId, { projectId, branch });
     }
@@ -702,10 +844,10 @@ export class ProjectsModule implements AgentModule {
      * so is a folder that is not a repository root or has no usable remote.
      */
     async resolveRemoteName(ctx: Context, agentId: string, projectId: string): Promise<Project> {
-        const { compute, project } = await this.#lookAt(ctx, agentId, projectId, "update_state");
+        const project = await this.#lookAt(ctx, agentId, projectId, "update_state");
         if (project.nameSource !== "folder") return project;
-        if (!(await this.#isRepositoryRoot(ctx, compute, project))) return project;
-        const remote = await selectProjectRemoteUrl(ctx, compute, project.repositoryRef);
+        if (!(await this.#isRepositoryRoot(project))) return project;
+        const remote = await selectGitRemoteUrl(this.#git, project.repositoryRef);
         const name = remote === undefined ? undefined : remoteProjectName(remote);
         if (name === undefined) return project;
         return await this.adoptRemoteName(ctx, agentId, { projectId, name });
@@ -840,7 +982,10 @@ export class ProjectsModule implements AgentModule {
         );
     }
 
-    /** Asks for the project to be set up again, whatever state it reached. */
+    /**
+     * Puts a project back in line for setup. Nothing initializes the home project, so for `home`
+     * this is a no-op that returns the row untouched, like every other guarded lifecycle write.
+     */
     async refresh(ctx: Context, agentId: string, projectId: string): Promise<Project> {
         return await this.#changeState(ctx, agentId, projectId, "refresh", (project) =>
             project.kind === "home"
@@ -851,6 +996,783 @@ export class ProjectsModule implements AgentModule {
                       initializationError: null,
                   },
         );
+    }
+
+    /**
+     * Asks for a project to be set up again, whatever state it reached, and starts that setup.
+     *
+     * This is the whole operation a person asks for, so unlike `refresh` it refuses the home project
+     * outright rather than quietly doing nothing: somebody who pressed a button deserves to be told
+     * there was nothing to press it for.
+     */
+    async setUpAgain(ctx: Context, agentId: string, projectId: string): Promise<Project> {
+        if ((await this.#lookAt(ctx, agentId, projectId, "update_state")).kind === "home") {
+            throw new Error("The Home project does not need to be set up.");
+        }
+        const refreshed = await this.refresh(ctx, agentId, projectId);
+        await this.scheduleInitialization(ctx, agentId, projectId);
+        return refreshed;
+    }
+
+    // --- Folders, Git, and setup -------------------------------------------------------------
+    //
+    // Everything below is the work the records describe: canonical paths, managed folders, clones,
+    // credentials, probes, avatar bytes, and the background setup that carries a new project
+    // through to a usable one. The catalog does it itself; nothing is handed to a host.
+
+    /** Where projects Rig created for someone live. */
+    get managedProjectsDirectory(): string {
+        return this.#managedProjectsDirectory;
+    }
+
+    /** The folder that is this machine's Home project. */
+    get homeDirectory(): string {
+        return this.#homeDirectory;
+    }
+
+    /** The Git surface for foreground work in a project folder. */
+    get git(): GitCommandRunner {
+        return this.#git;
+    }
+
+    /** The read-only Git surface used to look at a folder without changing it. */
+    get probeGit(): GitCommandRunner {
+        return this.#probeGit;
+    }
+
+    /** Who a project belongs to when the caller named nobody: this machine, and its one person. */
+    get #localCreator(): ProjectCreator | undefined {
+        const instanceId = this.#localInstanceId;
+        const profileId = this.#localProfileId;
+        if (instanceId === undefined || profileId === undefined) return undefined;
+        return { instanceId, profileId };
+    }
+
+    /**
+     * Picks up whatever the last run left unfinished: projects still being set up, failures worth
+     * another try, and stale avatar bytes.
+     */
+    async open(ctx: Context, agentId: string): Promise<void> {
+        // One machine, one person: the agent the catalog is opened for is the instance, and the
+        // only profile it can resolve is whoever this copy of Git commits as.
+        this.#localInstanceId = agentId;
+        for (const project of await this.#allProjects(ctx, agentId)) {
+            if (project.kind !== "regular" || project.status === "archived") continue;
+            if (project.initializationStatus === "initializing") {
+                await this.scheduleInitialization(ctx, agentId, project.id);
+            } else if (
+                project.initializationStatus === "failed" &&
+                project.initializationAttempt < MAX_PROJECT_INITIALIZATION_RETRIES &&
+                existsSync(project.repositoryRef)
+            ) {
+                await this.retryInitialization(ctx, agentId, project.id);
+                await this.scheduleInitialization(ctx, agentId, project.id);
+            }
+        }
+        this.#runInBackground("project-avatar-maintenance", async (workerCtx) => {
+            await this.collectAvatarGarbage(workerCtx, agentId);
+        });
+    }
+
+    /** Stops every background lifetime the catalog started and waits for the ones in flight. */
+    async close(_ctx: Context): Promise<void> {
+        this.#closed = true;
+        this.#backgroundAbort.abort();
+        this.#gitCredentialBroker.close();
+        this.#pendingInitializations.length = 0;
+        while (this.#tasks.size > 0) {
+            await Promise.allSettled([...this.#tasks]);
+        }
+    }
+
+    /**
+     * Runs work while this project's Git lock is held.
+     *
+     * Every worktree of a project shares one set of refs and reflogs, so the catalog that owns the
+     * project owns that lock, and the workspaces catalog takes it through here rather than keeping
+     * a second lock over the same repository.
+     */
+    async runInProjectGitLock<T>(
+        ctx: Context,
+        projectId: string,
+        work: (lockedCtx: Context) => Promise<T>,
+    ): Promise<T> {
+        return await this.#projectLocks.runInLock(ctx, projectId, work);
+    }
+
+    /**
+     * Finds the project a folder belongs to, importing the folder as a project if it is new.
+     *
+     * `requestedProjectId` names that import. A project is a folder, so a folder Rig already knows
+     * keeps the identity it has and the request is simply answered with it; the requested identity
+     * only takes effect for a folder that becomes a project now.
+     */
+    async resolvePath(
+        ctx: Context,
+        agentId: string,
+        cwd: string,
+        requestedProjectId?: string,
+    ): Promise<Project> {
+        const path = normalizeProjectCwd(cwd);
+        const importedId =
+            requestedProjectId === undefined
+                ? undefined
+                : clientChosenId(requestedProjectId, "project");
+        const existing = await this.getByPath(ctx, agentId, path);
+        if (existing !== undefined) {
+            // A project is only a folder, so working in it again is what brings it back: starting
+            // a session restores an archived project instead of asking someone to unarchive it.
+            if (importedId !== undefined && importedId !== existing.id) {
+                await this.#assertUnusedProjectId(ctx, agentId, importedId, path);
+            }
+            return existing.status === "archived"
+                ? await this.restore(ctx, agentId, existing.id)
+                : existing;
+        }
+        if (importedId !== undefined) {
+            await this.#assertUnusedProjectId(ctx, agentId, importedId, path);
+        }
+
+        const kind = path === this.#homeDirectory ? "home" : "regular";
+        const project = await this.create(ctx, agentId, {
+            ...(importedId === undefined ? {} : { id: importedId }),
+            repositoryRef: path,
+            kind,
+            name: kind === "home" ? HOME_PROJECT_NAME : folderProjectName(path),
+        });
+        if (kind === "regular") await this.scheduleInitialization(ctx, agentId, project.id);
+        return project;
+    }
+
+    /**
+     * Adds one explicit Git project without starting a session. Validation happens before the
+     * shared folder import, so a registered project is always the canonical root of a working tree.
+     */
+    async register(
+        ctx: Context,
+        agentId: string,
+        request: RegisterProjectRequest,
+    ): Promise<Project> {
+        if (!isAbsolute(request.path)) {
+            throw new ProjectRegistrationError(
+                "invalid_request",
+                "The project path must be absolute.",
+            );
+        }
+        if (request.projectId !== undefined) clientChosenProjectId(request.projectId);
+        const path = await validateRegistrationPath(this.#git, request.path);
+        return await this.resolvePath(
+            ctx,
+            agentId,
+            path,
+            ...(request.projectId === undefined ? [] : [request.projectId]),
+        );
+    }
+
+    /** Refuses a client-chosen project identity that already names another folder. */
+    async #assertUnusedProjectId(
+        ctx: Context,
+        agentId: string,
+        id: string,
+        path: string,
+    ): Promise<void> {
+        const known = await this.get(ctx, agentId, id);
+        if (known !== undefined && known.repositoryRef !== path) {
+            throw new ProjectRegistrationError(
+                "project_id_conflict",
+                "That project ID already names another folder.",
+            );
+        }
+    }
+
+    /** Every project this agent can see, archived ones included. */
+    async #allProjects(ctx: Context, agentId: string): Promise<readonly Project[]> {
+        return (await this.list(ctx, agentId, { includeArchived: true })).projects;
+    }
+
+    // --- Setting a project up ----------------------------------------------------------------
+
+    /** Queues the project's setup, if it is not already queued or running. */
+    async scheduleInitialization(ctx: Context, agentId: string, projectId: string): Promise<void> {
+        if (this.#closed || this.#initializing.has(projectId)) return;
+        // A catalog built without a root has nowhere to run setup. That is a supported way to use it
+        // — it still records everything it is told — so this declines rather than failing the write
+        // that asked, and says so once instead of throwing out of a timer nobody is holding.
+        if (this.#rootContext === undefined) {
+            ctx.log.debug("Project setup was not started: this catalog has no root lifetime.", {
+                projectId,
+            });
+            return;
+        }
+        const project = await this.get(ctx, agentId, projectId);
+        if (project === undefined) return;
+        if (!existsSync(project.repositoryRef) && project.remoteSource === undefined) {
+            await this.#failInitialization(
+                ctx,
+                agentId,
+                projectId,
+                "The project folder is not available.",
+            );
+            return;
+        }
+        this.#initializing.add(projectId);
+        this.#pendingInitializations.push({ agentId, projectId });
+        setImmediate(() => {
+            this.#drainInitializations();
+        });
+    }
+
+    #drainInitializations(): void {
+        if (this.#closed) return;
+        while (this.#activeInitializations < 2) {
+            const pending = this.#pendingInitializations.shift();
+            if (pending === undefined) return;
+            this.#activeInitializations += 1;
+            this.#runInBackground("project-initialization", async (workerCtx) => {
+                try {
+                    await this.#initializeProject(workerCtx, pending.agentId, pending.projectId);
+                } finally {
+                    this.#activeInitializations -= 1;
+                    this.#initializing.delete(pending.projectId);
+                    if (!this.#closed) this.#drainInitializations();
+                }
+            });
+        }
+    }
+
+    async #initializeProject(ctx: Context, agentId: string, projectId: string): Promise<void> {
+        if (this.#closed) return;
+        const project = await this.get(ctx, agentId, projectId);
+        if (
+            project === undefined ||
+            project.kind === "home" ||
+            project.initializationStatus !== "initializing"
+        ) {
+            return;
+        }
+        try {
+            if (project.remoteSource !== undefined) {
+                await this.#cloneRemoteProject(ctx, agentId, project);
+                if (this.#closed) return;
+            }
+            // A new project learns its presence and worktree capability here rather than waiting
+            // for the next start, because a client offers "Create workspace" immediately.
+            await this.probe(ctx, agentId, projectId);
+            if (this.#closed) return;
+
+            let remote: string | undefined;
+            const repositoryTopLevel = await this.#isRepositoryRoot(project);
+            if (repositoryTopLevel) {
+                try {
+                    remote = await selectGitRemoteUrl(this.#git, project.repositoryRef);
+                } catch {
+                    // A repository without a usable remote is a perfectly good project.
+                }
+            }
+            if (this.#closed) return;
+
+            // The trunk is decided while the project is being added, so every later workspace has
+            // a branch to fork without re-deciding it under someone's request.
+            if (repositoryTopLevel) await this.resolveDefaultBranch(ctx, agentId, projectId);
+            if (this.#closed) return;
+
+            const detectedName = remote === undefined ? undefined : remoteProjectName(remote);
+            const current = await this.get(ctx, agentId, projectId);
+            if (current === undefined) return;
+            if (detectedName !== undefined && current.nameSource === "folder") {
+                await this.adoptRemoteName(ctx, agentId, { projectId, name: detectedName });
+            }
+
+            if ((await this.get(ctx, agentId, projectId))?.avatar === undefined) {
+                const repositoryAvatar = repositoryTopLevel
+                    ? await findRepositoryAvatar(project.repositoryRef)
+                    : undefined;
+                const hostingAvatar =
+                    repositoryAvatar === undefined && remote !== undefined
+                        ? await findHostingAvatar(remote)
+                        : undefined;
+                const candidate = repositoryAvatar ?? hostingAvatar;
+                if (this.#closed) return;
+                if (
+                    candidate !== undefined &&
+                    (await this.get(ctx, agentId, projectId))?.avatar === undefined
+                ) {
+                    await this.storeAvatarImage(
+                        ctx,
+                        agentId,
+                        projectId,
+                        repositoryAvatar === undefined ? "hosting" : "repository",
+                        candidate,
+                    );
+                }
+            }
+            if (this.#closed) return;
+
+            await this.markInitializationReady(ctx, agentId, projectId);
+        } catch (error) {
+            if (this.#closed) return;
+            await this.#failInitialization(ctx, agentId, projectId, errorToMessage(error));
+        }
+    }
+
+    async #failInitialization(
+        ctx: Context,
+        agentId: string,
+        projectId: string,
+        message: string,
+    ): Promise<void> {
+        await this.markInitializationFailed(ctx, agentId, {
+            projectId,
+            error: boundedReason(message),
+        });
+    }
+
+    // --- Remote projects and credentials -----------------------------------------------------
+
+    /** Adds a project whose folder Rig has still to clone from a remote repository. */
+    async createRemote(
+        ctx: Context,
+        agentId: string,
+        request: CreateRemoteProjectRequest,
+        options: ProjectCreatorOptions = {},
+    ): Promise<Project> {
+        const name = validateManagedProjectFolderName(request.name);
+        const creator = options.createdBy ?? this.#localCreator;
+        if (creator === undefined) {
+            throw new ProjectRegistrationError(
+                "invalid_request",
+                "A person's profile is required to create a managed project.",
+            );
+        }
+        if (request.secret !== undefined && request.source.kind !== "github") {
+            throw new ProjectRegistrationError(
+                "unsupported_git_source",
+                "GitHub credentials can only be used with a GitHub repository.",
+            );
+        }
+        const id =
+            request.projectId === undefined ? createId() : clientChosenProjectId(request.projectId);
+        const path = normalizeFuturePath(join(this.#managedProjectsDirectory, name));
+        const githubToken =
+            options.githubToken ??
+            (request.secret?.kind === "github" && creator.instanceId === this.#localInstanceId
+                ? this.#localGitSecret("github")
+                : undefined);
+        if (githubToken !== undefined && request.source.kind !== "github") {
+            throw new ProjectRegistrationError(
+                "unsupported_git_source",
+                "GitHub credentials can only be used with a GitHub repository.",
+            );
+        }
+        const registerCredential = async (): Promise<void> => {
+            if (githubToken === undefined || request.source.kind !== "github") return;
+            await this.#gitCredentialBroker.register({
+                creator,
+                projectId: id,
+                repository: request.source.repository,
+                token: githubToken,
+            });
+        };
+
+        const retried = await this.#retriedRemoteProject(ctx, agentId, id, path, request, creator);
+        if (retried !== undefined) {
+            this.#creators.set(id, creator);
+            await registerCredential();
+            const canRetry =
+                retried.requiredSecretKind !== "github" ||
+                this.gitAuthentication(retried.id, creator) !== undefined;
+            if (retried.initializationStatus === "failed" && !canRetry) return retried;
+            if (retried.initializationStatus === "failed") {
+                await this.retryInitialization(ctx, agentId, id);
+            }
+            if (retried.initializationStatus !== "ready" && canRetry) {
+                await this.scheduleInitialization(ctx, agentId, id);
+            }
+            return (await this.get(ctx, agentId, id)) ?? retried;
+        }
+        if ((await this.getByPath(ctx, agentId, path)) !== undefined) {
+            throw new ProjectRegistrationError(
+                "project_path_conflict",
+                "That managed project folder already belongs to another project.",
+            );
+        }
+        if (existsSync(path)) {
+            throw new ProjectRegistrationError(
+                "project_path_conflict",
+                "That managed project folder already exists.",
+            );
+        }
+        await mkdir(this.#managedProjectsDirectory, { recursive: true });
+        this.#creators.set(id, creator);
+        await registerCredential();
+        try {
+            const project = await this.create(ctx, agentId, {
+                id,
+                repositoryRef: path,
+                kind: "regular",
+                name,
+                remoteSource: request.source,
+                ...(request.secret === undefined
+                    ? {}
+                    : { requiredSecretKind: request.secret.kind }),
+            });
+            await this.scheduleInitialization(ctx, agentId, id);
+            return project;
+        } catch (error) {
+            const raced = await this.#retriedRemoteProject(
+                ctx,
+                agentId,
+                id,
+                path,
+                request,
+                creator,
+            );
+            if (raced !== undefined) {
+                if (raced.initializationStatus !== "ready") {
+                    await this.scheduleInitialization(ctx, agentId, id);
+                }
+                return raced;
+            }
+            this.#gitCredentialBroker.revoke(id);
+            this.#creators.delete(id);
+            if ((await this.getByPath(ctx, agentId, path)) !== undefined) {
+                throw new ProjectRegistrationError(
+                    "project_path_conflict",
+                    "That managed project folder already belongs to another project.",
+                );
+            }
+            throw error;
+        }
+    }
+
+    async #retriedRemoteProject(
+        ctx: Context,
+        agentId: string,
+        id: string,
+        path: string,
+        request: CreateRemoteProjectRequest,
+        creator: ProjectCreator,
+    ): Promise<Project | undefined> {
+        const project = await this.get(ctx, agentId, id);
+        if (project === undefined) return undefined;
+        const recordedCreator = this.#creators.get(id);
+        if (
+            project.repositoryRef !== path ||
+            !remoteProjectSourcesEqual(project.remoteSource, request.source) ||
+            project.requiredSecretKind !== request.secret?.kind ||
+            (recordedCreator !== undefined &&
+                (recordedCreator.instanceId !== creator.instanceId ||
+                    recordedCreator.profileId !== creator.profileId))
+        ) {
+            throw new ProjectRegistrationError(
+                "project_id_conflict",
+                "That project ID already names a different project.",
+            );
+        }
+        return project;
+    }
+
+    async #cloneRemoteProject(ctx: Context, agentId: string, project: Project): Promise<void> {
+        if (project.remoteSource === undefined) return;
+        const stagingRoot = join(this.#managedProjectsDirectory, ".rig", "clones");
+        const stagingPath = join(stagingRoot, project.id);
+        if (existsSync(project.repositoryRef)) {
+            const topLevel = await readGitTopLevel(this.#probeGit, project.repositoryRef);
+            if (topLevel !== project.repositoryRef) {
+                throw new Error("The managed project folder is not the expected Git repository.");
+            }
+            const origin = await this.#probeGit.run(project.repositoryRef, [
+                "remote",
+                "get-url",
+                "origin",
+            ]);
+            if (!remoteSourceUrlMatches(origin.stdout.trim(), project.remoteSource)) {
+                throw new Error("The managed project folder has a different origin repository.");
+            }
+            await this.markCloneReady(ctx, agentId, project.id);
+            return;
+        }
+        const creator = this.#creators.get(project.id) ?? this.#localCreator;
+        if (creator === undefined) {
+            throw new Error(
+                "This project has no known creator, so its repository cannot be cloned. Add it again from the machine that created it.",
+            );
+        }
+        const profile = await this.#resolveProfile?.(creator.profileId, creator.instanceId);
+        if (profile === undefined || profile.parentInstanceId !== creator.instanceId) {
+            throw new Error("The project creator's profile is unavailable.");
+        }
+        const gitAuthentication = this.#gitCredentialBroker.daemonAuthentication(
+            project.id,
+            creator,
+        );
+        if (project.requiredSecretKind === "github" && gitAuthentication === undefined) {
+            throw new Error(
+                "GitHub credentials are unavailable. Try this project again once GitHub is connected.",
+            );
+        }
+        await mkdir(stagingRoot, { recursive: true });
+        await rm(stagingPath, { force: true, recursive: true });
+        try {
+            await this.#cloneRemote({
+                destination: stagingPath,
+                ...(gitAuthentication === undefined ? {} : { gitAuthentication }),
+                gitIdentity: { email: profile.email, name: profile.name },
+                source: project.remoteSource,
+            });
+            if ((await readGitTopLevel(this.#git, stagingPath)) !== stagingPath) {
+                throw new Error("The cloned folder is not a Git repository root.");
+            }
+            if (existsSync(project.repositoryRef)) {
+                throw new Error("The managed project folder appeared while cloning.");
+            }
+            await rename(stagingPath, project.repositoryRef);
+            await this.markCloneReady(ctx, agentId, project.id);
+        } finally {
+            await rm(stagingPath, { force: true, recursive: true });
+        }
+    }
+
+    async registerGitCredential(
+        ctx: Context,
+        agentId: string,
+        projectId: string,
+        creator: ProjectCreator,
+        githubToken: string,
+    ): Promise<GitAuthentication> {
+        const project = await this.get(ctx, agentId, projectId);
+        if (project?.remoteSource?.kind !== "github") {
+            throw new Error("GitHub credentials can only be used with a GitHub project.");
+        }
+        this.#creators.set(projectId, creator);
+        return await this.#gitCredentialBroker.register({
+            creator,
+            projectId,
+            repository: project.remoteSource.repository,
+            token: githubToken,
+        });
+    }
+
+    async refreshGitCredential(
+        ctx: Context,
+        agentId: string,
+        projectId: string,
+        creator: ProjectCreator,
+        githubToken: string,
+    ): Promise<GitAuthentication> {
+        const project = await this.get(ctx, agentId, projectId);
+        if (project?.remoteSource?.kind !== "github") {
+            throw new Error("That profile does not own a managed GitHub project.");
+        }
+        const recorded = this.#creators.get(projectId);
+        if (
+            recorded !== undefined &&
+            (recorded.instanceId !== creator.instanceId || recorded.profileId !== creator.profileId)
+        ) {
+            throw new Error("That profile does not own a managed GitHub project.");
+        }
+        const authentication = await this.registerGitCredential(
+            ctx,
+            agentId,
+            projectId,
+            creator,
+            githubToken,
+        );
+        if (project.initializationStatus === "failed") {
+            await this.retryInitialization(ctx, agentId, projectId);
+            await this.scheduleInitialization(ctx, agentId, projectId);
+        }
+        return authentication;
+    }
+
+    gitAuthentication(
+        projectId: string,
+        creator: ProjectCreator,
+    ): ReturnType<GitCredentialBroker["authentication"]> {
+        return this.#gitCredentialBroker.authentication(projectId, creator);
+    }
+
+    /** Re-registers the local credential for every managed project and retries what failed. */
+    async retryRemoteProjects(ctx: Context, agentId: string, kind: "github"): Promise<void> {
+        const token = this.#localGitSecret(kind);
+        if (token === undefined) return;
+        for (const project of await this.#allProjects(ctx, agentId)) {
+            if (project.requiredSecretKind !== kind) continue;
+            if (project.remoteSource?.kind !== "github") continue;
+            const creator = this.#creators.get(project.id) ?? this.#localCreator;
+            if (creator === undefined || creator.instanceId !== this.#localInstanceId) continue;
+            try {
+                await this.#gitCredentialBroker.register({
+                    creator,
+                    projectId: project.id,
+                    repository: project.remoteSource.repository,
+                    token,
+                });
+            } catch {
+                continue;
+            }
+            if (this.#closed) return;
+            if (project.initializationStatus === "failed") {
+                await this.retryInitialization(ctx, agentId, project.id);
+            }
+            await this.scheduleInitialization(ctx, agentId, project.id);
+        }
+    }
+
+    #localGitSecret(kind: "github"): string | undefined {
+        try {
+            return this.#resolveGitSecret?.(kind);
+        } catch {
+            return undefined;
+        }
+    }
+
+    /**
+     * The Git surface for one project, carrying that project's credential when it has one.
+     *
+     * A workspace cut from a private repository needs the same credential the clone used, so the
+     * catalog that holds the credential is the one that hands out the runner.
+     */
+    gitForProject(projectId: string): GitCommandRunner {
+        const creator = this.#creators.get(projectId) ?? this.#localCreator;
+        if (this.#hasCustomGit || creator === undefined) return this.#git;
+        const authentication = this.#gitCredentialBroker.daemonAuthentication(projectId, creator);
+        if (authentication === undefined) return this.#git;
+        return {
+            run: async (cwd, args, options) =>
+                await runGitCommandWithEnvironment(
+                    cwd,
+                    args,
+                    {
+                        GIT_CONFIG_GLOBAL: "/dev/null",
+                        GIT_CONFIG_NOSYSTEM: "1",
+                        ...authentication.environment,
+                    },
+                    options,
+                ),
+        };
+    }
+
+    // --- Avatar bytes ------------------------------------------------------------------------
+
+    /** Stores an image for a project and records the metadata that points at it. */
+    async storeAvatarImage(
+        ctx: Context,
+        agentId: string,
+        projectId: string,
+        source: ProjectAvatar["source"],
+        bytes: Buffer,
+        expectedVersion?: number,
+    ): Promise<Project | undefined> {
+        const project = await this.get(ctx, agentId, projectId);
+        if (project === undefined) return undefined;
+        if (bytes.byteLength > MAX_AVATAR_BYTES) {
+            throw new Error("The project image is larger than the allowed limit.");
+        }
+        const normalized = await normalizeProjectAvatar(bytes);
+        return await this.#avatarLocks.runInLock(ctx, normalized.hash, async () => {
+            await this.#avatars.write(normalized.hash, normalized.bytes);
+            if (this.#closed) return project;
+            try {
+                return await this.setAvatar(ctx, agentId, {
+                    projectId,
+                    avatar: {
+                        hash: normalized.hash,
+                        height: normalized.height,
+                        mediaType: "image/webp",
+                        source,
+                        url: `/v0/projects/avatars/${normalized.hash}`,
+                        width: normalized.width,
+                    },
+                    ...(expectedVersion === undefined ? {} : { expectedVersion }),
+                });
+            } catch (error) {
+                await this.#avatars.remove(normalized.hash);
+                throw error;
+            }
+        });
+    }
+
+    /** Removes stored avatar bytes no project has pointed at for a day. */
+    async collectAvatarGarbage(ctx: Context, agentId: string): Promise<void> {
+        if (this.#closed) return;
+        const referenced = new Set(
+            (await this.#allProjects(ctx, agentId))
+                .map((project) => project.avatar?.hash)
+                .filter((hash): hash is string => hash !== undefined),
+        );
+        await collectProjectAvatarGarbage({
+            now: this.#now(),
+            referencedHashes: referenced,
+            root: this.#avatars.root,
+            stopped: () => this.#closed,
+            store: this.#avatars,
+        });
+    }
+
+    // --- Git facts ---------------------------------------------------------------------------
+
+    /** Re-derives presence, worktree capability, and Git facts for every live project. */
+    async reconcileGitFacts(ctx: Context, agentId: string): Promise<void> {
+        for (const project of await this.#allProjects(ctx, agentId)) {
+            if (this.#closed) return;
+            // An archived project is hidden, so re-deriving its Git facts is wasted work.
+            if (project.status === "archived") continue;
+            await this.probe(ctx, agentId, project.id);
+        }
+    }
+
+    /**
+     * Persists Git facts observed by a live scan. Branch, HEAD and upstream are durable state, so
+     * a commit or a checkout has to reach clients that are not watching the live stream.
+     */
+    async recordGitFacts(
+        ctx: Context,
+        agentId: string,
+        projectId: string,
+        facts: GitRepositoryFacts,
+    ): Promise<void> {
+        await this.applyGitFacts(ctx, agentId, {
+            projectId,
+            git: projectGitFactsFrom(facts),
+        });
+    }
+
+    async #applyProjectProbe(
+        ctx: Context,
+        agentId: string,
+        projectId: string,
+        probe: GitRepositoryProbe,
+    ): Promise<Project> {
+        return await this.applyProbe(ctx, agentId, {
+            projectId,
+            presence: probe.presence,
+            worktreeSupport: probe.worktreeSupport,
+            ...(probe.worktreeSupportReason === undefined
+                ? {}
+                : { worktreeUnsupportedReason: boundedReason(probe.worktreeSupportReason) }),
+            ...(probe.facts === undefined ? {} : { git: projectGitFactsFrom(probe.facts) }),
+        });
+    }
+
+    /**
+     * Starts work that outlives whatever asked for it, on its own named lifetime. The caller's
+     * context is deliberately not used: a clone must not end when a request does.
+     */
+    #runInBackground(name: string, work: (ctx: Context) => Promise<void>): void {
+        if (this.#closed) return;
+        const root = this.#rootContext;
+        if (root === undefined) {
+            throw new Error(
+                "This project catalog was built without a rootContext, so it cannot start background work.",
+            );
+        }
+        const task = work(root.named(name))
+            .catch(() => undefined)
+            .finally(() => {
+                this.#tasks.delete(task);
+            });
+        this.#tasks.add(task);
     }
 
     formatProjectForModel(label: string, project: Project): string {
@@ -868,41 +1790,33 @@ export class ProjectsModule implements AgentModule {
         return formatSettingsForModel(projectId, settings, this.#maxOutputCharacters);
     }
 
-    /** The project and the machine it lives on, with the acting agent already authorized. */
+    /** The project this operation names, with the acting agent already authorized. */
     async #lookAt(
         ctx: Context,
         agentId: string,
         projectId: string,
         action: ProjectAuthorizationAction,
-    ): Promise<{ compute: HostCompute; project: Project }> {
+    ): Promise<Project> {
         this.#assertAgentId(agentId);
         this.#assertId(projectId);
         const project = await this.#mutations.getRequired(ctx, agentId, projectId);
         await this.#mutations.authorize(ctx, agentId, project.ownerAgentId, action);
-        return {
-            compute: await requireProjectCompute(ctx, this.#compute, agentId),
-            project,
-        };
+        return project;
     }
 
     /**
      * Whether Git considers this exact folder a repository root, rather than somewhere inside one.
      */
-    async #isRepositoryRoot(
-        ctx: Context,
-        compute: HostCompute,
-        project: Project,
-    ): Promise<boolean> {
+    async #isRepositoryRoot(project: Project): Promise<boolean> {
         if (project.kind === "home") return false;
-        const topLevel = await readProjectGit(ctx, compute, project.repositoryRef, [
-            "rev-parse",
-            "--show-toplevel",
-        ]);
-        if (topLevel === undefined) return false;
-        return (
-            (await realProjectPath(compute, topLevel)) ===
-            (await realProjectPath(compute, project.repositoryRef))
-        );
+        try {
+            return (
+                (await readGitTopLevel(this.#git, project.repositoryRef)) === project.repositoryRef
+            );
+        } catch {
+            // A regular folder without Git is a perfectly good project.
+            return false;
+        }
     }
 
     async #changeState(
@@ -1018,15 +1932,6 @@ export function assertProjectAvatarAsset(value: unknown): asserts value is Proje
     }
 }
 
-/** A folder's real path, so two spellings of the same directory compare equal. */
-async function realProjectPath(compute: HostCompute, path: string): Promise<string> {
-    try {
-        return await compute.fs.realpath(computePermissions("read_only"), path);
-    } catch {
-        return path;
-    }
-}
-
 /** Fits an observed reason into the one bounded sentence a project row keeps. */
 function boundedReason(reason: string): string {
     const text = reason.trim().replace(/\s+/gu, " ");
@@ -1057,4 +1962,55 @@ function requireProjectFromResult(result: ProjectStoreMutationResult): Project {
     }
     assertProject(result.project);
     return structuredClone(result.project);
+}
+
+function errorToMessage(error: unknown): string {
+    if (error instanceof Error) return error.message;
+    return typeof error === "string" ? error : JSON.stringify(error);
+}
+
+function remoteProjectSourcesEqual(
+    left: ProjectRemoteSource | undefined,
+    right: ProjectRemoteSource,
+): boolean {
+    if (left?.kind === "github") {
+        return right.kind === "github" && left.repository === right.repository;
+    }
+    return left?.kind === "git" && right.kind === "git" && left.url === right.url;
+}
+
+function remoteSourceUrlMatches(actual: string, source: ProjectRemoteSource): boolean {
+    try {
+        const expected = remoteUrlForSource(source);
+        const normalizedActual =
+            source.kind === "github"
+                ? remoteUrlForSource({
+                      kind: "github",
+                      repository: githubRepositoryFromUrl(actual),
+                  })
+                : new URL(actual).toString();
+        return source.kind === "github"
+            ? normalizedActual.toLowerCase() === expected.toLowerCase()
+            : normalizedActual === expected;
+    } catch {
+        return false;
+    }
+}
+
+function githubRepositoryFromUrl(value: string): string {
+    const url = new URL(value);
+    if (
+        url.protocol !== "https:" ||
+        url.hostname.toLowerCase() !== "github.com" ||
+        url.username.length > 0 ||
+        url.password.length > 0
+    ) {
+        throw new Error("The GitHub origin is invalid.");
+    }
+    const parts = url.pathname
+        .replace(/\.git$/u, "")
+        .split("/")
+        .filter(Boolean);
+    if (parts.length !== 2) throw new Error("The GitHub origin is invalid.");
+    return `${parts[0] ?? ""}/${parts[1] ?? ""}`;
 }

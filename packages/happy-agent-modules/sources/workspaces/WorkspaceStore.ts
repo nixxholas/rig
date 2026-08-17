@@ -349,36 +349,12 @@ export function assertWorkspaceTransactionChange(
     }
 }
 
-/** What a host is told before it moves a workspace's Git branch. */
-export const workspaceHostRenameBranchSchema = Type.Object(
-    {
-        workspaceId: workspaceIdSchema,
-        path: workspacePathSchema,
-        kind: workspaceKindSchema,
-        name: workspaceNameSchema,
-        branch: workspaceBranchSchema,
-        previousBranch: workspaceBranchSchema,
-    },
-    { additionalProperties: false },
-);
-
-/** What a host is told before it removes a workspace's worktree or copied folder. */
-export const workspaceHostArchiveSchema = Type.Object(
-    {
-        workspaceId: workspaceIdSchema,
-        path: workspacePathSchema,
-        kind: workspaceKindSchema,
-        gitCommonDir: Type.Optional(workspaceGitCommonDirSchema),
-    },
-    { additionalProperties: false },
-);
-
 const workspaceHostAvailabilitySchema = Type.Union([Type.Boolean(), Type.Promise(Type.Boolean())]);
 
 /**
- * The host's side of a workspace. Reservation stays inside the module — it is a durable decision
- * about names — but the host says which folders and branches are already spoken for, where a
- * workspace lives, and it performs the Git and filesystem work the durable record describes.
+ * What the store may ask the catalog around it while it decides. Reservation stays inside the store
+ * — it is a durable decision about names — but only the catalog knows which folders and branches
+ * are already spoken for, and where a workspace lives.
  *
  * The two availability answers are a real look at Git: a reservation refuses to invent a branch
  * when nothing can tell it which refs, loose or packed, already exist.
@@ -403,28 +379,6 @@ export const workspaceHostSchema = Type.Object(
                 workspaceHostAvailabilitySchema,
             ),
         ),
-        renameBranch: Type.Optional(
-            Type.Function(
-                [
-                    workspaceContextSchema,
-                    workspaceAgentIdSchema,
-                    workspaceHostRenameBranchSchema,
-                    workspaceMutationRequestSchema,
-                ],
-                Type.Promise(Type.Union([workspaceBranchSchema, Type.Undefined()])),
-            ),
-        ),
-        archive: Type.Optional(
-            Type.Function(
-                [
-                    workspaceContextSchema,
-                    workspaceAgentIdSchema,
-                    workspaceHostArchiveSchema,
-                    workspaceMutationRequestSchema,
-                ],
-                Type.Promise(Type.Void()),
-            ),
-        ),
         branchMetadata: Type.Optional(
             Type.Function(
                 [workspaceContextSchema, workspaceAgentIdSchema, workspaceIdSchema],
@@ -447,8 +401,6 @@ export const workspaceHostSchema = Type.Object(
 );
 
 export type WorkspaceHost = Static<typeof workspaceHostSchema>;
-export type WorkspaceHostRenameBranch = Static<typeof workspaceHostRenameBranchSchema>;
-export type WorkspaceHostArchive = Static<typeof workspaceHostArchiveSchema>;
 
 export const workspaceStoreOptionsSchema = Type.Object(
     { host: Type.Optional(workspaceHostSchema) },

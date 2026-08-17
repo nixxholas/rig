@@ -10,7 +10,7 @@ import type { StartedHappyAgent } from "../../start/startHappyAgent.js";
 import type { HappyAgentConfiguration } from "@slopus/happy-agent-modules";
 import { HAPPY_AGENT_RIG_PROTOCOL_VERSION } from "./rigProtocol.js";
 import { ProjectFilesModule } from "../files/ProjectFilesModule.js";
-import { GitModule } from "../git/GitModule.js";
+import { GitModule } from "@slopus/happy-agent-modules";
 import { readOrCreateAgentToken, isAuthorizedAgentRequest } from "./auth.js";
 import { AgentHttpError, sendError, sendJson } from "./errors.js";
 import { createAgentRoutes } from "./agentRoutes.js";
@@ -124,9 +124,9 @@ function routeGroups(
     options: StartAgentHttpServerOptions,
     agent: StartedHappyAgent,
 ): readonly AgentHttpRouteGroup[] {
-    // The one host the loader composed. Every route reads and writes through it, so a folder a
-    // route reports and a folder the background work actually created are the same folder.
-    const projects = agent.projectWorkspaces;
+    // The two catalogs the loader composed. Every route reads and writes through them, so a folder
+    // a route reports and a folder the background work actually created are the same folder.
+    const projects = agent.modules.projects;
     const protectedPaths = [
         ...new Set([
             ".git",
@@ -141,7 +141,7 @@ function routeGroups(
         new ProjectFilesModule({
             git: projects.git,
             protectedPaths,
-            projects: agent.modules.projects,
+            projects,
             workspaces: agent.modules.workspaces,
         });
     const git = options.configuration?.git ?? new GitModule({ runner: projects.git });
@@ -161,12 +161,10 @@ function routeGroups(
             agent,
             files: projectFiles,
             git,
-            projects,
         }),
         createWorkspaceRoutes({
             agent,
             git,
-            projects,
         }),
         createFileRoutes({
             agent,

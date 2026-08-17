@@ -3,8 +3,10 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { getManagedProjectsDirectory } from "../../sources/modules/projects/getManagedProjectsDirectory.js";
-import { getManagedWorkspacesDirectory } from "../../sources/modules/projects/getManagedWorkspacesDirectory.js";
+import {
+    getManagedProjectsDirectory,
+    getManagedWorkspacesDirectory,
+} from "@slopus/happy-agent-modules";
 
 describe("getManagedProjectsDirectory", () => {
     it("puts cloned projects beside the person's other Happy folders", () => {

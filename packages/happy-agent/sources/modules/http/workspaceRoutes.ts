@@ -8,8 +8,7 @@ import type { StartedHappyAgent } from "../../start/startHappyAgent.js";
 import { readValidatedBody } from "./body.js";
 import { AgentHttpError, sendJson } from "./errors.js";
 import { createRouteGroup, type AgentHttpRouteGroup } from "./router.js";
-import type { ProjectWorkspaceService } from "../projects/ProjectWorkspaceService.js";
-import type { GitModule } from "../git/GitModule.js";
+import type { GitModule } from "@slopus/happy-agent-modules";
 
 const createWorkspaceSchema = Type.Object(
     {
@@ -44,11 +43,14 @@ const emptySchema = Type.Object({}, { additionalProperties: false });
 export interface WorkspaceRouteOptions {
     readonly agent: StartedHappyAgent;
     readonly git?: GitModule;
-    readonly projects: ProjectWorkspaceService;
 }
 
 export function createWorkspaceRoutes(options: WorkspaceRouteOptions): AgentHttpRouteGroup {
-    const service = options.projects;
+    // Both catalogs directly: the workspaces catalog owns the rows and the checkouts, and the
+    // projects catalog answers whether the project in the path exists at all.
+    const catalog = options.agent.modules.workspaces;
+    const projects = options.agent.modules.projects;
+    const agentId = options.agent.rootAgentId;
     const assertEnabled = (): void => {
         if (!options.agent.configuration.values.features.workspaces) {
             throw new AgentHttpError(503, "Workspaces are disabled by configuration.");
@@ -70,7 +72,12 @@ export function createWorkspaceRoutes(options: WorkspaceRouteOptions): AgentHttp
                 // and only come back when the caller says so, and a workspace on its way out is
                 // already gone as far as the project is concerned.
                 const includeArchived = url.searchParams.get("includeArchived") === "true";
-                const rows = (await service.listWorkspaces(ctx, projectId)).filter(
+                const rows = (
+                    await catalog.list(ctx, agentId, {
+                        includeArchived: true,
+                        projectRef: projectId,
+                    })
+                ).filter(
                     (row) =>
                         includeArchived ||
                         (row.status !== "archived" && row.status !== "archiving"),
@@ -99,8 +106,9 @@ export function createWorkspaceRoutes(options: WorkspaceRouteOptions): AgentHttp
                 // Reservation is durable and immediate; the checkout runs behind it. The row that
                 // comes back already carries the branch, folder and storage key Git will use, so
                 // 202 means "this workspace exists and is being built", not "maybe".
-                const workspace = await service.createWorkspace(
+                const workspace = await catalog.createWorkspace(
                     ctx,
+                    agentId,
                     projectId,
                     {
                         ...(body.baseRef === undefined ? {} : { baseRef: body.baseRef }),
@@ -145,13 +153,11 @@ export function createWorkspaceRoutes(options: WorkspaceRouteOptions): AgentHttp
                 // the recorded branch, and the host moves the Git ref afterwards without holding
                 // the request while Git works.
                 const workspace = await mutate(ctx, projectId, workspaceId, expectedVersion, () =>
-                    service.renameWorkspace(
-                        ctx,
-                        projectId,
+                    catalog.rename(ctx, agentId, {
                         workspaceId,
-                        body.name,
+                        name: body.name,
                         expectedVersion,
-                    ),
+                    }),
                 );
                 await recordWorkspaceEvent(ctx, projectId, workspace, "workspace.updated", {
                     ...(body.mutationId === undefined ? {} : { mutationId: body.mutationId }),
@@ -169,16 +175,11 @@ export function createWorkspaceRoutes(options: WorkspaceRouteOptions): AgentHttp
                 const expectedVersion = await expectVersion(ctx, request, projectId, workspaceId);
                 await readValidatedBody(request, emptySchema);
                 // Archiving is durable the moment it is recorded. Removing the worktree is the
-                // host's background work: it can fail, be retried, or find the folder already
-                // gone, and none of that gives the workspace back.
+                // catalog's own background work: it can fail, be retried, or find the folder
+                // already gone, and none of that gives the workspace back.
                 const workspace = await mutate(ctx, projectId, workspaceId, expectedVersion, () =>
-                    service.beginWorkspaceArchive(ctx, projectId, workspaceId, expectedVersion),
+                    catalog.archive(ctx, agentId, workspaceId, { expectedVersion }),
                 );
-                if (workspace.status === "archiving") {
-                    options.agent.background("workspace-archive-cleanup", async (workerCtx) => {
-                        await service.removeArchivedWorkspace(workerCtx, projectId, workspaceId);
-                    });
-                }
                 await recordWorkspaceEvent(ctx, projectId, workspace, "workspace.updated");
                 sendJson(response, 202, { workspace: toWorkspace(workspace) });
             },
@@ -193,13 +194,11 @@ export function createWorkspaceRoutes(options: WorkspaceRouteOptions): AgentHttp
                 const expectedVersion = await expectVersion(ctx, request, projectId, workspaceId);
                 const body = await readValidatedBody(request, reorderSchema);
                 const workspace = await mutate(ctx, projectId, workspaceId, expectedVersion, () =>
-                    service.reorderWorkspace(
-                        ctx,
-                        projectId,
+                    catalog.reorder(ctx, agentId, {
                         workspaceId,
-                        body.afterId,
+                        afterId: body.afterId,
                         expectedVersion,
-                    ),
+                    }),
                 );
                 await recordWorkspaceEvent(ctx, projectId, workspace, "workspace.updated", {
                     ...(body.mutationId === undefined ? {} : { mutationId: body.mutationId }),
@@ -210,9 +209,19 @@ export function createWorkspaceRoutes(options: WorkspaceRouteOptions): AgentHttp
     ]);
 
     async function requireProject(ctx: Context, projectId: string): Promise<void> {
-        if ((await service.getProject(ctx, projectId)) === undefined) {
+        if ((await projects.get(ctx, agentId, projectId)) === undefined) {
             throw new AgentHttpError(404, "The project was not found.");
         }
+    }
+
+    /** One workspace, but only when it is the named project's. */
+    async function findWorkspace(
+        ctx: Context,
+        projectId: string,
+        workspaceId: string,
+    ): Promise<Workspace | undefined> {
+        const workspace = await catalog.get(ctx, agentId, workspaceId);
+        return workspace?.projectRef === projectId ? workspace : undefined;
     }
 
     async function requireWorkspace(
@@ -220,7 +229,7 @@ export function createWorkspaceRoutes(options: WorkspaceRouteOptions): AgentHttp
         projectId: string,
         workspaceId: string,
     ): Promise<Workspace> {
-        const workspace = await service.getWorkspace(ctx, projectId, workspaceId);
+        const workspace = await findWorkspace(ctx, projectId, workspaceId);
         if (workspace === undefined) {
             throw new AgentHttpError(404, "The workspace was not found.");
         }
@@ -269,7 +278,7 @@ export function createWorkspaceRoutes(options: WorkspaceRouteOptions): AgentHttp
         try {
             updated = await run();
         } catch (error) {
-            const now = await service.getWorkspace(ctx, projectId, workspaceId);
+            const now = await findWorkspace(ctx, projectId, workspaceId);
             if (now !== undefined && now.version !== expectedVersion) {
                 throw new AgentHttpError(409, "The workspace has changed.", {
                     currentVersion: now.version,

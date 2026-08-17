@@ -4,10 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import {
-    isPathLexicallyWithin,
-    syncWorkspaceFiles,
-} from "../../sources/modules/projects/syncWorkspaceFiles.js";
+import { isPathLexicallyWithin, syncWorkspaceFiles } from "@slopus/happy-agent-modules";
 
 const roots: string[] = [];
 

@@ -17,6 +17,10 @@ export {
     type HappyAgentConfigurationPaths,
 } from "./config/index.js";
 
+// Git: reading repositories, probing and watching them, and the worktree, clone, and transfer
+// actions the project and workspace catalogs perform. A plain domain module: no hooks, no tools.
+export * from "./git/index.js";
+
 // Events: bounded in-memory queue of raw events with strict UUIDv7 identifiers.
 export {
     appendEventInputSchema,

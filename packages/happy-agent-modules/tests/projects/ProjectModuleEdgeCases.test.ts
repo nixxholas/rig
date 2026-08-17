@@ -2,7 +2,7 @@ import { sql } from "drizzle-orm";
 import { Value } from "@sinclair/typebox/value";
 import { agentDatabaseRun } from "@slopus/happy-agent-base";
 import { withAfterCommit, type Context } from "@steve.kite/stdlib";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import {
     MAX_PROJECT_AVATAR_BYTES,
@@ -21,9 +21,6 @@ import {
     PROJECTS_TABLE,
     PROJECT_SETTINGS_TABLE,
 } from "../../sources/projects/ProjectMigrations.js";
-import { readProjectGitFacts } from "../../sources/projects/impl/probeProjectRepository.js";
-import { remoteProjectName } from "../../sources/projects/impl/remoteProjectName.js";
-import { runProjectGit } from "../../sources/projects/impl/runProjectGit.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
 
 describe("ProjectsModule edge cases", () => {
@@ -533,64 +530,6 @@ describe("ProjectsModule edge cases", () => {
             }),
         ).toBe(false);
         expect(Value.Check(projectStateChangeReasonSchema, "probe")).toBe(true);
-    });
-});
-
-describe("Projects Git helper boundaries", () => {
-    it("quotes Git arguments as data and converts timeout to a failure result", async () => {
-        const run = vi.fn().mockResolvedValue({
-            exitCode: null,
-            stderr: "",
-            stdout: "ignored",
-            timedOut: true,
-        });
-        const compute = {
-            shell: { run },
-        } as never;
-
-        const result = await runProjectGit(
-            {} as Context,
-            compute,
-            "/tmp/project",
-            ["show", "branch'name"],
-            { timeoutMs: 7, maxOutputBytes: 11 },
-        );
-
-        expect(result).toEqual({
-            code: 124,
-            stderr: "Git did not finish in time.",
-            stdout: "ignored",
-        });
-        expect(run).toHaveBeenCalledWith(
-            expect.objectContaining({
-                command: expect.stringContaining("'branch'\\''name'"),
-                cwd: "/tmp/project",
-                maxOutputBytes: 11,
-                timeoutMs: 7,
-            }),
-        );
-    });
-
-    it("reads branch facts and remote names without inventing missing values", async () => {
-        const outputs = new Map<string, string | undefined>([
-            ["rev-parse --verify HEAD", "0123456789abcdef"],
-            ["symbolic-ref --quiet --short HEAD", "main"],
-            ["rev-parse --abbrev-ref --symbolic-full-name @{upstream}", "origin/main"],
-            ["rev-list --left-right --count origin/main...HEAD", "2\t3"],
-        ]);
-        const read = async (args: readonly string[]) => outputs.get(args.join(" "));
-        await expect(readProjectGitFacts(read)).resolves.toEqual({
-            ahead: 3,
-            behind: 2,
-            branch: "main",
-            detached: false,
-            head: "0123456789abcdef",
-            upstream: "origin/main",
-        });
-        expect(remoteProjectName("https://github.com/slopus/happy.git")).toBe("happy");
-        expect(remoteProjectName("git@github.com:slopus/happy.git")).toBe("happy");
-        expect(remoteProjectName("/tmp/local-repository")).toBeUndefined();
-        expect(remoteProjectName("https://github.com/slopus/%E2%98%83.git")).toBe("☃");
     });
 });
 

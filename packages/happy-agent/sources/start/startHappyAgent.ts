@@ -61,10 +61,8 @@ import { openHappyAgentDatabase } from "../modules/agent/HappyAgentDatabase.js";
 import { acquireHappyAgentStorageLock } from "../modules/agent/HappyAgentStorageLock.js";
 import { readGlobalInstructions } from "../modules/agent/readGlobalInstructions.js";
 import { ConversationModule } from "../modules/conversations/ConversationModule.js";
-import { GitStateTracker } from "../modules/git/GitStateTracker.js";
-import { directGitCommandRunner } from "../modules/git/runGitCommand.js";
-import type { ProjectCreatorProfile } from "../modules/projects/ProjectHost.js";
-import { ProjectWorkspaceService } from "../modules/projects/ProjectWorkspaceService.js";
+import { GitStateTracker, directGitCommandRunner } from "@slopus/happy-agent-modules";
+import type { ProjectCreatorProfile } from "@slopus/happy-agent-modules";
 
 /** Everything a caller needs to say. Every other answer comes out of the configuration. */
 export interface StartHappyAgentOptions {
@@ -125,8 +123,8 @@ export interface StartedHappyAgent {
     readonly modules: HappyAgentModules;
     /** The one live Git watcher every reader shares instead of scanning once per request. */
     readonly gitTracker: GitStateTracker;
-    /** Git, managed folders, worktrees, clones and setup behind the project and workspace catalogs. */
-    readonly projectWorkspaces: ProjectWorkspaceService;
+    /** The agent this installation acts as, and the identity both catalogs were opened for. */
+    readonly rootAgentId: string;
     /** What this `.happy` folder is, from the first time anyone started it here. */
     readonly installation: {
         readonly epoch: string;
@@ -343,44 +341,50 @@ export async function startHappyAgent(
             },
         });
 
-        // The catalogs and the service behind them need each other: a workspace reservation asks Git
-        // which branches are taken, while the service reads and writes through these very modules
-        // and is keyed by a root agent that does not exist until they are assembled. The catalogs
-        // therefore reach the service through a box filled a few lines below, before anything can
-        // serve a request, so a call arriving earlier is a composition bug rather than a state a
-        // caller can be in.
-        const host: { service?: ProjectWorkspaceService } = {};
-        const hostService = (): ProjectWorkspaceService => {
-            if (host.service === undefined) {
-                throw new Error(
-                    "Projects and workspaces were used before their host was composed.",
-                );
-            }
-            return host.service;
-        };
+        // Cutting a worktree, cloning a repository, running setup commands and removing a folder are
+        // all consequences of a decision that has already been recorded, so the catalogs run them on
+        // the agent's own lifetime rather than on the request that asked and would be gone before
+        // they finish. `withDatabase` keeps the root a root; the cast only restates that.
+        const catalogRoot = withDatabase(hostRoot) as RootContext;
+        // The workspaces catalog is cut from the projects catalog: a workspace is a branch of a
+        // project's repository, in a folder under the project's own key, and the project owns the
+        // repository lock both of them take. That makes the dependency one-way, and the projects
+        // catalog is built first so it can be handed over rather than reached for.
         const projects = new ProjectsModule({
             crossWorkspace: configuration.values.features.crossWorkspace,
-            avatarAssetReader: {
-                read: async (avatarCtx, agentId, hash) =>
-                    await hostService().avatarAssetReader.read(avatarCtx, agentId, hash),
+            rootContext: catalogRoot,
+            // A project's own person: the profile this copy of Git commits as. Which machine that is
+            // the catalog learns when it is opened, so only the profile is named here.
+            localProfileId: LOCAL_PROJECT_PROFILE_ID,
+            resolveGitSecret: (kind) =>
+                kind === "github" ? localGithubToken(process.env) : undefined,
+            resolveProfile: async (profileId, instanceId) =>
+                profileId === LOCAL_PROJECT_PROFILE_ID
+                    ? await localGitProfile(instanceId)
+                    : undefined,
+            // Avatar bytes are content a person chose and expects to survive a restart, so they
+            // live beside the agent's own database rather than in a temporary folder.
+            stateDirectory: join(paths.agentHome, "projects"),
+            onHostError: (hostCtx, projectId, error) => {
+                hostCtx.log.warn(
+                    "Setting a project up failed; the record says so and it will be tried again.",
+                    { projectId },
+                    error,
+                );
             },
         });
         const workspaces = new WorkspacesModule({
-            // Removing a workspace's folder is the consequence of an archive that has already been
-            // recorded, so it runs on the agent's own lifetime rather than on the request that
-            // asked for it and would be gone before the folder is.
-            cleanupContext: withDatabase(hostRoot.named("workspace-folder-cleanup")),
             enabled: configuration.values.features.workspaces,
-            host: {
-                pathForStorageKey: (projectRef, storageKey) =>
-                    hostService().workspaceCatalogHost.pathForStorageKey(projectRef, storageKey),
-                isBranchUnavailable: (projectRef, branch) =>
-                    hostService().workspaceCatalogHost.isBranchUnavailable(projectRef, branch),
-                isStorageKeyUnavailable: (projectRef, storageKey) =>
-                    hostService().workspaceCatalogHost.isStorageKeyUnavailable(
-                        projectRef,
-                        storageKey,
-                    ),
+            projects,
+            rootContext: catalogRoot,
+            settings: configuration.values.workspace,
+            onHostError: (hostCtx, workspaceId, kind, message) => {
+                hostCtx.log.warn(
+                    kind === "archive"
+                        ? "Removing an archived workspace folder failed; it stays archived and on disk."
+                        : "Renaming a workspace branch failed; the record and Git now disagree.",
+                    { workspaceId, message },
+                );
             },
         });
 
@@ -534,68 +538,56 @@ export async function startHappyAgent(
                 ? await system.create(ctx, rootConfig, { id: rootAgentId })
                 : await system.resolve(ctx, rootAgentId);
 
-        const projectWorkspaces = new ProjectWorkspaceService({
-            agentId: rootAgentId,
-            extendBackgroundContext: withDatabase,
-            // One machine, one person: this installation is the instance, and the only profile it
-            // can resolve is whoever this copy of Git commits as.
-            localCreator: { instanceId: rootAgentId, profileId: LOCAL_PROJECT_PROFILE_ID },
-            localInstanceId: rootAgentId,
-            onWorkspaceBranchError: (error, projectId, workspaceId) => {
-                ctx.log.warn(
-                    "Renaming a workspace branch failed; the record and Git now disagree.",
-                    { projectId, workspaceId },
-                    error,
-                );
-            },
-            onWorkspaceCleanupError: (error, projectId, workspaceId) => {
-                ctx.log.warn(
-                    "Removing an archived workspace folder failed; it stays archived and on disk.",
-                    { projectId, workspaceId },
-                    error,
-                );
-            },
-            projects,
-            resolveGitSecret: (kind) =>
-                kind === "github" ? localGithubToken(process.env) : undefined,
-            resolveProfile: async (profileId) =>
-                profileId === LOCAL_PROJECT_PROFILE_ID
-                    ? await localGitProfile(rootAgentId)
-                    : undefined,
-            rootContext: hostRoot,
-            settings: configuration.values.workspace,
-            // Avatar bytes are content a person chose and expects to survive a restart, so they
-            // live beside the agent's own database rather than in a temporary folder.
-            stateDirectory: join(paths.agentHome, "projects"),
-            workspaces,
-        });
-        host.service = projectWorkspaces;
-
         // One watcher for the whole installation. Every reader that wants Git state registers here
         // and reads what the watcher already knows, instead of scanning repositories itself. What a
         // scan learns is written back through the catalogs, so a snapshot taken for one reader
-        // becomes a durable fact for every later one.
+        // becomes a durable fact for every later one. Failures are logged rather than raised: a scan
+        // arriving for a workspace that has just been archived is ordinary, and a watcher is not the
+        // place to decide a person sees an error.
         const gitTracker = new GitStateTracker({
             onObserverError: (_observerCtx, error, entity) => {
                 ctx.log.debug("A Git watcher could not be armed.", { path: entity.path }, error);
             },
             onSnapshot: async (snapshotCtx, entity, snapshot) => {
-                await projectWorkspaces.gitSnapshotObserver(
-                    withDatabase(snapshotCtx),
-                    entity,
-                    snapshot,
-                );
+                const factsCtx = withDatabase(snapshotCtx);
+                try {
+                    if (entity.workspaceId === undefined) {
+                        await projects.recordGitFacts(
+                            factsCtx,
+                            rootAgentId,
+                            entity.projectId,
+                            snapshot.facts,
+                        );
+                    } else {
+                        await workspaces.recordGitFacts(
+                            factsCtx,
+                            rootAgentId,
+                            entity.workspaceId,
+                            snapshot.facts,
+                        );
+                    }
+                } catch (error: unknown) {
+                    factsCtx.log.debug(
+                        "Git facts from a live scan were not stored.",
+                        { path: entity.path },
+                        error,
+                    );
+                }
             },
             rootContext: hostRoot,
         });
-        // The watcher and the project service stop before the systems that own their database: both
-        // write through the catalogs from background lifetimes, and a write arriving after the
-        // database closed is the one failure nobody would see.
+        // The watcher and both catalogs stop before the systems that own their database: all three
+        // write from background lifetimes, and a write arriving after the database closed is the one
+        // failure nobody would see. Workspaces close before the projects they are cut from.
         unwind.unshift(async () => {
             gitTracker.dispose();
-            await projectWorkspaces.close(withDatabase(ctx));
+            await workspaces.close(withDatabase(ctx));
+            await projects.close(withDatabase(ctx));
         });
-        await projectWorkspaces.open(withDatabase(ctx));
+        // The catalogs pick up whatever the last run left unfinished, and learn which machine they
+        // are from the agent they are opened for.
+        await projects.open(withDatabase(ctx), rootAgentId);
+        await workspaces.open(withDatabase(ctx), rootAgentId);
 
         return {
             agent,
@@ -611,7 +603,7 @@ export async function startHappyAgent(
             },
             models,
             modules,
-            projectWorkspaces,
+            rootAgentId,
             provider,
             providers,
             storage,

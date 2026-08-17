@@ -3,8 +3,8 @@ import { readValidatedBody } from "./body.js";
 import { AgentHttpError, sendJson } from "./errors.js";
 import { createRouteGroup, type AgentHttpRouteGroup } from "./router.js";
 import { ProjectFileError, type ProjectFilesModule } from "../files/ProjectFilesModule.js";
-import { GitModule, gitWatchSchema } from "../git/GitModule.js";
-import type { GitStateTracker, GitTrackedEntity } from "../git/GitStateTracker.js";
+import { GitModule, gitWatchSchema } from "@slopus/happy-agent-modules";
+import type { GitStateTracker, GitTrackedEntity } from "@slopus/happy-agent-modules";
 
 export interface GitRouteOptions {
     readonly agent: StartedHappyAgent;

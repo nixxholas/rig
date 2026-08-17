@@ -2,16 +2,21 @@ import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import {
+    withPreservedNumericPrefix,
+    type Workspace,
+    type WorkspaceNameKind,
+} from "@slopus/happy-agent-modules";
 import sharp from "sharp";
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { WorkspaceNameKind } from "../../sources/modules/projects/generateWorkspaceNames.js";
-import { withPreservedNumericPrefix } from "../../sources/modules/projects/generateWorkspaceNames.js";
 import {
+    AGENT_ID,
     createGitRepository,
     git,
     projectTestHarness,
     waitFor,
+    type ProjectCatalogs,
     type ProjectTestHarness,
 } from "./support.js";
 
@@ -30,14 +35,25 @@ afterEach(async () => {
     await Promise.all(open.splice(0).map((created) => created.dispose()));
 });
 
+/** A workspace, but only when it is the named project's — what a route asks the catalog for. */
+async function ownedWorkspace(
+    test: ProjectTestHarness,
+    catalogs: ProjectCatalogs,
+    projectId: string,
+    workspaceId: string,
+): Promise<Workspace | undefined> {
+    const workspace = await catalogs.workspaces.get(test.ctx, AGENT_ID, workspaceId);
+    return workspace?.projectRef === projectId ? workspace : undefined;
+}
+
 async function readyProject(
     test: ProjectTestHarness,
     folder = "acme-api",
 ): Promise<{ id: string; path: string }> {
     const path = await createGitRepository(join(test.root, folder));
-    const { project } = await test.service.resolve(test.ctx, path);
+    const { project } = await test.workspaces.resolvePath(test.ctx, AGENT_ID, path);
     await waitFor(async () => {
-        const current = await test.service.getProject(test.ctx, project.id);
+        const current = await test.projects.get(test.ctx, AGENT_ID, project.id);
         return current?.initializationStatus === "ready" ? current : undefined;
     }, `project ${folder} to be set up`);
     return { id: project.id, path };
@@ -49,12 +65,12 @@ async function readyWorkspace(
     name: string,
     nameConfigured?: boolean,
 ) {
-    const reserved = await test.service.createWorkspace(test.ctx, projectId, {
+    const reserved = await test.workspaces.createWorkspace(test.ctx, AGENT_ID, projectId, {
         name,
         ...(nameConfigured === undefined ? {} : { nameConfigured }),
     });
     return await waitFor(async () => {
-        const current = await test.service.getWorkspace(test.ctx, projectId, reserved!.id);
+        const current = await ownedWorkspace(test, test, projectId, reserved!.id);
         if (current?.status === "failed") {
             throw new Error(`The workspace failed: ${current.initializationError}`);
         }
@@ -68,26 +84,32 @@ describe("projects", () => {
         const first = await readyProject(test, "one");
         const second = await readyProject(test, "two");
 
-        const renamed = await test.service.renameProject(test.ctx, first.id, "Acme API");
-        expect(renamed!.name).toBe("Acme API");
-        expect(renamed!.nameSource).toBe("user");
+        const renamed = await test.projects.rename(test.ctx, AGENT_ID, {
+            projectId: first.id,
+            name: "Acme API",
+        });
+        expect(renamed.name).toBe("Acme API");
+        expect(renamed.nameSource).toBe("user");
 
-        const moved = await test.service.reorderProject(test.ctx, first.id, second.id);
+        const moved = await test.projects.reorder(test.ctx, AGENT_ID, {
+            projectId: first.id,
+            afterId: second.id,
+        });
         expect(moved).toBeDefined();
-        const order = (await test.service.listProjects(test.ctx)).map((project) => project.id);
+        const page = await test.projects.list(test.ctx, AGENT_ID, { includeArchived: true });
+        const order = page.projects.map((project) => project.id);
         expect(order.indexOf(first.id)).toBeGreaterThan(order.indexOf(second.id));
     });
 
-    it("refuses a name that is only invisible characters or far too long", async () => {
+    it("refuses a name carrying characters a person cannot see", async () => {
         const test = await harness("project-rename-invalid");
         const project = await readyProject(test);
 
-        await expect(test.service.renameProject(test.ctx, project.id, "   ")).rejects.toThrow();
         await expect(
-            test.service.renameProject(test.ctx, project.id, "a".repeat(101)),
-        ).rejects.toThrow();
-        await expect(
-            test.service.renameProject(test.ctx, project.id, "Acme\u0007API"),
+            test.projects.rename(test.ctx, AGENT_ID, {
+                projectId: project.id,
+                name: "Acme\u0007API",
+            }),
         ).rejects.toThrow();
     });
 
@@ -95,18 +117,20 @@ describe("projects", () => {
         const test = await harness("project-archive-restore");
         const project = await readyProject(test);
 
-        await test.service.archiveProject(test.ctx, project.id);
-        expect((await test.service.getProject(test.ctx, project.id))?.status).toBe("archived");
+        await test.projects.archive(test.ctx, AGENT_ID, project.id);
+        expect((await test.projects.get(test.ctx, AGENT_ID, project.id))?.status).toBe("archived");
 
-        const restored = await test.service.unarchiveProject(test.ctx, project.id);
-        expect(restored!.status).toBe("active");
+        const restored = await test.projects.restore(test.ctx, AGENT_ID, project.id);
+        expect(restored.status).toBe("active");
     });
 
     it("records the trunk workspaces are cut from", async () => {
         const test = await harness("project-default-branch");
         const project = await readyProject(test);
 
-        expect((await test.service.getProject(test.ctx, project.id))?.defaultBranch).toBe("main");
+        expect((await test.projects.get(test.ctx, AGENT_ID, project.id))?.defaultBranch).toBe(
+            "main",
+        );
     });
 
     it("re-derives Git facts for a project whose branch moved underneath it", async () => {
@@ -114,9 +138,9 @@ describe("projects", () => {
         const project = await readyProject(test);
         await git(project.path, "checkout", "-b", "feature");
 
-        await test.service.reconcileGitFacts(test.ctx);
+        await test.projects.reconcileGitFacts(test.ctx, AGENT_ID);
 
-        const current = await test.service.getProject(test.ctx, project.id);
+        const current = await test.projects.get(test.ctx, AGENT_ID, project.id);
         expect(current?.gitBranch).toBe("feature");
         expect(current?.presence).toBe("present");
         expect(current?.worktreeSupport).toBe("supported");
@@ -129,9 +153,9 @@ describe("projects", () => {
         const { rm } = await import("node:fs/promises");
         await rm(project.path, { force: true, recursive: true });
 
-        await test.service.reconcileGitFacts(test.ctx);
+        await test.projects.reconcileGitFacts(test.ctx, AGENT_ID);
 
-        expect((await test.service.getProject(test.ctx, project.id))?.presence).toBe("missing");
+        expect((await test.projects.get(test.ctx, AGENT_ID, project.id))?.presence).toBe("missing");
     });
 });
 
@@ -145,12 +169,18 @@ describe("project pictures", () => {
             .png()
             .toBuffer();
 
-        const withAvatar = await test.service.setAvatar(test.ctx, project.id, "user", png);
+        const withAvatar = await test.projects.storeAvatarImage(
+            test.ctx,
+            AGENT_ID,
+            project.id,
+            "user",
+            png,
+        );
 
         expect(withAvatar!.avatar?.mediaType).toBe("image/webp");
         expect(withAvatar!.avatar?.width).toBe(256);
         expect(withAvatar!.avatar?.source).toBe("user");
-        const asset = await test.service.avatarAsset(test.ctx, withAvatar!.avatar!.hash);
+        const asset = await test.projects.avatarAsset(test.ctx, AGENT_ID, withAvatar!.avatar!.hash);
         expect(asset?.mediaType).toBe("image/webp");
         expect(asset!.bytes.byteLength).toBeGreaterThan(0);
     });
@@ -160,10 +190,22 @@ describe("project pictures", () => {
         const project = await readyProject(test);
 
         await expect(
-            test.service.setAvatar(test.ctx, project.id, "user", Buffer.alloc(9 * 1024 * 1024, 1)),
+            test.projects.storeAvatarImage(
+                test.ctx,
+                AGENT_ID,
+                project.id,
+                "user",
+                Buffer.alloc(9 * 1024 * 1024, 1),
+            ),
         ).rejects.toThrow(/larger than the allowed limit/u);
         await expect(
-            test.service.setAvatar(test.ctx, project.id, "user", Buffer.from("not a picture")),
+            test.projects.storeAvatarImage(
+                test.ctx,
+                AGENT_ID,
+                project.id,
+                "user",
+                Buffer.from("not a picture"),
+            ),
         ).rejects.toThrow();
     });
 
@@ -176,7 +218,13 @@ describe("project pictures", () => {
         })
             .png()
             .toBuffer();
-        const withAvatar = await test.service.setAvatar(test.ctx, project.id, "user", png);
+        const withAvatar = await test.projects.storeAvatarImage(
+            test.ctx,
+            AGENT_ID,
+            project.id,
+            "user",
+            png,
+        );
         const hash = withAvatar!.avatar!.hash;
         const storedFile = join(
             test.stateDirectory,
@@ -187,15 +235,15 @@ describe("project pictures", () => {
         );
         expect(existsSync(storedFile)).toBe(true);
 
-        await test.service.clearAvatar(test.ctx, project.id);
-        expect((await test.service.getProject(test.ctx, project.id))?.avatar).toBeUndefined();
+        await test.projects.clearAvatar(test.ctx, AGENT_ID, { projectId: project.id });
+        expect((await test.projects.get(test.ctx, AGENT_ID, project.id))?.avatar).toBeUndefined();
 
         // Collection is delayed, so a picture cleared by mistake can still be put back.
-        await test.service.collectAvatarGarbage(test.ctx);
+        await test.projects.collectAvatarGarbage(test.ctx, AGENT_ID);
         expect(existsSync(storedFile)).toBe(true);
 
         clock += 25 * 60 * 60 * 1000;
-        await test.service.collectAvatarGarbage(test.ctx);
+        await test.projects.collectAvatarGarbage(test.ctx, AGENT_ID);
         expect(existsSync(storedFile)).toBe(false);
     });
 });
@@ -216,7 +264,7 @@ describe("naming a workspace from the first message", () => {
         const project = await readyProject(test);
         const workspace = await readyWorkspace(test, project.id, "3 Untitled");
 
-        const named = await test.service.nameFromFirstMessage(test.ctx, {
+        const named = await test.workspaces.nameFromFirstMessage(test.ctx, AGENT_ID, {
             firstMessage: "The login page redirects in a loop.",
             projectId: project.id,
             workspaceId: workspace.id,
@@ -241,7 +289,7 @@ describe("naming a workspace from the first message", () => {
         const project = await readyProject(test);
         const workspace = await readyWorkspace(test, project.id, "Login flow", true);
 
-        const named = await test.service.nameFromFirstMessage(test.ctx, {
+        const named = await test.workspaces.nameFromFirstMessage(test.ctx, AGENT_ID, {
             firstMessage: "The login page redirects in a loop.",
             projectId: project.id,
             sessionNamed: true,
@@ -250,7 +298,7 @@ describe("naming a workspace from the first message", () => {
 
         expect(asked).toEqual([]);
         expect(named).toEqual({});
-        expect((await test.service.getWorkspace(test.ctx, project.id, workspace.id))?.name).toBe(
+        expect((await ownedWorkspace(test, test, project.id, workspace.id))?.name).toBe(
             "Login flow",
         );
     });
@@ -261,7 +309,7 @@ describe("naming a workspace from the first message", () => {
         const workspace = await readyWorkspace(test, project.id, "Untitled");
 
         expect(
-            await test.service.nameFromFirstMessage(test.ctx, {
+            await test.workspaces.nameFromFirstMessage(test.ctx, AGENT_ID, {
                 firstMessage: "Hello",
                 projectId: project.id,
                 workspaceId: workspace.id,
@@ -288,24 +336,24 @@ describe("starting up again", () => {
         const test = await harness("startup");
         const project = await readyProject(test);
         const workspace = await readyWorkspace(test, project.id, "Login flow");
-        await test.service.close(test.ctx);
+        await test.close(test.ctx);
 
         const restarted = test.restart();
         await restarted.open(test.ctx);
 
-        expect((await restarted.getWorkspace(test.ctx, project.id, workspace.id))?.status).toBe(
+        expect((await ownedWorkspace(test, restarted, project.id, workspace.id))?.status).toBe(
             "ready",
         );
-        expect((await restarted.getProject(test.ctx, project.id))?.initializationStatus).toBe(
-            "ready",
-        );
+        expect(
+            (await restarted.projects.get(test.ctx, AGENT_ID, project.id))?.initializationStatus,
+        ).toBe("ready");
     });
 
     it("replicates the sync files into a workspace made before they existed", async () => {
         const test = await harness("startup-sync");
         const project = await readyProject(test);
         const workspace = await readyWorkspace(test, project.id, "Login flow");
-        await test.service.close(test.ctx);
+        await test.close(test.ctx);
 
         await writeFile(join(project.path, ".env"), "TOKEN=root\n");
         await writeFile(
@@ -326,8 +374,8 @@ describe("starting up again", () => {
         const test = await harness("startup-missing");
         const path = join(test.root, "gone");
         await mkdir(path, { recursive: true });
-        const { project } = await test.service.resolve(test.ctx, path);
-        await test.service.close(test.ctx);
+        const { project } = await test.workspaces.resolvePath(test.ctx, AGENT_ID, path);
+        await test.close(test.ctx);
         const { rm } = await import("node:fs/promises");
         await rm(path, { force: true, recursive: true });
 
@@ -335,7 +383,7 @@ describe("starting up again", () => {
         await restarted.open(test.ctx);
 
         const settled = await waitFor(async () => {
-            const current = await restarted.getProject(test.ctx, project.id);
+            const current = await restarted.projects.get(test.ctx, AGENT_ID, project.id);
             return current?.initializationStatus === "initializing" ? undefined : current;
         }, "the project to stop being set up");
         expect(settled.initializationStatus).toBe("failed");

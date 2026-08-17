@@ -142,16 +142,27 @@ export {
 export {
     assertProjectModuleOptions,
     assertProjectAvatarAsset,
-    projectAvatarAssetReaderSchema,
     projectClockSchema,
     projectEventIdFactorySchema,
     projectModuleOptionsSchema,
     projectIdFactorySchema,
     projectPostCommitErrorSchema,
     ProjectsModule,
-    type ProjectAvatarAssetReader,
     type ProjectModuleOptions,
 } from "./ProjectsModule.js";
+export { projectGitFactsFrom } from "./projectGitFacts.js";
+export {
+    projectCreatorProfileSchema,
+    type CreateRemoteProjectRequest,
+    type ProjectCreatorOptions,
+    type ProjectCreatorProfile,
+    type RegisterProjectRequest,
+} from "./ProjectProvisioning.js";
+export {
+    projectRegistrationErrorCodeSchema,
+    ProjectRegistrationError,
+    type ProjectRegistrationErrorCode,
+} from "./ProjectRegistrationError.js";
 export {
     assertProjectPage,
     assertProjectStore,
@@ -213,6 +224,7 @@ export {
     assertProjectSettings,
     assertProjectTransition,
 } from "./ProjectTransition.js";
+export { getManagedProjectsDirectory } from "./impl/getManagedProjectsDirectory.js";
 export {
     folderProjectName,
     HOME_PROJECT_NAME,
