@@ -12,3 +12,16 @@
   `SPEC.md` rather than removing the archive.
 - `senderAgentId` is attribution, never authorization. The reviewer's trust decision must keep
   resting solely on the positive `messageOrigin: "user"` stamp; a sender ID grants nothing.
+
+- The reviewer now returns its verdict as tagged fields (`<review>` wrapping `<risk_level>`,
+  `<user_authorization>`, `<outcome>`, `<rationale>`) instead of hand-assembled JSON. The user
+  found a session where the reviewer allowed a `sync to main` push twice and both allows were
+  discarded: its rationale quoted the phrase `"sync to main"`, the unescaped quotes made the JSON
+  unparseable, and the unreadable answer became a `rejected` denial telling the agent not to route
+  around a judgement the reviewer never made. Free text can break a format the model has to
+  assemble by hand; tags have nothing to escape. `SPEC.md` §2 (the "identical JSON contract" row),
+  §7.3, and §8 still describe the JSON contract and its brace recovery, so they contradict the
+  code and need a dictated update.
+- Unreadable verdicts are still classified as `rejected`. The user noted that `unavailable` is the
+  honest bucket — a verdict that could not be read is not a judgement about the action — but chose
+  the format fix first; the reclassification is still open.

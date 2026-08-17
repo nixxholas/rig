@@ -1,13 +1,17 @@
 import { Type, type Static } from "@sinclair/typebox";
 
 /**
- * Parses the guardian's final message into a verdict, ported byte-for-byte from Rig v1's
- * `permissions/parseAutoPermissionReview.ts`.
+ * Parses the guardian's final message into a verdict.
  *
- * The recovery path is deliberately thin and must stay that way for parity: strict JSON first,
- * then the text between the first `{` and the last `}` when the model wrapped its assessment in
- * prose. The verdict's defaults, normalization, and the 240-character reason cap are the exact v1
- * behavior, so the same guardian output produces the same decision here as it did in v1.
+ * The reviewer answers in the tagged form `createPermissionReviewInstructions` asks for, because
+ * v1's hand-assembled JSON broke whenever the rationale quoted the user: a single unescaped quote
+ * turned an allow into an unreadable answer and refused the call. Tags have no escaping to get
+ * wrong — the three classifications are closed word lists, and the rationale is whatever sits
+ * between its own tags.
+ *
+ * Reading stays deliberately thin. The last `<review>` block wins so the reviewer may think in
+ * prose first, and each field is read once from inside it. An unrecognized classification is not
+ * a verdict; the defaults, whitespace normalization, and 240-character reason cap are v1's.
  */
 
 export const autoPermissionRiskSchema = Type.Union([
@@ -65,49 +69,58 @@ const AUTHORIZATIONS: readonly AutoPermissionUserAuthorization[] = [
 ];
 
 export function parseAutoPermissionReview(text: string): AutoPermissionReview | undefined {
-    const value = parseGuardianJson(text);
-    if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
-    const record = value as Record<string, unknown>;
-    if (record.outcome !== "allow" && record.outcome !== "deny") return undefined;
-    const risk = RISKS.find((candidate) => candidate === record.risk_level);
-    if (record.risk_level != null && risk === undefined) return undefined;
-    const userAuthorization = AUTHORIZATIONS.find(
-        (candidate) => candidate === record.user_authorization,
-    );
-    if (record.user_authorization != null && userAuthorization === undefined) return undefined;
-    if (record.rationale != null && typeof record.rationale !== "string") return undefined;
-    const rationale =
-        typeof record.rationale === "string" && record.rationale.trim().length > 0
-            ? record.rationale
-            : record.outcome === "allow"
+    const block = reviewBlock(text);
+    const outcome = word(readTag(block, "outcome"));
+    if (outcome !== "allow" && outcome !== "deny") return undefined;
+    const riskWord = word(readTag(block, "risk_level"));
+    const risk = RISKS.find((candidate) => candidate === riskWord);
+    if (riskWord !== undefined && risk === undefined) return undefined;
+    const authorizationWord = word(readTag(block, "user_authorization"));
+    const userAuthorization = AUTHORIZATIONS.find((candidate) => candidate === authorizationWord);
+    if (authorizationWord !== undefined && userAuthorization === undefined) return undefined;
+    const rationale = readTag(block, "rationale");
+    const reason =
+        rationale !== undefined && rationale.trim().length > 0
+            ? rationale
+            : outcome === "allow"
               ? "Auto-review returned a low-risk allow decision."
               : "Auto-review returned a deny decision without a rationale.";
     return {
-        decision: record.outcome,
-        ...(record.outcome === "deny" ? { denialKind: "rejected" as const } : {}),
-        reason: normalizeReason(rationale),
-        risk: risk ?? (record.outcome === "allow" ? "low" : "high"),
+        decision: outcome,
+        ...(outcome === "deny" ? { denialKind: "rejected" as const } : {}),
+        reason: normalizeReason(reason),
+        risk: risk ?? (outcome === "allow" ? "low" : "high"),
         userAuthorization: userAuthorization ?? "unknown",
     };
 }
 
 /**
- * Matches the guardian's thin recovery path: prefer strict JSON, then accept the text between the
- * first opening and last closing brace when the model wrapped its assessment in prose.
+ * The verdict is the last `<review>` block, so a reviewer may reason in prose — and quote the
+ * contract it was given — before answering. A message that tags its fields without wrapping them
+ * is read whole, the same thin courtesy v1 extended to an assessment buried in prose.
  */
-function parseGuardianJson(text: string): unknown {
-    try {
-        return JSON.parse(text);
-    } catch {
-        const start = text.indexOf("{");
-        const end = text.lastIndexOf("}");
-        if (start < 0 || end <= start) return undefined;
-        try {
-            return JSON.parse(text.slice(start, end + 1));
-        } catch {
-            return undefined;
-        }
-    }
+function reviewBlock(text: string): string {
+    const start = text.lastIndexOf("<review>");
+    if (start < 0) return text;
+    const from = start + "<review>".length;
+    const end = text.indexOf("</review>", from);
+    return end < 0 ? text.slice(from) : text.slice(from, end);
+}
+
+/** The text between a field's own tags, or to the end of the block when it was never closed. */
+function readTag(block: string, name: string): string | undefined {
+    const open = `<${name}>`;
+    const start = block.indexOf(open);
+    if (start < 0) return undefined;
+    const from = start + open.length;
+    const end = block.indexOf(`</${name}>`, from);
+    return end < 0 ? block.slice(from) : block.slice(from, end);
+}
+
+/** A closed-list field's value: one bare word, however the reviewer cased or spaced it. */
+function word(value: string | undefined): string | undefined {
+    const normalized = value?.trim().toLowerCase();
+    return normalized === undefined || normalized.length === 0 ? undefined : normalized;
 }
 
 function normalizeReason(reason: string): string {

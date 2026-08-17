@@ -22,7 +22,7 @@ import { ScriptedProvider } from "../support/ScriptedProvider.js";
  *
  * The reviewer is not mocked here: `AutoModule` builds its own private `AgentSystemLocal`, creates a
  * reviewer agent, runs one real review inference through a scripted provider that answers with the
- * guardian's JSON verdict, parses that verdict, and re-derives the allow policy. Only model
+ * guardian's tagged verdict, parses that verdict, and re-derives the allow policy. Only model
  * inference is scripted; the archive, private system, reviewer lifecycle, prompt, and verdict
  * parsing are the production code paths a daemon uses in Auto mode.
  */
@@ -40,11 +40,17 @@ const MODELS: AgentModel[] = [
 
 const MAIN_AGENT_ID = "mainagentunderreview";
 
-/** A scripted review turn: the reviewer says one text message — its JSON verdict — and settles. */
-function verdictTurn(json: string): SessionEvent[] {
+/** The guardian's verdict in the tagged form its output contract asks for. */
+function taggedVerdict(fields: Record<string, string>): string {
+    const tags = Object.entries(fields).map(([name, value]) => `<${name}>${value}</${name}>`);
+    return `<review>\n${tags.join("\n")}\n</review>`;
+}
+
+/** A scripted review turn: the reviewer says one text message — its verdict — and settles. */
+function verdictTurn(text: string): SessionEvent[] {
     return [
         { type: "text_start" },
-        { type: "text_delta", delta: json },
+        { type: "text_delta", delta: text },
         { type: "text_end" },
         { type: "done", state: "normal", tokens: { input: 1, output: 1 } },
     ];
@@ -212,7 +218,7 @@ describe("AutoModule reviewer", () => {
     it("allows an action when the reviewer's verdict allows it", async () => {
         const { world, review } = await reviewWorld([
             verdictTurn(
-                JSON.stringify({
+                taggedVerdict({
                     risk_level: "low",
                     user_authorization: "high",
                     outcome: "allow",
@@ -231,7 +237,7 @@ describe("AutoModule reviewer", () => {
     it("denies an action when the reviewer's verdict denies it", async () => {
         const { world, review } = await reviewWorld([
             verdictTurn(
-                JSON.stringify({
+                taggedVerdict({
                     risk_level: "high",
                     user_authorization: "unknown",
                     outcome: "deny",
@@ -252,7 +258,7 @@ describe("AutoModule reviewer", () => {
         // user authorization is re-derived to a denial by the allow policy, defense in depth.
         const { world, review } = await reviewWorld([
             verdictTurn(
-                JSON.stringify({
+                taggedVerdict({
                     risk_level: "high",
                     user_authorization: "unknown",
                     outcome: "allow",
@@ -285,7 +291,7 @@ describe("AutoModule reviewer", () => {
         const { world, review } = await reviewWorld(
             [
                 verdictTurn(
-                    JSON.stringify({
+                    taggedVerdict({
                         outcome: "allow",
                         risk_level: "low",
                         user_authorization: "high",
@@ -305,7 +311,7 @@ describe("AutoModule reviewer", () => {
         const { world, review } = await reviewWorld(
             [
                 verdictTurn(
-                    JSON.stringify({
+                    taggedVerdict({
                         outcome: "allow",
                         risk_level: "low",
                         user_authorization: "high",
@@ -336,7 +342,7 @@ describe("AutoModule reviewer", () => {
     });
 
     it("reuses a normal reviewer session and sends a continued empty delta", async () => {
-        const verdict = JSON.stringify({
+        const verdict = taggedVerdict({
             outcome: "allow",
             risk_level: "low",
             user_authorization: "high",
@@ -358,7 +364,7 @@ describe("AutoModule reviewer", () => {
     });
 
     it("serializes concurrent reviews for one agent in FIFO order", async () => {
-        const verdict = JSON.stringify({
+        const verdict = taggedVerdict({
             outcome: "deny",
             risk_level: "high",
             user_authorization: "unknown",
@@ -393,7 +399,7 @@ describe("AutoModule reviewer", () => {
 
         const firstSignal = new AbortController();
         const secondController = new AbortController();
-        const verdict = JSON.stringify({
+        const verdict = taggedVerdict({
             outcome: "allow",
             risk_level: "low",
             user_authorization: "high",
@@ -415,7 +421,7 @@ describe("AutoModule reviewer", () => {
     });
 
     it("rebuilds the reviewer and resends the whole transcript after an abnormal run", async () => {
-        const verdict = JSON.stringify({
+        const verdict = taggedVerdict({
             outcome: "allow",
             risk_level: "low",
             user_authorization: "high",
@@ -435,7 +441,7 @@ describe("AutoModule reviewer", () => {
     });
 
     it("rereads security files and appends project instructions before every review", async () => {
-        const verdict = JSON.stringify({
+        const verdict = taggedVerdict({
             outcome: "allow",
             risk_level: "low",
             user_authorization: "high",

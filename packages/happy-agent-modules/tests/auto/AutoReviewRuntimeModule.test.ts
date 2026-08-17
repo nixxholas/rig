@@ -62,7 +62,7 @@ describe("AutoReviewRuntimeModule", () => {
             reviewerScope,
             persistedEvent({
                 type: "text_end",
-                block: { type: "text", text: '{"outcome":"allow"}' },
+                block: { type: "text", text: "<review><outcome>allow</outcome></review>" },
             }),
         );
         hooks?.onEventTransact?.(
@@ -117,7 +117,7 @@ describe("AutoReviewRuntimeModule", () => {
         expect(module.takeCapture("reviewer")).toEqual({
             entries: [
                 { type: "thinking", text: "I should inspect the target." },
-                { type: "text", text: '{"outcome":"allow"}' },
+                { type: "text", text: "<review><outcome>allow</outcome></review>" },
                 {
                     type: "tool_call",
                     name: "read_file",

@@ -3,8 +3,11 @@ import { describe, expect, it } from "vitest";
 
 import { convertGuardianReview } from "../../sources/auto/impl/convertGuardianReview.js";
 
-function guardian(outcome: string, extra: Record<string, unknown> = {}): string {
-    return JSON.stringify({ outcome, ...extra });
+function guardian(outcome: string, extra: Record<string, string> = {}): string {
+    const fields = Object.entries({ outcome, ...extra }).map(
+        ([name, value]) => `<${name}>${value}</${name}>`,
+    );
+    return `<review>\n${fields.join("\n")}\n</review>`;
 }
 
 describe("convertGuardianReview", () => {

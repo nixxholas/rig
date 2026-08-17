@@ -8,14 +8,20 @@ import {
 } from "../../sources/auto/impl/createPermissionReviewInstructions.js";
 
 describe("createPermissionReviewInstructions", () => {
-    it("guardian_prompt_matches_v1_golden_bytes", () => {
-        // The generated no-policy prompt must be byte-identical to the v1 guardian prompt, so the
-        // reviewer reads exactly the same policy. These are the exact length and hash the v1
-        // golden test asserts.
-        expect(PERMISSION_REVIEW_INSTRUCTIONS).toHaveLength(13_473);
+    it("pins the generated no-policy prompt to known bytes", () => {
+        // The judging policy is still v1's, byte for byte; only the output contract deviates, so
+        // the reviewer answers in tags instead of hand-assembled JSON. Any further drift in the
+        // prompt should be a deliberate edit, not an accident.
+        expect(PERMISSION_REVIEW_INSTRUCTIONS).toHaveLength(13_889);
         expect(createHash("sha256").update(PERMISSION_REVIEW_INSTRUCTIONS).digest("hex")).toBe(
-            "e455a9b4f059b0f2ab9bad7843f8c78a0cb7c273fc0c00764a9c4d5ac60d1ab2",
+            "646e3c230601fbb42ea960ea1c97449e606cc329c63fddc4629e51ea7283ba83",
         );
+    });
+
+    it("asks for the verdict as tagged fields the rationale cannot break", () => {
+        expect(PERMISSION_REVIEW_INSTRUCTIONS).toContain("<outcome>allow | deny</outcome>");
+        expect(PERMISSION_REVIEW_INSTRUCTIONS).toContain("<rationale>One concise sentence.");
+        expect(PERMISSION_REVIEW_INSTRUCTIONS).not.toContain("strict JSON");
     });
 
     it("appends a user security policy under the fixed stricter-wins heading", () => {

@@ -5,7 +5,14 @@ import { parseAutoPermissionReview } from "../../sources/auto/impl/parseAutoPerm
 describe("parseAutoPermissionReview", () => {
     it("reads the structured verdict the guardian is told to produce", () => {
         const review = parseAutoPermissionReview(
-            '{"outcome":"allow","risk_level":"low","user_authorization":"high","rationale":"Routine local edit."}',
+            [
+                "<review>",
+                "<risk_level>low</risk_level>",
+                "<user_authorization>high</user_authorization>",
+                "<outcome>allow</outcome>",
+                "<rationale>Routine local edit.</rationale>",
+                "</review>",
+            ].join("\n"),
         );
 
         expect(review).toEqual({
@@ -16,21 +23,28 @@ describe("parseAutoPermissionReview", () => {
         });
     });
 
-    it("accepts the same thin surrounding-prose recovery as the guardian", () => {
-        expect(
-            parseAutoPermissionReview(
-                'Assessment: {"outcome":"allow","risk_level":"low","user_authorization":"high","rationale":"Routine local edit."}',
-            ),
-        ).toEqual({
+    it("keeps a rationale that quotes the user, which broke the old JSON contract", () => {
+        const review = parseAutoPermissionReview(
+            [
+                "<review>",
+                "<risk_level>high</risk_level>",
+                "<user_authorization>high</user_authorization>",
+                "<outcome>allow</outcome>",
+                '<rationale>The user issued the "sync to main" command, whose documented workflow is exactly this non-force push {no escaping needed}.</rationale>',
+                "</review>",
+            ].join("\n"),
+        );
+
+        expect(review).toEqual({
             decision: "allow",
-            risk: "low",
+            reason: 'The user issued the "sync to main" command, whose documented workflow is exactly this non-force push {no escaping needed}.',
+            risk: "high",
             userAuthorization: "high",
-            reason: "Routine local edit.",
         });
     });
 
-    it("uses guardian defaults for omitted assessment details", () => {
-        expect(parseAutoPermissionReview('{"outcome":"allow"}')).toEqual({
+    it("accepts the short low-risk answer", () => {
+        expect(parseAutoPermissionReview("<review>\n<outcome>allow</outcome>\n</review>")).toEqual({
             decision: "allow",
             risk: "low",
             userAuthorization: "unknown",
@@ -39,7 +53,7 @@ describe("parseAutoPermissionReview", () => {
     });
 
     it("defaults an omitted deny rationale and risk to the deny values", () => {
-        expect(parseAutoPermissionReview('{"outcome":"deny"}')).toEqual({
+        expect(parseAutoPermissionReview("<review><outcome>deny</outcome></review>")).toEqual({
             decision: "deny",
             denialKind: "rejected",
             risk: "high",
@@ -48,9 +62,69 @@ describe("parseAutoPermissionReview", () => {
         });
     });
 
+    it("reads a verdict the reviewer wrote after thinking in prose", () => {
+        expect(
+            parseAutoPermissionReview(
+                "The target is a single file in the workspace.\n\n<review>\n<outcome>allow</outcome>\n</review>",
+            ),
+        ).toEqual({
+            decision: "allow",
+            risk: "low",
+            userAuthorization: "unknown",
+            reason: "Auto-review returned a low-risk allow decision.",
+        });
+    });
+
+    it("takes the last review block when the reviewer restated the contract first", () => {
+        expect(
+            parseAutoPermissionReview(
+                [
+                    "The contract asks for <review><outcome>allow | deny</outcome></review>.",
+                    "<review>",
+                    "<outcome>deny</outcome>",
+                    "<rationale>Deletes a path outside the workspace.</rationale>",
+                    "</review>",
+                ].join("\n"),
+            ),
+        ).toEqual({
+            decision: "deny",
+            denialKind: "rejected",
+            risk: "high",
+            userAuthorization: "unknown",
+            reason: "Deletes a path outside the workspace.",
+        });
+    });
+
+    it("reads tagged fields the reviewer did not wrap in a review block", () => {
+        expect(
+            parseAutoPermissionReview(
+                "<outcome>allow</outcome>\n<rationale>Read-only listing.</rationale>",
+            ),
+        ).toEqual({
+            decision: "allow",
+            risk: "low",
+            userAuthorization: "unknown",
+            reason: "Read-only listing.",
+        });
+    });
+
+    it("tolerates casing and padding in the closed-list fields", () => {
+        expect(
+            parseAutoPermissionReview(
+                "<review><outcome> Allow </outcome><risk_level>MEDIUM</risk_level></review>",
+            ),
+        ).toEqual({
+            decision: "allow",
+            risk: "medium",
+            userAuthorization: "unknown",
+            reason: "Auto-review returned a low-risk allow decision.",
+        });
+    });
+
     it("collapses whitespace and caps an overlong rationale at 240 characters", () => {
-        const rationale = `${"word ".repeat(80)}tail`;
-        const review = parseAutoPermissionReview(JSON.stringify({ outcome: "deny", rationale }));
+        const review = parseAutoPermissionReview(
+            `<review><outcome>deny</outcome><rationale>${"word ".repeat(80)}tail</rationale></review>`,
+        );
 
         // v1 keeps 237 characters plus the single-character ellipsis, so the cap is 238 total.
         expect(review?.reason).toHaveLength(238);
@@ -61,29 +135,32 @@ describe("parseAutoPermissionReview", () => {
     it("rejects unknown outcomes and unknown supplied classifications", () => {
         expect(
             parseAutoPermissionReview(
-                '{"outcome":"escalate","risk_level":"high","user_authorization":"low","rationale":"Not supported."}',
+                "<review><outcome>escalate</outcome><risk_level>high</risk_level></review>",
             ),
         ).toBeUndefined();
         expect(
             parseAutoPermissionReview(
-                '{"outcome":"allow","risk_level":"extreme","user_authorization":"high"}',
+                "<review><outcome>allow</outcome><risk_level>extreme</risk_level></review>",
             ),
         ).toBeUndefined();
         expect(
-            parseAutoPermissionReview('{"outcome":"allow","user_authorization":"total"}'),
+            parseAutoPermissionReview(
+                "<review><outcome>allow</outcome><user_authorization>total</user_authorization></review>",
+            ),
         ).toBeUndefined();
-        expect(parseAutoPermissionReview('{"outcome":"allow","rationale":42}')).toBeUndefined();
     });
 
     it("returns undefined for unreadable guardian text", () => {
-        expect(parseAutoPermissionReview("no json here")).toBeUndefined();
+        expect(parseAutoPermissionReview("no verdict here")).toBeUndefined();
         expect(parseAutoPermissionReview("")).toBeUndefined();
+        expect(parseAutoPermissionReview("<review></review>")).toBeUndefined();
+        expect(parseAutoPermissionReview('{"outcome":"allow"}')).toBeUndefined();
     });
 
     it("uses defaults for blank and whitespace-only rationales", () => {
         expect(
             parseAutoPermissionReview(
-                '{"outcome":"allow","rationale":" \\n\\t ","risk_level":"medium"}',
+                "<review><outcome>allow</outcome><risk_level>medium</risk_level><rationale> \n\t </rationale></review>",
             ),
         ).toEqual({
             decision: "allow",
@@ -93,7 +170,7 @@ describe("parseAutoPermissionReview", () => {
         });
         expect(
             parseAutoPermissionReview(
-                '{"outcome":"deny","rationale":" \\n\\t ","user_authorization":"low"}',
+                "<review><outcome>deny</outcome><user_authorization>low</user_authorization><rationale></rationale></review>",
             ),
         ).toEqual({
             decision: "deny",
@@ -107,36 +184,19 @@ describe("parseAutoPermissionReview", () => {
     it("normalizes all whitespace runs in a rationale", () => {
         expect(
             parseAutoPermissionReview(
-                JSON.stringify({
-                    outcome: "deny",
-                    rationale: "first\u000bsecond\u00a0third\nfourth",
-                }),
+                "<review><outcome>deny</outcome><rationale>first\u000bsecond\u00a0third\nfourth</rationale></review>",
             )?.reason,
         ).toBe("first second third fourth");
     });
 
-    it("handles null and non-object JSON as unreadable decisions", () => {
-        for (const text of ["null", "[]", "42", '"text"', "true", `{"outcome":null}`]) {
-            expect(parseAutoPermissionReview(text)).toBeUndefined();
-        }
-    });
-
-    it("rejects a wrapped object with no closing brace", () => {
+    it("reads a verdict whose tags were never closed", () => {
         expect(
-            parseAutoPermissionReview(
-                'Assessment: {"outcome":"allow","rationale":"missing closing brace"',
-            ),
-        ).toBeUndefined();
-    });
-
-    it("uses the first opening and last closing brace for thin recovery", () => {
-        expect(
-            parseAutoPermissionReview('Assessment: {"outcome":"allow"} trailing {"broken"'),
+            parseAutoPermissionReview("<review>\n<outcome>allow</outcome>\n<rationale>Cut off"),
         ).toEqual({
             decision: "allow",
             risk: "low",
             userAuthorization: "unknown",
-            reason: "Auto-review returned a low-risk allow decision.",
+            reason: "Cut off",
         });
     });
 
@@ -145,12 +205,14 @@ describe("parseAutoPermissionReview", () => {
         const overCap = "b".repeat(241);
 
         expect(
-            parseAutoPermissionReview(JSON.stringify({ outcome: "deny", rationale: atCap }))
-                ?.reason,
+            parseAutoPermissionReview(
+                `<review><outcome>deny</outcome><rationale>${atCap}</rationale></review>`,
+            )?.reason,
         ).toBe(atCap);
         expect(
-            parseAutoPermissionReview(JSON.stringify({ outcome: "deny", rationale: overCap }))
-                ?.reason,
+            parseAutoPermissionReview(
+                `<review><outcome>deny</outcome><rationale>${overCap}</rationale></review>`,
+            )?.reason,
         ).toBe(`${"b".repeat(237)}…`);
     });
 });
