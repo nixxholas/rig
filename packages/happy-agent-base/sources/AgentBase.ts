@@ -526,6 +526,14 @@ export class AgentBase {
     /** The durable settlement awaiting its post-commit observing hook. */
     #settlement: AgentBaseSettlement | undefined;
     /**
+     * Why the run in progress has failed, as its settlement will report it. It is set wherever a
+     * failure is surfaced to the conversation and by a run that ended by throwing, and cleared
+     * when a new turn starts, so it always describes the last thing that went wrong rather than
+     * anything the run recovered from. A settlement another process left behind cannot carry it:
+     * what a dead process knew about why it stopped died with it.
+     */
+    #runFailure: string | undefined;
+    /**
      * The pending state this instance last wrote, so a write that would change nothing is
      * skipped. The loop passes through the same stage many times in a turn, and a store is not
      * worth touching to tell it what it already says.
@@ -1788,6 +1796,41 @@ export class AgentBase {
         }
         // The outer loop reopens when an `afterAgentLoop` action requests more work, so the
         // loop hooks always bracket a settled-to-settled span.
+        //
+        // A failure thrown out of it is still the end of the run, so it is remembered rather than
+        // rethrown and the settle below happens exactly as it would have. An agent that stopped
+        // working while its store still says it is working is one nobody is ever told about:
+        // whoever is waiting on it — an owner, or the creator of a collaborator — waits for a
+        // turn no process is running any more.
+        let blocked = false;
+        try {
+            blocked = (await this.#runLoops(ctx)) === "blocked";
+        } catch (error: unknown) {
+            this.#runFailure = error instanceof Error ? error.message : String(error);
+        }
+        // A run that could not settle a staged tool result is the one exception: it must leave
+        // its pending state exactly as it found it, for the next attempt to finish.
+        if (blocked) return;
+        // Nothing is asked for any more, so the outstanding work is erased. That erasure is what
+        // makes the agent idle, and it commits together with whatever the settling hooks write,
+        // so no owner can ever see the agent finished without their conclusions or their
+        // conclusions without the agent being finished.
+        this.#settlementId ??= createId();
+        await this.#enterStage(ctx, "settlement");
+        await this.#settleDurably(ctx, {
+            loopId: this.#loopId ?? createId(),
+            settlementId: this.#settlementId,
+            ...(this.#runFailure === undefined ? {} : { error: this.#runFailure }),
+        });
+    }
+
+    /**
+     * Every loop of the run, one after another: each opens with its loop hooks, answers turns
+     * until nothing more is asked for, and closes with them. It answers whether the run ended
+     * because there was nothing left to do or because a staged tool result could not settle; the
+     * settling caller above decides what that ending means.
+     */
+    async #runLoops(ctx: Context): Promise<"blocked" | "settling"> {
         do {
             this.#loopId ??= createId();
             const loop: AgentBaseLoop = { loopId: this.#loopId };
@@ -1815,7 +1858,7 @@ export class AgentBase {
                     { "agent.loop.id": loop.loopId },
                     (turnCtx) => this.#runTurn(turnCtx, loop, abort),
                 );
-                if (outcome === "blocked") return;
+                if (outcome === "blocked") return "blocked";
                 if (outcome === "stop") break;
                 // Each turn cancels on its own scope. Reopening it here rather than at the top
                 // keeps the run's first turn under the scope its opening hook already ran in.
@@ -1830,16 +1873,7 @@ export class AgentBase {
             );
             await this.#applyActions(ctx, this.#hooks.afterAgentLoop, abort.signal, loop);
         } while (this.#turnRequested && (!this.#closed || this.#hasNoticeWorkToFinish()));
-        // Nothing is asked for any more, so the outstanding work is erased. That erasure is what
-        // makes the agent idle, and it commits together with whatever the settling hooks write,
-        // so no owner can ever see the agent finished without their conclusions or their
-        // conclusions without the agent being finished.
-        this.#settlementId ??= createId();
-        await this.#enterStage(ctx, "settlement");
-        await this.#settleDurably(ctx, {
-            loopId: this.#loopId ?? createId(),
-            settlementId: this.#settlementId,
-        });
+        return "settling";
     }
 
     /**
@@ -1855,6 +1889,9 @@ export class AgentBase {
     ): Promise<"continue" | "stop" | "blocked"> {
         this.#turnAborted = false;
         this.#durableWorkBlocked = false;
+        // A failure the run has moved on from is not what its settlement reports: the turn that
+        // failed is over, and this one is the run's answer to it.
+        this.#runFailure = undefined;
         this.#turnId ??= createId();
         setAgentSpanAttributes(ctx, { "agent.turn.id": this.#turnId });
         // Claimed before any awaiting, so a request raised while the turn is still starting up
@@ -1874,11 +1911,14 @@ export class AgentBase {
             (error: unknown) => error,
         );
         if (loadFailure !== undefined) {
+            const message =
+                loadFailure instanceof Error ? loadFailure.message : String(loadFailure);
+            this.#runFailure = message;
             await this.#emit(ctx, {
                 type: "done",
                 state: "error",
                 kind: "internal_error",
-                message: loadFailure instanceof Error ? loadFailure.message : String(loadFailure),
+                message,
             });
             this.#turnId = undefined;
             return "stop";
@@ -1938,6 +1978,9 @@ export class AgentBase {
             {
                 "agent.loop.id": settlement.loopId,
                 "agent.settlement.id": settlement.settlementId,
+                ...(settlement.error === undefined
+                    ? {}
+                    : { "agent.settlement.error": settlement.error }),
             },
             (settleCtx) => this.#settleRecord(settleCtx, settlement),
         );
@@ -1960,6 +2003,9 @@ export class AgentBase {
             this.#loopId = undefined;
             this.#turnId = undefined;
             this.#inferenceId = undefined;
+            // The failure has been reported by the settlement it belongs to; the next run starts
+            // out having nothing to answer for.
+            this.#runFailure = undefined;
             this.#settlementId = undefined;
             this.#settlement = settlement;
             // Settled means nothing is owed: the next scheduled message activates the agent
@@ -2768,6 +2814,10 @@ export class AgentBase {
      * never cause another.
      */
     async #appendFailure(ctx: Context, message: string): Promise<void> {
+        // The settlement reports it whether or not the conversation can be written to: an owner
+        // waiting on this agent learns why it stopped from the settlement alone, and a failure
+        // the history never recorded is exactly the one nobody else would ever see.
+        this.#runFailure = message;
         if (this.#loaded === undefined) return;
         const failure: SessionSystemMessage = {
             role: "system",

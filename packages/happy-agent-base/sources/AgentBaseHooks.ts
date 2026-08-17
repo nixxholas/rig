@@ -155,9 +155,21 @@ export interface AgentBaseCompletedCompaction extends AgentBaseCompactionStart {
     readonly result: CompletedSessionCompaction;
 }
 
-/** Stable identity of the transaction that settles one loop. */
+/** Stable identity of the transaction that settles one loop, and how that loop ended. */
 export interface AgentBaseSettlement extends AgentBaseLoop {
     readonly settlementId: string;
+    /**
+     * Why the run failed, when it did. Every run settles, including the ones that ended badly —
+     * a provider error, a usage limit, a conversation that could not be read, a failure thrown
+     * out of the loop itself — and this is what that ending was, in the same words the failure
+     * was surfaced to the conversation with.
+     *
+     * Absent when the run simply ran out of work, and absent as well from a settlement resumed
+     * by a later process, which knows only that a run was left unfinished and not why. A module
+     * reporting a run to somebody waiting on it should treat its presence as the difference
+     * between an answer and an apology.
+     */
+    readonly error?: string;
 }
 
 /** One validated tool invocation, as it stands before anything decides what to do with it. */
