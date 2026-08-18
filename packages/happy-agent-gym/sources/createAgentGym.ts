@@ -3,14 +3,7 @@ import { relative } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import type { AgentModel, AgentPermissionMode } from "@slopus/happy-agent-base";
-// The agent is started from its own sources rather than its published build, so a gym always
-// exercises the code in this checkout and a failure points at the file that caused it.
-import { startHappyAgentDaemon, type HappyAgentDaemon } from "../../happy-agent/sources/main.js";
-import type {
-    HappyAgentModules,
-    StartedHappyAgent,
-} from "../../happy-agent/sources/start/startHappyAgent.js";
-import type { AgentEvent } from "@slopus/happy-agent-modules";
+import { startHappyAgentDaemon, type HappyAgentDaemon } from "@slopus/happy-agent";
 
 import { createGymCompute } from "./createGymCompute.js";
 import {
@@ -51,28 +44,45 @@ export interface GymSelection {
     readonly serviceTier: null;
 }
 
-/** A session as the daemon reports it. */
+/** An agent as the daemon reports it. */
 export interface GymSessionRecord {
     readonly id: string;
     readonly [key: string]: unknown;
 }
 
-/** What the daemon answers when it takes a message. */
+/** The API's grouped transcript shape. */
+export interface GymAgentHistory {
+    readonly hasMore: boolean;
+    readonly pending: readonly Record<string, unknown>[];
+    readonly runs: readonly Record<string, unknown>[];
+}
+
+/** One public API event envelope. */
+export interface GymAgentEvent {
+    readonly cursor: string;
+    readonly occurredAt: number;
+    readonly payload: unknown;
+    readonly type: string;
+}
+
+/** The accepted message and its run. */
 export interface GymAcceptance {
-    readonly accepted: string;
-    readonly delivery: string;
+    /** The API message ID. */
     readonly id: string;
-    /** The run this message belongs to, which is what a completion is waited for by. */
+    /** The run that accepted the message. */
     readonly runId: string;
+    /** The agent that owns the message. */
+    readonly agentId: string;
+    /** The owning agent ID, retained for existing gym scenario ergonomics. */
     readonly sessionId: string;
+    /** The public event cursor at send time. */
+    readonly cursor: string;
     readonly [key: string]: unknown;
 }
 
 export interface GymSendOptions {
-    /** The session to send to. Defaults to the chat the gym opened as it started. */
+    /** The agent to send to. Defaults to the chat the gym opened as it started. */
     readonly sessionId?: string;
-    /** Whether the daemon answers only once the message is durably recorded. Defaults to true. */
-    readonly await?: boolean;
     /**
      * Whether to return only after the run this message started has settled. Defaults to true for
      * a send and false for steering, which by definition joins a run that is already going.
@@ -86,13 +96,11 @@ export interface GymSendOptions {
 }
 
 export interface GymCreateSessionOptions {
-    /** The folder the session works in. Defaults to the gym workspace. */
+    /** The folder the agent works in. Defaults to the gym workspace. */
     readonly cwd?: string;
     readonly id?: string;
-    readonly effort?: string;
-    readonly modelId?: string;
-    readonly providerId?: string;
-    readonly permissionMode?: AgentPermissionMode;
+    /** Optional fixed title for the agent. */
+    readonly title?: string;
 }
 
 /**
@@ -115,13 +123,11 @@ export interface AgentGym {
     /** What the scripted model was asked, and what it could not answer. */
     readonly inference: GymInferenceLog;
     readonly daemon: HappyAgentDaemon;
-    readonly agent: StartedHappyAgent;
-    readonly modules: HappyAgentModules;
     /**
-     * The chat every scenario works in unless it names another.
+     * The agent every scenario works in unless it names another.
      *
-     * The daemon has no conversation of its own, so the gym opens one as it starts, exactly as a
-     * person would. Scenarios that need a second chat call `createSession`.
+     * The daemon has no agent of its own, so the gym opens one as it starts. Scenarios that need
+     * another agent call `createSession`.
      */
     readonly defaultSessionId: string;
     /** The provider, model, effort and tier every gym request names by default. */
@@ -134,28 +140,30 @@ export interface AgentGym {
     /** Queue a message for the current turn's boundary. */
     steer(text: string, options?: GymSendOptions): Promise<GymAcceptance>;
     /** Wait for one run to settle, and answer with the durable event that says how it ended. */
-    waitForRun(runId: string, timeoutMs?: number): Promise<AgentEvent>;
+    waitForRun(runId: string, timeoutMs?: number): Promise<GymAgentEvent>;
     /** Cancel the active turn. */
     abort(sessionId?: string): Promise<unknown>;
     /** Compact a conversation. */
     compact(sessionId?: string): Promise<unknown>;
-    /** Create another chat. */
+    /** Create another agent. The historic helper name keeps scenarios concise. */
     createSession(options?: GymCreateSessionOptions): Promise<GymSessionRecord>;
-    /** Every session the daemon lists. */
+    /** Every top-level agent in the gym's root workspace. */
     listSessions(): Promise<readonly GymSessionRecord[]>;
-    /** One session, including its recent messages. */
+    /** One agent. */
     getSession(sessionId?: string): Promise<GymSessionRecord>;
-    /** The client-facing event projection for one session. */
+    /** The agent transcript grouped by run, plus messages waiting to be accepted. */
+    history(sessionId?: string): Promise<GymAgentHistory>;
+    /** All public events for one agent. */
     sessionEvents(sessionId?: string): Promise<readonly Record<string, unknown>[]>;
 
     /** Every durable event the installation has recorded, oldest first. */
-    events(): Promise<readonly AgentEvent[]>;
+    events(): Promise<readonly GymAgentEvent[]>;
     /** The first durable event matching `predicate`, waiting for it to arrive. */
     waitForEvent(
-        predicate: (event: AgentEvent) => boolean,
+        predicate: (event: GymAgentEvent) => boolean,
         description?: string,
         timeoutMs?: number,
-    ): Promise<AgentEvent>;
+    ): Promise<GymAgentEvent>;
     /**
      * Wait for any condition, polling instead of sleeping.
      *
@@ -166,7 +174,7 @@ export interface AgentGym {
         description?: string | (() => string),
         timeoutMs?: number,
     ): Promise<Result>;
-    /** Open a live Server-Sent Events subscription, such as `/v0/events/live`. */
+    /** Open one Server-Sent Events subscription, such as `/v0/events/stream`. */
     stream(path?: string, options?: GymEventStreamOptions): GymEventStream;
 
     /** Read a file from the workspace as text. */
@@ -207,6 +215,8 @@ class AgentGymInstance implements AgentGym {
     #http: GymHttpClient | undefined;
     #token = "";
     #defaultSessionId: string | undefined;
+    #rootWorkspaceId: string | undefined;
+    readonly #workspaceIdsByPath = new Map<string, string>();
 
     constructor(home: GymHome, options: AgentGymOptions) {
         this.#home = home;
@@ -223,12 +233,6 @@ class AgentGymInstance implements AgentGym {
         const daemon = await startHappyAgentDaemon({
             compute: createGymCompute(),
             happyHome: this.#home.happyHome,
-            httpConfiguration: {
-                onUnexpectedError: (error: unknown) => {
-                    this.#errors.push(error);
-                },
-                p2pName: "Happy Agent Gym",
-            },
             inference: {
                 models: this.#scripted.models,
                 providers: this.#scripted.providers,
@@ -242,9 +246,12 @@ class AgentGymInstance implements AgentGym {
             timeoutMs: Math.max(this.#timeoutMs, 20_000),
             token: this.#token,
         });
-        // Nothing in the daemon opens a chat by itself, so the gym opens the one every scenario
-        // works in before any of them runs. A restart keeps it: the conversation is durable, and a
-        // scenario that restarts the daemon is asking whether its own chat survived.
+        // A project is its root workspace. Register the gym directory once, then put the default
+        // agent in that root workspace. A restart keeps both durable resources.
+        this.#rootWorkspaceId ??= await this.#registerProject(this.workspacePath);
+        // Nothing in the daemon opens an agent by itself, so the gym opens the one every scenario
+        // works in before any of them runs. A restart keeps it: the agent is durable, and a
+        // scenario that restarts the daemon is asking whether its own conversation survived.
         this.#defaultSessionId ??= (await this.createSession()).id;
     }
 
@@ -277,14 +284,6 @@ class AgentGymInstance implements AgentGym {
         return this.#running;
     }
 
-    get agent(): StartedHappyAgent {
-        return this.#running.agent;
-    }
-
-    get modules(): HappyAgentModules {
-        return this.#running.agent.modules;
-    }
-
     get defaultSessionId(): string {
         if (this.#defaultSessionId === undefined) throw new Error("This gym is not running.");
         return this.#defaultSessionId;
@@ -304,110 +303,110 @@ class AgentGymInstance implements AgentGym {
     }
 
     async send(text: string, options: GymSendOptions = {}): Promise<GymAcceptance> {
-        const acceptance = await this.http.ok<GymAcceptance>(
+        const agentId = this.#sessionId(options.sessionId);
+        const response = await this.http.ok<ApiSendResponse>(
             "POST",
-            `/v0/sessions/${this.#sessionId(options.sessionId)}/messages`,
-            this.#messageBody(text, options),
+            `/v0/agents/${agentId}/send`,
+            this.#messageBody(text, options, "queue"),
         );
+        const acceptance = await this.#acceptance(agentId, response);
         if (options.wait ?? true) await this.waitForRun(acceptance.runId);
         return acceptance;
     }
 
     async steer(text: string, options: GymSendOptions = {}): Promise<GymAcceptance> {
-        const acceptance = await this.http.ok<GymAcceptance>(
+        const agentId = this.#sessionId(options.sessionId);
+        const response = await this.http.ok<ApiSendResponse>(
             "POST",
-            `/v0/sessions/${this.#sessionId(options.sessionId)}/steer`,
-            this.#messageBody(text, options),
+            `/v0/agents/${agentId}/send`,
+            this.#messageBody(text, options, "steer"),
         );
+        const acceptance = await this.#acceptance(agentId, response);
         if (options.wait === true) await this.waitForRun(acceptance.runId);
         return acceptance;
     }
 
-    async waitForRun(runId: string, timeoutMs = this.#timeoutMs): Promise<AgentEvent> {
+    async waitForRun(runId: string, timeoutMs = this.#timeoutMs): Promise<GymAgentEvent> {
         return await this.waitForEvent(
-            (event) => event.type === "loop.settled" && runIdOf(event) === runId,
+            (event) =>
+                (event.type === "run.finished" || event.type === "run.boundary") &&
+                finishedRunIdOf(event) === runId,
             `run ${runId} to settle`,
             timeoutMs,
         );
     }
 
     async abort(sessionId?: string): Promise<unknown> {
-        return await this.http.ok("POST", `/v0/sessions/${this.#sessionId(sessionId)}/abort`, {
-            await: true,
-        });
+        return await this.http.ok("POST", `/v0/agents/${this.#sessionId(sessionId)}/abort`, {});
     }
 
     async compact(sessionId?: string): Promise<unknown> {
-        return await this.http.ok("POST", `/v0/sessions/${this.#sessionId(sessionId)}/compact`, {
-            await: true,
-        });
+        return await this.http.ok("POST", `/v0/agents/${this.#sessionId(sessionId)}/compact`, {});
     }
 
     async createSession(options: GymCreateSessionOptions = {}): Promise<GymSessionRecord> {
-        const selection = this.selection;
-        const body = await this.http.ok<{ readonly session: GymSessionRecord }>(
+        const workspaceId = await this.#workspaceForPath(options.cwd ?? this.workspacePath);
+        const body = await this.http.ok<{ readonly agent: GymSessionRecord }>(
             "POST",
-            "/v0/sessions",
+            "/v0/agents",
             {
-                cwd: options.cwd ?? this.workspacePath,
-                effort: options.effort ?? selection.effort,
-                modelId: options.modelId ?? selection.modelId,
-                providerId: options.providerId ?? selection.providerId,
-                serviceTier: null,
+                workspaceId,
                 ...(options.id === undefined ? {} : { id: options.id }),
-                ...(options.permissionMode === undefined
-                    ? {}
-                    : { permissionMode: options.permissionMode }),
+                ...(options.title === undefined ? {} : { title: options.title }),
             },
         );
-        return body.session;
+        return body.agent;
     }
 
     async listSessions(): Promise<readonly GymSessionRecord[]> {
-        const body = await this.http.ok<{ readonly sessions: readonly GymSessionRecord[] }>(
-            "GET",
-            "/v0/sessions",
+        const body = await this.http.ok<{
+            readonly projects: readonly {
+                readonly agents?: readonly GymSessionRecord[];
+                readonly id: string;
+            }[];
+        }>("GET", "/v0/projects");
+        const project = body.projects.find(
+            (candidate) => candidate.id === this.#rootWorkspaceIdOrThrow(),
         );
-        return body.sessions;
+        return project?.agents ?? [];
     }
 
     async getSession(sessionId?: string): Promise<GymSessionRecord> {
-        const body = await this.http.ok<{ readonly session: GymSessionRecord }>(
+        const body = await this.http.ok<{ readonly agent: GymSessionRecord }>(
             "GET",
-            `/v0/sessions/${this.#sessionId(sessionId)}`,
+            `/v0/agents/${this.#sessionId(sessionId)}`,
         );
-        return body.session;
+        return body.agent;
+    }
+
+    async history(sessionId?: string): Promise<GymAgentHistory> {
+        return await this.http.ok<GymAgentHistory>(
+            "GET",
+            `/v0/agents/${this.#sessionId(sessionId)}/messages`,
+        );
     }
 
     async sessionEvents(sessionId?: string): Promise<readonly Record<string, unknown>[]> {
-        const body = await this.http.ok<{
-            readonly events: readonly Record<string, unknown>[];
-        }>("GET", `/v0/sessions/${this.#sessionId(sessionId)}/events`);
+        const agentId = this.#sessionId(sessionId);
+        return (await this.events())
+            .filter((event) => agentIdOfEvent(event) === agentId)
+            .map((event): Record<string, unknown> => ({ ...event }));
+    }
+
+    async events(): Promise<readonly GymAgentEvent[]> {
+        const body = await this.http.ok<{ readonly events: readonly GymAgentEvent[] }>(
+            "GET",
+            "/v0/events?limit=10000",
+        );
         return body.events;
     }
 
-    async events(): Promise<readonly AgentEvent[]> {
-        const journal = this.modules.events;
-        const response = await this.http.get<{ readonly events?: readonly AgentEvent[] }>(
-            `/v0/events?after=${encodeURIComponent(journal.originCursor())}&limit=${String(
-                journal.capacity(),
-            )}`,
-        );
-        if (response.status !== 200) {
-            throw new Error(
-                `The Happy agent answered ${String(response.status)} for its events: ` +
-                    response.text,
-            );
-        }
-        return response.body.events ?? [];
-    }
-
     async waitForEvent(
-        predicate: (event: AgentEvent) => boolean,
+        predicate: (event: GymAgentEvent) => boolean,
         description = "a matching event",
         timeoutMs = this.#timeoutMs,
-    ): Promise<AgentEvent> {
-        let seen: readonly AgentEvent[] = [];
+    ): Promise<GymAgentEvent> {
+        let seen: readonly GymAgentEvent[] = [];
         return await this.waitUntil(
             async () => {
                 seen = await this.events();
@@ -435,7 +434,7 @@ class AgentGymInstance implements AgentGym {
         }
     }
 
-    stream(path = "/v0/events/live", options: GymEventStreamOptions = {}): GymEventStream {
+    stream(path = "/v0/events/stream", options: GymEventStreamOptions = {}): GymEventStream {
         return this.http.stream(path, { timeoutMs: this.#timeoutMs, ...options });
     }
 
@@ -491,29 +490,134 @@ class AgentGymInstance implements AgentGym {
         return sessionId ?? this.defaultSessionId;
     }
 
-    #messageBody(text: string, options: GymSendOptions): Record<string, unknown> {
+    #messageBody(
+        text: string,
+        options: GymSendOptions,
+        delivery: "queue" | "steer",
+    ): Record<string, unknown> {
         const selection = this.selection;
         return {
-            await: options.await ?? true,
-            effort: options.effort ?? selection.effort,
-            modelId: options.modelId ?? selection.modelId,
-            providerId: options.providerId ?? selection.providerId,
-            serviceTier: null,
+            delivery,
+            mode: {
+                effort: options.effort ?? selection.effort,
+                modelId: options.modelId ?? selection.modelId,
+                permissionMode: options.permissionMode ?? "auto",
+                providerId: options.providerId ?? selection.providerId,
+                serviceTier: null,
+            },
             text,
             ...(options.mutationId === undefined ? {} : { mutationId: options.mutationId }),
-            ...(options.permissionMode === undefined
-                ? {}
-                : { permissionMode: options.permissionMode }),
         };
+    }
+
+    async #acceptance(agentId: string, response: ApiSendResponse): Promise<GymAcceptance> {
+        return {
+            agentId,
+            cursor: response.cursor,
+            id: response.message.id,
+            runId: await this.#acceptedRunId(agentId, response.message),
+            sessionId: agentId,
+        };
+    }
+
+    async #acceptedRunId(agentId: string, message: ApiMessage): Promise<string> {
+        if (message.runId !== null && message.runId !== undefined) return message.runId;
+        const event = await this.waitForEvent(
+            (candidate) =>
+                agentIdOfEvent(candidate) === agentId &&
+                acceptedMessageIdsOf(candidate).includes(message.id),
+            `message ${message.id} to be accepted`,
+        );
+        const runId = startedRunIdOf(event);
+        if (runId === undefined) {
+            throw new Error(
+                `The Happy agent accepted message ${message.id} without starting a run.`,
+            );
+        }
+        return runId;
+    }
+
+    async #workspaceForPath(path: string): Promise<string> {
+        const known = this.#workspaceIdsByPath.get(path);
+        if (known !== undefined) return known;
+        return await this.#registerProject(path);
+    }
+
+    async #registerProject(path: string): Promise<string> {
+        const body = await this.http.ok<{ readonly project: { readonly id: string } }>(
+            "POST",
+            "/v0/projects",
+            { path },
+        );
+        this.#workspaceIdsByPath.set(path, body.project.id);
+        return body.project.id;
+    }
+
+    #rootWorkspaceIdOrThrow(): string {
+        if (this.#rootWorkspaceId === undefined) {
+            throw new Error("This gym has not registered its root workspace.");
+        }
+        return this.#rootWorkspaceId;
     }
 }
 
 /** The run an event belongs to, for the events that name one. */
-export function runIdOf(event: AgentEvent): string | undefined {
+export function runIdOf(event: GymAgentEvent): string | undefined {
     const payload = event.payload;
     if (payload === null || typeof payload !== "object") return undefined;
-    const runId = (payload as { readonly runId?: unknown }).runId;
-    return typeof runId === "string" ? runId : undefined;
+    const direct = (payload as { readonly runId?: unknown }).runId;
+    if (typeof direct === "string") return direct;
+    return startedRunIdOf(event) ?? finishedRunIdOf(event);
+}
+
+/** The agent an event belongs to, when its payload names one directly. */
+export function agentIdOfEvent(event: GymAgentEvent): string | undefined {
+    const payload = event.payload;
+    if (payload === null || typeof payload !== "object") return undefined;
+    const agentId = (payload as { readonly agentId?: unknown }).agentId;
+    return typeof agentId === "string" ? agentId : undefined;
+}
+
+interface ApiMessage {
+    readonly id: string;
+    readonly runId?: string | null;
+}
+
+interface ApiSendResponse {
+    readonly cursor: string;
+    readonly message: ApiMessage;
+}
+
+function acceptedMessageIdsOf(event: GymAgentEvent): readonly string[] {
+    const payload = event.payload;
+    if (payload === null || typeof payload !== "object") return [];
+    const values = (payload as { readonly acceptedMessageIds?: unknown }).acceptedMessageIds;
+    if (!Array.isArray(values) || !values.every((value) => typeof value === "string")) return [];
+    return values;
+}
+
+function startedRunIdOf(event: GymAgentEvent): string | undefined {
+    const payload = event.payload;
+    if (payload === null || typeof payload !== "object") return undefined;
+    const run =
+        event.type === "run.boundary"
+            ? (payload as { readonly startedRun?: unknown }).startedRun
+            : (payload as { readonly run?: unknown }).run;
+    if (run === null || typeof run !== "object") return undefined;
+    const id = (run as { readonly id?: unknown }).id;
+    return typeof id === "string" ? id : undefined;
+}
+
+function finishedRunIdOf(event: GymAgentEvent): string | undefined {
+    const payload = event.payload;
+    if (payload === null || typeof payload !== "object") return undefined;
+    const run =
+        event.type === "run.boundary"
+            ? (payload as { readonly finishedRun?: unknown }).finishedRun
+            : (payload as { readonly run?: unknown }).run;
+    if (run === null || typeof run !== "object") return undefined;
+    const id = (run as { readonly id?: unknown }).id;
+    return typeof id === "string" ? id : undefined;
 }
 
 /** Delete a path inside a gym workspace. Exported for scenarios that arrange missing files. */

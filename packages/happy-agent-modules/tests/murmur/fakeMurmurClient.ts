@@ -38,8 +38,9 @@ export function peerProfile(overrides: Partial<MurmurPeerProfile> = {}): MurmurP
         id: "aremoteprofile0000000001",
         name: "Remote",
         parentInstanceId: "aremoteinstance000000001",
+        photo: null,
         updatedAt: 2,
-        version: 1,
+        version: "01991f3a-5c1e-7000-8000-2f9a1b3c4d5e",
         ...overrides,
     };
 }

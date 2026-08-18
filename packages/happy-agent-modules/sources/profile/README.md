@@ -1,66 +1,39 @@
 # Profile
 
-The one person this installation belongs to. A profile is what sharing puts on the wire so a
-contact sees a name rather than a key, and what a project records about who created it.
+The one person this installation belongs to. The module owns exactly one stable profile identity
+and its one optional photo. It takes no config, path, host, or storage object.
 
-One installation is one person, so there is exactly one profile here. Creating a second is
-refused with a clear message rather than silently ignored, and no method takes a list.
+Call `open(instanceId)` after installation startup. `ensure(ctx)` then materializes the stable
+empty singleton when needed; that initialization is not a user change and emits no event.
+`create(ctx, { name, email })` remains the one-step operation used by P2P identity setup and
+refuses a second profile.
 
-```ts
-import { ProfileModule } from "@slopus/happy-agent-modules";
+## Public operations
 
-const profile = new ProfileModule();
-profile.onEvent(async (ctx, event) => {
-    await events.record(ctx, { type: "profile.changed", payload: event });
-});
-// The agent this installation runs as is the machine the profile records.
-profile.open(rootAgentId);
-```
+- `get(ctx)` reads an already-materialized profile.
+- `ensure(ctx)` returns the singleton, creating it with `name`, `email`, and `photo` set to `null`.
+- `getById(ctx, profileId)` and `isLocal(ctx, profileId)` expose the private identity seam used by
+  sharing.
+- `update(ctx, profileId, patch, { expectedVersion? })` changes or clears `name` and `email`.
+- `getPhoto(ctx)` returns normalized WebP bytes, content hash, strong ETag, dimensions, and
+  ThumbHash, or `undefined`.
+- `putPhoto(ctx, bytes, contentType, { expectedVersion? })` accepts PNG, JPEG, or WebP up to
+  8 MiB, strips metadata, bounds dimensions, and atomically replaces the retained image.
+- `deletePhoto(ctx, { expectedVersion? })` removes it. Deleting an absent photo is idempotent.
 
-The module takes nothing: one person, one profile, one clock. Whoever wants to hear about changes
-subscribes after construction.
+Conditional mutation failure throws `ProfileVersionConflictError`, whose `current` field is the
+authoritative profile. API callers use this as their atomic `If-Match` boundary.
 
-`open(agentId)` names the installation. It is separate from the constructor because the agent
-only exists once the module system has started, and a profile records the machine it was made on
-so another machine reading it later knows it may not speak for that person. Before `open`,
-`isLocal` is false and `create` and `update` refuse.
+## Versions and events
 
-## Direct operations
-
-- `get(ctx)` returns the profile, or nothing when nobody has been named.
-- `getById(ctx, profileId)` returns the same profile when the id matches, for a caller holding
-  one that wants to confirm it still exists.
-- `isLocal(ctx, profileId)` says whether this installation owns that profile and may act as that
-  person. [Murmur](../murmur/README.md) is given this catalog and asks it directly, so that
-  decision is made in one place.
-- `create(ctx, { email, name })` names the person. A second call throws
-  "This installation already has a profile."
-- `update(ctx, profileId, { email?, name? })` increments `version`, moves `updatedAt`, and
-  returns nothing when the id is unknown. An installation that does not own the profile is
-  refused.
-
-Names and addresses are validated with TypeBox before anything is written. The name pattern
-refuses control characters and bidirectional overrides, so a name cannot make a display lie
-about which text belongs to it.
-
-## Events
-
-Every create and update publishes a `profile_changed` event carrying `{ profileId, version }`.
-The host is what puts it on its event stream; the module only says that it happened.
-
-`onEvent(listener)` subscribes and returns the function that stops the subscription. Listeners
-hear about a change that is already saved, so one that throws is reported through `ctx.log.warn`
-and the others still hear about it.
+Every actual mutation mints a UUIDv7 strictly newer than the profile version it replaces, including
+through clock rollback and restart. `profile_changed` is delivered after commit and carries
+`profileId`, `previousVersion`, and `version`; its event ID is the new version. Listener failure is
+logged and cannot roll back or conceal the durable mutation.
 
 ## Storage
 
-Migration `001-profile` creates `happy_agent_profile`, a single-row table holding the profile as
-validated JSON. Nothing else in the module is durable.
-
-## Deliberately not here
-
-- **Photos.** `RigProfile` carries an optional photo, and the wire schema still accepts one so
-  responses stay valid, but nothing here stores or serves image bytes. Adding it means a place
-  to put the bytes and a re-encoding step, and neither exists yet.
-- **Replication.** Legacy Rig let a parent installation push a profile to a secondary. One
-  installation, one person, one machine: there is nobody to replicate to.
+Released migration `001-profile` remains unchanged. Append-only migration `002-profile-photo`
+adds the single-row bounded image table. The profile JSON owns metadata and the photo table owns
+the bytes; both change in one transaction. Replacement retains one blob, deletion retains none,
+and photo reads verify the SHA-256 content hash before returning bytes.

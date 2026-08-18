@@ -1,0 +1,205 @@
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { createId } from "@paralleldrive/cuid2";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { GitModule } from "../../sources/git/index.js";
+import { projectMigrations, ProjectsModule } from "../../sources/projects/index.js";
+import { validateRegistrationPath } from "../../sources/projects/impl/validateRegistrationPath.js";
+import {
+    workspaceMigrations,
+    WorkspacesModule,
+    type Workspace,
+} from "../../sources/workspaces/index.js";
+import { cleanupRoots, createRepository, gitRunner } from "../git/helpers.js";
+import { testConfigRootedAt } from "../support/configModule.js";
+import { moduleDatabase } from "../support/moduleDatabase.js";
+
+afterEach(cleanupRoots);
+
+describe("plain-directory project registration", () => {
+    it("persists non-Git facts and creates copied child workspaces after restart", async () => {
+        const root = await mkdtemp(join(tmpdir(), "plain-project-registration-"));
+        const folder = join(root, "source");
+        await mkdir(folder);
+        await writeFile(join(folder, "project.txt"), "plain directory\n", "utf8");
+        const world = await createWorld(root, "plain-directory");
+        let reopened: ProjectsModule | undefined;
+        try {
+            const registered = await world.projects.register(world.database.context, {
+                path: folder,
+            });
+            expect(registered.id).toMatch(/^[a-z][a-z0-9]{23}$/);
+            expect(registered.repositoryRef).toBe(world.git.normalizeProjectCwd(folder));
+
+            const ready = await waitForProject(
+                world.projects,
+                world.database.context,
+                registered.id,
+            );
+            expect(ready).toMatchObject({
+                gitAhead: 0,
+                gitBehind: 0,
+                gitDetached: false,
+                initializationStatus: "ready",
+                presence: "present",
+                worktreeSupport: "unsupported",
+                worktreeUnsupportedReason: "This folder is not a Git repository.",
+            });
+            expect(ready).not.toHaveProperty("defaultBranch");
+            expect(ready).not.toHaveProperty("gitBranch");
+            expect(ready).not.toHaveProperty("gitHead");
+            expect(ready).not.toHaveProperty("gitUpstream");
+
+            reopened = new ProjectsModule(world.config, world.git);
+            await expect(reopened.get(world.database.context, registered.id)).resolves.toEqual(
+                ready,
+            );
+
+            const workspaceId = createId();
+            const reserved = await world.workspaces.createWorkspace(
+                world.database.context,
+                registered.id,
+                { id: workspaceId, name: "Copied child" },
+            );
+            expect(reserved).toMatchObject({
+                id: workspaceId,
+                kind: "directory",
+                parentId: registered.id,
+                status: "initializing",
+            });
+            const workspace = await waitForWorkspace(
+                world.workspaces,
+                world.database.context,
+                workspaceId,
+            );
+            expect(workspace.kind).toBe("directory");
+            await expect(readFile(join(workspace.path, "project.txt"), "utf8")).resolves.toBe(
+                "plain directory\n",
+            );
+        } finally {
+            if (reopened !== undefined) await reopened.close(world.database.context);
+            await world.close();
+            await rm(root, { force: true, recursive: true });
+        }
+    });
+
+    it("still rejects a Git subdirectory because only the repository root is a project", async () => {
+        const repository = await createRepository();
+        const subdirectory = join(repository, "packages", "child");
+        await mkdir(subdirectory, { recursive: true });
+        const root = await mkdtemp(join(tmpdir(), "git-subdirectory-registration-"));
+        const world = await createWorld(root, "git-subdirectory");
+        try {
+            await expect(
+                world.projects.register(world.database.context, { path: subdirectory }),
+            ).rejects.toMatchObject({
+                code: "not_git_top_level",
+            });
+        } finally {
+            await world.close();
+            await rm(root, { force: true, recursive: true });
+        }
+    });
+
+    it("keeps missing, inaccessible, and non-directory paths as registration errors", async () => {
+        const root = await mkdtemp(join(tmpdir(), "invalid-directory-registration-"));
+        const file = join(root, "file.txt");
+        const inaccessible = join(root, "inaccessible");
+        await writeFile(file, "not a directory\n", "utf8");
+        await mkdir(inaccessible);
+        const world = await createWorld(root, "invalid-directory");
+        try {
+            await expect(
+                world.projects.register(world.database.context, {
+                    path: join(root, "missing"),
+                }),
+            ).rejects.toMatchObject({ code: "path_missing" });
+            await expect(
+                world.projects.register(world.database.context, { path: file }),
+            ).rejects.toMatchObject({ code: "not_directory" });
+
+            const inaccessibleGit = {
+                normalizeProjectCwd: () => inaccessible,
+                topLevel: () =>
+                    Promise.reject(
+                        Object.assign(new Error("Permission denied."), { code: "EACCES" }),
+                    ),
+            };
+            await expect(
+                validateRegistrationPath(inaccessibleGit, inaccessible),
+            ).rejects.toMatchObject({ code: "path_inaccessible" });
+        } finally {
+            await world.close();
+            await rm(root, { force: true, recursive: true });
+        }
+    });
+});
+
+async function createWorld(root: string, name: string) {
+    const config = await testConfigRootedAt(join(root, "state"));
+    const git = GitModule.withRunner(gitRunner);
+    const projects = new ProjectsModule(config, git);
+    const workspaces = new WorkspacesModule(config, projects, git);
+    const database = moduleDatabase(
+        [...projectMigrations, ...workspaceMigrations],
+        `${name}-database`,
+    );
+    await database.ready;
+    return {
+        config,
+        database,
+        git,
+        projects,
+        workspaces,
+        close: async () => {
+            await workspaces.close(database.context);
+            await projects.close(database.context);
+            database.close();
+        },
+    };
+}
+
+async function waitForProject(
+    projects: ProjectsModule,
+    ctx: Parameters<ProjectsModule["get"]>[0],
+    projectId: string,
+) {
+    let project: Awaited<ReturnType<ProjectsModule["get"]>>;
+    await vi.waitFor(
+        async () => {
+            project = await projects.get(ctx, projectId);
+            if (project?.initializationStatus === "failed") {
+                throw new Error(project.initializationError ?? "Project initialization failed.");
+            }
+            expect(project?.initializationStatus).toBe("ready");
+        },
+        { timeout: 15_000 },
+    );
+    if (project === undefined) throw new Error("The project was not found.");
+    return project;
+}
+
+async function waitForWorkspace(
+    workspaces: WorkspacesModule,
+    ctx: Parameters<WorkspacesModule["get"]>[0],
+    workspaceId: string,
+): Promise<Workspace> {
+    let workspace: Workspace | undefined;
+    await vi.waitFor(
+        async () => {
+            workspace = await workspaces.get(ctx, workspaceId);
+            if (workspace?.status === "failed") {
+                throw new Error(
+                    workspace.initializationError ?? "Workspace initialization failed.",
+                );
+            }
+            expect(workspace?.status).toBe("ready");
+        },
+        { timeout: 15_000 },
+    );
+    if (workspace === undefined) throw new Error("The workspace was not found.");
+    return workspace;
+}

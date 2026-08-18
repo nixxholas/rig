@@ -5,7 +5,11 @@ import { Value } from "@sinclair/typebox/value";
 import { sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 
-import { workspaceMigrations, workspaceSchema } from "../../sources/workspaces/index.js";
+import {
+    WorkspacesModule,
+    workspaceMigrations,
+    workspaceSchema,
+} from "../../sources/workspaces/index.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
 import { temporaryWorkspacesCatalog } from "../support/workspacesModule.js";
 
@@ -22,6 +26,7 @@ function workspaceDatabase(name: string): ReturnType<typeof moduleDatabase> {
 const ROW = {
     id: "workspace-1",
     projectRef: "project-1",
+    parentId: "project-1",
     name: "Workspace",
     nameConfigured: false,
     branch: "worktree/workspace",
@@ -161,6 +166,155 @@ describe("WorkspacesModule", () => {
             await expect(
                 workspaces.reserve(database.context, { ...input, baseRef: "origin/release" }),
             ).rejects.toThrow("different base");
+        } finally {
+            database.close();
+        }
+    });
+
+    it("durably places agents in a workspace and keeps their manual order", async () => {
+        const { config, git, projects, workspaces } = await temporaryWorkspacesCatalog();
+        const events: string[] = [];
+        const unsubscribe = workspaces.onEventTransactional((_ctx, event) => {
+            events.push(event.type);
+        });
+        const database = workspaceDatabase("workspace-agent-associations-test");
+        await database.ready;
+        try {
+            workspaces.beforeStart(database.context, { parentOf: async () => null } as never);
+            await workspaces.reserve(database.context, {
+                id: "workspace-1",
+                projectRef: "acme",
+                name: "First workspace",
+            });
+            await workspaces.reserve(database.context, {
+                id: "workspace-2",
+                projectRef: "acme",
+                name: "Second workspace",
+            });
+
+            await workspaces.attachAgent(database.context, "workspace-1", "agent-1");
+            await workspaces.attachAgent(database.context, "workspace-1", "agent-2");
+            await workspaces.attachAgent(database.context, "workspace-1", "agent-3");
+            const attached = await workspaces.listAgents(database.context, "workspace-1");
+            expect(attached.map((association) => association.agentId)).toEqual([
+                "agent-1",
+                "agent-2",
+                "agent-3",
+            ]);
+            expect(new Set(attached.map((association) => association.orderKey)).size).toBe(3);
+
+            await workspaces.reorderAgent(database.context, "workspace-1", "agent-3", null);
+            const reordered = await workspaces.listAgents(database.context, "workspace-1");
+            expect(await workspaces.listAgentIds(database.context, "workspace-1")).toEqual([
+                "agent-3",
+                "agent-1",
+                "agent-2",
+            ]);
+            expect(reordered[0]?.orderKey).not.toBe(attached[2]?.orderKey);
+            expect(reordered.slice(1)).toEqual(attached.slice(0, 2));
+
+            const restarted = new WorkspacesModule(config, projects, git);
+            expect(await restarted.listAgents(database.context, "workspace-1")).toEqual(reordered);
+
+            await workspaces.attachAgent(database.context, "workspace-2", "agent-1");
+            expect(await workspaces.workspaceForAgent(database.context, "agent-1")).toBe(
+                "workspace-2",
+            );
+            expect(await workspaces.listAgentIds(database.context, "workspace-1")).toEqual([
+                "agent-3",
+                "agent-2",
+            ]);
+            expect(await workspaces.listAgentIds(database.context, "workspace-2")).toEqual([
+                "agent-1",
+            ]);
+            expect(events).toEqual([
+                "workspace_created",
+                "workspace_created",
+                "workspace_agent_attached",
+                "workspace_agent_attached",
+                "workspace_agent_attached",
+                "workspace_agent_reordered",
+                "workspace_agent_detached",
+                "workspace_agent_attached",
+            ]);
+        } finally {
+            unsubscribe();
+            database.close();
+        }
+    });
+
+    it("places workspaces under an implicit project root and orders only siblings", async () => {
+        const { workspaces } = await temporaryWorkspacesCatalog();
+        const database = workspaceDatabase("workspace-hierarchy-test");
+        await database.ready;
+        try {
+            const root = await workspaces.reserve(database.context, {
+                id: "workspace-root",
+                projectRef: "acme",
+                name: "Root workspace",
+            });
+            await workspaces.reserve(database.context, {
+                id: "workspace-child-a",
+                projectRef: "acme",
+                parentId: root.workspace.id,
+                name: "Child A",
+            });
+            const childB = await workspaces.reserve(database.context, {
+                id: "workspace-child-b",
+                projectRef: "acme",
+                parentId: root.workspace.id,
+                name: "Child B",
+            });
+
+            expect(root.workspace.parentId).toBe("acme");
+            expect(childB.workspace.parentId).toBe(root.workspace.id);
+            expect(
+                (await workspaces.listChildren(database.context, "acme")).map(
+                    (workspace) => workspace.id,
+                ),
+            ).toEqual(["workspace-root"]);
+            expect(
+                (await workspaces.listChildren(database.context, "acme", root.workspace.id)).map(
+                    (workspace) => workspace.id,
+                ),
+            ).toEqual(["workspace-child-b", "workspace-child-a"]);
+
+            await workspaces.reorder(database.context, {
+                workspaceId: "workspace-child-a",
+                afterId: null,
+            });
+            expect(
+                (await workspaces.listChildren(database.context, "acme", root.workspace.id)).map(
+                    (workspace) => workspace.id,
+                ),
+            ).toEqual(["workspace-child-a", "workspace-child-b"]);
+        } finally {
+            database.close();
+        }
+    });
+
+    it("rejects an invalid workspace ancestor chain while resolving an agent owner", async () => {
+        const { workspaces } = await temporaryWorkspacesCatalog();
+        const database = workspaceDatabase("workspace-ancestor-safety-test");
+        await database.ready;
+        try {
+            workspaces.beforeStart(database.context, { parentOf: async () => null } as never);
+            const workspace = await workspaces.reserve(database.context, {
+                id: "workspace-1",
+                projectRef: "acme",
+                name: "Workspace",
+            });
+            await workspaces.attachAgent(database.context, workspace.workspace.id, "agent-1");
+            await agentDatabaseRows(
+                database.database,
+                sql`UPDATE happy_agent_module_workspaces
+                    SET parent_id = ${workspace.workspace.id}
+                    WHERE id = ${workspace.workspace.id}`,
+            );
+
+            await expect(workspaces.workspaceForAgent(database.context, "agent-1")).rejects.toThrow(
+                "cyclic parent chain",
+            );
         } finally {
             database.close();
         }

@@ -17,10 +17,10 @@ export const MAX_PROJECT_EVENT_ID_LENGTH = 128;
 export const MAX_PROJECT_TIMESTAMP = 7_258_118_400_000;
 export const MAX_PROJECT_VERSION = Number.MAX_SAFE_INTEGER;
 export const MAX_PROJECT_ORDER_KEY_LENGTH = 128;
-export const MAX_PROJECT_AVATAR_HASH_LENGTH = 64;
-export const MAX_PROJECT_AVATAR_URL_LENGTH = 2_048;
+export const MAX_PROJECT_AVATAR_CONTENT_HASH_LENGTH = 64;
 export const MAX_PROJECT_AVATAR_DIMENSION = 16_384;
 export const MAX_PROJECT_AVATAR_BYTES = 8 * 1024 * 1024;
+export const MAX_PROJECT_AVATAR_THUMBHASH_LENGTH = 128;
 /** Longest human-readable failure detail kept on one project row. */
 export const MAX_PROJECT_ERROR_LENGTH = 500;
 export const MAX_PROJECT_GIT_REF_LENGTH = 512;
@@ -233,34 +233,29 @@ export const projectOrderKeySchema = Type.String({
     pattern: "^[0-9]+$",
 });
 
-export const projectAvatarHashSchema = Type.String({
-    minLength: MAX_PROJECT_AVATAR_HASH_LENGTH,
-    maxLength: MAX_PROJECT_AVATAR_HASH_LENGTH,
+export const projectAvatarContentHashSchema = Type.String({
+    minLength: MAX_PROJECT_AVATAR_CONTENT_HASH_LENGTH,
+    maxLength: MAX_PROJECT_AVATAR_CONTENT_HASH_LENGTH,
     pattern: "^[a-f0-9]{64}$",
 });
 
-export const projectAvatarMediaTypeSchema = Type.Literal("image/webp");
+export const projectAvatarContentTypeSchema = Type.Literal("image/webp");
 
 export const projectAvatarSourceSchema = Type.Union([
-    Type.Literal("repository"),
-    Type.Literal("hosting"),
     Type.Literal("user"),
+    Type.Literal("generated"),
 ]);
 
-export const projectAvatarUrlSchema = Type.String({
-    minLength: 1,
-    maxLength: MAX_PROJECT_AVATAR_URL_LENGTH,
-    pattern: "^[^\\u0000\\r\\n]+$",
+export const projectAvatarThumbhashSchema = Type.String({
+    minLength: 4,
+    maxLength: MAX_PROJECT_AVATAR_THUMBHASH_LENGTH,
 });
 
 export const projectAvatarSchema = Type.Object(
     {
-        hash: projectAvatarHashSchema,
-        height: Type.Integer({ minimum: 1, maximum: MAX_PROJECT_AVATAR_DIMENSION }),
-        mediaType: projectAvatarMediaTypeSchema,
+        kind: Type.Literal("image"),
         source: projectAvatarSourceSchema,
-        url: projectAvatarUrlSchema,
-        width: Type.Integer({ minimum: 1, maximum: MAX_PROJECT_AVATAR_DIMENSION }),
+        thumbhash: projectAvatarThumbhashSchema,
     },
     { additionalProperties: false },
 );
@@ -271,11 +266,21 @@ export const projectAvatarAssetSchema = Type.Object(
             minByteLength: 1,
             maxByteLength: MAX_PROJECT_AVATAR_BYTES,
         }),
-        hash: projectAvatarHashSchema,
-        mediaType: projectAvatarMediaTypeSchema,
+        contentHash: projectAvatarContentHashSchema,
+        contentType: projectAvatarContentTypeSchema,
+        etag: Type.String({ minLength: 66, maxLength: 66, pattern: '^"[a-f0-9]{64}"$' }),
+        height: Type.Integer({ minimum: 1, maximum: MAX_PROJECT_AVATAR_DIMENSION }),
+        thumbhash: projectAvatarThumbhashSchema,
+        width: Type.Integer({ minimum: 1, maximum: MAX_PROJECT_AVATAR_DIMENSION }),
     },
     { additionalProperties: false },
 );
+
+export const projectAvatarUploadContentTypeSchema = Type.Union([
+    Type.Literal("image/jpeg"),
+    Type.Literal("image/png"),
+    Type.Literal("image/webp"),
+]);
 
 export const projectStatusSchema = Type.Union([Type.Literal("active"), Type.Literal("archived")]);
 
@@ -395,14 +400,34 @@ export const projectReorderInputSchema = Type.Object(
     { additionalProperties: false },
 );
 
-export const projectSetAvatarInputSchema = Type.Object(
-    {
-        avatar: projectAvatarSchema,
-        expectedVersion: Type.Optional(projectVersionSchema),
-        projectId: projectIdSchema,
-    },
-    { additionalProperties: false },
-);
+export const projectSetAvatarInputSchema = Type.Union([
+    Type.Object(
+        {
+            bytes: Type.Uint8Array({
+                minByteLength: 1,
+                maxByteLength: MAX_PROJECT_AVATAR_BYTES,
+            }),
+            contentType: projectAvatarUploadContentTypeSchema,
+            expectedVersion: Type.Optional(projectVersionSchema),
+            projectId: projectIdSchema,
+            source: Type.Literal("user"),
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            bytes: Type.Uint8Array({
+                minByteLength: 1,
+                maxByteLength: MAX_PROJECT_AVATAR_BYTES,
+            }),
+            contentType: Type.Optional(projectAvatarUploadContentTypeSchema),
+            expectedVersion: Type.Optional(projectVersionSchema),
+            projectId: projectIdSchema,
+            source: Type.Literal("generated"),
+        },
+        { additionalProperties: false },
+    ),
+]);
 
 export const projectClearAvatarInputSchema = Type.Object(
     {
@@ -475,10 +500,11 @@ export type ProjectRequiredSecretKind = Static<typeof projectRequiredSecretKindS
 export type ProjectTimestamp = Static<typeof projectTimestampSchema>;
 export type ProjectVersion = Static<typeof projectVersionSchema>;
 export type ProjectOrderKey = Static<typeof projectOrderKeySchema>;
-export type ProjectAvatarHash = Static<typeof projectAvatarHashSchema>;
-export type ProjectAvatarMediaType = Static<typeof projectAvatarMediaTypeSchema>;
+export type ProjectAvatarContentHash = Static<typeof projectAvatarContentHashSchema>;
+export type ProjectAvatarContentType = Static<typeof projectAvatarContentTypeSchema>;
 export type ProjectAvatarSource = Static<typeof projectAvatarSourceSchema>;
-export type ProjectAvatarUrl = Static<typeof projectAvatarUrlSchema>;
+export type ProjectAvatarThumbhash = Static<typeof projectAvatarThumbhashSchema>;
+export type ProjectAvatarUploadContentType = Static<typeof projectAvatarUploadContentTypeSchema>;
 export type ProjectAvatar = Static<typeof projectAvatarSchema>;
 export type ProjectAvatarAsset = Static<typeof projectAvatarAssetSchema>;
 export type ProjectStatus = Static<typeof projectStatusSchema>;

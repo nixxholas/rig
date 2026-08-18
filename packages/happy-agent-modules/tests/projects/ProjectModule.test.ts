@@ -1,10 +1,9 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { rm } from "node:fs/promises";
 
 import { sql } from "drizzle-orm";
 import { Value } from "@sinclair/typebox/value";
-import { agentDatabaseRows } from "@slopus/happy-agent-base";
+import { agentDatabaseRows, agentDatabaseRun } from "@slopus/happy-agent-base";
+import sharp from "sharp";
 import { describe, expect, it } from "vitest";
 
 import { GitModule } from "../../sources/git/index.js";
@@ -192,6 +191,108 @@ describe("ProjectsModule", () => {
                 "003-project-order-version-avatar",
                 "004-project-folder-record",
                 "005-project-without-owner",
+                "006-project-root-agents",
+                "007-project-root-agent-order-keys",
+                "008-project-avatar-assets",
+            ]);
+        } finally {
+            database.close();
+        }
+    });
+
+    it("upgrades legacy root-agent positions into durable order keys", async () => {
+        const database = moduleDatabase([], "projects-agent-order-key-upgrade-test");
+        try {
+            const legacyMigrations = projectMigrations.slice(0, 6);
+            for (const [, migrate] of legacyMigrations) {
+                await migrate(database.context, database.database);
+            }
+            await agentDatabaseRun(
+                database.database,
+                sql`INSERT INTO happy_agent_module_project_root_agents (project_id, agent_id)
+                    VALUES ('project-1', 'agent-a'), ('project-1', 'agent-b')`,
+            );
+
+            const [, migrateOrderKeys] = projectMigrations[6]!;
+            await migrateOrderKeys(database.context, database.database);
+
+            expect(
+                await agentDatabaseRows<{ readonly agent_id: string; readonly order_key: string }>(
+                    database.database,
+                    sql`SELECT agent_id, order_key
+                        FROM happy_agent_module_project_root_agents
+                        ORDER BY position`,
+                ),
+            ).toEqual([
+                { agent_id: "agent-a", order_key: "00000000000000000001" },
+                { agent_id: "agent-b", order_key: "00000000000000000002" },
+            ]);
+        } finally {
+            database.close();
+        }
+    });
+
+    it("keeps each top-level agent in its project's durable root order", async () => {
+        const database = await migratedProjectDatabase("projects-root-agents-test");
+        try {
+            const projects = await projectsModule();
+            projects.beforeStart(database.context, {
+                parentOf: () => Promise.resolve(null),
+            } as never);
+            const first = await projects.create(database.context, {
+                repositoryRef: "/tmp/projects/root-agents-first",
+                name: "First",
+            });
+            const second = await projects.create(database.context, {
+                repositoryRef: "/tmp/projects/root-agents-second",
+                name: "Second",
+            });
+
+            await projects.attachAgent(database.context, first.id, "agent-b");
+            await projects.attachAgent(database.context, first.id, "agent-a");
+            await projects.attachAgent(database.context, first.id, "agent-b");
+
+            const attached = await projects.listAgents(database.context, first.id);
+            expect(attached).toEqual([
+                {
+                    agentId: "agent-b",
+                    orderKey: expect.any(String),
+                },
+                {
+                    agentId: "agent-a",
+                    orderKey: expect.any(String),
+                },
+            ]);
+            expect(new Set(attached.map((association) => association.orderKey)).size).toBe(2);
+            expect(await projects.listAgentIds(database.context, first.id)).toEqual([
+                "agent-b",
+                "agent-a",
+            ]);
+            await projects.reorderAgent(database.context, first.id, "agent-a", null);
+            const reordered = await projects.listAgents(database.context, first.id);
+            expect(await projects.listAgentIds(database.context, first.id)).toEqual([
+                "agent-a",
+                "agent-b",
+            ]);
+            expect(reordered[0]?.orderKey).not.toBe(attached[1]?.orderKey);
+            expect(reordered[1]?.orderKey).toBe(attached[0]?.orderKey);
+
+            const restarted = new ProjectsModule(await temporaryTestConfig(), new GitModule());
+            expect(await restarted.listAgents(database.context, first.id)).toEqual(reordered);
+            expect(await projects.projectForAgent(database.context, "agent-a")).toMatchObject({
+                id: first.id,
+            });
+            expect(
+                await projects.projectForAgent(database.context, "agent-missing"),
+            ).toBeUndefined();
+            await expect(
+                projects.attachAgent(database.context, second.id, "agent-a"),
+            ).rejects.toThrow(`Agent "agent-a" already belongs to project "${first.id}".`);
+
+            await projects.archive(database.context, first.id);
+            expect(await projects.listAgentIds(database.context, first.id)).toEqual([
+                "agent-a",
+                "agent-b",
             ]);
         } finally {
             database.close();
@@ -541,19 +642,13 @@ describe("ProjectsModule", () => {
         const database = await migratedProjectDatabase("projects-avatar-test");
         const config = await temporaryTestConfig();
         try {
-            const hash = "a".repeat(64);
-            const avatar = {
-                hash,
-                height: 128,
-                mediaType: "image/webp" as const,
-                source: "user" as const,
-                url: `/project-assets/${hash}`,
-                width: 128,
-            };
+            const bytes = await projectAvatarPng(220, 80, 40);
             expect(
                 Value.Check(projectSetAvatarInputSchema, {
-                    avatar,
+                    bytes,
+                    contentType: "image/png",
                     projectId: "project-avatar",
+                    source: "user",
                 }),
             ).toBe(true);
             const projects = new ProjectsModule(config, new GitModule());
@@ -562,36 +657,27 @@ describe("ProjectsModule", () => {
                 name: "Avatar",
             });
             const updated = await projects.setAvatar(database.context, {
-                avatar,
+                bytes,
+                contentType: "image/png",
                 expectedVersion: created.version,
                 projectId: created.id,
+                source: "user",
             });
-            expect(updated.avatar).toEqual(avatar);
-            // The catalog records what an avatar is; the picture is a file beside the agent's own
-            // state, and nothing has written one yet.
-            await expect(projects.avatarAsset(database.context, hash)).resolves.toBeUndefined();
-
-            // Configuration owns where the agent keeps its own state, so the picture lands beside
-            // it rather than anywhere the catalog was told about.
-            const assetPath = join(
-                config.configuration.paths.agentHome,
-                "projects",
-                "assets",
-                "project-avatars",
-                hash.slice(0, 2),
-                `${hash}.webp`,
+            expect(updated.avatar).toMatchObject({
+                kind: "image",
+                source: "user",
+                thumbhash: expect.any(String),
+            });
+            await expect(projects.avatarAsset(database.context, created.id)).resolves.toMatchObject(
+                {
+                    contentHash: expect.stringMatching(/^[a-f0-9]{64}$/u),
+                    contentType: "image/webp",
+                    thumbhash: updated.avatar?.thumbhash,
+                },
             );
-            await mkdir(dirname(assetPath), { recursive: true });
-            await writeFile(assetPath, Buffer.from([1, 2, 3]));
-
-            await expect(projects.avatarAsset(database.context, hash)).resolves.toMatchObject({
-                hash,
-                mediaType: "image/webp",
-            });
-            // The catalog is shared for this installation, so avatar bytes are likewise shared.
-            await expect(projects.avatarAsset(database.context, hash)).resolves.toMatchObject({
-                hash,
-                mediaType: "image/webp",
+            const asset = await projects.avatarAsset(database.context, created.id);
+            await expect(sharp(asset?.bytes).metadata()).resolves.toMatchObject({
+                format: "webp",
             });
 
             const cleared = await projects.clearAvatar(database.context, {
@@ -599,6 +685,9 @@ describe("ProjectsModule", () => {
                 projectId: created.id,
             });
             expect(cleared.avatar).toBeUndefined();
+            await expect(
+                projects.avatarAsset(database.context, created.id),
+            ).resolves.toBeUndefined();
         } finally {
             database.close();
             await rm(config.configuration.paths.happyHome, { force: true, recursive: true });
@@ -834,6 +923,19 @@ async function migratedProjectDatabase(name: string) {
         await migrate(database.context, database.database);
     }
     return database;
+}
+
+async function projectAvatarPng(red: number, green: number, blue: number): Promise<Buffer> {
+    return await sharp({
+        create: {
+            background: { alpha: 0.75, b: blue, g: green, r: red },
+            channels: 4,
+            height: 80,
+            width: 120,
+        },
+    })
+        .png()
+        .toBuffer();
 }
 
 /** The tools this module hands one agent. `subagent-a` is the only agent here with a parent. */

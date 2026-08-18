@@ -1,98 +1,77 @@
-import { withAgentDatabase } from "@slopus/happy-agent-base";
-import type { HappyAgentConfiguration } from "@slopus/happy-agent-modules";
-
 import {
-    startHappyAgent,
-    type StartedHappyAgent,
-    type StartHappyAgentOptions,
-} from "./start/startHappyAgent.js";
-import {
-    startAgentHttpServer,
-    type AgentHttpConfiguration,
-    type AgentHttpRouteGroup,
-    type AgentHttpServer,
-} from "./modules/http/index.js";
+    startHappyAgentRuntime,
+    type HappyAgentRuntime,
+    type StartHappyAgentRuntimeOptions,
+} from "@slopus/happy-agent-modules";
 
-export interface StartHappyAgentDaemonOptions extends StartHappyAgentOptions {
-    /** Optional host-backed daemon configuration and inspector capabilities. */
-    readonly httpConfiguration?: AgentHttpConfiguration;
-    /** Additional route families registered by the composition root. */
-    readonly routeGroups?: readonly AgentHttpRouteGroup[];
-}
+import { bindAgentSocket, type BoundAgentSocket } from "./socket/AgentSocket.js";
+
+export type StartHappyAgentDaemonOptions = Omit<StartHappyAgentRuntimeOptions, "onPrepared">;
 
 export interface HappyAgentDaemon {
-    readonly agent: StartedHappyAgent;
-    readonly configuration: HappyAgentConfiguration;
-    readonly http: AgentHttpServer;
     readonly socketPath: string;
     readonly tokenPath: string;
     close(): Promise<void>;
 }
 
-/**
- * Starts the complete local Happy agent and its private `/v0` Unix-socket API.
- *
- * The daemon is only the socket around the agent. The configuration decides everything the agent
- * itself is, so the caller says where the `.happy` folder is and nothing more.
- */
+/** Start the modules-owned runtime and bind its API to the configured Unix socket. */
 export async function startHappyAgentDaemon(
     options: StartHappyAgentDaemonOptions = {},
 ): Promise<HappyAgentDaemon> {
-    const agent = await startHappyAgent(options);
-    const configuration = agent.configuration;
+    let bound: BoundAgentSocket | undefined;
+    let unsubscribeShutdown: (() => void) | undefined;
     let closeDaemon: (() => Promise<void>) | undefined;
-    let http: AgentHttpServer;
+    let shutdownRequested = false;
+    let runtime: HappyAgentRuntime;
+
     try {
-        http = await startAgentHttpServer({
-            agent,
-            agentConfiguration: configuration,
-            ctx: agent.ctx.named("happy-agent-http"),
-            configuration: {
-                durableGlobalEventQueue: configuration.values.settings.durableGlobalEventQueue,
-                inferenceMaxRetries: configuration.values.settings.inferenceMaxRetries,
-                p2pName: configuration.values.p2p.name,
-                ...(options.httpConfiguration ?? {}),
-            },
-            ...(options.routeGroups === undefined ? {} : { routeGroups: options.routeGroups }),
-            ...(options.version === undefined ? {} : { version: options.version }),
-            onShutdown: () => {
-                void closeDaemon?.().catch(() => undefined);
+        runtime = await startHappyAgentRuntime({
+            ...options,
+            onPrepared: async (prepared) => {
+                bound = await bindAgentSocket(prepared);
+                unsubscribeShutdown = prepared.api.onShutdown(async () => {
+                    if (closeDaemon === undefined) {
+                        shutdownRequested = true;
+                        return;
+                    }
+                    await closeDaemon();
+                });
             },
         });
     } catch (error) {
-        await agent.close().catch(() => undefined);
+        unsubscribeShutdown?.();
+        await bound?.close().catch(() => undefined);
         throw error;
+    }
+
+    if (bound === undefined) {
+        await runtime.close().catch(() => undefined);
+        throw new Error("The Happy agent runtime started without binding its socket.");
     }
 
     let closing: Promise<void> | undefined;
     closeDaemon = () => {
-        closing ??= closeHappyAgentDaemon(agent, http);
+        closing ??= closeHappyAgentDaemon(runtime, bound!, unsubscribeShutdown);
         return closing;
     };
+    if (shutdownRequested) void closeDaemon();
+
     return {
-        agent,
         close: closeDaemon,
-        configuration,
-        http,
-        socketPath: configuration.paths.socketPath,
-        tokenPath: configuration.paths.tokenPath,
+        socketPath: bound.socketPath,
+        tokenPath: runtime.configuration.paths.tokenPath,
     };
 }
 
 async function closeHappyAgentDaemon(
-    agent: StartedHappyAgent,
-    http: AgentHttpServer,
+    runtime: HappyAgentRuntime,
+    bound: BoundAgentSocket,
+    unsubscribeShutdown: (() => void) | undefined,
 ): Promise<void> {
-    const ctx = agent.ctx.named("happy-agent-shutdown");
-    await agent.modules.events
-        .record(withAgentDatabase(ctx, agent.database), {
-            payload: {},
-            type: "daemon.stopping",
-        })
-        .catch(() => undefined);
+    unsubscribeShutdown?.();
     const failures: unknown[] = [];
-    await http.close().catch((error: unknown) => failures.push(error));
-    await agent.close().catch((error: unknown) => failures.push(error));
+    await bound.close().catch((error: unknown) => failures.push(error));
+    await runtime.close().catch((error: unknown) => failures.push(error));
     if (failures.length > 0) {
         throw new AggregateError(failures, "The Happy agent daemon did not close cleanly.");
     }

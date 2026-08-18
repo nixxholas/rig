@@ -1,11 +1,12 @@
+import { HappyAgentClient, type HealthResponse } from "@slopus/happy-agent-client";
+
 import {
+    createUnixSocketFetch,
     ensureLocalProtocolServer,
-    ProtocolHttpClient,
     readTokenIfPresent,
     stopLocalProtocolServer,
 } from "../client/index.js";
 import { getHappyDaemonPaths } from "../daemon/index.js";
-import type { HealthResponse } from "../protocol/index.js";
 
 export type DaemonCommand = "reload" | "start" | "stop" | "status";
 
@@ -22,7 +23,7 @@ export async function runDaemonCommand(command: DaemonCommand): Promise<void> {
     const connection = await connectToExistingDaemon();
     if (command === "reload") {
         if (connection !== undefined) {
-            await stopLocalProtocolServer(connection.client);
+            await stopLocalProtocolServer(connection.client, getHappyDaemonPaths().socketPath);
         }
         const reloaded = await ensureLocalProtocolServer({
             confirmRestart: async () => true,
@@ -39,17 +40,12 @@ export async function runDaemonCommand(command: DaemonCommand): Promise<void> {
             console.log(`Daemon log: ${paths.logPath}`);
             return;
         }
-        if (connection.health.status === "error") {
-            console.log(`Daemon could not start: ${connection.health.error}`);
+        if (!connection.health.ready) {
+            console.log(`Daemon is starting at ${paths.socketPath}`);
             console.log(`Daemon log: ${paths.logPath}`);
             return;
         }
-        if (connection.health.status === "starting") {
-            console.log(`Daemon is starting at ${connection.client.socketPath}`);
-            console.log(`Daemon log: ${paths.logPath}`);
-            return;
-        }
-        console.log(`Daemon is running at ${connection.client.socketPath}`);
+        console.log(`Daemon is running at ${paths.socketPath}`);
         console.log(`Daemon log: ${paths.logPath}`);
         return;
     }
@@ -64,7 +60,7 @@ export async function runDaemonCommand(command: DaemonCommand): Promise<void> {
 
 async function connectToExistingDaemon(): Promise<
     | {
-          client: ProtocolHttpClient;
+          client: HappyAgentClient;
           health: HealthResponse;
       }
     | undefined
@@ -75,13 +71,13 @@ async function connectToExistingDaemon(): Promise<
         return undefined;
     }
 
-    const client = new ProtocolHttpClient({
-        pathPrefix: "/v0",
-        socketPath: paths.socketPath,
+    const client = new HappyAgentClient({
+        endpoint: "http://happy",
+        fetch: createUnixSocketFetch(paths.socketPath),
         token,
     });
     try {
-        const health = await client.health();
+        const health = await client.getHealth();
         return { client, health };
     } catch {
         return undefined;

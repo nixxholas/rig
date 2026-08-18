@@ -1,9 +1,15 @@
+import type { HealthResponse } from "@slopus/happy-agent-client";
 import type { Context } from "@steve.kite/stdlib";
 
 import { ensureLocalProtocolServer } from "../client/index.js";
-import type { RigCliInstallationInspection } from "../protocol/index.js";
-import { RIG_PROTOCOL_VERSION } from "../protocol/index.js";
 import { readPackageVersion } from "../readPackageVersion.js";
+
+export interface RigCliInspection {
+    cliVersion: string;
+    formatVersion: 2;
+    health: HealthResponse;
+    source: "cli";
+}
 
 export interface RunRigInspectionOptions {
     json?: boolean;
@@ -11,16 +17,16 @@ export interface RunRigInspectionOptions {
     rigVersion?: string;
 }
 
+/** Reports only facts available through the public Happy Agent API. */
 export async function runRigInspection(
     _ctx: Context,
     options: RunRigInspectionOptions = {},
-): Promise<RigCliInstallationInspection> {
-    const daemon = await (await ensureLocalProtocolServer()).client.installation();
-    const inspection: RigCliInstallationInspection = {
-        cliProtocolVersion: RIG_PROTOCOL_VERSION,
+): Promise<RigCliInspection> {
+    const health = await (await ensureLocalProtocolServer()).client.getHealth();
+    const inspection: RigCliInspection = {
         cliVersion: options.rigVersion ?? readPackageVersion(),
-        data: daemon.data,
-        formatVersion: 1,
+        formatVersion: 2,
+        health,
         source: "cli",
     };
     const log = options.log ?? console.log;
@@ -29,29 +35,15 @@ export async function runRigInspection(
     return inspection;
 }
 
-export function formatRigInspection(inspection: RigCliInstallationInspection): readonly string[] {
-    const lines = [
+export function formatRigInspection(inspection: RigCliInspection): readonly string[] {
+    return [
         `Installed Rig CLI version: ${inspection.cliVersion}`,
-        `Installed Rig CLI protocol version: ${String(inspection.cliProtocolVersion)}`,
+        `Happy Agent daemon version: ${inspection.health.version.daemon}`,
+        `Happy Agent protocol version: ${String(inspection.health.version.protocol)}`,
+        inspection.health.ready ? "Happy Agent is ready." : "Happy Agent is starting.",
     ];
-    if (inspection.data.status === "initialized") {
-        lines.push(
-            "Happy Agent data is initialized.",
-            `Happy Agent data epoch: ${inspection.data.epoch}`,
-            `Happy Agent data schema version: ${String(inspection.data.schemaVersion)}`,
-        );
-    } else if (inspection.data.status === "absent") {
-        lines.push("Happy Agent data has not been created.");
-    } else if (inspection.data.status === "uninitialized") {
-        lines.push("Happy Agent data exists but has not been initialized.");
-    } else {
-        lines.push(inspection.data.message);
-    }
-    return lines;
 }
 
-export function rigInspectionExitCode(inspection: RigCliInstallationInspection): 0 | 2 {
-    return inspection.data.status === "incompatible" || inspection.data.status === "unavailable"
-        ? 2
-        : 0;
+export function rigInspectionExitCode(_inspection: RigCliInspection): 0 {
+    return 0;
 }

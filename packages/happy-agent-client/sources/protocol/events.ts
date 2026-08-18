@@ -9,7 +9,7 @@
 import type { Cuid2, EventCursor, ResourceVersion, Timestamp } from "./common.js";
 import type { Agent } from "./agents.js";
 import type { GitState } from "./git.js";
-import type { Message, RunStatus } from "./messages.js";
+import type { Message, Run } from "./messages.js";
 import type { BackgroundProcess } from "./processes.js";
 import type { Profile } from "./profile.js";
 import type { Project } from "./projects.js";
@@ -67,14 +67,24 @@ export type QuestionUpdatedPayload = ResourceUpdate<Question> & { questionId: Cu
 /** A run began; the agent left `"idle"`. */
 export interface RunStartedPayload extends MutationEcho {
     agentId: Cuid2;
-    runId: Cuid2;
+    run: Run;
+    /** Pending user messages accepted into the run, oldest first. */
+    acceptedMessageIds: Cuid2[];
+}
+
+/** User steering atomically closed one run and opened its successor. */
+export interface RunBoundaryPayload extends MutationEcho {
+    agentId: Cuid2;
+    finishedRun: Run;
+    startedRun: Run;
+    /** Pending steering messages accepted into the successor, oldest first. */
+    acceptedMessageIds: Cuid2[];
 }
 
 /** A run reached a terminal state; the agent is `"idle"` again. */
 export interface RunFinishedPayload extends MutationEcho {
     agentId: Cuid2;
-    runId: Cuid2;
-    status: Exclude<RunStatus, "running">;
+    run: Run;
 }
 
 export interface MessageCreatedPayload extends MutationEcho {
@@ -152,6 +162,7 @@ export type HappyAgentEvent =
     | EventEnvelope<"question.created", QuestionCreatedPayload>
     | EventEnvelope<"question.updated", QuestionUpdatedPayload>
     | EventEnvelope<"run.started", RunStartedPayload>
+    | EventEnvelope<"run.boundary", RunBoundaryPayload>
     | EventEnvelope<"run.finished", RunFinishedPayload>
     | EventEnvelope<"message.created", MessageCreatedPayload>
     | EventEnvelope<"message.updated", MessageUpdatedPayload>

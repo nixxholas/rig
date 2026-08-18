@@ -2,17 +2,12 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import {
-    loadHappyAgentConfiguration,
-    resolveAgentDaemonPaths,
-    startHappyAgentDaemon,
-    stopAgentDaemon,
-} from "@slopus/happy-agent";
+import { startHappyAgentDaemon, stopAgentDaemon } from "@slopus/happy-agent";
 import { createRootContext } from "@steve.kite/stdlib";
 
 import { parsePermissionMode } from "../../rig/sources/app/parsePermissionMode.js";
 import { configureDevelopmentEnvironment } from "../../rig/sources/development/index.js";
-import { getDaemonIdentity } from "../../rig/sources/daemon/index.js";
+import { getDaemonIdentity, getHappyDaemonPaths } from "../../rig/sources/daemon/index.js";
 import { installCliFailureReporting } from "../../rig/sources/installCliFailureReporting.js";
 import { reportCliFailure } from "../../rig/sources/reportCliFailure.js";
 import { runApp, type RunAppOptions } from "../../rig/sources/app/runApp.js";
@@ -43,13 +38,12 @@ async function main(): Promise<void> {
     // the daemon identity, or runApp would try to replace the daemon this process just started.
     process.env.HAPPY_HOME_DIR = happyHome;
     if (isDaemonStop(process.argv.slice(2))) {
-        await stopDaemon(happyHome);
+        await stopDaemon();
         return;
     }
     const identity = getDaemonIdentity();
     const daemon = await startHappyAgentDaemon({
         happyHome,
-        httpConfiguration: { identity },
         version: identity.version,
     });
     try {
@@ -72,10 +66,13 @@ function isDaemonStop(args: readonly string[]): boolean {
     return args[0] === "daemon" && args[1] === "stop";
 }
 
-async function stopDaemon(happyHome: string): Promise<void> {
-    const configuration = await loadHappyAgentConfiguration(happyHome);
-    const paths = resolveAgentDaemonPaths(configuration);
-    const result = await stopAgentDaemon(paths);
+async function stopDaemon(): Promise<void> {
+    const paths = getHappyDaemonPaths();
+    const result = await stopAgentDaemon({
+        agentHome: paths.directory,
+        socketPath: paths.socketPath,
+        tokenPath: paths.tokenPath,
+    });
     if (!result.stopped) {
         process.stdout.write("No Happy agent is running for this development home.\n");
         return;

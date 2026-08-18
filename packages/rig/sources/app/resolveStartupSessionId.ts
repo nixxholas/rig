@@ -1,5 +1,6 @@
-import type { ProtocolHttpClient } from "../client/index.js";
-import type { SessionSummary } from "../protocol/index.js";
+import type { HappyAgentClient } from "@slopus/happy-agent-client";
+
+import { loadAgentCatalog, type AgentCatalogEntry } from "../client/loadAgentCatalog.js";
 import { RigUserError } from "../RigUserError.js";
 import type { SessionCommandOptions } from "./parseSessionCommand.js";
 import { shortenHomePath } from "./shortenHomePath.js";
@@ -19,7 +20,7 @@ const MAX_OFFERED_SESSIONS = 50;
  * dismisses the picker, which is a decision rather than a failure.
  */
 export async function resolveStartupSessionId(options: {
-    client: ProtocolHttpClient;
+    client: HappyAgentClient;
     cwd: string;
     selection: StartupSessionSelection;
     startup: StartupStatusApp;
@@ -28,63 +29,58 @@ export async function resolveStartupSessionId(options: {
     const { all, last, sessionId: requestedSessionId } = options.selection.selection;
     let sessionId = requestedSessionId;
     if (sessionId === undefined) {
-        options.startup.setStatus("Loading saved sessions.");
-        // Asking to resume is asking for saved sessions, so sessions the TUI archived on
-        // its way out belong in the list just as much as the ones still showing.
-        const listed = await options.client.listSessions({ archived: "all" });
+        options.startup.setStatus("Loading saved agents.");
+        const listed = await loadAgentCatalog(options.client);
         const matching = all
-            ? listed.sessions
-            : listed.sessions.filter((session) => session.cwd === options.cwd);
-        // Resuming is about recent work, so recency wins over the board ordering the
-        // dashboard uses, and only the newest handful is worth paging through.
-        const sessions = [...matching]
+            ? listed.entries
+            : listed.entries.filter((entry) => entry.cwd === options.cwd);
+        const agents = [...matching]
             .sort((left, right) => lastActivity(right) - lastActivity(left))
             .slice(0, MAX_OFFERED_SESSIONS);
-        if (sessions.length === 0) {
+        if (agents.length === 0) {
             throw all
-                ? new RigUserError("Rig has no saved sessions yet.", {
+                ? new RigUserError("Rig has no saved agents yet.", {
                       hint: "Run rig to start one.",
                   })
-                : new RigUserError(
-                      `Rig has no saved sessions in ${shortenHomePath(options.cwd)}.`,
-                      { hint: "Use --all to pick a session from another directory." },
-                  );
+                : new RigUserError(`Rig has no saved agents in ${shortenHomePath(options.cwd)}.`, {
+                      hint: "Use --all to pick an agent from another directory.",
+                  });
         }
         if (last) {
-            sessionId = sessions[0]?.id;
+            sessionId = agents[0]?.agent.id;
             if (sessionId === undefined) {
-                throw new RigUserError("Rig has no saved sessions yet.", {
+                throw new RigUserError("Rig has no saved agents yet.", {
                     hint: "Run rig to start one.",
                 });
             }
         } else {
             sessionId = await options.startup.selectSession({
                 confirmVerb: forking ? "fork" : "resume",
-                sessions,
+                agents,
                 showDirectory: all,
                 subtitle: all
-                    ? `${countLabel(sessions.length, matching.length)} across every directory.`
-                    : `${countLabel(sessions.length, matching.length)} in ${shortenHomePath(
+                    ? `${countLabel(agents.length, matching.length)} across every directory.`
+                    : `${countLabel(agents.length, matching.length)} in ${shortenHomePath(
                           options.cwd,
                       )}.`,
-                title: forking ? "Fork a session" : "Resume a session",
+                title: forking ? "Fork an agent" : "Resume an agent",
             });
             if (sessionId === undefined) return undefined;
         }
     }
 
     if (!forking) return sessionId;
-    options.startup.setStatus("Forking session.");
-    const forked = await options.client.forkSession(sessionId);
-    return forked.session.id;
+    throw new RigUserError("The Happy Agent API does not expose agent forking.", {
+        hint: "Resume the agent or start a new one.",
+    });
 }
 
-function lastActivity(session: SessionSummary): number {
-    return session.lastMessageAt ?? session.updatedAt;
+function lastActivity(entry: AgentCatalogEntry): number {
+    return entry.agent.updatedAt;
 }
 
 /** Says so plainly when older sessions exist beyond the ones being offered. */
 function countLabel(shown: number, available: number): string {
-    if (shown < available) return `${shown} most recent of ${available} saved sessions`;
-    return `${shown} saved session${shown === 1 ? "" : "s"}`;
+    if (shown < available) return `${shown} most recent of ${available} saved agents`;
+    return `${shown} saved agent${shown === 1 ? "" : "s"}`;
 }

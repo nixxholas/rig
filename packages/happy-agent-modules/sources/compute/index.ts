@@ -14,6 +14,21 @@ export {
     type HostCompute,
     type HostComputeProvider,
 } from "./ComputeModule.js";
+export {
+    computeProcessChangesSchema,
+    computeProcessEventListenerSchema,
+    computeProcessEventSchema,
+    computeProcessSchema,
+    computeProcessStatusSchema,
+    MAX_RETAINED_EXITED_PROCESSES,
+    MAX_RETAINED_EXITED_PROCESSES_PER_AGENT,
+    type ComputeProcess,
+    type ComputeProcessChanges,
+    type ComputeProcessEvent,
+    type ComputeProcessEventListener,
+    type ComputeProcessStatus,
+    type ComputeProcessUnsubscribe,
+} from "./ComputeProcess.js";
 export { createComputeModules, type CreatedComputeModules } from "./createComputeModules.js";
 export type {
     Compute,
@@ -22,6 +37,7 @@ export type {
     ComputePermissions,
     ComputeRunOptions,
     ComputeSessionActivity,
+    ComputeSessionExit,
     ComputeSessionReadOptions,
     ComputeSessionSnapshot,
     ComputeSessionStatus,

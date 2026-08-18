@@ -48,13 +48,25 @@ import {
     workspaceStorageKeyExists,
 } from "./impl/workspaceGitRefSnapshot.js";
 import {
+    createWorkspaceRequestSchema,
     type CreateWorkspaceRequest,
+    workspaceCreatorOptionsSchema,
     type WorkspaceCreatorOptions,
 } from "./WorkspaceProvisioning.js";
+import {
+    workspaceAgentAttachmentSchema,
+    workspaceAgentLookupSchema,
+    workspaceAgentReorderInputSchema,
+    type WorkspaceAgentAssociation,
+    type WorkspaceAgentAttachment,
+    type WorkspaceAgentOrder,
+    type WorkspaceAgentReorderInput,
+} from "./WorkspaceAgent.js";
 import {
     workspaceApplyGitFactsInputSchema,
     workspaceApplyProbeInputSchema,
     workspaceArchiveOptionsSchema,
+    workspaceChildrenQuerySchema,
     workspaceIdSchema,
     workspaceInheritNameInputSchema,
     workspaceMarkFailedInputSchema,
@@ -71,6 +83,7 @@ import {
     type WorkspaceApplyGitFactsInput,
     type WorkspaceApplyProbeInput,
     type WorkspaceArchiveOptions,
+    type WorkspaceChildrenQuery,
     type WorkspaceInheritNameInput,
     type WorkspaceMarkFailedInput,
     type WorkspaceMarkReadyInput,
@@ -149,6 +162,18 @@ import { getWorkspaceTool } from "./tools/get_workspace.js";
 import { listWorkspacesTool } from "./tools/list_workspaces.js";
 import { renameWorkspaceTool } from "./tools/rename_workspace.js";
 import { transferWorkspaceTool } from "./tools/transfer_workspace.js";
+import {
+    insertWorkspaceAgent,
+    moveWorkspaceAgent,
+    readWorkspaceAgent,
+    readWorkspaceAgents,
+} from "./store/workspaceAgents.js";
+import { orderKeyBetween } from "./store/workspaceOrdering.js";
+import {
+    readWorkspaceAncestorIds,
+    readWorkspaceChildren,
+    touchWorkspace,
+} from "./store/workspaceRecords.js";
 
 /** How many workspaces one page may carry, and how much text a page may spend on them. */
 export const WORKSPACE_PAGE_SIZE = 50;
@@ -194,6 +219,8 @@ export class WorkspacesModule implements AgentModule {
     readonly #syncTimers = new Map<string, NodeJS.Timeout>();
     readonly #tasks = new Set<Promise<void>>();
     readonly #workspaceLocks: MapAsyncLock<string> = mapAsyncLock();
+    /** An agent lock serializes relocation; owner locks serialize each affected resource version. */
+    readonly #agentAssociationLocks: MapAsyncLock<string> = mapAsyncLock();
     readonly #workspacesDirectory: string;
 
     #closed = false;
@@ -294,6 +321,7 @@ export class WorkspacesModule implements AgentModule {
                     {
                         id: workspaceId,
                         projectRef: normalized.projectRef,
+                        parentId: normalized.parentId ?? normalized.projectRef,
                         name: normalized.name,
                         nameConfigured: normalized.nameConfigured ?? false,
                         kind: normalized.kind ?? "git_worktree",
@@ -351,6 +379,7 @@ export class WorkspacesModule implements AgentModule {
                 return {
                     type: "workspace_renamed",
                     workspace: after,
+                    previousWorkspace: before,
                     previousName: before.name,
                 };
             },
@@ -385,6 +414,7 @@ export class WorkspacesModule implements AgentModule {
                 return {
                     type: "workspace_renamed",
                     workspace: after,
+                    previousWorkspace: before,
                     previousName: before.name,
                 };
             },
@@ -409,10 +439,11 @@ export class WorkspacesModule implements AgentModule {
                     { workspaceId: normalized.workspaceId, branch: normalized.branch },
                     request,
                 ),
-            (_before, after) => ({
+            (before, after) => ({
                 type: "workspace_updated",
                 change: "set_branch",
                 workspace: after,
+                previousWorkspace: requirePreviousWorkspace(before),
             }),
         );
     }
@@ -440,10 +471,11 @@ export class WorkspacesModule implements AgentModule {
                     { workspaceId: normalized.workspaceId, facts: normalized.facts },
                     request,
                 ),
-            (_before, after) => ({
+            (before, after) => ({
                 type: "workspace_updated",
                 change: "record_initialization",
                 workspace: after,
+                previousWorkspace: requirePreviousWorkspace(before),
             }),
         );
     }
@@ -464,10 +496,11 @@ export class WorkspacesModule implements AgentModule {
                     { workspaceId: normalized.workspaceId },
                     request,
                 ),
-            (_before, after) => ({
+            (before, after) => ({
                 type: "workspace_updated",
                 change: "mark_ready",
                 workspace: after,
+                previousWorkspace: requirePreviousWorkspace(before),
             }),
         );
     }
@@ -488,10 +521,11 @@ export class WorkspacesModule implements AgentModule {
                     { workspaceId: normalized.workspaceId, error: normalized.error },
                     request,
                 ),
-            (_before, after) => ({
+            (before, after) => ({
                 type: "workspace_updated",
                 change: "mark_failed",
                 workspace: after,
+                previousWorkspace: requirePreviousWorkspace(before),
             }),
         );
     }
@@ -519,10 +553,11 @@ export class WorkspacesModule implements AgentModule {
                     { workspaceId: normalized.workspaceId, error: normalized.error },
                     request,
                 ),
-            (_before, after) => ({
+            (before, after) => ({
                 type: "workspace_updated",
                 change: "mark_initialization_failed",
                 workspace: after,
+                previousWorkspace: requirePreviousWorkspace(before),
             }),
         );
     }
@@ -555,6 +590,7 @@ export class WorkspacesModule implements AgentModule {
                     : {
                           type: "workspace_reordered",
                           workspace: after,
+                          previousWorkspace: before,
                           previousOrderKey: before.orderKey,
                       },
         );
@@ -589,10 +625,11 @@ export class WorkspacesModule implements AgentModule {
                     },
                     request,
                 ),
-            (_before, after) => ({
+            (before, after) => ({
                 type: "workspace_updated",
                 change: "begin_archive",
                 workspace: after,
+                previousWorkspace: requirePreviousWorkspace(before),
             }),
         );
     }
@@ -614,7 +651,11 @@ export class WorkspacesModule implements AgentModule {
             workspaceId,
             async (txCtx, request) =>
                 await this.#store.completeArchive(txCtx, { workspaceId }, request),
-            (_before, after) => ({ type: "workspace_archived", workspace: after }),
+            (before, after) => ({
+                type: "workspace_archived",
+                workspace: after,
+                previousWorkspace: requirePreviousWorkspace(before),
+            }),
         );
     }
 
@@ -732,18 +773,44 @@ export class WorkspacesModule implements AgentModule {
         creatorSessionId?: string,
         options: WorkspaceCreatorOptions = {},
     ): Promise<Workspace | undefined> {
+        this.#assertInput(createWorkspaceRequestSchema, request, "workspace creation");
+        this.#assertInput(workspaceCreatorOptionsSchema, options, "workspace creator options");
+        const normalized = structuredClone(request);
         const projects = this.#projects;
         const project = await this.#project(ctx, projectId);
         if (project === undefined) return undefined;
-        if (request.secret !== undefined && project.remoteSource?.kind !== "github") {
+        if (
+            project.status !== "active" ||
+            project.initializationStatus !== "ready" ||
+            project.presence !== "present" ||
+            !existsSync(project.repositoryRef)
+        ) {
+            throw new Error(
+                "The project root must be active and ready before creating a workspace.",
+            );
+        }
+        if (normalized.secret !== undefined && project.remoteSource?.kind !== "github") {
             throw new Error("GitHub credentials can only be used with a GitHub project.");
         }
-        const name = projects.validateName(request.name);
+        const name = projects.validateName(normalized.name);
         const requestedId =
-            request.id === undefined
+            normalized.id === undefined
                 ? undefined
-                : projects.validateClientChosenId(request.id, "workspace");
-        const baseRef = projects.validateBaseRef(request.baseRef);
+                : projects.validateClientChosenId(normalized.id, "workspace");
+        const workspaceId = requestedId ?? createId();
+        if (workspaceId === project.id) {
+            throw new Error("A workspace cannot use its project's implicit root ID.");
+        }
+        const parent = await this.#provisioningParent(
+            ctx,
+            project,
+            normalized.parentId,
+            workspaceId,
+        );
+        const requestedBaseRef = projects.validateBaseRef(normalized.baseRef);
+        // A nested workspace forks the parent branch by default. The durable baseRef makes a
+        // delayed or restarted initialization resolve the same checkout relationship.
+        const baseRef = requestedBaseRef ?? parent?.branch;
         const creator = options.createdBy;
         if (options.githubToken !== undefined && creator !== undefined) {
             await projects.registerGitCredential(ctx, projectId, creator, options.githubToken);
@@ -757,7 +824,6 @@ export class WorkspacesModule implements AgentModule {
 
         const kind = await this.#workspaceKindFor(ctx, project);
         const workspaceRoot = this.#workspaceRoot(projectId);
-        const workspaceId = requestedId ?? createId();
         const gitRefs = workspaceGitRefSnapshot(project.repositoryRef);
         const fallbackStorageKey = `${projects.storageKeyFor(name).slice(0, 20)}-${workspaceId}`;
 
@@ -766,11 +832,12 @@ export class WorkspacesModule implements AgentModule {
             {
                 id: workspaceId,
                 projectRef: projectId,
+                parentId: parent?.id ?? projectId,
                 name,
                 kind,
-                ...(request.nameConfigured === undefined
+                ...(normalized.nameConfigured === undefined
                     ? {}
-                    : { nameConfigured: request.nameConfigured }),
+                    : { nameConfigured: normalized.nameConfigured }),
                 ...(baseRef === undefined ? {} : { baseRef }),
                 ...(creatorSessionId === undefined ? {} : { creatorSessionId }),
                 ...(gitRefs.complete ? {} : { storageKeySeed: fallbackStorageKey }),
@@ -903,6 +970,43 @@ export class WorkspacesModule implements AgentModule {
         return probed.worktreeSupport === "supported" ? "git_worktree" : "directory";
     }
 
+    /**
+     * Resolves the file/check-out parent of a new workspace. A project is its own implicit root;
+     * every other parent must be a usable workspace in that project.
+     */
+    async #provisioningParent(
+        ctx: Context,
+        project: Project,
+        requestedParentId: string | undefined,
+        workspaceId: string,
+    ): Promise<Workspace | undefined> {
+        const parentId = requestedParentId ?? project.id;
+        if (parentId === project.id) return undefined;
+        if (parentId === workspaceId) {
+            throw new Error("A workspace cannot be its own parent.");
+        }
+        const parent = await this.get(ctx, parentId);
+        if (parent === undefined) {
+            throw new Error(`Workspace parent "${parentId}" was not found.`);
+        }
+        if (parent.projectRef !== project.id) {
+            throw new Error("A workspace parent must belong to the same project.");
+        }
+        await readWorkspaceAncestorIds(ctx.db, parent);
+        this.#assertReadyProvisioningParent(parent);
+        return parent;
+    }
+
+    #assertReadyProvisioningParent(parent: Workspace): void {
+        if (
+            parent.status !== "ready" ||
+            parent.presence !== "present" ||
+            !existsSync(parent.path)
+        ) {
+            throw new Error("A workspace parent must be active, ready, and available.");
+        }
+    }
+
     #workspaceRoot(projectId: string): string {
         const storageKey = this.#projectFolders.get(projectId)?.storageKey ?? projectId;
         return join(this.#workspacesDirectory, storageKey);
@@ -969,12 +1073,13 @@ export class WorkspacesModule implements AgentModule {
     ): Promise<Workspace | undefined> {
         let locked = await this.#ownedWorkspace(ctx, workspace.projectRef, workspace.id);
         if (locked?.status !== "initializing") return undefined;
+        const parent = await this.#initializationParent(ctx, locked);
 
         if (locked.kind === "directory") {
             if (existsSync(locked.path)) return locked;
             if (this.#closed) return undefined;
             await copyProjectFolder({
-                projectPath: project.repositoryRef,
+                projectPath: parent?.path ?? project.repositoryRef,
                 workspacePath: locked.path,
             });
             return locked;
@@ -1011,6 +1116,24 @@ export class WorkspacesModule implements AgentModule {
         }
         await this.#createCheckoutLocked(ctx, locked, project.repositoryRef, locked.baseCommit);
         return locked;
+    }
+
+    /** Revalidates the durable parent immediately before touching its checkout or files. */
+    async #initializationParent(
+        ctx: Context,
+        workspace: Workspace,
+    ): Promise<Workspace | undefined> {
+        if (workspace.parentId === workspace.projectRef) return undefined;
+        const parent = await this.get(ctx, workspace.parentId);
+        if (parent === undefined) {
+            throw new Error("The workspace's parent was not found.");
+        }
+        if (parent.projectRef !== workspace.projectRef) {
+            throw new Error("The workspace's parent belongs to another project.");
+        }
+        await readWorkspaceAncestorIds(ctx.db, parent);
+        this.#assertReadyProvisioningParent(parent);
+        return parent;
     }
 
     async #prepareInitialization(
@@ -1171,9 +1294,25 @@ export class WorkspacesModule implements AgentModule {
      */
     async #archiveProjectWorkspaces(ctx: Context, projectId: string): Promise<void> {
         if (!this.#enabled) return;
-        const workspaces = (await this.#allWorkspaces(ctx, projectId)).filter(
+        const active = (await this.#allWorkspaces(ctx, projectId)).filter(
             (workspace) => workspace.status !== "archived" && workspace.status !== "archiving",
         );
+        const withDepth = await Promise.all(
+            active.map(async (workspace) => ({
+                workspace,
+                depth: (await readWorkspaceAncestorIds(ctx.db, workspace)).length,
+            })),
+        );
+        // Child checkout decisions leave the catalog before their parents. This preserves the
+        // same archive boundary as a direct request while archiving an entire project atomically.
+        const workspaces = withDepth
+            .sort(
+                (left, right) =>
+                    right.depth - left.depth ||
+                    left.workspace.orderKey.localeCompare(right.workspace.orderKey) ||
+                    left.workspace.id.localeCompare(right.workspace.id),
+            )
+            .map(({ workspace }) => workspace);
         for (const workspace of workspaces) {
             await this.beginArchive(ctx, workspace.id);
             this.#stopSetup(workspace.id);
@@ -1510,10 +1649,11 @@ export class WorkspacesModule implements AgentModule {
                     { workspaceId: normalized.workspaceId, facts: normalized.facts },
                     request,
                 ),
-            (_before, after) => ({
+            (before, after) => ({
                 type: "workspace_updated",
                 change: "apply_git_facts",
                 workspace: after,
+                previousWorkspace: requirePreviousWorkspace(before),
             }),
         );
     }
@@ -1538,10 +1678,11 @@ export class WorkspacesModule implements AgentModule {
                     },
                     request,
                 ),
-            (_before, after) => ({
+            (before, after) => ({
                 type: "workspace_updated",
                 change: "apply_probe",
                 workspace: after,
+                previousWorkspace: requirePreviousWorkspace(before),
             }),
         );
     }
@@ -1589,6 +1730,31 @@ export class WorkspacesModule implements AgentModule {
         return (await this.listPage(ctx, query)).workspaces;
     }
 
+    /** Lists the direct children of one project's root or workspace in durable sibling order. */
+    async listChildren(
+        ctx: Context,
+        projectRef: string,
+        parentId: string = projectRef,
+        includeArchived = false,
+    ): Promise<readonly Workspace[]> {
+        this.#assertEnabled();
+        const input = { projectRef, parentId, includeArchived };
+        this.#assertInput<WorkspaceChildrenQuery>(
+            workspaceChildrenQuerySchema,
+            input,
+            "workspace children query",
+        );
+        await this.#assertParentBelongsToProject(ctx, input.projectRef, input.parentId);
+        return structuredClone(
+            await readWorkspaceChildren(
+                ctx.db,
+                input.projectRef,
+                input.parentId,
+                input.includeArchived,
+            ),
+        );
+    }
+
     async get(ctx: Context, workspaceId: string): Promise<Workspace | undefined> {
         this.#assertEnabled();
         this.#assertId(workspaceId, "workspace");
@@ -1600,6 +1766,254 @@ export class WorkspacesModule implements AgentModule {
             throw new Error("Workspace store returned a different workspace identity.");
         }
         return structuredClone(raw);
+    }
+
+    /**
+     * Places an agent in one workspace. An agent has one durable workspace at a time; attaching it
+     * elsewhere moves that association without changing either workspace's folder or lifecycle.
+     */
+    async attachAgent(
+        ctx: Context,
+        workspaceId: string,
+        agentId: string,
+    ): Promise<WorkspaceAgentAssociation> {
+        this.#assertEnabled();
+        const input = { workspaceId, agentId };
+        this.#assertInput<WorkspaceAgentAttachment>(
+            workspaceAgentAttachmentSchema,
+            input,
+            "agent attachment",
+        );
+        const agents = this.#agents;
+        if (agents === undefined) {
+            throw new Error(
+                "The workspaces module was asked to attach an agent before it started.",
+            );
+        }
+        if ((await agents.parentOf(ctx, agentId)) !== null) {
+            throw new Error("Only a top-level agent can be attached to a workspace.");
+        }
+        return await this.#agentAssociationLocks.runInLock(
+            ctx,
+            `agent:${input.agentId}`,
+            async (agentCtx) => {
+                const existing = await readWorkspaceAgent(agentCtx.db, input.agentId);
+                return await this.#withWorkspaceAgentOwnerLocks(
+                    agentCtx,
+                    [input.workspaceId, ...(existing === undefined ? [] : [existing.workspaceId])],
+                    async (lockCtx) =>
+                        await lockCtx.inTx(async (txCtx) => {
+                            const targetBefore = await this.#requireAgentWorkspace(
+                                txCtx,
+                                input.workspaceId,
+                            );
+                            const current = await readWorkspaceAgent(txCtx.db, input.agentId);
+                            if (current?.workspaceId === input.workspaceId) {
+                                return structuredClone(current);
+                            }
+                            const sourceBefore =
+                                current === undefined
+                                    ? undefined
+                                    : await this.#requireAgentWorkspace(txCtx, current.workspaceId);
+                            const siblings = await readWorkspaceAgents(txCtx.db, input.workspaceId);
+                            const association: WorkspaceAgentAssociation = {
+                                workspaceId: input.workspaceId,
+                                agentId: input.agentId,
+                                orderKey: orderKeyBetween(siblings.at(-1)?.orderKey ?? null, null),
+                            };
+                            if (current === undefined) {
+                                await insertWorkspaceAgent(txCtx.db, association);
+                            } else {
+                                await moveWorkspaceAgent(txCtx.db, association);
+                            }
+
+                            if (sourceBefore !== undefined) {
+                                const sourceAfter = await touchWorkspace(txCtx.db, sourceBefore);
+                                await this.#mutations.observe(
+                                    txCtx,
+                                    this.#mutations.newEvent({
+                                        type: "workspace_agent_detached",
+                                        agentId: input.agentId,
+                                        nextWorkspaceId: input.workspaceId,
+                                        workspace: sourceAfter,
+                                        previousWorkspace: sourceBefore,
+                                    }),
+                                );
+                            }
+                            const targetAfter = await touchWorkspace(txCtx.db, targetBefore);
+                            await this.#mutations.observe(
+                                txCtx,
+                                this.#mutations.newEvent({
+                                    type: "workspace_agent_attached",
+                                    association,
+                                    ...(sourceBefore === undefined
+                                        ? {}
+                                        : { previousWorkspaceId: sourceBefore.id }),
+                                    workspace: targetAfter,
+                                    previousWorkspace: targetBefore,
+                                }),
+                            );
+                            return structuredClone(association);
+                        }),
+                );
+            },
+        );
+    }
+
+    /** Agent identities in the durable order a person last set for one workspace. */
+    async listAgentIds(ctx: Context, workspaceId: string): Promise<readonly string[]> {
+        return (await this.listAgents(ctx, workspaceId)).map((association) => association.agentId);
+    }
+
+    /** Agent placements in the durable order a person last set for one workspace. */
+    async listAgents(ctx: Context, workspaceId: string): Promise<readonly WorkspaceAgentOrder[]> {
+        this.#assertEnabled();
+        this.#assertId(workspaceId, "workspace");
+        return (await readWorkspaceAgents(ctx.db, workspaceId)).map((association) => ({
+            agentId: association.agentId,
+            orderKey: association.orderKey,
+        }));
+    }
+
+    /** The workspace that owns an agent's placement, including an archived workspace. */
+    async workspaceForAgent(ctx: Context, agentId: string): Promise<string | undefined> {
+        this.#assertEnabled();
+        this.#assertInput(workspaceAgentLookupSchema, { agentId }, "agent lookup");
+        const association = await readWorkspaceAgent(ctx.db, agentId);
+        if (association === undefined) return undefined;
+        await this.#assertWorkspaceHierarchy(ctx, association.workspaceId);
+        return association.workspaceId;
+    }
+
+    /** Moves one attached agent after another agent, or to the beginning when `afterAgentId` is null. */
+    async reorderAgent(
+        ctx: Context,
+        workspaceId: string,
+        agentId: string,
+        afterAgentId: string | null,
+    ): Promise<WorkspaceAgentAssociation> {
+        this.#assertEnabled();
+        const input = { workspaceId, agentId, afterAgentId };
+        this.#assertInput<WorkspaceAgentReorderInput>(
+            workspaceAgentReorderInputSchema,
+            input,
+            "agent reorder",
+        );
+        if (input.agentId === input.afterAgentId) {
+            throw new Error("An agent cannot be placed after itself.");
+        }
+        return await this.#agentAssociationLocks.runInLock(
+            ctx,
+            `agent:${input.agentId}`,
+            async (agentCtx) =>
+                await this.#withWorkspaceAgentOwnerLocks(
+                    agentCtx,
+                    [input.workspaceId],
+                    async (lockCtx) =>
+                        await lockCtx.inTx(async (txCtx) => {
+                            const workspaceBefore = await this.#requireAgentWorkspace(
+                                txCtx,
+                                input.workspaceId,
+                            );
+                            const attached = await readWorkspaceAgents(txCtx.db, input.workspaceId);
+                            const current = attached.find(
+                                (association) => association.agentId === input.agentId,
+                            );
+                            if (current === undefined) {
+                                throw new Error(
+                                    `Agent "${input.agentId}" is not attached to that workspace.`,
+                                );
+                            }
+                            const remaining = attached.filter(
+                                (association) => association.agentId !== input.agentId,
+                            );
+                            const afterIndex =
+                                input.afterAgentId === null
+                                    ? -1
+                                    : remaining.findIndex(
+                                          (association) =>
+                                              association.agentId === input.afterAgentId,
+                                      );
+                            if (input.afterAgentId !== null && afterIndex === -1) {
+                                throw new Error(
+                                    "The agent to place after is not attached to that workspace.",
+                                );
+                            }
+                            const orderKey = orderKeyBetween(
+                                afterIndex === -1
+                                    ? null
+                                    : (remaining[afterIndex]?.orderKey ?? null),
+                                remaining[afterIndex + 1]?.orderKey ?? null,
+                            );
+                            if (current.orderKey === orderKey) return structuredClone(current);
+                            const reordered = { ...current, orderKey };
+                            await moveWorkspaceAgent(txCtx.db, reordered);
+                            const workspaceAfter = await touchWorkspace(txCtx.db, workspaceBefore);
+                            await this.#mutations.observe(
+                                txCtx,
+                                this.#mutations.newEvent({
+                                    type: "workspace_agent_reordered",
+                                    association: reordered,
+                                    previousOrderKey: current.orderKey,
+                                    workspace: workspaceAfter,
+                                    previousWorkspace: workspaceBefore,
+                                }),
+                            );
+                            return structuredClone(reordered);
+                        }),
+                ),
+        );
+    }
+
+    async #requireAgentWorkspace(ctx: Context, workspaceId: string): Promise<Workspace> {
+        const workspace = await this.get(ctx, workspaceId);
+        if (workspace === undefined) {
+            throw new Error(`Workspace "${workspaceId}" was not found.`);
+        }
+        await this.#assertWorkspaceHierarchy(ctx, workspaceId);
+        return workspace;
+    }
+
+    async #withWorkspaceAgentOwnerLocks<TResult>(
+        ctx: Context,
+        workspaceIds: readonly string[],
+        work: (lockCtx: Context) => Promise<TResult>,
+    ): Promise<TResult> {
+        const owners = [...new Set(workspaceIds)].sort();
+        const acquire = async (index: number, lockCtx: Context): Promise<TResult> => {
+            const workspaceId = owners[index];
+            if (workspaceId === undefined) return await work(lockCtx);
+            return await this.#agentAssociationLocks.runInLock(
+                lockCtx,
+                `workspace:${workspaceId}`,
+                async (nextCtx) => await acquire(index + 1, nextCtx),
+            );
+        };
+        return await acquire(0, ctx);
+    }
+
+    async #assertParentBelongsToProject(
+        ctx: Context,
+        projectRef: string,
+        parentId: string,
+    ): Promise<void> {
+        if (parentId === projectRef) return;
+        const parent = await this.get(ctx, parentId);
+        if (parent === undefined) {
+            throw new Error(`Workspace parent "${parentId}" was not found.`);
+        }
+        if (parent.projectRef !== projectRef) {
+            throw new Error("A workspace parent must belong to the same project.");
+        }
+        await readWorkspaceAncestorIds(ctx.db, parent);
+    }
+
+    async #assertWorkspaceHierarchy(ctx: Context, workspaceId: string): Promise<void> {
+        const workspace = await this.get(ctx, workspaceId);
+        if (workspace === undefined) {
+            throw new Error(`Workspace "${workspaceId}" was not found.`);
+        }
+        await readWorkspaceAncestorIds(ctx.db, workspace);
     }
 
     /** Resolves a folder to the workspace that lives in it, for a host resolving a cwd. */
@@ -1689,6 +2103,7 @@ export class WorkspacesModule implements AgentModule {
                     : this.#mutations.newEvent({
                           type: "workspace_transferred",
                           workspace: after,
+                          previousWorkspace: before,
                           ...("workspaceId" in request
                               ? { previousProjectRef: before.projectRef }
                               : {}),
@@ -2076,6 +2491,13 @@ function requireTransferFromResult(
         throw new Error("Workspace transfer did not return a valid transfer result.");
     }
     return result;
+}
+
+function requirePreviousWorkspace(workspace: Workspace | undefined): Workspace {
+    if (workspace === undefined) {
+        throw new Error("A workspace update did not have a previous workspace.");
+    }
+    return workspace;
 }
 
 /** Why a workspace cannot be worked in, said the way a person would say it. */

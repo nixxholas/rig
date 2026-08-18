@@ -1,8 +1,10 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+import { HappyAgentClient } from "@slopus/happy-agent-client";
+
 import { main } from "../../rig/sources/app/main.js";
-import { ProtocolHttpClient, readTokenIfPresent } from "../../rig/sources/client/index.js";
+import { createUnixSocketFetch, readTokenIfPresent } from "../../rig/sources/client/index.js";
 import { getHappyDaemonPaths } from "../../rig/sources/daemon/index.js";
 import { resolveGlobalDevelopmentIdentityVersion } from "../../rig/sources/development/resolveGlobalDevelopmentIdentityVersion.js";
 import { installCliFailureReporting } from "../../rig/sources/installCliFailureReporting.js";
@@ -45,12 +47,12 @@ async function readRunningVersion(): Promise<string | undefined> {
     const token = await readTokenIfPresent(paths.tokenPath);
     if (token === undefined) return undefined;
     try {
-        const health = await new ProtocolHttpClient({
-            pathPrefix: "/v0",
-            socketPath: paths.socketPath,
+        const health = await new HappyAgentClient({
+            endpoint: "http://happy",
+            fetch: createUnixSocketFetch(paths.socketPath),
             token,
-        }).health();
-        return health.identity.version;
+        }).getHealth();
+        return health.version.daemon;
     } catch {
         return undefined;
     }

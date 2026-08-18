@@ -101,6 +101,95 @@ describe("GitModule live tracking", () => {
         expect(published).toBe(1);
     });
 
+    it("atomically replaces the tracked subscription set without rescanning retained repositories", async () => {
+        const firstRepository = await createRepository();
+        const firstHead = await commitFile(firstRepository, "tracked.txt", "one\n");
+        await setOriginMain(firstRepository, firstHead);
+        const secondRepository = await createRepository();
+        const secondHead = await commitFile(secondRepository, "tracked.txt", "one\n");
+        await setOriginMain(secondRepository, secondHead);
+        const module = open();
+        const published: string[] = [];
+        module.onSnapshot((_ctx, entity) => {
+            published.push(entity.workspaceId ?? entity.projectId);
+        });
+        const first = { path: firstRepository, projectId: "project-1" };
+        const second = {
+            path: secondRepository,
+            projectId: "project-1",
+            workspaceId: "workspace-2",
+        };
+
+        module.replaceTracked([first, second]);
+        await waitFor(() => published.length === 2);
+        const retained = module.trackedSnapshot(second);
+
+        module.replaceTracked([second, first]);
+        expect(module.trackedSnapshot(second)).toBe(retained);
+        expect(published).toHaveLength(2);
+
+        module.replaceTracked([second]);
+        expect(module.trackedKeys()).toEqual(["workspace:workspace-2"]);
+        expect(module.trackedSnapshot(first)).toBeUndefined();
+        expect(module.liveSnapshots()).toHaveLength(1);
+        expect(module.trackedSnapshot(second)).toBe(retained);
+    });
+
+    it("retires omitted repositories before their first scan and settles concurrent replacements to the final set", async () => {
+        const firstRepository = await createRepository();
+        const firstHead = await commitFile(firstRepository, "tracked.txt", "one\n");
+        await setOriginMain(firstRepository, firstHead);
+        const secondRepository = await createRepository();
+        const secondHead = await commitFile(secondRepository, "tracked.txt", "one\n");
+        await setOriginMain(secondRepository, secondHead);
+        const module = open();
+        const published: string[] = [];
+        module.onSnapshot((_ctx, entity) => {
+            published.push(entity.workspaceId ?? entity.projectId);
+        });
+        const first = { path: firstRepository, projectId: "project-1" };
+        const second = {
+            path: secondRepository,
+            projectId: "project-1",
+            workspaceId: "workspace-2",
+        };
+
+        await Promise.all([
+            Promise.resolve().then(() => module.replaceTracked([first])),
+            Promise.resolve().then(() => module.replaceTracked([second])),
+        ]);
+
+        expect(module.trackedKeys()).toEqual(["workspace:workspace-2"]);
+        await waitFor(() => published.length === 1);
+        expect(published).toEqual(["workspace-2"]);
+        expect(module.trackedSnapshot(first)).toBeUndefined();
+        expect(module.trackedSnapshot(second)).toBeDefined();
+    });
+
+    it("releases a replaced watch set when disposed and rejects malformed public input", async () => {
+        const repository = await createRepository();
+        const head = await commitFile(repository, "tracked.txt", "one\n");
+        await setOriginMain(repository, head);
+        const module = open();
+        let published = 0;
+        module.onSnapshot(() => {
+            published += 1;
+        });
+
+        expect(() => module.replaceTracked([{ projectId: "project-1" }] as never)).toThrow(
+            "The Git watch entities are invalid.",
+        );
+
+        module.replaceTracked([{ path: repository, projectId: "project-1" }]);
+        module.dispose();
+        expect(module.trackedKeys()).toEqual([]);
+
+        await waitForNoChange(() => published, 250);
+        expect(
+            module.trackedSnapshot({ path: repository, projectId: "project-1" }),
+        ).toBeUndefined();
+    });
+
     it("reports the configured Git boundary's failure rather than scanning around it", async () => {
         const repository = await createRepository();
         const head = await commitFile(repository, "tracked.txt", "one\n");
@@ -127,4 +216,13 @@ async function waitFor(predicate: () => boolean): Promise<void> {
         await new Promise((resolve) => setTimeout(resolve, 5));
     }
     throw new Error("Timed out waiting for the Git module.");
+}
+
+async function waitForNoChange(read: () => number, durationMs: number): Promise<void> {
+    const initial = read();
+    const deadline = Date.now() + durationMs;
+    while (Date.now() < deadline) {
+        expect(read()).toBe(initial);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+    }
 }

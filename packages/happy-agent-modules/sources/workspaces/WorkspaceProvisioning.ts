@@ -1,16 +1,37 @@
-import type { ProjectCreator } from "../git/index.js";
+import { Type, type Static } from "@sinclair/typebox";
+
+import { projectCreatorSchema } from "../git/index.js";
+
+import {
+    workspaceBaseRefSchema,
+    workspaceIdSchema,
+    workspaceNameSchema,
+    workspaceParentIdSchema,
+} from "./Workspace.js";
 
 /** What a caller asks for when it wants one new workspace in a project. */
-export interface CreateWorkspaceRequest {
-    readonly baseRef?: string;
-    readonly id?: string;
-    readonly name: string;
-    readonly nameConfigured?: boolean;
-    readonly secret?: { readonly kind: "github" };
-}
+export const createWorkspaceRequestSchema = Type.Object(
+    {
+        baseRef: Type.Optional(workspaceBaseRefSchema),
+        id: Type.Optional(workspaceIdSchema),
+        name: workspaceNameSchema,
+        nameConfigured: Type.Optional(Type.Boolean()),
+        /** The project ID is the implicit root; another value names a ready workspace parent. */
+        parentId: Type.Optional(workspaceParentIdSchema),
+        secret: Type.Optional(
+            Type.Object({ kind: Type.Literal("github") }, { additionalProperties: false }),
+        ),
+    },
+    { additionalProperties: false },
+);
+export type CreateWorkspaceRequest = Static<typeof createWorkspaceRequestSchema>;
 
 /** Who asked for the workspace, and with which credential. */
-export interface WorkspaceCreatorOptions {
-    readonly createdBy?: ProjectCreator;
-    readonly githubToken?: string;
-}
+export const workspaceCreatorOptionsSchema = Type.Object(
+    {
+        createdBy: Type.Optional(projectCreatorSchema),
+        githubToken: Type.Optional(Type.String({ minLength: 1, maxLength: 16_384 })),
+    },
+    { additionalProperties: false },
+);
+export type WorkspaceCreatorOptions = Static<typeof workspaceCreatorOptionsSchema>;

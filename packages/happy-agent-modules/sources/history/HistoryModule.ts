@@ -2,6 +2,8 @@ import type {
     AgentBaseAcceptedMessage,
     AgentBaseInference,
     AgentBasePersistedEvent,
+    AgentBaseSettlement,
+    AgentBaseTurn,
     AgentModule,
     AgentModuleHooks,
     AgentModuleScope,
@@ -25,14 +27,19 @@ import {
 } from "@slopus/happy-agent-base";
 
 import { isUserOriginMetadata, senderAgentIdOf } from "../impl/messageOrigin.js";
+import type { EventsModule } from "../events/index.js";
 import {
     historyBlockSchema,
     historyMessageSchema,
     historyMessageInputSchema,
+    historyMutationIdSchema,
     historyMessageWithinPersistenceBounds,
     historyAgentIdSchema,
+    historyRecordIdSchema,
+    historyRemoteMessageIdSchema,
     MAX_HISTORY_BLOCKS_PER_PAGE,
     MAX_HISTORY_MESSAGES_PER_APPEND,
+    MAX_HISTORY_MESSAGE_JSON_BYTES,
     MAX_HISTORY_PAGE_SIZE,
     MAX_HISTORY_PENDING_BLOCKS,
     MAX_HISTORY_POSITION,
@@ -63,6 +70,21 @@ import {
     type HistoryRecord,
     type HistoryStoreQuery,
 } from "./HistoryStore.js";
+import {
+    historyPendingMessageSchema,
+    historyRunReasonSchema,
+    historyRunSchema,
+    historyRunStatusSchema,
+    historyRunsPageSchema,
+    historyRunsQuerySchema,
+    MAX_HISTORY_MESSAGES_PER_RUN,
+    MAX_HISTORY_PENDING_MESSAGES,
+    MAX_HISTORY_RUNS_PER_PAGE,
+    type HistoryPendingMessage,
+    type HistoryRun,
+    type HistoryRunsPage,
+    type HistoryRunsQuery,
+} from "./HistoryRun.js";
 import { createHistoryExcerpt, type HistoryExcerpt } from "./impl/createHistoryExcerpt.js";
 import {
     historyMessageSearchParts,
@@ -80,6 +102,11 @@ type HistoryToolArguments = Static<typeof historyToolArgumentsSchema>;
 const PENDING_BLOCKS_KEY = "pending_blocks";
 const TOOL_NAME_KEY = "tool_name";
 const pendingBlocksSchema = Type.Array(historyBlockSchema, { maxItems: 2_048 });
+const happyMessageMetadataSchema = Type.Object(
+    { remoteMessageId: historyRemoteMessageIdSchema },
+    { additionalProperties: true },
+);
+type HappyMessageMetadata = Static<typeof happyMessageMetadataSchema>;
 const DEFAULT_READER_LIMIT = 200;
 const positiveIntegerSchema = Type.Integer({ minimum: 1 });
 /** How much tool output is recorded before the rest is dropped as not worth keeping. */
@@ -93,6 +120,8 @@ const excerptBudgetSchema = Type.Integer({
     maximum: MAX_HISTORY_EXCERPT_CHARACTERS,
 });
 const HISTORY_TABLE = "happy_agent_module_history";
+const HISTORY_RUNS_TABLE = "happy_agent_module_history_runs";
+const HISTORY_PENDING_TABLE = "happy_agent_module_history_pending";
 
 /**
  * What a subscriber is handed once an append has committed.
@@ -126,9 +155,14 @@ export type HistoryAppendListener = (
  */
 export class HistoryModule implements AgentModule {
     readonly name = "history";
+    readonly #events: EventsModule | undefined;
 
     /** Who is watching the archive: the live subscriptions this module supervises. */
     readonly #appendListeners = new Set<HistoryAppendListener>();
+
+    constructor(events?: EventsModule) {
+        this.#events = events;
+    }
 
     readonly migrations: readonly AgentModuleMigration[] = [
         [
@@ -152,6 +186,51 @@ export class HistoryModule implements AgentModule {
                             tool_results BIGINT NOT NULL,
                             PRIMARY KEY (agent_id, position),
                             UNIQUE (agent_id, record_id)
+                        )
+                    `),
+                );
+            },
+        ],
+        [
+            "002-history-runs-and-pending",
+            async (_ctx, database) => {
+                await agentDatabaseRun(
+                    database,
+                    sql.raw(`ALTER TABLE ${HISTORY_TABLE} ADD COLUMN run_id TEXT`),
+                );
+                await agentDatabaseRun(
+                    database,
+                    sql.raw(`
+                        CREATE INDEX IF NOT EXISTS happy_agent_module_history_run_position
+                        ON ${HISTORY_TABLE} (agent_id, run_id, position)
+                    `),
+                );
+                await agentDatabaseRun(
+                    database,
+                    sql.raw(`
+                        CREATE TABLE IF NOT EXISTS ${HISTORY_RUNS_TABLE} (
+                            agent_id TEXT NOT NULL,
+                            sequence BIGINT NOT NULL,
+                            run_id TEXT NOT NULL,
+                            status TEXT NOT NULL,
+                            reason TEXT,
+                            started_at BIGINT NOT NULL,
+                            ended_at BIGINT,
+                            PRIMARY KEY (agent_id, sequence),
+                            UNIQUE (agent_id, run_id)
+                        )
+                    `),
+                );
+                await agentDatabaseRun(
+                    database,
+                    sql.raw(`
+                        CREATE TABLE IF NOT EXISTS ${HISTORY_PENDING_TABLE} (
+                            agent_id TEXT NOT NULL,
+                            position BIGINT NOT NULL,
+                            message_id TEXT NOT NULL,
+                            message_json TEXT NOT NULL,
+                            PRIMARY KEY (agent_id, position),
+                            UNIQUE (agent_id, message_id)
                         )
                     `),
                 );
@@ -181,15 +260,215 @@ export class HistoryModule implements AgentModule {
         ) {
             throw new Error("The history module received an invalid message.");
         }
+        const activeRunId = this.#events?.activeRunId(agentId);
         const normalized = {
             ...message,
             at: message.at ?? Date.now(),
             recordId: message.recordId ?? createRecordId(),
+            ...(message.runId !== undefined
+                ? {}
+                : activeRunId === undefined
+                  ? {}
+                  : { runId: activeRunId }),
         };
         if (!Value.Check(historyMessageSchema, normalized)) {
             throw new Error("The history module produced an invalid message.");
         }
         await this.#direct(ctx, (txCtx) => this.#append(txCtx, agentId, normalized));
+    }
+
+    /**
+     * Persist a user message before offering it to Agent Base.
+     *
+     * Callers that need the pending row and Base's queue admission to be one commit run this and
+     * `AgentSystemRef.send` or `steer` inside the same outer `ctx.inTx` operation. Reusing an ID is
+     * a conflict: the ID is not an idempotency key.
+     */
+    async queuePending(ctx: Context, message: HistoryPendingMessage): Promise<void> {
+        if (!Value.Check(historyPendingMessageSchema, message)) {
+            throw new Error("The history module received an invalid pending message.");
+        }
+        await this.#direct(ctx, async (txCtx) => {
+            const countRows = await agentDatabaseRows<{ count: number | string }>(
+                txCtx.db,
+                sql`SELECT COUNT(*) AS count
+                    FROM ${sql.raw(HISTORY_PENDING_TABLE)}
+                    WHERE agent_id = ${message.agentId}`,
+            );
+            const count = toSafeInteger(countRows[0]?.count, "pending message count");
+            if (count >= MAX_HISTORY_PENDING_MESSAGES) {
+                throw new Error("The history module reached its pending message limit.");
+            }
+            const positionRows = await agentDatabaseRows<{ position: number | string }>(
+                txCtx.db,
+                sql`SELECT COALESCE(MAX(position), -1) + 1 AS position
+                    FROM ${sql.raw(HISTORY_PENDING_TABLE)}
+                    WHERE agent_id = ${message.agentId}`,
+            );
+            const position = toSafeInteger(positionRows[0]?.position, "pending message position");
+            const encoded = JSON.stringify(message);
+            if (new TextEncoder().encode(encoded).byteLength > MAX_HISTORY_MESSAGE_JSON_BYTES) {
+                throw new Error("The pending history message exceeds its durable size limit.");
+            }
+            await agentDatabaseRun(
+                txCtx.db,
+                sql`INSERT INTO ${sql.raw(HISTORY_PENDING_TABLE)} (
+                        agent_id, position, message_id, message_json
+                    ) VALUES (
+                        ${message.agentId}, ${position}, ${message.id}, ${encoded}
+                    )`,
+            );
+        });
+    }
+
+    /** Remove a message whose Base queue admission failed or was otherwise rolled back. */
+    async removePending(ctx: Context, agentId: string, messageId: string): Promise<boolean> {
+        if (
+            !Value.Check(historyAgentIdSchema, agentId) ||
+            !Value.Check(historyRecordIdSchema, messageId)
+        ) {
+            throw new Error("The history module received an invalid pending message identity.");
+        }
+        return await this.#direct(ctx, async (txCtx) => {
+            const existing = await readPendingMessage(txCtx.db, agentId, messageId);
+            if (existing === undefined) return false;
+            await agentDatabaseRun(
+                txCtx.db,
+                sql`DELETE FROM ${sql.raw(HISTORY_PENDING_TABLE)}
+                    WHERE agent_id = ${agentId} AND message_id = ${messageId}`,
+            );
+            return true;
+        });
+    }
+
+    /** The complete durable composer queue, oldest first. */
+    async pending(ctx: Context, agentId: string): Promise<HistoryPendingMessage[]> {
+        if (!Value.Check(historyAgentIdSchema, agentId)) {
+            throw new Error("The history module received an invalid pending-message agent ID.");
+        }
+        return await this.#direct(ctx, async (txCtx) => {
+            const rows = await agentDatabaseRows<HistoryPendingRow>(
+                txCtx.db,
+                sql`SELECT position, message_id, message_json
+                    FROM ${sql.raw(HISTORY_PENDING_TABLE)}
+                    WHERE agent_id = ${agentId}
+                    ORDER BY position ASC
+                    LIMIT ${MAX_HISTORY_PENDING_MESSAGES + 1}`,
+            );
+            if (rows.length > MAX_HISTORY_PENDING_MESSAGES) {
+                throw new Error("The history module found too many pending messages.");
+            }
+            return rows.map((row) => parsePendingRow(row, agentId));
+        });
+    }
+
+    /** One accepted durable message by its stable identity, including inside its commit. */
+    async message(
+        ctx: Context,
+        agentId: string,
+        messageId: string,
+    ): Promise<HistoryMessage | undefined> {
+        if (
+            !Value.Check(historyAgentIdSchema, agentId) ||
+            !Value.Check(historyRecordIdSchema, messageId)
+        ) {
+            throw new Error("The history module received an invalid message lookup.");
+        }
+        return await this.#direct(ctx, async (txCtx) => {
+            const rows = await agentDatabaseRows<HistoryRow>(
+                txCtx.db,
+                sql`SELECT ${sql.raw(HISTORY_ROW_COLUMNS)}
+                    FROM ${sql.raw(HISTORY_TABLE)}
+                    WHERE agent_id = ${agentId} AND record_id = ${messageId}
+                    LIMIT 1`,
+            );
+            return rows[0] === undefined ? undefined : toHistoryRecord(rows[0]).message;
+        });
+    }
+
+    /**
+     * Read accepted history in whole-run pages and always include the complete pending queue.
+     *
+     * `limit` is a message lower bound: once it is reached no new run is begun, while the run
+     * already selected is returned whole. `after` is the sole exception to whole-run loading and
+     * extends only a still-running newest run from the named message.
+     */
+    async runs(
+        ctx: Context,
+        agentId: string,
+        query: HistoryRunsQuery = {},
+    ): Promise<HistoryRunsPage> {
+        if (
+            !Value.Check(historyAgentIdSchema, agentId) ||
+            !Value.Check(historyRunsQuerySchema, query) ||
+            (query.before !== undefined && query.after !== undefined)
+        ) {
+            throw new Error("The history run reader received an invalid query.");
+        }
+        return await this.#direct(ctx, async (txCtx) => {
+            const limit = query.limit ?? 50;
+            const anchor = await resolveRunAnchor(txCtx.db, agentId, query);
+            const candidates = await candidateRuns(txCtx.db, agentId, anchor);
+            const selected: { row: HistoryRunRow; afterPosition?: number }[] = [];
+            let selectedMessages = 0;
+            let hasMore = candidates.length > MAX_HISTORY_RUNS_PER_PAGE;
+            const boundedCandidates = candidates.slice(0, MAX_HISTORY_RUNS_PER_PAGE);
+            for (let index = 0; index < boundedCandidates.length; index += 1) {
+                const row = boundedCandidates[index] as HistoryRunRow;
+                const afterPosition =
+                    anchor.kind === "after" &&
+                    anchor.includeAnchorRun &&
+                    row.run_id === anchor.runId
+                        ? anchor.position
+                        : undefined;
+                const count = await countHistoryRows(
+                    txCtx.db,
+                    afterPosition === undefined
+                        ? sql`agent_id = ${agentId} AND run_id = ${row.run_id}`
+                        : sql`agent_id = ${agentId}
+                            AND run_id = ${row.run_id}
+                            AND position > ${afterPosition}`,
+                );
+                if (count === 0) continue;
+                selected.push({
+                    row,
+                    ...(afterPosition === undefined ? {} : { afterPosition }),
+                });
+                selectedMessages += count;
+                if (selectedMessages >= limit) {
+                    hasMore = hasMore || index < boundedCandidates.length - 1;
+                    break;
+                }
+            }
+            const chronological = anchor.kind === "after" ? selected : [...selected].reverse();
+            const runs: HistoryRun[] = [];
+            for (const selectedRun of chronological) {
+                const records = await readRunMessages(
+                    txCtx.db,
+                    agentId,
+                    selectedRun.row.run_id,
+                    selectedRun.afterPosition,
+                );
+                const messages = records.map((record) => record.message);
+                runs.push(
+                    runFromRow(
+                        selectedRun.row,
+                        query.omitToolData === true ? omitPresentedToolData(messages) : messages,
+                    ),
+                );
+            }
+            const pending = await readPendingMessages(txCtx.db, agentId);
+            const page: HistoryRunsPage = {
+                agentId,
+                runs,
+                pending,
+                hasMore,
+            };
+            if (!Value.Check(historyRunsPageSchema, page)) {
+                throw new Error("The history module produced an invalid run page.");
+            }
+            return page;
+        });
     }
 
     /** Everything an agent's history holds, oldest first. */
@@ -374,12 +653,21 @@ export class HistoryModule implements AgentModule {
         if (!Value.Check(historyToolResultBlockSchema, toolResultBlock)) {
             throw new Error("History module received an invalid tool result.");
         }
-        await this.#append(ctx, scope.agent.id, {
+        const runId = this.#events?.activeRunId(scope.agent.id);
+        const message: HistoryMessage = {
             at: Date.now(),
             blocks: [toolResultBlock],
-            recordId: createRecordId(),
+            recordId: runId === undefined ? createRecordId() : `${runId}-assistant`,
             role: "assistant",
-        });
+            ...(scope.agent.model === undefined ? {} : { model: scope.agent.model }),
+            provider: scope.agent.provider,
+            ...(runId === undefined ? {} : { runId }),
+        };
+        if (runId === undefined) {
+            await this.#append(ctx, scope.agent.id, message);
+        } else {
+            await this.#mergeRunMessage(ctx, scope.agent.id, message);
+        }
     }
 
     async #afterInference(
@@ -388,12 +676,10 @@ export class HistoryModule implements AgentModule {
         inference: AgentBaseInference,
     ): Promise<void> {
         const blocks = await this.#pendingBlocks(ctx, scope);
-        const responseId =
-            blocks.length > 0 || inference.errorMessage !== undefined
-                ? createRecordId()
-                : undefined;
+        const runId = this.#events?.activeRunId(scope.agent.id);
         const attribution = {
             at: Date.now(),
+            ...(runId === undefined ? {} : { runId }),
             ...(scope.agent.model === undefined ? {} : { model: scope.agent.model }),
             provider: scope.agent.provider,
         };
@@ -402,7 +688,10 @@ export class HistoryModule implements AgentModule {
             messages.push({
                 role: "assistant",
                 blocks,
-                recordId: `${responseId}:assistant`,
+                recordId:
+                    runId === undefined
+                        ? `${inference.inferenceId}:assistant`
+                        : `${runId}-assistant`,
                 ...attribution,
             });
         }
@@ -410,7 +699,7 @@ export class HistoryModule implements AgentModule {
             messages.push({
                 role: "error",
                 blocks: [{ type: "text", text: inference.errorMessage }],
-                recordId: `${responseId}:error`,
+                recordId: runId === undefined ? `${inference.inferenceId}:error` : `${runId}-error`,
                 ...attribution,
             });
         }
@@ -418,7 +707,13 @@ export class HistoryModule implements AgentModule {
             await scope.runKV.delete(ctx, PENDING_BLOCKS_KEY);
             return;
         }
-        await this.#append(ctx, scope.agent.id, ...messages);
+        if (runId === undefined) {
+            await this.#append(ctx, scope.agent.id, ...messages);
+        } else {
+            for (const message of messages) {
+                await this.#mergeRunMessage(ctx, scope.agent.id, message);
+            }
+        }
         await scope.runKV.delete(ctx, PENDING_BLOCKS_KEY);
     }
 
@@ -433,7 +728,9 @@ export class HistoryModule implements AgentModule {
         }
         if (
             !Value.Check(historyBlockSchema, block) ||
-            (block.type === "tool_call" && !historyToolArgumentsWithinByteLimit(block.arguments))
+            (block.type === "tool_call" &&
+                block.arguments !== undefined &&
+                !historyToolArgumentsWithinByteLimit(block.arguments))
         ) {
             throw new Error("History module received an invalid pending block.");
         }
@@ -447,6 +744,132 @@ export class HistoryModule implements AgentModule {
             throw new Error("History module found invalid pending blocks.");
         }
         return value as HistoryBlock[];
+    }
+
+    async #beginRun(
+        ctx: Context,
+        agentId: string,
+        runId: string,
+        kind: AgentBaseAcceptedMessage["kind"],
+        startedAt: number,
+    ): Promise<void> {
+        const exact = await agentDatabaseRows<{ run_id: string }>(
+            ctx.db,
+            sql`SELECT run_id
+                FROM ${sql.raw(HISTORY_RUNS_TABLE)}
+                WHERE agent_id = ${agentId} AND run_id = ${runId}
+                LIMIT 1`,
+        );
+        if (exact.length > 0) return;
+        const running = await agentDatabaseRows<{ run_id: string }>(
+            ctx.db,
+            sql`SELECT run_id
+                FROM ${sql.raw(HISTORY_RUNS_TABLE)}
+                WHERE agent_id = ${agentId} AND status = 'running'
+                ORDER BY sequence DESC
+                LIMIT 1`,
+        );
+        if (running[0] !== undefined) {
+            await agentDatabaseRun(
+                ctx.db,
+                sql`UPDATE ${sql.raw(HISTORY_RUNS_TABLE)}
+                    SET status = ${kind === "steering" ? "aborted" : "completed"},
+                        reason = ${kind === "steering" ? "steering" : "completed"},
+                        ended_at = ${startedAt}
+                    WHERE agent_id = ${agentId} AND run_id = ${running[0].run_id}`,
+            );
+        }
+        const sequenceRows = await agentDatabaseRows<{ sequence: number | string }>(
+            ctx.db,
+            sql`SELECT COALESCE(MAX(sequence), -1) + 1 AS sequence
+                FROM ${sql.raw(HISTORY_RUNS_TABLE)}
+                WHERE agent_id = ${agentId}`,
+        );
+        const sequence = toSafeInteger(sequenceRows[0]?.sequence, "history run sequence");
+        await agentDatabaseRun(
+            ctx.db,
+            sql`INSERT INTO ${sql.raw(HISTORY_RUNS_TABLE)} (
+                    agent_id, sequence, run_id, status, reason, started_at, ended_at
+                ) VALUES (
+                    ${agentId}, ${sequence}, ${runId}, 'running', NULL, ${startedAt}, NULL
+                )`,
+        );
+    }
+
+    async #finishRun(
+        ctx: Context,
+        agentId: string,
+        status: HistoryRun["status"],
+        reason: HistoryRun["reason"],
+        endedAt: number,
+    ): Promise<void> {
+        const runId = this.#events?.activeRunId(agentId);
+        if (runId === undefined) return;
+        await agentDatabaseRun(
+            ctx.db,
+            sql`UPDATE ${sql.raw(HISTORY_RUNS_TABLE)}
+                SET status = ${status}, reason = ${reason}, ended_at = ${endedAt}
+                WHERE agent_id = ${agentId} AND run_id = ${runId} AND status = 'running'`,
+        );
+    }
+
+    /**
+     * Grow one run-visible message under its stable live identity.
+     *
+     * Agent Base commits every completed inference block and tool result exactly once. Merging
+     * those committed slices here keeps the durable reload shaped like the live stream: one
+     * assistant message per run, with blocks in commit order, rather than one replacement row per
+     * provider inference.
+     */
+    async #mergeRunMessage(ctx: Context, agentId: string, incoming: HistoryMessage): Promise<void> {
+        if (incoming.runId === undefined) {
+            throw new Error("A merged history message must belong to a run.");
+        }
+        const rows = await agentDatabaseRows<HistoryRow>(
+            ctx.db,
+            sql`SELECT ${sql.raw(HISTORY_ROW_COLUMNS)}
+                FROM ${sql.raw(HISTORY_TABLE)}
+                WHERE agent_id = ${agentId} AND record_id = ${incoming.recordId}
+                LIMIT 1`,
+        );
+        const row = rows[0];
+        if (row === undefined) {
+            await this.#append(ctx, agentId, incoming);
+            return;
+        }
+        const existing = toHistoryRecord(row).message;
+        if (
+            existing.runId !== incoming.runId ||
+            existing.role !== incoming.role ||
+            existing.recordId !== incoming.recordId
+        ) {
+            throw new Error("The stable run message identity belongs to another history record.");
+        }
+        const merged: HistoryMessage = {
+            ...incoming,
+            ...existing,
+            blocks: [...existing.blocks, ...incoming.blocks],
+        };
+        if (!historyMessageWithinPersistenceBounds(merged)) {
+            throw new Error("The history module reached its stable run message limit.");
+        }
+        const encoded = JSON.stringify(merged);
+        const stats = summarizeHistory([merged]);
+        const searchText = foldHistorySearchText(historyMessageSearchParts(merged).join("\n"));
+        await agentDatabaseRun(
+            ctx.db,
+            sql`UPDATE ${sql.raw(HISTORY_TABLE)}
+                SET message_json = ${encoded},
+                    search_text = ${searchText},
+                    assistant_messages = ${stats.assistantMessages},
+                    user_messages = ${stats.userMessages},
+                    text_characters = ${stats.textCharacters},
+                    thinking_blocks = ${stats.thinkingBlocks},
+                    tool_calls = ${stats.toolCalls},
+                    tool_results = ${stats.toolResults}
+                WHERE agent_id = ${agentId} AND record_id = ${merged.recordId}`,
+        );
+        this.#scheduleAppendNotification(ctx, agentId, [merged]);
     }
 
     async #append(
@@ -471,6 +894,19 @@ export class HistoryModule implements AgentModule {
         if (count + messages.length > MAX_HISTORY_TOTAL_MESSAGES) {
             throw new Error("The history module reached its record limit.");
         }
+        const runIds = new Set(
+            messages.flatMap((message) => (message.runId === undefined ? [] : [message.runId])),
+        );
+        for (const runId of runIds) {
+            const existing = await countHistoryRows(
+                ctx.db,
+                sql`agent_id = ${agentId} AND run_id = ${runId}`,
+            );
+            const incoming = messages.filter((message) => message.runId === runId).length;
+            if (existing + incoming > MAX_HISTORY_MESSAGES_PER_RUN) {
+                throw new Error("The history module reached its per-run message limit.");
+            }
+        }
         const positionRows = await agentDatabaseRows<{ position: number | string }>(
             ctx.db,
             sql`SELECT COALESCE(MAX(position), -1) + 1 AS position
@@ -491,6 +927,7 @@ export class HistoryModule implements AgentModule {
                         agent_id,
                         position,
                         record_id,
+                        run_id,
                         role,
                         message_json,
                         search_text,
@@ -504,6 +941,7 @@ export class HistoryModule implements AgentModule {
                         ${agentId},
                         ${position},
                         ${message.recordId},
+                        ${message.runId ?? null},
                         ${message.role},
                         ${encoded},
                         ${searchText},
@@ -779,6 +1217,25 @@ export class HistoryModule implements AgentModule {
             scope: AgentModuleScope,
             accepted: AgentBaseAcceptedMessage,
         ): Promise<void> => {
+            if (this.#events === undefined) {
+                throw new Error(
+                    "History message acceptance requires the Events module for run identity.",
+                );
+            }
+            const runId = await this.#events.runIdForAccepted(ctx, scope.agent.id, accepted);
+            const pending = await readPendingMessage(ctx.db, scope.agent.id, accepted.id);
+            const acceptedAt = pending?.createdAt ?? Date.now();
+            const metadataMutationId = accepted.metadata?.["mutationId"];
+            const mutationId =
+                pending?.mutationId ??
+                (Value.Check(historyMutationIdSchema, metadataMutationId)
+                    ? (metadataMutationId as string)
+                    : undefined);
+            const happyMetadata = accepted.metadata?.["happy"];
+            const remoteMessageId = Value.Check(happyMessageMetadataSchema, happyMetadata)
+                ? (happyMetadata as HappyMessageMetadata).remoteMessageId
+                : undefined;
+            await this.#beginRun(ctx, scope.agent.id, runId, accepted.kind, acceptedAt);
             const fromUser = isUserOriginMetadata(accepted.metadata);
             const sender = fromUser ? undefined : senderAgentIdOf(accepted.metadata);
             // A message from another agent may carry the reasoning that agent exposed. It is
@@ -789,12 +1246,33 @@ export class HistoryModule implements AgentModule {
                 return block.text === undefined ? [] : [{ type: "thinking", thinking: block.text }];
             });
             await this.#append(ctx, scope.agent.id, {
-                at: Date.now(),
+                at: acceptedAt,
                 blocks,
-                recordId: createRecordId(),
+                recordId: accepted.id,
                 role: fromUser ? "user" : "agent",
+                runId,
+                ...(fromUser
+                    ? {
+                          delivery:
+                              pending?.delivery ??
+                              (accepted.kind === "steering" ? "steer" : "queue"),
+                          ...(pending === undefined ? {} : { mode: pending.mode }),
+                          ...(mutationId === undefined ? {} : { mutationId }),
+                      }
+                    : {}),
                 ...(sender === undefined ? {} : { senderAgentId: sender }),
+                ...(accepted.metadata?.hideFromUser === undefined
+                    ? {}
+                    : { hideFromUser: accepted.metadata.hideFromUser }),
+                ...(remoteMessageId === undefined ? {} : { remoteMessageId }),
             });
+            if (pending !== undefined) {
+                await agentDatabaseRun(
+                    ctx.db,
+                    sql`DELETE FROM ${sql.raw(HISTORY_PENDING_TABLE)}
+                        WHERE agent_id = ${scope.agent.id} AND message_id = ${accepted.id}`,
+                );
+            }
         },
 
         /**
@@ -842,24 +1320,50 @@ export class HistoryModule implements AgentModule {
             inference: AgentBaseInference,
         ): Promise<void> => this.#afterInference(ctx, scope, inference),
 
+        afterTurnTransact: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+            turn: AgentBaseTurn,
+        ): Promise<void> => {
+            if (!turn.aborted) return;
+            await this.#finishRun(ctx, scope.agent.id, "aborted", "abort", Date.now());
+        },
+
         /**
          * Finish an archive that was interrupted after its response blocks were committed.
          *
          * The settling transaction is the last place the run KV is available. An archive failure
          * therefore rolls settlement back and leaves the pending blocks for the next restart.
          */
-        afterAgentSettledTransact: async (ctx: Context, scope: AgentModuleScope): Promise<void> => {
+        afterAgentSettledTransact: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+            settlement: AgentBaseSettlement,
+        ): Promise<void> => {
             const blocks = await this.#pendingBlocks(ctx, scope);
-            if (blocks.length === 0) return;
-            await this.#append(ctx, scope.agent.id, {
-                at: Date.now(),
-                blocks,
-                recordId: createRecordId(),
-                ...(scope.agent.model === undefined ? {} : { model: scope.agent.model }),
-                provider: scope.agent.provider,
-                role: "assistant",
-            });
-            await scope.runKV.delete(ctx, PENDING_BLOCKS_KEY);
+            if (blocks.length > 0) {
+                const runId = this.#events?.activeRunId(scope.agent.id);
+                const message: HistoryMessage = {
+                    at: Date.now(),
+                    blocks,
+                    recordId: runId === undefined ? createRecordId() : `${runId}-assistant`,
+                    ...(scope.agent.model === undefined ? {} : { model: scope.agent.model }),
+                    provider: scope.agent.provider,
+                    role: "assistant",
+                    ...(runId === undefined ? {} : { runId }),
+                };
+                if (runId === undefined) {
+                    await this.#append(ctx, scope.agent.id, message);
+                } else {
+                    await this.#mergeRunMessage(ctx, scope.agent.id, message);
+                }
+                await scope.runKV.delete(ctx, PENDING_BLOCKS_KEY);
+            }
+            if (settlement.error !== undefined) {
+                await this.#finishRun(ctx, scope.agent.id, "failed", "error", Date.now());
+            } else {
+                await this.#finishRun(ctx, scope.agent.id, "completed", "completed", Date.now());
+            }
         },
     };
 
@@ -869,6 +1373,7 @@ export class HistoryModule implements AgentModule {
 interface HistoryRow {
     readonly position: number | string;
     readonly record_id: string;
+    readonly run_id: string | null;
     readonly role: string;
     readonly message_json: string;
     readonly search_text: string;
@@ -880,9 +1385,37 @@ interface HistoryRow {
     readonly tool_results: number | string;
 }
 
+interface HistoryPendingRow {
+    readonly position: number | string;
+    readonly message_id: string;
+    readonly message_json: string;
+}
+
+interface HistoryRunRow {
+    readonly agent_id: string;
+    readonly sequence: number | string;
+    readonly run_id: string;
+    readonly status: string;
+    readonly reason: string | null;
+    readonly started_at: number | string;
+    readonly ended_at: number | string | null;
+}
+
+type HistoryRunAnchor =
+    | { readonly kind: "latest"; readonly sequence: number }
+    | { readonly kind: "before"; readonly sequence: number }
+    | {
+          readonly kind: "after";
+          readonly sequence: number;
+          readonly runId: string;
+          readonly position: number;
+          readonly includeAnchorRun: boolean;
+      };
+
 /** Every column a selected archive row is read back with, so all of it can be checked. */
 const HISTORY_ROW_COLUMNS = `position,
                              record_id,
+                             run_id,
                              role,
                              message_json,
                              search_text,
@@ -1018,6 +1551,9 @@ function toHistoryRecord(row: HistoryRow): HistoryRecord {
     if (row.record_id !== message.recordId) {
         throw new Error("The history module found a mismatched record identity.");
     }
+    if (row.run_id !== (message.runId ?? null)) {
+        throw new Error("The history module found a mismatched run identity.");
+    }
     if (row.role !== message.role) {
         throw new Error("The history module found a mismatched persisted role.");
     }
@@ -1057,6 +1593,242 @@ function parseStoredMessage(encoded: string): HistoryMessage {
         throw new Error("The history module found an invalid persisted message.");
     }
     return parsed;
+}
+
+async function readPendingMessage(
+    database: AgentDatabaseFacade<AgentDatabase>,
+    agentId: string,
+    messageId: string,
+): Promise<HistoryPendingMessage | undefined> {
+    const rows = await agentDatabaseRows<HistoryPendingRow>(
+        database,
+        sql`SELECT position, message_id, message_json
+            FROM ${sql.raw(HISTORY_PENDING_TABLE)}
+            WHERE agent_id = ${agentId} AND message_id = ${messageId}
+            LIMIT 1`,
+    );
+    return rows[0] === undefined ? undefined : parsePendingRow(rows[0], agentId);
+}
+
+function parsePendingRow(row: HistoryPendingRow, agentId: string): HistoryPendingMessage {
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(row.message_json);
+    } catch {
+        throw new Error("The history module found malformed pending-message JSON.");
+    }
+    if (!Value.Check(historyPendingMessageSchema, parsed)) {
+        throw new Error("The history module found an invalid pending message.");
+    }
+    const candidate = parsed as HistoryPendingMessage;
+    if (candidate.agentId !== agentId || candidate.id !== row.message_id) {
+        throw new Error("The history module found a mismatched pending message.");
+    }
+    toSafeInteger(row.position, "pending message position");
+    return candidate;
+}
+
+async function readPendingMessages(
+    database: AgentDatabaseFacade<AgentDatabase>,
+    agentId: string,
+): Promise<HistoryPendingMessage[]> {
+    const rows = await agentDatabaseRows<HistoryPendingRow>(
+        database,
+        sql`SELECT position, message_id, message_json
+            FROM ${sql.raw(HISTORY_PENDING_TABLE)}
+            WHERE agent_id = ${agentId}
+            ORDER BY position ASC
+            LIMIT ${MAX_HISTORY_PENDING_MESSAGES + 1}`,
+    );
+    if (rows.length > MAX_HISTORY_PENDING_MESSAGES) {
+        throw new Error("The history module found too many pending messages.");
+    }
+    return rows.map((row) => parsePendingRow(row, agentId));
+}
+
+async function resolveRunAnchor(
+    database: AgentDatabaseFacade<AgentDatabase>,
+    agentId: string,
+    query: HistoryRunsQuery,
+): Promise<HistoryRunAnchor> {
+    if (query.before !== undefined) {
+        const rows = await agentDatabaseRows<{ sequence: number | string }>(
+            database,
+            sql`SELECT sequence
+                FROM ${sql.raw(HISTORY_RUNS_TABLE)}
+                WHERE agent_id = ${agentId} AND run_id = ${query.before}
+                LIMIT 1`,
+        );
+        if (rows[0] === undefined) {
+            throw new Error("The history run cursor was not found.");
+        }
+        return {
+            kind: "before",
+            sequence: toSafeInteger(rows[0].sequence, "history run sequence"),
+        };
+    }
+    if (query.after !== undefined) {
+        const messageRows = await agentDatabaseRows<{
+            position: number | string;
+            run_id: string | null;
+        }>(
+            database,
+            sql`SELECT position, run_id
+                FROM ${sql.raw(HISTORY_TABLE)}
+                WHERE agent_id = ${agentId} AND record_id = ${query.after}
+                LIMIT 1`,
+        );
+        const message = messageRows[0];
+        if (message === undefined || message.run_id === null) {
+            throw new Error("The history message cursor was not found.");
+        }
+        const runRows = await agentDatabaseRows<HistoryRunRow>(
+            database,
+            sql`SELECT agent_id, sequence, run_id, status, reason, started_at, ended_at
+                FROM ${sql.raw(HISTORY_RUNS_TABLE)}
+                WHERE agent_id = ${agentId} AND run_id = ${message.run_id}
+                LIMIT 1`,
+        );
+        const run = runRows[0];
+        if (run === undefined) {
+            throw new Error("The history message cursor names no run.");
+        }
+        return {
+            kind: "after",
+            sequence: toSafeInteger(run.sequence, "history run sequence"),
+            runId: run.run_id,
+            position: toSafeInteger(message.position, "history message position"),
+            includeAnchorRun: run.status === "running",
+        };
+    }
+    const rows = await agentDatabaseRows<{ sequence: number | string }>(
+        database,
+        sql`SELECT COALESCE(MAX(sequence), -1) + 1 AS sequence
+            FROM ${sql.raw(HISTORY_RUNS_TABLE)}
+            WHERE agent_id = ${agentId}`,
+    );
+    return {
+        kind: "latest",
+        sequence: toSafeInteger(rows[0]?.sequence, "history run sequence"),
+    };
+}
+
+async function candidateRuns(
+    database: AgentDatabaseFacade<AgentDatabase>,
+    agentId: string,
+    anchor: HistoryRunAnchor,
+): Promise<readonly HistoryRunRow[]> {
+    const limit = MAX_HISTORY_RUNS_PER_PAGE + 1;
+    if (anchor.kind === "after") {
+        return await agentDatabaseRows<HistoryRunRow>(
+            database,
+            anchor.includeAnchorRun
+                ? sql`SELECT agent_id, sequence, run_id, status, reason, started_at, ended_at
+                    FROM ${sql.raw(HISTORY_RUNS_TABLE)}
+                    WHERE agent_id = ${agentId} AND sequence >= ${anchor.sequence}
+                    ORDER BY sequence ASC
+                    LIMIT ${limit}`
+                : sql`SELECT agent_id, sequence, run_id, status, reason, started_at, ended_at
+                    FROM ${sql.raw(HISTORY_RUNS_TABLE)}
+                    WHERE agent_id = ${agentId} AND sequence > ${anchor.sequence}
+                    ORDER BY sequence ASC
+                    LIMIT ${limit}`,
+        );
+    }
+    return await agentDatabaseRows<HistoryRunRow>(
+        database,
+        sql`SELECT agent_id, sequence, run_id, status, reason, started_at, ended_at
+            FROM ${sql.raw(HISTORY_RUNS_TABLE)}
+            WHERE agent_id = ${agentId} AND sequence < ${anchor.sequence}
+            ORDER BY sequence DESC
+            LIMIT ${limit}`,
+    );
+}
+
+async function readRunMessages(
+    database: AgentDatabaseFacade<AgentDatabase>,
+    agentId: string,
+    runId: string,
+    afterPosition?: number,
+): Promise<HistoryRecord[]> {
+    const rows = await agentDatabaseRows<HistoryRow>(
+        database,
+        afterPosition === undefined
+            ? sql`SELECT ${sql.raw(HISTORY_ROW_COLUMNS)}
+                FROM ${sql.raw(HISTORY_TABLE)}
+                WHERE agent_id = ${agentId} AND run_id = ${runId}
+                ORDER BY position ASC
+                LIMIT ${MAX_HISTORY_MESSAGES_PER_RUN + 1}`
+            : sql`SELECT ${sql.raw(HISTORY_ROW_COLUMNS)}
+                FROM ${sql.raw(HISTORY_TABLE)}
+                WHERE agent_id = ${agentId}
+                    AND run_id = ${runId}
+                    AND position > ${afterPosition}
+                ORDER BY position ASC
+                LIMIT ${MAX_HISTORY_MESSAGES_PER_RUN + 1}`,
+    );
+    if (rows.length > MAX_HISTORY_MESSAGES_PER_RUN) {
+        throw new Error("The history module found a run too large to read.");
+    }
+    return rows.map(toHistoryRecord);
+}
+
+function runFromRow(row: HistoryRunRow, messages: HistoryMessage[]): HistoryRun {
+    const sequence = toSafeInteger(row.sequence, "history run sequence");
+    const startedAt = toSafeInteger(row.started_at, "history run start");
+    const endedAt = row.ended_at === null ? null : toSafeInteger(row.ended_at, "history run end");
+    if (
+        sequence > MAX_HISTORY_POSITION ||
+        !Value.Check(historyAgentIdSchema, row.agent_id) ||
+        !Value.Check(historyRecordIdSchema, row.run_id) ||
+        !Value.Check(historyRunStatusSchema, row.status) ||
+        !Value.Check(historyRunReasonSchema, row.reason)
+    ) {
+        throw new Error("The history module found invalid run metadata.");
+    }
+    const run: HistoryRun = {
+        id: row.run_id,
+        agentId: row.agent_id,
+        status: row.status as HistoryRun["status"],
+        reason: row.reason as HistoryRun["reason"],
+        startedAt,
+        endedAt,
+        messages,
+    };
+    if (!Value.Check(historyRunSchema, run)) {
+        throw new Error("The history module produced an invalid history run.");
+    }
+    return run;
+}
+
+/**
+ * Drop raw tool payload only when a durable human-readable display exists for the same call.
+ *
+ * Calls without presentation keep their arguments and results because a client would otherwise
+ * have nothing to render.
+ */
+function omitPresentedToolData(messages: readonly HistoryMessage[]): HistoryMessage[] {
+    const presentedCallIds = new Set<string>();
+    for (const message of messages) {
+        for (const block of message.blocks) {
+            if (block.type === "tool_result" && block.display !== undefined) {
+                presentedCallIds.add(block.callId);
+            }
+        }
+    }
+    return messages.map((message) => ({
+        ...message,
+        blocks: message.blocks.map((block): HistoryBlock => {
+            const clone = structuredClone(block) as HistoryBlock;
+            if (clone.type === "tool_call" && presentedCallIds.has(clone.callId)) {
+                delete clone.arguments;
+            }
+            if (clone.type === "tool_result" && clone.display !== undefined) {
+                delete clone.output;
+            }
+            return clone;
+        }),
+    }));
 }
 
 function toSafeInteger(value: unknown, label: string): number {
@@ -1146,7 +1918,7 @@ function createRecordId(): string {
 function toHistoryOutputBlock(block: SessionOutputBlock): HistoryBlock {
     return block.type === "text"
         ? { text: block.text, type: "text" }
-        : { mediaType: block.mimeType, type: "image" };
+        : { data: block.data, mediaType: block.mimeType, type: "image" };
 }
 
 function renderOutput(blocks: readonly SessionOutputBlock[], limit: number): string {

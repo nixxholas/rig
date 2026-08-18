@@ -8,6 +8,7 @@ import { withAfterCommit, type Context } from "@steve.kite/stdlib";
 import { sql } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { EventsModule } from "../../sources/events/EventsModule.js";
 import { UsageModule } from "../../sources/usage/UsageModule.js";
 import type { UsageEvent } from "../../sources/usage/UsageEvent.js";
 import { getAgentTreeUsageTool } from "../../sources/usage/tools/get_agent_tree_usage.js";
@@ -71,7 +72,10 @@ function agentContext(ctx: Context, id: string): Context {
  */
 function fakeAgents(
     roster: Readonly<
-        Record<string, { readonly parent?: string; readonly createdBy?: string; readonly title?: string }>
+        Record<
+            string,
+            { readonly parent?: string; readonly createdBy?: string; readonly title?: string }
+        >
     >,
 ): AgentSystemRef {
     return {
@@ -96,6 +100,22 @@ async function inCompletion(ctx: Context, work: (txCtx: Context) => Promise<void
     const [txCtx, drain] = withAfterCommit(ctx);
     await work(txCtx);
     await drain();
+}
+
+async function createUsageTest(name: string): Promise<{
+    database: ReturnType<typeof moduleDatabase>;
+    events: EventsModule;
+    module: UsageModule;
+}> {
+    const events = new EventsModule();
+    const database = moduleDatabase(events.migrations, name);
+    await database.ready;
+    await events.beforeStart?.(database.context);
+    const module = new UsageModule(events);
+    for (const [, migration] of module.migrations) {
+        await migration(database.context, database.database);
+    }
+    return { database, events, module };
 }
 
 async function recordInference(
@@ -131,19 +151,16 @@ describe("UsageModule", () => {
     });
 
     it("uses Base inference and turn IDs inside the ambient completion transaction", async () => {
-        const database = moduleDatabase([], "usage-base-identities");
+        const { database, module } = await createUsageTest("usage-base-identities");
         const ctx = database.context;
         // Only the clock is moved; the database and its promises keep real timers.
         vi.useFakeTimers({ toFake: ["Date"] });
         vi.setSystemTime(100);
         const events: UsageEvent[] = [];
-        const module = new UsageModule();
         module.onEventTransactional((_eventCtx, event) => {
             events.push(structuredClone(event));
         });
         const hooks = await resolveModuleHooks(ctx, module);
-        await module.migrations[0]![1](database.context, database.database);
-        await module.migrations[1]![1](database.context, database.database);
         const runKV = new FakeKV();
         const agentScope = scope(database.database, runKV);
 
@@ -185,6 +202,7 @@ describe("UsageModule", () => {
             {
                 id: "inference-base-id",
                 kind: "inference",
+                runId: "loop-1",
                 startedAt: 125,
                 finishedAt: 150,
                 durationMs: 25,
@@ -193,6 +211,7 @@ describe("UsageModule", () => {
             {
                 id: "turn-base-id",
                 kind: "turn",
+                runId: "loop-1",
                 startedAt: 100,
                 finishedAt: 175,
                 durationMs: 75,
@@ -213,14 +232,11 @@ describe("UsageModule", () => {
     });
 
     it("clears the current context after a turn with no provider measurement", async () => {
-        const database = moduleDatabase([], "usage-current-context-invalidation");
+        const { database, module } = await createUsageTest("usage-current-context-invalidation");
         const ctx = database.context;
         vi.useFakeTimers({ toFake: ["Date"] });
         vi.setSystemTime(100);
-        const module = new UsageModule();
         const hooks = await resolveModuleHooks(ctx, module);
-        await module.migrations[0]![1](database.context, database.database);
-        await module.migrations[1]![1](database.context, database.database);
         const runKV = new FakeKV();
         const agentScope = scope(database.database, runKV);
 
@@ -263,12 +279,9 @@ describe("UsageModule", () => {
     });
 
     it("allows the exported usage tool to aggregate for a host-neutral caller", async () => {
-        const database = moduleDatabase([], "usage-host-neutral-tool");
+        const { database, module } = await createUsageTest("usage-host-neutral-tool");
         const ctx = database.context;
-        const module = new UsageModule();
         const hooks = await resolveModuleHooks(ctx, module);
-        await module.migrations[0]![1](database.context, database.database);
-        await module.migrations[1]![1](database.context, database.database);
         await recordInference(ctx, hooks, database.database, "agent-1", "inference-1", {
             input: 3,
             output: 2,
@@ -282,9 +295,8 @@ describe("UsageModule", () => {
     });
 
     it("builds the agent tree from the collection it started with and its own records", async () => {
-        const database = moduleDatabase([], "usage-agent-tree");
+        const { database, module } = await createUsageTest("usage-agent-tree");
         const ctx = database.context;
-        const module = new UsageModule();
         const hooks = await resolveModuleHooks(
             ctx,
             module,
@@ -297,8 +309,6 @@ describe("UsageModule", () => {
                 "agent-4": { createdBy: "agent-2", parent: "agent-2" },
             }),
         );
-        await module.migrations[0]![1](ctx, database.database);
-        await module.migrations[1]![1](ctx, database.database);
         await recordInference(ctx, hooks, database.database, "agent-1", "inference-1", {
             input: 6,
             output: 4,
@@ -357,9 +367,12 @@ describe("UsageModule", () => {
     });
 
     it("drops reset receipts and performs each reset as an ordinary mutation", async () => {
-        const database = moduleDatabase([], "usage-reset");
+        const events = new EventsModule();
+        const database = moduleDatabase(events.migrations, "usage-reset");
+        await database.ready;
+        await events.beforeStart?.(database.context);
+        const module = new UsageModule(events);
         const ctx = database.context;
-        const module = new UsageModule();
         const resets: UsageEvent[] = [];
         module.onEvent((_eventCtx, event) => {
             if (event.type === "usage_reset") resets.push(event);
@@ -374,6 +387,7 @@ describe("UsageModule", () => {
         expect(beforeDrop).toHaveLength(1);
 
         await module.migrations[1]![1](database.context, database.database);
+        await module.migrations[2]![1](database.context, database.database);
         const afterDrop = await agentDatabaseRows<{ name: string }>(
             database.database,
             sql`SELECT name FROM sqlite_master

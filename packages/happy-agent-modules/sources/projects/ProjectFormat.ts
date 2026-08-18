@@ -27,9 +27,7 @@ export function projectText(project: Project): string {
         ...(project.description === undefined ? [] : [`Description: ${project.description}`]),
         ...(project.avatar === undefined
             ? []
-            : [
-                  `Avatar: ${project.avatar.width}x${project.avatar.height} at ${project.avatar.url}`,
-              ]),
+            : [`Avatar: ${project.avatar.source} image with a ThumbHash placeholder`]),
         `Order key: ${project.orderKey}`,
         `Version: ${String(project.version)}`,
         `Created at: ${String(project.createdAt)}`,

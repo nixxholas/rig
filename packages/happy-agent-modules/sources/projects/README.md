@@ -7,7 +7,7 @@ settings, their order, their avatar bytes and its own migrations in the Agent
 Base database — and it does the work those rows describe. Resolving a path,
 importing a folder, cloning a remote, brokering the credential the clone needs,
 probing a repository, deciding the trunk, holding the repository lock, storing
-and collecting avatar bytes: all of it is this module's own. There is no host
+avatar bytes: all of it is this module's own. There is no host
 object between the catalog and the disk.
 
 ```ts
@@ -19,14 +19,14 @@ await projects.open(ctx, agentId);
 
 Two modules and nothing else.
 
-| Module                                | What it answers                                                          |
-| ------------------------------------- | ------------------------------------------------------------------------ |
+| Module                                | What it answers                                                                                                                                                   |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [`ConfigModule`](../config/README.md) | Where managed projects live, where the agent keeps its own state, whether cross-workspace work is on, and the GitHub token a clone of a private repository needs. |
-| [`GitModule`](../git/README.md)       | Every Git command, probe, clone and worktree, the credentials they carry, and who this copy of Git commits as. |
+| [`GitModule`](../git/README.md)       | Every Git command, probe, clone and worktree, the credentials they carry, and who this copy of Git commits as.                                                    |
 
 There is no `rootContext`, no path string, no runner and no callback. The
 lifetime the catalog's own Git and filesystem work runs on is derived from the
-first context it is used with: a clone, a project setup, or an avatar sweep
+first context it is used with: a clone or project setup
 outlives the request that started it, so none of them run on the caller's
 context. A detached context deliberately carries no storage, so the catalog puts
 the agent database back on that lifetime itself.
@@ -42,7 +42,7 @@ Two answers that used to be the composition root's are now owned deliberately:
   this module; a caller never passes a profile resolver.
 
 `open(ctx, agentId)` picks up whatever the last run left unfinished — projects
-still being set up, failures worth another try, and stale avatar bytes — and
+still being set up and failures worth another try — and
 `close(ctx)` stops every background lifetime and waits for the ones in flight.
 
 ## The record
@@ -83,6 +83,10 @@ and the `createdAt`/`updatedAt`/`archivedAt` timestamps. Timestamps are
 bounded by a real date rather than `Number.MAX_SAFE_INTEGER`, and `archivedAt`
 can never precede `createdAt`.
 
+An image avatar is exactly `{ kind: "image", source, thumbhash }` on the
+project, where `source` is `"user"` or `"generated"`. The normalized WebP and
+its integrity metadata are read separately by project ID.
+
 Settings are a bounded object, not arbitrary JSON: an optional
 `defaultWorkspaceCompute` of `{ type: "local" }` or
 `{ type: "docker", image }`. Anything else is rejected.
@@ -120,14 +124,16 @@ Reads:
   that ended exactly on the last row returns no `nextCursor`.
 - `get` reads by ID, `getByPath` reads by canonical folder path.
 - `readSettings` returns the bounded settings record.
-- `avatarAsset` reads bounded normalized bytes from the module's own avatar
-  store, after resolving the owning row and applying the normal same-owner
-  authorization.
+- `avatarAsset` reads the project's bounded normalized WebP by project ID,
+  verifies its content hash, and returns its strong ETag and ThumbHash.
 
 Folders, clones and Git — the module's own work:
 
 - `resolvePath` finds the project a folder belongs to, importing the folder as a
-  project if it is new. `register` validates and records one folder;
+  project if it is new. `register` validates and records one readable existing
+  folder. A Git folder must be its repository root; an ordinary directory is
+  equally valid and records Git as absent with unsupported worktrees, so child
+  workspaces naturally become copied folders.
   `createRemote` records a project that still has to be cloned and starts the
   clone. `retryRemoteProjects` picks up the clones a newly available credential
   unblocks.
@@ -141,7 +147,6 @@ Folders, clones and Git — the module's own work:
 - `gitForProject` returns the Git surface for a project, carrying the credential
   its clone needs. `registerGitCredential`, `refreshGitCredential` and
   `gitAuthentication` manage those credentials, which are never stored in a row.
-- `storeAvatarImage` and `collectAvatarGarbage` own the avatar bytes.
 - `reconcileGitFacts` and `recordGitFacts` refresh the Git cache from a scan.
 
 Registration and catalog edits:
@@ -150,7 +155,9 @@ Registration and catalog edits:
   once, converges in the same transaction, restores an archived row, and
   returns `{ project, created, changed }`.
 - `rename`, `archive`, `restore`, `reorder`, `setAvatar`, `clearAvatar` and
-  `updateSettings` all accept an optional `expectedVersion`.
+  `updateSettings` all accept an optional `expectedVersion`. `setAvatar`
+  accepts raw PNG, JPEG, or WebP bytes, normalizes them, computes their
+  ThumbHash, and stores only the API-shaped metadata on the project.
 
 Lifecycle, each recording what was observed or done:
 
@@ -206,10 +213,15 @@ subscriber that fails is logged through the context's own logger and reaches
 nobody else, because the change it describes is already durable. Registration
 uses stdlib `afterCommit(ctx, ...)`.
 
+Every non-creation event that carries a project also carries the complete
+`previousProject`, so a subscriber can chain versions without rereading
+mutable state. Avatar set and clear events are published only from the
+transaction that commits both the project metadata and its image bytes.
+
 Access is same-owner only. There is no installable authorization policy: a
 project belongs to the agent that made it.
 
-Avatar bytes live under the agent's own state folder, addressed by the content hash the row
-records, so they survive a restart and so two projects that chose the same image
-share one file. `collectAvatarGarbage` removes the files no row points at any
-more; it runs when the catalog opens.
+Migration `008-project-avatar-assets` appends the project-owned avatar table.
+Its normalized WebP, content hash, ThumbHash, and dimensions commit atomically
+with the project row. Replacing or deleting an avatar therefore cannot leave a
+durable project pointing at stale or missing bytes.

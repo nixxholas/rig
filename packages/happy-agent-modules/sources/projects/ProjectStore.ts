@@ -2,8 +2,8 @@ import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
 import {
+    projectAvatarAssetSchema,
     projectAvatarSchema,
-    projectAvatarHashSchema,
     projectDescriptionSchema,
     projectErrorSchema,
     projectGitDivergenceSchema,
@@ -90,6 +90,7 @@ export const projectStoreReorderInputSchema = Type.Object(
 
 export const projectStoreSetAvatarInputSchema = Type.Object(
     {
+        asset: projectAvatarAssetSchema,
         avatar: projectAvatarSchema,
         expectedVersion: Type.Optional(projectVersionSchema),
         projectId: projectIdSchema,
@@ -285,9 +286,9 @@ export const projectStoreSchema = Type.Object(
             [projectContextSchema, projectRepositoryRefSchema],
             Type.Promise(Type.Union([projectSchema, Type.Undefined()])),
         ),
-        findByAvatarHash: Type.Function(
-            [projectContextSchema, projectAvatarHashSchema],
-            Type.Promise(Type.Union([projectSchema, Type.Undefined()])),
+        readAvatar: Type.Function(
+            [projectContextSchema, projectIdSchema],
+            Type.Promise(Type.Union([projectAvatarAssetSchema, Type.Undefined()])),
         ),
         rename: Type.Function(
             [projectContextSchema, projectStoreRenameInputSchema],

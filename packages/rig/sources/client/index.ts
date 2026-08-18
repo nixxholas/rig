@@ -7,16 +7,15 @@ export {
 } from "./ensureLocalProtocolServer.js";
 export { stopLocalProtocolServer } from "./stopLocalProtocolServer.js";
 export { createUnixSocketFetch } from "./createUnixSocketFetch.js";
+export { HappyAgentEventHub } from "./HappyAgentEventHub.js";
 export {
-    ProtocolHttpClient,
-    type AttachRemoteTerminalOptions,
-    type ProtocolHttpClientOptions,
-    type ProxyHttpRequestOptions,
-    type ProxyHttpResponse,
-    type WatchSessionEventsOptions,
-} from "./ProtocolHttpClient.js";
+    ensureWorkspaceForCwd,
+    loadAgentCatalog,
+    workspaceForCwd,
+    type AgentCatalog,
+    type AgentCatalogEntry,
+} from "./loadAgentCatalog.js";
 export { RemoteTerminalAttachment } from "./RemoteTerminalAttachment.js";
 export { RemoteTerminalClientReplica } from "./RemoteTerminalClientReplica.js";
-export { SessionTerminalConnection } from "./SessionTerminalConnection.js";
 export { RemoteAgent, type RemoteAgentOptions } from "./RemoteAgent.js";
 export { RemoteAgentRunError } from "./RemoteAgentRunError.js";

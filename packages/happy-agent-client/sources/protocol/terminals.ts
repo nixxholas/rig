@@ -1,6 +1,6 @@
 /** Terminals: interactive shells belonging to a workspace, not to any agent. */
 
-import type { Cuid2, ResourceVersion } from "./common.js";
+import type { Cuid2, MutationId, ResourceVersion } from "./common.js";
 
 /**
  * The terminal object.
@@ -44,10 +44,12 @@ export interface OpenTerminalRequest {
     rows?: number;
     maxScrollback?: number;
     colorScheme?: "dark" | "light";
+    mutationId?: MutationId;
 }
 
 /** `PATCH /v0/workspaces/:workspaceId/terminals/:terminalId` */
 export interface ResizeTerminalRequest {
     cols: number;
     rows: number;
+    mutationId?: MutationId;
 }

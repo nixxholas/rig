@@ -24,21 +24,30 @@ export class TerminalCollection {
     /** Which project this folder belongs to, so a project closing takes its workspaces with it. */
     readonly projectId: string;
 
-    readonly #onChange: () => void;
+    readonly #nextVersion: () => string;
+    readonly #onCreated: (terminal: Terminal) => void;
+    readonly #onUpdated: (before: Terminal, after: Terminal) => void;
     readonly #processFactory: TerminalProcessFactory;
     readonly #root: string;
     readonly #sessions = new Map<string, TerminalSession>();
+    readonly #workspaceId: string;
 
     constructor(options: {
-        readonly onChange?: () => void;
+        readonly nextVersion: () => string;
+        readonly onCreated: (terminal: Terminal) => void;
+        readonly onUpdated: (before: Terminal, after: Terminal) => void;
         readonly processFactory: TerminalProcessFactory;
         readonly projectId: string;
         readonly root: string;
+        readonly workspaceId: string;
     }) {
         this.projectId = options.projectId;
-        this.#onChange = options.onChange ?? (() => undefined);
+        this.#nextVersion = options.nextVersion;
+        this.#onCreated = options.onCreated;
+        this.#onUpdated = options.onUpdated;
         this.#processFactory = options.processFactory;
         this.#root = options.root;
+        this.#workspaceId = options.workspaceId;
     }
 
     async create(input: CreateTerminalInput): Promise<TerminalSession> {
@@ -58,7 +67,8 @@ export class TerminalCollection {
             colorScheme,
             cwd,
             maxScrollback,
-            onChange: () => this.#onChange(),
+            nextVersion: this.#nextVersion,
+            onChange: this.#onUpdated,
             processFactory: this.#processFactory,
             processOptions: {
                 cols,
@@ -68,9 +78,10 @@ export class TerminalCollection {
                 ...(input.shell === undefined ? {} : { shell: input.shell }),
             },
             rows,
+            workspaceId: this.#workspaceId,
         });
         this.#sessions.set(session.id, session);
-        this.#onChange();
+        this.#onCreated(session.terminal());
         return session;
     }
 
@@ -78,7 +89,6 @@ export class TerminalCollection {
         const sessions = [...this.#sessions.values()];
         this.#sessions.clear();
         await Promise.all(sessions.map(async (session) => await session.dispose()));
-        this.#onChange();
     }
 
     get(terminalId: string): TerminalSession | undefined {

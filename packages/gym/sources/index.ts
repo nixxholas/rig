@@ -33,3 +33,11 @@ export type {
     TerminalScreenshotOptions,
     TerminalSnapshot,
 } from "./types.js";
+export type {
+    GymInferenceBlock,
+    GymInferenceContext,
+    GymInferenceMessage,
+    GymInferenceOptions,
+    GymInferenceRequest,
+    GymInferenceResponse,
+} from "./inferenceTypes.js";

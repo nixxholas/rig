@@ -10,13 +10,14 @@ import {
 } from "../ProjectRow.js";
 import type { ProjectStore } from "../ProjectStore.js";
 import { databaseFor, readProject, readProjectByPath } from "./projectRecords.js";
+import { queryProjectAvatar } from "./projectAvatars.js";
 
 const DEFAULT_PAGE_LIMIT = 50;
 
 /** Every read the catalog offers: by identity, by folder, by avatar, and by page. */
 export function createProjectQueries(): Pick<
     ProjectStore,
-    "list" | "get" | "findByPath" | "findByAvatarHash" | "readSettings"
+    "list" | "get" | "findByPath" | "readAvatar" | "readSettings"
 > {
     return {
         list: async (ctx, query) => {
@@ -48,16 +49,7 @@ export function createProjectQueries(): Pick<
         get: async (ctx, projectId) => await readProject(databaseFor(ctx), projectId),
         findByPath: async (ctx, repositoryRef) =>
             await readProjectByPath(databaseFor(ctx), repositoryRef),
-        findByAvatarHash: async (ctx, hash) => {
-            const rows = await agentDatabaseRows<ProjectRow>(
-                databaseFor(ctx),
-                sql`SELECT * FROM ${sql.raw(PROJECTS_TABLE)}
-                    WHERE json_extract(avatar_json, '$.hash') = ${hash}
-                    LIMIT 1`,
-            );
-            const row = rows[0];
-            return row === undefined ? undefined : projectFromRow(row);
-        },
+        readAvatar: queryProjectAvatar,
         readSettings: async (ctx, projectId) => {
             const database = databaseFor(ctx);
             const rows = await agentDatabaseRows<ProjectSettingsRow>(

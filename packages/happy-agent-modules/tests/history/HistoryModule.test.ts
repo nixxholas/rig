@@ -5,6 +5,7 @@ import {
     USER_MESSAGE_ORIGIN_METADATA,
     senderAgentIdMetadata,
 } from "../../sources/impl/messageOrigin.js";
+import { EventsModule } from "../../sources/events/index.js";
 import { HistoryModule } from "../../sources/history/HistoryModule.js";
 import { formatHistoryMessage } from "../../sources/history/impl/formatHistoryMessage.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
@@ -155,9 +156,14 @@ describe("HistoryModule durability", () => {
     });
 
     it("records who sent each accepted incoming message", async () => {
-        const history = new HistoryModule();
-        const database = moduleDatabase(history.migrations, "history-origin-test");
+        const events = new EventsModule();
+        const history = new HistoryModule(events);
+        const database = moduleDatabase(
+            [...events.migrations, ...history.migrations],
+            "history-origin-test",
+        );
         await database.ready;
+        await resolveModuleHooks(database.context, events);
         const hooks = await resolveModuleHooks(database.context, history);
 
         const scope = {

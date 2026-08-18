@@ -1,6 +1,7 @@
 import { visibleWidth, type TUI } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 
+import { agentCatalogEntry } from "./agentCatalogTestFixture.js";
 import { StartupStatusApp } from "./StartupStatusApp.js";
 
 describe("StartupStatusApp", () => {
@@ -100,7 +101,7 @@ describe("StartupStatusApp", () => {
         await expect(confirmation).resolves.toBe(true);
     });
 
-    it("picks a session on the startup screen instead of a numbered prompt", async () => {
+    it("picks an agent on the startup screen instead of a numbered prompt", async () => {
         const app = new StartupStatusApp({
             cwd: "/workspace",
             now: () => 1_700_000_000_000,
@@ -109,44 +110,28 @@ describe("StartupStatusApp", () => {
             version: "1.3.0",
         });
         const choice = app.selectSession({
-            confirmVerb: "resume",
-            sessions: [
-                {
-                    archived: false,
-                    createdAt: 1_700_000_000_000,
-                    cwd: "/workspace",
-                    id: "session-1",
-                    ownerInstanceId: "alocalinstance00000000001",
-                    modelId: "gpt-5",
-                    orderKey: "a",
-                    permissionMode: "workspace_write",
-                    projectId: "project-1",
-                    providerId: "codex",
-                    scope: { kind: "project", projectId: "project-1" },
-                    recap: "Reworked the startup screen.",
-                    sessionTokenCount: { lastContextTokens: 34_500, totalTokens: 90_000 },
-                    status: "idle",
+            agents: [
+                agentCatalogEntry({
+                    id: "agent-1",
                     title: "Startup polish",
                     titleStatus: "ready",
-                    updatedAt: 1_700_000_000_000,
-                },
+                }),
             ],
+            confirmVerb: "resume",
             showDirectory: false,
-            subtitle: "1 saved session in /workspace.",
-            title: "Resume a session",
+            subtitle: "1 saved agent in /workspace.",
+            title: "Resume an agent",
         });
 
         const rendered = stripAnsi(app.render(80).join("\n"));
         expect(rendered).toContain("██████╗ ██╗ ██████╗");
-        expect(rendered).toContain("Resume a session");
+        expect(rendered).toContain("Resume an agent");
         expect(rendered).toContain("Startup polish");
-        expect(rendered).toContain("35k context");
-        expect(rendered).toContain("Reworked the startup screen.");
         expect(rendered).not.toContain("1. Startup polish");
 
         app.handleInput("\r");
 
-        await expect(choice).resolves.toBe("session-1");
+        await expect(choice).resolves.toBe("agent-1");
     });
 });
 

@@ -35,6 +35,7 @@ export {
     workspaceArchiveOptionsSchema,
     workspaceBaseRefSchema,
     workspaceBranchSchema,
+    workspaceChildrenQuerySchema,
     workspaceCommitSchema,
     workspaceCreateToolInputSchema,
     workspaceDivergenceSchema,
@@ -52,6 +53,7 @@ export {
     workspaceNameSchema,
     workspaceOperationIdSchema,
     workspaceOrderKeySchema,
+    workspaceParentIdSchema,
     workspacePathSchema,
     workspacePresenceSchema,
     workspaceProjectRefSchema,
@@ -75,6 +77,7 @@ export {
     type WorkspaceArchiveOptions,
     type WorkspaceBaseRef,
     type WorkspaceBranch,
+    type WorkspaceChildrenQuery,
     type WorkspaceCreateToolInput,
     type WorkspaceGitFacts,
     type WorkspaceId,
@@ -87,6 +90,7 @@ export {
     type WorkspaceName,
     type WorkspaceOperationId,
     type WorkspaceOrderKey,
+    type WorkspaceParentId,
     type WorkspacePath,
     type WorkspacePresence,
     type WorkspaceProjectRef,
@@ -102,6 +106,18 @@ export {
     type WorkspaceStorageKey,
     type WorkspaceVersion,
 } from "./Workspace.js";
+export {
+    workspaceAgentAssociationSchema,
+    workspaceAgentAttachmentSchema,
+    workspaceAgentLookupSchema,
+    workspaceAgentOrderSchema,
+    workspaceAgentReorderInputSchema,
+    type WorkspaceAgentAssociation,
+    type WorkspaceAgentAttachment,
+    type WorkspaceAgentLookup,
+    type WorkspaceAgentOrder,
+    type WorkspaceAgentReorderInput,
+} from "./WorkspaceAgent.js";
 export { workspaceBranchName, workspaceNameKey, workspaceStorageKey } from "./WorkspaceIdentity.js";
 export {
     workspaceContextSchema,
@@ -156,6 +172,8 @@ export {
     type WorkspaceReservation,
 } from "./WorkspacesModule.js";
 export {
+    createWorkspaceRequestSchema,
+    workspaceCreatorOptionsSchema,
     type CreateWorkspaceRequest,
     type WorkspaceCreatorOptions,
 } from "./WorkspaceProvisioning.js";

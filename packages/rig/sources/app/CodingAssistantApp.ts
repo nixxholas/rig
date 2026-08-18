@@ -199,6 +199,8 @@ export interface CodingAssistantAppOptions {
     initialBackgroundProcesses?: readonly BashSessionActivity[];
     initialUsage?: Usage;
     initialMcpServers?: readonly McpServerSummary[];
+    /** Already persisted public API messages, oldest first. */
+    initialMessages?: readonly Message[];
     initialNotices?: readonly { text: string; title: string }[];
     initialSessionEvents?: readonly SessionEvent[];
     initialSessionTokenCount?: SessionTokenCount;
@@ -665,6 +667,18 @@ export class CodingAssistantApp implements Component, Focusable {
             this.#skipInitialUsageReplay = false;
             this.#replayingInitialSessionEvents = false;
         }
+        for (const message of options.initialMessages ?? []) {
+            if (message.role === "user") {
+                const text = message.blocks
+                    .map((block) =>
+                        block.type === "text" ? block.text : `[Image: ${block.mediaType}]`,
+                    )
+                    .join("\n");
+                this.#appendEntry({ id: message.id, role: "user", text });
+            } else {
+                this.#applyAgentMessage(message);
+            }
+        }
         // The session snapshot is authoritative for pending questions. Restore it only
         // after historical run events have replayed so an older run_finished event cannot
         // clear an approval that is still pending on the current run.
@@ -686,6 +700,38 @@ export class CodingAssistantApp implements Component, Focusable {
 
     get focused(): boolean {
         return this.#focused;
+    }
+
+    /** Adds a public API message delivered outside this app's active send call. */
+    applyMessage(message: Message): void {
+        if (message.role === "user") {
+            const text = message.blocks
+                .map((block) =>
+                    block.type === "text" ? block.text : `[Image: ${block.mediaType}]`,
+                )
+                .join("\n");
+            if (!this.#reconcileSubmittedUserEntry(message.id, text)) {
+                this.#appendEntry({ id: message.id, role: "user", text });
+            }
+            this.#requestRender();
+            return;
+        }
+        this.#applyAgentMessage(message);
+    }
+
+    /** Applies a public API streaming or reset event delivered outside the active send call. */
+    applyAgentLoopEvent(event: AgentLoopEvent): void {
+        this.#applyAgentEvent(event);
+    }
+
+    /** Opens a question received from the public agent event stream. */
+    applyUserInputRequest(request: UserInputRequest): void {
+        this.#enqueueUserInputRequest(request);
+    }
+
+    /** Clears a question after another client answered or canceled it. */
+    resolveUserInputRequest(requestId: string): void {
+        this.#removeUserInputRequest(requestId);
     }
 
     set focused(value: boolean) {
@@ -3687,8 +3733,7 @@ export class CodingAssistantApp implements Component, Focusable {
      */
     #applySystemNotice(event: Extract<SessionEvent, { type: "system_notice" }>): void {
         const message = event.data.message;
-        const structured =
-            message.structured?.kind === "notice" ? message.structured : undefined;
+        const structured = message.structured?.kind === "notice" ? message.structured : undefined;
         const title = structured?.title ?? "Notice";
         const details =
             structured?.details ??

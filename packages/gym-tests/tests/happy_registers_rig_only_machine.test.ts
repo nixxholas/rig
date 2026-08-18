@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createGym, type Gym } from "@slopus/rig-gym";
-import { decryptHappyPayload } from "../../rig/sources/happy/happyEncryption.js";
+import { decryptHappyPayload } from "@slopus/happy-agent-modules";
 
 const running = new Set<Gym>();
 

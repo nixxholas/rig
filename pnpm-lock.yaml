@@ -94,6 +94,9 @@ importers:
       '@earendil-works/pi-tui':
         specifier: ^0.80.3
         version: 0.80.3
+      '@slopus/happy-agent-modules':
+        specifier: workspace:*
+        version: link:../happy-agent-modules
       '@slopus/happy-providers':
         specifier: 0.0.10
         version: 0.0.10(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
@@ -118,64 +121,13 @@ importers:
 
   packages/happy-agent:
     dependencies:
-      '@libsql/client':
-        specifier: ^0.17.4
-        version: 0.17.4
-      '@noble/ciphers':
-        specifier: ^1.3.0
-        version: 1.3.0
-      '@noble/curves':
-        specifier: ^1.9.7
-        version: 1.9.7
-      '@paralleldrive/cuid2':
-        specifier: ^3.3.0
-        version: 3.3.0
-      '@sinclair/typebox':
-        specifier: ^0.34.49
-        version: 0.34.49
-      '@slopus/happy-agent-base':
-        specifier: npm:@slopus/happy-agent-base@0.0.20
-        version: 0.0.20(@aws-sdk/credential-provider-node@3.972.71)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)
-      '@slopus/happy-agent-compute':
-        specifier: npm:@slopus/happy-agent-compute@0.1.6
-        version: 0.1.6
       '@slopus/happy-agent-modules':
         specifier: workspace:*
         version: link:../happy-agent-modules
-      '@slopus/happy-providers':
-        specifier: 0.0.10
-        version: 0.0.10(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
-      '@steve.kite/stdlib':
-        specifier: 0.0.12
-        version: 0.0.12
-      deunicode:
-        specifier: 1.0.7
-        version: 1.0.7
-      drizzle-orm:
-        specifier: ^0.45.2
-        version: 0.45.2(@electric-sql/pglite@0.5.5)(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@types/pg@8.15.6)(postgres@3.4.9)(sql.js@1.14.1)
-      sharp:
-        specifier: ^0.35.3
-        version: 0.35.3(@types/node@24.13.3)
-      socket.io-client:
-        specifier: ^4.8.3
-        version: 4.8.3
-      ws:
-        specifier: ^8.21.1
-        version: 8.21.1
-      zod:
-        specifier: ^4.4.3
-        version: 4.4.3
     devDependencies:
-      '@slopus/ghostty-web':
-        specifier: workspace:*
-        version: link:../ghostty-web
       '@types/node':
         specifier: ^24.0.10
         version: 24.13.3
-      '@types/ws':
-        specifier: ^8.18.1
-        version: 8.18.1
       typescript:
         specifier: ^7.0.2
         version: 7.0.2
@@ -322,9 +274,18 @@ importers:
 
   packages/happy-agent-modules:
     dependencies:
+      '@libsql/client':
+        specifier: ^0.17.4
+        version: 0.17.4
       '@lydell/node-pty':
         specifier: 1.2.0-beta.12
         version: 1.2.0-beta.12
+      '@noble/ciphers':
+        specifier: ^1.3.0
+        version: 1.3.0
+      '@noble/curves':
+        specifier: ^1.9.7
+        version: 1.9.7
       '@opentelemetry/api':
         specifier: ^1.9.1
         version: 1.9.1
@@ -382,9 +343,15 @@ importers:
       smol-toml:
         specifier: ^1.7.0
         version: 1.7.0
+      socket.io-client:
+        specifier: ^4.8.3
+        version: 4.8.3
       turndown:
         specifier: ^7.2.4
         version: 7.2.4
+      ws:
+        specifier: ^8.21.1
+        version: 8.21.1
     devDependencies:
       '@slopus/happy-agent-base':
         specifier: npm:@slopus/happy-agent-base@0.0.20
@@ -395,6 +362,9 @@ importers:
       '@types/turndown':
         specifier: ^5.0.5
         version: 5.0.6
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.1
       typescript:
         specifier: ^7.0.2
         version: 7.0.2
@@ -553,6 +523,12 @@ importers:
       '@slopus/happy-agent':
         specifier: workspace:*
         version: link:../happy-agent
+      '@slopus/happy-agent-client':
+        specifier: workspace:*
+        version: link:../happy-agent-client
+      '@slopus/happy-agent-modules':
+        specifier: workspace:*
+        version: link:../happy-agent-modules
       '@slopus/happy-providers':
         specifier: 0.0.10
         version: 0.0.10(@aws-sdk/credential-provider-node@3.972.71)(@smithy/signature-v4@5.6.9)(ws@8.21.1)(zod@4.4.3)
@@ -618,6 +594,9 @@ importers:
       '@slopus/happy-agent':
         specifier: workspace:*
         version: link:../happy-agent
+      '@slopus/happy-agent-client':
+        specifier: workspace:*
+        version: link:../happy-agent-client
       '@steve.kite/stdlib':
         specifier: 0.0.12
         version: 0.0.12

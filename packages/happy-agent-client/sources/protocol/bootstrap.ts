@@ -10,8 +10,8 @@ import type { Workspace } from "./workspaces.js";
  * `GET /v0/bootstrap/desktop`
  *
  * A composition of other endpoints' objects; nothing here has a shape of its
- * own. Agents are intentionally absent — a workspace's agent list is fetched
- * when that workspace is opened.
+ * own. There is no separate global agent list: each included project and
+ * workspace carries its own ordered top-level agents.
  */
 export interface DesktopBootstrapResponse {
     config: DaemonConfig;

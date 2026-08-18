@@ -19,6 +19,7 @@ import {
     writeGuardedProject,
     writeGuardedProjectOrder,
 } from "./projectRecords.js";
+import { deleteProjectAvatar, queryProjectAvatar, writeProjectAvatar } from "./projectAvatars.js";
 
 /** The edits a person makes to a catalog row: its name, place, avatar and settings. */
 export function createProjectCatalogEdits(): Pick<
@@ -153,7 +154,11 @@ export function createProjectCatalogEdits(): Pick<
                 input.expectedVersion,
                 "The project changed before the avatar could be saved.",
             );
-            if (sameJson(before.avatar, input.avatar)) {
+            const beforeAsset = await queryProjectAvatar(ctx, input.projectId);
+            if (
+                sameJson(before.avatar, input.avatar) &&
+                beforeAsset?.contentHash === input.asset.contentHash
+            ) {
                 return {
                     operation: "set_avatar",
                     changed: false,
@@ -161,6 +166,7 @@ export function createProjectCatalogEdits(): Pick<
                 };
             }
             const updatedAt = Date.now();
+            await writeProjectAvatar(ctx, input.projectId, input.asset);
             return {
                 operation: "set_avatar",
                 changed: true,
@@ -193,6 +199,7 @@ export function createProjectCatalogEdits(): Pick<
                 };
             }
             const updatedAt = Date.now();
+            await deleteProjectAvatar(ctx, input.projectId);
             return {
                 operation: "clear_avatar",
                 changed: true,

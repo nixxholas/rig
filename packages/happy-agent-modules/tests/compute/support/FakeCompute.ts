@@ -4,11 +4,12 @@ import type {
     ComputeFileSystem,
     ComputeRunOptions,
     ComputeSessionActivity,
+    ComputeSessionExit,
     ComputeSessionReadOptions,
     ComputeSessionSnapshot,
     ComputeSessionStatus,
     ComputeShell,
-} from "../../../sources/index.js";
+} from "../../../sources/compute/index.js";
 import type { Context } from "@steve.kite/stdlib";
 
 /** How one command behaves when the tools run it. */
@@ -273,8 +274,22 @@ export class FakeCompute implements Compute {
     }
 
     #createShell(): ComputeShell {
+        let activeSessionCountListener: ((count: number) => void) | undefined;
+        let sessionExitListener: ((exit: ComputeSessionExit) => void | Promise<void>) | undefined;
         const sessionOf = (sessionId: number): FakeSession | undefined =>
             this.sessions.find((session) => session.sessionId === sessionId);
+        const activeSessions = (): readonly ComputeSessionActivity[] =>
+            this.sessions
+                .filter((session) => session.status === "running")
+                .map((session) => ({
+                    command: session.command,
+                    cwd: session.cwd,
+                    sessionId: session.sessionId,
+                    status: "running" as const,
+                }));
+        const notifyActive = (): void => {
+            activeSessionCountListener?.(activeSessions().length);
+        };
         const snapshotOf = (session: FakeSession, delta: string): ComputeSessionSnapshot => ({
             command: session.command,
             cwd: session.cwd,
@@ -289,15 +304,7 @@ export class FakeCompute implements Compute {
         });
         return {
             cwd: this.cwd,
-            activeSessions: (): readonly ComputeSessionActivity[] =>
-                this.sessions
-                    .filter((session) => session.status === "running")
-                    .map((session) => ({
-                        command: session.command,
-                        cwd: session.cwd,
-                        sessionId: session.sessionId,
-                        status: "running" as const,
-                    })),
+            activeSessions,
             detachSession: (sessionId) => {
                 this.detached.add(sessionId);
             },
@@ -306,11 +313,13 @@ export class FakeCompute implements Compute {
                 if (session === undefined) return Promise.resolve(undefined);
                 session.status = "killed";
                 session.exitCode = null;
+                notifyActive();
                 return Promise.resolve(snapshotOf(session, session.pending));
             },
             readSession: (sessionId: number, options?: ComputeSessionReadOptions) => {
                 const session = sessionOf(sessionId);
                 if (session === undefined) return Promise.resolve(undefined);
+                let exited = false;
                 if (session.status === "running") {
                     const next = session.remaining.shift();
                     if (next !== undefined) {
@@ -320,10 +329,20 @@ export class FakeCompute implements Compute {
                     if (session.remaining.length === 0 && session.script.keepRunning !== true) {
                         session.status = "completed";
                         session.exitCode = session.script.exitCode ?? 0;
+                        exited = true;
                     }
                 }
                 const delta = session.pending;
                 if (options?.peek !== true) session.pending = "";
+                if (exited) {
+                    notifyActive();
+                    void sessionExitListener?.({
+                        command: session.command,
+                        exitCode: session.exitCode,
+                        sessionId,
+                        status: "completed",
+                    });
+                }
                 return Promise.resolve(snapshotOf(session, delta));
             },
             run: async (_options) => ({
@@ -352,7 +371,15 @@ export class FakeCompute implements Compute {
                     exitCode: null,
                 };
                 this.sessions.push(session);
+                notifyActive();
                 return Promise.resolve(session.sessionId);
+            },
+            setActiveSessionCountListener(listener) {
+                activeSessionCountListener = listener;
+                listener?.(activeSessions().length);
+            },
+            setSessionExitListener(listener) {
+                sessionExitListener = listener;
             },
             supportsSessionInput: true,
             writeSession: (_permissions, sessionId, data) => {

@@ -8,6 +8,7 @@ export const MAX_HISTORY_MODEL_LENGTH = 256;
 export const MAX_HISTORY_TEXT_LENGTH = 1_000_000;
 export const MAX_HISTORY_THINKING_LENGTH = 1_000_000;
 export const MAX_HISTORY_MEDIA_TYPE_LENGTH = 256;
+export const MAX_HISTORY_IMAGE_DATA_LENGTH = 48 * 1_024 * 1_024;
 export const MAX_HISTORY_CALL_ID_LENGTH = 256;
 export const MAX_HISTORY_TOOL_NAME_LENGTH = 256;
 export const MAX_HISTORY_TOOL_OUTPUT_LENGTH = 1_000_000;
@@ -20,7 +21,7 @@ export const MAX_HISTORY_ARGUMENT_DEPTH = 8;
 /** Maximum UTF-8 bytes occupied by one serialized tool-argument value. */
 export const MAX_HISTORY_ARGUMENT_BYTES = 1_000_000;
 /** Maximum UTF-8 bytes occupied by one serialized durable history message. */
-export const MAX_HISTORY_MESSAGE_JSON_BYTES = 8 * 1024 * 1024;
+export const MAX_HISTORY_MESSAGE_JSON_BYTES = 64 * 1_024 * 1_024;
 export const MAX_HISTORY_BLOCKS_PER_MESSAGE = 2_048;
 export const MAX_HISTORY_MESSAGES_PER_APPEND = 512;
 export const MAX_HISTORY_PENDING_BLOCKS = 2_048;
@@ -32,6 +33,9 @@ export const MAX_HISTORY_TOTAL_TEXT_CHARACTERS = MAX_HISTORY_TOTAL_BLOCKS * MAX_
 export const MAX_HISTORY_POSITION = Number.MAX_SAFE_INTEGER;
 export const MAX_HISTORY_AGENT_ID_LENGTH = 256;
 export const MAX_HISTORY_QUERY_LENGTH = 100_000;
+export const MAX_HISTORY_MODE_VALUE_LENGTH = 256;
+export const MAX_HISTORY_MUTATION_ID_LENGTH = 1_024;
+export const MAX_HISTORY_REMOTE_MESSAGE_ID_LENGTH = 1_024;
 
 const boundedIdentifier = (maxLength: number) =>
     Type.String({
@@ -49,9 +53,37 @@ export const historyTimestampSchema = Type.Integer({
     minimum: 0,
     maximum: MAX_HISTORY_POSITION,
 });
+export const historyMutationIdSchema = Type.String({
+    minLength: 1,
+    maxLength: MAX_HISTORY_MUTATION_ID_LENGTH,
+});
+export const historyRemoteMessageIdSchema = Type.String({
+    minLength: 1,
+    maxLength: MAX_HISTORY_REMOTE_MESSAGE_ID_LENGTH,
+});
+
+/** The complete composer selection carried by a person's message. */
+export const historyMessageModeSchema = Type.Object(
+    {
+        providerId: boundedIdentifier(MAX_HISTORY_MODE_VALUE_LENGTH),
+        modelId: boundedIdentifier(MAX_HISTORY_MODE_VALUE_LENGTH),
+        effort: boundedIdentifier(MAX_HISTORY_MODE_VALUE_LENGTH),
+        serviceTier: Type.Union([boundedIdentifier(MAX_HISTORY_MODE_VALUE_LENGTH), Type.Null()]),
+        permissionMode: Type.Union([
+            Type.Literal("read_only"),
+            Type.Literal("workspace_write"),
+            Type.Literal("auto"),
+            Type.Literal("full_access"),
+        ]),
+    },
+    { additionalProperties: false },
+);
+
+/** The TypeScript type inferred from {@link historyMessageModeSchema}. */
+export type HistoryMessageMode = Static<typeof historyMessageModeSchema>;
 
 /**
- * Who a recorded message came from. The five roles a reader may filter on.
+ * Who a recorded message came from. The six roles a reader may filter on.
  *
  * Provider input shapes only have user and assistant roles, so goal continuations, collaboration
  * hand-offs, and other system-generated messages all reach the model wearing the user role. The
@@ -63,6 +95,7 @@ export const historyRoleSchema = Type.Union([
     Type.Literal("agent"),
     Type.Literal("assistant"),
     Type.Literal("error"),
+    Type.Literal("service"),
     Type.Literal("system"),
     Type.Literal("user"),
 ]);
@@ -138,6 +171,8 @@ export const historyImageBlockSchema = Type.Object(
             maxLength: MAX_HISTORY_MEDIA_TYPE_LENGTH,
             pattern: "^[^\\u0000\\r\\n]+$",
         }),
+        /** Inline base64 media, retained exactly for public transcript reconstruction. */
+        data: Type.Optional(Type.String({ maxLength: MAX_HISTORY_IMAGE_DATA_LENGTH })),
     },
     { additionalProperties: false },
 );
@@ -148,7 +183,7 @@ export const historyToolCallBlockSchema = Type.Object(
         type: Type.Literal("tool_call"),
         callId: boundedIdentifier(MAX_HISTORY_CALL_ID_LENGTH),
         name: boundedIdentifier(MAX_HISTORY_TOOL_NAME_LENGTH),
-        arguments: historyToolArgumentsSchema,
+        arguments: Type.Optional(historyToolArgumentsSchema),
     },
     { additionalProperties: false },
 );
@@ -165,7 +200,7 @@ export const historyToolResultBlockSchema = Type.Object(
         /** A bounded one-line summary suitable for a person-facing history view. */
         display: Type.Optional(Type.String({ maxLength: MAX_HISTORY_TOOL_DISPLAY_LENGTH })),
         /** What the model was shown, as text. */
-        output: Type.String({ maxLength: MAX_HISTORY_TOOL_OUTPUT_LENGTH }),
+        output: Type.Optional(Type.String({ maxLength: MAX_HISTORY_TOOL_OUTPUT_LENGTH })),
         isError: Type.Optional(Type.Boolean()),
     },
     { additionalProperties: false },
@@ -194,6 +229,18 @@ const historyMessageFields = {
     blocks: Type.Array(historyBlockSchema, { maxItems: MAX_HISTORY_BLOCKS_PER_MESSAGE }),
     /** Stable identity for this archive record. Reuse is a storage conflict. */
     recordId: historyRecordIdSchema,
+    /** The accepted run this message belongs to. */
+    runId: Type.Optional(historyRecordIdSchema),
+    /** How a user message entered the agent. */
+    delivery: Type.Optional(Type.Union([Type.Literal("queue"), Type.Literal("steer")])),
+    /** The selection a user message made effective. */
+    mode: Type.Optional(historyMessageModeSchema),
+    /** Optimistic client mutation identity, echoed but never interpreted or deduplicated. */
+    mutationId: Type.Optional(historyMutationIdSchema),
+    /** Keep this operational message out of person-facing transcript projection. */
+    hideFromUser: Type.Optional(Type.Boolean()),
+    /** Happy's source identity, used to suppress a remote message echo. */
+    remoteMessageId: Type.Optional(historyRemoteMessageIdSchema),
     /** When it was recorded, in epoch milliseconds. */
     at: Type.Optional(historyTimestampSchema),
     /** The registry ID of the provider that produced it, for an inference. */
@@ -246,7 +293,9 @@ export function historyMessageWithinPersistenceBounds(message: unknown): boolean
     if (
         candidate.blocks.some(
             (block) =>
-                block.type === "tool_call" && !historyToolArgumentsWithinByteLimit(block.arguments),
+                block.type === "tool_call" &&
+                block.arguments !== undefined &&
+                !historyToolArgumentsWithinByteLimit(block.arguments),
         )
     ) {
         return false;

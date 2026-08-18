@@ -1,8 +1,5 @@
-import type {
-    GymInferenceRequest,
-    GymInferenceResponse,
-} from "../../rig/sources/executor/gym-types.js";
 import type { HttpInterceptHandler } from "./InterceptingHttpProxy.js";
+import type { GymInferenceRequest, GymInferenceResponse } from "./inferenceTypes.js";
 
 export type GymMockResponse =
     | GymInferenceResponse

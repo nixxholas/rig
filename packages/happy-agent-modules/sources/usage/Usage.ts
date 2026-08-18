@@ -18,6 +18,7 @@ export const MAX_USAGE_MODEL_LENGTH = 512;
 export const MAX_USAGE_TREE_TITLE_LENGTH = 512;
 export const MAX_USAGE_TREE_PATH_LENGTH = 1_024;
 export const MAX_USAGE_ID_LENGTH = 128;
+export const MAX_USAGE_RUN_ID_LENGTH = 256;
 export const MAX_USAGE_TOKEN_COUNT = 1_000_000_000;
 export const MAX_USAGE_DURATION_MS = 31_536_000_000;
 export const MAX_USAGE_TIMESTAMP = Number.MAX_SAFE_INTEGER;
@@ -27,6 +28,11 @@ export const MAX_USAGE_TOTAL_DURATION_MS = MAX_USAGE_RECORDS * MAX_USAGE_DURATIO
 export const usageIdSchema = Type.String({
     minLength: 1,
     maxLength: MAX_USAGE_ID_LENGTH,
+});
+
+export const usageRunIdSchema = Type.String({
+    minLength: 1,
+    maxLength: MAX_USAGE_RUN_ID_LENGTH,
 });
 
 export const usageAgentIdSchema = Type.String({
@@ -83,12 +89,15 @@ export const usageTokensSchema = Type.Object(
     {
         input: usageTokenCountSchema,
         output: usageTokenCountSchema,
+        cacheRead: Type.Optional(usageTokenCountSchema),
+        cacheWrite: Type.Optional(usageTokenCountSchema),
     },
     { additionalProperties: false },
 );
 
 const usageAttributionProperties = {
     agentId: usageAgentIdSchema,
+    runId: Type.Optional(usageRunIdSchema),
     provider: usageProviderSchema,
     model: Type.Optional(usageModelSchema),
     effort: Type.Optional(usageEffortSchema),
@@ -129,6 +138,7 @@ export const usageTurnRecordSchema = Type.Object(
 export const usageRecordSchema = Type.Union([usageInferenceRecordSchema, usageTurnRecordSchema]);
 
 export type UsageId = Static<typeof usageIdSchema>;
+export type UsageRunId = Static<typeof usageRunIdSchema>;
 export type UsageAgentId = Static<typeof usageAgentIdSchema>;
 export type UsageProvider = Static<typeof usageProviderSchema>;
 export type UsageModel = Static<typeof usageModelSchema>;
@@ -142,6 +152,35 @@ export type UsageTokens = Static<typeof usageTokensSchema>;
 export type UsageInferenceRecord = Static<typeof usageInferenceRecordSchema>;
 export type UsageTurnRecord = Static<typeof usageTurnRecordSchema>;
 export type UsageRecord = Static<typeof usageRecordSchema>;
+
+export const usageRunTokensSchema = Type.Object(
+    {
+        input: Type.Integer({ minimum: 0, maximum: MAX_USAGE_TOTAL_TOKENS }),
+        output: Type.Integer({ minimum: 0, maximum: MAX_USAGE_TOTAL_TOKENS }),
+        cacheRead: Type.Integer({ minimum: 0, maximum: MAX_USAGE_TOTAL_TOKENS }),
+        cacheWrite: Type.Integer({ minimum: 0, maximum: MAX_USAGE_TOTAL_TOKENS }),
+    },
+    { additionalProperties: false },
+);
+
+export const usageRunBreakdownSchema = Type.Record(
+    usageProviderSchema,
+    Type.Record(usageModelSchema, usageRunTokensSchema),
+);
+
+export const usageRunSummarySchema = Type.Object(
+    {
+        agentId: usageAgentIdSchema,
+        runId: usageRunIdSchema,
+        usage: usageRunBreakdownSchema,
+        costUsd: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
+    },
+    { additionalProperties: false },
+);
+
+export type UsageRunTokens = Static<typeof usageRunTokensSchema>;
+export type UsageRunBreakdown = Static<typeof usageRunBreakdownSchema>;
+export type UsageRunSummary = Static<typeof usageRunSummarySchema>;
 
 /** The latest provider-measured context size for an agent or collection. */
 export const usageCurrentContextSchema = Type.Object(

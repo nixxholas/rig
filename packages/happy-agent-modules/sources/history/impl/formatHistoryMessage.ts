@@ -40,7 +40,7 @@ export function formatHistoryMessage(
             );
         } else if (block.type === "tool_call") {
             if (!includeTools) continue;
-            lines.push(`Tool call: ${block.name} ${truncateJson(block.arguments)}`);
+            lines.push(`Tool call: ${block.name} ${truncateJson(block.arguments ?? null)}`);
         } else {
             if (!includeTools) continue;
             const summary =
@@ -48,7 +48,7 @@ export function formatHistoryMessage(
                     ? ""
                     : `\nSummary: ${truncate(block.display, DISPLAY_LIMIT)}`;
             lines.push(
-                `Tool result: ${block.toolName} (${block.isError === true ? "error" : "ok"})${summary}\nOutput: ${truncate(block.output, OUTPUT_LIMIT)}`,
+                `Tool result: ${block.toolName} (${block.isError === true ? "error" : "ok"})${summary}\nOutput: ${truncate(block.output ?? "", OUTPUT_LIMIT)}`,
             );
         }
     }

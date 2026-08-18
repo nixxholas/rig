@@ -4,6 +4,8 @@ import type { Context } from "@steve.kite/stdlib";
 
 export const PROJECTS_TABLE = "happy_agent_module_projects";
 export const PROJECT_SETTINGS_TABLE = "happy_agent_module_project_settings";
+export const PROJECT_ROOT_AGENTS_TABLE = "happy_agent_module_project_root_agents";
+export const PROJECT_AVATARS_TABLE = "happy_agent_module_project_avatars";
 const PROJECT_RECEIPTS_TABLE = "happy_agent_module_project_operation_receipts";
 const PROJECT_PROOFS_TABLE = "happy_agent_module_project_mutation_proofs";
 
@@ -239,6 +241,80 @@ export const projectMigrations = [
                 sql`CREATE TABLE ${sql.raw(PROJECT_SETTINGS_TABLE)} (
                     project_id TEXT PRIMARY KEY,
                     settings_json TEXT NOT NULL
+                )`,
+            );
+        },
+    ],
+    [
+        "006-project-root-agents",
+        /**
+         * A root agent is a project's root conversation. The association contains only stable
+         * identities and insertion order; Agent Base owns its configuration, metadata, and archive.
+         */
+        async (_ctx: Context, database: AgentDatabase): Promise<void> => {
+            await agentDatabaseRun(
+                database,
+                sql`CREATE TABLE ${sql.raw(PROJECT_ROOT_AGENTS_TABLE)} (
+                    position INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL UNIQUE
+                )`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`CREATE INDEX ${sql.raw(`${PROJECT_ROOT_AGENTS_TABLE}_project_position`)}
+                    ON ${sql.raw(PROJECT_ROOT_AGENTS_TABLE)} (project_id, position)`,
+            );
+        },
+    ],
+    [
+        "007-project-root-agent-order-keys",
+        /**
+         * Root-agent placement uses a fractional key. Reordering updates just the
+         * moved association, leaving every neighbour's durable placement intact.
+         */
+        async (_ctx: Context, database: AgentDatabase): Promise<void> => {
+            await agentDatabaseRun(
+                database,
+                sql`ALTER TABLE ${sql.raw(PROJECT_ROOT_AGENTS_TABLE)}
+                    ADD COLUMN order_key TEXT NOT NULL DEFAULT ''`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`UPDATE ${sql.raw(PROJECT_ROOT_AGENTS_TABLE)}
+                    SET order_key = printf('%020d', position)
+                    WHERE order_key = ''`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`CREATE INDEX ${sql.raw(`${PROJECT_ROOT_AGENTS_TABLE}_project_order`)}
+                    ON ${sql.raw(PROJECT_ROOT_AGENTS_TABLE)} (project_id, order_key, agent_id)`,
+            );
+        },
+    ],
+    [
+        "008-project-avatar-assets",
+        /**
+         * A project avatar is one normalized image, not metadata pointing at an independently
+         * managed file. The bytes and their integrity metadata commit with the project row.
+         * Earlier avatar JSON used a different shape, so it is deliberately discarded rather
+         * than interpreted as the new resource.
+         */
+        async (_ctx: Context, database: AgentDatabase): Promise<void> => {
+            await agentDatabaseRun(
+                database,
+                sql`UPDATE ${sql.raw(PROJECTS_TABLE)} SET avatar_json = NULL`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`CREATE TABLE ${sql.raw(PROJECT_AVATARS_TABLE)} (
+                    project_id TEXT PRIMARY KEY,
+                    image_bytes BLOB NOT NULL,
+                    content_type TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    thumbhash TEXT NOT NULL,
+                    width INTEGER NOT NULL,
+                    height INTEGER NOT NULL
                 )`,
             );
         },

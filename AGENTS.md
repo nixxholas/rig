@@ -12,6 +12,12 @@ Discussion notes that support or contextualize master plans must live only in
 `master-plans/notes/`. Do not create these notes in the `master-plans/` root,
 in another documentation directory, or anywhere else in the repository.
 
+## API specification
+
+Do not create, edit, rename, or delete any `API.md` file without direct human
+input in the current task that explicitly authorizes the specific API
+specification change.
+
 ## Modules
 
 A module is a self-contained feature. It carries everything that feature needs to work: it extends the agent loop through its own hooks, owns its tools, starts and supervises its background processes, and holds its connections to third-party services. Adding a module to an agent is the whole installation — nothing elsewhere should have to be wired up, registered, or branched on for the feature to function.

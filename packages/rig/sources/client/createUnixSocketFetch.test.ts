@@ -1,0 +1,93 @@
+import { createServer, type RequestListener, type Server } from "node:http";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { join } from "node:path";
+
+import { HappyAgentClient } from "@slopus/happy-agent-client";
+import { afterEach, describe, expect, it } from "vitest";
+
+import { createUnixSocketFetch } from "./createUnixSocketFetch.js";
+
+const roots: string[] = [];
+const servers: Server[] = [];
+
+afterEach(async () => {
+    await Promise.all(
+        servers.splice(0).map(
+            (server) =>
+                new Promise<void>((resolve) => {
+                    server.close(() => resolve());
+                }),
+        ),
+    );
+    await Promise.all(roots.splice(0).map((root) => rm(root, { force: true, recursive: true })));
+});
+
+describe("createUnixSocketFetch", () => {
+    it("carries HappyAgentClient JSON requests over the Unix socket", async () => {
+        const { client } = await serve((request, response) => {
+            expect(request.url).toBe("/v0/health");
+            expect(request.headers.authorization).toBe("Bearer token");
+            response.setHeader("content-type", "application/json");
+            response.end(
+                JSON.stringify({
+                    healthy: true,
+                    ready: true,
+                    status: "ready",
+                    version: { daemon: "1.2.3", protocol: 17 },
+                }),
+            );
+        });
+
+        await expect(client.getHealth()).resolves.toEqual({
+            healthy: true,
+            ready: true,
+            status: "ready",
+            version: { daemon: "1.2.3", protocol: 17 },
+        });
+    });
+
+    it("streams SSE frames without buffering the response", async () => {
+        const { client } = await serve((_request, response) => {
+            response.writeHead(200, { "content-type": "text/event-stream" });
+            response.write(
+                'event: hello\ndata: {"cursor":"01900000-0000-7000-8000-000000000000","gap":false,"resumed":true,"connectedAt":1}\n\n',
+            );
+            response.end(
+                'id: 01900000-0000-7000-8000-000000000001\nevent: config.updated\ndata: {"cursor":"01900000-0000-7000-8000-000000000001","type":"config.updated","occurredAt":2,"payload":{}}\n\n',
+            );
+        });
+
+        const frames = [];
+        for await (const frame of client.streamEvents()) frames.push(frame);
+
+        expect(frames.map((frame) => frame.kind)).toEqual(["hello", "event"]);
+        expect(frames[1]).toMatchObject({
+            event: { type: "config.updated" },
+            kind: "event",
+        });
+    });
+});
+
+async function serve(listener: RequestListener): Promise<{ client: HappyAgentClient }> {
+    const localRoot = join(process.cwd(), "../../.local");
+    await mkdir(localRoot, { recursive: true });
+    const root = await mkdtemp(join(localRoot, "rig-fetch-"));
+    roots.push(root);
+    const socketPath = join(root, "daemon.sock");
+    const server = createServer(listener);
+    servers.push(server);
+    await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(socketPath, () => {
+            server.off("error", reject);
+            resolve();
+        });
+    });
+    return {
+        client: new HappyAgentClient({
+            endpoint: "http://happy",
+            fetch: createUnixSocketFetch(socketPath),
+            token: "token",
+        }),
+    };
+}

@@ -1,18 +1,30 @@
+import type { Context } from "@steve.kite/stdlib";
+import type {
+    Agent as ApiAgent,
+    DaemonConfig,
+    HappyAgentClient,
+    HappyAgentEvent,
+    Message as ApiMessage,
+    MessageBlock as ApiMessageBlock,
+    MessageHistoryResponse,
+    MessageMode,
+    Run,
+    ToolCallBlock as ApiToolCallBlock,
+} from "@slopus/happy-agent-client";
+
 import type {
     AgentCompactionResult,
+    AgentLoopEvent,
     AgentSnapshot,
     ContentBlock,
-    GoalStatus,
+    Message,
     Model,
     PermissionMode,
-    ProviderError,
-    SecretAttachmentScope,
     ServiceTier,
-    SessionGoal,
     StopReason,
-    UserMessage,
+    ToolCallBlock,
+    ToolResultBlock,
 } from "../protocol/index.js";
-import type { Context } from "@steve.kite/stdlib";
 import type {
     AgentRunOptions,
     AgentRunResult,
@@ -23,243 +35,213 @@ import type {
 } from "../app/CodingAssistantAgentBackend.js";
 import type {
     AbortRunOptions,
-    ModelCatalog,
-    ProtocolSession,
-    SessionEvent,
-    RunShellCommandResponse,
+    AbortRunResponse,
+    GetSessionUsageResponse,
     ReadBackgroundProcessResponse,
-    StopBackgroundProcessResponse,
+    RunShellCommandResponse,
     SteerMessageResponse,
-    SubmitContextMessageResponse,
+    StopBackgroundProcessResponse,
 } from "../protocol/index.js";
-import { ProtocolHttpClient } from "./ProtocolHttpClient.js";
 import { RemoteAgentRunError } from "./RemoteAgentRunError.js";
+import type { HappyAgentEventHub } from "./HappyAgentEventHub.js";
 
 export interface RemoteAgentOptions {
-    client: ProtocolHttpClient;
-    debug?: boolean;
-    modelCatalog?: ModelCatalog;
-    session: ProtocolSession;
+    agent: ApiAgent;
+    client: HappyAgentClient;
+    config: DaemonConfig;
+    events: HappyAgentEventHub;
+    history: MessageHistoryResponse;
+}
+
+interface PendingSelection {
+    effort?: string;
+    modelId?: string;
+    permissionMode?: PermissionMode;
+    providerId?: string;
+    serviceTier?: ServiceTier | null;
 }
 
 /**
- * A model, reasoning effort, fast-mode, or permission choice the user has made here and that no
- * run has carried to the daemon yet.
+ * The TUI's agent backend over the public Happy Agent API.
  *
- * The protocol applies these fields when the next message's run starts, so choosing a model is a
- * local decision rather than a separate session mutation that a busy or restrictive daemon could
- * reject. The choice is re-asserted over any authoritative session that still predates it.
+ * This class projects public message blocks into Rig's renderer vocabulary, but
+ * it never reconstructs or calls the removed session protocol. Runs, messages,
+ * steering, compaction, drafts, questions, and processes all go through the
+ * durable `HappyAgentClient` instance supplied by the daemon connection.
  */
-interface RemoteAgentSelection {
-    readonly effort?: string;
-    readonly modelId?: string;
-    readonly permissionMode?: PermissionMode;
-    readonly providerId?: string;
-    /** Null turns fast mode off; absent leaves it untouched. */
-    readonly serviceTier?: ServiceTier | null;
-}
-
 export class RemoteAgent implements CodingAssistantAgentBackend {
     readonly id: string;
 
-    #client: ProtocolHttpClient;
-    #debug: boolean;
-    #modelId: string;
-    #modelCatalog: ModelCatalog | undefined;
-    #models: readonly Model[];
-    #providerId: string;
-    #pendingSteeringMessages = new Map<string, { message: UserMessage; runId: string }>();
-    #session: ProtocolSession;
-    #selection: RemoteAgentSelection | undefined;
+    #agent: ApiAgent;
+    readonly #client: HappyAgentClient;
+    readonly #config: DaemonConfig;
+    readonly #events: HappyAgentEventHub;
+    #history: MessageHistoryResponse;
+    readonly #messages = new Map<string, ApiMessage>();
+    readonly #messageEventResults = new Map<string, ApiMessage | typeof MESSAGE_DELETED>();
+    #activeSend = false;
+    #selection: PendingSelection | undefined;
 
     constructor(options: RemoteAgentOptions) {
+        this.#agent = options.agent;
         this.#client = options.client;
-        this.#debug = options.debug === true;
-        this.#session = options.session;
-        this.#modelCatalog = options.modelCatalog;
-        this.id = options.session.agentId;
-        this.#modelId = options.session.modelId;
-        this.#models = options.session.models;
-        this.#providerId = options.session.providerId;
-    }
-
-    async steer(
-        content: string | readonly ContentBlock[],
-        options: SteeringRunOptions = {},
-    ): Promise<SteerMessageResponse> {
-        const displayText = options.displayText ?? contentToDisplayText(content);
-        const selection = this.#selection;
-        try {
-            const submitted = await this.#client.steerMessage(this.#session.id, {
-                ...(options.clientSubmissionId === undefined
-                    ? {}
-                    : { clientSubmissionId: options.clientSubmissionId }),
-                ...(options.expectedRunId === undefined
-                    ? {}
-                    : { expectedRunId: options.expectedRunId }),
-                ...(typeof content === "string" ? {} : { content }),
-                ...(options.displayText !== undefined ? { displayText: options.displayText } : {}),
-                ...this.#messageSelection(selection),
-                text: displayText,
-            });
-            this.#clearSubmittedSelection(selection);
-            return submitted;
-        } catch (error) {
-            if (options.clientSubmissionId !== undefined) {
-                try {
-                    const { events } = await this.#client.getEvents(this.#session.id);
-                    const submitted = events.find(
-                        (event) =>
-                            event.type === "message_submitted" &&
-                            event.data.message.id === options.clientSubmissionId,
-                    );
-                    if (
-                        submitted?.type === "message_submitted" &&
-                        submitted.data.delivery !== "context"
-                    ) {
-                        const reconciled = {
-                            delivery: submitted.data.delivery ?? "run",
-                            eventId: submitted.id,
-                            runId: submitted.data.runId,
-                            sessionId: submitted.sessionId,
-                        };
-                        this.#clearSubmittedSelection(selection);
-                        return reconciled;
-                    }
-                } catch {
-                    // Preserve the original steering error when acceptance cannot be reconciled.
-                }
-            }
-            throw error;
+        this.#config = options.config;
+        this.#events = options.events;
+        this.#history = options.history;
+        this.id = options.agent.id;
+        for (const run of options.history.runs) {
+            for (const message of run.messages) this.#messages.set(message.id, message);
         }
+        for (const message of options.history.pending) this.#messages.set(message.id, message);
     }
 
     get canChangeModel(): boolean {
-        return !this.#session.modelLocked;
+        return true;
     }
 
     get confirmedServiceTier(): ServiceTier | undefined {
-        return sessionServiceTier(this.#session);
+        return this.#currentMode().serviceTier === null ? undefined : "fast";
     }
 
     get provider(): CodingAssistantClientProvider {
-        const serviceTiers = this.#modelCatalog?.providers.find(
-            (provider) => provider.providerId === this.#providerId,
-        )?.serviceTiers;
+        const providerId = this.#currentMode().providerId;
+        const provider = this.#config.providers[providerId];
         return {
-            id: this.#providerId,
-            models: this.#models,
-            ...(serviceTiers === undefined ? {} : { serviceTiers }),
+            id: providerId,
+            models: this.#modelsForProvider(providerId),
+            ...(provider?.models.some(
+                (reference) =>
+                    reference.enabled &&
+                    (
+                        reference.serviceTiers ??
+                        this.#config.models[reference.id]?.serviceTiers ??
+                        []
+                    ).length > 0,
+            )
+                ? { serviceTiers: ["fast" as const] }
+                : {}),
         };
     }
 
     get model(): Model {
-        const model = this.#models.find((candidate) => candidate.id === this.#modelId);
+        const mode = this.#currentMode();
+        const model = this.#modelsForProvider(mode.providerId).find(
+            (candidate) => candidate.id === mode.modelId,
+        );
         if (model === undefined) {
-            throw new Error(`Unknown remote model '${this.#modelId}'.`);
+            throw new Error(`Unknown model '${mode.modelId}' for provider '${mode.providerId}'.`);
         }
         return model;
     }
 
     get modelChoices(): readonly CodingAssistantModelChoice[] {
-        return (
-            this.#modelCatalog?.providers.flatMap((provider) =>
-                provider.models.map((model) => ({ model, providerId: provider.providerId })),
-            ) ?? this.#models.map((model) => ({ model, providerId: this.#providerId }))
+        return Object.entries(this.#config.providers).flatMap(([providerId, provider]) =>
+            provider.enabled
+                ? this.#modelsForProvider(providerId).map((model) => ({ model, providerId }))
+                : [],
         );
     }
 
     get permissionMode(): PermissionMode {
-        return this.#session.permissionMode;
+        return this.#currentMode().permissionMode;
     }
 
     get draft(): string {
-        return this.#session.draft ?? "";
+        return this.#agent.draft?.text ?? "";
     }
 
     get draftUpdatedAt(): number | undefined {
-        return this.#session.draftUpdatedAt;
+        return this.#agent.draft === null ? undefined : this.#agent.updatedAt;
     }
 
-    /**
-     * Store the composer draft on the daemon so the other terminals and clients
-     * attached to this session show the same unsent message. `updatedAt` is when
-     * the user typed it, which decides who wins when two clients disagree.
-     */
     async setDraft(
         draft: string,
         options: { origin?: string; updatedAt?: number } = {},
     ): Promise<void> {
-        await this.#client.setSessionDraft(this.#session.id, {
-            draft: draft.length === 0 ? null : draft,
-            ...(options.origin === undefined ? {} : { origin: options.origin }),
+        const mode = this.#currentMode();
+        const response = await this.#client.saveAgentDraft(this.id, {
+            draft:
+                draft.length === 0
+                    ? null
+                    : {
+                          effort: mode.effort,
+                          modelId: mode.modelId,
+                          permissionMode: mode.permissionMode,
+                          providerId: mode.providerId,
+                          serviceTier: mode.serviceTier,
+                          text: draft,
+                      },
             ...(options.updatedAt === undefined ? {} : { updatedAt: options.updatedAt }),
+            ...(options.origin === undefined ? {} : { mutationId: options.origin }),
         });
+        this.#agent = response.agent;
     }
 
-    get goal(): SessionGoal | undefined {
-        return this.#session.goal === undefined ? undefined : { ...this.#session.goal };
-    }
-
-    get projectSecretIds(): readonly string[] {
-        return [...this.#session.projectSecretIds];
-    }
-
-    get secretIds(): readonly string[] {
-        return [...this.#session.secretIds];
-    }
-
-    get sessionSecretIds(): readonly string[] {
-        return [...this.#session.sessionSecretIds];
-    }
-
-    async attachSecret(secretId: string, scope: SecretAttachmentScope = "session"): Promise<void> {
-        const response = await this.#client.attachSecret(this.#session.id, secretId, scope);
-        this.#replaceSession(response.session);
-    }
-
-    async detachSecret(secretId: string, scope: SecretAttachmentScope = "session"): Promise<void> {
-        const response = await this.#client.detachSecret(this.#session.id, secretId, scope);
-        this.#replaceSession(response.session);
-    }
-
-    abort(options?: AbortRunOptions) {
-        return this.#client.abort(this.#session.id, options);
+    async abort(options: AbortRunOptions = {}): Promise<AbortRunResponse> {
+        const response = await this.#client.abortAgent(this.id, {
+            ...(options.expectedRunId === undefined
+                ? {}
+                : { expectedRunId: options.expectedRunId }),
+            ...(options.mutationId === undefined ? {} : { mutationId: options.mutationId }),
+        });
+        this.#agent = response.agent;
+        return { aborted: true, eventId: response.cursor };
     }
 
     async stopBackgroundProcesses(): Promise<number> {
-        const response = await this.#client.stopBackgroundProcesses(this.#session.id);
-        return response.stoppedProcesses;
+        const activity = await this.#client.getAgentActivity(this.id);
+        const running = activity.processes.filter((process) => process.status === "running");
+        await Promise.all(running.map((process) => this.#client.stopProcess(this.id, process.id)));
+        return running.length;
     }
 
     readBackgroundProcess(
-        sessionId: number,
-        options?: { waitMs?: number },
+        _sessionId: number,
+        _options?: { waitMs?: number },
     ): Promise<ReadBackgroundProcessResponse | undefined> {
-        return this.#client.readBackgroundProcess(this.#session.id, sessionId, options);
+        // The public process API deliberately exposes lifecycle, not output.
+        return Promise.resolve(undefined);
     }
 
-    stopBackgroundProcess(sessionId: number): Promise<StopBackgroundProcessResponse> {
-        return this.#client.stopBackgroundProcess(this.#session.id, sessionId);
+    stopBackgroundProcess(_sessionId: number): Promise<StopBackgroundProcessResponse> {
+        // Public process IDs are CUID2 strings; the old numeric terminal handle
+        // is not fabricated or guessed.
+        return Promise.resolve({ stopped: false });
     }
 
-    getUsage() {
-        return this.#client.getSessionUsage(this.#session.id);
-    }
-
-    async setGoal(objective: string): Promise<void> {
-        const response = await this.#client.setGoal(this.#session.id, { objective });
-        this.#replaceSession(response.session);
-    }
-
-    async changeGoalStatus(status: GoalStatus): Promise<void> {
-        const response = await this.#client.changeGoalStatus(this.#session.id, { status });
-        this.#replaceSession(response.session);
-    }
-
-    async clearGoal(): Promise<void> {
-        const response = await this.#client.clearGoal(this.#session.id);
-        this.#replaceSession(response.session);
+    async getUsage(): Promise<GetSessionUsageResponse> {
+        const response = await this.#client.getAgentUsage(this.id);
+        const groups = Object.entries(response.usage).flatMap(([providerId, models]) =>
+            Object.entries(models).map(([modelId, usage]) => ({
+                kind: "attributed" as const,
+                modelId,
+                providerId,
+                requestedModelId: modelId,
+                usage: {
+                    cacheRead: usage.cacheRead,
+                    cacheWrite: usage.cacheWrite,
+                    cost: {
+                        cacheRead: 0,
+                        cacheWrite: 0,
+                        input: 0,
+                        output: 0,
+                        total: 0,
+                    },
+                    input: usage.input,
+                    output: usage.output,
+                    totalTokens: usage.input + usage.output,
+                },
+            })),
+        );
+        return {
+            currentProviderId: this.#currentMode().providerId,
+            groups,
+            quotas: [],
+            sessionTokenCount: {
+                lastContextTokens: 0,
+                totalTokens: groups.reduce((total, group) => total + group.usage.totalTokens, 0),
+            },
+        };
     }
 
     async compact(
@@ -267,30 +249,47 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         _signal?: AbortSignal,
         _onEvent?: AgentRunOptions["onEvent"],
     ): Promise<AgentCompactionResult> {
-        const response = await this.#client.compact(this.#session.id);
-        this.#replaceSession(response.session);
-        return response.result;
+        const response = await this.#client.compactAgent(this.id);
+        this.#agent = response.agent;
+        return {
+            compacted: true,
+            compactedMessageCount: 0,
+            estimatedTokensAfter: 0,
+            estimatedTokensBefore: 0,
+            retainedMessageCount: this.#snapshotMessages().length,
+        };
     }
 
-    async reset(): Promise<void> {
-        const response = await this.#client.reset(this.#session.id);
-        this.#replaceSession(response.session);
+    reset(): Promise<void> {
+        return Promise.reject(
+            new Error("The Happy Agent API does not expose transcript reset or rewind."),
+        );
     }
 
     runShellCommand(
-        command: string,
-        options: { commandId: string },
+        _command: string,
+        _options: { commandId: string },
     ): Promise<RunShellCommandResponse> {
-        return this.#client.runShellCommand(this.#session.id, {
-            command,
-            commandId: options.commandId,
-        });
+        return Promise.reject(
+            new Error(
+                "Direct shell composer commands are not part of the Happy Agent API. Send the command to the agent instead.",
+            ),
+        );
     }
 
-    async rewind(messageId: string): Promise<UserMessage> {
-        const response = await this.#client.rewind(this.#session.id, messageId);
-        this.#replaceSession(response.session);
-        return response.message;
+    async steer(
+        content: string | readonly ContentBlock[],
+        options: SteeringRunOptions = {},
+    ): Promise<void | SteerMessageResponse> {
+        const selection = this.#selection;
+        await this.#client.sendMessage(this.id, {
+            ...toSendBody(content, options.displayText, this.#messageMode(selection)),
+            delivery: "steer",
+            ...(options.clientSubmissionId === undefined
+                ? {}
+                : { mutationId: options.clientSubmissionId }),
+        });
+        this.#clearSelection(selection);
     }
 
     async send(
@@ -298,728 +297,494 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         content: string | readonly ContentBlock[],
         options: AgentRunOptions = {},
     ): Promise<AgentRunResult> {
-        const displayText = options.displayText ?? contentToDisplayText(content);
-        const requestContent =
-            typeof content === "string"
-                ? options.displayText !== undefined && content !== displayText
-                    ? [{ type: "text" as const, text: content }]
-                    : undefined
-                : content;
-        // The local selection travels with the message the protocol applies it to, so a model or
-        // reasoning choice never needs a separate session mutation.
         const selection = this.#selection;
-        const submitted = await this.#client.submitMessage(this.#session.id, {
-            ...(options.clientSubmissionId === undefined
-                ? {}
-                : { clientSubmissionId: options.clientSubmissionId }),
-            ...(requestContent === undefined ? {} : { content: requestContent }),
-            ...(this.#debug ? { debug: true } : {}),
-            ...(options.displayText !== undefined ? { displayText: options.displayText } : {}),
-            ...this.#messageSelection(selection),
-            text: displayText,
-        });
-        this.#clearSubmittedSelection(selection);
-        const streamController = new AbortController();
-        let finished:
-            | {
-                  agentRunId?: string;
-                  errorMessage?: string;
-                  messages: AgentSnapshot["messages"];
-                  providerError?: ProviderError;
-                  providerId?: string;
-                  requestedModelId?: string;
-                  stopReason: StopReason;
-              }
-            | undefined;
-        let failure: Error | undefined;
-        let aborted = false;
+        this.#activeSend = true;
+        const submitted = await this.#client
+            .sendMessage(this.id, {
+                ...toSendBody(content, options.displayText, this.#messageMode(selection)),
+                delivery: "queue",
+                ...(options.clientSubmissionId === undefined
+                    ? {}
+                    : { mutationId: options.clientSubmissionId }),
+            })
+            .catch((error: unknown) => {
+                this.#activeSend = false;
+                throw error;
+            });
+        this.#clearSelection(selection);
 
+        let activeRunId = submitted.message.runId;
+        let terminalRun: Run | undefined;
+        let aborted = false;
+        const streamController = new AbortController();
         const abort = () => {
-            if (aborted) return;
             aborted = true;
             void this.#client
-                .abort(this.#session.id, { expectedRunId: submitted.runId })
+                .abortAgent(this.id, activeRunId === null ? {} : { expectedRunId: activeRunId })
                 .catch(() => undefined);
+            streamController.abort();
         };
         options.signal?.addEventListener("abort", abort, { once: true });
         if (options.signal?.aborted === true) abort();
 
-        await this.#client.watchSessionEvents({
-            after: submitted.eventId,
-            sessionId: this.#session.id,
-            signal: streamController.signal,
-            onEvent: async (event) => {
-                if (!isRunEvent(event, submitted.runId)) {
-                    return;
-                }
+        try {
+            await this.#events.follow({
+                after: submitted.cursor,
+                signal: streamController.signal,
+                onEvent: async (event) => {
+                    if (!belongsToAgent(event, this.id)) return false;
+                    this.#applyResourceEvent(event);
+                    await this.#forwardMessageEvent(event, options);
 
-                this.applySessionEvent(event);
-
-                if (event.type === "run_error") {
-                    failure = new RemoteAgentRunError(
-                        event.data.errorMessage,
-                        submitted.debugDirectory,
-                    );
-                    streamController.abort();
-                    return;
-                }
-
-                if (event.type === "run_finished") {
-                    finished = {
-                        ...(event.data.agentRunId !== undefined
-                            ? { agentRunId: event.data.agentRunId }
-                            : {}),
-                        ...(event.data.errorMessage === undefined
-                            ? {}
-                            : { errorMessage: event.data.errorMessage }),
-                        messages: this.#session.snapshot.messages,
-                        ...(event.data.providerError === undefined
-                            ? {}
-                            : { providerError: event.data.providerError }),
-                        ...(event.data.providerId === undefined
-                            ? {}
-                            : { providerId: event.data.providerId }),
-                        ...(event.data.requestedModelId === undefined
-                            ? {}
-                            : { requestedModelId: event.data.requestedModelId }),
-                        stopReason: event.data.stopReason,
-                    };
-                    streamController.abort();
-                }
-            },
-        });
-
-        options.signal?.removeEventListener("abort", abort);
-
-        if (failure !== undefined) {
-            throw failure;
-        }
-        const debug =
-            submitted.debugDirectory === undefined
-                ? {}
-                : { debugDirectory: submitted.debugDirectory };
-        const contextMessages =
-            this.#session.snapshot.contextMessages ?? this.#session.snapshot.messages;
-        if (finished === undefined) {
-            const messages = this.#session.snapshot.messages;
-            if (aborted) {
-                return {
-                    ...debug,
-                    messages,
-                    contextMessages,
-                    runId: submitted.runId,
-                    stopReason: "aborted",
-                };
-            }
-            return {
-                ...debug,
-                errorMessage: "The remote run ended without a completion event.",
-                messages,
-                contextMessages,
-                providerError: {
-                    type: "unclassified",
-                    diagnostics: {
-                        attempts: 1,
-                        upstreamMessage: "The remote run ended without a completion event.",
-                    },
+                    if (
+                        event.type === "run.started" &&
+                        event.payload.acceptedMessageIds.includes(submitted.message.id)
+                    ) {
+                        activeRunId = event.payload.run.id;
+                    } else if (
+                        event.type === "run.boundary" &&
+                        activeRunId === event.payload.finishedRun.id
+                    ) {
+                        // Steering is one user-visible continuation. Keep consuming
+                        // the atomic successor instead of leaving its output without
+                        // an owner in the terminal.
+                        activeRunId = event.payload.startedRun.id;
+                    } else if (
+                        event.type === "run.finished" &&
+                        activeRunId === event.payload.run.id
+                    ) {
+                        terminalRun = event.payload.run;
+                        return true;
+                    }
+                    return false;
                 },
-                providerId: this.#providerId,
-                requestedModelId: this.#modelId,
-                runId: submitted.runId,
-                stopReason: "error",
-            };
+            });
+        } catch (error) {
+            if (!aborted) throw error;
+        } finally {
+            this.#activeSend = false;
+            options.signal?.removeEventListener("abort", abort);
+            streamController.abort();
         }
 
-        if (finished.stopReason === "error") {
-            return {
-                ...debug,
-                errorMessage: finished.errorMessage ?? "The model response failed.",
-                messages: finished.messages,
-                contextMessages,
-                providerError: finished.providerError ?? {
-                    type: "unclassified",
-                    diagnostics: {
-                        attempts: 1,
-                        upstreamMessage: finished.errorMessage ?? "The model response failed.",
-                    },
-                },
-                providerId: finished.providerId ?? this.#providerId,
-                requestedModelId: finished.requestedModelId ?? this.#modelId,
-                runId: finished.agentRunId ?? submitted.runId,
-                stopReason: "error",
-            };
+        await this.#refresh();
+        const snapshot = this.snapshot();
+        const runId = terminalRun?.id ?? activeRunId ?? submitted.message.id;
+        const stopReason = aborted ? "aborted" : toStopReason(terminalRun);
+        if (terminalRun?.status === "failed") {
+            throw new RemoteAgentRunError("The remote run failed.");
         }
         return {
-            ...debug,
-            messages: finished.messages,
-            contextMessages,
-            runId: finished.agentRunId ?? submitted.runId,
-            stopReason: finished.stopReason,
+            contextMessages: snapshot.messages,
+            messages: snapshot.messages,
+            runId,
+            stopReason,
         };
-    }
-
-    sendContext(text: string): Promise<SubmitContextMessageResponse> {
-        return this.#client.submitContextMessage(this.#session.id, { text });
     }
 
     setEffort(effort: string | undefined): void {
         if (effort === undefined) return;
         this.#selection = { ...this.#selection, effort };
-        this.#applySelection();
     }
 
     setModel(modelId: string, effort: string | undefined, providerId?: string): void {
-        const nextProviderId = providerId ?? this.#providerId;
-        if (
-            !this.canChangeModel &&
-            (modelId !== this.#modelId || nextProviderId !== this.#providerId)
-        ) {
-            this.setEffort(effort);
-            return;
+        const resolvedProviderId = providerId ?? this.#currentMode().providerId;
+        if (!this.#modelsForProvider(resolvedProviderId).some((model) => model.id === modelId)) {
+            throw new Error(`Unknown model '${modelId}' for provider '${resolvedProviderId}'.`);
         }
-
-        const nextProvider = this.#modelCatalog?.providers.find(
-            (provider) => provider.providerId === nextProviderId,
-        );
-        const nextModels = nextProvider?.models ?? this.#models;
-        if (!nextModels.some((model) => model.id === modelId)) {
-            throw new Error(`Unknown remote model '${modelId}' for provider '${nextProviderId}'.`);
-        }
-
-        const currentServiceTier = sessionServiceTier(this.#session);
-        const keepServiceTier =
-            currentServiceTier === undefined ||
-            nextProvider?.serviceTiers?.includes(currentServiceTier) === true;
         this.#selection = {
             ...this.#selection,
             ...(effort === undefined ? {} : { effort }),
             modelId,
-            providerId: nextProviderId,
-            ...(keepServiceTier ? {} : { serviceTier: null }),
+            providerId: resolvedProviderId,
         };
-        this.#applySelection();
     }
 
     setServiceTier(serviceTier: ServiceTier | undefined): void {
         this.#selection = { ...this.#selection, serviceTier: serviceTier ?? null };
-        this.#applySelection();
     }
 
     setPermissionMode(permissionMode: PermissionMode): Promise<void> {
         this.#selection = { ...this.#selection, permissionMode };
-        this.#applySelection();
         return Promise.resolve();
     }
 
     snapshot(): AgentSnapshot {
-        return this.#session.snapshot;
-    }
-
-    applySessionEvent(event: SessionEvent): void {
-        if (event.sessionId !== this.#session.id) {
-            return;
-        }
-
-        if (event.type === "session_created") {
-            this.#replaceSession({ ...event.data.session, lastEventId: event.id });
-            return;
-        }
-
-        if (event.type === "session_updated") {
-            const current = event.data.session;
-            const loaded = this.#session.snapshot;
-            const contextMessages =
-                event.data.appendedContextMessage === undefined
-                    ? loaded.contextMessages
-                    : appendUniqueMessage(
-                          loaded.contextMessages ?? loaded.messages,
-                          event.data.appendedContextMessage,
-                      );
-            this.#replaceSession({
-                ...current,
-                lastEventId: event.id,
-                snapshot: {
-                    ...current.snapshot,
-                    messages: loaded.messages,
-                    queue: loaded.queue,
-                    tools: loaded.tools,
-                    ...(contextMessages === undefined ? {} : { contextMessages }),
-                    ...(loaded.instructions === undefined
-                        ? {}
-                        : { instructions: loaded.instructions }),
-                    ...(loaded.lastRunId === undefined ? {} : { lastRunId: loaded.lastRunId }),
-                    ...(current.systemPrompt === undefined
-                        ? {}
-                        : { systemPrompt: current.systemPrompt }),
-                },
-            });
-            return;
-        }
-
-        this.#session = { ...this.#session, lastEventId: event.id };
-
-        if (event.type === "system_notice") {
-            // A system notice is a visible service row with no run lifecycle and no model context.
-            // It advances the cursor like any other event, but the snapshot's messages and context
-            // are left untouched. Replay boundaries by event ID already keep it from applying twice.
-            return;
-        }
-
-        if (event.type === "permission_review") {
-            // A permission-review annotation decorates a tool row by tool-call id; it has no run of
-            // its own and no effect on this snapshot's messages, context, or run bookkeeping. Like a
-            // system notice, it only advances the cursor here — the app that renders the transcript
-            // is what attaches it to the tool row.
-            return;
-        }
-
-        if (event.type === "session_activity_changed") {
-            this.#session = { ...this.#session, activity: event.data.activity };
-            return;
-        }
-
-        if (event.type === "session_archived") {
-            this.#session = { ...this.#session, archived: event.data.archived };
-            return;
-        }
-
-        if (event.type === "session_draft_changed") {
-            const { draft, updatedAt } = event.data;
-            this.#session =
-                draft === undefined
-                    ? { ...omitDraft(this.#session), draftUpdatedAt: updatedAt }
-                    : { ...this.#session, draft, draftUpdatedAt: updatedAt };
-            return;
-        }
-
-        if (event.type === "session_workspace_archived") {
-            this.#pendingSteeringMessages.clear();
-            this.#session = {
-                ...this.#session,
-                archived: true,
-                modelLocked: false,
-                status: "archived",
-            };
-            return;
-        }
-
-        if (event.type === "message_submitted") {
-            if (event.data.delivery === "context") {
-                this.#session = {
-                    ...this.#session,
-                    snapshot: {
-                        ...this.#session.snapshot,
-                        messages: appendUniqueMessage(
-                            this.#session.snapshot.messages,
-                            event.data.message,
-                        ),
-                    },
-                };
-                return;
-            }
-            if (event.data.delivery === "steer") {
-                this.#pendingSteeringMessages.set(event.data.message.id, {
-                    message: event.data.message,
-                    runId: event.data.runId,
-                });
-                this.#session = { ...this.#session, modelLocked: true, status: "running" };
-                return;
-            }
-            this.#session = {
-                ...this.#session,
-                modelLocked: true,
-                status: this.#session.status === "running" ? "running" : "queued",
-                snapshot: {
-                    ...this.#session.snapshot,
-                    messages: appendUniqueMessage(
-                        this.#session.snapshot.messages,
-                        event.data.message,
-                    ),
-                },
-            };
-            return;
-        }
-
-        if (event.type === "steering_applied") {
-            for (const messageId of event.data.messageIds) {
-                const pending = this.#pendingSteeringMessages.get(messageId);
-                if (pending === undefined || pending.runId !== event.data.runId) continue;
-                this.#session = {
-                    ...this.#session,
-                    snapshot: {
-                        ...this.#session.snapshot,
-                        messages: appendUniqueMessage(
-                            this.#session.snapshot.messages,
-                            pending.message,
-                        ),
-                    },
-                };
-                this.#pendingSteeringMessages.delete(messageId);
-            }
-            return;
-        }
-
-        if (event.type === "agent_message") {
-            this.#session = {
-                ...this.#session,
-                snapshot: {
-                    ...this.#session.snapshot,
-                    messages: appendUniqueMessage(
-                        this.#session.snapshot.messages,
-                        event.data.message,
-                    ),
-                },
-            };
-            return;
-        }
-
-        if (event.type === "run_started") {
-            this.#session = { ...this.#session, modelLocked: true, status: "running" };
-            return;
-        }
-
-        if (event.type === "run_error") {
-            this.#discardPendingSteeringMessages(event.data.runId);
-            this.#session = {
-                ...this.#session,
-                modelLocked: event.data.modelLocked,
-                status: "error",
-            };
-            return;
-        }
-
-        if (event.type === "run_finished") {
-            this.#discardPendingSteeringMessages(event.data.runId);
-            this.#session = {
-                ...this.#session,
-                modelLocked: event.data.modelLocked,
-                status: event.data.stopReason === "aborted" ? "aborted" : "completed",
-            };
-            return;
-        }
-
-        if (event.type === "session_reset") {
-            this.#pendingSteeringMessages.clear();
-            this.#session = {
-                ...this.#session,
-                modelLocked: false,
-                status: "idle",
-            };
-            this.#applyAuthoritativeSnapshot(event.data.snapshot);
-            return;
-        }
-
-        if (event.type === "session_rewound") {
-            this.#pendingSteeringMessages.clear();
-            this.#session = {
-                ...this.#session,
-                modelLocked: false,
-                status: "idle",
-            };
-            this.#applyAuthoritativeSnapshot(event.data.snapshot);
-            return;
-        }
-
-        if (event.type === "session_configuration_changed") {
-            this.#modelId = event.data.modelId;
-            this.#providerId = event.data.providerId;
-            this.#models =
-                this.#modelCatalog?.providers.find(
-                    (provider) => provider.providerId === this.#providerId,
-                )?.models ?? this.#models;
-            const { effort: _effort, serviceTier: _serviceTier, ...session } = this.#session;
-            const {
-                effort: _snapshotEffort,
-                serviceTier: _snapshotServiceTier,
-                ...snapshot
-            } = this.#session.snapshot;
-            this.#session = {
-                ...session,
-                ...(event.data.effort !== undefined ? { effort: event.data.effort } : {}),
-                // Only an actual model change releases the lock; a reasoning or fast mode change
-                // leaves whatever the user pinned in place.
-                modelLocked: event.data.changed.includes("model")
-                    ? false
-                    : this.#session.modelLocked,
-                modelId: event.data.modelId,
-                models: this.#models,
-                providerId: event.data.providerId,
-            };
-            // Configuration events carry only configuration. Keep the already loaded bounded
-            // transcript instead of duplicating it into every durable model or effort change.
-            this.#applyAuthoritativeSnapshot({
-                ...snapshot,
-                ...(event.data.effort === undefined ? {} : { effort: event.data.effort }),
-                modelId: event.data.modelId,
-                providerId: event.data.providerId,
-                ...(event.data.serviceTier === null ? {} : { serviceTier: event.data.serviceTier }),
-            });
-            return;
-        }
-
-        if (event.type === "permission_mode_changed") {
-            this.#session = {
-                ...this.#session,
-                permissionMode: event.data.permissionMode,
-            };
-            return;
-        }
-
-        if (event.type === "secrets_changed") {
-            this.#session = {
-                ...this.#session,
-                projectSecretIds: event.data.projectSecretIds,
-                secretIds: event.data.secretIds,
-                sessionSecretIds: event.data.sessionSecretIds,
-            };
-            return;
-        }
-
-        if (event.type === "goal_changed") {
-            if (event.data.goal === null) {
-                const { goal: _goal, ...session } = this.#session;
-                this.#session = session;
-            } else {
-                this.#session = { ...this.#session, goal: { ...event.data.goal } };
-            }
-            return;
-        }
-
-        if (event.type === "user_input_requested") {
-            this.#session = {
-                ...this.#session,
-                pendingUserInputs: [
-                    ...this.#session.pendingUserInputs.filter(
-                        (request) => request.requestId !== event.data.requestId,
-                    ),
-                    event.data,
-                ],
-            };
-            return;
-        }
-
-        if (event.type === "user_input_resolved") {
-            this.#session = {
-                ...this.#session,
-                pendingUserInputs: this.#session.pendingUserInputs.filter(
-                    (request) => request.requestId !== event.data.requestId,
-                ),
-            };
-            return;
-        }
-
-        if (event.type === "mcp_servers_changed") {
-            this.#session = { ...this.#session, mcpServers: event.data.servers };
-            return;
-        }
-
-        if (event.type === "tasks_changed") {
-            this.#session = { ...this.#session, tasks: event.data.tasks };
-            return;
-        }
-
-        if (event.type === "external_tool_call_requested") {
-            this.#session = {
-                ...this.#session,
-                pendingExternalToolCalls: [
-                    ...(this.#session.pendingExternalToolCalls ?? []).filter(
-                        (call) => call.id !== event.data.call.id,
-                    ),
-                    event.data.call,
-                ],
-            };
-            return;
-        }
-
-        if (event.type === "external_tool_call_resolved") {
-            this.#session = {
-                ...this.#session,
-                pendingExternalToolCalls: (this.#session.pendingExternalToolCalls ?? []).filter(
-                    (call) => call.id !== event.data.call.id,
-                ),
-            };
-            return;
-        }
-    }
-
-    #replaceSession(session: ProtocolSession): void {
-        if (
-            session.lastEventId !== undefined &&
-            this.#session.lastEventId !== undefined &&
-            session.lastEventId < this.#session.lastEventId
-        ) {
-            return;
-        }
-        this.#session = session;
-        this.#modelId = session.modelId;
-        this.#models = session.models;
-        this.#providerId = session.providerId;
-        this.#applySelection();
-    }
-
-    #discardPendingSteeringMessages(runId: string): void {
-        for (const [messageId, pending] of this.#pendingSteeringMessages) {
-            if (pending.runId === runId) this.#pendingSteeringMessages.delete(messageId);
-        }
-    }
-
-    /**
-     * The complete selection this message runs on: whatever the person has just changed, over what
-     * the session already runs on. The agent infers nothing from the last message, so every message
-     * carries the whole answer.
-     */
-    #messageSelection(selection: RemoteAgentSelection | undefined): {
-        readonly effort: string;
-        readonly modelId: string;
-        readonly permissionMode?: PermissionMode;
-        readonly providerId: string;
-        readonly serviceTier: ServiceTier | null;
-    } {
-        const modelId = selection?.modelId ?? this.#session.modelId;
-        const providerId = selection?.providerId ?? this.#session.providerId;
-        const provider = this.#modelCatalog?.providers.find(
-            (candidate) => candidate.providerId === providerId,
-        );
-        const model = (provider?.models ?? this.#models).find(
-            (candidate) => candidate.id === modelId,
-        );
+        const mode = this.#currentMode();
         return {
-            effort:
-                selection?.effort ??
-                this.#session.effort ??
-                model?.defaultThinkingLevel ??
-                "medium",
-            modelId,
-            ...(selection?.permissionMode === undefined
-                ? {}
-                : { permissionMode: selection.permissionMode }),
-            providerId,
-            serviceTier:
-                selection?.serviceTier === undefined
-                    ? (sessionServiceTier(this.#session) ?? null)
-                    : selection.serviceTier,
+            effort: mode.effort,
+            id: this.id,
+            messages: this.#snapshotMessages(),
+            modelId: mode.modelId,
+            providerId: mode.providerId,
+            queue: this.#history.pending.map((message) => ({
+                id: message.id,
+                message: toRigMessage(message),
+            })),
+            ...(mode.serviceTier === null ? {} : { serviceTier: "fast" }),
+            status: this.#agent.status === "idle" ? "idle" : "running",
+            tools: [],
         };
     }
 
-    #clearSubmittedSelection(selection: RemoteAgentSelection | undefined): void {
+    /** Applies one global API event and returns a renderable message when it carried one. */
+    applyEvent(event: HappyAgentEvent): Message | undefined {
+        if (!belongsToAgent(event, this.id)) return undefined;
+        this.#applyResourceEvent(event);
+        const message = this.#projectMessageEvent(event);
+        if (message !== undefined && message !== MESSAGE_DELETED && event.type !== "message.delta")
+            return toRigMessage(message);
+        return undefined;
+    }
+
+    /** Projects streaming and reset API events into Rig's live inference vocabulary. */
+    applyLoopEvent(event: HappyAgentEvent): AgentLoopEvent | undefined {
+        if (this.#activeSend) return undefined;
+        return this.#projectLoopEvent(event);
+    }
+
+    #projectLoopEvent(event: HappyAgentEvent): AgentLoopEvent | undefined {
+        if (!belongsToAgent(event, this.id)) return undefined;
+        const message = this.#projectMessageEvent(event);
+        if (event.type === "message.deleted") return { type: "block_reset" };
+        if (
+            event.type !== "message.delta" ||
+            message === undefined ||
+            message === MESSAGE_DELETED
+        ) {
+            return undefined;
+        }
+        const block = message.content[event.payload.blockIndex];
+        if (block?.type === "reasoning") {
+            return {
+                type: "thinking_delta",
+                contentIndex: event.payload.blockIndex,
+                delta: event.payload.append,
+            };
+        }
+        if (block?.type === "text") {
+            return { type: "text_delta", delta: event.payload.append };
+        }
+        return undefined;
+    }
+
+    #modelsForProvider(providerId: string): readonly Model[] {
+        const provider = this.#config.providers[providerId];
+        if (provider === undefined) return [];
+        return provider.models.flatMap((reference) => {
+            const definition = this.#config.models[reference.id];
+            if (!reference.enabled || definition === undefined) return [];
+            return [
+                {
+                    defaultThinkingLevel: definition.defaultEffort,
+                    id: reference.id,
+                    name: definition.name,
+                    thinkingLevels: definition.efforts,
+                },
+            ];
+        });
+    }
+
+    #currentMode(): MessageMode {
+        const base = this.#agent.lastMode ?? this.#config.defaults;
+        const previousServiceTier = this.#agent.lastMode?.serviceTier ?? null;
+        return {
+            effort: this.#selection?.effort ?? base.effort,
+            modelId: this.#selection?.modelId ?? base.modelId,
+            permissionMode: this.#selection?.permissionMode ?? base.permissionMode,
+            providerId: this.#selection?.providerId ?? base.providerId,
+            serviceTier:
+                this.#selection?.serviceTier === undefined
+                    ? previousServiceTier
+                    : this.#selection.serviceTier === null
+                      ? null
+                      : preferredServiceTier(
+                            this.#config,
+                            this.#selection?.providerId ?? base.providerId,
+                            this.#selection?.modelId ?? base.modelId,
+                        ),
+        };
+    }
+
+    #messageMode(selection: PendingSelection | undefined): MessageMode {
+        const current = this.#currentMode();
+        if (selection === undefined) return current;
+        return {
+            effort: selection.effort ?? current.effort,
+            modelId: selection.modelId ?? current.modelId,
+            permissionMode: selection.permissionMode ?? current.permissionMode,
+            providerId: selection.providerId ?? current.providerId,
+            serviceTier:
+                selection.serviceTier === undefined
+                    ? current.serviceTier
+                    : selection.serviceTier === null
+                      ? null
+                      : preferredServiceTier(
+                            this.#config,
+                            selection.providerId ?? current.providerId,
+                            selection.modelId ?? current.modelId,
+                        ),
+        };
+    }
+
+    #clearSelection(selection: PendingSelection | undefined): void {
         if (selection !== undefined && this.#selection === selection) this.#selection = undefined;
     }
 
-    #applyAuthoritativeSnapshot(snapshot: AgentSnapshot): void {
-        const { serviceTier: _serviceTier, ...session } = this.#session;
-        this.#session = {
-            ...session,
-            ...(snapshot.serviceTier === undefined ? {} : { serviceTier: snapshot.serviceTier }),
-            snapshot,
-        };
-        this.#applySelection();
+    #snapshotMessages(): Message[] {
+        return this.#history.runs.flatMap((run) => run.messages.map(toRigMessage));
     }
 
-    /**
-     * Writes the pending local selection over the current session.
-     *
-     * It runs both when the user chooses and whenever the daemon sends an authoritative session,
-     * because until a run has carried the selection the daemon still describes the previous one.
-     */
-    #applySelection(): void {
-        const selection = this.#selection;
-        if (selection === undefined) return;
-        if (selection.modelId !== undefined) {
-            const providerId = selection.providerId ?? this.#providerId;
-            const models =
-                this.#modelCatalog?.providers.find((provider) => provider.providerId === providerId)
-                    ?.models ?? this.#models;
-            this.#modelId = selection.modelId;
-            this.#models = models;
-            this.#providerId = providerId;
-            this.#session = {
-                ...this.#session,
-                modelId: selection.modelId,
-                models,
-                providerId,
-                snapshot: {
-                    ...this.#session.snapshot,
-                    modelId: selection.modelId,
-                    providerId,
-                },
-            };
+    async #refresh(): Promise<void> {
+        const [agent, history] = await Promise.all([
+            this.#client.getAgent(this.id),
+            this.#client.getMessages(this.id, { limit: 50 }),
+        ]);
+        this.#agent = agent.agent;
+        this.#history = history;
+        this.#messages.clear();
+        for (const run of history.runs) {
+            for (const message of run.messages) this.#messages.set(message.id, message);
         }
-        if (selection.effort !== undefined) {
-            this.#session = {
-                ...this.#session,
-                effort: selection.effort,
-                snapshot: { ...this.#session.snapshot, effort: selection.effort },
-            };
-        }
-        if (selection.serviceTier !== undefined) {
-            this.#setLocalServiceTier(selection.serviceTier ?? undefined);
-        }
-        if (selection.permissionMode !== undefined) {
-            this.#session = {
-                ...this.#session,
-                permissionMode: selection.permissionMode,
-            };
-        }
+        for (const message of history.pending) this.#messages.set(message.id, message);
     }
 
-    #setLocalServiceTier(serviceTier: ServiceTier | undefined): void {
-        const { serviceTier: _sessionServiceTier, ...session } = this.#session;
-        const { serviceTier: _snapshotServiceTier, ...snapshot } = this.#session.snapshot;
-        this.#session = {
-            ...session,
-            ...(serviceTier === undefined ? {} : { serviceTier }),
-            snapshot: {
-                ...snapshot,
-                ...(serviceTier === undefined ? {} : { serviceTier }),
-            },
+    #applyResourceEvent(event: HappyAgentEvent): void {
+        if (event.type !== "agent.updated" || event.payload.agentId !== this.id) return;
+        this.#agent = {
+            ...this.#agent,
+            ...event.payload.changes,
+            version: event.payload.version,
         };
     }
-}
 
-function omitDraft(session: ProtocolSession): ProtocolSession {
-    const { draft: _draft, ...rest } = session;
-    return rest;
-}
-
-function sessionServiceTier(session: ProtocolSession): ServiceTier | undefined {
-    return session.serviceTier ?? session.snapshot.serviceTier;
-}
-
-function appendUniqueMessage(
-    messages: AgentSnapshot["messages"],
-    message: AgentSnapshot["messages"][number],
-): AgentSnapshot["messages"] {
-    if (messages.some((candidate) => candidate.id === message.id)) {
-        return messages;
-    }
-    return [...messages, message];
-}
-
-function isRunEvent(event: SessionEvent, runId: string): boolean {
-    if (event.type === "session_activity_changed") {
-        return event.data.activity.runId === runId;
-    }
-    if (
-        event.type !== "agent_event" &&
-        event.type !== "provider_event" &&
-        event.type !== "agent_message" &&
-        event.type !== "run_error" &&
-        event.type !== "run_finished" &&
-        event.type !== "run_started" &&
-        event.type !== "steering_applied"
-    ) {
-        return false;
+    async #forwardMessageEvent(event: HappyAgentEvent, options: AgentRunOptions): Promise<void> {
+        const message = this.applyEvent(event);
+        const loopEvent = this.#projectLoopEvent(event);
+        if (loopEvent !== undefined) await options.onEvent?.(loopEvent);
+        if (message?.role === "agent") await options.onMessage?.(message);
     }
 
-    return event.data.runId === runId;
+    #projectMessageEvent(event: HappyAgentEvent): ApiMessage | typeof MESSAGE_DELETED | undefined {
+        const cached = this.#messageEventResults.get(event.cursor);
+        if (cached !== undefined) return cached;
+        let result: ApiMessage | typeof MESSAGE_DELETED | undefined;
+        if (event.type === "message.created" || event.type === "message.updated") {
+            result = structuredClone(event.payload.message);
+            this.#messages.set(result.id, result);
+        } else if (event.type === "message.delta") {
+            const current = this.#messages.get(event.payload.messageId);
+            const block = current?.content[event.payload.blockIndex];
+            if (current !== undefined && (block?.type === "text" || block?.type === "reasoning")) {
+                result = {
+                    ...current,
+                    content: current.content.map((candidate, index) =>
+                        index === event.payload.blockIndex
+                            ? { ...block, text: block.text + event.payload.append }
+                            : candidate,
+                    ),
+                };
+                this.#messages.set(result.id, result);
+            }
+        } else if (event.type === "message.deleted") {
+            this.#messages.delete(event.payload.messageId);
+            result = MESSAGE_DELETED;
+        }
+        if (result !== undefined) {
+            this.#messageEventResults.set(event.cursor, result);
+            if (this.#messageEventResults.size > 512) {
+                const oldest = this.#messageEventResults.keys().next().value as string | undefined;
+                if (oldest !== undefined) this.#messageEventResults.delete(oldest);
+            }
+        }
+        return result;
+    }
 }
 
-function contentToDisplayText(content: string | readonly ContentBlock[]): string {
+const MESSAGE_DELETED = Symbol("message-deleted");
+
+function toSendBody(
+    content: string | readonly ContentBlock[],
+    displayText: string | undefined,
+    mode: MessageMode,
+): {
+    content?: ApiMessageBlock[];
+    mode: MessageMode;
+    text: string;
+} {
     if (typeof content === "string") {
-        return content;
+        return { mode, text: displayText ?? content };
     }
+    return {
+        content: content.map((block) =>
+            block.type === "text"
+                ? { text: block.text, type: "text" as const }
+                : {
+                      data: block.data,
+                      mimeType: block.mediaType,
+                      type: "image" as const,
+                  },
+        ),
+        mode,
+        text:
+            displayText ??
+            content
+                .map((block) => (block.type === "text" ? block.text : `[image:${block.mediaType}]`))
+                .join(""),
+    };
+}
 
-    return content
-        .map((block) => (block.type === "text" ? block.text : `[image:${block.mediaType}]`))
-        .join("");
+function toRigMessage(message: ApiMessage): Message {
+    if (message.role === "user") {
+        return {
+            blocks: message.content.flatMap(toRigContentBlock),
+            id: message.id,
+            role: "user",
+        };
+    }
+    if (message.role === "agent") {
+        return {
+            blocks: message.content.flatMap((block, index) =>
+                toRigAgentBlocks(message.id, block, index),
+            ),
+            id: message.id,
+            role: "agent",
+        };
+    }
+    return {
+        blocks: message.content.flatMap(toRigContentBlock),
+        id: message.id,
+        role: "system",
+    };
+}
+
+function toRigContentBlock(block: ApiMessageBlock): ContentBlock[] {
+    if (block.type === "text") return [{ text: block.text, type: "text" }];
+    if (block.type === "image") {
+        return [{ data: block.data, mediaType: block.mimeType, type: "image" }];
+    }
+    if (block.type === "reasoning") return [{ text: block.text, type: "text" }];
+    return [];
+}
+
+function toRigAgentBlocks(
+    messageId: string,
+    block: ApiMessageBlock,
+    index: number,
+): (ContentBlock | { thinking: string; type: "thinking" } | ToolCallBlock | ToolResultBlock)[] {
+    if (block.type === "text") return [{ text: block.text, type: "text" }];
+    if (block.type === "image") {
+        return [{ data: block.data, mediaType: block.mimeType, type: "image" }];
+    }
+    if (block.type === "reasoning") return [{ thinking: block.text, type: "thinking" }];
+    const toolCallId = `${messageId}:tool:${String(index)}`;
+    const callPresentation = toToolCallPresentation(block);
+    const call: ToolCallBlock = {
+        arguments: block.arguments ?? {},
+        id: toolCallId,
+        name: block.name,
+        ...(callPresentation === undefined ? {} : { presentation: callPresentation }),
+        type: "tool_call",
+    };
+    if (block.status === "running") return [call];
+    const resultPresentation = toToolResultPresentation(block);
+    const result: ToolResultBlock = {
+        display: toolResultText(block),
+        ...(block.status === "failed"
+            ? { failure: { kind: "execution_failed" as const }, isError: true }
+            : {}),
+        ...(resultPresentation === undefined ? {} : { presentation: resultPresentation }),
+        rendered: [],
+        toolCallId,
+        toolName: block.name,
+        type: "tool_result",
+    };
+    return [call, result];
+}
+
+function toToolCallPresentation(
+    block: ApiToolCallBlock,
+): ToolCallBlock["presentation"] | undefined {
+    const presentation = block.presentation;
+    if (presentation?.type === "exploration") {
+        return { operations: presentation.operations, type: "exploration" };
+    }
+    if (presentation?.type === "exec_command") {
+        return { command: presentation.command, type: "exec_command" };
+    }
+    if (presentation?.type === "search") {
+        return { query: presentation.query, target: presentation.target, type: "search" };
+    }
+    return undefined;
+}
+
+function toToolResultPresentation(
+    block: ApiToolCallBlock,
+): ToolResultBlock["presentation"] | undefined {
+    const presentation = block.presentation;
+    if (presentation?.type === "exploration") {
+        return { operations: presentation.operations, type: "exploration" };
+    }
+    if (presentation?.type === "exec_command") {
+        return {
+            command: presentation.command,
+            output: presentation.output ?? toolResultText(block),
+            type: "exec_command",
+        };
+    }
+    if (presentation?.type === "background_terminal_interaction") {
+        // Rig's old renderer used numeric process handles. Do not invent one
+        // from the public CUID2; render the command as an ordinary result.
+        return {
+            command: presentation.command,
+            output: presentation.input,
+            type: "exec_command",
+        };
+    }
+    if (presentation?.type === "file_diff") {
+        return {
+            files: presentation.files,
+            ...(presentation.omittedFiles === undefined
+                ? {}
+                : { omittedFiles: presentation.omittedFiles }),
+            type: "file_diff",
+        };
+    }
+    if (presentation?.type === "search") {
+        return {
+            query: presentation.query,
+            sources: presentation.sources ?? [],
+            target: presentation.target,
+            type: "search",
+        };
+    }
+    return undefined;
+}
+
+function toolResultText(block: ApiToolCallBlock): string {
+    const output = block.result?.output;
+    if (typeof output === "string") return output;
+    if (block.result === undefined) return block.status === "failed" ? "Tool failed." : "";
+    return JSON.stringify(block.result);
+}
+
+function belongsToAgent(event: HappyAgentEvent, agentId: string): boolean {
+    const payload = event.payload as { agentId?: unknown; agent?: { id?: unknown } };
+    return payload.agentId === agentId || payload.agent?.id === agentId;
+}
+
+function toStopReason(run: Run | undefined): StopReason {
+    if (run === undefined) return "error";
+    if (run.reason === "abort" || run.reason === "steering") return "aborted";
+    if (run.reason === "error" || run.status === "failed") return "error";
+    return "stop";
+}
+
+function preferredServiceTier(
+    config: DaemonConfig,
+    providerId: string,
+    modelId: string,
+): string | null {
+    const reference = config.providers[providerId]?.models.find((model) => model.id === modelId);
+    return (reference?.serviceTiers ?? config.models[modelId]?.serviceTiers ?? [])[0] ?? null;
 }

@@ -34,12 +34,11 @@ import {
 } from "../git/index.js";
 
 import {
-    MAX_PROJECT_AVATAR_BYTES,
     MAX_PROJECT_ERROR_LENGTH,
     MAX_PROJECT_INITIALIZATION_ATTEMPTS,
     projectAdoptRemoteNameInputSchema,
+    projectAgentIdSchema,
     projectAvatarAssetSchema,
-    projectAvatarHashSchema,
     projectClearAvatarInputSchema,
     projectCreateInputSchema,
     projectEnsureInputSchema,
@@ -54,7 +53,6 @@ import {
     projectSetDefaultBranchInputSchema,
     type Project,
     type ProjectAdoptRemoteNameInput,
-    type ProjectAvatar,
     type ProjectAvatarAsset,
     type ProjectClearAvatarInput,
     type ProjectCreateInput,
@@ -69,6 +67,7 @@ import {
     type ProjectSetAvatarInput,
     type ProjectSetDefaultBranchInput,
 } from "./Project.js";
+import { projectAgentAttachmentSchema, type ProjectAgentOrder } from "./ProjectAgentAssociation.js";
 import {
     type CreateRemoteProjectRequest,
     type ProjectCreatorOptions,
@@ -76,10 +75,8 @@ import {
     type RegisterProjectRequest,
 } from "./ProjectProvisioning.js";
 import { ProjectRegistrationError } from "./ProjectRegistrationError.js";
-import { collectProjectAvatarGarbage } from "./impl/collectProjectAvatarGarbage.js";
 import { findHostingAvatar, findRepositoryAvatar } from "./impl/findProjectAvatar.js";
-import { MAX_AVATAR_BYTES, normalizeProjectAvatar } from "./impl/normalizeProjectAvatar.js";
-import { ProjectAvatarStore } from "./impl/ProjectAvatarStore.js";
+import { normalizeProjectAvatar } from "./impl/normalizeProjectAvatar.js";
 import {
     clientChosenId,
     clientChosenProjectId,
@@ -128,6 +125,13 @@ import {
 } from "./ProjectTransition.js";
 import { folderProjectName, HOME_PROJECT_NAME, projectStorageKey } from "./projectIdentity.js";
 import { listProjectsTool } from "./tools/index.js";
+import {
+    attachProjectRootAgent,
+    listProjectRootAgents,
+    projectForProjectRootAgent,
+    reorderProjectRootAgent,
+} from "./store/projectRootAgents.js";
+import { touchProject } from "./store/projectRecords.js";
 
 /** How many projects one page may carry, and how much text a page may spend on them. */
 export const PROJECT_PAGE_SIZE = 50;
@@ -189,13 +193,12 @@ export class ProjectsModule implements AgentModule {
 
     // --- The catalog's own Git and filesystem work -------------------------------------------
 
-    readonly #avatars: ProjectAvatarStore;
-    readonly #avatarLocks: MapAsyncLock<string> = mapAsyncLock();
     readonly #creators = new Map<string, ProjectCreator>();
     readonly #homeDirectory: string;
     readonly #initializing = new Set<string>();
     readonly #pendingInitializations: string[] = [];
     readonly #projectLocks: MapAsyncLock<string> = mapAsyncLock();
+    readonly #agentAssociationLocks: MapAsyncLock<string> = mapAsyncLock();
     readonly #tasks = new Set<Promise<void>>();
 
     #activeInitializations = 0;
@@ -215,11 +218,6 @@ export class ProjectsModule implements AgentModule {
         // a setting rather than something a caller decides per installation.
         this.#crossWorkspace = config.configuration.values.features.crossWorkspace;
         this.#homeDirectory = git.normalizeProjectCwd(homedir());
-        // Avatar bytes are content a person chose and expect to survive a restart, so they live
-        // beside the agent's own database rather than in a temporary folder.
-        this.#avatars = new ProjectAvatarStore(
-            git.normalizeFuturePath(join(config.configuration.paths.agentHome, "projects")),
-        );
     }
 
     /** Takes a subscriber that runs inside the transaction a catalog change commits in. */
@@ -291,6 +289,139 @@ export class ProjectsModule implements AgentModule {
     }
 
     /**
+     * Attaches one root agent to this project. The association is permanent so an archived agent
+     * remains visible in its original project; Agent Base owns whether that agent is archived.
+     */
+    async attachAgent(ctx: Context, projectId: string, agentId: string): Promise<void> {
+        const attachment = { projectId, agentId };
+        this.#assertInput(projectAgentAttachmentSchema, attachment, "agent attachment");
+        await this.#agentAssociationLocks.runInLock(
+            ctx,
+            `agent:${agentId}`,
+            async (agentCtx) =>
+                await this.#agentAssociationLocks.runInLock(
+                    agentCtx,
+                    `project:${projectId}`,
+                    async (lockCtx) =>
+                        await lockCtx.inTx(async (txCtx) => {
+                            const before = await this.#mutations.getRequired(txCtx, projectId);
+                            const agents = this.#agents;
+                            if (agents === undefined) {
+                                throw new Error(
+                                    "The projects module was asked to attach an agent before it started.",
+                                );
+                            }
+                            if ((await agents.parentOf(txCtx, agentId)) !== null) {
+                                throw new Error("Only a root agent can be attached to a project.");
+                            }
+                            const association = await attachProjectRootAgent(txCtx, attachment);
+                            if (association === undefined) return;
+                            const after = await touchProject(
+                                txCtx.db,
+                                before,
+                                "The project changed while its agent was being attached.",
+                            );
+                            assertProjectTransition(before, after, []);
+                            await this.#mutations.observe(
+                                txCtx,
+                                this.#mutations.newEvent({
+                                    type: "project_agent_attached",
+                                    association,
+                                    project: after,
+                                    previousProject: before,
+                                }),
+                                ctx,
+                            );
+                        }),
+                ),
+        );
+    }
+
+    /** Root-agent IDs in durable attachment order, including agents archived by Agent Base. */
+    async listAgentIds(ctx: Context, projectId: string): Promise<readonly string[]> {
+        return (await this.listAgents(ctx, projectId)).map((association) => association.agentId);
+    }
+
+    /** Root-agent order in durable order, including agents archived by Agent Base. */
+    async listAgents(ctx: Context, projectId: string): Promise<readonly ProjectAgentOrder[]> {
+        this.#assertId(projectId);
+        return (await listProjectRootAgents(ctx, projectId)).map((association) => ({
+            agentId: association.agentId,
+            orderKey: association.orderKey,
+        }));
+    }
+
+    /** The project an attached root agent belongs to, or undefined when it is not project-owned. */
+    async projectForAgent(ctx: Context, agentId: string): Promise<Project | undefined> {
+        const project = await projectForProjectRootAgent(ctx, agentId);
+        if (project === undefined) return undefined;
+        assertProject(project);
+        assertProjectRecord(project);
+        return structuredClone(project);
+    }
+
+    /** Moves a top-level agent within this project's root-agent order. */
+    async reorderAgent(
+        ctx: Context,
+        projectId: string,
+        agentId: string,
+        afterAgentId: string | null,
+    ): Promise<void> {
+        this.#assertId(projectId);
+        if (!Value.Check(projectAgentIdSchema, agentId)) {
+            throw new Error("The project agent ID is invalid.");
+        }
+        if (afterAgentId !== null && !Value.Check(projectAgentIdSchema, afterAgentId)) {
+            throw new Error("The project agent ID to place after is invalid.");
+        }
+        await this.#agentAssociationLocks.runInLock(
+            ctx,
+            `agent:${agentId}`,
+            async (agentCtx) =>
+                await this.#agentAssociationLocks.runInLock(
+                    agentCtx,
+                    `project:${projectId}`,
+                    async (lockCtx) =>
+                        await lockCtx.inTx(async (txCtx) => {
+                            const before = await this.#mutations.getRequired(txCtx, projectId);
+                            const previousOrderKey = (
+                                await listProjectRootAgents(txCtx, projectId)
+                            ).find((entry) => entry.agentId === agentId)?.orderKey;
+                            const association = await reorderProjectRootAgent(
+                                txCtx,
+                                projectId,
+                                agentId,
+                                afterAgentId,
+                            );
+                            if (association === undefined) return;
+                            if (previousOrderKey === undefined) {
+                                throw new Error(
+                                    `Agent "${agentId}" does not belong to project "${projectId}".`,
+                                );
+                            }
+                            const after = await touchProject(
+                                txCtx.db,
+                                before,
+                                "The project changed while its agent was being reordered.",
+                            );
+                            assertProjectTransition(before, after, []);
+                            await this.#mutations.observe(
+                                txCtx,
+                                this.#mutations.newEvent({
+                                    type: "project_agent_reordered",
+                                    association,
+                                    previousOrderKey,
+                                    project: after,
+                                    previousProject: before,
+                                }),
+                                ctx,
+                            );
+                        }),
+                ),
+        );
+    }
+
+    /**
      * Resolves a canonical folder path to its project. This is the catalog's
      * path-keyed identity: a host that knows only a working directory finds the
      * owning project here.
@@ -306,7 +437,7 @@ export class ProjectsModule implements AgentModule {
 
     async readSettings(ctx: Context, projectId: string): Promise<ProjectSettings> {
         this.#assertId(projectId);
-        const project = await this.#mutations.getRequired(ctx, projectId);
+        await this.#mutations.getRequired(ctx, projectId);
         return await this.#mutations.readSettings(ctx, projectId);
     }
 
@@ -372,7 +503,11 @@ export class ProjectsModule implements AgentModule {
             event: (after, before) =>
                 before === undefined
                     ? { type: "project_created", project: after }
-                    : { type: "project_restored", project: after },
+                    : {
+                          type: "project_restored",
+                          project: after,
+                          previousProject: before,
+                      },
             run: async (txCtx) =>
                 await requirePromise(
                     this.#store.ensure(txCtx, {
@@ -416,7 +551,8 @@ export class ProjectsModule implements AgentModule {
             event: (after, before) => ({
                 type: "project_renamed",
                 project: after,
-                previousName: before?.name ?? after.name,
+                previousProject: requirePreviousProject(before),
+                previousName: requirePreviousProject(before).name,
             }),
             run: async (txCtx) =>
                 await requirePromise(
@@ -438,7 +574,11 @@ export class ProjectsModule implements AgentModule {
         const result = await this.#mutations.run(ctx, {
             changeable: ["status", "archivedAt"],
             projectId,
-            event: (after) => ({ type: "project_archived", project: after }),
+            event: (after, before) => ({
+                type: "project_archived",
+                project: after,
+                previousProject: requirePreviousProject(before),
+            }),
             run: async (txCtx) =>
                 await requirePromise(
                     this.#store.archive(txCtx, { projectId }),
@@ -461,7 +601,11 @@ export class ProjectsModule implements AgentModule {
         const result = await this.#mutations.run(ctx, {
             changeable: ["status", "archivedAt"],
             projectId,
-            event: (after) => ({ type: "project_restored", project: after }),
+            event: (after, before) => ({
+                type: "project_restored",
+                project: after,
+                previousProject: requirePreviousProject(before),
+            }),
             run: async (txCtx) =>
                 await requirePromise(
                     this.#store.restore(txCtx, { projectId }),
@@ -483,8 +627,9 @@ export class ProjectsModule implements AgentModule {
             projectId: normalized.projectId,
             event: (after, before) => ({
                 type: "project_reordered",
-                previousOrderKey: before?.orderKey ?? after.orderKey,
+                previousOrderKey: requirePreviousProject(before).orderKey,
                 project: after,
+                previousProject: requirePreviousProject(before),
             }),
             run: async (txCtx) =>
                 await requirePromise(
@@ -498,18 +643,44 @@ export class ProjectsModule implements AgentModule {
     async setAvatar(ctx: Context, input: ProjectSetAvatarInput): Promise<Project> {
         this.#assertInput(projectSetAvatarInputSchema, input, "avatar");
         const normalized = structuredClone(input);
+        const image = await normalizeProjectAvatar(normalized.bytes, normalized.contentType);
+        const avatar = {
+            kind: "image" as const,
+            source: normalized.source,
+            thumbhash: image.thumbhash,
+        };
+        const asset: ProjectAvatarAsset = {
+            bytes: new Uint8Array(image.bytes),
+            contentHash: image.contentHash,
+            contentType: image.contentType,
+            etag: `"${image.contentHash}"`,
+            height: image.height,
+            thumbhash: image.thumbhash,
+            width: image.width,
+        };
         const result = await this.#mutations.run(ctx, {
             changeable: ["avatar"],
             projectId: normalized.projectId,
-            event: (after) => ({ type: "project_avatar_updated", project: after }),
+            event: (after, before) => ({
+                type: "project_avatar_updated",
+                project: after,
+                previousProject: requirePreviousProject(before),
+            }),
             run: async (txCtx) =>
                 await requirePromise(
-                    this.#store.setAvatar(txCtx, normalized),
+                    this.#store.setAvatar(txCtx, {
+                        asset,
+                        avatar,
+                        projectId: normalized.projectId,
+                        ...(normalized.expectedVersion === undefined
+                            ? {}
+                            : { expectedVersion: normalized.expectedVersion }),
+                    }),
                     "Project store set avatar",
                 ),
         });
         const project = requireProjectFromResult(result);
-        if (!sameJson(project.avatar, normalized.avatar)) {
+        if (!sameJson(project.avatar, avatar)) {
             throw new Error("The stored avatar does not match the one that was requested.");
         }
         return project;
@@ -521,7 +692,11 @@ export class ProjectsModule implements AgentModule {
         const result = await this.#mutations.run(ctx, {
             changeable: ["avatar"],
             projectId: normalized.projectId,
-            event: (after) => ({ type: "project_avatar_cleared", project: after }),
+            event: (after, before) => ({
+                type: "project_avatar_cleared",
+                project: after,
+                previousProject: requirePreviousProject(before),
+            }),
             run: async (txCtx) =>
                 await requirePromise(
                     this.#store.clearAvatar(txCtx, normalized),
@@ -532,30 +707,19 @@ export class ProjectsModule implements AgentModule {
         if (project.avatar !== undefined) {
             throw new Error("The project still has an avatar after it was cleared.");
         }
-        // Setting the project up again is what looks for a picture, so clearing one asks for that
-        // look rather than leaving the project without an image until something else happens.
-        if (project.kind === "regular") {
-            await this.scheduleInitialization(ctx, normalized.projectId);
-        }
         return project;
     }
 
-    async avatarAsset(ctx: Context, hash: string): Promise<ProjectAvatarAsset | undefined> {
-        if (!Value.Check(projectAvatarHashSchema, hash)) {
-            throw new Error("The project avatar hash is invalid.");
+    async avatarAsset(ctx: Context, projectId: string): Promise<ProjectAvatarAsset | undefined> {
+        this.#assertId(projectId);
+        const project = await this.#mutations.getRequired(ctx, projectId);
+        if (project.avatar === undefined) return undefined;
+        const raw = await this.#store.readAvatar(ctx, projectId);
+        if (raw === undefined) {
+            throw new Error("Project avatar metadata points at missing image bytes.");
         }
-        const project = await this.#store.findByAvatarHash(ctx, hash);
-        if (project === undefined) return undefined;
-        assertProject(project);
-        assertProjectRecord(project);
-        const raw = await this.#avatars.read(hash);
-        if (raw === undefined) return undefined;
         assertProjectAvatarAsset(raw);
-        if (
-            raw.hash !== hash ||
-            raw.bytes.byteLength > MAX_PROJECT_AVATAR_BYTES ||
-            raw.mediaType !== "image/webp"
-        ) {
+        if (raw.thumbhash !== project.avatar.thumbhash) {
             throw new Error("The stored project avatar does not match the one asked for.");
         }
         return structuredClone(raw);
@@ -599,6 +763,8 @@ export class ProjectsModule implements AgentModule {
                     this.#mutations.newEvent({
                         type: "project_settings_updated",
                         projectId: normalized.projectId,
+                        project: after,
+                        previousProject: before,
                         settings: afterSettings,
                     }),
                 );
@@ -860,7 +1026,7 @@ export class ProjectsModule implements AgentModule {
 
     /**
      * Picks up whatever the last run left unfinished: projects still being set up, failures worth
-     * another try, and stale avatar bytes.
+     * another try.
      */
     async open(ctx: Context, localInstanceId: string): Promise<void> {
         this.#localInstanceId = localInstanceId;
@@ -877,9 +1043,6 @@ export class ProjectsModule implements AgentModule {
                 await this.scheduleInitialization(ctx, project.id);
             }
         }
-        this.#runInBackground(ctx, "project-avatar-maintenance", async (workerCtx) => {
-            await this.collectAvatarGarbage(workerCtx);
-        });
     }
 
     /** Stops every background lifetime the catalog started and waits for the ones in flight. */
@@ -887,7 +1050,7 @@ export class ProjectsModule implements AgentModule {
         this.#closed = true;
         this.#pendingInitializations.length = 0;
         while (this.#tasks.size > 0) {
-            await Promise.allSettled([...this.#tasks]);
+            await Promise.allSettled(this.#tasks);
         }
     }
 
@@ -944,8 +1107,8 @@ export class ProjectsModule implements AgentModule {
     }
 
     /**
-     * Adds one explicit Git project without starting a session. Validation happens before the
-     * shared folder import, so a registered project is always the canonical root of a working tree.
+     * Adds one explicit project without starting a session. A Git folder must be the canonical
+     * working-tree root; an ordinary readable directory is valid and gets copied workspaces.
      */
     async register(ctx: Context, request: RegisterProjectRequest): Promise<Project> {
         if (!isAbsolute(request.path)) {
@@ -1079,12 +1242,11 @@ export class ProjectsModule implements AgentModule {
                     candidate !== undefined &&
                     (await this.get(ctx, projectId))?.avatar === undefined
                 ) {
-                    await this.storeAvatarImage(
-                        ctx,
+                    await this.setAvatar(ctx, {
+                        bytes: candidate,
                         projectId,
-                        repositoryAvatar === undefined ? "hosting" : "repository",
-                        candidate,
-                    );
+                        source: "generated",
+                    });
                 }
             }
             if (this.#closed) return;
@@ -1403,65 +1565,6 @@ export class ProjectsModule implements AgentModule {
         }
     }
 
-    // --- Avatar bytes ------------------------------------------------------------------------
-
-    /** Stores an image for a project and records the metadata that points at it. */
-    async storeAvatarImage(
-        ctx: Context,
-        projectId: string,
-        source: ProjectAvatar["source"],
-        bytes: Buffer,
-        expectedVersion?: number,
-    ): Promise<Project | undefined> {
-        const project = await this.get(ctx, projectId);
-        if (project === undefined) return undefined;
-        if (bytes.byteLength > MAX_AVATAR_BYTES) {
-            throw new Error("The project image is larger than the allowed limit.");
-        }
-        const normalized = await normalizeProjectAvatar(bytes);
-        return await this.#avatarLocks.runInLock(ctx, normalized.hash, async () => {
-            await this.#avatars.write(normalized.hash, normalized.bytes);
-            if (this.#closed) return project;
-            try {
-                return await this.setAvatar(ctx, {
-                    projectId,
-                    avatar: {
-                        hash: normalized.hash,
-                        height: normalized.height,
-                        mediaType: "image/webp",
-                        source,
-                        // Where a client should ask for the picture, relative to the daemon API it
-                        // already speaks. Clients re-serve this path from their own origin, so it
-                        // names the asset route and carries no protocol prefix of its own.
-                        url: `/project-assets/${normalized.hash}`,
-                        width: normalized.width,
-                    },
-                    ...(expectedVersion === undefined ? {} : { expectedVersion }),
-                });
-            } catch (error) {
-                await this.#avatars.remove(normalized.hash);
-                throw error;
-            }
-        });
-    }
-
-    /** Removes stored avatar bytes no project has pointed at for a day. */
-    async collectAvatarGarbage(ctx: Context): Promise<void> {
-        if (this.#closed) return;
-        const referenced = new Set(
-            (await this.#allProjects(ctx))
-                .map((project) => project.avatar?.hash)
-                .filter((hash): hash is string => hash !== undefined),
-        );
-        await collectProjectAvatarGarbage({
-            now: Date.now(),
-            referencedHashes: referenced,
-            root: this.#avatars.root,
-            stopped: () => this.#closed,
-            store: this.#avatars,
-        });
-    }
-
     // --- Git facts ---------------------------------------------------------------------------
 
     /** Re-derives presence, worktree capability, and Git facts for every live project. */
@@ -1508,8 +1611,8 @@ export class ProjectsModule implements AgentModule {
     /**
      * The lifetime the catalog's own Git and filesystem work runs on.
      *
-     * A clone, a setup pass, or an avatar sweep outlives the call that asked for it, so it never
-     * runs on that call's context. The lifetime is detached from the first context the catalog is
+     * A clone or setup pass outlives the call that asked for it, so it never runs on that call's
+     * context. The lifetime is detached from the first context the catalog is
      * used with. A detached context carries no storage — that is what stops work outliving its
      * caller from writing through a transaction facade that has already committed — so the agent
      * database is put back on it deliberately, and nothing else about the request comes along.
@@ -1581,10 +1684,11 @@ export class ProjectsModule implements AgentModule {
         const result = await this.#mutations.run(ctx, {
             changeable: PROJECT_STATE_FIELDS,
             projectId,
-            event: (after) => ({
+            event: (after, before) => ({
                 type: "project_state_changed",
                 reason,
                 project: after,
+                previousProject: requirePreviousProject(before),
             }),
             run: async (txCtx, before) => {
                 if (before === undefined) throw new Error(`Project "${projectId}" was not found.`);
@@ -1611,7 +1715,7 @@ export class ProjectsModule implements AgentModule {
 
     /** A fresh project identity, minted by this module. */
     #newIdentity(): string {
-        const value = globalThis.crypto.randomUUID();
+        const value = createId();
         if (!Value.Check(projectIdSchema, value)) {
             throw new Error("The project catalog minted an identity it cannot represent.");
         }
@@ -1711,6 +1815,13 @@ function requireProjectFromResult(result: ProjectStoreMutationResult): Project {
     }
     assertProject(result.project);
     return structuredClone(result.project);
+}
+
+function requirePreviousProject(project: Project | undefined): Project {
+    if (project === undefined) {
+        throw new Error("A project update did not have a previous project.");
+    }
+    return project;
 }
 
 function errorToMessage(error: unknown): string {

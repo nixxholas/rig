@@ -4,6 +4,7 @@ export {
     eventContextSchema,
     eventIdSchema,
     eventListenerSchema,
+    latestAgentEventSchema,
     eventReplaySchema,
     eventSchema,
     eventTypeSchema,
@@ -17,6 +18,7 @@ export {
     type EventReplay,
     type EventsModuleListener,
     type EventType,
+    type LatestAgentEvent,
 } from "./types.js";
 
 export { EventsModule, EVENTS_CAPACITY } from "./EventsModule.js";

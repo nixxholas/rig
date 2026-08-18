@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import { Value } from "@sinclair/typebox/value";
 import { agentDatabaseRun } from "@slopus/happy-agent-base";
 import { withAfterCommit, type Context } from "@steve.kite/stdlib";
+import sharp from "sharp";
 import { describe, expect, it } from "vitest";
 
 import { GitModule } from "../../sources/git/index.js";
@@ -17,7 +18,6 @@ import {
     projectSettingsSchema,
     projectStateChangeReasonSchema,
     ProjectsModule,
-    type ProjectAvatar,
 } from "../../sources/projects/index.js";
 import {
     PROJECTS_TABLE,
@@ -85,7 +85,7 @@ describe("ProjectsModule edge cases", () => {
         }
     });
 
-    it("treats equivalent avatar metadata with different key order as a no-op", async () => {
+    it("treats the same normalized avatar bytes as a no-op", async () => {
         const database = await migratedProjectDatabase("projects-avatar-order-edge");
         try {
             const projects = await projectsModule();
@@ -93,30 +93,19 @@ describe("ProjectsModule edge cases", () => {
                 name: "Avatar order",
                 repositoryRef: "/tmp/projects/avatar-order",
             });
-            const avatar: ProjectAvatar = {
-                hash: "a".repeat(64),
-                height: 64,
-                mediaType: "image/webp",
-                source: "user",
-                url: "/assets/avatar",
-                width: 64,
-            };
+            const bytes = await projectAvatarPng(40, 80, 220);
             const first = await projects.setAvatar(database.context, {
+                bytes,
+                contentType: "image/png",
                 projectId: created.id,
-                avatar,
+                source: "user",
             });
 
-            const equivalent: ProjectAvatar = {
-                width: avatar.width,
-                url: avatar.url,
-                source: avatar.source,
-                mediaType: avatar.mediaType,
-                height: avatar.height,
-                hash: avatar.hash,
-            };
             const second = await projects.setAvatar(database.context, {
+                bytes: new Uint8Array(bytes),
+                contentType: "image/png",
                 projectId: created.id,
-                avatar: equivalent,
+                source: "user",
             });
 
             expect(second.version).toBe(first.version);
@@ -474,12 +463,9 @@ describe("ProjectsModule edge cases", () => {
                 createdAt: 1,
                 updatedAt: 1,
                 avatar: {
-                    hash: "a".repeat(64),
-                    height: 1,
-                    mediaType: "image/webp",
+                    kind: "image",
                     source: "user",
-                    url: "/avatar",
-                    width: 1,
+                    thumbhash: "abcd",
                 },
             }),
         ).toBe(true);
@@ -525,4 +511,17 @@ async function migratedProjectDatabase(name: string) {
         await migrate(database.context, database.database);
     }
     return database;
+}
+
+async function projectAvatarPng(red: number, green: number, blue: number): Promise<Buffer> {
+    return await sharp({
+        create: {
+            background: { alpha: 1, b: blue, g: green, r: red },
+            channels: 4,
+            height: 48,
+            width: 64,
+        },
+    })
+        .png()
+        .toBuffer();
 }

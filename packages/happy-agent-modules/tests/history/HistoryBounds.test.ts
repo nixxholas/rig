@@ -10,6 +10,7 @@ import {
     MAX_HISTORY_ARGUMENT_DEPTH,
     MAX_HISTORY_BLOCKS_PER_MESSAGE,
     MAX_HISTORY_MESSAGE_JSON_BYTES,
+    MAX_HISTORY_REMOTE_MESSAGE_ID_LENGTH,
     MAX_HISTORY_TEXT_LENGTH,
 } from "../../sources/history/HistoryMessage.js";
 import { historyStoreSchema } from "../../sources/history/HistoryStore.js";
@@ -47,6 +48,18 @@ describe("history runtime bounds and contracts", () => {
             Value.Check(historyBlockSchema, {
                 mediaType: "",
                 type: "image",
+            }),
+        ).toBe(false);
+        expect(
+            Value.Check(historyMessageSchema, {
+                ...validMessage(),
+                remoteMessageId: "r".repeat(MAX_HISTORY_REMOTE_MESSAGE_ID_LENGTH + 1),
+            }),
+        ).toBe(false);
+        expect(
+            Value.Check(historyMessageSchema, {
+                ...validMessage(),
+                hideFromUser: "yes",
             }),
         ).toBe(false);
     });
@@ -90,7 +103,8 @@ describe("history runtime bounds and contracts", () => {
 
     it("enforces the final serialized-message byte ceiling after per-field limits", () => {
         const largeText = "x".repeat(MAX_HISTORY_TEXT_LENGTH - 1);
-        const blocks = Array.from({ length: 9 }, (_, index) => ({
+        const blockCount = Math.ceil(MAX_HISTORY_MESSAGE_JSON_BYTES / MAX_HISTORY_TEXT_LENGTH) + 1;
+        const blocks = Array.from({ length: blockCount }, (_, index) => ({
             text: `${index}${largeText}`,
             type: "text" as const,
         }));

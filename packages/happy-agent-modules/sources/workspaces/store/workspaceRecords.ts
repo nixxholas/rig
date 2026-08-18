@@ -9,6 +9,7 @@ import { WORKSPACES_TABLE } from "../WorkspaceMigrations.js";
 type WorkspaceRow = {
     readonly id: string;
     readonly project_ref: string;
+    readonly parent_id: string;
     readonly name: string;
     readonly name_configured: number;
     readonly branch: string;
@@ -77,6 +78,58 @@ export async function readProjectWorkspaces(
     return rows.map(workspaceFromRow);
 }
 
+/** Direct children of one node, ordered within that one sibling list. */
+export async function readWorkspaceChildren(
+    database: AgentDatabase,
+    projectRef: string,
+    parentId: string,
+    includeArchived = true,
+): Promise<readonly Workspace[]> {
+    const rows = await agentDatabaseRows<WorkspaceRow>(
+        database,
+        includeArchived
+            ? sql`SELECT * FROM ${sql.raw(WORKSPACES_TABLE)}
+                   WHERE project_ref = ${projectRef} AND parent_id = ${parentId}
+                   ORDER BY order_key, id`
+            : sql`SELECT * FROM ${sql.raw(WORKSPACES_TABLE)}
+                   WHERE project_ref = ${projectRef}
+                     AND parent_id = ${parentId}
+                     AND status NOT IN ('archived', 'archiving')
+                   ORDER BY order_key, id`,
+    );
+    return rows.map(workspaceFromRow);
+}
+
+/**
+ * Validates and returns the chain from a workspace to its project's implicit root. A corrupt or
+ * cross-project parent never becomes an ownership answer.
+ */
+export async function readWorkspaceAncestorIds(
+    database: AgentDatabase,
+    workspace: Workspace,
+): Promise<readonly string[]> {
+    const ancestors: string[] = [];
+    const visited = new Set<string>();
+    let current = workspace;
+    for (;;) {
+        if (visited.has(current.id)) {
+            throw new Error(`Workspace "${workspace.id}" has a cyclic parent chain.`);
+        }
+        visited.add(current.id);
+        ancestors.push(current.id);
+        if (current.parentId === current.projectRef) return ancestors;
+
+        const parent = await readWorkspace(database, current.parentId);
+        if (parent === undefined) {
+            throw new Error(`Workspace "${current.id}" has a parent that does not exist.`);
+        }
+        if (parent.projectRef !== workspace.projectRef) {
+            throw new Error(`Workspace "${current.id}" has a parent in another project.`);
+        }
+        current = parent;
+    }
+}
+
 export async function readProjectWorkspacesFor(
     database: AgentDatabase,
     workspaceId: string,
@@ -126,13 +179,13 @@ export async function insertWorkspace(
     await agentDatabaseRun(
         database,
         sql`INSERT INTO ${sql.raw(WORKSPACES_TABLE)} (
-            id, project_ref, name, name_key, name_configured, branch, storage_key,
+            id, project_ref, parent_id, name, name_key, name_configured, branch, storage_key,
             kind, path, base_ref, base_commit, git_common_dir, presence, status, order_key,
             version, creator_session_id, git_ahead, git_behind, git_detached, git_head,
             git_upstream, initialization_attempt, initialization_error, created_at, updated_at,
             archived_at
         ) VALUES (
-            ${workspace.id}, ${workspace.projectRef}, ${workspace.name},
+            ${workspace.id}, ${workspace.projectRef}, ${workspace.parentId}, ${workspace.name},
             ${workspaceNameKey(workspace.name)}, ${workspace.nameConfigured ? 1 : 0},
             ${workspace.branch}, ${workspace.storageKey}, ${workspace.kind}, ${workspace.path},
             ${workspace.baseRef ?? null}, ${workspace.baseCommit ?? null},
@@ -162,6 +215,7 @@ export async function writeWorkspace(
         database,
         sql`UPDATE ${sql.raw(WORKSPACES_TABLE)}
             SET project_ref = ${workspace.projectRef},
+                parent_id = ${workspace.parentId},
                 name = ${workspace.name},
                 name_key = ${workspaceNameKey(workspace.name)},
                 name_configured = ${workspace.nameConfigured ? 1 : 0},
@@ -202,6 +256,22 @@ export async function writeWorkspace(
     return stored;
 }
 
+/** Advances the resource version for a change owned by an adjacent workspace table. */
+export async function touchWorkspace(
+    database: AgentDatabase,
+    workspace: Workspace,
+): Promise<Workspace> {
+    return await writeWorkspace(
+        database,
+        {
+            ...workspace,
+            version: workspace.version + 1,
+            updatedAt: Date.now(),
+        },
+        workspace.version,
+    );
+}
+
 /** Whether a failed write lost a race for a name, rather than failing for some other reason. */
 export function isUniquenessConflict(error: unknown): boolean {
     // A driver reports the failed statement and keeps the constraint that refused it as the cause.
@@ -218,6 +288,7 @@ function workspaceFromRow(row: WorkspaceRow): Workspace {
     const workspace: Workspace = {
         id: row.id,
         projectRef: row.project_ref,
+        parentId: row.parent_id,
         name: row.name,
         nameConfigured: Number(row.name_configured) !== 0,
         branch: row.branch,

@@ -16,9 +16,11 @@ import {
 } from "@slopus/happy-agent-base";
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
+import type { SessionEvent, SessionUsage } from "@slopus/happy-providers";
 import { afterCommit, type Context } from "@steve.kite/stdlib";
 import { sql } from "drizzle-orm";
 
+import { EventsModule } from "../events/index.js";
 import {
     usageEventListenerSchema,
     usageEventSchema,
@@ -37,8 +39,8 @@ import {
     usageAgentTreeSchema,
     usageIdSchema,
     usagePageQuerySchema,
-    usagePageSchema,
-    usageRecordSchema,
+    usageRunIdSchema,
+    usageRunSummarySchema,
     usageSummarySchema,
     usageTimestampSchema,
     usageTokensSchema,
@@ -51,8 +53,8 @@ import {
     type UsagePageQuery,
     type UsageRecord,
     type UsageResetTarget,
+    type UsageRunSummary,
     type UsageSummary,
-    type UsageTokens,
     type UsageTurnRecord,
 } from "./Usage.js";
 import { usageVoidOrPromiseVoidSchema } from "./UsageContracts.js";
@@ -85,6 +87,18 @@ const usagePendingKindSchema = Type.Union([Type.Literal("inference"), Type.Liter
 const usagePendingSchema = Type.Object(
     {
         startedAt: usageTimestampSchema,
+        runId: usageRunIdSchema,
+        usage: Type.Optional(
+            Type.Object(
+                {
+                    input: usageTokensSchema.properties.input,
+                    output: usageTokensSchema.properties.output,
+                    cacheRead: usageTokensSchema.properties.input,
+                    cacheWrite: usageTokensSchema.properties.output,
+                },
+                { additionalProperties: false },
+            ),
+        ),
     },
     { additionalProperties: false },
 );
@@ -153,10 +167,26 @@ export class UsageModule implements AgentModule {
                 );
             },
         ],
+        [
+            "003-usage-run-attribution",
+            async (_ctx: Context, database: AgentDatabaseFacade<AgentDatabase>): Promise<void> => {
+                await agentDatabaseRun(
+                    database,
+                    sql`ALTER TABLE happy_agent_usage_records ADD COLUMN run_id TEXT`,
+                );
+                await agentDatabaseRun(
+                    database,
+                    sql`CREATE INDEX happy_agent_usage_records_agent_run_time
+                        ON happy_agent_usage_records (agent_id, run_id, finished_at, record_id)`,
+                );
+            },
+        ],
     ] as const;
     readonly #transactionalListeners = new Set<UsageEventListener>();
     readonly #listeners = new Set<UsageEventListener>();
     #agents: AgentSystemRef | undefined;
+
+    constructor(private readonly events: EventsModule) {}
 
     /**
      * Watch committed usage inside the transaction that records it.
@@ -235,9 +265,27 @@ export class UsageModule implements AgentModule {
             throw new Error(`Usage page limit cannot exceed ${USAGE_PAGE_SIZE}.`);
         }
         const cursor = query.cursor ?? 0;
-        const page = await new UsageDatabase().read(ctx, agentId, { cursor, limit }, USAGE_PAGE_SIZE);
+        const page = await new UsageDatabase().read(
+            ctx,
+            agentId,
+            { cursor, limit },
+            USAGE_PAGE_SIZE,
+        );
         assertUsagePage(page, agentId, cursor, limit);
         return cloneValue(page);
+    }
+
+    /** Read the exact bounded provider/model usage attributed to one run. */
+    async readRun(ctx: Context, agentId: string, runId: string): Promise<UsageRunSummary> {
+        this.#assertAgentAccess(ctx, agentId);
+        if (!Value.Check(usageRunIdSchema, runId)) {
+            throw new Error("Usage run ID is invalid.");
+        }
+        const summary = await new UsageDatabase().run(ctx, agentId, runId);
+        if (!Value.Check(usageRunSummarySchema, summary)) {
+            throw new Error("Usage store returned invalid run usage.");
+        }
+        return cloneValue(summary);
     }
 
     /** Read a bounded aggregate for one agent or the whole collection. */
@@ -479,11 +527,13 @@ export class UsageModule implements AgentModule {
         ctx: Context,
         scope: AgentModuleScope,
         kind: UsagePendingKind,
+        loopId: string,
     ): Promise<void> {
         try {
             const key = kind === "inference" ? INFERENCE_PENDING_KEY : TURN_PENDING_KEY;
             const pending: UsagePending = {
                 startedAt: this.#now(),
+                runId: (await this.events.activeRunIdInTransaction(ctx, scope.agent.id)) ?? loopId,
             };
             await scope.runKV.write(ctx, key, cloneValue(pending));
         } catch (error: unknown) {
@@ -496,72 +546,127 @@ export class UsageModule implements AgentModule {
         scope: AgentModuleScope,
         inference: AgentBaseInference,
     ): Promise<void> {
-        await this.#finish(ctx, scope, "inference", async (startedAt, finishedAt, durationMs) => {
-            if (inference.tokens === undefined) {
-                throw new Error("Inference did not report provider token counts.");
-            }
-            assertUsageTokens(inference.tokens);
-            const record: UsageInferenceRecord = {
-                id: inference.inferenceId,
-                agentId: scope.agent.id,
-                provider: scope.agent.provider,
-                kind: "inference",
-                tokens: cloneValue(inference.tokens),
-                startedAt,
-                finishedAt,
-                durationMs,
-                ...(scope.agent.model === undefined ? {} : { model: scope.agent.model }),
-                ...(scope.agent.effort === undefined ? {} : { effort: scope.agent.effort }),
-                ...(scope.agent.tier === undefined ? {} : { tier: scope.agent.tier }),
-                ...(inference.state === undefined ? {} : { state: inference.state }),
-                ...(inference.errorMessage === undefined
-                    ? {}
-                    : { errorMessage: inference.errorMessage }),
-            };
-            assertUsageRecord(record);
-            await this.#record(ctx, scope, record);
-        });
+        await this.#finish(
+            ctx,
+            scope,
+            "inference",
+            async (startedAt, finishedAt, durationMs, pending) => {
+                if (inference.tokens === undefined) {
+                    throw new Error("Inference did not report provider token counts.");
+                }
+                assertUsageTokens(inference.tokens);
+                const record: UsageInferenceRecord = {
+                    id: inference.inferenceId,
+                    agentId: scope.agent.id,
+                    provider: scope.agent.provider,
+                    kind: "inference",
+                    runId: pending.runId,
+                    tokens: {
+                        input: inference.tokens.input,
+                        output: inference.tokens.output,
+                        cacheRead: pending.usage?.cacheRead ?? 0,
+                        cacheWrite: pending.usage?.cacheWrite ?? 0,
+                    },
+                    startedAt,
+                    finishedAt,
+                    durationMs,
+                    ...(scope.agent.model === undefined ? {} : { model: scope.agent.model }),
+                    ...(scope.agent.effort === undefined ? {} : { effort: scope.agent.effort }),
+                    ...(scope.agent.tier === undefined ? {} : { tier: scope.agent.tier }),
+                    ...(inference.state === undefined ? {} : { state: inference.state }),
+                    ...(inference.errorMessage === undefined
+                        ? {}
+                        : { errorMessage: inference.errorMessage }),
+                };
+                assertUsageRecord(record);
+                await this.#record(ctx, scope, record);
+            },
+        );
     }
 
     async #finishTurn(ctx: Context, scope: AgentModuleScope, turn: AgentBaseTurn): Promise<void> {
-        await this.#finish(ctx, scope, "turn", async (startedAt, finishedAt, durationMs) => {
-            if (
-                turn.contextTokens !== undefined &&
-                (!Number.isInteger(turn.contextTokens) ||
-                    turn.contextTokens < 0 ||
-                    turn.contextTokens > MAX_USAGE_TOKEN_COUNT)
-            ) {
-                throw new Error("Turn context tokens are invalid.");
-            }
-            const record: UsageTurnRecord = {
-                id: turn.turnId,
-                agentId: scope.agent.id,
-                provider: scope.agent.provider,
-                kind: "turn",
-                aborted: turn.aborted,
-                startedAt,
-                finishedAt,
-                durationMs,
-                ...(scope.agent.model === undefined ? {} : { model: scope.agent.model }),
-                ...(scope.agent.effort === undefined ? {} : { effort: scope.agent.effort }),
-                ...(scope.agent.tier === undefined ? {} : { tier: scope.agent.tier }),
-                ...(turn.contextTokens === undefined ? {} : { contextTokens: turn.contextTokens }),
+        await this.#finish(
+            ctx,
+            scope,
+            "turn",
+            async (startedAt, finishedAt, durationMs, pending) => {
+                if (
+                    turn.contextTokens !== undefined &&
+                    (!Number.isInteger(turn.contextTokens) ||
+                        turn.contextTokens < 0 ||
+                        turn.contextTokens > MAX_USAGE_TOKEN_COUNT)
+                ) {
+                    throw new Error("Turn context tokens are invalid.");
+                }
+                const record: UsageTurnRecord = {
+                    id: turn.turnId,
+                    agentId: scope.agent.id,
+                    provider: scope.agent.provider,
+                    kind: "turn",
+                    runId: pending.runId,
+                    aborted: turn.aborted,
+                    startedAt,
+                    finishedAt,
+                    durationMs,
+                    ...(scope.agent.model === undefined ? {} : { model: scope.agent.model }),
+                    ...(scope.agent.effort === undefined ? {} : { effort: scope.agent.effort }),
+                    ...(scope.agent.tier === undefined ? {} : { tier: scope.agent.tier }),
+                    ...(turn.contextTokens === undefined
+                        ? {}
+                        : { contextTokens: turn.contextTokens }),
+                };
+                assertUsageRecord(record);
+                await this.#record(ctx, scope, record);
+            },
+        );
+    }
+
+    async #recordProviderUsage(
+        ctx: Context,
+        scope: AgentModuleScope,
+        usage: SessionUsage,
+    ): Promise<void> {
+        try {
+            const stored = await scope.runKV.read(ctx, INFERENCE_PENDING_KEY);
+            if (stored === undefined) return;
+            const pending = assertPending(stored);
+            const updated: UsagePending = {
+                ...pending,
+                usage: {
+                    input: usage.input,
+                    output: usage.output,
+                    cacheRead: usage.cacheRead,
+                    cacheWrite: usage.cacheWrite,
+                },
             };
-            assertUsageRecord(record);
-            await this.#record(ctx, scope, record);
-        });
+            if (!Value.Check(usagePendingSchema, updated)) {
+                throw new Error("Provider usage is outside its configured bounds.");
+            }
+            await scope.runKV.write(ctx, INFERENCE_PENDING_KEY, cloneValue(updated));
+        } catch (error: unknown) {
+            this.#reportObserverError(ctx, "provider_usage", error);
+        }
     }
 
     async #finish(
         ctx: Context,
         scope: AgentModuleScope,
         kind: UsagePendingKind,
-        write: (startedAt: number, finishedAt: number, durationMs: number) => Promise<void>,
+        write: (
+            startedAt: number,
+            finishedAt: number,
+            durationMs: number,
+            pending: UsagePending,
+        ) => Promise<void>,
     ): Promise<void> {
         const key = kind === "inference" ? INFERENCE_PENDING_KEY : TURN_PENDING_KEY;
         try {
             const stored = await scope.runKV.read(ctx, key);
-            const startedAt = stored === undefined ? this.#now() : assertPending(stored).startedAt;
+            if (stored === undefined) {
+                throw new Error("Usage observation start is unavailable.");
+            }
+            const pending = assertPending(stored);
+            const startedAt = pending.startedAt;
             const finishedAt = this.#now();
             if (finishedAt < startedAt) {
                 throw new Error("Usage clock moved backwards.");
@@ -574,7 +679,7 @@ export class UsageModule implements AgentModule {
             ) {
                 throw new Error("Usage duration is outside its configured bounds.");
             }
-            await write(startedAt, finishedAt, durationMs);
+            await write(startedAt, finishedAt, durationMs, pending);
             await scope.runKV.delete(ctx, key);
         } catch (error: unknown) {
             this.#reportObserverError(ctx, `after_${kind}`, error);
@@ -770,18 +875,27 @@ export class UsageModule implements AgentModule {
         beforeInferenceTransact: async (
             ctx: Context,
             scope: AgentModuleScope,
-            _inference: AgentBaseInferenceStart,
+            inference: AgentBaseInferenceStart,
         ): Promise<void> => {
-            await this.#beginObservation(ctx, scope, "inference");
+            await this.#beginObservation(ctx, scope, "inference", inference.loopId);
         },
 
         /** Persist the turn start time in Base's current transaction. */
         beforeTurnTransact: async (
             ctx: Context,
             scope: AgentModuleScope,
-            _turn: AgentBaseTurnStart,
+            turn: AgentBaseTurnStart,
         ): Promise<void> => {
-            await this.#beginObservation(ctx, scope, "turn");
+            await this.#beginObservation(ctx, scope, "turn", turn.loopId);
+        },
+
+        onEvent: async (
+            ctx: Context,
+            scope: AgentModuleScope,
+            event: SessionEvent,
+        ): Promise<void> => {
+            if (event.type !== "token_usage") return;
+            await this.#recordProviderUsage(ctx, scope, event.usage);
         },
 
         /** Record provider-measured tokens inside Base's inference completion transaction. */
@@ -834,7 +948,11 @@ function treeRelation(
 function agentTitle(config: AgentConfig | undefined): string | undefined {
     const title = config?.metadata?.title;
     if (typeof title !== "string") return undefined;
-    const oneLine = title.replaceAll(/[\u0000\r\n]/gu, " ").trim();
+    const oneLine = title
+        .replaceAll("\u0000", " ")
+        .replaceAll("\r", " ")
+        .replaceAll("\n", " ")
+        .trim();
     if (oneLine.length === 0) return undefined;
     return truncate(oneLine, MAX_USAGE_TREE_TITLE_LENGTH);
 }

@@ -1,7 +1,7 @@
 import { truncateToWidth, type Component, type Focusable, type TUI } from "@earendil-works/pi-tui";
 
 import type { DaemonRestartRequest } from "../client/index.js";
-import type { SessionSummary } from "../protocol/index.js";
+import type { AgentCatalogEntry } from "../client/index.js";
 import { createSelectionPanel } from "./createSelectionPanel.js";
 import { createSessionPicker, fitSessionPickerToViewport } from "./createSessionPicker.js";
 import { formatActivityElapsedTime } from "./formatActivityElapsedTime.js";
@@ -77,18 +77,18 @@ export class StartupStatusApp implements Component, Focusable {
     }
 
     /**
-     * Lets the user pick a saved session on the same startup screen the daemon status uses, so
+     * Lets the user pick a saved agent on the same startup screen the daemon status uses, so
      * `rig resume` never drops out of the TUI into a numbered prompt. Resolves undefined when the
      * user dismisses the picker.
      */
     selectSession(options: {
+        agents: readonly AgentCatalogEntry[];
         confirmVerb: string;
-        sessions: readonly SessionSummary[];
         showDirectory: boolean;
         subtitle: string;
         title: string;
     }): Promise<string | undefined> {
-        this.setStatus("Waiting for a session choice.");
+        this.setStatus("Waiting for an agent choice.");
         return new Promise((resolve) => {
             const finish = (sessionId: string | undefined) => {
                 this.#selectionPanel = undefined;
@@ -99,8 +99,8 @@ export class StartupStatusApp implements Component, Focusable {
                 confirmVerb: options.confirmVerb,
                 now: this.#now,
                 onCancel: () => finish(undefined),
-                onSelect: (session) => finish(session.id),
-                sessions: options.sessions,
+                onSelect: (entry) => finish(entry.agent.id),
+                agents: options.agents,
                 showDirectory: options.showDirectory,
                 subtitle: options.subtitle,
                 theme: this.#theme,

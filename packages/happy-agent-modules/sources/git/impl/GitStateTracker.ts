@@ -6,7 +6,7 @@ import type { GitChangeSnapshot, GitChangeState, GitTrackedEntity } from "../typ
 import { watchGitRepositoryChanges } from "../watchGitRepositoryChanges.js";
 
 const WATCH_TTL_MS = 5 * 60 * 1000;
-const TRACKED_LIMIT = 32;
+const TRACKED_LIMIT = 256;
 const SCAN_CONCURRENCY = 4;
 const DEBOUNCE_MS = 150;
 const MAXIMUM_DEBOUNCE_MS = 750;
@@ -100,6 +100,43 @@ export class GitStateTracker {
             existing.lastActiveAt = Date.now();
             return;
         }
+        this.#watch(entity);
+    }
+
+    /**
+     * Makes the tracked set exactly match one caller-owned subscription set.
+     *
+     * This stays synchronous deliberately: retired trackers have their generation advanced and
+     * their scans aborted before new watchers are armed, so a completed asynchronous scan cannot
+     * publish an entity the replacement omitted.
+     */
+    replace(entities: readonly GitTrackedEntity[]): void {
+        if (this.#disposed) return;
+        const desired = new Map<string, GitTrackedEntity>();
+        for (const entity of entities) desired.set(entityKey(entity), entity);
+
+        for (const tracker of Array.from(this.#trackers.values())) {
+            const entity = desired.get(tracker.key);
+            if (entity === undefined || !sameEntity(tracker.entity, entity)) {
+                this.#retire(tracker);
+            }
+        }
+
+        const now = Date.now();
+        for (const [key, entity] of desired) {
+            const existing = this.#trackers.get(key);
+            if (existing === undefined) {
+                this.#watch(entity);
+                continue;
+            }
+            existing.entity = entity;
+            existing.expiresAt = now + WATCH_TTL_MS;
+            existing.lastActiveAt = now;
+        }
+    }
+
+    #watch(entity: GitTrackedEntity): void {
+        const key = entityKey(entity);
         const tracker: RepositoryTracker = {
             backoffMs: BACKOFF_START_MS,
             backoffTimer: undefined,
@@ -354,4 +391,12 @@ function sameState(left: GitChangeSnapshot | undefined, right: GitChangeState): 
     const { generation: _generation, scannedAt: _leftAt, version: _version, ...previous } = left;
     const { scannedAt: _rightAt, ...next } = right;
     return JSON.stringify(previous) === JSON.stringify(next);
+}
+
+function sameEntity(left: GitTrackedEntity, right: GitTrackedEntity): boolean {
+    return (
+        left.path === right.path &&
+        left.projectId === right.projectId &&
+        left.workspaceId === right.workspaceId
+    );
 }

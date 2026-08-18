@@ -171,18 +171,19 @@ await gym.send("Later.", { wait: false }); // returns as soon as it is accepted
 await gym.steer("Actually, stop at the readme."); // joins the run already going
 await gym.abort();
 await gym.compact();
-const session = await gym.createSession({ cwd: gym.workspacePath });
-await gym.send("In the new chat.", { sessionId: session.id });
+const agent = await gym.createSession({ cwd: gym.workspacePath });
+await gym.send("In the new agent.", { sessionId: agent.id });
 ```
 
-`gym.defaultSessionId` is the chat an installation opens with. Every request names the provider,
-model, effort and tier from `gym.selection` unless the scenario overrides them.
+`gym.defaultSessionId` is the default agent the gym opens in its root workspace. Every message
+names the provider, model, effort and tier from `gym.selection` unless the scenario overrides
+them.
 
 Anything the helpers do not cover goes through the client directly, which never throws on an
 unsuccessful status:
 
 ```ts
-const response = await gym.http.post(`/v0/sessions/${gym.defaultSessionId}/messages`, body);
+const response = await gym.http.post(`/v0/agents/${gym.defaultSessionId}/send`, body);
 expect(response.status).toBe(400);
 expect(response.text).toContain("not served by provider");
 ```
@@ -193,33 +194,31 @@ expect(response.text).toContain("not served by provider");
 
 Three vocabularies exist, and a scenario should assert against the one it means.
 
-**Durable events** are the installation's own journal: `agent.created`, `loop.started`,
-`message.accepted`, `provider.event`, `inference.completed`, `turn.completed`, `loop.settled`,
-`permission.event`, `user_input.event`, `session.created`, `daemon.stopping`.
+**Durable events** are the API journal: `agent.created`, `run.started`, `run.boundary`,
+`run.finished`, `message.created`, `message.updated`, and `message.delta`.
 
 ```ts
 const settled = await gym.waitForEvent(
-    (event) => event.type === "loop.settled",
+    (event) => event.type === "run.finished",
     "the run to settle",
 );
-expect(settled.payload).toMatchObject({ stopReason: "stop" });
+expect(settled.payload).toMatchObject({ run: { reason: "completed" } });
 ```
 
 `gym.waitForRun(runId)` is the same wait for one specific run, and `gym.send` uses it.
 
-**The session projection** is what a Rig client renders: `run_finished`, `message_submitted`,
-`agent_event`, `run_error`, `permission_event`. Read it with `gym.sessionEvents()`.
+`gym.sessionEvents()` filters that same public journal to one agent; it does not use a separate
+projection endpoint.
 
-**Server-Sent Events** come in two shapes. `/v0/events/live` sends a `hello` frame and then names
-every frame `update`, wrapping the durable event under `data.event`. `/v0/events/stream` names each
-frame after the event's own type. `frameEvent(frame)` unwraps either.
+**Server-Sent Events** use `/v0/events/stream`. It sends a `hello` frame, then names each frame
+after the event's own type. `frameEvent(frame)` returns the event envelope.
 
 ```ts
-const stream = gym.stream("/v0/events/live");
+const stream = gym.stream("/v0/events/stream");
 try {
     await stream.opened();
     await gym.send("Stream this.");
-    await stream.waitFor((frame) => frameEvent(frame)?.type === "loop.settled");
+    await stream.waitFor((frame) => frameEvent(frame)?.type === "run.finished");
 } finally {
     stream.close();
 }
@@ -268,7 +267,7 @@ Avoid `agent.test.ts`, `integration.test.ts`, or a bare issue number.
 
 A strong scenario asserts more than the last sentence the model produced:
 
-- **What the client sees** — the session projection, the session record, or the HTTP status.
+- **What the client sees** — the agent events, agent record, or HTTP status.
 - **What the model was shown** — exact user text, tool results, conversation order, offered tools.
 - **What really happened** — files in the workspace, durable events, the run's stop reason.
 - **That it still works** — a second turn after the first.

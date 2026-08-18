@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 
 import { Type, type Static } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
 import type { AgentModule } from "@slopus/happy-agent-base";
 import { createRootContext, detach, type Context, type RootContext } from "@steve.kite/stdlib";
 
@@ -47,6 +48,7 @@ import { scanGitRepository } from "./scanGitRepository.js";
 import { selectGitRemoteUrl } from "./selectGitRemoteUrl.js";
 import { supportsRecursiveWorktreeWatch } from "./watchGitRepositoryChanges.js";
 import {
+    gitTrackedEntitySchema,
     projectCreatorSchema,
     type GitChangeSnapshot,
     type GitChangeState,
@@ -78,6 +80,9 @@ export const gitWatchSchema = Type.Object(
     },
     { additionalProperties: false },
 );
+export const gitTrackedEntitiesSchema = Type.Array(gitTrackedEntitySchema, {
+    maxItems: MAX_WATCH_ENTITIES,
+});
 
 /**
  * Names the project credential a Git command should carry.
@@ -659,6 +664,25 @@ export class GitModule implements AgentModule {
     track(entity: GitTrackedEntity): void {
         if (this.#disposed) return;
         this.#trackerInstance().watch(entity);
+    }
+
+    /**
+     * Atomically replaces the live-watch set.
+     *
+     * Re-registering an unchanged entity retains its watcher and last snapshot. An omitted entity
+     * is retired immediately, even when its first scan has not completed, so it cannot keep a
+     * filesystem watcher, timer, or pending publication alive after the caller lost interest.
+     */
+    replaceTracked(entities: readonly GitTrackedEntity[]): void {
+        if (!Value.Check(gitTrackedEntitiesSchema, entities)) {
+            throw new Error("The Git watch entities are invalid.");
+        }
+        if (this.#disposed) return;
+        if (entities.length === 0) {
+            this.#tracker?.replace([]);
+            return;
+        }
+        this.#trackerInstance().replace(entities);
     }
 
     /** Stops watching one repository and releases its watchers and timers. */

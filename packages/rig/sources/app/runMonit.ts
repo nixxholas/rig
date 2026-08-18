@@ -1,4 +1,4 @@
-import { ensureLocalProtocolServer } from "../client/index.js";
+import { ensureLocalProtocolServer, loadAgentCatalog } from "../client/index.js";
 import { formatSessionSummaries } from "./formatSessionSummaries.js";
 
 export interface RunMonitOptions {
@@ -11,8 +11,11 @@ export async function runMonit(options: RunMonitOptions = {}): Promise<void> {
     const columns = options.columns ?? process.stdout.columns ?? 100;
     const limit = Math.max(0, rows - 1);
     const localServer = await ensureLocalProtocolServer();
-    const response = await localServer.client.listSessions({ archived: "all", limit });
-    const lines = formatSessionSummaries(response.sessions, { columns, rows });
+    const catalog = await loadAgentCatalog(localServer.client);
+    const agents = catalog.entries
+        .sort((left, right) => right.agent.updatedAt - left.agent.updatedAt)
+        .slice(0, limit);
+    const lines = formatSessionSummaries(agents, { columns, rows });
     for (const line of lines) {
         console.log(line);
     }

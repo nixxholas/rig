@@ -29,7 +29,7 @@ describe("installResumeInstructions", () => {
         instructions.report();
 
         expect(write).toHaveBeenCalledTimes(1);
-        expect(write.mock.calls[0]?.[0]).toContain("Session: abc123");
+        expect(write.mock.calls[0]?.[0]).toContain("Agent: abc123");
         expect(write.mock.calls[0]?.[0]).toContain("Resume: rig resume abc123");
         expect(processEvents.listeners).toHaveLength(0);
     });

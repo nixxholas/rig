@@ -2,6 +2,9 @@ export {
     createTerminalInputSchema,
     resizeTerminalInputSchema,
     terminalColorSchemeSchema,
+    terminalChangesSchema,
+    terminalEventListenerSchema,
+    terminalEventSchema,
     terminalSchema,
     terminalScopeSchema,
     terminalStatusSchema,
@@ -18,9 +21,13 @@ export {
     type ResizeTerminalInput,
     type Terminal,
     type TerminalColorScheme,
+    type TerminalChanges,
     type TerminalErrorCode,
+    type TerminalEvent,
+    type TerminalEventListener,
     type TerminalScope,
     type TerminalStatus,
+    type TerminalUnsubscribe,
 } from "./Terminal.js";
 export {
     type TerminalProcess,

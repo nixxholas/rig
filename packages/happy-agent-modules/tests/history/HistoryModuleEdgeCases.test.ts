@@ -12,6 +12,7 @@ import {
     USER_MESSAGE_ORIGIN_METADATA,
     senderAgentIdMetadata,
 } from "../../sources/impl/messageOrigin.js";
+import { EventsModule } from "../../sources/events/index.js";
 import { HistoryModule } from "../../sources/history/HistoryModule.js";
 import {
     MAX_HISTORY_PENDING_BLOCKS,
@@ -532,16 +533,21 @@ describe("HistoryModule edge cases", () => {
     });
 
     it("records user, agent, and malformed sender provenance distinctly", async () => {
-        const history = new HistoryModule();
-        const database = moduleDatabase(history.migrations, "history-provenance-edge");
+        const events = new EventsModule();
+        const history = new HistoryModule(events);
+        const database = moduleDatabase(
+            [...events.migrations, ...history.migrations],
+            "history-provenance-edge",
+        );
         await database.ready;
+        await resolveModuleHooks(database.context, events);
         const hooks = await resolveModuleHooks(database.context, history);
         const scope = scopeFor();
 
         try {
-            const accepted = (metadata: Record<string, unknown> | undefined) =>
+            const accepted = (id: string, metadata: Record<string, unknown> | undefined) =>
                 ({
-                    id: "accepted",
+                    id,
                     kind: "send",
                     message: { content: [{ text: "message", type: "text" }], role: "user" },
                     metadata,
@@ -549,17 +555,26 @@ describe("HistoryModule edge cases", () => {
             await hooks.messageAcceptedTransact!(
                 database.context,
                 scope,
-                accepted({ ...USER_MESSAGE_ORIGIN_METADATA, senderAgentId: "agent-b" }),
+                accepted("accepted-user", {
+                    ...USER_MESSAGE_ORIGIN_METADATA,
+                    senderAgentId: "agent-b",
+                }),
             );
             await hooks.messageAcceptedTransact!(
                 database.context,
                 scope,
-                accepted({ ...AGENT_MESSAGE_ORIGIN_METADATA, senderAgentId: "bad\nsender" }),
+                accepted("accepted-malformed", {
+                    ...AGENT_MESSAGE_ORIGIN_METADATA,
+                    senderAgentId: "bad\nsender",
+                }),
             );
             await hooks.messageAcceptedTransact!(
                 database.context,
                 scope,
-                accepted({ ...AGENT_MESSAGE_ORIGIN_METADATA, ...senderAgentIdMetadata("agent-b") }),
+                accepted("accepted-agent", {
+                    ...AGENT_MESSAGE_ORIGIN_METADATA,
+                    ...senderAgentIdMetadata("agent-b"),
+                }),
             );
 
             const page = await history.read(database.context, "agent-a");
@@ -633,7 +648,9 @@ describe("HistoryModule edge cases", () => {
 
             const page = await history.read(database.context, "agent-a");
             const block = page.messages[0]?.message.blocks[0];
-            if (block?.type !== "tool_result") throw new Error("Expected a recorded tool result.");
+            if (block?.type !== "tool_result" || block.output === undefined) {
+                throw new Error("Expected a recorded tool result.");
+            }
             expect(block.output).toContain("...[truncated 4000 chars]");
             expect(block.output.length).toBeLessThan(20_000);
             expect(block.display).toBe(`Tool read returned ${block.output.length} characters.`);

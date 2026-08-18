@@ -41,8 +41,9 @@ collection still works — it takes a lifetime of its own.
   private repository takes `{ credential: { projectId, creator } }` and resolves the environment
   itself, so no caller ever holds a Git runner of its own.
 - **Snapshots.** `generation`, `snapshot`, `watch`, `invalidate`.
-- **Live tracking.** `track`, `untrack`, `markChanged`, `trackedSnapshot`, `trackedKeys`,
-  `liveSnapshots`, `refresh`, and `onSnapshot(observer)` which returns its own unsubscribe.
+- **Live tracking.** `track`, `untrack`, `replaceTracked`, `markChanged`, `trackedSnapshot`,
+  `trackedKeys`, `liveSnapshots`, `refresh`, and `onSnapshot(observer)` which returns its own
+  unsubscribe.
 - **Shutdown.** `dispose` stops every watcher, clears the cache and closes the credential broker.
 
 ## Behavior worth knowing

@@ -81,6 +81,20 @@ export const eventsMigrations: readonly AgentModuleMigration[] = [
             );
         },
     ],
+    [
+        "002-latest-agent-events",
+        async (_ctx, database) => {
+            await agentDatabaseRun(
+                database,
+                sql`CREATE TABLE IF NOT EXISTS happy_agent_latest_events (
+                    agent_id TEXT PRIMARY KEY,
+                    event_id TEXT NOT NULL,
+                    occurred_at INTEGER NOT NULL,
+                    previous_event_id TEXT
+                )`,
+            );
+        },
+    ],
 ];
 
 export async function loadEventState(
@@ -160,12 +174,86 @@ export async function loadActiveRun<State>(
     return row === undefined ? undefined : parse(deserializePayload(row.state_json));
 }
 
+/** The newest event for one agent strictly before `beforeId`, or simply the newest when omitted. */
+export async function loadPreviousEventCursor(
+    database: AgentDatabase,
+    agentId: string,
+    beforeId?: string,
+): Promise<string | undefined> {
+    const rows = await agentDatabaseRows<{ event_id: string }>(
+        database,
+        beforeId === undefined
+            ? sql`SELECT event_id
+                FROM happy_agent_events
+                WHERE agent_id = ${agentId}
+                ORDER BY event_id DESC
+                LIMIT 1`
+            : sql`SELECT event_id
+                FROM happy_agent_events
+                WHERE agent_id = ${agentId} AND event_id < ${beforeId}
+                ORDER BY event_id DESC
+                LIMIT 1`,
+    );
+    if (rows[0] !== undefined) return rows[0].event_id;
+    const retained = await agentDatabaseRows<{
+        event_id: string;
+        previous_event_id: string | null;
+    }>(
+        database,
+        beforeId === undefined
+            ? sql`SELECT event_id, previous_event_id
+                FROM happy_agent_latest_events
+                WHERE agent_id = ${agentId}
+                LIMIT 1`
+            : sql`SELECT event_id, previous_event_id
+                FROM happy_agent_latest_events
+                WHERE agent_id = ${agentId} AND event_id = ${beforeId}
+                LIMIT 1`,
+    );
+    const latest = retained[0];
+    if (latest === undefined) return undefined;
+    return beforeId === undefined ? latest.event_id : (latest.previous_event_id ?? undefined);
+}
+
+/** The exact newest durable event identity and timestamp for one agent. */
+export async function loadLatestAgentEvent(
+    database: AgentDatabase,
+    agentId: string,
+): Promise<{ readonly cursor: string; readonly occurredAt: number } | undefined> {
+    const rows = await agentDatabaseRows<{ event_id: string; occurred_at: number | string }>(
+        database,
+        sql`SELECT event_id, occurred_at
+            FROM happy_agent_latest_events
+            WHERE agent_id = ${agentId}
+            LIMIT 1`,
+    );
+    const row = rows[0];
+    if (row === undefined) return undefined;
+    const occurredAt = Number(row.occurred_at);
+    if (!Number.isSafeInteger(occurredAt) || occurredAt < 0) {
+        throw new Error("The durable agent event timestamp is invalid.");
+    }
+    return { cursor: row.event_id, occurredAt };
+}
+
 export async function insertEvent(
     database: AgentDatabase,
     event: AgentEvent,
     capacity: number,
 ): Promise<void> {
     const payload = serializePayload(event.payload);
+    const previous =
+        event.agentId === undefined
+            ? undefined
+            : (
+                  await agentDatabaseRows<{ event_id: string }>(
+                      database,
+                      sql`SELECT event_id
+                          FROM happy_agent_latest_events
+                          WHERE agent_id = ${event.agentId}
+                          LIMIT 1`,
+                  )
+              )[0]?.event_id;
     await agentDatabaseRun(
         database,
         sql`INSERT INTO happy_agent_events (
@@ -174,6 +262,20 @@ export async function insertEvent(
                 ${event.id}, ${event.agentId ?? null}, ${event.occurredAt}, ${event.type}, ${payload}
             )`,
     );
+    if (event.agentId !== undefined) {
+        await agentDatabaseRun(
+            database,
+            sql`INSERT INTO happy_agent_latest_events (
+                    agent_id, event_id, occurred_at, previous_event_id
+                ) VALUES (
+                    ${event.agentId}, ${event.id}, ${event.occurredAt}, ${previous ?? null}
+                )
+                ON CONFLICT(agent_id) DO UPDATE SET
+                    event_id = excluded.event_id,
+                    occurred_at = excluded.occurred_at,
+                    previous_event_id = excluded.previous_event_id`,
+        );
+    }
     const removed = await agentDatabaseRows<{ event_id: string }>(
         database,
         sql`SELECT event_id FROM happy_agent_events
@@ -276,7 +378,7 @@ function serializePayload(payload: unknown): string {
 
 function deserializePayload(encoded: string): unknown {
     if (Buffer.byteLength(encoded, "utf8") > MAX_EVENT_PAYLOAD_BYTES) {
-        throw new Error("The agent event payload exceeds the 2 MiB durable limit.");
+        throw new Error("The agent event payload exceeds the 5 MiB durable limit.");
     }
     return restoreUndefined(JSON.parse(encoded));
 }

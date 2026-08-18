@@ -2,7 +2,12 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, open } from "node:fs/promises";
 
 import {
-    daemonIdentitiesMatch,
+    HappyAgentClient,
+    HAPPY_AGENT_PROTOCOL_VERSION,
+    type HealthResponse,
+} from "@slopus/happy-agent-client";
+
+import {
     getDaemonIdentity,
     getHappyDaemonPaths,
     runHappyAgentServer,
@@ -15,8 +20,8 @@ import {
 } from "../daemon/daemonToken.js";
 import { rotateDaemonLog } from "../daemon/rotateDaemonLog.js";
 import { RigUserError } from "../RigUserError.js";
-import type { DaemonIdentity, ReadyHealthResponse } from "../protocol/index.js";
-import { ProtocolHttpClient } from "./ProtocolHttpClient.js";
+import type { DaemonIdentity } from "../protocol/index.js";
+import { createUnixSocketFetch } from "./createUnixSocketFetch.js";
 import { stopLocalProtocolServer } from "./stopLocalProtocolServer.js";
 
 const DAEMON_CHILD_STARTUP_TIMEOUT_MS = 60_000;
@@ -24,7 +29,7 @@ const DAEMON_CHILD_TERMINATION_TIMEOUT_MS = 2_000;
 const DAEMON_RESTART_ATTEMPTS = 20;
 
 export interface LocalProtocolServerConnection {
-    client: ProtocolHttpClient;
+    client: HappyAgentClient;
     paths: HappyDaemonPaths;
     token: string;
 }
@@ -54,17 +59,14 @@ export async function ensureLocalProtocolServer(
 
     for (let attempt = 0; attempt < DAEMON_RESTART_ATTEMPTS; attempt += 1) {
         const observed = await observeLocalProtocolServer(paths);
-        if (
-            observed !== undefined &&
-            daemonIdentitiesMatch(currentIdentity, observed.health.identity)
-        ) {
+        if (observed !== undefined && daemonVersionsMatch(currentIdentity, observed.health)) {
             return await connectToObservedServer(observed, paths);
         }
 
         if (observed !== undefined) {
             const request: DaemonRestartRequest = {
                 currentIdentity,
-                runningIdentity: observed.health.identity,
+                runningIdentity: { version: observed.health.version.daemon },
             };
             const shouldRestart = (await options.confirmRestart?.(request)) ?? false;
             if (!shouldRestart) {
@@ -73,7 +75,7 @@ export async function ensureLocalProtocolServer(
                 });
             }
             options.onStatus?.("Restarting local daemon.");
-            await stopLocalProtocolServer(observed.client);
+            await stopLocalProtocolServer(observed.client, paths.socketPath);
         }
 
         options.onStatus?.("Starting local daemon.");
@@ -81,7 +83,7 @@ export async function ensureLocalProtocolServer(
         const health = await readHealth(connection.client);
         // Another Rig may have won the race to start a daemon with a different identity; observe
         // again instead of handing back a connection to the wrong daemon.
-        if (health === undefined || !daemonIdentitiesMatch(currentIdentity, health.identity)) {
+        if (health === undefined || !daemonVersionsMatch(currentIdentity, health)) {
             await delay(250);
             continue;
         }
@@ -97,8 +99,8 @@ export async function readTokenIfPresent(tokenPath: string): Promise<string | un
 }
 
 interface ObservedLocalProtocolServer {
-    client: ProtocolHttpClient;
-    health: Awaited<ReturnType<ProtocolHttpClient["health"]>>;
+    client: HappyAgentClient;
+    health: HealthResponse;
     token: string;
 }
 
@@ -152,15 +154,17 @@ async function startLocalProtocolServer(
     };
 }
 
-function createDaemonClient(paths: HappyDaemonPaths, token: string): ProtocolHttpClient {
-    return new ProtocolHttpClient({ pathPrefix: "/v0", socketPath: paths.socketPath, token });
+function createDaemonClient(paths: HappyDaemonPaths, token: string): HappyAgentClient {
+    return new HappyAgentClient({
+        endpoint: "http://happy",
+        fetch: createUnixSocketFetch(paths.socketPath),
+        token,
+    });
 }
 
-async function readHealth(
-    client: ProtocolHttpClient,
-): Promise<Awaited<ReturnType<ProtocolHttpClient["health"]>> | undefined> {
+async function readHealth(client: HappyAgentClient): Promise<HealthResponse | undefined> {
     try {
-        return await client.health();
+        return await client.getHealth();
     } catch {
         return undefined;
     }
@@ -255,14 +259,14 @@ async function terminateSpawnedLocalServer(child: SpawnedLocalServerProcess): Pr
     });
 }
 
-export async function waitForReady(client: ProtocolHttpClient): Promise<ReadyHealthResponse> {
+export async function waitForReady(client: HappyAgentClient): Promise<HealthResponse> {
     let deadline = Date.now() + 5_000;
     let observedStarting = false;
     let recoveredAfterStartingFailure = false;
     while (Date.now() < deadline) {
-        let health: Awaited<ReturnType<ProtocolHttpClient["health"]>>;
+        let health: HealthResponse;
         try {
-            health = await client.health();
+            health = await client.getHealth();
         } catch {
             // The socket may not be accepting connections yet.
             if (observedStarting && !recoveredAfterStartingFailure) {
@@ -272,8 +276,8 @@ export async function waitForReady(client: ProtocolHttpClient): Promise<ReadyHea
             await delay(50);
             continue;
         }
-        if (health.status === "ready") return health;
-        if (health.status === "error") throw daemonStartupError(health.error);
+        assertCompatibleProtocol(health);
+        if (health.ready) return health;
         observedStarting = true;
         deadline = Date.now() + 5_000;
         await delay(50);
@@ -286,16 +290,27 @@ export async function waitForReady(client: ProtocolHttpClient): Promise<ReadyHea
 }
 
 async function resolveReadyHealth(
-    client: ProtocolHttpClient,
-    health: Awaited<ReturnType<ProtocolHttpClient["health"]>>,
-): Promise<ReadyHealthResponse> {
-    if (health.status === "error") throw daemonStartupError(health.error);
-    if (health.status === "ready") return health;
+    client: HappyAgentClient,
+    health: HealthResponse,
+): Promise<HealthResponse> {
+    assertCompatibleProtocol(health);
+    if (health.ready) return health;
     return waitForReady(client);
 }
 
-function daemonStartupError(message: string): Error {
-    return new Error(`Daemon could not start: ${message}`);
+function assertCompatibleProtocol(health: HealthResponse): void {
+    if (health.version.protocol === HAPPY_AGENT_PROTOCOL_VERSION) return;
+    throw new RigUserError(
+        `The running daemon uses protocol ${String(health.version.protocol)}, but this Rig expects protocol ${String(HAPPY_AGENT_PROTOCOL_VERSION)}.`,
+        { hint: "Restart the daemon with this Rig version." },
+    );
+}
+
+function daemonVersionsMatch(identity: DaemonIdentity, health: HealthResponse): boolean {
+    return (
+        health.version.protocol === HAPPY_AGENT_PROTOCOL_VERSION &&
+        health.version.daemon === identity.version
+    );
 }
 
 function delay(ms: number): Promise<void> {

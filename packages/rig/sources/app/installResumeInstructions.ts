@@ -36,7 +36,7 @@ export function installResumeInstructions(options: {
     const report = (): void => {
         if (done) return;
         done = true;
-        write(`\nSession: ${options.sessionId}\nResume: ${options.resumeCommand}\n`);
+        write(`\nAgent: ${options.sessionId}\nResume: ${options.resumeCommand}\n`);
     };
 
     const uninstall = (): void => {

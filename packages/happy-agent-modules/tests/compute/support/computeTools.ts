@@ -12,7 +12,7 @@ import {
     ComputeModule,
     type HostCompute,
     type HostComputeProvider,
-} from "../../../sources/index.js";
+} from "../../../sources/compute/index.js";
 import { testConfig } from "../../support/computeModule.js";
 import { resolveModuleHooks } from "../../support/moduleHooks.js";
 

@@ -4,6 +4,7 @@ export * from "./HistoryAgent.js";
 export * from "./HistoryMessage.js";
 export * from "./HistoryModule.js";
 export * from "./HistoryPage.js";
+export * from "./HistoryRun.js";
 export * from "./HistoryStore.js";
 export * from "./impl/createHistoryExcerpt.js";
 export * from "./impl/formatHistoryMessage.js";

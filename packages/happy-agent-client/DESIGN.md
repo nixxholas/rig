@@ -49,9 +49,9 @@ occasional imperative call (onboarding checks, a health probe, a file read for a
 
 ```ts
 const client = new HappyAgentClient({
-    endpoint: "http://happy",   // any authority; only path and query matter to the daemon
+    endpoint: "http://happy", // any authority; only path and query matter to the daemon
     token: "<bearer token>",
-    fetch: socketFetch,          // optional; defaults to globalThis.fetch
+    fetch: socketFetch, // optional; defaults to globalThis.fetch
 });
 ```
 
@@ -67,11 +67,24 @@ class HappyAgentClient {
     getHealth(options?: RequestOptions): Promise<HealthResponse>;
     listProjects(options?: RequestOptions): Promise<ProjectListResponse>;
     getProject(projectId: Cuid2, options?: RequestOptions): Promise<ProjectResponse>;
-    listWorkspaces(query?: ListWorkspacesQuery, options?: RequestOptions): Promise<WorkspaceListResponse>;
-    createWorkspace(request: CreateWorkspaceRequest, options?: RequestOptions): Promise<WorkspaceResponse>;
-    listAgents(query?: ListAgentsQuery, options?: RequestOptions): Promise<AgentListResponse>;
-    sendMessage(agentId: Cuid2, request: SendMessageRequest, options?: RequestOptions): Promise<SendMessageResponse>;
-    getMessages(agentId: Cuid2, query?: MessageHistoryQuery, options?: RequestOptions): Promise<MessageHistoryResponse>;
+    listWorkspaces(
+        query?: ListWorkspacesQuery,
+        options?: RequestOptions,
+    ): Promise<WorkspaceListResponse>;
+    createWorkspace(
+        request: CreateWorkspaceRequest,
+        options?: RequestOptions,
+    ): Promise<WorkspaceResponse>;
+    sendMessage(
+        agentId: Cuid2,
+        request: SendMessageRequest,
+        options?: RequestOptions,
+    ): Promise<SendMessageResponse>;
+    getMessages(
+        agentId: Cuid2,
+        query?: MessageHistoryQuery,
+        options?: RequestOptions,
+    ): Promise<MessageHistoryResponse>;
     getEvents(query?: EventPageQuery, options?: RequestOptions): Promise<EventPageResponse>;
     streamEvents(options?: EventStreamOptions): AsyncIterable<EventStreamFrame>;
     getDesktopBootstrap(options?: RequestOptions): Promise<DesktopBootstrapResponse>;
@@ -98,9 +111,9 @@ Every non-2xx response rejects with one error class:
 
 ```ts
 class HappyAgentApiError extends Error {
-    readonly status: number;            // HTTP status
-    readonly code: string | null;        // stable snake_case string when the daemon supplied one
-    readonly body: ApiErrorBody | null;  // complete daemon error body, including documented extras
+    readonly status: number; // HTTP status
+    readonly code: string | null; // stable snake_case string when the daemon supplied one
+    readonly body: ApiErrorBody | null; // complete daemon error body, including documented extras
 }
 ```
 
@@ -159,7 +172,7 @@ equality.
 ```ts
 interface HappyAgentConnection {
     compatibility(): ServerCompatibility;
-    state(): ConnectionState;                   // live | connecting | reconnecting | resyncing
+    state(): ConnectionState; // live | connecting | reconnecting | resyncing
 
     /** The whole catalog: projects, their workspace trees, and agent summaries. */
     catalog(options: CatalogSubscriptionOptions): CatalogSubscription;
@@ -173,8 +186,8 @@ interface HappyAgentConnection {
     /** Config, profile, and onboarding, refetched on their nudge events. */
     environment(options: EnvironmentSubscriptionOptions): EnvironmentSubscription;
 
-    actions: HappyAgentActions;                 // the optimistic mutation surface, below
-    client: HappyAgentClient;                   // layer 1, shared transport and token
+    actions: HappyAgentActions; // the optimistic mutation surface, below
+    client: HappyAgentClient; // layer 1, shared transport and token
     close(): void;
 }
 ```
@@ -183,7 +196,8 @@ interface HappyAgentConnection {
   each with its workspace tree (built from `parentId`), and each workspace with its active
   agents — title, status, unread, pending question, draft. It is fed by the `project.*`,
   `workspace.*`, `agent.*`, and `question.*` events and bootstraps from
-  `client.getDesktopBootstrap()` plus `client.listAgents(...)` per opened workspace.
+  `client.getDesktopBootstrap()` plus project/workspace reads whose resources carry their own
+  ordered top-level agents.
 - **`conversation`** replaces `connectSession`; its state is specified in the next section.
 - **`git`** wraps `POST /v0/git/watch` re-registration and the `git.updated` snapshots; the
   consumer names the workspace IDs it is looking at and receives whole-state replacements.
@@ -240,8 +254,8 @@ the daemon's echo is recognized by `mutationId` rather than applied twice.
 ```ts
 interface HappyAgentActions {
     // Agents and conversation
-    createAgent(input: CreateAgentInput): Cuid2;          // returns the client-minted agent ID
-    send(agentId: Cuid2, input: SendInput): Cuid2;        // returns the client-minted message ID
+    createAgent(input: CreateAgentInput): Cuid2; // returns the client-minted agent ID
+    send(agentId: Cuid2, input: SendInput): Cuid2; // returns the client-minted message ID
     abort(agentId: Cuid2, expectedRunId?: Cuid2): void;
     compact(agentId: Cuid2): void;
     answerQuestion(agentId: Cuid2, questionId: Cuid2, answers: QuestionAnswers): void;
@@ -258,7 +272,7 @@ interface HappyAgentActions {
     renameProject(projectId: Cuid2, name: string): void;
     archiveProject(projectId: Cuid2): void;
     reorderProject(projectId: Cuid2, afterId: Cuid2 | null): void;
-    createWorkspace(input: CreateWorkspaceInput): Cuid2;  // returns the client-minted workspace ID
+    createWorkspace(input: CreateWorkspaceInput): Cuid2; // returns the client-minted workspace ID
     renameWorkspace(workspaceId: Cuid2, name: string): void;
     archiveWorkspace(workspaceId: Cuid2): void;
     reorderWorkspace(workspaceId: Cuid2, afterId: Cuid2 | null): void;

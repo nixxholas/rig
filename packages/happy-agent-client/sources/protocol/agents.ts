@@ -13,12 +13,7 @@ import type {
 import type { BackgroundProcess } from "./processes.js";
 
 /** What the agent is doing right now. */
-export type AgentStatus =
-    | "idle"
-    | "thinking"
-    | "working"
-    | "generating_tools"
-    | "running_tools";
+export type AgentStatus = "idle" | "thinking" | "working" | "generating_tools" | "running_tools";
 
 /** Why the agent has something the person has not looked at. */
 export interface AgentUnread {
@@ -66,11 +61,6 @@ export interface Agent {
     archivedAt: Timestamp | null;
 }
 
-/** `GET /v0/agents` */
-export interface AgentListResponse {
-    agents: Agent[];
-}
-
 /** Every single-agent route answers with this. */
 export interface AgentResponse {
     agent: Agent;
@@ -89,18 +79,6 @@ export interface AgentActivityResponse {
     subagents: Agent[];
     /** Full process objects, newest first, exited ones included. */
     processes: BackgroundProcess[];
-}
-
-/** `GET /v0/agents` query parameters. */
-export interface ListAgentsQuery {
-    /** Only agents in this workspace. */
-    workspaceId?: Cuid2;
-    /** A parent's subagents; otherwise subagents are excluded. */
-    parentAgentId?: Cuid2;
-    /** `false` (default) for active, `true` for archived only, `"all"` for both. */
-    archived?: boolean | "all";
-    /** Default and maximum 50. */
-    limit?: number;
 }
 
 /** `POST /v0/agents` — creation always makes a top-level agent. */

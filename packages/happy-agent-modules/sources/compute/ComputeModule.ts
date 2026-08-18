@@ -23,6 +23,12 @@ import type {
     ComputeSessionActivity,
     ComputeSessionSnapshot,
 } from "./Compute.js";
+import {
+    type ComputeProcess,
+    type ComputeProcessEventListener,
+    type ComputeProcessUnsubscribe,
+} from "./ComputeProcess.js";
+import { ComputeProcessRegistry } from "./ComputeProcessRegistry.js";
 import { computeToolVendor, type ComputeToolVendor } from "./ComputeToolVendor.js";
 import { computeInstructionsForVendor } from "./impl/computeInstructionsForVendor.js";
 import { computePermissionsForContext } from "./impl/computePermissionsForContext.js";
@@ -156,6 +162,7 @@ export class ComputeModule implements AgentModule {
     readonly #computes = new Map<string, CachedCompute>();
     readonly #computeLocks: MapAsyncLock<string> = mapAsyncLock<string>();
     readonly #activeOperations = new Set<Promise<unknown>>();
+    readonly #processes = new ComputeProcessRegistry();
     readonly #readLocks: MapAsyncLock<string> = mapAsyncLock<string>();
     /**
      * Read locks for the automatic permission reviewer's tools. The reviewer runs over a compute the
@@ -226,9 +233,27 @@ export class ComputeModule implements AgentModule {
                     throw new Error("Compute module is closed.");
                 }
                 this.#computes.set(agentId, { cwd: config.cwd, compute });
+                this.#processes.attach(agentId, compute);
                 return compute;
             }),
         );
+    }
+
+    /**
+     * Observe background-process lifecycle transitions after the new state is available to readers.
+     *
+     * Subscribe during startup, before agents can run commands, to see this daemon lifetime in
+     * full. A failing observer cannot make a command start, exit, or stop appear to have failed.
+     */
+    onProcessEvent(listener: ComputeProcessEventListener): ComputeProcessUnsubscribe {
+        return this.#processes.onEvent(listener);
+    }
+
+    /** Running commands and bounded exited history for one agent, newest first. */
+    async listProcesses(ctx: Context, agentId: string): Promise<readonly ComputeProcess[]> {
+        void ctx;
+        if (agentId.length === 0) throw new Error("Compute agent ID is invalid.");
+        return this.#processes.list(agentId);
     }
 
     /** Commands currently running for one already-resolved agent compute. */
@@ -243,15 +268,32 @@ export class ComputeModule implements AgentModule {
         commandId: number,
     ): Promise<ComputeSessionSnapshot | undefined> {
         const compute = this.#computes.get(agentId)?.compute;
-        return await compute?.shell.readSession(commandId, { peek: true });
+        const snapshot = await compute?.shell.readSession(commandId, { peek: true });
+        if (compute !== undefined && snapshot !== undefined && snapshot.status !== "running") {
+            this.#processes.exit(agentId, compute, commandId, snapshot.exitCode);
+        }
+        return snapshot;
     }
 
     /** Stop a command by hand, returning whether it was still present. */
     async stopCommand(agentId: string, commandId: number): Promise<boolean> {
         const compute = this.#computes.get(agentId)?.compute;
-        return compute === undefined
-            ? false
-            : (await compute.shell.killSession(commandId)) !== undefined;
+        if (compute === undefined) return false;
+        const stopped = await compute.shell.killSession(commandId);
+        if (stopped !== undefined && stopped.status !== "running") {
+            this.#processes.exit(agentId, compute, commandId, stopped.exitCode);
+        }
+        return stopped !== undefined;
+    }
+
+    /** Stop one command addressed by its public process ID and return its final public state. */
+    async stopProcess(
+        ctx: Context,
+        agentId: string,
+        processId: string,
+    ): Promise<ComputeProcess | undefined> {
+        void ctx;
+        return await this.#processes.stop(agentId, processId);
     }
 
     /**
@@ -318,6 +360,8 @@ export class ComputeModule implements AgentModule {
         if (this.#disposePromise !== undefined) return await this.#disposePromise;
         this.#closed = true;
         this.#disposePromise = (async () => {
+            for (const { compute } of this.#computes.values()) this.#processes.detach(compute);
+            await this.#processes.drain();
             await Promise.allSettled([...this.#activeOperations]);
             const cached = [...this.#computes.values()];
             this.#computes.clear();
@@ -327,6 +371,7 @@ export class ComputeModule implements AgentModule {
                 ...cached.map(async ({ compute }) => await compute.dispose(ctx)),
                 ...(reviewer === undefined ? [] : [reviewer.dispose(ctx)]),
             ]);
+            this.#processes.clear();
         })();
         return await this.#disposePromise;
     }
@@ -399,7 +444,10 @@ export class ComputeModule implements AgentModule {
                     const cached = this.#computes.get(agent.id);
                     if (cached === undefined) return;
                     this.#computes.delete(agent.id);
+                    this.#processes.detach(cached.compute);
+                    await this.#processes.drain();
                     await cached.compute.dispose(lockCtx);
+                    this.#processes.exitAll(agent.id, cached.compute);
                 }),
             );
         },

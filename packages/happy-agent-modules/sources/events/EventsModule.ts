@@ -31,6 +31,8 @@ import {
     loadActiveRun,
     loadActiveRuns,
     loadEventState,
+    loadLatestAgentEvent,
+    loadPreviousEventCursor,
     saveActiveRun,
     saveOriginCursor,
     trimEvents,
@@ -46,6 +48,9 @@ import {
     type EventListener,
     type EventReplay,
     type EventsModuleListener,
+    latestAgentEventSchema,
+    type LatestAgentEvent,
+    eventAgentIdSchema,
 } from "./types.js";
 
 const unknownRecordSchema = Type.Record(Type.String(), Type.Unknown());
@@ -62,6 +67,9 @@ const activeRunSchema = Type.Object(
         ]),
         argumentBuffers: Type.Record(Type.String(), Type.String()),
         blocks: Type.Array(Type.Unknown()),
+        acceptedMessageIds: Type.Array(Type.String({ minLength: 1, maxLength: 256 }), {
+            maxItems: 512,
+        }),
         callIndexes: Type.Record(Type.String(), Type.Integer({ minimum: 0 })),
         /**
          * What the provider said when it ended the run badly. It is kept on the run so the
@@ -70,6 +78,7 @@ const activeRunSchema = Type.Object(
          */
         errorMessage: Type.Optional(Type.String({ maxLength: 8_192 })),
         runId: Type.String({ minLength: 1, maxLength: 256 }),
+        hasProviderEvent: Type.Boolean(),
         stopReason: Type.Union([
             Type.Literal("aborted"),
             Type.Literal("error"),
@@ -153,6 +162,18 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
         return this.#entries.findLast((event) => event.agentId === agentId)?.id;
     }
 
+    /** The newest durable event identity and time for one agent, read as one consistent fact. */
+    async latestAgentEvent(ctx: Context, agentId: string): Promise<LatestAgentEvent | undefined> {
+        if (!Value.Check(eventAgentIdSchema, agentId)) {
+            throw new Error("The event journal received an invalid agent event lookup.");
+        }
+        const latest = await loadLatestAgentEvent(ctx.db, agentId);
+        if (latest !== undefined && !Value.Check(latestAgentEventSchema, latest)) {
+            throw new Error("The event journal found invalid latest agent event metadata.");
+        }
+        return latest;
+    }
+
     /**
      * How many events the live window keeps. Every bound inside the journal reads it from here, so
      * a subclass that answers differently really does get a smaller window — which is how a test
@@ -170,6 +191,72 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
      */
     activeRunId(agentId: string): string | undefined {
         return this.#runs.get(agentId)?.runId;
+    }
+
+    /** The active run identity visible inside the caller's current transaction. */
+    async activeRunIdInTransaction(ctx: Context, agentId: string): Promise<string | undefined> {
+        if (!Value.Check(eventAgentIdSchema, agentId)) {
+            throw new Error("The event journal received an invalid active run lookup.");
+        }
+        return (await loadActiveRun(ctx.db, agentId, parseActiveRun))?.runId;
+    }
+
+    /**
+     * Resolve and persist the exact run identity for one accepted message in the caller's
+     * transaction.
+     *
+     * Multiple messages consumed together share the first message's run. Once provider work has
+     * begun, the next accepted message opens the next run; steering is therefore a boundary while
+     * messages merely queued during a run remain pending until that run has produced its answer.
+     * Repeating this for the same accepted ID is harmless, which lets another module ask before
+     * the Events hook records its own envelope.
+     */
+    async runIdForAccepted(
+        ctx: Context,
+        agentId: string,
+        accepted: AgentBaseAcceptedMessage,
+    ): Promise<string> {
+        if (
+            !Value.Check(eventAgentIdSchema, agentId) ||
+            !Value.Check(eventAgentIdSchema, accepted.id)
+        ) {
+            throw new Error("The event journal received an invalid accepted message identity.");
+        }
+        const previous = await loadActiveRun(ctx.db, agentId, parseActiveRun);
+        let run: ActiveRun;
+        if (previous?.acceptedMessageIds.includes(accepted.id) === true) {
+            run = previous;
+        } else if (previous === undefined || previous.hasProviderEvent) {
+            run = {
+                ...emptyRun(accepted.id),
+                acceptedMessageIds: [accepted.id],
+            };
+        } else {
+            run = {
+                ...previous,
+                acceptedMessageIds: [...previous.acceptedMessageIds, accepted.id],
+            };
+        }
+        await saveActiveRun(ctx.db, agentId, run);
+        afterCommit(ctx, () => {
+            this.#runs.set(agentId, run);
+        });
+        return run.runId;
+    }
+
+    /** The exact prior resource-event cursor, including inside the current event transaction. */
+    async previousCursor(
+        ctx: Context,
+        agentId: string,
+        beforeId?: string,
+    ): Promise<string | undefined> {
+        if (
+            !Value.Check(eventAgentIdSchema, agentId) ||
+            (beforeId !== undefined && !Value.Check(eventIdSchema, beforeId))
+        ) {
+            throw new Error("The event journal received an invalid cursor lookup.");
+        }
+        return await loadPreviousEventCursor(ctx.db, agentId, beforeId);
     }
 
     async record(ctx: Context, input: AppendEventInput): Promise<AgentEvent> {
@@ -286,19 +373,13 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
             // The run this message steers may have been accepted earlier in this very transaction,
             // where the in-memory map has not been updated yet, so the transaction's own row is the
             // authority on what is running.
-            const previous = await loadActiveRun(ctx.db, scope.agent.id, parseActiveRun);
-            const run =
-                accepted.kind === "steering" && previous !== undefined
-                    ? previous
-                    : emptyRun(accepted.id);
-            await saveActiveRun(ctx.db, scope.agent.id, run);
-            afterCommit(ctx, () => {
-                this.#runs.set(scope.agent.id, run);
-            });
-            await this.openLoop(ctx, scope.agent.id, run.runId);
+            const runId = await this.runIdForAccepted(ctx, scope.agent.id, accepted);
+            await this.openLoop(ctx, scope.agent.id, runId);
             await this.recordInDatabase(ctx, ctx.db, {
                 agentId: scope.agent.id,
-                payload: { ...accepted, runId: run.runId },
+                // Message content belongs to History and may carry tens of MiB of inline media.
+                // The journal records only the ordered acceptance fact needed to project runs.
+                payload: { id: accepted.id, kind: accepted.kind, runId },
                 type: "message.accepted",
             });
         },
@@ -346,7 +427,11 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
         ): Promise<void> => {
             await ctx.inTx(async (txCtx) => {
                 const current = this.#runs.get(scope.agent.id) ?? emptyRun(this.#createId());
-                const projected = projectProviderEvent(current, event, Date.now());
+                const projected = projectProviderEvent(
+                    { ...current, hasProviderEvent: true },
+                    event,
+                    Date.now(),
+                );
                 await saveActiveRun(txCtx.db, scope.agent.id, projected.run);
                 afterCommit(txCtx, () => {
                     this.#runs.set(scope.agent.id, projected.run);
@@ -554,11 +639,13 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
 
 function emptyRun(runId: string): ActiveRun {
     return {
+        acceptedMessageIds: [],
         activeIndex: null,
         activeKind: null,
         argumentBuffers: {},
         blocks: [],
         callIndexes: {},
+        hasProviderEvent: false,
         runId,
         stopReason: "stop",
         text: "",
@@ -579,14 +666,24 @@ function projectProviderEvent(
     let rigEvent: UnknownRecord | undefined;
     const messageId = `${run.runId}-assistant`;
     if (event.type === "block_start") {
-        run = { ...emptyRun(run.runId), stopReason: run.stopReason };
+        run = {
+            ...emptyRun(run.runId),
+            acceptedMessageIds: run.acceptedMessageIds,
+            hasProviderEvent: true,
+            stopReason: run.stopReason,
+        };
         rigEvent = { messageId, type: "block_start" };
     } else if (event.type === "block_stop") {
         run.activeIndex = null;
         run.activeKind = null;
         rigEvent = { messageId, type: "block_stop" };
     } else if (event.type === "block_reset") {
-        run = { ...emptyRun(run.runId), stopReason: run.stopReason };
+        run = {
+            ...emptyRun(run.runId),
+            acceptedMessageIds: run.acceptedMessageIds,
+            hasProviderEvent: true,
+            stopReason: run.stopReason,
+        };
         rigEvent = { messageId, partial: partialMessage(run, now), type: "block_reset" };
     } else if (event.type === "text_start") {
         run.activeIndex = run.blocks.length;

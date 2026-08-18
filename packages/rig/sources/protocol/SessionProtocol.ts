@@ -1043,24 +1043,6 @@ export interface CancelScheduledMessageResponse {
     message?: ScheduledMessage;
 }
 
-export interface RecordSessionActivityResponse {
-    recorded: true;
-}
-
-export interface SessionTerminalHeartbeatRequest {
-    connectionId: string;
-    focused: boolean;
-    targetPid: number;
-}
-
-export interface SessionTerminalHeartbeatResponse {
-    connected: true;
-}
-
-export interface DisconnectSessionTerminalResponse {
-    disconnected: boolean;
-}
-
 export interface RunShellCommandRequest {
     command: string;
     commandId: string;

@@ -6,6 +6,8 @@ export {
     runIdOf,
     type AgentGym,
     type AgentGymOptions,
+    type GymAgentEvent,
+    type GymAgentHistory,
     type GymAcceptance,
     type GymCreateSessionOptions,
     type GymSelection,

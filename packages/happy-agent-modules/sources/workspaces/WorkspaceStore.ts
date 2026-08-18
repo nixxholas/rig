@@ -11,6 +11,7 @@ import {
     workspaceMutationOperationSchema,
     workspaceNameSchema,
     workspaceOperationIdSchema,
+    workspaceParentIdSchema,
     workspacePathSchema,
     workspacePresenceSchema,
     workspaceProjectRefSchema,
@@ -55,8 +56,8 @@ import {
 import { byOrder, orderKeyBetween } from "./store/workspaceOrdering.js";
 import {
     assertWorkspace,
-    readProjectWorkspaces,
     readProjectWorkspacesFor,
+    readWorkspaceChildren,
     readWorkspace,
     readWorkspaceByPath,
     readWorkspacePage,
@@ -83,6 +84,7 @@ export const workspaceStoreReserveInputSchema = Type.Object(
     {
         id: workspaceIdSchema,
         projectRef: workspaceProjectRefSchema,
+        parentId: workspaceParentIdSchema,
         name: workspaceNameSchema,
         nameConfigured: Type.Boolean(),
         kind: workspaceKindSchema,
@@ -474,7 +476,9 @@ export function createWorkspaceStore(catalog: WorkspacesModule): WorkspaceStore 
             if (target === undefined) {
                 throw new Error(`Workspace "${input.workspaceId}" was not found.`);
             }
-            const ordered = (await readProjectWorkspaces(database, target.projectRef))
+            const ordered = (
+                await readWorkspaceChildren(database, target.projectRef, target.parentId)
+            )
                 .filter((row) => row.id !== input.workspaceId)
                 .sort(byOrder);
             const afterIndex =
@@ -496,18 +500,37 @@ export function createWorkspaceStore(catalog: WorkspacesModule): WorkspaceStore 
             });
         },
 
-        beginArchive: async (ctx, input, operation) =>
-            await update(ctx, input.workspaceId, operation, (before) => {
+        beginArchive: async (ctx, input, operation) => {
+            const before = await readWorkspace(ctx.db, input.workspaceId);
+            if (
+                before !== undefined &&
+                before.status !== "archived" &&
+                before.status !== "archiving"
+            ) {
+                const activeChildren = await readWorkspaceChildren(
+                    ctx.db,
+                    before.projectRef,
+                    before.id,
+                    false,
+                );
+                if (activeChildren.length > 0) {
+                    throw new Error(
+                        "A workspace with an active child workspace cannot be archived.",
+                    );
+                }
+            }
+            return await update(ctx, input.workspaceId, operation, (current) => {
                 assertExpectedVersion(
-                    before,
+                    current,
                     input.expectedVersion,
                     "The workspace changed before it could be archived.",
                 );
-                if (isSettled(before)) return undefined;
-                const next: Workspace = { ...before, status: "archiving" };
+                if (isSettled(current)) return undefined;
+                const next: Workspace = { ...current, status: "archiving" };
                 delete next.initializationError;
                 return next;
-            }),
+            });
+        },
 
         completeArchive: async (ctx, input, operation) =>
             await update(ctx, input.workspaceId, operation, (before) => {
@@ -673,11 +696,16 @@ async function defaultWorkspaceTransfer(
     if (workspace === undefined) throw new Error(`Workspace "${input.workspaceId}" was not found.`);
     const changed = workspace.projectRef !== input.targetProjectRef;
     if (changed) {
+        const children = await readWorkspaceChildren(database, workspace.projectRef, workspace.id);
+        if (children.length > 0) {
+            throw new Error("A workspace with nested workspaces cannot move to another project.");
+        }
         await writeWorkspace(
             database,
             {
                 ...workspace,
                 projectRef: input.targetProjectRef,
+                parentId: input.targetProjectRef,
                 version: workspace.version + 1,
                 updatedAt: Math.max(now(), workspace.updatedAt + 1),
             },

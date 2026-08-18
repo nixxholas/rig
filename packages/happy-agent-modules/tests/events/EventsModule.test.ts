@@ -187,6 +187,36 @@ describe("EventsModule", () => {
         }
     });
 
+    it("reads the transaction-authoritative active run before commit and after restart", async () => {
+        const first = new EventsModule();
+        const database = moduleDatabase(first.migrations ?? [], "events-active-run-lookup");
+        await database.ready;
+        try {
+            await first.beforeStart?.(database.context);
+            await database.context.inTx(async (txCtx) => {
+                const runId = await first.runIdForAccepted(txCtx, "agent-1", {
+                    id: "message-1",
+                    kind: "message",
+                    message: { content: [{ type: "text", text: "Hello" }] },
+                } as never);
+                expect(first.activeRunId("agent-1")).toBeUndefined();
+                await expect(first.activeRunIdInTransaction(txCtx, "agent-1")).resolves.toBe(runId);
+            });
+
+            const durableRunId = await first.activeRunIdInTransaction(database.context, "agent-1");
+            expect(durableRunId).toBe(first.activeRunId("agent-1"));
+
+            const restarted = new EventsModule();
+            await restarted.beforeStart?.(database.context);
+            await expect(
+                restarted.activeRunIdInTransaction(database.context, "agent-1"),
+            ).resolves.toBe(durableRunId);
+            expect(restarted.activeRunId("agent-1")).toBe(durableRunId);
+        } finally {
+            database.close();
+        }
+    });
+
     it("retains only its live window and persists the advanced origin", async () => {
         const first = new SmallWindowEventsModule(2);
         const database = moduleDatabase(first.migrations ?? [], "events-retention-test");
@@ -694,6 +724,140 @@ describe("EventsModule", () => {
         }
     });
 
+    it("opens a successor run only when steering follows provider work", async () => {
+        const events = new EventsModule();
+        const database = moduleDatabase(events.migrations ?? [], "events-steering-boundary-test");
+        await database.ready;
+        try {
+            const hooks = await resolveModuleHooks(database.context, events);
+            const scope = scopeFor("agent-steering-boundary");
+            await hooks.messageAcceptedTransact?.(database.context, scope, {
+                id: "message-first",
+                kind: "send",
+                message: { role: "user", content: [{ type: "text", text: "Start." }] },
+            });
+            await hooks.onEvent?.(database.context, scope, { type: "text_start" });
+            await hooks.messageAcceptedTransact?.(database.context, scope, {
+                id: "message-steering",
+                kind: "steering",
+                message: { role: "user", content: [{ type: "text", text: "Adjust." }] },
+            });
+
+            const accepted = events
+                .replay(events.originCursor())
+                ?.events.filter((event) => event.type === "message.accepted")
+                .map((event) => event.payload as { runId: string });
+            expect(accepted?.map((event) => event.runId)).toEqual([
+                "message-first",
+                "message-steering",
+            ]);
+        } finally {
+            database.close();
+        }
+    });
+
+    it("resolves an exact prior agent cursor transactionally and after restart", async () => {
+        const events = new EventsModule();
+        const database = moduleDatabase(events.migrations ?? [], "events-previous-cursor-test");
+        await database.ready;
+        try {
+            await resolveModuleHooks(database.context, events);
+            const first = await events.record(database.context, {
+                agentId: "agent-cursor",
+                payload: {},
+                type: "test.first",
+            });
+            const other = await events.record(database.context, {
+                agentId: "other-agent",
+                payload: {},
+                type: "test.other",
+            });
+            const second = await events.record(database.context, {
+                agentId: "agent-cursor",
+                payload: {},
+                type: "test.second",
+            });
+
+            expect(await events.previousCursor(database.context, "agent-cursor", second.id)).toBe(
+                first.id,
+            );
+            expect(await events.previousCursor(database.context, "agent-cursor")).toBe(second.id);
+            expect(other.id > first.id).toBe(true);
+            expect(await events.latestAgentEvent(database.context, "agent-cursor")).toEqual({
+                cursor: second.id,
+                occurredAt: second.occurredAt,
+            });
+
+            await database.context.inTx(async (txCtx) => {
+                const third = await events.record(txCtx, {
+                    agentId: "agent-cursor",
+                    payload: {},
+                    type: "test.third",
+                });
+                expect(await events.latestAgentEvent(txCtx, "agent-cursor")).toEqual({
+                    cursor: third.id,
+                    occurredAt: third.occurredAt,
+                });
+            });
+
+            const restarted = new EventsModule();
+            await resolveModuleHooks(database.context, restarted);
+            expect(
+                await restarted.previousCursor(database.context, "agent-cursor", second.id),
+            ).toBe(first.id);
+            expect(await restarted.latestAgentEvent(database.context, "agent-cursor")).toEqual(
+                await events.latestAgentEvent(database.context, "agent-cursor"),
+            );
+        } finally {
+            database.close();
+        }
+    });
+
+    it("retains per-agent version truth after the replay journal trims it", async () => {
+        const events = new SmallWindowEventsModule(1);
+        const database = moduleDatabase(events.migrations ?? [], "events-agent-version-retention");
+        await database.ready;
+        try {
+            await resolveModuleHooks(database.context, events);
+            const first = await events.record(database.context, {
+                agentId: "quiet-agent",
+                payload: {},
+                type: "test.first",
+            });
+            await events.record(database.context, {
+                agentId: "other-agent",
+                payload: {},
+                type: "test.other",
+            });
+            expect(events.replay(events.originCursor())?.events).toHaveLength(1);
+            expect(await events.latestAgentEvent(database.context, "quiet-agent")).toEqual({
+                cursor: first.id,
+                occurredAt: first.occurredAt,
+            });
+
+            const second = await events.record(database.context, {
+                agentId: "quiet-agent",
+                payload: {},
+                type: "test.second",
+            });
+            expect(await events.previousCursor(database.context, "quiet-agent", second.id)).toBe(
+                first.id,
+            );
+
+            const restarted = new SmallWindowEventsModule(1);
+            await resolveModuleHooks(database.context, restarted);
+            expect(await restarted.latestAgentEvent(database.context, "quiet-agent")).toEqual({
+                cursor: second.id,
+                occurredAt: second.occurredAt,
+            });
+            expect(await restarted.previousCursor(database.context, "quiet-agent", second.id)).toBe(
+                first.id,
+            );
+        } finally {
+            database.close();
+        }
+    });
+
     it("projects reasoning, tool-call, server-result, retry, reset, and done variants", async () => {
         const events = new EventsModule();
         const database = moduleDatabase(events.migrations ?? [], "events-provider-projection-test");
@@ -1192,7 +1356,7 @@ describe("EventsModule", () => {
                 payload: new Map([["nested", { value: 1 }]]),
                 type: "test.collection-payload",
             });
-            const nested = (observed[0]?.payload as Map<string, { value: number }>).get("nested");
+            const nested = (observed[0]!.payload as Map<string, { value: number }>).get("nested");
             expect(nested).toBeDefined();
             expect(Object.isFrozen(nested)).toBe(true);
         } finally {

@@ -12,6 +12,7 @@ import {
     resourceVersionSchema,
     timestampSchema,
 } from "./common.js";
+import type { Agent } from "./agents.js";
 
 /** What the workspace was created from. */
 export const workspaceBaseSchema = Type.Object({
@@ -24,6 +25,8 @@ export type WorkspaceBase = Static<typeof workspaceBaseSchema>;
 
 /** The workspace object. A project's root workspace shares the project's ID. */
 export const workspaceSchema = Type.Object({
+    /** Ordered top-level agents rooted directly in this workspace. */
+    agents: Type.Array(Type.Unsafe<Agent>({ type: "object" })),
     archivedAt: Nullable(timestampSchema),
     /** `null` on a root workspace, which was not branched from anything. */
     base: Nullable(workspaceBaseSchema),

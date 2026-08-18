@@ -1,11 +1,11 @@
 # Workspaces
 
-A workspace is one place a session actually works: a branch, a folder, a base it came from, and a
+A workspace is one place an agent actually works: a branch, a folder, a base it came from, and a
 lifecycle that says whether it is usable yet. The module owns that catalog and its migrations in the
 Agent Base database, it owns the _decisions_ — which name, which branch, which folder key, which
 status — and it does the Git and filesystem work those decisions imply. Cutting the worktree,
 copying the folder, running the setup commands, replicating the shared files, renaming the branch,
-moving a session between workspaces and removing an archived folder are all this module's own work.
+moving an agent between workspaces and removing an archived folder are all this module's own work.
 There is no host object between the catalog and the disk.
 
 The important consequence is ordering: the durable reservation happens **first**, and Git happens
@@ -31,11 +31,11 @@ const agent = await Agent.create(ctx, { ...options, modules: [projects, workspac
 
 Three modules, and nothing else.
 
-| Module                                      | What it answers                                                        |
-| ------------------------------------------- | ---------------------------------------------------------------------- |
-| [`ConfigModule`](../config/README.md)       | Where managed workspace folders live, whether managed workspaces are on at all, and what a workspace folder does by default — setup commands, sync paths, what is kept on archive. |
-| [`ProjectsModule`](../projects/README.md)   | The project's folder, its credential, its repository lock, and the vocabulary a workspace names things with. |
-| [`GitModule`](../git/README.md)             | Worktrees, branches, clones, transfers, and every path Git is handed.  |
+| Module                                    | What it answers                                                                                                                                                                    |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`ConfigModule`](../config/README.md)     | Where managed workspace folders live, whether managed workspaces are on at all, and what a workspace folder does by default — setup commands, sync paths, what is kept on archive. |
+| [`ProjectsModule`](../projects/README.md) | The project's folder, its credential, its repository lock, and the vocabulary a workspace names things with.                                                                       |
+| [`GitModule`](../git/README.md)           | Worktrees, branches, clones, transfers, and every path Git is handed.                                                                                                              |
 
 The dependency on projects is one-way. A workspace is a branch of a project's repository, in a
 folder under that project's key, cut from the trunk that project decided on, and every worktree of
@@ -56,8 +56,10 @@ that name is [titles](../titles/README.md): it asks, and then renames the worksp
 `inheritName`. What a folder and a branch are called is this catalog's to write down and nobody
 else's, but what they should be called is not a question it asks.
 
-Access is same-owner only: a workspace belongs to the agent that made it, and there is no policy to
-install. Identities are `crypto.randomUUID()` and time is `Date.now()`, both the module's own.
+The catalog records agent placement separately from workspace lifecycle: an agent belongs to at most
+one workspace and its `orderKey` orders it among that workspace's agents. Agent identity and
+lifecycle remain in Agent Base. Identities are `crypto.randomUUID()` and time is `Date.now()`, both
+the module's own.
 `WORKSPACE_PAGE_SIZE` (50) and `MAX_WORKSPACE_OUTPUT_CHARACTERS` (12,000) bound paging and
 model-facing text. `onEventTransactional(listener)` and `onEvent(listener)` take a subscriber and
 return the call that ends the subscription. When the module's own folder removal or branch rename
@@ -76,7 +78,7 @@ on a workspace being able to answer "which branch?" and "which folder?" without 
 
 | Field                                                            | Meaning                                                                                                                                                                |
 | ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `id`, `ownerAgentId`, `projectRef`                               | Identity and ownership.                                                                                                                                                |
+| `id`, `projectRef`, `parentId`                                   | Identity, the project containing the workspace, and its parent. `projectRef` itself is the project's implicit root, so no duplicate root workspace row exists.         |
 | `name`, `nameConfigured`                                         | Display name, and whether a person chose it. An inherited name may be replaced silently; a configured one may not.                                                     |
 | `branch`                                                         | The Git branch, mandatory. Derived as `worktree/<kebab-name>` unless a caller supplies one.                                                                            |
 | `storageKey`                                                     | The kebab-case folder key, mandatory and unique within the project.                                                                                                    |
@@ -86,7 +88,7 @@ on a workspace being able to answer "which branch?" and "which folder?" without 
 | `gitCommonDir`                                                   | The shared `.git` directory a worktree belongs to, for cleanup.                                                                                                        |
 | `presence`                                                       | `"present"` or `"missing"` — whether the folder is still on disk. A reservation starts `missing`, because the durable row is written before anything touches the disk. |
 | `status`                                                         | `initializing`, `ready`, `failed`, `archiving`, or `archived`. There is no `active`.                                                                                   |
-| `orderKey`                                                       | A fractional order key; lexicographic order is list order. New reservations lead the list.                                                                             |
+| `orderKey`                                                       | A fractional order key; lexicographic order is the order among one parent's children. New reservations lead that sibling list.                                         |
 | `version`                                                        | An integer bumped on every durable change, and the token for optimistic concurrency.                                                                                   |
 | `creatorSessionId`                                               | The session that asked for it, if any.                                                                                                                                 |
 | `gitAhead`, `gitBehind`, `gitDetached`, `gitHead`, `gitUpstream` | What the last Git scan observed.                                                                                                                                       |

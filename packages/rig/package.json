@@ -66,6 +66,8 @@
         "@slopus/ghostty-wasm": "1.3.6",
         "@slopus/ghostty-web": "workspace:*",
         "@slopus/happy-agent": "workspace:*",
+        "@slopus/happy-agent-client": "workspace:*",
+        "@slopus/happy-agent-modules": "workspace:*",
         "@slopus/happy-providers": "0.0.10",
         "@steve.kite/stdlib": "0.0.12",
         "smol-toml": "^1.7.0",

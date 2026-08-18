@@ -2,7 +2,7 @@ import type { Duplex } from "node:stream";
 
 import WebSocket from "ws";
 
-import { WebSocketDuplex, createNodeBinaryWebSocket } from "@slopus/happy-agent";
+import { WebSocketDuplex, createNodeBinaryWebSocket } from "@slopus/happy-agent-modules/transport";
 
 const MAX_WIRE_MESSAGE_BYTES = 4 * 1024 * 1024 + 20;
 

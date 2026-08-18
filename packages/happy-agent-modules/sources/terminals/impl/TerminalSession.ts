@@ -36,19 +36,24 @@ export class TerminalSession {
     readonly #driver: GhosttyRemoteTerminalServerDriver;
     #exitCode: number | null = null;
     readonly #exited: Promise<void>;
-    readonly #onChange: () => void;
+    readonly #nextVersion: () => string;
+    readonly #onChange: (before: Terminal, after: Terminal) => void;
     readonly #process: TerminalProcess;
     readonly #protocol: RemoteTerminalProtocolServer;
     readonly #state: GhosttyTerminalState;
     #status: "exited" | "running" = "running";
     readonly #unsubscribe: () => void;
+    #version: string;
+    readonly #workspaceId: string;
 
     private constructor(options: {
         readonly colorScheme: TerminalColorScheme;
         readonly created: ReturnType<typeof createGhosttyRemoteTerminalServer>;
-        readonly onChange: () => void;
+        readonly nextVersion: () => string;
+        readonly onChange: (before: Terminal, after: Terminal) => void;
         readonly process: TerminalProcess;
         readonly state: GhosttyTerminalState;
+        readonly workspaceId: string;
     }) {
         this.colorScheme = options.colorScheme;
         this.#state = options.state;
@@ -56,19 +61,23 @@ export class TerminalSession {
         this.#driver = options.created.driver;
         this.#protocol = options.created.protocol;
         this.#onChange = options.onChange;
+        this.#nextVersion = options.nextVersion;
+        this.#version = options.nextVersion();
+        this.#workspaceId = options.workspaceId;
         this.#unsubscribe = options.process.onData((data) => {
             // Output the canonical emulator cannot accept is not something to retry or drop: the
             // screen would silently stop matching. Ending the process is the honest failure.
             void this.#driver.publishOutput(data).catch(() => options.process.kill());
         });
         this.#exited = options.process.wait().then(async ({ exitCode }) => {
+            const before = this.terminal();
             this.#exitCode = exitCode;
             this.#status = "exited";
             this.#unsubscribe();
             // Exit is ordered after the last display barrier, so a viewer sees the final screen
             // and only then learns the process is gone.
             await this.#driver.publishExit(exitCode).catch(() => undefined);
-            this.#onChange();
+            this.#changed(before);
         });
     }
 
@@ -77,10 +86,12 @@ export class TerminalSession {
         readonly colorScheme: TerminalColorScheme;
         readonly cwd: string;
         readonly maxScrollback: number;
-        readonly onChange?: () => void;
+        readonly nextVersion: () => string;
+        readonly onChange: (before: Terminal, after: Terminal) => void;
         readonly processFactory: TerminalProcessFactory;
         readonly processOptions: Parameters<TerminalProcessFactory["start"]>[0];
         readonly rows: number;
+        readonly workspaceId: string;
     }): Promise<TerminalSession> {
         const state = await GhosttyTerminalState.create({
             cols: options.cols,
@@ -124,9 +135,11 @@ export class TerminalSession {
             return new TerminalSession({
                 colorScheme: options.colorScheme,
                 created,
-                onChange: options.onChange ?? (() => undefined),
+                nextVersion: options.nextVersion,
+                onChange: options.onChange,
                 process,
                 state,
+                workspaceId: options.workspaceId,
             });
         } catch (error) {
             await process?.kill();
@@ -162,10 +175,11 @@ export class TerminalSession {
      */
     async resize(cols: number, rows: number): Promise<Terminal> {
         assertSize(cols, rows);
+        const before = this.terminal();
+        if (before.cols === cols && before.rows === rows) return before;
         await this.#protocol.resize(cols, rows);
-        const terminal = this.terminal();
-        this.#onChange();
-        return terminal;
+        this.#changed(before);
+        return this.terminal();
     }
 
     async stop(): Promise<Terminal> {
@@ -184,8 +198,31 @@ export class TerminalSession {
             id: this.id,
             rows: dimensions.rows,
             status: this.#status,
+            version: this.#version,
+            workspaceId: this.#workspaceId,
         };
     }
+
+    /** Mint one new resource version and notify observers if state actually changed. */
+    #changed(before: Terminal): void {
+        const current = this.terminal();
+        if (sameTerminalState(before, current)) return;
+        this.#version = this.#nextVersion();
+        this.#onChange(before, this.terminal());
+    }
+}
+
+function sameTerminalState(left: Terminal, right: Terminal): boolean {
+    return (
+        left.cols === right.cols &&
+        left.colorScheme === right.colorScheme &&
+        left.epoch === right.epoch &&
+        left.exitCode === right.exitCode &&
+        left.id === right.id &&
+        left.rows === right.rows &&
+        left.status === right.status &&
+        left.workspaceId === right.workspaceId
+    );
 }
 
 /**

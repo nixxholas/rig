@@ -8,6 +8,7 @@ import { withAfterCommit, withLogger, type Context } from "@steve.kite/stdlib";
 import { sql } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { EventsModule } from "../../sources/events/EventsModule.js";
 import {
     MAX_USAGE_GROUPS,
     MAX_USAGE_OUTPUT_CHARACTERS,
@@ -56,8 +57,11 @@ async function withUsageDatabase<T>(
     name: string,
     callback: (database: UsageDatabaseHandle) => Promise<T>,
 ): Promise<T> {
-    const database = moduleDatabase([], name) as UsageDatabaseHandle;
-    const module = new UsageModule();
+    const events = new EventsModule();
+    const database = moduleDatabase(events.migrations, name) as UsageDatabaseHandle;
+    await database.ready;
+    await events.beforeStart?.(database.context);
+    const module = new UsageModule(events);
     try {
         for (const [, migration] of module.migrations) {
             await migration(database.context, database.database);
@@ -198,7 +202,7 @@ function fakeAgents(
 
 /** A module already started against a collection, the way the system starts one. */
 async function startedModule(ctx: Context, agents: AgentSystemRef): Promise<UsageModule> {
-    const module = new UsageModule();
+    const module = new UsageModule(new EventsModule());
     await resolveModuleHooks(ctx, module, agents);
     return module;
 }
@@ -239,7 +243,7 @@ describe("UsageModule edge cases", () => {
             // Only the clock is moved; the database and its promises keep real timers.
             vi.useFakeTimers({ toFake: ["Date"] });
             vi.setSystemTime(100);
-            const module = new UsageModule();
+            const module = new UsageModule(new EventsModule());
             const hooks = await resolveModuleHooks(database.context, module);
             const runKV = new FakeKV();
             const scope = makeScope(database.database, runKV);
@@ -306,7 +310,7 @@ describe("UsageModule edge cases", () => {
     it("treats missing provider tokens as an advisory observation failure and clears pending state", async () => {
         await withUsageDatabase("usage-missing-tokens", async (database) => {
             const [ctx, warnings] = capturingContext(database.context);
-            const module = new UsageModule();
+            const module = new UsageModule(new EventsModule());
             const hooks = await resolveModuleHooks(ctx, module);
             const runKV = new FakeKV();
             const scope = makeScope(database.database, runKV);
@@ -342,7 +346,7 @@ describe("UsageModule edge cases", () => {
             const [ctx, warnings] = capturingContext(database.context);
             vi.useFakeTimers({ toFake: ["Date"] });
             vi.setSystemTime(200);
-            const module = new UsageModule();
+            const module = new UsageModule(new EventsModule());
             const hooks = await resolveModuleHooks(ctx, module);
             const scope = makeScope(database.database);
 
@@ -372,7 +376,7 @@ describe("UsageModule edge cases", () => {
     it("survives a fresh module instance and rejects malformed JSON at the persistence boundary", async () => {
         await withUsageDatabase("usage-reload-and-malformed-json", async (database) => {
             await insertRawRecord(database, inferenceRecord("reload", "agent-1", 10));
-            const fresh = new UsageModule();
+            const fresh = new UsageModule(new EventsModule());
             await expect(fresh.readPage(database.context, "agent-1")).resolves.toMatchObject({
                 totalRecords: 1,
                 records: [{ id: "reload" }],
@@ -397,9 +401,9 @@ describe("UsageModule edge cases", () => {
                 durationMs: 999,
             });
             await insertRawRecord(database, invalid);
-            await expect(new UsageModule().readPage(database.context, "agent-1")).rejects.toThrow(
-                "duration",
-            );
+            await expect(
+                new UsageModule(new EventsModule()).readPage(database.context, "agent-1"),
+            ).rejects.toThrow("duration");
         });
     });
 
@@ -415,7 +419,9 @@ describe("UsageModule edge cases", () => {
              * a trusted total.
              */
             await expect(
-                new UsageModule().aggregate(database.context, { agentId: "agent-1" }),
+                new UsageModule(new EventsModule()).aggregate(database.context, {
+                    agentId: "agent-1",
+                }),
             ).rejects.toThrow("duration");
         });
     });
@@ -429,7 +435,7 @@ describe("UsageModule edge cases", () => {
                     inferenceRecord(`record-${index}`, "agent-1", index + 10),
                 );
             }
-            const module = new UsageModule();
+            const module = new UsageModule(new EventsModule());
             const first = await module.readPage(database.context, "agent-1", { limit: 7 });
             expect(first.records).toHaveLength(7);
             expect(first.records[0]?.id).toBe("record-1");
@@ -462,7 +468,7 @@ describe("UsageModule edge cases", () => {
                     }),
                 );
             }
-            const module = new UsageModule();
+            const module = new UsageModule(new EventsModule());
             const pages: UsageSummary[] = [];
             let cursor = 0;
             while (true) {
@@ -489,7 +495,7 @@ describe("UsageModule edge cases", () => {
 
     it("rejects invalid page and aggregate bounds before touching storage", async () => {
         await withUsageDatabase("usage-query-bounds", async (database) => {
-            const module = new UsageModule();
+            const module = new UsageModule(new EventsModule());
             await expect(
                 module.readPage(database.context, "agent-1", { limit: USAGE_PAGE_SIZE }),
             ).resolves.toMatchObject({ agentId: "agent-1", cursor: 0 });
@@ -515,7 +521,7 @@ describe("UsageModule edge cases", () => {
         await withUsageDatabase("usage-agent-boundary", async (database) => {
             await insertRawRecord(database, inferenceRecord("owned", "agent-1", 10));
             await insertRawRecord(database, inferenceRecord("other", "agent-2", 11));
-            const module = new UsageModule();
+            const module = new UsageModule(new EventsModule());
             const current = agentContext(database.context, "agent-1");
 
             await expect(module.read(current, "agent-2")).rejects.toThrow("current agent");
@@ -536,7 +542,7 @@ describe("UsageModule edge cases", () => {
         await withUsageDatabase("usage-tool-scope", async (database) => {
             await insertRawRecord(database, inferenceRecord("a", "agent-1", 11));
             await insertRawRecord(database, inferenceRecord("b", "agent-2", 12));
-            const module = new UsageModule();
+            const module = new UsageModule(new EventsModule());
             const hostTool = getUsageTool(module);
             await expect(
                 hostTool.execute(database.context, { target: "agent-2" }, undefined as never),
@@ -576,10 +582,7 @@ describe("UsageModule edge cases", () => {
                 }),
             );
             const tree = await module.readAgentTreeUsage(database.context, "agent-1");
-            expect(tree.sessions.map((session) => session.agentId)).toEqual([
-                "agent-1",
-                "agent-2",
-            ]);
+            expect(tree.sessions.map((session) => session.agentId)).toEqual(["agent-1", "agent-2"]);
             expect(tree.sessions[0]).toMatchObject({ relation: "root", path: "/agent-1" });
             expect(tree.sessions[1]).toMatchObject({
                 parentAgentId: "agent-1",
@@ -618,11 +621,10 @@ describe("UsageModule edge cases", () => {
         });
     });
 
-
     it("answers a subtree read only from inside that subtree, and never before it has started", async () => {
         await withUsageDatabase("usage-tree-authorization", async (database) => {
             await expect(
-                new UsageModule().readAgentTreeUsage(database.context, "agent-1"),
+                new UsageModule(new EventsModule()).readAgentTreeUsage(database.context, "agent-1"),
             ).rejects.toThrow("before it started");
 
             const module = await startedModule(
@@ -631,7 +633,7 @@ describe("UsageModule edge cases", () => {
                     "agent-1": {},
                     "agent-2": { createdBy: "agent-1", parent: "agent-1" },
                     "agent-3": { createdBy: "agent-2", parent: "agent-2" },
-                    "elsewhere": {},
+                    elsewhere: {},
                 }),
             );
             // Host code names no agent, so no agent-facing policy applies to it.
@@ -650,10 +652,9 @@ describe("UsageModule edge cases", () => {
         });
     });
 
-
     it("renders bounded model output without emitting a partial group row", async () => {
         await withUsageDatabase("usage-output-bounds", async (database) => {
-            const module = new UsageModule();
+            const module = new UsageModule(new EventsModule());
             const summary: UsageSummary = {
                 agentId: "agent-1",
                 cursor: 0,
@@ -701,14 +702,13 @@ describe("UsageModule edge cases", () => {
         });
     });
 
-
     it("publishes one stable deeply frozen event to both kinds of subscriber", async () => {
         await withUsageDatabase("usage-events-stable", async (database) => {
             vi.useFakeTimers({ toFake: ["Date"] });
             vi.setSystemTime(100);
             let transactional: UsageEvent | undefined;
             let postCommit: UsageEvent | undefined;
-            const module = new UsageModule();
+            const module = new UsageModule(new EventsModule());
             module.onEventTransactional((_ctx: Context, event: UsageEvent) => {
                 transactional = event;
                 expect(Object.isFrozen(event)).toBe(true);
@@ -756,7 +756,6 @@ describe("UsageModule edge cases", () => {
         });
     });
 
-
     it("contains a hostile post-commit subscriber failure after the record is durable", async () => {
         await withUsageDatabase("usage-post-commit-errors", async (database) => {
             const [ctx, warnings] = capturingContext(database.context);
@@ -769,7 +768,7 @@ describe("UsageModule edge cases", () => {
                 },
             };
             const announced: string[] = [];
-            const module = new UsageModule();
+            const module = new UsageModule(new EventsModule());
             module.onEvent(async () => {
                 throw hostile;
             });
@@ -805,12 +804,11 @@ describe("UsageModule edge cases", () => {
         });
     });
 
-
     it("does not publish reset events or delete rows when an outer transaction rolls back", async () => {
         await withUsageDatabase("usage-reset-rollback", async (database) => {
             await insertRawRecord(database, inferenceRecord("rollback", "agent-1", 10));
             const events: UsageEvent[] = [];
-            const module = new UsageModule();
+            const module = new UsageModule(new EventsModule());
             module.onEvent((_ctx: Context, event: UsageEvent) => {
                 events.push(event);
             });
@@ -828,11 +826,10 @@ describe("UsageModule edge cases", () => {
         });
     });
 
-
     it("does not let a transactional subscriber failure escape advisory accounting", async () => {
         await withUsageDatabase("usage-transactional-listener-failure", async (database) => {
             const [ctx, warnings] = capturingContext(database.context);
-            const module = new UsageModule();
+            const module = new UsageModule(new EventsModule());
             module.onEventTransactional(() => {
                 throw new Error("transactional projection failed");
             });
@@ -870,12 +867,10 @@ describe("UsageModule edge cases", () => {
         });
     });
 
-
-
     it("takes nothing, and keeps one set of bounds no caller can widen", async () => {
-        expect(new UsageModule()).toBeInstanceOf(UsageModule);
+        expect(new UsageModule(new EventsModule())).toBeInstanceOf(UsageModule);
         await withUsageDatabase("usage-fixed-bounds", async (database) => {
-            const module = new UsageModule();
+            const module = new UsageModule(new EventsModule());
             await expect(
                 module.readPage(database.context, "agent-1", { limit: USAGE_PAGE_SIZE }),
             ).resolves.toMatchObject({ agentId: "agent-1", cursor: 0 });
@@ -890,7 +885,6 @@ describe("UsageModule edge cases", () => {
             ).rejects.toThrow(`cannot exceed ${USAGE_GROUP_PAGE_SIZE}`);
         });
     });
-
 
     it("names every agent in the tree by its full path from the root of the snapshot", async () => {
         await withUsageDatabase("usage-tree-paths", async (database) => {
@@ -917,7 +911,6 @@ describe("UsageModule edge cases", () => {
         });
     });
 
-
     it("keeps reset events bounded and reports the removed count", async () => {
         await withUsageDatabase("usage-reset-event-count", async (database) => {
             for (let index = 0; index < 3; index++) {
@@ -929,7 +922,7 @@ describe("UsageModule edge cases", () => {
             vi.useFakeTimers({ toFake: ["Date"] });
             vi.setSystemTime(100);
             const events: UsageEvent[] = [];
-            const module = new UsageModule();
+            const module = new UsageModule(new EventsModule());
             module.onEventTransactional((_ctx: Context, event: UsageEvent) => {
                 events.push(event);
             });
@@ -948,7 +941,6 @@ describe("UsageModule edge cases", () => {
         });
     });
 
-
     it("returns exact collection aggregates and latest context measurements", async () => {
         await withUsageDatabase("usage-collection-aggregate", async (database) => {
             await insertRawRecord(database, inferenceRecord("one", "agent-1", 10));
@@ -964,7 +956,10 @@ describe("UsageModule edge cases", () => {
                     tokens: { input: 4, output: 6 },
                 }),
             );
-            const summary = await new UsageModule().aggregate(database.context, {});
+            const summary = await new UsageModule(new EventsModule()).aggregate(
+                database.context,
+                {},
+            );
             expect(summary).toMatchObject({
                 totalTokens: 15,
                 inferenceCount: 2,
@@ -984,7 +979,7 @@ describe("UsageModule edge cases", () => {
 
     it("keeps model-facing tree output bounded at the minimum budget", async () => {
         await withUsageDatabase("usage-tree-output", async (database) => {
-            const module = new UsageModule();
+            const module = new UsageModule(new EventsModule());
             const large: UsageAgentTree = {
                 sessions: [
                     { agentId: "agent-1", path: "/agent-1", relation: "root", totalTokens: 10 },
@@ -1011,11 +1006,10 @@ describe("UsageModule edge cases", () => {
         });
     });
 
-
     it("validates aggregate shape and rejects forged totals/cursors from persisted storage", async () => {
         await withUsageDatabase("usage-summary-invariants", async (database) => {
             await insertRawRecord(database, inferenceRecord("summary", "agent-1", 10));
-            const module = new UsageModule();
+            const module = new UsageModule(new EventsModule());
             const summary = await module.aggregate(database.context, {
                 agentId: "agent-1",
             });

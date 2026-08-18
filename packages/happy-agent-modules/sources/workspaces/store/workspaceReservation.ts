@@ -24,6 +24,8 @@ import {
     insertWorkspace,
     isUniquenessConflict,
     readProjectWorkspaces,
+    readWorkspaceAncestorIds,
+    readWorkspaceChildren,
     readWorkspace,
 } from "./workspaceRecords.js";
 
@@ -68,15 +70,19 @@ export async function reserveWorkspace(
 
     const probe = reservationProbe(input.projectRef, hooks, catalog);
     const seed = input.storageKeySeed ?? workspaceStorageKey(input.name);
+    await assertParentIsInProject(database, input);
 
     for (let attempt = 1; ; attempt += 1) {
-        const siblings = await readProjectWorkspaces(database, input.projectRef);
+        const projectWorkspaces = await readProjectWorkspaces(database, input.projectRef);
+        const siblings = await readWorkspaceChildren(database, input.projectRef, input.parentId);
         const name = uniqueWorkspaceName(input.name, (candidate) =>
-            siblings.some((row) => workspaceNameKey(row.name) === workspaceNameKey(candidate)),
+            projectWorkspaces.some(
+                (row) => workspaceNameKey(row.name) === workspaceNameKey(candidate),
+            ),
         );
         const storageKey = await uniqueWorkspaceStorageKey(seed, async (candidate) => {
             if (
-                siblings.some(
+                projectWorkspaces.some(
                     (row) =>
                         row.storageKey.toLocaleLowerCase("en-US") ===
                         candidate.toLocaleLowerCase("en-US"),
@@ -89,7 +95,7 @@ export async function reserveWorkspace(
         const branch = await uniqueWorkspaceBranch(
             workspaceBranchName(input.storageKeySeed ?? name),
             async (candidate) => {
-                if (siblings.some((row) => row.branch === candidate)) return true;
+                if (projectWorkspaces.some((row) => row.branch === candidate)) return true;
                 return await probe.isBranchUnavailable(candidate);
             },
         );
@@ -103,6 +109,7 @@ export async function reserveWorkspace(
         const workspace: Workspace = {
             id: input.id,
             projectRef: input.projectRef,
+            parentId: input.parentId,
             name,
             nameConfigured: input.nameConfigured,
             branch,
@@ -167,6 +174,9 @@ export function assertReservationStillMeans(
     if (existing.projectRef !== input.projectRef) {
         throw new Error("That workspace ID already names a workspace in another project.");
     }
+    if (existing.parentId !== input.parentId) {
+        throw new Error("That workspace ID already names a workspace under another parent.");
+    }
     if (existing.kind !== input.kind) {
         throw new Error("That workspace ID already names a workspace of another kind.");
     }
@@ -215,6 +225,27 @@ export function assertReservationStillMeans(
     ) {
         throw new Error("That workspace ID already names a workspace in another folder.");
     }
+}
+
+async function assertParentIsInProject(
+    database: AgentDatabase,
+    input: WorkspaceStoreReserveInput,
+): Promise<void> {
+    if (input.id === input.projectRef) {
+        throw new Error("A workspace cannot use its project's implicit root ID.");
+    }
+    if (input.parentId === input.id) {
+        throw new Error("A workspace cannot be its own parent.");
+    }
+    if (input.parentId === input.projectRef) return;
+    const parent = await readWorkspace(database, input.parentId);
+    if (parent === undefined) {
+        throw new Error(`Workspace parent "${input.parentId}" was not found.`);
+    }
+    if (parent.projectRef !== input.projectRef) {
+        throw new Error("A workspace parent must belong to the same project.");
+    }
+    await readWorkspaceAncestorIds(database, parent);
 }
 
 /**

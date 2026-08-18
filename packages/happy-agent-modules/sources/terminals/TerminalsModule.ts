@@ -4,18 +4,25 @@ import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { mapAsyncLock, type Context, type MapAsyncLock } from "@steve.kite/stdlib";
 
+import { createUuidV7Factory } from "../events/index.js";
 import { ProjectsModule } from "../projects/index.js";
 import { WorkspacesModule } from "../workspaces/index.js";
 
 import {
     createTerminalInputSchema,
     resizeTerminalInputSchema,
+    terminalEventListenerSchema,
+    terminalEventSchema,
     terminalScopeSchema,
     TerminalError,
     type CreateTerminalInput,
     type ResizeTerminalInput,
     type Terminal,
+    type TerminalChanges,
+    type TerminalEvent,
+    type TerminalEventListener,
     type TerminalScope,
+    type TerminalUnsubscribe,
 } from "./Terminal.js";
 import type { TerminalProcessFactory } from "./TerminalProcess.js";
 import { createHostTerminalProcessFactory } from "./impl/createHostTerminalProcessFactory.js";
@@ -38,6 +45,8 @@ export class TerminalsModule {
     readonly name = "terminals";
 
     readonly #locks: MapAsyncLock<string> = mapAsyncLock<string>();
+    readonly #listeners = new Set<TerminalEventListener>();
+    readonly #nextVersion = createUuidV7Factory();
     readonly #projects: ProjectsModule;
     readonly #scopes = new Map<string, TerminalCollection>();
     readonly #workspaces: WorkspacesModule;
@@ -74,6 +83,23 @@ export class TerminalsModule {
         return module;
     }
 
+    /**
+     * Takes a listener for this daemon lifetime's non-durable terminal state.
+     *
+     * Register during startup, before this module can create a terminal, to observe all lifecycle
+     * events. Unlike durable catalog modules terminals have no transactional subscription: their
+     * process and screen disappear with the daemon.
+     */
+    onEvent(listener: TerminalEventListener): TerminalUnsubscribe {
+        if (!Value.Check(terminalEventListenerSchema, listener)) {
+            throw new Error("A terminal subscriber must be a function.");
+        }
+        this.#listeners.add(listener);
+        return () => {
+            this.#listeners.delete(listener);
+        };
+    }
+
     /** Open one terminal in a project or workspace folder. */
     async create(
         ctx: Context,
@@ -99,11 +125,7 @@ export class TerminalsModule {
     }
 
     /** One terminal's current record. */
-    async get(
-        ctx: Context,
-        scope: TerminalScope,
-        terminalId: string,
-    ): Promise<Terminal> {
+    async get(ctx: Context, scope: TerminalScope, terminalId: string): Promise<Terminal> {
         return (await this.session(ctx, scope, terminalId)).terminal();
     }
 
@@ -152,11 +174,7 @@ export class TerminalsModule {
     }
 
     /** Stop the process. The record stays, holding the exit code, until the terminal is evicted. */
-    async stop(
-        ctx: Context,
-        scope: TerminalScope,
-        terminalId: string,
-    ): Promise<Terminal> {
+    async stop(ctx: Context, scope: TerminalScope, terminalId: string): Promise<Terminal> {
         const session = await this.session(ctx, scope, terminalId);
         return await session.stop();
     }
@@ -199,10 +217,7 @@ export class TerminalsModule {
      * Two people opening the first terminal of the same project at the same moment must end up in
      * one collection, or the limit and the listing would each describe half of the truth.
      */
-    async #collection(
-        ctx: Context,
-        scope: TerminalScope,
-    ): Promise<TerminalCollection> {
+    async #collection(ctx: Context, scope: TerminalScope): Promise<TerminalCollection> {
         const key = scopeKey(scope);
         const root = await this.#root(ctx, scope);
         return await this.#locks.runInLock(ctx, key, async () => {
@@ -212,13 +227,43 @@ export class TerminalsModule {
             const existing = this.#scopes.get(key);
             if (existing !== undefined) return existing;
             const created = new TerminalCollection({
+                nextVersion: this.#nextVersion,
+                onCreated: (terminal) => this.#emit({ terminal, type: "terminal_created" }),
+                onUpdated: (before, after) => this.#emitUpdated(before, after),
                 projectId: scope.projectId,
                 processFactory: this.#processFactory,
                 root,
+                workspaceId: scope.workspaceId ?? scope.projectId,
             });
             this.#scopes.set(key, created);
             return created;
         });
+    }
+
+    #emitUpdated(before: Terminal, after: Terminal): void {
+        const changes = terminalChanges(before, after);
+        if (Object.keys(changes).length === 0) return;
+        this.#emit({
+            changes,
+            previousVersion: before.version,
+            terminalId: after.id,
+            type: "terminal_updated",
+            version: after.version,
+        });
+    }
+
+    #emit(event: TerminalEvent): void {
+        if (!Value.Check(terminalEventSchema, event)) {
+            throw new Error("The terminal module created an invalid event.");
+        }
+        for (const listener of [...this.#listeners]) {
+            try {
+                void Promise.resolve(listener(structuredClone(event))).catch(() => undefined);
+            } catch {
+                // Terminal state has already changed. An observer must not make opening, resizing,
+                // or stopping a person's shell look like it failed.
+            }
+        }
     }
 
     /** Where this folder actually is, according to the catalog that owns it. */
@@ -229,10 +274,7 @@ export class TerminalsModule {
         }
         if (scope.workspaceId === undefined) {
             if (project.status === "archived") {
-                throw new TerminalError(
-                    "conflict",
-                    "An archived project cannot open a terminal.",
-                );
+                throw new TerminalError("conflict", "An archived project cannot open a terminal.");
             }
             return project.repositoryRef;
         }
@@ -241,10 +283,7 @@ export class TerminalsModule {
             throw new TerminalError("not_found", "The workspace was not found.");
         }
         if (workspace.status !== "ready") {
-            throw new TerminalError(
-                "conflict",
-                "Only a ready workspace can open a terminal.",
-            );
+            throw new TerminalError("conflict", "Only a ready workspace can open a terminal.");
         }
         return workspace.path;
     }
@@ -259,4 +298,16 @@ function assertScope(scope: TerminalScope): void {
 /** One key per folder. A project and its workspaces are separate collections, as their folders are. */
 function scopeKey(scope: TerminalScope): string {
     return JSON.stringify([scope.projectId, scope.workspaceId ?? null]);
+}
+
+function terminalChanges(before: Terminal, after: Terminal): TerminalChanges {
+    return {
+        ...(before.cols === after.cols ? {} : { cols: after.cols }),
+        ...(before.colorScheme === after.colorScheme ? {} : { colorScheme: after.colorScheme }),
+        ...(before.epoch === after.epoch ? {} : { epoch: after.epoch }),
+        ...(before.exitCode === after.exitCode ? {} : { exitCode: after.exitCode }),
+        ...(before.rows === after.rows ? {} : { rows: after.rows }),
+        ...(before.status === after.status ? {} : { status: after.status }),
+        ...(before.workspaceId === after.workspaceId ? {} : { workspaceId: after.workspaceId }),
+    };
 }

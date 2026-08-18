@@ -13,6 +13,7 @@ import {
     resourceVersionSchema,
     timestampSchema,
 } from "./common.js";
+import type { Agent } from "./agents.js";
 
 /** Where a cloned project came from; `null` for a registered local folder. */
 export const remoteSourceSchema = Type.Union([
@@ -45,6 +46,8 @@ export type ProjectSettings = Static<typeof projectSettingsSchema>;
 
 /** The project object. A project is also the root workspace of its tree. */
 export const projectSchema = Type.Object({
+    /** Ordered top-level agents rooted directly in this project workspace. */
+    agents: Type.Array(Type.Unsafe<Agent>({ type: "object" })),
     archivedAt: Nullable(timestampSchema),
     avatar: Nullable(projectAvatarSchema),
     compute: computeSchema,
@@ -97,6 +100,7 @@ export const registerProjectRequestSchema = Type.Object({
     path: Type.String(),
     /** Optional client-supplied ID, for callers that need it before the answer. */
     projectId: Type.Optional(cuid2Schema),
+    mutationId: Type.Optional(mutationIdSchema),
 });
 export type RegisterProjectRequest = Static<typeof registerProjectRequestSchema>;
 
@@ -105,6 +109,7 @@ export const cloneProjectRequestSchema = Type.Object({
     /** The folder name for the clone. */
     name: Type.String(),
     projectId: Type.Optional(cuid2Schema),
+    mutationId: Type.Optional(mutationIdSchema),
     /** Names the stored credential kind to clone with. */
     secret: Type.Optional(Type.Object({ kind: Type.Literal("github") })),
     source: remoteSourceSchema,

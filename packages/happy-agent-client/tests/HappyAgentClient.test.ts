@@ -47,19 +47,17 @@ function streamOf(text: string): ReadableStream<Uint8Array<ArrayBuffer>> {
 
 describe("HappyAgentClient", () => {
     it("authenticates every request and resolves routes beneath the endpoint", async () => {
-        const { fetch, requests } = stubFetch(() => json({ agents: [] }));
+        const { fetch, requests } = stubFetch(() => json({ projects: [] }));
         const client = new HappyAgentClient({
             endpoint: "http://agent.local/prefix",
             token: "a-token",
             fetch,
         });
 
-        await client.listAgents({ workspaceId: "w1", archived: "all", limit: 20 });
+        await client.listProjects();
 
         const request = requests[0];
-        expect(request?.url).toBe(
-            "http://agent.local/prefix/v0/agents?workspaceId=w1&archived=all&limit=20",
-        );
+        expect(request?.url).toBe("http://agent.local/prefix/v0/projects");
         expect(request?.headers.get("authorization")).toBe("Bearer a-token");
         expect(request?.method).toBe("GET");
     });
@@ -112,7 +110,9 @@ describe("HappyAgentClient", () => {
         );
         const client = new HappyAgentClient({ endpoint: "http://agent.local", token: "t", fetch });
 
-        const failure = await client.getEvents({ after: "01991f3a-5c1e" }).catch((error: unknown) => error);
+        const failure = await client
+            .getEvents({ after: "01991f3a-5c1e" })
+            .catch((error: unknown) => error);
 
         expect(failure).toBeInstanceOf(HappyAgentApiError);
         const error = failure as HappyAgentApiError;

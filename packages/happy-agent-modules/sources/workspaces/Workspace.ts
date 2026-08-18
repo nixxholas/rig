@@ -87,6 +87,16 @@ export const workspaceProjectRefSchema = Type.String({
     pattern: IDENTIFIER_PATTERN,
 });
 
+/**
+ * A workspace lives below either another workspace or its project's implicit root. Projects do
+ * not need duplicate root workspace rows: their ID is the root identity.
+ */
+export const workspaceParentIdSchema = Type.String({
+    minLength: 1,
+    maxLength: MAX_WORKSPACE_PROJECT_REF_LENGTH,
+    pattern: IDENTIFIER_PATTERN,
+});
+
 export const workspaceNameSchema = Type.String({
     minLength: 1,
     maxLength: MAX_WORKSPACE_NAME_LENGTH,
@@ -228,6 +238,7 @@ export const workspaceSchema = Type.Object(
     {
         id: workspaceIdSchema,
         projectRef: workspaceProjectRefSchema,
+        parentId: workspaceParentIdSchema,
         name: workspaceNameSchema,
         /** False while the name is still a placeholder a first chat may replace. */
         nameConfigured: Type.Boolean(),
@@ -271,6 +282,8 @@ export const workspaceReserveInputSchema = Type.Object(
         id: Type.Optional(workspaceIdSchema),
         operationId: Type.Optional(workspaceOperationIdSchema),
         projectRef: workspaceProjectRefSchema,
+        /** Omit this to place the workspace directly under its project's implicit root. */
+        parentId: Type.Optional(workspaceParentIdSchema),
         name: workspaceNameSchema,
         nameConfigured: Type.Optional(Type.Boolean()),
         kind: Type.Optional(workspaceKindSchema),
@@ -375,6 +388,17 @@ export const workspaceReorderInputSchema = Type.Object(
     { additionalProperties: false },
 );
 
+/** Lists one project's direct workspace children, in their durable sibling order. */
+export const workspaceChildrenQuerySchema = Type.Object(
+    {
+        projectRef: workspaceProjectRefSchema,
+        /** Defaults to `projectRef`, the project's implicit root. */
+        parentId: Type.Optional(workspaceParentIdSchema),
+        includeArchived: Type.Optional(Type.Boolean()),
+    },
+    { additionalProperties: false },
+);
+
 /** Records the branch a host actually created or renamed to. */
 export const workspaceSetBranchInputSchema = Type.Object(
     {
@@ -448,6 +472,7 @@ export type WorkspaceAgentId = Static<typeof workspaceAgentIdSchema>;
 export type WorkspaceOperationId = Static<typeof workspaceOperationIdSchema>;
 export type WorkspaceSessionId = Static<typeof workspaceSessionIdSchema>;
 export type WorkspaceProjectRef = Static<typeof workspaceProjectRefSchema>;
+export type WorkspaceParentId = Static<typeof workspaceParentIdSchema>;
 export type WorkspaceName = Static<typeof workspaceNameSchema>;
 export type WorkspaceBaseRef = Static<typeof workspaceBaseRefSchema>;
 export type WorkspaceBranch = Static<typeof workspaceBranchSchema>;
@@ -469,6 +494,7 @@ export type WorkspaceRenameInput = Static<typeof workspaceRenameInputSchema>;
 export type WorkspaceRenameToolInput = Static<typeof workspaceRenameToolInputSchema>;
 export type WorkspaceInheritNameInput = Static<typeof workspaceInheritNameInputSchema>;
 export type WorkspaceReorderInput = Static<typeof workspaceReorderInputSchema>;
+export type WorkspaceChildrenQuery = Static<typeof workspaceChildrenQuerySchema>;
 export type WorkspaceSetBranchInput = Static<typeof workspaceSetBranchInputSchema>;
 export type WorkspaceInitializationFacts = Static<typeof workspaceInitializationFactsSchema>;
 export type WorkspaceRecordInitializationInput = Static<

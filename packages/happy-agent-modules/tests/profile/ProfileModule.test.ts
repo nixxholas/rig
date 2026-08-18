@@ -1,21 +1,28 @@
+import { createHash } from "node:crypto";
+
 import { Value } from "@sinclair/typebox/value";
+import sharp from "sharp";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { PROFILE_MIGRATION_KEY, ProfileModule } from "../../sources/profile/ProfileModule.js";
+import {
+    PROFILE_MIGRATION_KEY,
+    PROFILE_PHOTO_MIGRATION_KEY,
+    ProfileModule,
+} from "../../sources/profile/ProfileModule.js";
 import {
     profileChangedEventSchema,
+    profilePhotoAssetSchema,
     profileSchema,
+    profileVersionSchema,
     type ProfileChangedEvent,
 } from "../../sources/profile/ProfileTypes.js";
+import { ProfileVersionConflictError } from "../../sources/profile/ProfileVersionConflictError.js";
+import { MAX_PROFILE_PHOTO_BYTES } from "../../sources/profile/normalizeProfilePhoto.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
 
 const LOCAL_INSTANCE_ID = "alocalinstance000000001";
 const OTHER_INSTANCE_ID = "anotherinstance00000001";
 
-/**
- * The module reads the wall clock, so the test moves the wall clock. Nothing about the moment a
- * profile was written is injectable any more, which is what the production code relies on.
- */
 async function createFixture(name: string) {
     vi.useFakeTimers();
     vi.setSystemTime(1_000);
@@ -30,103 +37,170 @@ async function createFixture(name: string) {
     return { events, profiles, test, unsubscribe };
 }
 
+async function png(
+    red: number,
+    green: number,
+    blue: number,
+    width = 80,
+    height = 50,
+): Promise<Buffer> {
+    return await sharp({
+        create: {
+            background: { alpha: 0.75, b: blue, g: green, r: red },
+            channels: 4,
+            height,
+            width,
+        },
+    })
+        .png()
+        .toBuffer();
+}
+
 describe("ProfileModule", () => {
     afterEach(() => {
         vi.useRealTimers();
     });
 
-    it("names the one person behind this installation and refuses a second", async () => {
-        const fixture = await createFixture("profile-create");
-        const ctx = fixture.test.context;
+    it("appends photo storage without changing the released profile migration", async () => {
+        const fixture = await createFixture("profile-migrations");
         try {
             expect(fixture.profiles.migrations.map(([key]) => key)).toEqual([
                 PROFILE_MIGRATION_KEY,
+                PROFILE_PHOTO_MIGRATION_KEY,
             ]);
-            await expect(fixture.profiles.get(ctx)).resolves.toBeUndefined();
+        } finally {
+            fixture.test.close();
+        }
+    });
 
-            const profile = await fixture.profiles.create(ctx, {
-                email: "steve@example.test",
-                name: "Steve",
-            });
+    it("materializes one stable empty singleton without reporting a user-visible update", async () => {
+        const fixture = await createFixture("profile-empty");
+        const ctx = fixture.test.context;
+        try {
+            await expect(fixture.profiles.get(ctx)).resolves.toBeUndefined();
+            const profile = await fixture.profiles.ensure(ctx);
             expect(Value.Check(profileSchema, profile)).toBe(true);
             expect(profile).toMatchObject({
                 createdAt: 1_000,
+                email: null,
+                name: null,
+                parentInstanceId: LOCAL_INSTANCE_ID,
+                photo: null,
+                updatedAt: 1_000,
+            });
+            expect(Value.Check(profileVersionSchema, profile.version)).toBe(true);
+            await expect(fixture.profiles.ensure(ctx)).resolves.toEqual(profile);
+            await expect(fixture.profiles.getById(ctx, profile.id)).resolves.toEqual(profile);
+            await expect(fixture.profiles.isLocal(ctx, profile.id)).resolves.toBe(true);
+            expect(fixture.events).toEqual([]);
+        } finally {
+            fixture.test.close();
+        }
+    });
+
+    it("can create the complete P2P identity once and emits its UUIDv7 creation", async () => {
+        const fixture = await createFixture("profile-create");
+        const ctx = fixture.test.context;
+        try {
+            const profile = await fixture.profiles.create(ctx, {
                 email: "steve@example.test",
                 name: "Steve",
-                parentInstanceId: LOCAL_INSTANCE_ID,
-                updatedAt: 1_000,
-                version: 1,
             });
-            await expect(fixture.profiles.get(ctx)).resolves.toEqual(profile);
-            await expect(fixture.profiles.getById(ctx, profile.id)).resolves.toEqual(profile);
-            await expect(fixture.profiles.getById(ctx, "amissingprofile00000001")).resolves
-                .toBeUndefined();
-            await expect(fixture.profiles.isLocal(ctx, profile.id)).resolves.toBe(true);
-
+            expect(profile.photo).toBeNull();
+            expect(Value.Check(profileVersionSchema, profile.version)).toBe(true);
+            expect(fixture.events).toEqual([
+                {
+                    createdAt: 1_000,
+                    data: {
+                        previousVersion: null,
+                        profileId: profile.id,
+                        version: profile.version,
+                    },
+                    id: profile.version,
+                    type: "profile_changed",
+                },
+            ]);
             await expect(
                 fixture.profiles.create(ctx, { email: "other@example.test", name: "Other" }),
             ).rejects.toThrow("This installation already has a profile.");
-            await expect(fixture.profiles.get(ctx)).resolves.toEqual(profile);
         } finally {
             fixture.test.close();
         }
     });
 
-    it("counts every change and moves the moment it was changed", async () => {
-        const fixture = await createFixture("profile-update");
+    it("updates and clears nullable metadata with atomic expected-version checks", async () => {
+        const fixture = await createFixture("profile-update-clear");
         const ctx = fixture.test.context;
         try {
-            const profile = await fixture.profiles.create(ctx, {
+            const original = await fixture.profiles.ensure(ctx);
+            vi.setSystemTime(2_000);
+            const named = await fixture.profiles.update(
+                ctx,
+                original.id,
+                { email: "steve@example.test", name: "Steve" },
+                { expectedVersion: original.version },
+            );
+            expect(named).toBeDefined();
+            expect(named!.version > original.version).toBe(true);
+            expect(named).toMatchObject({
                 email: "steve@example.test",
                 name: "Steve",
+                updatedAt: 2_000,
             });
 
-            vi.setSystemTime(2_000);
-            const updated = await fixture.profiles.update(ctx, profile.id, { name: "Steve K" });
-            expect(updated).toEqual({
-                ...profile,
-                name: "Steve K",
-                updatedAt: 2_000,
-                version: 2,
+            await expect(
+                fixture.profiles.update(
+                    ctx,
+                    original.id,
+                    { name: "Stale" },
+                    { expectedVersion: original.version },
+                ),
+            ).rejects.toMatchObject({
+                current: named,
+                name: "ProfileVersionConflictError",
             });
-            await expect(fixture.profiles.get(ctx)).resolves.toEqual(updated);
 
             vi.setSystemTime(3_000);
-            await expect(
-                fixture.profiles.update(ctx, profile.id, { email: "steve@elsewhere.test" }),
-            ).resolves.toMatchObject({
-                email: "steve@elsewhere.test",
-                name: "Steve K",
+            const cleared = await fixture.profiles.update(
+                ctx,
+                original.id,
+                { email: null, name: null },
+                { expectedVersion: named!.version },
+            );
+            expect(cleared).toMatchObject({
+                email: null,
+                name: null,
                 updatedAt: 3_000,
-                version: 3,
             });
+            expect(cleared!.version > named!.version).toBe(true);
+            expect(fixture.events.map((event) => event.data.previousVersion)).toEqual([
+                original.version,
+                named!.version,
+            ]);
         } finally {
             fixture.test.close();
         }
     });
 
-    it("has nothing to update when the id belongs to nobody here", async () => {
-        const fixture = await createFixture("profile-update-unknown");
+    it("rejects malformed metadata and protects the installation-owned identity", async () => {
+        const fixture = await createFixture("profile-validation");
         const ctx = fixture.test.context;
         try {
-            await fixture.profiles.create(ctx, { email: "steve@example.test", name: "Steve" });
-            await expect(
-                fixture.profiles.update(ctx, "amissingprofile00000001", { name: "Nobody" }),
-            ).resolves.toBeUndefined();
-            expect(fixture.events).toHaveLength(1);
-        } finally {
-            fixture.test.close();
-        }
-    });
-
-    it("lets only the installation that owns a person speak for them", async () => {
-        const fixture = await createFixture("profile-ownership");
-        const ctx = fixture.test.context;
-        try {
+            for (const name of ["", "Steve\u202eK", "Steve\u0007"]) {
+                await expect(
+                    fixture.profiles.create(ctx, { email: "steve@example.test", name }),
+                ).rejects.toThrow("The profile name or email address is not valid.");
+            }
             const profile = await fixture.profiles.create(ctx, {
                 email: "steve@example.test",
                 name: "Steve",
             });
+            await expect(fixture.profiles.update(ctx, profile.id, {})).rejects.toThrow(
+                "The profile update is not valid.",
+            );
+            await expect(
+                fixture.profiles.update(ctx, profile.id, { email: "not-an-email" }),
+            ).rejects.toThrow("The profile update is not valid.");
 
             const elsewhere = new ProfileModule();
             elsewhere.open(OTHER_INSTANCE_ID);
@@ -140,146 +214,169 @@ describe("ProfileModule", () => {
         }
     });
 
-    it("knows nothing is local until it learns which installation this is", async () => {
-        const fixture = await createFixture("profile-not-open");
+    it("normalizes, hashes, placeholders, replaces, and deletes the one retained photo", async () => {
+        const fixture = await createFixture("profile-photo");
         const ctx = fixture.test.context;
         try {
-            const profile = await fixture.profiles.create(ctx, {
-                email: "steve@example.test",
-                name: "Steve",
+            const original = await fixture.profiles.ensure(ctx);
+            const firstInput = await png(240, 30, 60);
+            vi.setSystemTime(2_000);
+            const first = await fixture.profiles.putPhoto(ctx, firstInput, "image/png", {
+                expectedVersion: original.version,
+            });
+            expect(first.photo).not.toBeNull();
+            expect(first.photo?.thumbhash).toMatch(/^[A-Za-z0-9+/]+={0,2}$/);
+            const firstAsset = await fixture.profiles.getPhoto(ctx);
+            expect(firstAsset).toBeDefined();
+            expect(Value.Check(profilePhotoAssetSchema, firstAsset)).toBe(true);
+            expect(firstAsset).toMatchObject({
+                contentHash: first.photo?.contentHash,
+                contentType: "image/webp",
+                etag: `"${first.photo?.contentHash}"`,
+                height: 50,
+                thumbhash: first.photo?.thumbhash,
+                width: 80,
+            });
+            expect(createHash("sha256").update(firstAsset!.bytes).digest("hex")).toBe(
+                firstAsset!.contentHash,
+            );
+            await expect(sharp(firstAsset!.bytes).metadata()).resolves.toMatchObject({
+                format: "webp",
+                height: 50,
+                width: 80,
             });
 
-            const unopened = new ProfileModule();
-            await expect(unopened.isLocal(ctx, profile.id)).resolves.toBe(false);
-            await expect(unopened.get(ctx)).resolves.toEqual(profile);
+            const secondInput = await png(10, 80, 220, 60, 90);
+            vi.setSystemTime(3_000);
+            const second = await fixture.profiles.putPhoto(ctx, secondInput, "image/png", {
+                expectedVersion: first.version,
+            });
+            const secondAsset = await fixture.profiles.getPhoto(ctx);
+            expect(secondAsset?.contentHash).toBe(second.photo?.contentHash);
+            expect(secondAsset?.contentHash).not.toBe(firstAsset?.contentHash);
+            expect(second.version > first.version).toBe(true);
+
+            vi.setSystemTime(4_000);
+            const deleted = await fixture.profiles.deletePhoto(ctx, {
+                expectedVersion: second.version,
+            });
+            expect(deleted.photo).toBeNull();
+            expect(deleted.version > second.version).toBe(true);
+            await expect(fixture.profiles.getPhoto(ctx)).resolves.toBeUndefined();
+
+            const eventCount = fixture.events.length;
             await expect(
-                unopened.create(ctx, { email: "steve@example.test", name: "Steve" }),
-            ).rejects.toThrow("The profile is not open yet.");
+                fixture.profiles.deletePhoto(ctx, { expectedVersion: deleted.version }),
+            ).resolves.toEqual(deleted);
+            expect(fixture.events).toHaveLength(eventCount);
         } finally {
             fixture.test.close();
         }
     });
 
-    it("refuses a name or an email address it would not be safe to show anyone", async () => {
-        const fixture = await createFixture("profile-validation");
+    it("bounds photo input and refuses a misleading or unsupported content type", async () => {
+        const fixture = await createFixture("profile-photo-validation");
         const ctx = fixture.test.context;
         try {
-            for (const name of ["", "Steve\u202eK", "Steve\u0007"]) {
-                await expect(
-                    fixture.profiles.create(ctx, { email: "steve@example.test", name }),
-                ).rejects.toThrow("The profile name or email address is not valid.");
-            }
-            for (const email of ["steve", "steve@example", "steve <steve@example.test>"]) {
-                await expect(
-                    fixture.profiles.create(ctx, { email, name: "Steve" }),
-                ).rejects.toThrow("The profile name or email address is not valid.");
-            }
-            await expect(fixture.profiles.get(ctx)).resolves.toBeUndefined();
-
-            const profile = await fixture.profiles.create(ctx, {
-                email: "steve@example.test",
-                name: "Steve",
-            });
-            await expect(fixture.profiles.update(ctx, profile.id, {})).rejects.toThrow(
-                "The profile name or email address is not valid.",
+            const input = await png(20, 40, 60);
+            await expect(fixture.profiles.putPhoto(ctx, input, "image/jpeg")).rejects.toThrow(
+                "does not match its content type",
             );
             await expect(
-                fixture.profiles.update(ctx, profile.id, { email: "steve@example" }),
-            ).rejects.toThrow("The profile name or email address is not valid.");
+                fixture.profiles.putPhoto(
+                    ctx,
+                    new Uint8Array(MAX_PROFILE_PHOTO_BYTES + 1),
+                    "image/png",
+                ),
+            ).rejects.toThrow("no larger than 8 MiB");
+            await expect(fixture.profiles.get(ctx)).resolves.toBeUndefined();
+            await expect(fixture.profiles.getPhoto(ctx)).resolves.toBeUndefined();
         } finally {
             fixture.test.close();
         }
     });
 
-    it("tells listeners which version of the person is current now", async () => {
+    it("retains identity, media, and monotonic versions across a module restart and clock rollback", async () => {
+        const fixture = await createFixture("profile-restart");
+        const ctx = fixture.test.context;
+        try {
+            const original = await fixture.profiles.ensure(ctx);
+            const withPhoto = await fixture.profiles.putPhoto(
+                ctx,
+                await png(50, 100, 150),
+                "image/png",
+                { expectedVersion: original.version },
+            );
+            const asset = await fixture.profiles.getPhoto(ctx);
+
+            const restarted = new ProfileModule();
+            restarted.open(LOCAL_INSTANCE_ID);
+            vi.setSystemTime(500);
+            await expect(restarted.get(ctx)).resolves.toEqual(withPhoto);
+            await expect(restarted.getPhoto(ctx)).resolves.toEqual(asset);
+            const updated = await restarted.update(
+                ctx,
+                withPhoto.id,
+                { name: "After restart" },
+                { expectedVersion: withPhoto.version },
+            );
+            expect(updated?.id).toBe(original.id);
+            expect(updated!.version > withPhoto.version).toBe(true);
+        } finally {
+            fixture.test.close();
+        }
+    });
+
+    it("publishes validated chained events after commit and isolates failed listeners", async () => {
         const fixture = await createFixture("profile-events");
-        const ctx = fixture.test.context;
-        try {
-            const profile = await fixture.profiles.create(ctx, {
-                email: "steve@example.test",
-                name: "Steve",
-            });
-            vi.setSystemTime(2_000);
-            await fixture.profiles.update(ctx, profile.id, { name: "Steve K" });
-
-            expect(fixture.events.every((event) => Value.Check(profileChangedEventSchema, event)))
-                .toBe(true);
-            expect(fixture.events).toEqual([
-                {
-                    createdAt: 1_000,
-                    data: { profileId: profile.id, version: 1 },
-                    id: `${profile.id}-1`,
-                    type: "profile_changed",
-                },
-                {
-                    createdAt: 2_000,
-                    data: { profileId: profile.id, version: 2 },
-                    id: `${profile.id}-2`,
-                    type: "profile_changed",
-                },
-            ]);
-        } finally {
-            fixture.test.close();
-        }
-    });
-
-    it("stops telling a listener that has walked away, and keeps the others", async () => {
-        const fixture = await createFixture("profile-unsubscribe");
-        const ctx = fixture.test.context;
-        try {
-            const second: string[] = [];
-            const stopSecond = fixture.profiles.onEvent((_ctx, event) => {
-                second.push(event.id);
-            });
-
-            const profile = await fixture.profiles.create(ctx, {
-                email: "steve@example.test",
-                name: "Steve",
-            });
-            expect(fixture.events).toHaveLength(1);
-            expect(second).toEqual([`${profile.id}-1`]);
-
-            fixture.unsubscribe();
-            fixture.unsubscribe();
-            await fixture.profiles.update(ctx, profile.id, { name: "Steve K" });
-
-            expect(fixture.events).toHaveLength(1);
-            expect(second).toEqual([`${profile.id}-1`, `${profile.id}-2`]);
-
-            stopSecond();
-            await fixture.profiles.update(ctx, profile.id, { name: "Steve Korshakov" });
-            expect(second).toHaveLength(2);
-        } finally {
-            fixture.test.close();
-        }
-    });
-
-    it("saves the change even when a listener throws afterwards", async () => {
-        const fixture = await createFixture("profile-listener-failure");
         const ctx = fixture.test.context;
         try {
             fixture.profiles.onEvent(() => {
                 throw new Error("listener exploded");
             });
+            const observed: string[] = [];
+            const stop = fixture.profiles.onEvent((_eventCtx, event) => {
+                observed.push(event.id);
+            });
 
             const profile = await fixture.profiles.create(ctx, {
                 email: "steve@example.test",
                 name: "Steve",
             });
-            await expect(fixture.profiles.get(ctx)).resolves.toEqual(profile);
-            expect(fixture.events).toHaveLength(1);
+            const updated = await fixture.profiles.update(ctx, profile.id, { name: "Steve K" });
+            expect(updated).toBeDefined();
+            expect(
+                fixture.events.every((event) => Value.Check(profileChangedEventSchema, event)),
+            ).toBe(true);
+            expect(fixture.events[1]?.data.previousVersion).toBe(profile.version);
+            expect(observed).toEqual([profile.version, updated!.version]);
+
+            stop();
+            stop();
+            await fixture.profiles.update(ctx, profile.id, { name: "Steve Korshakov" });
+            expect(observed).toHaveLength(2);
         } finally {
             fixture.test.close();
         }
     });
 
-    it("refuses anything but a function as a listener", async () => {
-        const fixture = await createFixture("profile-listener-shape");
+    it("exposes a typed conflict carrying an immutable authoritative snapshot", async () => {
+        const fixture = await createFixture("profile-conflict");
+        const ctx = fixture.test.context;
         try {
-            for (const candidate of [undefined, null, 42, "listener", {}]) {
-                expect(() => fixture.profiles.onEvent(candidate as never)).toThrow(
-                    "Profile event listener must be a function.",
+            const profile = await fixture.profiles.ensure(ctx);
+            const updated = await fixture.profiles.update(ctx, profile.id, { name: "Steve" });
+            try {
+                await fixture.profiles.update(
+                    ctx,
+                    profile.id,
+                    { name: "Stale" },
+                    { expectedVersion: profile.version },
                 );
+                expect.unreachable();
+            } catch (error: unknown) {
+                expect(error).toBeInstanceOf(ProfileVersionConflictError);
+                expect((error as ProfileVersionConflictError).current).toEqual(updated);
             }
         } finally {
             fixture.test.close();

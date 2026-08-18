@@ -1,47 +1,42 @@
-import { findLastAgentResponseText } from "./findLastAgentResponseText.js";
-import { errorToMessage } from "../errorToMessage.js";
-import { ensureLocalProtocolServer } from "../client/index.js";
-import { loadConfig } from "../config/index.js";
 import type {
-    CreateSessionRequest,
-    PermissionMode,
-    ProtocolSession,
-    ServiceTier,
-    SessionEvent,
-    StopReason,
-} from "../protocol/index.js";
+    Agent,
+    DaemonConfig,
+    HappyAgentClient,
+    Message,
+    MessageMode,
+    Run,
+} from "@slopus/happy-agent-client";
+
+import {
+    ensureLocalProtocolServer,
+    ensureWorkspaceForCwd,
+    HappyAgentEventHub,
+    loadAgentCatalog,
+} from "../client/index.js";
+import { loadConfig } from "../config/index.js";
+import { errorToMessage } from "../errorToMessage.js";
+import type { PermissionMode } from "../protocol/index.js";
+import { RigUserError } from "../RigUserError.js";
 import { parsePermissionMode } from "./parsePermissionMode.js";
 import type { ExecCommandOptions } from "./parseExecCommand.js";
 import { readExecPrompt } from "./readExecPrompt.js";
-import { resolveSessionSelection } from "./resolveSessionSelection.js";
-import { RigUserError } from "../RigUserError.js";
 
 export async function runExec(
     options: ExecCommandOptions,
     environment: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
-    let debugDirectory: string | undefined;
     try {
-        await run(options, environment, (directory) => {
-            debugDirectory = directory;
-        });
+        await run(options, environment);
     } catch (error) {
         if (options.outputFormat === "text") throw error;
-        const payload = {
-            ...(debugDirectory === undefined ? {} : { debugDirectory }),
-            error: errorToMessage(error),
-            type: "error",
-        };
-        process.stdout.write(`${JSON.stringify(payload)}\n`);
+        process.stdout.write(
+            `${JSON.stringify({ error: errorToMessage(error), type: "error" })}\n`,
+        );
         process.exitCode = 1;
     }
 }
 
-async function run(
-    options: ExecCommandOptions,
-    environment: NodeJS.ProcessEnv,
-    onDebugDirectory: (directory: string) => void,
-): Promise<void> {
+async function run(options: ExecCommandOptions, environment: NodeJS.ProcessEnv): Promise<void> {
     const cwd = process.cwd();
     const prompt = await readExecPrompt(options.prompt);
     const loadedConfig = await loadConfig({ cwd, env: environment });
@@ -50,189 +45,203 @@ async function run(
             ? { onStatus: (message: string) => process.stderr.write(`${message}\n`) }
             : {},
     );
+    const config = (await connection.client.getConfig()).config;
+    const opened = await openAgent(options, cwd, connection.client);
+    const events = new HappyAgentEventHub(connection.client, opened.lastCursor);
+    events.start();
+    const mode = resolveMode(options, environment, loadedConfig.config.defaults, config, opened);
+    const submitted = await connection.client.sendMessage(opened.id, {
+        delivery: "queue",
+        mode,
+        text: prompt,
+    });
 
-    const opened = await openSession(
-        options,
-        cwd,
-        loadedConfig.config.defaults,
-        connection.client,
-        environment,
-    );
-    let session = opened.session;
-    if (options.fork) {
-        session = (await connection.client.forkSession(session.id)).session;
-    }
-
-    const sessionTerminal = await connection.client.connectSessionTerminal(session.id);
+    const controller = new AbortController();
+    let activeRunId = submitted.message.runId;
+    let terminalRun: Run | undefined;
+    let failure: string | undefined;
+    const abort = () => {
+        void connection.client
+            .abortAgent(opened.id, {
+                ...(activeRunId === null ? {} : { expectedRunId: activeRunId }),
+            })
+            .catch(() => undefined);
+        controller.abort();
+    };
+    process.once("SIGINT", abort);
     try {
-        const submitted = await connection.client.submitMessage(session.id, {
-            ...(options.debug === true ? { debug: true } : {}),
-            // A resumed session keeps running on what it already runs on unless this invocation
-            // said otherwise; a new one was just created with exactly these values.
-            effort: (opened.resumed ? options.effort : undefined) ?? session.effort ?? "medium",
-            interactive: false,
-            modelId: (opened.resumed ? options.modelId : undefined) ?? session.modelId,
-            ...(opened.resumed && options.permissionMode !== undefined
-                ? { permissionMode: options.permissionMode }
-                : {}),
-            providerId: (opened.resumed ? options.providerId : undefined) ?? session.providerId,
-            serviceTier: session.serviceTier ?? null,
-            text: prompt,
+        await events.follow({
+            after: submitted.cursor,
+            signal: controller.signal,
+            onEvent: async (event) => {
+                if (options.outputFormat === "stream-json") {
+                    process.stdout.write(`${JSON.stringify({ event, type: "event" })}\n`);
+                }
+                if (
+                    event.type === "question.created" &&
+                    event.payload.question.agentId === opened.id
+                ) {
+                    failure = "The agent requested interactive input during a headless run.";
+                    await connection.client.abortAgent(opened.id).catch(() => undefined);
+                    return true;
+                }
+                if (
+                    event.type === "run.started" &&
+                    event.payload.agentId === opened.id &&
+                    event.payload.acceptedMessageIds.includes(submitted.message.id)
+                ) {
+                    activeRunId = event.payload.run.id;
+                } else if (
+                    event.type === "run.boundary" &&
+                    event.payload.agentId === opened.id &&
+                    activeRunId === event.payload.finishedRun.id
+                ) {
+                    activeRunId = event.payload.startedRun.id;
+                } else if (
+                    event.type === "run.finished" &&
+                    event.payload.agentId === opened.id &&
+                    activeRunId === event.payload.run.id
+                ) {
+                    terminalRun = event.payload.run;
+                    return true;
+                }
+                return false;
+            },
         });
-        if (submitted.debugDirectory !== undefined) onDebugDirectory(submitted.debugDirectory);
-        if (options.outputFormat === "text" && submitted.debugDirectory !== undefined) {
-            process.stderr.write(`Debug log: ${submitted.debugDirectory}\n`);
-        }
-        const controller = new AbortController();
-        let failure: string | undefined;
-        let stopReason: StopReason | undefined;
-        const abort = () => {
-            stopReason = "aborted";
-            void connection.client.abort(session.id);
-            controller.abort();
-        };
-        process.once("SIGINT", abort);
-        try {
-            await connection.client.watchSessionEvents({
-                after: submitted.eventId,
-                sessionId: session.id,
-                signal: controller.signal,
-                onEvent(event) {
-                    if (options.outputFormat === "stream-json") {
-                        process.stdout.write(`${JSON.stringify({ event, type: "event" })}\n`);
-                    }
-                    if (event.type === "user_input_requested") {
-                        failure = "The agent requested interactive input during a headless run.";
-                        void connection.client.abort(session.id);
-                        controller.abort();
-                        return;
-                    }
-                    if (!belongsToRun(event, submitted.runId)) return;
-                    if (event.type === "run_error") {
-                        failure = event.data.errorMessage;
-                        controller.abort();
-                    } else if (event.type === "run_finished") {
-                        stopReason = event.data.stopReason;
-                        controller.abort();
-                    }
-                },
-            });
-        } finally {
-            process.off("SIGINT", abort);
-        }
-
-        const completed = (await connection.client.getSession(session.id)).session;
-        const response = findLastAgentResponseText(completed.snapshot.messages) ?? "";
-        if (failure !== undefined) {
-            emitFailure(
-                options.outputFormat,
-                failure,
-                completed.id,
-                submitted.runId,
-                submitted.debugDirectory,
-            );
-            process.exitCode = 1;
-            return;
-        }
-
-        const result = {
-            ...(submitted.debugDirectory === undefined
-                ? {}
-                : { debugDirectory: submitted.debugDirectory }),
-            response,
-            runId: submitted.runId,
-            sessionId: completed.id,
-            stopReason: stopReason ?? "error",
-            type: "result",
-        };
-        if (options.outputFormat === "text") {
-            process.stdout.write(
-                response.length === 0 || response.endsWith("\n") ? response : `${response}\n`,
-            );
-        } else {
-            process.stdout.write(`${JSON.stringify(result)}\n`);
-        }
-        if (result.stopReason === "error" || result.stopReason === "aborted") process.exitCode = 1;
     } finally {
-        await sessionTerminal.close().catch(() => undefined);
+        process.off("SIGINT", abort);
+        controller.abort();
+        await events.close();
     }
+
+    const history = await connection.client.getMessages(opened.id, { limit: 50 });
+    const response = lastAgentText(history.runs.flatMap((run) => run.messages));
+    if (failure !== undefined || terminalRun?.status === "failed") {
+        emitFailure(
+            options.outputFormat,
+            failure ?? "The agent run failed.",
+            opened.id,
+            terminalRun?.id ?? activeRunId ?? submitted.message.id,
+        );
+        process.exitCode = 1;
+        return;
+    }
+
+    const result = {
+        agentId: opened.id,
+        response,
+        runId: terminalRun?.id ?? activeRunId ?? submitted.message.id,
+        stopReason: terminalRun?.reason ?? "error",
+        type: "result",
+    };
+    if (options.outputFormat === "text") {
+        process.stdout.write(
+            response.length === 0 || response.endsWith("\n") ? response : `${response}\n`,
+        );
+    } else {
+        process.stdout.write(`${JSON.stringify(result)}\n`);
+    }
+    if (terminalRun === undefined || terminalRun.status === "aborted") process.exitCode = 1;
 }
 
-async function openSession(
+async function openAgent(
     options: ExecCommandOptions,
     cwd: string,
+    client: HappyAgentClient,
+): Promise<Agent> {
+    if (options.fork) {
+        throw new RigUserError("The Happy Agent API does not expose agent forking.", {
+            hint: "Resume an agent or start a new one.",
+        });
+    }
+    let agentId = options.resumeSessionId;
+    if (options.last) {
+        const catalog = await loadAgentCatalog(client);
+        agentId = catalog.entries
+            .filter((entry) => entry.cwd === cwd)
+            .sort((left, right) => right.agent.updatedAt - left.agent.updatedAt)[0]?.agent.id;
+        if (agentId === undefined) {
+            throw new RigUserError("Rig has no saved agents in this directory.", {
+                hint: "Pass --resume <agent-id> to name one explicitly.",
+            });
+        }
+    }
+    if (agentId !== undefined) return (await client.getAgent(agentId)).agent;
+    const workspace = await ensureWorkspaceForCwd(client, cwd);
+    return (await client.createAgent({ workspaceId: workspace.id })).agent;
+}
+
+function resolveMode(
+    options: ExecCommandOptions,
+    environment: NodeJS.ProcessEnv,
     defaults: {
         effort?: string;
-        instructions?: string;
         modelId: string;
         permissionMode: PermissionMode;
         providerId?: string;
-        serviceTier?: ServiceTier;
+        serviceTier?: "fast";
     },
-    client: Awaited<ReturnType<typeof ensureLocalProtocolServer>>["client"],
-    environment: NodeJS.ProcessEnv,
-): Promise<{ readonly resumed: boolean; readonly session: ProtocolSession }> {
-    let sessionId = options.resumeSessionId;
-    if (options.last) {
-        const listed = await client.listSessions();
-        sessionId = listed.sessions.find((session) => session.cwd === cwd)?.id;
-        if (sessionId === undefined) {
-            throw new RigUserError("Rig has no saved sessions in this directory.", {
-                hint: "Pass --resume <session-id> to name one explicitly.",
-            });
-        }
-    }
-    if (sessionId !== undefined) {
-        return { resumed: true, session: (await client.getSession(sessionId)).session };
-    }
-
-    const providerId = options.providerId ?? environment.RIG_PROVIDER ?? defaults.providerId;
-    const effort = options.effort ?? environment.RIG_EFFORT ?? defaults.effort;
-    // The agent chooses nothing, so the catalog it published completes whatever this invocation
-    // and the configuration left unsaid.
-    const catalog = (await client.models()).catalog;
-    const selection = resolveSessionSelection(
-        {
-            modelId: options.modelId ?? environment.RIG_MODEL ?? defaults.modelId,
-            ...(providerId === undefined ? {} : { providerId }),
-            ...(effort === undefined ? {} : { effort }),
-            ...(defaults.serviceTier === undefined ? {} : { serviceTier: defaults.serviceTier }),
-        },
-        catalog,
+    config: DaemonConfig,
+    agent: Agent,
+): MessageMode {
+    const previous = agent.lastMode;
+    const providerId =
+        options.providerId ??
+        environment.RIG_PROVIDER ??
+        previous?.providerId ??
+        defaults.providerId ??
+        config.defaults.providerId;
+    const modelId =
+        options.modelId ??
+        environment.RIG_MODEL ??
+        previous?.modelId ??
+        defaults.modelId ??
+        config.defaults.modelId;
+    const effort =
+        options.effort ??
+        environment.RIG_EFFORT ??
+        previous?.effort ??
+        defaults.effort ??
+        config.defaults.effort;
+    const permissionMode =
+        options.permissionMode ??
+        (environment.RIG_PERMISSION_MODE === undefined
+            ? undefined
+            : parsePermissionMode(environment.RIG_PERMISSION_MODE)) ??
+        previous?.permissionMode ??
+        defaults.permissionMode ??
+        config.defaults.permissionMode;
+    const providerModel = config.providers[providerId]?.models.find(
+        (reference) => reference.id === modelId && reference.enabled,
     );
-    const request: CreateSessionRequest = {
-        cwd,
-        ...selection,
-        // Read the same way the model and provider are. An exec run that asked for a narrower
-        // mode and silently got the default would be given reach it was told it would not have.
-        permissionMode:
-            options.permissionMode ??
-            (environment.RIG_PERMISSION_MODE === undefined
-                ? undefined
-                : parsePermissionMode(environment.RIG_PERMISSION_MODE)) ??
-            defaults.permissionMode,
+    if (providerModel === undefined) {
+        throw new RigUserError(`Model '${modelId}' is not enabled on provider '${providerId}'.`);
+    }
+    const tiers = providerModel.serviceTiers ?? config.models[modelId]?.serviceTiers ?? [];
+    return {
+        effort,
+        modelId,
+        permissionMode,
+        providerId,
+        serviceTier:
+            previous?.serviceTier ?? (defaults.serviceTier === "fast" ? (tiers[0] ?? null) : null),
     };
-    const instructions = defaults.instructions;
-    if (instructions !== undefined) request.instructions = instructions;
-    return { resumed: false, session: (await client.createSession(request)).session };
 }
 
-function belongsToRun(event: SessionEvent, runId: string): boolean {
-    return "runId" in event.data && event.data.runId === runId;
+function lastAgentText(messages: readonly Message[]): string {
+    const message = [...messages].reverse().find((candidate) => candidate.role === "agent");
+    if (message === undefined || message.role !== "agent") return "";
+    return message.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("");
 }
 
 function emitFailure(
     outputFormat: ExecCommandOptions["outputFormat"],
-    error: string,
-    sessionId: string,
+    message: string,
+    agentId: string,
     runId: string,
-    debugDirectory?: string,
 ): void {
     if (outputFormat === "text") {
-        process.stderr.write(`${error}\n`);
-        return;
+        throw new Error(message);
     }
-    process.stdout.write(
-        `${JSON.stringify({ ...(debugDirectory === undefined ? {} : { debugDirectory }), error, runId, sessionId, type: "error" })}\n`,
-    );
+    process.stdout.write(`${JSON.stringify({ agentId, error: message, runId, type: "error" })}\n`);
 }

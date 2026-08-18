@@ -6,6 +6,7 @@
  */
 
 import type { Cuid2, EventCursor, MessageMode, Timestamp } from "./common.js";
+import type { UsageBreakdown } from "./usage.js";
 
 /** A tool call rendered for display, from a closed set every client implements once. */
 export type ToolPresentation =
@@ -168,13 +169,21 @@ export interface ServiceMessage {
 }
 
 export type RunStatus = "running" | "completed" | "aborted" | "failed";
+export type RunReason = "completed" | "steering" | "abort" | "error";
 
 /** The work an agent did in response to a message. */
 export interface Run {
     id: Cuid2;
     status: RunStatus;
+    reason: RunReason | null;
     startedAt: Timestamp;
     endedAt: Timestamp | null;
+    usage: UsageBreakdown;
+    costUsd: number | null;
+}
+
+/** One whole history group, with its messages oldest first. */
+export interface HistoryRun extends Run {
     /** Oldest first. */
     messages: Message[];
 }
@@ -217,7 +226,7 @@ export interface MessageHistoryQuery {
 /** `GET /v0/agents/:agentId/messages` */
 export interface MessageHistoryResponse {
     /** Oldest first, whole runs only. */
-    runs: Run[];
+    runs: HistoryRun[];
     /**
      * Messages sent but not yet accepted by inference. Every history load
      * returns the complete list regardless of cursors.

@@ -119,7 +119,7 @@ export class GymHttpClient {
         return response.body;
     }
 
-    /** Open one Server-Sent Events stream, such as `/v0/events/live`. */
+    /** Open one Server-Sent Events stream, such as `/v0/events/stream`. */
     stream(path: string, options: GymEventStreamOptions = {}): GymEventStream {
         return new GymEventStream({
             path,

@@ -9,13 +9,10 @@ import type {
 } from "./requestOptions.js";
 import type {
     AbortAgentRequest,
-    Agent,
     AgentAbortResponse,
     AgentActivityResponse,
-    AgentListResponse,
     AgentResponse,
     CreateAgentRequest,
-    ListAgentsQuery,
     MutationOnlyRequest,
     ReorderAgentRequest,
     SaveAgentDraftRequest,
@@ -292,9 +289,7 @@ export class HappyAgentClient {
     }
 
     /** `GET /v0/profile/photo` — the photo bytes; `null` when unchanged. */
-    async getProfilePhoto(
-        options: ConditionalRequestOptions = {},
-    ): Promise<BinaryContent | null> {
+    async getProfilePhoto(options: ConditionalRequestOptions = {}): Promise<BinaryContent | null> {
         return await this.#binary({
             method: "GET",
             path: "v0/profile/photo",
@@ -337,9 +332,7 @@ export class HappyAgentClient {
     }
 
     /** `POST /v0/onboarding/complete` — idempotent. */
-    async completeOnboarding(
-        options: RequestOptions = {},
-    ): Promise<OnboardingCompletedResponse> {
+    async completeOnboarding(options: RequestOptions = {}): Promise<OnboardingCompletedResponse> {
         return await this.#json({
             method: "POST",
             path: "v0/onboarding/complete",
@@ -381,10 +374,7 @@ export class HappyAgentClient {
     }
 
     /** `GET /v0/projects/:projectId` */
-    async getProject(
-        projectId: Cuid2,
-        options: RequestOptions = {},
-    ): Promise<ProjectResponse> {
+    async getProject(projectId: Cuid2, options: RequestOptions = {}): Promise<ProjectResponse> {
         return await this.#json({
             method: "GET",
             path: `v0/projects/${encodeURIComponent(projectId)}`,
@@ -423,10 +413,7 @@ export class HappyAgentClient {
     }
 
     /** `POST /v0/projects/:projectId/refresh` — re-runs project setup. */
-    async refreshProject(
-        projectId: Cuid2,
-        options: RequestOptions = {},
-    ): Promise<ProjectResponse> {
+    async refreshProject(projectId: Cuid2, options: RequestOptions = {}): Promise<ProjectResponse> {
         return await this.#json({
             method: "POST",
             path: `v0/projects/${encodeURIComponent(projectId)}/refresh`,
@@ -791,24 +778,6 @@ export class HappyAgentClient {
         });
     }
 
-    /** `GET /v0/agents` — catalog order; subagents only when asked for. */
-    async listAgents(
-        query: ListAgentsQuery = {},
-        options: RequestOptions = {},
-    ): Promise<AgentListResponse> {
-        return await this.#json({
-            method: "GET",
-            path: "v0/agents",
-            query: {
-                workspaceId: query.workspaceId,
-                parentAgentId: query.parentAgentId,
-                archived: query.archived,
-                limit: query.limit,
-            },
-            signal: options.signal,
-        });
-    }
-
     /** `GET /v0/agents/:agentId` */
     async getAgent(agentId: Cuid2, options: RequestOptions = {}): Promise<AgentResponse> {
         return await this.#json({
@@ -993,10 +962,7 @@ export class HappyAgentClient {
     }
 
     /** `GET /v0/agents/:agentId/usage` — the agent's whole life, subagents included. */
-    async getAgentUsage(
-        agentId: Cuid2,
-        options: RequestOptions = {},
-    ): Promise<AgentUsageResponse> {
+    async getAgentUsage(agentId: Cuid2, options: RequestOptions = {}): Promise<AgentUsageResponse> {
         return await this.#json({
             method: "GET",
             path: `v0/agents/${encodeURIComponent(agentId)}/usage`,
@@ -1086,9 +1052,7 @@ export class HappyAgentClient {
      * The `cursor` it carries is the newest event as of the snapshot, so a
      * stream opened from it leaves no window for a change to fall through.
      */
-    async getDesktopBootstrap(
-        options: RequestOptions = {},
-    ): Promise<DesktopBootstrapResponse> {
+    async getDesktopBootstrap(options: RequestOptions = {}): Promise<DesktopBootstrapResponse> {
         return await this.#json({
             method: "GET",
             path: "v0/bootstrap/desktop",

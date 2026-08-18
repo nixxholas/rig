@@ -7,13 +7,15 @@ Lifecycle records join Agent Base's existing completion transactions instead of 
 
 ```ts
 import { Agent } from "@slopus/happy-agent-base";
-import { UsageModule } from "@slopus/happy-agent-modules";
+import { EventsModule, UsageModule } from "@slopus/happy-agent-modules";
 
-const usage = new UsageModule();
+const events = new EventsModule();
+const usage = new UsageModule(events);
 const agent = await Agent.create(ctx, { ...options, modules: [usage] });
 ```
 
-The module takes nothing. One instance serves every agent in a collection: it owns its tables,
+The module takes the Events module so every record uses the journal's exact durable run identity.
+One instance serves every agent in a collection: it owns its tables,
 uses the database carried by the current context, reads the wall clock itself, mints its own event
 identities, and holds the collection of agents it was started with so it can answer questions about
 one agent's subtree. Its bounds are constants — `USAGE_PAGE_SIZE` (50 raw records per page),
@@ -83,6 +85,9 @@ model a cost was actually spent on live on the records and are read through `rea
   `agentId` (via `contextAgentId`) doesn't match `agentId`.
 - `readPage(ctx, agentId, query?)` — one bounded page of raw `UsageRecord`s (`cursor`, `limit`),
   for a host that needs provider/model detail rather than totals.
+- `readRun(ctx, agentId, runId)` — the bounded provider-then-model inference usage attributed to
+  one exact run, including cache reads and writes. `costUsd` is `null` because the current provider
+  contract does not report monetary cost; the module never estimates one.
 - `aggregate(ctx, query?)` / `readAggregate` / `readAggregateUsage` — a bounded summary for one
   agent (`query.agentId` set) or the whole collection (`query.agentId` omitted). Only reachable
   from a non-agent context; an agent-scoped `ctx` cannot ask for the whole collection.
@@ -116,17 +121,19 @@ read is the only thing that uses it.
 
 The module keeps almost nothing itself. Two kinds of state exist:
 
-**Run KV** (`scope.runKV`, scoped to the active run): the start time of the current inference and
-turn, written by the before hooks and deleted by the matching completion hooks.
+**Run KV** (`scope.runKV`, scoped to the active run): the start time and exact Events-owned run ID
+of the current inference and turn, written by the before hooks and deleted by the matching
+completion hooks. Inference state also retains the latest provider-reported cache usage.
 
-- Key `pending_inference` — `{ startedAt: UsageTimestamp }`
-- Key `pending_turn` — `{ startedAt: UsageTimestamp }`
+- Key `pending_inference` — `{ startedAt, runId, usage? }`
+- Key `pending_turn` — `{ startedAt, runId }`
 
 The identities come from Agent Base rather than module-owned replay state.
 
 **Module-owned table** (`happy_agent_usage_records`): durable records and bounded aggregates.
 Migration `002-drop-usage-reset-receipts` removes the obsolete reset-receipt table created by the
-immutable first migration.
+immutable first migration. Migration `003-usage-run-attribution` adds the exact run ID and its
+bounded lookup index.
 
 - `record(ctx, UsageRecord)` inserts one record (`usage_inference_record` or `usage_turn_record`),
   keyed by Base's `inferenceId` or `turnId` and attributed by

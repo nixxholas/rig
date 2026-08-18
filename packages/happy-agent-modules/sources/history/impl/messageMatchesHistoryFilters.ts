@@ -33,8 +33,11 @@ export function historyMessageSearchParts(message: HistoryMessage): readonly str
         if (block.type === "text") parts.push(block.text);
         else if (block.type === "image") parts.push(block.mediaType);
         else if (block.type === "thinking") parts.push(block.thinking);
-        else if (block.type === "tool_call") parts.push(block.name, stringify(block.arguments));
-        else parts.push(block.toolName, block.display ?? "", block.output);
+        else if (block.type === "tool_call") {
+            parts.push(block.name, stringify(block.arguments ?? null));
+        } else {
+            parts.push(block.toolName, block.display ?? "", block.output ?? "");
+        }
     }
     return parts;
 }

@@ -3,6 +3,7 @@ import { agentDatabaseRun, type AgentDatabase } from "@slopus/happy-agent-base";
 import type { Context } from "@steve.kite/stdlib";
 
 export const WORKSPACES_TABLE = "happy_agent_module_workspaces";
+export const WORKSPACE_AGENTS_TABLE = "happy_agent_module_workspace_agents";
 const WORKSPACE_RECEIPTS_TABLE = "happy_agent_module_workspace_operation_receipts";
 const WORKSPACE_PROOFS_TABLE = "happy_agent_module_workspace_mutation_proofs";
 
@@ -210,6 +211,50 @@ export const workspaceMigrations = [
                 database,
                 sql`CREATE UNIQUE INDEX IF NOT EXISTS ${sql.raw(`${WORKSPACES_TABLE}_name_key`)}
                     ON ${sql.raw(WORKSPACES_TABLE)} (project_ref, name_key)`,
+            );
+        },
+    ],
+    [
+        // Conversations are agents, and their durable placement belongs to the workspace catalog.
+        // Associations stay separate from workspace lifecycle rows: moving an agent changes neither
+        // a branch nor the folder it works in.
+        "006-workspace-agent-associations",
+        async (_ctx: Context, database: AgentDatabase): Promise<void> => {
+            await agentDatabaseRun(
+                database,
+                sql`CREATE TABLE ${sql.raw(WORKSPACE_AGENTS_TABLE)} (
+                    workspace_id TEXT NOT NULL,
+                    agent_id TEXT PRIMARY KEY,
+                    order_key TEXT NOT NULL
+                )`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`CREATE INDEX ${sql.raw(`${WORKSPACE_AGENTS_TABLE}_workspace_order`)}
+                    ON ${sql.raw(WORKSPACE_AGENTS_TABLE)} (workspace_id, order_key, agent_id)`,
+            );
+        },
+    ],
+    [
+        // A project ID is the implicit root of its workspace tree. Existing workspaces become
+        // direct children of that root; nested workspaces are introduced by new reservations.
+        "007-workspace-hierarchy",
+        async (_ctx: Context, database: AgentDatabase): Promise<void> => {
+            await agentDatabaseRun(
+                database,
+                sql`ALTER TABLE ${sql.raw(WORKSPACES_TABLE)}
+                    ADD COLUMN parent_id TEXT NOT NULL DEFAULT ''`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`UPDATE ${sql.raw(WORKSPACES_TABLE)}
+                    SET parent_id = project_ref
+                    WHERE parent_id = ''`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`CREATE INDEX ${sql.raw(`${WORKSPACES_TABLE}_project_parent_order`)}
+                    ON ${sql.raw(WORKSPACES_TABLE)} (project_ref, parent_id, order_key, id)`,
             );
         },
     ],

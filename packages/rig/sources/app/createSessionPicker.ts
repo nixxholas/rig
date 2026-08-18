@@ -1,6 +1,6 @@
 import { matchesKey, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 
-import type { SessionSummary } from "../protocol/index.js";
+import type { AgentCatalogEntry } from "../client/index.js";
 import { DEFAULT_TERMINAL_THEME } from "./defaultTerminalTheme.js";
 import { formatSessionPickerEntry, type SessionPickerEntry } from "./formatSessionPickerEntry.js";
 import { surfaceThemedLine } from "./surfaceThemedLine.js";
@@ -18,8 +18,8 @@ export interface CreateSessionPickerOptions {
     confirmVerb: string;
     now?: () => number;
     onCancel: () => void;
-    onSelect: (session: SessionSummary) => void;
-    sessions: readonly SessionSummary[];
+    onSelect: (entry: AgentCatalogEntry) => void;
+    agents: readonly AgentCatalogEntry[];
     showDirectory: boolean;
     subtitle: string;
     theme?: TerminalTheme;
@@ -38,8 +38,8 @@ class SessionPicker implements Component {
     readonly #confirmVerb: string;
     readonly #entries: readonly SessionPickerEntry[];
     readonly #onCancel: () => void;
-    readonly #onSelect: (session: SessionSummary) => void;
-    readonly #sessions: readonly SessionSummary[];
+    readonly #onSelect: (entry: AgentCatalogEntry) => void;
+    readonly #agents: readonly AgentCatalogEntry[];
     readonly #subtitle: string;
     readonly #theme: TerminalTheme;
     readonly #title: string;
@@ -51,9 +51,9 @@ class SessionPicker implements Component {
     constructor(options: CreateSessionPickerOptions) {
         const now = (options.now ?? Date.now)();
         this.#confirmVerb = options.confirmVerb;
-        this.#sessions = options.sessions;
-        this.#entries = options.sessions.map((session) =>
-            formatSessionPickerEntry(session, { now, showDirectory: options.showDirectory }),
+        this.#agents = options.agents;
+        this.#entries = options.agents.map((entry) =>
+            formatSessionPickerEntry(entry, { now, showDirectory: options.showDirectory }),
         );
         this.#onCancel = options.onCancel;
         this.#onSelect = options.onSelect;
@@ -110,8 +110,8 @@ class SessionPicker implements Component {
             return;
         }
         if (matchesKey(data, "enter")) {
-            const session = this.#sessions[this.#selectedIndex];
-            if (session !== undefined) this.#onSelect(session);
+            const entry = this.#agents[this.#selectedIndex];
+            if (entry !== undefined) this.#onSelect(entry);
         }
     }
 
@@ -158,7 +158,7 @@ class SessionPicker implements Component {
 
     #footer(): string {
         const hidden = this.#entries.length - this.#maxVisible;
-        const scroll = hidden > 0 ? ` ${this.#entries.length} sessions.` : "";
+        const scroll = hidden > 0 ? ` ${this.#entries.length} agents.` : "";
         return `Use ↑/↓ to move, Enter to ${this.#confirmVerb}, Esc to cancel.${scroll}`;
     }
 

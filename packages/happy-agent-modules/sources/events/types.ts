@@ -48,6 +48,17 @@ export const eventSchema = Type.Object(
 
 export type AgentEvent = Static<typeof eventSchema>;
 
+/** The exact newest durable event identity and time for one agent resource. */
+export const latestAgentEventSchema = Type.Object(
+    {
+        cursor: eventIdSchema,
+        occurredAt: Type.Integer({ minimum: 0 }),
+    },
+    { additionalProperties: false },
+);
+
+export type LatestAgentEvent = Static<typeof latestAgentEventSchema>;
+
 /** Input for appending a raw event. The module assigns id and occurredAt. */
 export const appendEventInputSchema = Type.Object(
     {

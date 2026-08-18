@@ -116,6 +116,24 @@ export async function writeGuardedProject(
     return stored;
 }
 
+/** Advances the resource version for a change owned by an adjacent project table. */
+export async function touchProject(
+    database: AgentDatabase,
+    project: Project,
+    refusal: string,
+): Promise<Project> {
+    return await writeGuardedProject(
+        database,
+        project.id,
+        project.version,
+        sql`UPDATE ${sql.raw(PROJECTS_TABLE)}
+            SET updated_at = ${Date.now()}, version = version + 1
+            WHERE id = ${project.id} AND version = ${project.version}
+            RETURNING id`,
+        refusal,
+    );
+}
+
 /**
  * A write that rearranges a row without changing what the project is. Order is where a project sits
  * in a list, so it leaves the version alone — but it still refuses a row that moved underneath it,

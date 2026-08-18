@@ -1,7 +1,7 @@
-import type { SessionSummary, SessionSummaryStatus } from "../protocol/index.js";
+import type { AgentCatalogEntry } from "../client/index.js";
 
 export function formatSessionSummaries(
-    sessions: readonly SessionSummary[],
+    sessions: readonly AgentCatalogEntry[],
     options: { columns: number; rows: number },
 ): readonly string[] {
     const visibleRows = Math.max(0, options.rows);
@@ -23,12 +23,12 @@ export function formatSessionSummaries(
     return lines;
 }
 
-function formatSessionSummary(session: SessionSummary): string {
+function formatSessionSummary(entry: AgentCatalogEntry): string {
     return [
-        padRight(humanizeSessionStatus(session), 10),
-        padRight(formatTimestamp(session.lastMessageAt), 17),
-        padRight(session.id, 23),
-        titleText(session),
+        padRight(humanizeSessionStatus(entry), 16),
+        padRight(formatTimestamp(entry.agent.updatedAt), 17),
+        padRight(entry.agent.id, 23),
+        titleText(entry),
     ].join(" ");
 }
 
@@ -45,35 +45,34 @@ function formatTimestamp(value: number | undefined): string {
     return `${month}-${day} ${hour}:${minute}`;
 }
 
-function humanizeSessionStatus(session: SessionSummary): string {
-    if (session.unread?.reason === "attention_needed") return "Attention";
-    if (session.unread?.reason === "turn_finished") return "Finished";
-    if (session.archived) return "Archived";
-    return humanizeStatus(session.status);
+function humanizeSessionStatus(entry: AgentCatalogEntry): string {
+    const agent = entry.agent;
+    if (agent.pendingQuestionId !== null) return "Attention";
+    if (agent.unread?.reason === "turn_finished") return "Finished";
+    if (agent.archivedAt !== null) return "Archived";
+    return humanizeStatus(agent.status);
 }
 
-function humanizeStatus(status: SessionSummaryStatus): string {
+function humanizeStatus(status: AgentCatalogEntry["agent"]["status"]): string {
     if (status === "idle") return "Idle";
-    if (status === "queued") return "Queued";
-    if (status === "running") return "Running";
-    if (status === "completed") return "Completed";
-    if (status === "aborted") return "Aborted";
-    if (status === "suspended") return "Suspended";
-    return "Error";
+    if (status === "thinking") return "Thinking";
+    if (status === "generating_tools") return "Generating tools";
+    if (status === "running_tools") return "Running tools";
+    return "Working";
 }
 
 function padRight(value: string, length: number): string {
     return value.length >= length ? value : `${value}${" ".repeat(length - value.length)}`;
 }
 
-function titleText(session: SessionSummary): string {
-    if (session.title !== undefined && session.title.length > 0) {
-        return session.title;
+function titleText(entry: AgentCatalogEntry): string {
+    if (entry.agent.title !== null && entry.agent.title.length > 0) {
+        return entry.agent.title;
     }
-    if (session.titleStatus === "generating") {
+    if (entry.agent.titleStatus === "idle") {
         return "Generating title";
     }
-    return "Untitled session";
+    return "Untitled agent";
 }
 
 function truncate(value: string, columns: number): string {

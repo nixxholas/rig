@@ -12,7 +12,7 @@ export interface GymHomeOptions {
     readonly files?: Readonly<Record<string, GymFixture>>;
     /** Extra `happy.toml` content, appended after whatever the gym itself configures. */
     readonly config?: string;
-    /** The permission mode sessions start in when a request does not name one. */
+    /** The default permission mode for messages whose composer mode does not override it. */
     readonly permissionMode?: "read_only" | "workspace_write" | "auto" | "full_access";
 }
 
@@ -41,7 +41,7 @@ const MAX_SOCKET_PATH = 100;
  * own to exhaust that bound.
  */
 export async function createGymHome(options: GymHomeOptions = {}): Promise<GymHome> {
-    const scratch = resolve(import.meta.dirname, "../../../.context/gym");
+    const scratch = resolve(import.meta.dirname, "../../../.local/g");
     await mkdir(scratch, { recursive: true });
     const root = await mkdtemp(join(scratch, "g-"));
     const happyHome = join(root, ".happy");

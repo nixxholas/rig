@@ -59,7 +59,7 @@ export const historyQuerySchema = Type.Object(
         /** Case-insensitive text to search the whole stored message for. */
         query: Type.Optional(historyQueryTextSchema),
         /** Return only messages in these roles. */
-        roles: Type.Optional(Type.Array(historyRoleSchema, { maxItems: 5 })),
+        roles: Type.Optional(Type.Array(historyRoleSchema, { maxItems: 6 })),
         /** Which agent to read. Omitted means the one asking. */
         target: Type.Optional(historyAgentTargetSchema),
     },
@@ -84,7 +84,7 @@ export const historyStoreQuerySchema = Type.Object(
             minimum: 1,
         }),
         query: Type.Optional(historyQueryTextSchema),
-        roles: Type.Optional(Type.Array(historyRoleSchema, { maxItems: 5 })),
+        roles: Type.Optional(Type.Array(historyRoleSchema, { maxItems: 6 })),
     },
     { additionalProperties: false },
 );

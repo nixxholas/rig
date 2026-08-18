@@ -1,0 +1,3501 @@
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import * as inspector from "node:inspector";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { AsyncLocalStorage } from "node:async_hooks";
+import type { Socket } from "node:net";
+import { dirname, join } from "node:path";
+
+import { createId } from "@paralleldrive/cuid2";
+import {
+    currentAgentEnvironment,
+    type AgentConfig,
+    type AgentBaseMessageOptions,
+    type AgentModule,
+    type AgentModuleHooks,
+    type AgentSystemRef,
+} from "@slopus/happy-agent-base";
+import type { Static, TSchema } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
+import type { Context } from "@steve.kite/stdlib";
+import { WebSocketServer } from "ws";
+
+import { ComputeModule, type ComputeProcessEvent } from "../compute/index.js";
+import { ConfigModule } from "../config/index.js";
+import { EventsModule, eventIdSchema, type AgentEvent } from "../events/index.js";
+import {
+    fileReadQuerySchema,
+    fileRevisionQuerySchema,
+    fileSearchQuerySchema,
+    fileTreeQuerySchema,
+    fileWriteSchema,
+    ProjectFileError,
+    ProjectFilesModule,
+} from "../files/index.js";
+import { GitModule } from "../git/index.js";
+import { HistoryModule } from "../history/index.js";
+import type { HistoryPendingMessage } from "../history/index.js";
+import { USER_MESSAGE_ORIGIN_METADATA } from "../impl/messageOrigin.js";
+import {
+    ProfileModule,
+    ProfileVersionConflictError,
+    type ProfileChangedEvent,
+    type ProfilePhotoContentType,
+} from "../profile/index.js";
+import {
+    ProjectRegistrationError,
+    ProjectsModule,
+    type Project,
+    type ProjectEvent,
+} from "../projects/index.js";
+import {
+    TerminalError,
+    TerminalsModule,
+    type TerminalEvent,
+    type TerminalScope,
+} from "../terminals/index.js";
+import { createNodeBinaryWebSocket, WebSocketDuplex } from "../transport/index.js";
+import { UsageModule, type UsageInferenceRecord } from "../usage/index.js";
+import { UserInputModule, type UserInputEvent } from "../userInput/index.js";
+import { WorkspacesModule, type Workspace, type WorkspaceEvent } from "../workspaces/index.js";
+import { ApiError, invalidRequest, notFound, type ApiErrorCode } from "./ApiError.js";
+import { ApiEventJournal, type ApiEvent } from "./ApiEventJournal.js";
+import {
+    agentResource,
+    apiResourceVersion,
+    gitResource,
+    messageResource,
+    profileResource,
+    projectResource,
+    questionResource,
+    rootWorkspaceResource,
+    terminalResource,
+    workspaceResource,
+} from "./ApiResourceProjection.js";
+import {
+    abortBodySchema,
+    agentCreateBodySchema,
+    apiIdSchema,
+    documentBodySchema,
+    draftBodySchema,
+    emptyMutationBodySchema,
+    gitWatchBodySchema,
+    messageSendBodySchema,
+    profilePatchBodySchema,
+    projectCloneBodySchema,
+    projectRegisterBodySchema,
+    projectSettingsBodySchema,
+    questionAnswerBodySchema,
+    renameBodySchema,
+    reorderBodySchema,
+    securityDocumentBodySchema,
+    terminalCreateBodySchema,
+    terminalResizeBodySchema,
+    workspaceCreateBodySchema,
+} from "./ApiSchemas.js";
+import { WorkspaceProxy } from "./WorkspaceProxy.js";
+
+const API_PROTOCOL_VERSION = 17;
+const MAX_JSON_BODY_BYTES = 48 * 1024 * 1024;
+const HEARTBEAT_MS = 15_000;
+const TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+const MAX_TERMINAL_WIRE_MESSAGE_BYTES = 4 * 1024 * 1024 + 20;
+const MAX_ANNOUNCED_PENDING_MESSAGES = 10_000;
+const MAX_ANNOUNCED_AGENT_CREATIONS = 10_000;
+
+interface AcceptedMessageBatch {
+    readonly kind: "send" | "steering";
+    readonly runId: string;
+    readonly messages: {
+        readonly id: string;
+        readonly occurredAt: number;
+        readonly previousVersion: string;
+        readonly version: string;
+    }[];
+}
+
+/**
+ * The daemon's complete application protocol boundary.
+ *
+ * It is an agent module so it can subscribe before any other module starts emitting. It does not
+ * own a listener or a socket: the executable binds the Unix socket and forwards requests here.
+ */
+export class ApiModule implements AgentModule {
+    readonly name = "api";
+
+    readonly #config: ConfigModule;
+    readonly #events: EventsModule;
+    readonly #projects: ProjectsModule;
+    readonly #workspaces: WorkspacesModule;
+    readonly #terminals: TerminalsModule;
+    readonly #files: ProjectFilesModule;
+    readonly #git: GitModule;
+    readonly #history: HistoryModule;
+    readonly #userInput: UserInputModule;
+    readonly #usage: UsageModule;
+    readonly #profile: ProfileModule;
+    readonly #compute: ComputeModule;
+    readonly #mutationIds = new AsyncLocalStorage<string>();
+    readonly #journal = new MutationAwareApiEventJournal(this.#mutationIds);
+    readonly #webSockets = new WebSocketServer({
+        maxPayload: MAX_TERMINAL_WIRE_MESSAGE_BYTES,
+        noServer: true,
+        perMessageDeflate: false,
+    });
+    readonly #workspaceProxy = new WorkspaceProxy();
+    readonly #unsubscribe: (() => void)[] = [];
+    readonly #streams = new Set<ServerResponse>();
+    readonly #shutdownListeners = new Set<() => void | Promise<void>>();
+    readonly #loopStarts = new Map<
+        string,
+        { readonly runId: string; readonly startedAt: number }
+    >();
+    readonly #activeRuns = new Map<string, Record<string, unknown>>();
+    readonly #announcedPendingMessages = new Set<string>();
+    readonly #apiPendingMessageIds = new Set<string>();
+    readonly #announcedAgentCreations = new Set<string>();
+    readonly #acceptedMessageBatches = new Map<string, AcceptedMessageBatch>();
+    readonly #processOwners = new Map<string, string>();
+    readonly #agentEventChains = new Map<string, Promise<void>>();
+
+    #agents: AgentSystemRef | undefined;
+    #ready = false;
+    #closed = false;
+    #token: string | undefined;
+    #preparePromise: Promise<void> | undefined;
+
+    constructor(
+        config: ConfigModule,
+        events: EventsModule,
+        projects: ProjectsModule,
+        workspaces: WorkspacesModule,
+        terminals: TerminalsModule,
+        files: ProjectFilesModule,
+        git: GitModule,
+        history: HistoryModule,
+        userInput: UserInputModule,
+        usage: UsageModule,
+        profile: ProfileModule,
+        compute: ComputeModule,
+    ) {
+        this.#config = config;
+        this.#events = events;
+        this.#projects = projects;
+        this.#workspaces = workspaces;
+        this.#terminals = terminals;
+        this.#files = files;
+        this.#git = git;
+        this.#history = history;
+        this.#userInput = userInput;
+        this.#usage = usage;
+        this.#profile = profile;
+        this.#compute = compute;
+    }
+
+    readonly beforeStart = async (
+        ctx: Context,
+        agents: AgentSystemRef,
+    ): Promise<AgentModuleHooks> => {
+        this.#agents = agents;
+        // Install first. Reading or creating the token may touch disk, and no producer should gain
+        // a window in which it can emit while the API is awaiting that work.
+        this.#subscribeToModules(ctx);
+        await this.prepare();
+        return {};
+    };
+
+    get ready(): boolean {
+        return this.#ready;
+    }
+
+    token(): string | undefined {
+        return this.#token;
+    }
+
+    /** Prepare authentication before the executable exposes the starting-health socket. */
+    async prepare(): Promise<void> {
+        this.#preparePromise ??= (async () => {
+            this.#token = await loadOrCreateToken(this.#config.configuration.paths.tokenPath);
+        })();
+        await this.#preparePromise;
+    }
+
+    cursor(): string {
+        return this.#journal.cursor();
+    }
+
+    /** Subscribe to the daemon-level shutdown request after the response has been flushed. */
+    onShutdown(listener: () => void | Promise<void>): () => void {
+        this.#shutdownListeners.add(listener);
+        return () => {
+            this.#shutdownListeners.delete(listener);
+        };
+    }
+
+    async markReady(): Promise<void> {
+        if (this.#closed) throw new Error("The API module is already closed.");
+        this.#ready = true;
+    }
+
+    async close(): Promise<void> {
+        if (this.#closed) return;
+        this.#closed = true;
+        this.#ready = false;
+        for (const unsubscribe of this.#unsubscribe.splice(0)) unsubscribe();
+        this.#shutdownListeners.clear();
+        for (const stream of this.#streams) stream.end();
+        this.#streams.clear();
+        this.#announcedPendingMessages.clear();
+        this.#apiPendingMessageIds.clear();
+        this.#announcedAgentCreations.clear();
+        this.#acceptedMessageBatches.clear();
+        this.#processOwners.clear();
+        await Promise.allSettled(this.#agentEventChains.values());
+        this.#agentEventChains.clear();
+        for (const client of this.#webSockets.clients) client.terminate();
+        this.#webSockets.close();
+        this.#workspaceProxy.close();
+    }
+
+    async handleRequest(
+        ctx: Context,
+        request: IncomingMessage,
+        response: ServerResponse,
+    ): Promise<void> {
+        setCommonHeaders(response);
+        try {
+            this.#authenticate(request);
+            const url = requestUrl(request);
+            if (request.method === "GET" && url.pathname === "/v0/health") {
+                sendJson(response, 200, this.#health());
+                return;
+            }
+            if (!this.#ready) {
+                throw new ApiError(503, "not_initialized", "Happy Agent is still starting.");
+            }
+            if (request.method === "GET" && url.pathname === "/") {
+                sendJson(response, 200, { text: "Welcome to Happy Agent!" });
+                return;
+            }
+            if (
+                (url.pathname === "/v0/workspaces" ||
+                    url.pathname.startsWith("/v0/workspaces/") ||
+                    url.pathname === "/v0/git/watch") &&
+                this.#config.configuration.values.features.workspaces === false
+            ) {
+                throw new ApiError(503, "unsupported", "Workspaces are disabled in this daemon.");
+            }
+            if (request.method === "GET" && url.pathname === "/v0/config") {
+                sendJson(response, 200, { config: this.#sanitizedConfig() });
+                return;
+            }
+            if (request.method === "PATCH" && url.pathname === "/v0/config") {
+                await readJson(request);
+                throw new ApiError(
+                    409,
+                    "conflict",
+                    "This daemon cannot change its settings at runtime.",
+                );
+            }
+            if (request.method === "GET" && url.pathname === "/v0/config/instructions") {
+                sendJson(response, 200, {
+                    instructions:
+                        (await this.#config.readGlobalInstructions(ctx, 256 * 1_024)) ?? "",
+                });
+                return;
+            }
+            if (request.method === "GET" && url.pathname === "/v0/config/security") {
+                sendJson(response, 200, {
+                    policy: (await this.#config.readGlobalSecurity(ctx, 32 * 1_024)) ?? "",
+                });
+                return;
+            }
+            if (request.method === "PUT" && url.pathname === "/v0/config/instructions") {
+                const body = await bodyAs(request, documentBodySchema, "instructions document");
+                await this.#withMutationId(body.mutationId, async () => {
+                    await writeOwnerOnlyDocument(
+                        this.#config.configuration.paths.instructionsPath,
+                        body.instructions,
+                    );
+                    this.#journal.append("config.updated", {});
+                });
+                sendJson(response, 200, { instructions: body.instructions });
+                return;
+            }
+            if (request.method === "PUT" && url.pathname === "/v0/config/security") {
+                const body = await bodyAs(request, securityDocumentBodySchema, "security policy");
+                await this.#withMutationId(body.mutationId, async () => {
+                    await writeOwnerOnlyDocument(
+                        this.#config.configuration.paths.securityPath,
+                        body.policy,
+                    );
+                    this.#journal.append("config.updated", {});
+                });
+                sendJson(response, 200, { policy: body.policy });
+                return;
+            }
+            if (request.method === "GET" && url.pathname === "/v0/onboarding") {
+                sendJson(response, 200, await this.#onboarding(ctx));
+                return;
+            }
+            if (request.method === "POST" && url.pathname === "/v0/onboarding/complete") {
+                await writeOwnerOnlyDocument(this.#onboardingMarker(), "complete\n");
+                sendJson(response, 200, { completed: true });
+                return;
+            }
+            if (request.method === "GET" && url.pathname === "/v0/profile") {
+                sendJson(response, 200, {
+                    profile: profileResource(await this.#profile.ensure(ctx)),
+                });
+                return;
+            }
+            if (request.method === "PATCH" && url.pathname === "/v0/profile") {
+                await this.#handleProfilePatch(ctx, request, response);
+                return;
+            }
+            if (url.pathname === "/v0/profile/photo" && request.method === "GET") {
+                const photo = await this.#profile.getPhoto(ctx);
+                if (photo === undefined) throw notFound("The profile has no photo.");
+                if (request.headers["if-none-match"] === photo.etag) {
+                    response.writeHead(304, {
+                        "cache-control": "no-store",
+                        etag: photo.etag,
+                    });
+                    response.end();
+                    return;
+                }
+                response.writeHead(200, {
+                    "cache-control": "no-store",
+                    "content-length": photo.bytes.byteLength,
+                    "content-type": photo.contentType,
+                    etag: photo.etag,
+                });
+                response.end(Buffer.from(photo.bytes));
+                return;
+            }
+            if (url.pathname === "/v0/profile/photo" && request.method === "PUT") {
+                const current = await this.#profile.ensure(ctx);
+                const resource = profileResource(current);
+                const expectedVersion = requireIfMatch(request, resource["version"], {
+                    currentVersion: resource["version"],
+                    profile: resource,
+                });
+                const contentType = request.headers["content-type"]?.split(";")[0]?.trim();
+                if (
+                    contentType !== "image/png" &&
+                    contentType !== "image/jpeg" &&
+                    contentType !== "image/webp"
+                ) {
+                    throw invalidRequest("The profile photo must be a PNG, JPEG, or WebP image.");
+                }
+                const bytes = await readBytes(request, 8 * 1024 * 1024);
+                const profile = await this.#profile.putPhoto(
+                    ctx,
+                    bytes,
+                    contentType as ProfilePhotoContentType,
+                    { expectedVersion },
+                );
+                sendJson(response, 200, { profile: profileResource(profile) });
+                return;
+            }
+            if (url.pathname === "/v0/profile/photo" && request.method === "DELETE") {
+                const current = await this.#profile.ensure(ctx);
+                const resource = profileResource(current);
+                const expectedVersion = requireIfMatch(request, resource["version"], {
+                    currentVersion: resource["version"],
+                    profile: resource,
+                });
+                const profile = await this.#profile.deletePhoto(ctx, {
+                    expectedVersion,
+                });
+                sendJson(response, 200, { profile: profileResource(profile) });
+                return;
+            }
+            if (request.method === "GET" && url.pathname === "/v0/projects") {
+                const projects = await this.#allProjects(ctx, true);
+                sendJson(response, 200, {
+                    projects: await Promise.all(
+                        projects.map(
+                            async (project) => await this.#projectWithAgents(ctx, project),
+                        ),
+                    ),
+                });
+                return;
+            }
+            if (await this.#handleProjectRoute(ctx, request, response, url)) return;
+            if (request.method === "GET" && url.pathname === "/v0/workspaces") {
+                await this.#handleWorkspaceList(ctx, url, response);
+                return;
+            }
+            if (await this.#handleWorkspaceRoute(ctx, request, response, url)) return;
+            if (await this.#handleWorkspaceContentRoute(ctx, request, response, url)) return;
+            if (request.method === "POST" && url.pathname === "/v0/git/watch") {
+                await this.#handleGitWatch(ctx, request, response);
+                return;
+            }
+            if (await this.#handleAgentRoute(ctx, request, response, url)) return;
+            if (request.method === "GET" && url.pathname === "/v0/usage") {
+                sendJson(response, 200, await this.#daemonUsage(ctx));
+                return;
+            }
+            if (request.method === "GET" && url.pathname === "/v0/bootstrap/desktop") {
+                sendJson(response, 200, await this.#desktopBootstrap(ctx));
+                return;
+            }
+            if (request.method === "GET" && url.pathname === "/v0/events") {
+                this.#handleEventPull(url, response);
+                return;
+            }
+            if (request.method === "GET" && url.pathname === "/v0/events/stream") {
+                this.#handleEventStream(request, response, url);
+                return;
+            }
+            if (request.method === "POST" && url.pathname === "/v0/shutdown") {
+                sendJson(response, 202, { shuttingDown: true, pid: process.pid });
+                setImmediate(() => {
+                    for (const listener of [...this.#shutdownListeners]) {
+                        void Promise.resolve(listener()).catch((error: unknown) => {
+                            ctx.log.error("A daemon shutdown listener failed.", {}, error);
+                        });
+                    }
+                });
+                return;
+            }
+            if (request.method === "POST" && url.pathname === "/v0/debug/inspector") {
+                inspector.open(0, "127.0.0.1", false);
+                sendJson(response, 200, { inspectorUrl: inspector.url() });
+                return;
+            }
+            if (request.method === "DELETE" && url.pathname === "/v0/debug/inspector") {
+                const stopped = inspector.url() !== undefined;
+                if (stopped) inspector.close();
+                sendJson(response, 200, { stopped });
+                return;
+            }
+            throw notFound("The requested endpoint does not exist.");
+        } catch (error: unknown) {
+            this.#sendError(ctx, response, error);
+        }
+    }
+
+    async handleUpgrade(
+        ctx: Context,
+        request: IncomingMessage,
+        socket: Socket,
+        head: Buffer,
+    ): Promise<boolean> {
+        const match =
+            /^\/v0\/workspaces\/([a-z][a-z0-9]*)\/terminals\/([a-z][a-z0-9]*)\/attach$/.exec(
+                requestUrl(request).pathname,
+            );
+        if (match === null) return false;
+        if (!this.#authorized(request)) {
+            writeSocketError(socket, 401, "Unauthorized");
+            return true;
+        }
+        if (!this.#ready) {
+            writeSocketError(socket, 503, "Happy Agent is still starting.");
+            return true;
+        }
+        if (this.#config.configuration.values.features.workspaces === false) {
+            writeSocketError(socket, 503, "Workspaces are disabled in this daemon.", "unsupported");
+            return true;
+        }
+        try {
+            const workspaceId = match[1] as string;
+            const terminalId = match[2] as string;
+            const { scope } = await this.#resolveWorkspaceScope(ctx, workspaceId);
+            const session = await this.#terminals.session(ctx, scope, terminalId);
+            this.#webSockets.handleUpgrade(request, socket, head, (webSocket) => {
+                const stream = new WebSocketDuplex(createNodeBinaryWebSocket(webSocket));
+                const detach = session.attach(stream);
+                stream.once("close", detach);
+            });
+        } catch (error: unknown) {
+            this.#writeSocketFailure(ctx, socket, error, "The terminal was not found.");
+        }
+        return true;
+    }
+
+    async handleConnect(
+        ctx: Context,
+        request: IncomingMessage,
+        socket: Socket,
+        head: Buffer,
+    ): Promise<boolean> {
+        const match = /^\/v0\/workspaces\/([a-z][a-z0-9]*)\/proxy$/.exec(
+            requestUrl(request).pathname,
+        );
+        if (match === null) return false;
+        if (!this.#authorized(request)) {
+            writeSocketError(socket, 401, "Unauthorized");
+            return true;
+        }
+        if (!this.#ready) {
+            writeSocketError(socket, 503, "Happy Agent is still starting.");
+            return true;
+        }
+        if (this.#config.configuration.values.features.workspaces === false) {
+            writeSocketError(socket, 503, "Workspaces are disabled in this daemon.", "unsupported");
+            return true;
+        }
+        try {
+            await this.#resolveWorkspaceScope(ctx, match[1] as string);
+            this.#workspaceProxy.accept(socket, head);
+        } catch (error: unknown) {
+            this.#writeSocketFailure(ctx, socket, error, "The workspace was not found.");
+        }
+        return true;
+    }
+
+    #subscribeToModules(ctx: Context): void {
+        if (this.#unsubscribe.length > 0) return;
+        this.#unsubscribe.push(
+            this.#events.subscribe((event) => this.#enqueueAgentEvent(ctx, event)),
+            this.#projects.onEvent(async (ctx, event) => {
+                await this.#convertProjectEvent(ctx, event);
+            }),
+            this.#workspaces.onEvent(async (ctx, event) => {
+                await this.#convertWorkspaceEvent(ctx, event);
+            }),
+            this.#terminals.onEvent(async (event) => {
+                this.#convertTerminalEvent(event);
+            }),
+            this.#git.onSnapshot(async (_ctx, entity, snapshot) => {
+                this.#journal.append("git.updated", {
+                    workspaceId: entity.workspaceId ?? entity.projectId,
+                    git: gitResource(snapshot),
+                });
+            }),
+            this.#history.onAppend((_ctx, agentId, messages) => {
+                for (const message of messages) {
+                    if (
+                        message.role === "user" ||
+                        message.senderAgentId !== undefined ||
+                        message.provider !== undefined ||
+                        message.model !== undefined
+                    ) {
+                        continue;
+                    }
+                    this.#journal.append("message.created", {
+                        agentId,
+                        runId: message.runId ?? this.#activeRuns.get(agentId)?.["id"] ?? null,
+                        message: messageResource(message),
+                    });
+                }
+            }),
+            this.#userInput.onEvent(async (eventCtx, event) => {
+                await this.#convertUserInputEvent(eventCtx, event);
+            }),
+            this.#usage.onEvent(async (eventCtx, event) => {
+                if (event.type !== "usage_recorded") return;
+                await this.#updateAgentMetadata(eventCtx, event.record.agentId, {});
+            }),
+            this.#profile.onEvent(async (ctx: Context, event: ProfileChangedEvent) => {
+                const profile = profileResource(await this.#profile.ensure(ctx));
+                this.#journal.append("profile.updated", {
+                    previousVersion: event.data.previousVersion,
+                    version: event.data.version,
+                    profile,
+                });
+            }),
+            this.#compute.onProcessEvent(async (event) => {
+                await this.#convertProcessEvent(ctx, event);
+            }),
+        );
+    }
+
+    async #convertProcessEvent(ctx: Context, event: ComputeProcessEvent): Promise<void> {
+        if (event.type === "process_started") {
+            const process = event.process;
+            this.#processOwners.set(process.id, process.agentId);
+            this.#journal.append("process.started", { process });
+            await this.#announceProcessCount(ctx, process.agentId);
+            return;
+        }
+        const agentId = this.#processOwners.get(event.processId);
+        this.#journal.append(
+            event.type === "process_exited" ? "process.exited" : "process.updated",
+            {
+                ...(agentId === undefined ? {} : { agentId }),
+                processId: event.processId,
+                previousVersion: event.previousVersion,
+                version: event.version,
+                changes: event.changes,
+            },
+        );
+        if (agentId !== undefined) {
+            if (event.type === "process_exited") this.#processOwners.delete(event.processId);
+            await this.#announceProcessCount(ctx, agentId);
+        }
+    }
+
+    async #announceProcessCount(ctx: Context, agentId: string): Promise<void> {
+        const running = [...this.#processOwners.values()].filter(
+            (ownerAgentId) => ownerAgentId === agentId,
+        ).length;
+        await this.#updateAgentMetadata(ctx, agentId, {
+            processes: { running },
+        });
+    }
+
+    async #convertProjectEvent(ctx: Context, event: ProjectEvent): Promise<void> {
+        if (event.type === "project_settings_updated") {
+            const resource = await this.#projectWithAgents(ctx, event.project);
+            this.#journal.append(
+                "project.updated",
+                {
+                    projectId: event.project.id,
+                    previousVersion: apiResourceVersion(
+                        event.previousProject.updatedAt,
+                        event.previousProject.version,
+                        event.previousProject.id,
+                    ),
+                    version: resource["version"],
+                    changes: {
+                        settings: event.settings,
+                        updatedAt: event.project.updatedAt,
+                    },
+                },
+                event.at,
+            );
+            this.#appendRootWorkspaceProjectUpdate(
+                event.project,
+                event.previousProject,
+                resource["agents"],
+                false,
+                event.at,
+            );
+            return;
+        }
+        const resource = await this.#projectWithAgents(ctx, event.project);
+        if (event.type === "project_created") {
+            this.#journal.append("project.created", { project: resource }, event.at);
+            this.#journal.append(
+                "workspace.created",
+                {
+                    workspace: {
+                        ...rootWorkspaceResource(event.project),
+                        agents: resource["agents"],
+                    },
+                },
+                event.at,
+            );
+            return;
+        }
+        const previous = await projectResource(ctx, this.#projects, event.previousProject);
+        const agentsChanged =
+            event.type === "project_agent_attached" || event.type === "project_agent_reordered";
+        const changes = agentsChanged
+            ? {
+                  agents: resource["agents"],
+                  updatedAt: resource["updatedAt"],
+              }
+            : resourceChanges(previous, resource);
+        this.#journal.append(
+            "project.updated",
+            {
+                projectId: event.project.id,
+                previousVersion: previous["version"],
+                version: resource["version"],
+                changes,
+            },
+            event.at,
+        );
+        this.#appendRootWorkspaceProjectUpdate(
+            event.project,
+            event.previousProject,
+            resource["agents"],
+            agentsChanged,
+            event.at,
+        );
+    }
+
+    #appendRootWorkspaceProjectUpdate(
+        project: Project,
+        previousProject: Project,
+        agents: unknown,
+        agentsChanged: boolean,
+        at: number,
+    ): void {
+        const resource: Record<string, unknown> = {
+            ...rootWorkspaceResource(project),
+            agents,
+        };
+        const previous = rootWorkspaceResource(previousProject);
+        this.#journal.append(
+            "workspace.updated",
+            {
+                workspaceId: project.id,
+                previousVersion: previous["version"],
+                version: resource["version"],
+                changes: agentsChanged
+                    ? {
+                          agents,
+                          updatedAt: resource["updatedAt"],
+                      }
+                    : resourceChanges(previous, resource),
+            },
+            at,
+        );
+    }
+
+    async #convertWorkspaceEvent(ctx: Context, event: WorkspaceEvent): Promise<void> {
+        if (event.type === "workspace_transfer_scheduled") return;
+        const resource: Record<string, unknown> = {
+            ...workspaceResource(event.workspace),
+            agents: await this.#agentsForWorkspace(ctx, event.workspace.id),
+        };
+        if (event.type === "workspace_created") {
+            this.#journal.append("workspace.created", { workspace: resource }, event.at);
+            return;
+        }
+        const previous = workspaceResource(event.previousWorkspace);
+        const changes =
+            event.type === "workspace_agent_attached" ||
+            event.type === "workspace_agent_detached" ||
+            event.type === "workspace_agent_reordered"
+                ? {
+                      agents: resource["agents"],
+                      updatedAt: resource["updatedAt"],
+                  }
+                : resourceChanges(previous, resource);
+        this.#journal.append(
+            "workspace.updated",
+            {
+                workspaceId: event.workspace.id,
+                previousVersion: previous["version"],
+                version: resource["version"],
+                changes,
+            },
+            event.at,
+        );
+    }
+
+    #convertTerminalEvent(event: TerminalEvent): void {
+        if (event.type === "terminal_created") {
+            this.#journal.append("terminal.created", {
+                terminal: terminalResource(event.terminal.workspaceId, event.terminal),
+            });
+            return;
+        }
+        this.#journal.append("terminal.updated", {
+            terminalId: event.terminalId,
+            previousVersion: event.previousVersion,
+            version: event.version,
+            changes: event.changes,
+        });
+    }
+
+    async #convertUserInputEvent(ctx: Context, event: UserInputEvent): Promise<void> {
+        const question = questionResource(
+            event.request,
+            this.#events.activeRunId(event.request.askingAgentId),
+        );
+        if (event.type === "user_input_requested") {
+            this.#journal.append("question.created", { question }, event.at);
+            await this.#updateAgentMetadata(ctx, event.request.askingAgentId, {
+                pendingQuestionId: event.request.id,
+            });
+            return;
+        }
+        this.#journal.append(
+            "question.updated",
+            {
+                questionId: event.request.id,
+                agentId: event.request.askingAgentId,
+                previousVersion: apiResourceVersion(event.request.createdAt, 1, event.request.id),
+                version: question["version"],
+                changes: {
+                    status: question["status"],
+                    answers: question["answers"],
+                    answeredAt: question["answeredAt"],
+                    updatedAt: event.request.updatedAt,
+                },
+            },
+            event.at,
+        );
+        await this.#updateAgentMetadata(ctx, event.request.askingAgentId, {
+            pendingQuestionId: null,
+        });
+    }
+
+    #enqueueAgentEvent(ctx: Context, event: AgentEvent): void {
+        const key = event.agentId ?? "\u0000daemon";
+        const previous = this.#agentEventChains.get(key) ?? Promise.resolve();
+        const next = previous
+            .then(async () => {
+                await this.#convertAgentEvent(ctx, event);
+            })
+            .catch((error: unknown) => {
+                ctx.log.error(
+                    "The API could not convert an agent event.",
+                    { agentId: event.agentId, eventType: event.type },
+                    error,
+                );
+            });
+        this.#agentEventChains.set(key, next);
+        void next.finally(() => {
+            if (this.#agentEventChains.get(key) === next) {
+                this.#agentEventChains.delete(key);
+            }
+        });
+    }
+
+    async #convertAgentEvent(ctx: Context, event: AgentEvent): Promise<void> {
+        const agentId = event.agentId;
+        if (agentId === undefined) return;
+        const payload = recordValue(event.payload);
+        if (event.type !== "message.accepted" && this.#acceptedMessageBatches.has(agentId)) {
+            this.#flushAcceptedMessages(agentId);
+        }
+        if (event.type === "agent.created") {
+            await this.#announceCreatedAgent(ctx, agentId);
+            await this.#refreshParentSubagents(ctx, agentId);
+            return;
+        }
+        if (event.type === "loop.started") {
+            const runId = stringValue(payload?.["runId"]) ?? stringValue(payload?.["loopId"]);
+            if (runId !== undefined) {
+                this.#loopStarts.set(agentId, { runId, startedAt: event.occurredAt });
+            }
+            await this.#appendAgentUpdate(ctx, event, {
+                status: "working",
+                updatedAt: event.occurredAt,
+            });
+            return;
+        }
+        if (event.type === "message.accepted") {
+            const previousVersion = await this.#events.previousCursor(ctx, agentId, event.id);
+            if (previousVersion === undefined) {
+                throw new Error("An accepted message has no prior agent resource version.");
+            }
+            await this.#acceptMessageEvent(ctx, agentId, event, payload, previousVersion);
+            await this.#refreshParentSubagents(ctx, agentId);
+            return;
+        }
+        if (event.type === "loop.settled") {
+            this.#flushAcceptedMessages(agentId);
+            const run = this.#activeRuns.get(agentId);
+            if (run === undefined) {
+                await this.#appendAgentUpdate(ctx, event, {
+                    status: "idle",
+                    updatedAt: event.occurredAt,
+                });
+                await this.#refreshParentSubagents(ctx, agentId);
+                return;
+            }
+            const stopReason = stringValue(payload?.["stopReason"]);
+            const failed = typeof payload?.["error"] === "string" || stopReason === "error";
+            const aborted = stopReason === "aborted";
+            const finished = {
+                ...run,
+                status: failed ? "failed" : aborted ? "aborted" : "completed",
+                reason: failed ? "error" : aborted ? "abort" : "completed",
+                endedAt: event.occurredAt,
+            };
+            this.#activeRuns.delete(agentId);
+            this.#journal.append("run.finished", { agentId, run: finished }, event.occurredAt);
+            await this.#appendAgentUpdate(ctx, event, {
+                status: "idle",
+                updatedAt: event.occurredAt,
+            });
+            await this.#updateAgentMetadata(ctx, agentId, {
+                unread: {
+                    reason: "turn_finished",
+                    since: event.occurredAt,
+                },
+            });
+            await this.#refreshParentSubagents(ctx, agentId);
+            return;
+        }
+        if (event.type === "agent.metadata-changed") {
+            const update = recordValue(payload?.["update"]);
+            if (update === undefined) return;
+            await this.#appendAgentUpdate(
+                ctx,
+                event,
+                agentMetadataChanges(update, event.occurredAt),
+            );
+            return;
+        }
+        if (event.type === "provider.event") {
+            this.#convertProviderMessageEvent(event, payload);
+        }
+        if (event.type === "inference.completed") {
+            this.#recordRunUsage(agentId, payload);
+        }
+        const status = statusForAgentEvent(event.type, payload);
+        await this.#appendAgentUpdate(ctx, event, {
+            ...(status === undefined ? {} : { status }),
+            updatedAt: event.occurredAt,
+        });
+    }
+
+    #recordRunUsage(agentId: string, payload: Readonly<Record<string, unknown>> | undefined): void {
+        const run = this.#activeRuns.get(agentId);
+        const provider = stringValue(payload?.["provider"]);
+        const model = stringValue(payload?.["model"]);
+        const tokens = recordValue(payload?.["tokens"]);
+        if (run === undefined || provider === undefined || model === undefined) return;
+        const usage = structuredClone(recordValue(run["usage"]) ?? {});
+        const providerUsage = structuredClone(recordValue(usage[provider]) ?? {});
+        const current = recordValue(providerUsage[model]) ?? {};
+        providerUsage[model] = {
+            input: numericValue(current["input"]) + numericValue(tokens?.["input"]),
+            output: numericValue(current["output"]) + numericValue(tokens?.["output"]),
+            cacheRead: numericValue(current["cacheRead"]) + numericValue(tokens?.["cacheRead"]),
+            cacheWrite: numericValue(current["cacheWrite"]) + numericValue(tokens?.["cacheWrite"]),
+        };
+        usage[provider] = providerUsage;
+        this.#activeRuns.set(agentId, { ...run, usage });
+    }
+
+    #convertProviderMessageEvent(
+        event: AgentEvent,
+        payload: Readonly<Record<string, unknown>> | undefined,
+    ): void {
+        if (payload?.["recovered"] === true) return;
+        const agentId = event.agentId;
+        const underlyingRunId = stringValue(payload?.["runId"]);
+        const rigEvent = recordValue(payload?.["rigEvent"]);
+        const type = stringValue(rigEvent?.["type"]);
+        if (agentId === undefined || underlyingRunId === undefined || type === undefined) {
+            return;
+        }
+        const runId =
+            (this.#activeRuns.get(agentId)?.["id"] as string | undefined) ?? underlyingRunId;
+        const messageId = apiAssistantMessageId(runId);
+        if (type === "block_start") {
+            this.#journal.append(
+                "message.created",
+                {
+                    agentId,
+                    runId,
+                    message: {
+                        id: messageId,
+                        role: "agent",
+                        createdAt: event.occurredAt,
+                        content: [],
+                    },
+                },
+                event.occurredAt,
+            );
+            return;
+        }
+        if (type === "block_reset") {
+            this.#journal.append(
+                "message.deleted",
+                { agentId, runId, messageId },
+                event.occurredAt,
+            );
+            return;
+        }
+        if (type === "text_delta" || type === "thinking_delta") {
+            const blockIndex = rigEvent?.["contentIndex"];
+            const append = rigEvent?.["delta"];
+            if (
+                typeof blockIndex === "number" &&
+                Number.isSafeInteger(blockIndex) &&
+                blockIndex >= 0 &&
+                typeof append === "string"
+            ) {
+                this.#journal.append(
+                    "message.delta",
+                    { agentId, runId, messageId, blockIndex, append },
+                    event.occurredAt,
+                );
+            }
+            return;
+        }
+        const partial = recordValue(rigEvent?.["partial"]);
+        const content = providerMessageContent(partial?.["content"]);
+        if (content === undefined) return;
+        this.#journal.append(
+            "message.updated",
+            {
+                agentId,
+                runId,
+                message: {
+                    id: messageId,
+                    role: "agent",
+                    createdAt: event.occurredAt,
+                    content,
+                },
+            },
+            event.occurredAt,
+        );
+    }
+
+    async #appendAgentUpdate(
+        ctx: Context,
+        event: AgentEvent,
+        changes: Readonly<Record<string, unknown>>,
+    ): Promise<void> {
+        const agentId = event.agentId;
+        if (agentId === undefined) return;
+        const previousVersion = await this.#events.previousCursor(ctx, agentId, event.id);
+        if (previousVersion === undefined) {
+            throw new Error("An agent update has no prior resource version.");
+        }
+        this.#journal.append(
+            "agent.updated",
+            {
+                agentId,
+                previousVersion,
+                version: event.id,
+                changes,
+            },
+            event.occurredAt,
+        );
+    }
+
+    async #acceptMessageEvent(
+        ctx: Context,
+        agentId: string,
+        event: AgentEvent,
+        payload: Record<string, unknown> | undefined,
+        previousVersion: string,
+    ): Promise<void> {
+        const id = stringValue(payload?.["id"]);
+        const kind = stringValue(payload?.["kind"]);
+        const runId = stringValue(payload?.["runId"]);
+        if (id === undefined || runId === undefined) return;
+        const message = await this.#history.message(ctx, agentId, id);
+        if (message === undefined) {
+            throw new Error("An accepted message is missing from durable history.");
+        }
+        const projected = messageResource(message);
+        const role = projected["role"];
+        const current = this.#activeRuns.get(agentId);
+        const fromUser = role === "user";
+        if (!fromUser) {
+            this.#journal.append(
+                "message.created",
+                {
+                    agentId,
+                    runId: current?.["id"] ?? runId,
+                    message: projected,
+                },
+                event.occurredAt,
+            );
+            return;
+        }
+        if (!this.#apiPendingMessageIds.has(id)) {
+            this.#journal.append(
+                "message.created",
+                {
+                    agentId,
+                    runId: null,
+                    message: {
+                        ...projected,
+                        status: "pending",
+                        delivery: kind === "steering" ? "steer" : "queue",
+                        runId: null,
+                    },
+                },
+                event.occurredAt,
+            );
+        }
+        const acceptedKind = kind === "steering" ? "steering" : "send";
+        const existing = this.#acceptedMessageBatches.get(agentId);
+        if (
+            existing !== undefined &&
+            (existing.kind !== acceptedKind || existing.runId !== runId)
+        ) {
+            this.#flushAcceptedMessages(agentId);
+        }
+        const batch = this.#acceptedMessageBatches.get(agentId) ?? {
+            kind: acceptedKind,
+            runId,
+            messages: [],
+        };
+        batch.messages.push({
+            id,
+            occurredAt: event.occurredAt,
+            previousVersion,
+            version: event.id,
+        });
+        this.#acceptedMessageBatches.set(agentId, batch);
+        setImmediate(() => {
+            if (this.#acceptedMessageBatches.get(agentId) === batch) {
+                this.#flushAcceptedMessages(agentId);
+            }
+        });
+    }
+
+    #flushAcceptedMessages(agentId: string): void {
+        const batch = this.#acceptedMessageBatches.get(agentId);
+        if (batch === undefined || batch.messages.length === 0) return;
+        if (batch.messages.some((message) => this.#announcedPendingMessages.has(message.id))) {
+            return;
+        }
+        this.#acceptedMessageBatches.delete(agentId);
+        const first = batch.messages[0] as AcceptedMessageBatch["messages"][number];
+        const occurredAt = batch.messages.at(-1)?.occurredAt ?? first.occurredAt;
+        const current = this.#activeRuns.get(agentId);
+        const start = this.#loopStarts.get(agentId);
+        const startedRun: Record<string, unknown> = {
+            id: batch.runId,
+            status: "running",
+            reason: null,
+            startedAt: start?.startedAt ?? first.occurredAt,
+            endedAt: null,
+            usage: {},
+            costUsd: null,
+        };
+        const acceptedMessageIds = batch.messages.map((message) => message.id);
+        if (batch.kind === "steering" && current !== undefined) {
+            const finishedRun = {
+                ...current,
+                status: "aborted",
+                reason: "steering",
+                endedAt: occurredAt,
+            };
+            this.#journal.append(
+                "run.boundary",
+                {
+                    agentId,
+                    finishedRun,
+                    startedRun,
+                    acceptedMessageIds,
+                },
+                occurredAt,
+            );
+        } else {
+            if (current !== undefined) {
+                this.#journal.append(
+                    "run.finished",
+                    {
+                        agentId,
+                        run: {
+                            ...current,
+                            status: "completed",
+                            reason: "completed",
+                            endedAt: occurredAt,
+                        },
+                    },
+                    occurredAt,
+                );
+            }
+            this.#journal.append(
+                "run.started",
+                { agentId, run: startedRun, acceptedMessageIds },
+                occurredAt,
+            );
+        }
+        this.#activeRuns.set(agentId, startedRun);
+        this.#loopStarts.delete(agentId);
+        this.#journal.append(
+            "agent.updated",
+            {
+                agentId,
+                previousVersion: first.previousVersion,
+                version: batch.messages.at(-1)?.version ?? first.version,
+                changes: { status: "thinking", updatedAt: occurredAt },
+            },
+            occurredAt,
+        );
+    }
+
+    async #announceCreatedAgent(ctx: Context, agentId: string): Promise<void> {
+        if (this.#announcedAgentCreations.has(agentId)) return;
+        const workspaceId = await this.#workspaceIdForAgent(ctx, agentId);
+        if (workspaceId === undefined) return;
+        const agent = await this.#buildAgentResource(
+            ctx,
+            agentId,
+            workspaceId,
+            await this.#agentOrderKey(ctx, agentId),
+        );
+        if (agent === undefined || this.#announcedAgentCreations.has(agentId)) return;
+        boundedAdd(this.#announcedAgentCreations, agentId, MAX_ANNOUNCED_AGENT_CREATIONS);
+        this.#journal.append("agent.created", { agent });
+    }
+
+    async #refreshParentSubagents(ctx: Context, childAgentId: string): Promise<void> {
+        const agents = this.#agentSystem();
+        const parentAgentId = await agents.parentOf(ctx, childAgentId);
+        if (parentAgentId === null) return;
+        const children = await agents.childOf(ctx, parentAgentId);
+        const subagents = {
+            total: children.length,
+            running: children.filter((agentId) => this.#events.activeRunId(agentId) !== undefined)
+                .length,
+        };
+        const parent = await agents.config(ctx, parentAgentId);
+        if (parent === undefined || sameJsonValue(parent.metadata?.["subagents"], subagents)) {
+            return;
+        }
+        await this.#updateAgentMetadata(ctx, parentAgentId, { subagents });
+    }
+
+    async #handleAgentRoute(
+        ctx: Context,
+        request: IncomingMessage,
+        response: ServerResponse,
+        url: URL,
+    ): Promise<boolean> {
+        if (request.method === "POST" && url.pathname === "/v0/agents") {
+            const body = await bodyAs(request, agentCreateBodySchema, "agent creation");
+            const agents = this.#agentSystem();
+            if (body.id !== undefined && (await agents.config(ctx, body.id)) !== undefined) {
+                const existing = await this.#requireAgentResource(ctx, body.id);
+                sendJson(response, 201, { agent: existing });
+                return true;
+            }
+            const ownership = await this.#resolveWorkspaceScope(ctx, body.workspaceId);
+            const baseEnvironment = currentAgentEnvironment();
+            const now = Date.now();
+            const config: AgentConfig = {
+                provenance: { createdAt: now },
+                environment: {
+                    ...baseEnvironment,
+                    workingDirectory: ownership.root,
+                },
+                metadata: {
+                    ...(body.title === undefined ? {} : { title: body.title }),
+                    updatedAt: now,
+                    version: 1,
+                },
+                modules: {
+                    compute: { cwd: ownership.root },
+                },
+            };
+            const created = await this.#withMutationId(body.mutationId, async () => {
+                const agent = await agents.create(ctx, config, {
+                    ...(body.id === undefined ? {} : { id: body.id }),
+                    parent: null,
+                });
+                if (ownership.childWorkspaceId === undefined) {
+                    await this.#projects.attachAgent(ctx, ownership.projectId, agent.id);
+                } else {
+                    await this.#workspaces.attachAgent(ctx, ownership.childWorkspaceId, agent.id);
+                }
+                return agent;
+            });
+            const agent = await this.#requireAgentResource(ctx, created.id);
+            if (!this.#announcedAgentCreations.has(created.id)) {
+                boundedAdd(
+                    this.#announcedAgentCreations,
+                    created.id,
+                    MAX_ANNOUNCED_AGENT_CREATIONS,
+                );
+                this.#journal.append("agent.created", {
+                    agent,
+                    ...(body.mutationId === undefined ? {} : { mutationId: body.mutationId }),
+                });
+            }
+            sendJson(response, 201, { agent });
+            return true;
+        }
+        const agentMatch = /^\/v0\/agents\/([a-z][a-z0-9]*)$/.exec(url.pathname);
+        if (agentMatch !== null && request.method === "GET") {
+            sendJson(response, 200, {
+                agent: await this.#requireAgentResource(ctx, agentMatch[1] as string),
+            });
+            return true;
+        }
+        const action =
+            /^\/v0\/agents\/([a-z][a-z0-9]*)\/(send|messages|question|abort|compact|read|archive|unarchive|reorder|draft|usage|activity)$/.exec(
+                url.pathname,
+            );
+        if (action !== null) {
+            const agentId = action[1] as string;
+            const operation = action[2] as string;
+            if (operation === "send" && request.method === "POST") {
+                await this.#handleAgentSend(ctx, request, response, agentId);
+                return true;
+            }
+            if (operation === "messages" && request.method === "GET") {
+                await this.#handleAgentMessages(ctx, response, url, agentId);
+                return true;
+            }
+            if (operation === "question" && request.method === "GET") {
+                const page = await this.#userInput.listPage(ctx, agentId, {
+                    askingAgentId: agentId,
+                    status: "pending",
+                    limit: 1,
+                });
+                const pending = page.requests[0];
+                sendJson(response, 200, {
+                    question:
+                        pending === undefined
+                            ? null
+                            : questionResource(pending, this.#events.activeRunId(agentId)),
+                });
+                return true;
+            }
+            if (operation === "abort" && request.method === "POST") {
+                const body = await bodyAs(request, abortBodySchema, "agent abort");
+                const active =
+                    (this.#activeRuns.get(agentId)?.["id"] as string | undefined) ??
+                    this.#events.activeRunId(agentId);
+                if (
+                    body.expectedRunId !== undefined &&
+                    active !== undefined &&
+                    body.expectedRunId !== active
+                ) {
+                    throw new ApiError(409, "conflict", "A different run is active.");
+                }
+                const cursor = this.#journal.cursor();
+                await this.#withMutationId(
+                    body.mutationId,
+                    async () => await this.#agentSystem().abort(ctx, agentId),
+                );
+                sendJson(response, 202, {
+                    agent: await this.#requireAgentResource(ctx, agentId),
+                    cursor,
+                });
+                return true;
+            }
+            if (operation === "compact" && request.method === "POST") {
+                if (this.#events.activeRunId(agentId) !== undefined) {
+                    throw new ApiError(
+                        409,
+                        "conflict",
+                        "A working agent cannot be compacted explicitly.",
+                    );
+                }
+                const body = await bodyAs(request, emptyMutationBodySchema, "agent compaction");
+                const cursor = this.#journal.cursor();
+                await this.#withMutationId(
+                    body.mutationId,
+                    async () => await this.#agentSystem().compact(ctx, agentId),
+                );
+                sendJson(response, 202, {
+                    agent: await this.#requireAgentResource(ctx, agentId),
+                    cursor,
+                });
+                return true;
+            }
+            if (operation === "read" && request.method === "POST") {
+                const body = await bodyAs(request, emptyMutationBodySchema, "read marker");
+                await this.#withMutationId(
+                    body.mutationId,
+                    async () => await this.#updateAgentMetadata(ctx, agentId, { unread: null }),
+                );
+                sendJson(response, 200, {
+                    agent: await this.#requireAgentResource(ctx, agentId),
+                });
+                return true;
+            }
+            if (
+                (operation === "archive" || operation === "unarchive") &&
+                request.method === "POST"
+            ) {
+                await this.#assertTopLevelAgent(ctx, agentId, true);
+                const body = await bodyAs(request, emptyMutationBodySchema, "agent archival");
+                await this.#withMutationId(body.mutationId, async () => {
+                    if (operation === "archive") {
+                        await this.#agentSystem().abort(ctx, agentId);
+                    }
+                    await this.#updateAgentMetadata(ctx, agentId, {
+                        archivedAt: operation === "archive" ? Date.now() : null,
+                    });
+                });
+                sendJson(response, 200, {
+                    agent: await this.#requireAgentResource(ctx, agentId),
+                });
+                return true;
+            }
+            if (operation === "reorder" && request.method === "POST") {
+                await this.#assertTopLevelAgent(ctx, agentId);
+                const body = await bodyAs(request, reorderBodySchema, "agent reorder");
+                const workspaceId = await this.#workspaces.workspaceForAgent(ctx, agentId);
+                if (workspaceId === undefined) {
+                    const project = await this.#projects.projectForAgent(ctx, agentId);
+                    if (project === undefined) throw notFound("The agent was not found.");
+                    await this.#withMutationId(
+                        body.mutationId,
+                        async () =>
+                            await this.#projects.reorderAgent(
+                                ctx,
+                                project.id,
+                                agentId,
+                                body.afterId,
+                            ),
+                    );
+                } else {
+                    await this.#withMutationId(
+                        body.mutationId,
+                        async () =>
+                            await this.#workspaces.reorderAgent(
+                                ctx,
+                                workspaceId,
+                                agentId,
+                                body.afterId,
+                            ),
+                    );
+                }
+                await this.#withMutationId(
+                    body.mutationId,
+                    async () =>
+                        await this.#updateAgentMetadata(ctx, agentId, {
+                            orderKey: await this.#agentOrderKey(ctx, agentId),
+                        }),
+                );
+                sendJson(response, 200, {
+                    agent: await this.#requireAgentResource(ctx, agentId),
+                });
+                return true;
+            }
+            if (operation === "draft" && request.method === "PUT") {
+                await this.#assertTopLevelAgent(ctx, agentId);
+                const body = await bodyAs(request, draftBodySchema, "agent draft");
+                const config = await this.#agentSystem().config(ctx, agentId);
+                if (config === undefined) throw notFound("The agent was not found.");
+                const storedAt =
+                    typeof config.metadata?.["draftUpdatedAt"] === "number"
+                        ? config.metadata["draftUpdatedAt"]
+                        : -1;
+                if (body.updatedAt === undefined || body.updatedAt >= storedAt) {
+                    await this.#withMutationId(
+                        body.mutationId,
+                        async () =>
+                            await this.#updateAgentMetadata(ctx, agentId, {
+                                draft: body.draft,
+                                draftUpdatedAt: body.updatedAt ?? Date.now(),
+                            }),
+                    );
+                }
+                sendJson(response, 200, {
+                    agent: await this.#requireAgentResource(ctx, agentId),
+                });
+                return true;
+            }
+            if (operation === "usage" && request.method === "GET") {
+                await this.#requireAgentResource(ctx, agentId);
+                const records = await this.#usageRecordsForAgentTree(ctx, agentId);
+                sendJson(response, 200, { usage: usageRecordsSince(records, 0) });
+                return true;
+            }
+            if (operation === "activity" && request.method === "GET") {
+                const agents = this.#agentSystem();
+                if ((await agents.config(ctx, agentId)) === undefined) {
+                    throw notFound("The agent was not found.");
+                }
+                const children = await agents.childOf(ctx, agentId);
+                sendJson(response, 200, {
+                    subagents: await Promise.all(
+                        [...children]
+                            .reverse()
+                            .map(async (childId) => await this.#requireAgentResource(ctx, childId)),
+                    ),
+                    processes: await this.#compute.listProcesses(ctx, agentId),
+                });
+                return true;
+            }
+            return false;
+        }
+        const answer = /^\/v0\/agents\/([a-z][a-z0-9]*)\/question\/([a-z][a-z0-9]*)\/answer$/.exec(
+            url.pathname,
+        );
+        if (answer !== null && request.method === "POST") {
+            const agentId = answer[1] as string;
+            const questionId = answer[2] as string;
+            const body = await bodyAs(request, questionAnswerBodySchema, "question answer");
+            const requestRow = await this.#userInput.get(ctx, agentId, questionId);
+            if (requestRow === undefined) throw notFound("The question was not found.");
+            if (requestRow.status !== "pending") {
+                throw new ApiError(409, "conflict", "The question has already been resolved.", {
+                    question: questionResource(requestRow, this.#events.activeRunId(agentId)),
+                });
+            }
+            const expectedQuestionIds = requestRow.questions?.map((question) => question.id) ?? [
+                requestRow.id,
+            ];
+            const answeredQuestionIds = Object.keys(body.answers);
+            if (
+                answeredQuestionIds.length !== expectedQuestionIds.length ||
+                expectedQuestionIds.some((questionId) => !Object.hasOwn(body.answers, questionId))
+            ) {
+                throw invalidRequest("Every question in the batch must receive an answer.");
+            }
+            const answered = await this.#withMutationId(
+                body.mutationId,
+                async () =>
+                    await this.#userInput.answer(ctx, agentId, {
+                        requestId: questionId,
+                        answers: Object.fromEntries(
+                            Object.entries(body.answers).map(([id, values]) => [
+                                id,
+                                values.length === 1
+                                    ? (values[0] as string)
+                                    : { selectedOptions: values },
+                            ]),
+                        ),
+                    }),
+            );
+            sendJson(response, 200, {
+                question: questionResource(answered, this.#events.activeRunId(agentId)),
+            });
+            return true;
+        }
+        const process = /^\/v0\/agents\/([a-z][a-z0-9]*)\/processes\/([a-z][a-z0-9]*)$/.exec(
+            url.pathname,
+        );
+        if (process !== null && request.method === "DELETE") {
+            const agentId = process[1] as string;
+            const processId = process[2] as string;
+            await this.#requireAgentResource(ctx, agentId);
+            const stopped = await this.#compute.stopProcess(ctx, agentId, processId);
+            if (stopped === undefined) throw notFound("The process was not found.");
+            sendJson(response, 200, { process: stopped });
+            return true;
+        }
+        return false;
+    }
+
+    async #handleAgentSend(
+        ctx: Context,
+        request: IncomingMessage,
+        response: ServerResponse,
+        agentId: string,
+    ): Promise<void> {
+        await this.#assertTopLevelAgent(ctx, agentId);
+        const body = await bodyAs(request, messageSendBodySchema, "agent message");
+        const selected = this.#config.models.find(
+            (model) => model.providerId === body.mode.providerId && model.id === body.mode.modelId,
+        );
+        if (
+            selected === undefined ||
+            !selected.effortLevels.some((effort) => effort === body.mode.effort) ||
+            (body.mode.serviceTier !== null &&
+                !selected.serviceTiers?.some((tier) => tier === body.mode.serviceTier))
+        ) {
+            throw invalidRequest(
+                "The selected provider, model, effort, or service tier is unavailable.",
+            );
+        }
+        const effort = selected.effortLevels.find((candidate) => candidate === body.mode.effort);
+        if (effort === undefined) throw invalidRequest("The selected effort is unavailable.");
+        const serviceTier =
+            body.mode.serviceTier === null
+                ? undefined
+                : selected.serviceTiers?.find((candidate) => candidate === body.mode.serviceTier);
+        const id = createId();
+        const content = [{ type: "text" as const, text: body.text }, ...(body.content ?? [])];
+        const options: AgentBaseMessageOptions = {
+            id,
+            provider: body.mode.providerId,
+            model: body.mode.modelId,
+            effort,
+            ...(serviceTier === undefined ? {} : { serviceTier }),
+            permissionMode: body.mode.permissionMode,
+            metadata: {
+                ...USER_MESSAGE_ORIGIN_METADATA,
+                mode: body.mode,
+                ...(body.mutationId === undefined ? {} : { mutationId: body.mutationId }),
+            },
+        };
+        const agents = this.#agentSystem();
+        const cursor = this.#journal.cursor();
+        const createdAt = Date.now();
+        const delivery = body.delivery ?? "queue";
+        const pending: HistoryPendingMessage = {
+            id,
+            agentId,
+            role: "user",
+            status: "pending",
+            delivery,
+            createdAt,
+            blocks: content.map((block) =>
+                block.type === "text"
+                    ? { type: "text" as const, text: block.text }
+                    : {
+                          type: "image" as const,
+                          mediaType: block.mimeType,
+                          data: block.data,
+                      },
+            ),
+            mode: body.mode,
+            runId: null,
+        };
+        this.#announcedPendingMessages.add(id);
+        boundedAdd(this.#apiPendingMessageIds, id, MAX_ANNOUNCED_PENDING_MESSAGES);
+        if (this.#announcedPendingMessages.size > MAX_ANNOUNCED_PENDING_MESSAGES) {
+            const oldest = this.#announcedPendingMessages.values().next().value as
+                | string
+                | undefined;
+            if (oldest !== undefined) this.#announcedPendingMessages.delete(oldest);
+        }
+        try {
+            await ctx.inTx(async (txCtx) => {
+                await this.#history.queuePending(txCtx, pending);
+                if (delivery === "steer") {
+                    await agents.steer(txCtx, agentId, { role: "user", content }, options);
+                } else {
+                    await agents.send(txCtx, agentId, { role: "user", content }, options);
+                }
+            });
+        } catch (error) {
+            this.#announcedPendingMessages.delete(id);
+            this.#apiPendingMessageIds.delete(id);
+            throw error;
+        }
+        const accepted = await this.#history.message(ctx, agentId, id);
+        const message = {
+            id,
+            role: "user",
+            status: accepted === undefined ? "pending" : "accepted",
+            delivery,
+            createdAt,
+            content,
+            mode: body.mode,
+            runId: accepted?.runId ?? null,
+        };
+        this.#journal.append("message.created", {
+            agentId,
+            runId: null,
+            message: { ...message, status: "pending", runId: null },
+            ...(body.mutationId === undefined ? {} : { mutationId: body.mutationId }),
+        });
+        this.#announcedPendingMessages.delete(id);
+        this.#flushAcceptedMessages(agentId);
+        await this.#withMutationId(
+            body.mutationId,
+            async () => await this.#updateAgentMetadata(ctx, agentId, { lastMode: body.mode }),
+        );
+        sendJson(response, 202, { message, cursor });
+    }
+
+    async #handleAgentMessages(
+        ctx: Context,
+        response: ServerResponse,
+        url: URL,
+        agentId: string,
+    ): Promise<void> {
+        const before = optionalApiId(url.searchParams.get("before"), "run");
+        const after = optionalApiId(url.searchParams.get("after"), "message");
+        if (before !== undefined && after !== undefined) {
+            throw invalidRequest("History cannot page before a run and after a message together.");
+        }
+        const limit = integerParameter(url.searchParams.get("limit"), 50, 1, 500);
+        const omitToolData = booleanParameter(url.searchParams.get("omitToolData"), false);
+        await this.#requireAgentResource(ctx, agentId);
+        const page = await this.#history.runs(ctx, agentId, {
+            ...(before === undefined ? {} : { before }),
+            ...(after === undefined ? {} : { after }),
+            limit,
+            omitToolData,
+        });
+        sendJson(response, 200, {
+            runs: await Promise.all(
+                page.runs.map(async (run) => {
+                    const runUsage = await this.#usage.readRun(ctx, agentId, run.id);
+                    return {
+                        id: run.id,
+                        status: run.status,
+                        reason: run.reason,
+                        startedAt: run.startedAt,
+                        endedAt: run.endedAt,
+                        usage: runUsage.usage,
+                        costUsd: runUsage.costUsd,
+                        messages: run.messages.map((message) => messageResource(message)),
+                    };
+                }),
+            ),
+            pending: page.pending.map(pendingMessageResource),
+            hasMore: page.hasMore,
+        });
+    }
+
+    async #requireAgentResource(ctx: Context, agentId: string): Promise<Record<string, unknown>> {
+        const workspaceId = await this.#workspaceIdForAgent(ctx, agentId);
+        if (workspaceId === undefined) throw notFound("The agent was not found.");
+        const resource = await this.#buildAgentResource(
+            ctx,
+            agentId,
+            workspaceId,
+            await this.#agentOrderKey(ctx, agentId),
+        );
+        if (resource === undefined) throw notFound("The agent was not found.");
+        return resource;
+    }
+
+    async #buildAgentResource(
+        ctx: Context,
+        agentId: string,
+        workspaceId: string,
+        orderKey?: string | null,
+    ): Promise<Record<string, unknown> | undefined> {
+        const children = await this.#agentSystem().childOf(ctx, agentId);
+        const [processes, questions, runningSubagents] = await Promise.all([
+            this.#compute.listProcesses(ctx, agentId),
+            this.#userInput.listPage(ctx, agentId, {
+                askingAgentId: agentId,
+                status: "pending",
+                limit: 1,
+            }),
+            Promise.all(children.map(async (childId) => this.#events.activeRunId(childId))).then(
+                (runIds) => runIds.filter((runId) => runId !== undefined).length,
+            ),
+        ]);
+        return await agentResource(ctx, this.#agentSystem(), this.#events, agentId, workspaceId, {
+            ...(orderKey === undefined ? {} : { orderKey }),
+            pendingQuestionId: questions.requests[0]?.id ?? null,
+            runningProcesses: processes.filter((process) => process.status === "running").length,
+            runningSubagents,
+        });
+    }
+
+    async #agentOrderKey(ctx: Context, agentId: string): Promise<string | null> {
+        const workspaceId = await this.#workspaces.workspaceForAgent(ctx, agentId);
+        if (workspaceId !== undefined) {
+            return (
+                (await this.#workspaces.listAgents(ctx, workspaceId)).find(
+                    (association) => association.agentId === agentId,
+                )?.orderKey ?? null
+            );
+        }
+        const project = await this.#projects.projectForAgent(ctx, agentId);
+        if (project === undefined) return null;
+        return (
+            (await this.#projects.listAgents(ctx, project.id)).find(
+                (association) => association.agentId === agentId,
+            )?.orderKey ?? null
+        );
+    }
+
+    async #workspaceIdForAgent(ctx: Context, agentId: string): Promise<string | undefined> {
+        let current = agentId;
+        for (let depth = 0; depth < 64; depth += 1) {
+            const workspaceId = await this.#workspaces.workspaceForAgent(ctx, current);
+            if (workspaceId !== undefined) return workspaceId;
+            const project = await this.#projects.projectForAgent(ctx, current);
+            if (project !== undefined) return project.id;
+            const parent = await this.#agentSystem().parentOf(ctx, current);
+            if (parent === null) return undefined;
+            current = parent;
+        }
+        throw new Error("The agent ancestry exceeds the supported depth.");
+    }
+
+    async #assertTopLevelAgent(
+        ctx: Context,
+        agentId: string,
+        allowArchived = false,
+    ): Promise<void> {
+        const agents = this.#agentSystem();
+        if ((await agents.config(ctx, agentId)) === undefined) {
+            throw notFound("The agent was not found.");
+        }
+        if ((await agents.parentOf(ctx, agentId)) !== null) {
+            throw new ApiError(409, "conflict", "Subagents are read-only through this API.");
+        }
+        const config = await agents.config(ctx, agentId);
+        if (!allowArchived && typeof config?.metadata?.["archivedAt"] === "number") {
+            throw new ApiError(409, "conflict", "The agent is archived.");
+        }
+    }
+
+    async #updateAgentMetadata(
+        ctx: Context,
+        agentId: string,
+        update: Record<string, unknown>,
+    ): Promise<void> {
+        const config = await this.#agentSystem().config(ctx, agentId);
+        if (config === undefined) throw notFound("The agent was not found.");
+        const version =
+            typeof config.metadata?.["version"] === "number" ? config.metadata["version"] + 1 : 1;
+        await this.#agentSystem().updateMetadata(ctx, agentId, {
+            ...update,
+            updatedAt: Date.now(),
+            version,
+        });
+    }
+
+    #handleEventPull(url: URL, response: ServerResponse): void {
+        const after = optionalCursor(url.searchParams.get("after"));
+        const until = optionalCursor(url.searchParams.get("until"));
+        const limit = integerParameter(url.searchParams.get("limit"), 100, 1, 10_000);
+        const replay = this.#journal.replay(after, until, limit);
+        if (replay === undefined) {
+            throw new ApiError(409, "cursor_unavailable", "Event cursor is unavailable.", {
+                cursor: this.#journal.cursor(),
+            });
+        }
+        sendJson(response, 200, replay);
+    }
+
+    #handleEventStream(request: IncomingMessage, response: ServerResponse, url: URL): void {
+        const supplied =
+            request.headers["last-event-id"] ?? url.searchParams.get("after") ?? undefined;
+        const after = Array.isArray(supplied)
+            ? optionalCursor(supplied[0] ?? null)
+            : optionalCursor(supplied);
+        let replaying = true;
+        let overflowed = false;
+        const pending: ApiEvent[] = [];
+        const unsubscribe = this.#journal.subscribe((event) => {
+            if (replaying) {
+                pending.push(event);
+                if (pending.length > 10_000) overflowed = true;
+                return;
+            }
+            if (!writeSseEvent(response, event)) response.end();
+        });
+        const current = this.#journal.cursor();
+        const gap = after !== undefined && !this.#journal.hasCursor(after);
+        const replay =
+            after === undefined || gap
+                ? []
+                : (this.#journal.replay(after, current, 10_000)?.events ?? []);
+        response.writeHead(200, {
+            "cache-control": "no-store",
+            connection: "keep-alive",
+            "content-type": "text/event-stream; charset=utf-8",
+            "x-accel-buffering": "no",
+        });
+        this.#streams.add(response);
+        if (
+            !response.write(
+                `event: hello\ndata: ${JSON.stringify({
+                    cursor: current,
+                    gap,
+                    resumed: after !== undefined && !gap,
+                    connectedAt: Date.now(),
+                })}\n\n`,
+            )
+        ) {
+            unsubscribe();
+            response.end();
+            return;
+        }
+        for (const event of replay) {
+            if (!writeSseEvent(response, event)) {
+                unsubscribe();
+                response.end();
+                return;
+            }
+        }
+        replaying = false;
+        if (overflowed) {
+            unsubscribe();
+            response.end();
+            return;
+        }
+        for (const event of pending) {
+            if (event.cursor > current && !writeSseEvent(response, event)) {
+                unsubscribe();
+                response.end();
+                return;
+            }
+        }
+        pending.splice(0);
+        const heartbeat = setInterval(() => {
+            if (!response.write(`: heartbeat ${Date.now()}\n\n`)) response.end();
+        }, HEARTBEAT_MS);
+        heartbeat.unref();
+        const close = () => {
+            clearInterval(heartbeat);
+            unsubscribe();
+            this.#streams.delete(response);
+        };
+        request.once("close", close);
+        response.once("close", close);
+    }
+
+    async #handleProjectRoute(
+        ctx: Context,
+        request: IncomingMessage,
+        response: ServerResponse,
+        url: URL,
+    ): Promise<boolean> {
+        if (request.method === "POST" && url.pathname === "/v0/projects") {
+            const body = await bodyAs(request, projectRegisterBodySchema, "project registration");
+            const project = await this.#withMutationId(
+                body.mutationId,
+                async () =>
+                    await this.#projects.register(ctx, {
+                        path: body.path,
+                        ...(body.projectId === undefined ? {} : { projectId: body.projectId }),
+                    }),
+            );
+            sendJson(response, 200, { project: await this.#projectWithAgents(ctx, project) });
+            return true;
+        }
+        if (request.method === "POST" && url.pathname === "/v0/projects/clone") {
+            const body = await bodyAs(request, projectCloneBodySchema, "project clone");
+            const project = await this.#withMutationId(
+                body.mutationId,
+                async () =>
+                    await this.#projects.createRemote(ctx, {
+                        name: body.name,
+                        source: body.source,
+                        ...(body.secret === undefined ? {} : { secret: body.secret }),
+                        ...(body.projectId === undefined ? {} : { projectId: body.projectId }),
+                    }),
+            );
+            sendJson(response, 202, { project: await this.#projectWithAgents(ctx, project) });
+            return true;
+        }
+        const match = /^\/v0\/projects\/([a-z][a-z0-9]*)$/.exec(url.pathname);
+        if (match !== null) {
+            const projectId = match[1] as string;
+            if (request.method === "GET") {
+                const project = await this.#requireProject(ctx, projectId);
+                sendJson(response, 200, {
+                    project: await this.#projectWithAgents(ctx, project),
+                });
+                return true;
+            }
+            if (request.method === "PATCH") {
+                const body = await bodyAs(request, renameBodySchema, "project rename");
+                const current = await this.#requireProjectMatch(ctx, request, projectId);
+                const project = await this.#withMutationId(
+                    body.mutationId,
+                    async () =>
+                        await this.#projects.rename(ctx, {
+                            projectId,
+                            name: body.name,
+                            expectedVersion: current.version,
+                        }),
+                );
+                sendJson(response, 200, {
+                    project: await this.#projectWithAgents(ctx, project),
+                });
+                return true;
+            }
+            return false;
+        }
+        const settings = /^\/v0\/projects\/([a-z][a-z0-9]*)\/settings$/.exec(url.pathname);
+        if (settings !== null && request.method === "PUT") {
+            const projectId = settings[1] as string;
+            const body = await bodyAs(request, projectSettingsBodySchema, "project settings");
+            const current = await this.#requireProjectMatch(ctx, request, projectId);
+            await this.#withMutationId(
+                body.mutationId,
+                async () =>
+                    await this.#projects.updateSettings(ctx, {
+                        projectId,
+                        expectedVersion: current.version,
+                        settings: {
+                            defaultWorkspaceCompute:
+                                body.defaultWorkspaceCompute.type === "host"
+                                    ? { type: "local" }
+                                    : body.defaultWorkspaceCompute,
+                        },
+                    }),
+            );
+            const project = await this.#requireProject(ctx, projectId);
+            const resource = await this.#projectWithAgents(ctx, project);
+            sendJson(response, 200, {
+                project: resource,
+                settings: resource["settings"],
+            });
+            return true;
+        }
+        const action = /^\/v0\/projects\/([a-z][a-z0-9]*)\/(refresh|reorder|archive)$/.exec(
+            url.pathname,
+        );
+        if (action !== null && request.method === "POST") {
+            const projectId = action[1] as string;
+            const operation = action[2] as "refresh" | "reorder" | "archive";
+            if (operation === "refresh") {
+                const project = await this.#projects.refresh(ctx, projectId);
+                sendJson(response, 202, {
+                    project: await this.#projectWithAgents(ctx, project),
+                });
+                return true;
+            }
+            const current = await this.#requireProjectMatch(ctx, request, projectId);
+            if (operation === "reorder") {
+                const body = await bodyAs(request, reorderBodySchema, "project reorder");
+                const project = await this.#withMutationId(
+                    body.mutationId,
+                    async () =>
+                        await this.#projects.reorder(ctx, {
+                            projectId,
+                            afterId: body.afterId,
+                            expectedVersion: current.version,
+                        }),
+                );
+                sendJson(response, 200, {
+                    project: await this.#projectWithAgents(ctx, project),
+                });
+                return true;
+            }
+            const body = await bodyAs(request, emptyMutationBodySchema, "project archive");
+            const project = await this.#withMutationId(
+                body.mutationId,
+                async () => await this.#projects.archive(ctx, projectId),
+            );
+            sendJson(response, 202, {
+                project: await this.#projectWithAgents(ctx, project),
+            });
+            return true;
+        }
+        const avatar = /^\/v0\/projects\/([a-z][a-z0-9]*)\/avatar$/.exec(url.pathname);
+        if (avatar === null) return false;
+        const projectId = avatar[1] as string;
+        if (request.method === "GET") {
+            await this.#requireProject(ctx, projectId);
+            const asset = await this.#projects.avatarAsset(ctx, projectId);
+            if (asset === undefined) throw notFound("The project has no avatar.");
+            if (request.headers["if-none-match"] === asset.etag) {
+                response.writeHead(304, {
+                    "cache-control": "no-store",
+                    etag: asset.etag,
+                });
+                response.end();
+                return true;
+            }
+            response.writeHead(200, {
+                "cache-control": "no-store",
+                "content-length": asset.bytes.byteLength,
+                "content-type": asset.contentType,
+                etag: asset.etag,
+            });
+            response.end(Buffer.from(asset.bytes));
+            return true;
+        }
+        if (request.method === "PUT") {
+            const current = await this.#requireProjectMatch(ctx, request, projectId);
+            const contentType = request.headers["content-type"]?.split(";")[0]?.trim();
+            if (
+                contentType !== "image/png" &&
+                contentType !== "image/jpeg" &&
+                contentType !== "image/webp"
+            ) {
+                throw invalidRequest("The project avatar must be a PNG, JPEG, or WebP image.");
+            }
+            const bytes = await readBytes(request, 8 * 1024 * 1024);
+            const project = await this.#projects.setAvatar(ctx, {
+                projectId,
+                bytes,
+                contentType,
+                source: "user",
+                expectedVersion: current.version,
+            });
+            sendJson(response, 200, {
+                project: await this.#projectWithAgents(ctx, project),
+            });
+            return true;
+        }
+        if (request.method === "DELETE") {
+            const current = await this.#requireProjectMatch(ctx, request, projectId);
+            const project = await this.#projects.clearAvatar(ctx, {
+                projectId,
+                expectedVersion: current.version,
+            });
+            sendJson(response, 200, {
+                project: await this.#projectWithAgents(ctx, project),
+            });
+            return true;
+        }
+        return false;
+    }
+
+    async #requireProject(ctx: Context, projectId: string): Promise<Project> {
+        const project = await this.#projects.get(ctx, projectId);
+        if (project === undefined) throw notFound("The project was not found.");
+        return project;
+    }
+
+    async #requireProjectMatch(
+        ctx: Context,
+        request: IncomingMessage,
+        projectId: string,
+    ): Promise<Project> {
+        const project = await this.#requireProject(ctx, projectId);
+        const resource = await this.#projectWithAgents(ctx, project);
+        requireIfMatch(request, resource["version"], {
+            currentVersion: resource["version"],
+            project: resource,
+        });
+        return project;
+    }
+
+    async #handleWorkspaceRoute(
+        ctx: Context,
+        request: IncomingMessage,
+        response: ServerResponse,
+        url: URL,
+    ): Promise<boolean> {
+        if (request.method === "POST" && url.pathname === "/v0/workspaces") {
+            const body = await bodyAs(request, workspaceCreateBodySchema, "workspace creation");
+            const root = await this.#projects.get(ctx, body.parentId);
+            let projectId: string;
+            if (root !== undefined) {
+                if (root.archivedAt !== undefined || root.status !== "active") {
+                    throw notFound("The parent workspace was not found.");
+                }
+                projectId = root.id;
+            } else {
+                const parent = await this.#workspaces.get(ctx, body.parentId);
+                if (
+                    parent === undefined ||
+                    parent.archivedAt !== undefined ||
+                    parent.status === "archived" ||
+                    parent.status === "archiving"
+                ) {
+                    throw notFound("The parent workspace was not found.");
+                }
+                if (parent.status === "initializing") {
+                    throw new ApiError(
+                        409,
+                        "not_initialized",
+                        "The parent workspace is still initializing.",
+                    );
+                }
+                if (parent.status !== "ready") {
+                    throw new ApiError(409, "conflict", "The parent workspace is unavailable.");
+                }
+                projectId = parent.projectRef;
+            }
+            const workspace = await this.#withMutationId(
+                body.mutationId,
+                async () =>
+                    await this.#workspaces.createWorkspace(
+                        ctx,
+                        projectId,
+                        {
+                            name: body.name,
+                            nameConfigured: true,
+                            parentId: body.parentId,
+                            ...(body.baseRef === undefined ? {} : { baseRef: body.baseRef }),
+                            ...(body.id === undefined ? {} : { id: body.id }),
+                        },
+                        body.agentId,
+                    ),
+            );
+            if (workspace === undefined) throw notFound("The parent workspace was not found.");
+            sendJson(response, 202, {
+                workspace: {
+                    ...workspaceResource(workspace),
+                    agents: await this.#agentsForWorkspace(ctx, workspace.id),
+                },
+            });
+            return true;
+        }
+        const match = /^\/v0\/workspaces\/([a-z][a-z0-9]*)$/.exec(url.pathname);
+        if (match !== null) {
+            const workspaceId = match[1] as string;
+            if (request.method === "GET") {
+                sendJson(response, 200, {
+                    workspace: await this.#workspaceWithAgents(ctx, workspaceId),
+                });
+                return true;
+            }
+            if (request.method === "PATCH") {
+                const project = await this.#projects.get(ctx, workspaceId);
+                if (project !== undefined) {
+                    throw new ApiError(
+                        409,
+                        "conflict",
+                        "Rename the root workspace through its project.",
+                    );
+                }
+                const body = await bodyAs(request, renameBodySchema, "workspace rename");
+                const current = await this.#requireWorkspaceMatch(ctx, request, workspaceId);
+                const workspace = await this.#withMutationId(
+                    body.mutationId,
+                    async () =>
+                        await this.#workspaces.rename(ctx, {
+                            workspaceId,
+                            name: body.name,
+                            expectedVersion: current.version,
+                        }),
+                );
+                sendJson(response, 200, {
+                    workspace: {
+                        ...workspaceResource(workspace),
+                        agents: await this.#agentsForWorkspace(ctx, workspace.id),
+                    },
+                });
+                return true;
+            }
+            return false;
+        }
+        const action = /^\/v0\/workspaces\/([a-z][a-z0-9]*)\/(archive|reorder)$/.exec(url.pathname);
+        if (action === null || request.method !== "POST") return false;
+        const workspaceId = action[1] as string;
+        if ((await this.#projects.get(ctx, workspaceId)) !== undefined) {
+            throw new ApiError(
+                409,
+                "conflict",
+                action[2] === "archive"
+                    ? "Archive the root workspace through its project."
+                    : "Reorder the root workspace through its project.",
+            );
+        }
+        const current = await this.#requireWorkspaceMatch(ctx, request, workspaceId);
+        if (action[2] === "reorder") {
+            const body = await bodyAs(request, reorderBodySchema, "workspace reorder");
+            const workspace = await this.#withMutationId(
+                body.mutationId,
+                async () =>
+                    await this.#workspaces.reorder(ctx, {
+                        workspaceId,
+                        afterId: body.afterId,
+                        expectedVersion: current.version,
+                    }),
+            );
+            sendJson(response, 200, {
+                workspace: {
+                    ...workspaceResource(workspace),
+                    agents: await this.#agentsForWorkspace(ctx, workspace.id),
+                },
+            });
+            return true;
+        }
+        const body = await bodyAs(request, emptyMutationBodySchema, "workspace archive");
+        const workspace = await this.#withMutationId(
+            body.mutationId,
+            async () =>
+                await this.#workspaces.archive(ctx, workspaceId, {
+                    expectedVersion: current.version,
+                }),
+        );
+        sendJson(response, 202, {
+            workspace: {
+                ...workspaceResource(workspace),
+                agents: await this.#agentsForWorkspace(ctx, workspace.id),
+            },
+        });
+        return true;
+    }
+
+    async #workspaceWithAgents(
+        ctx: Context,
+        workspaceId: string,
+    ): Promise<Record<string, unknown>> {
+        const project = await this.#projects.get(ctx, workspaceId);
+        if (project !== undefined) {
+            if (project.archivedAt !== undefined || project.status !== "active") {
+                throw new ApiError(409, "conflict", "The root workspace is not available.");
+            }
+            if (project.initializationStatus === "initializing") {
+                throw new ApiError(
+                    409,
+                    "not_initialized",
+                    "The root workspace is still initializing.",
+                );
+            }
+            if (project.initializationStatus !== "ready") {
+                throw new ApiError(409, "conflict", "The root workspace is not available.");
+            }
+            return {
+                ...rootWorkspaceResource(project),
+                agents: await this.#agentsForProject(ctx, project.id),
+            };
+        }
+        const workspace = await this.#workspaces.get(ctx, workspaceId);
+        if (workspace === undefined) throw notFound("The workspace was not found.");
+        return {
+            ...workspaceResource(workspace),
+            agents: await this.#agentsForWorkspace(ctx, workspace.id),
+        };
+    }
+
+    async #requireWorkspaceMatch(
+        ctx: Context,
+        request: IncomingMessage,
+        workspaceId: string,
+    ): Promise<Workspace> {
+        const workspace = await this.#workspaces.get(ctx, workspaceId);
+        if (workspace === undefined) throw notFound("The workspace was not found.");
+        const resource: Record<string, unknown> = {
+            ...workspaceResource(workspace),
+            agents: await this.#agentsForWorkspace(ctx, workspace.id),
+        };
+        requireIfMatch(request, resource["version"], {
+            currentVersion: resource["version"],
+            workspace: resource,
+        });
+        return workspace;
+    }
+
+    async #handleWorkspaceContentRoute(
+        ctx: Context,
+        request: IncomingMessage,
+        response: ServerResponse,
+        url: URL,
+    ): Promise<boolean> {
+        const terminals = /^\/v0\/workspaces\/([a-z][a-z0-9]*)\/terminals$/.exec(url.pathname);
+        if (terminals !== null) {
+            const workspaceId = terminals[1] as string;
+            const { scope } = await this.#resolveWorkspaceScope(ctx, workspaceId);
+            if (request.method === "GET") {
+                const rows = await this.#terminals.list(ctx, scope);
+                sendJson(response, 200, {
+                    terminals: rows.map((row) => terminalResource(workspaceId, row)),
+                });
+                return true;
+            }
+            if (request.method === "POST") {
+                const body = await bodyAs(request, terminalCreateBodySchema, "terminal settings");
+                const { mutationId, ...input } = body;
+                const terminal = await this.#withMutationId(
+                    mutationId,
+                    async () => await this.#terminals.create(ctx, scope, input),
+                );
+                sendJson(response, 201, { terminal: terminalResource(workspaceId, terminal) });
+                return true;
+            }
+            return false;
+        }
+        const terminal = /^\/v0\/workspaces\/([a-z][a-z0-9]*)\/terminals\/([a-z][a-z0-9]*)$/.exec(
+            url.pathname,
+        );
+        if (terminal !== null) {
+            const workspaceId = terminal[1] as string;
+            const terminalId = terminal[2] as string;
+            const { scope } = await this.#resolveWorkspaceScope(ctx, workspaceId);
+            if (request.method === "PATCH") {
+                const body = await bodyAs(request, terminalResizeBodySchema, "terminal size");
+                const { mutationId, ...input } = body;
+                const resized = await this.#withMutationId(
+                    mutationId,
+                    async () => await this.#terminals.resize(ctx, scope, terminalId, input),
+                );
+                sendJson(response, 200, {
+                    terminal: terminalResource(workspaceId, resized),
+                });
+                return true;
+            }
+            if (request.method === "DELETE") {
+                const stopped = await this.#terminals.stop(ctx, scope, terminalId);
+                sendJson(response, 200, {
+                    terminal: terminalResource(workspaceId, stopped),
+                });
+                return true;
+            }
+            return false;
+        }
+        const fileRoute =
+            /^\/v0\/workspaces\/([a-z][a-z0-9]*)\/(files|file-tree|file|file-revision)$/.exec(
+                url.pathname,
+            );
+        if (fileRoute !== null) {
+            const workspaceId = fileRoute[1] as string;
+            const kind = fileRoute[2] as "files" | "file-tree" | "file" | "file-revision";
+            const { projectId, childWorkspaceId } = await this.#resolveWorkspaceScope(
+                ctx,
+                workspaceId,
+            );
+            const root = await this.#files.resolveRoot(ctx, projectId, childWorkspaceId);
+            if (kind === "files" && request.method === "GET") {
+                const query = queryAs(
+                    {
+                        query: url.searchParams.get("query") ?? undefined,
+                        ...(url.searchParams.has("limit")
+                            ? {
+                                  limit: integerParameter(url.searchParams.get("limit"), 50, 1, 50),
+                              }
+                            : {}),
+                    },
+                    fileSearchQuerySchema,
+                    "file search",
+                );
+                sendJson(response, 200, await this.#files.search(root, query));
+                return true;
+            }
+            if (kind === "file-tree" && request.method === "GET") {
+                const query = queryAs(
+                    {
+                        ...(url.searchParams.has("path")
+                            ? { path: url.searchParams.get("path") ?? "" }
+                            : {}),
+                        ...(url.searchParams.has("cursor")
+                            ? { cursor: url.searchParams.get("cursor") ?? "" }
+                            : {}),
+                        ...(url.searchParams.has("limit")
+                            ? {
+                                  limit: integerParameter(
+                                      url.searchParams.get("limit"),
+                                      100,
+                                      1,
+                                      500,
+                                  ),
+                              }
+                            : {}),
+                    },
+                    fileTreeQuerySchema,
+                    "file tree",
+                );
+                const tree = await this.#files.tree(root, query);
+                sendJson(response, 200, {
+                    entries: tree.entries,
+                    nextCursor: tree.nextCursor,
+                });
+                return true;
+            }
+            if (kind === "file" && request.method === "GET") {
+                const query = queryAs(
+                    { path: url.searchParams.get("path") ?? undefined },
+                    fileReadQuerySchema,
+                    "file read",
+                );
+                sendJson(response, 200, await this.#files.read(root, query));
+                return true;
+            }
+            if (kind === "file" && request.method === "PUT") {
+                const body = await bodyAs(request, fileWriteSchema, "file write");
+                sendJson(response, 200, await this.#files.write(root, body));
+                return true;
+            }
+            if (kind === "file-revision" && request.method === "GET") {
+                const query = queryAs(
+                    {
+                        path: url.searchParams.get("path") ?? undefined,
+                        revision: url.searchParams.get("revision") ?? undefined,
+                    },
+                    fileRevisionQuerySchema,
+                    "file revision",
+                );
+                const revision = await this.#files.readRevision(root, query);
+                if (revision.content === null) {
+                    throw notFound("The file was not found at that revision.");
+                }
+                sendJson(response, 200, { content: revision.content });
+                return true;
+            }
+            return false;
+        }
+        const git = /^\/v0\/workspaces\/([a-z][a-z0-9]*)\/git$/.exec(url.pathname);
+        if (git !== null && request.method === "GET") {
+            const workspaceId = git[1] as string;
+            const { root } = await this.#resolveWorkspaceScope(ctx, workspaceId);
+            const snapshot = await this.#git.snapshot(root, workspaceId);
+            sendJson(response, 200, { git: gitResource(snapshot) });
+            return true;
+        }
+        return false;
+    }
+
+    async #handleGitWatch(
+        ctx: Context,
+        request: IncomingMessage,
+        response: ServerResponse,
+    ): Promise<void> {
+        const body = await bodyAs(request, gitWatchBodySchema, "Git watch request");
+        const snapshots: Record<string, unknown> = {};
+        const tracked: {
+            readonly entity: {
+                readonly path: string;
+                readonly projectId: string;
+                readonly workspaceId?: string;
+            };
+            readonly workspaceId: string;
+        }[] = [];
+        for (const workspaceId of body.workspaceIds) {
+            const { projectId, childWorkspaceId, root } = await this.#resolveWorkspaceScope(
+                ctx,
+                workspaceId,
+            );
+            const entity = {
+                path: root,
+                projectId,
+                ...(childWorkspaceId === undefined ? {} : { workspaceId: childWorkspaceId }),
+            };
+            tracked.push({ entity, workspaceId });
+        }
+        this.#git.replaceTracked(tracked.map(({ entity }) => entity));
+        for (const { entity, workspaceId } of tracked) {
+            const snapshot = this.#git.trackedSnapshot(entity);
+            if (snapshot !== undefined) snapshots[workspaceId] = gitResource(snapshot);
+        }
+        sendJson(response, 200, { snapshots });
+    }
+
+    async #resolveWorkspaceScope(
+        ctx: Context,
+        workspaceId: string,
+    ): Promise<{
+        readonly childWorkspaceId?: string;
+        readonly projectId: string;
+        readonly root: string;
+        readonly scope: TerminalScope;
+    }> {
+        const project = await this.#projects.get(ctx, workspaceId);
+        if (project !== undefined) {
+            return {
+                projectId: project.id,
+                root: project.repositoryRef,
+                scope: { projectId: project.id },
+            };
+        }
+        const workspace = await this.#workspaces.get(ctx, workspaceId);
+        if (workspace === undefined) throw notFound("The workspace was not found.");
+        if (workspace.status === "initializing") {
+            throw new ApiError(409, "not_initialized", "The workspace is still initializing.");
+        }
+        if (workspace.status !== "ready") {
+            throw new ApiError(409, "conflict", "The workspace is not available.");
+        }
+        return {
+            childWorkspaceId: workspace.id,
+            projectId: workspace.projectRef,
+            root: workspace.path,
+            scope: { projectId: workspace.projectRef, workspaceId: workspace.id },
+        };
+    }
+
+    async #handleWorkspaceList(ctx: Context, url: URL, response: ServerResponse): Promise<void> {
+        const projectId = url.searchParams.get("projectId") ?? undefined;
+        const includeArchived = booleanParameter(url.searchParams.get("includeArchived"), false);
+        const projects = (await this.#allProjects(ctx, includeArchived)).filter(
+            (project) => projectId === undefined || project.id === projectId,
+        );
+        const workspaces = await this.#allWorkspaces(ctx, projectId, includeArchived);
+        const roots = await Promise.all(
+            projects.map(async (project) => ({
+                ...rootWorkspaceResource(project),
+                agents: await this.#agentsForProject(ctx, project.id),
+            })),
+        );
+        sendJson(response, 200, {
+            workspaces: [
+                ...roots,
+                ...(await Promise.all(
+                    workspaces.map(async (workspace) => ({
+                        ...workspaceResource(workspace),
+                        agents: await this.#agentsForWorkspace(ctx, workspace.id),
+                    })),
+                )),
+            ],
+        });
+    }
+
+    async #allProjects(ctx: Context, includeArchived: boolean): Promise<Project[]> {
+        const projects: Project[] = [];
+        let cursor: string | undefined;
+        do {
+            const page = await this.#projects.list(ctx, {
+                includeArchived,
+                ...(cursor === undefined ? {} : { cursor }),
+                limit: 50,
+            });
+            projects.push(...page.projects);
+            cursor = page.nextCursor;
+        } while (cursor !== undefined);
+        return projects;
+    }
+
+    async #allWorkspaces(
+        ctx: Context,
+        projectRef: string | undefined,
+        includeArchived: boolean,
+    ): Promise<Workspace[]> {
+        const workspaces: Workspace[] = [];
+        let cursor: number | undefined;
+        do {
+            const page = await this.#workspaces.listPage(ctx, {
+                includeArchived,
+                ...(projectRef === undefined ? {} : { projectRef }),
+                ...(cursor === undefined ? {} : { cursor }),
+                limit: 50,
+            });
+            workspaces.push(...page.workspaces);
+            cursor = page.nextCursor;
+        } while (cursor !== undefined);
+        return workspaces;
+    }
+
+    async #projectWithAgents(ctx: Context, project: Project): Promise<Record<string, unknown>> {
+        return {
+            ...(await projectResource(ctx, this.#projects, project)),
+            agents: await this.#agentsForProject(ctx, project.id),
+        };
+    }
+
+    async #agentsForProject(
+        ctx: Context,
+        projectId: string,
+    ): Promise<readonly Record<string, unknown>[]> {
+        const associations = await this.#projects.listAgents(ctx, projectId);
+        const resources = await Promise.all(
+            associations.map(
+                async (association) =>
+                    await this.#buildAgentResource(
+                        ctx,
+                        association.agentId,
+                        projectId,
+                        association.orderKey,
+                    ),
+            ),
+        );
+        return resources.filter(
+            (resource): resource is Record<string, unknown> =>
+                resource !== undefined && resource["archivedAt"] === null,
+        );
+    }
+
+    async #agentsForWorkspace(
+        ctx: Context,
+        workspaceId: string,
+    ): Promise<readonly Record<string, unknown>[]> {
+        const associations = await this.#workspaces.listAgents(ctx, workspaceId);
+        const resources = await Promise.all(
+            associations.map(
+                async (association) =>
+                    await this.#buildAgentResource(
+                        ctx,
+                        association.agentId,
+                        workspaceId,
+                        association.orderKey,
+                    ),
+            ),
+        );
+        return resources.filter(
+            (resource): resource is Record<string, unknown> =>
+                resource !== undefined && resource["archivedAt"] === null,
+        );
+    }
+
+    #agentSystem(): AgentSystemRef {
+        const agents = this.#agents;
+        if (agents === undefined) throw new Error("The API module has not started.");
+        return agents;
+    }
+
+    async #withMutationId<Value>(
+        mutationId: string | undefined,
+        operation: () => Promise<Value>,
+    ): Promise<Value> {
+        return mutationId === undefined
+            ? await operation()
+            : await this.#mutationIds.run(mutationId, operation);
+    }
+
+    async #handleProfilePatch(
+        ctx: Context,
+        request: IncomingMessage,
+        response: ServerResponse,
+    ): Promise<void> {
+        const body = await bodyAs(request, profilePatchBodySchema, "profile update");
+        if (body.name === undefined && body.email === undefined) {
+            throw invalidRequest("A profile update must change a name or email address.");
+        }
+        const current = await this.#profile.ensure(ctx);
+        const resource = profileResource(current);
+        const expectedVersion = requireIfMatch(request, resource["version"], {
+            currentVersion: resource["version"],
+            profile: resource,
+        });
+        const updated = await this.#withMutationId(
+            body.mutationId,
+            async () =>
+                await this.#profile.update(
+                    ctx,
+                    current.id,
+                    {
+                        ...(body.name === undefined ? {} : { name: body.name }),
+                        ...(body.email === undefined ? {} : { email: body.email }),
+                    },
+                    { expectedVersion },
+                ),
+        );
+        if (updated === undefined) throw notFound("The profile was not found.");
+        sendJson(response, 200, { profile: profileResource(updated) });
+    }
+
+    async #onboarding(ctx: Context): Promise<Record<string, unknown>> {
+        const [profile, projects, marker] = await Promise.all([
+            this.#profile.get(ctx),
+            this.#allProjects(ctx, false),
+            readFile(this.#onboardingMarker(), "utf8").catch((error: NodeJS.ErrnoException) => {
+                if (error.code === "ENOENT") return undefined;
+                throw error;
+            }),
+        ]);
+        const signedIn = [...new Set(this.#config.models.map((model) => model.providerId))];
+        return {
+            completed: marker !== undefined,
+            steps: {
+                providers: { done: signedIn.length > 0, signedIn },
+                profile: { done: profile?.name != null },
+                project: { done: projects.length > 0 },
+            },
+        };
+    }
+
+    async #desktopBootstrap(ctx: Context): Promise<Record<string, unknown>> {
+        // Capture first. A mutation concurrent with the reads is replayed after this cursor, which
+        // may cause a harmless dirty/refetch but can never disappear between snapshot and stream.
+        const cursor = this.#journal.cursor();
+        const [profile, onboarding, projects, workspaces] = await Promise.all([
+            this.#profile.ensure(ctx),
+            this.#onboarding(ctx),
+            this.#allProjects(ctx, false),
+            this.#allWorkspaces(ctx, undefined, false),
+        ]);
+        const shallow = workspaces.filter(
+            (workspace: Workspace) => workspace.parentId === workspace.projectRef,
+        );
+        return {
+            config: this.#sanitizedConfig(),
+            profile: profileResource(profile),
+            onboarding,
+            projects: await Promise.all(
+                projects.map(
+                    async (project: Project) => await this.#projectWithAgents(ctx, project),
+                ),
+            ),
+            workspaces: [
+                ...(await Promise.all(
+                    projects.map(async (project: Project) => ({
+                        ...rootWorkspaceResource(project),
+                        agents: await this.#agentsForProject(ctx, project.id),
+                    })),
+                )),
+                ...(await Promise.all(
+                    shallow.map(async (workspace: Workspace) => ({
+                        ...workspaceResource(workspace),
+                        agents: await this.#agentsForWorkspace(ctx, workspace.id),
+                    })),
+                )),
+            ],
+            cursor,
+        };
+    }
+
+    async #daemonUsage(ctx: Context): Promise<Record<string, unknown>> {
+        const now = Date.now();
+        const records = await this.#allUsageRecords(ctx);
+        return {
+            hour: usageRecordsSince(records, now - 60 * 60 * 1_000),
+            day: usageRecordsSince(records, now - 24 * 60 * 60 * 1_000),
+            week: usageRecordsSince(records, now - 7 * 24 * 60 * 60 * 1_000),
+            month: usageRecordsSince(records, now - 30 * 24 * 60 * 60 * 1_000),
+        };
+    }
+
+    async #allUsageRecords(ctx: Context): Promise<readonly UsageInferenceRecord[]> {
+        const agents = this.#agentSystem();
+        const roots = new Set<string>();
+        const [projects, workspaces] = await Promise.all([
+            this.#allProjects(ctx, true),
+            this.#allWorkspaces(ctx, undefined, true),
+        ]);
+        for (const project of projects) {
+            for (const id of await this.#projects.listAgentIds(ctx, project.id)) roots.add(id);
+        }
+        for (const workspace of workspaces) {
+            for (const id of await this.#workspaces.listAgentIds(ctx, workspace.id)) roots.add(id);
+        }
+        const all = new Set<string>();
+        const pending = [...roots];
+        while (pending.length > 0) {
+            if (all.size >= 10_000) {
+                throw new ApiError(
+                    413,
+                    "too_large",
+                    "The agent collection is too large to aggregate usage.",
+                );
+            }
+            const id = pending.shift() as string;
+            if (all.has(id)) continue;
+            all.add(id);
+            pending.push(...(await agents.childOf(ctx, id)));
+        }
+        const records: UsageInferenceRecord[] = [];
+        for (const agentId of all) {
+            let cursor: number | undefined = 0;
+            while (cursor !== undefined) {
+                const page = await this.#usage.readPage(ctx, agentId, {
+                    cursor,
+                    limit: 100,
+                });
+                for (const record of page.records) {
+                    if (record.kind === "inference") records.push(record);
+                }
+                cursor = page.nextCursor;
+            }
+        }
+        return records;
+    }
+
+    async #usageRecordsForAgentTree(
+        ctx: Context,
+        rootAgentId: string,
+    ): Promise<readonly UsageInferenceRecord[]> {
+        const agents = this.#agentSystem();
+        const pending = [rootAgentId];
+        const visited = new Set<string>();
+        const records: UsageInferenceRecord[] = [];
+        while (pending.length > 0) {
+            if (visited.size >= 10_000) {
+                throw new ApiError(
+                    413,
+                    "too_large",
+                    "The agent tree is too large to aggregate usage.",
+                );
+            }
+            const agentId = pending.shift() as string;
+            if (visited.has(agentId)) continue;
+            visited.add(agentId);
+            pending.push(...(await agents.childOf(ctx, agentId)));
+            let cursor: number | undefined = 0;
+            while (cursor !== undefined) {
+                const page = await this.#usage.readPage(ctx, agentId, {
+                    cursor,
+                    limit: 100,
+                });
+                for (const record of page.records) {
+                    if (record.kind === "inference") records.push(record);
+                }
+                cursor = page.nextCursor;
+            }
+        }
+        return records;
+    }
+
+    #onboardingMarker(): string {
+        return join(this.#config.configuration.paths.agentHome, "onboarding-v0");
+    }
+
+    #health(): Record<string, unknown> {
+        return {
+            healthy: true,
+            ready: this.#ready,
+            status: this.#ready ? "ready" : "starting",
+            version: {
+                protocol: API_PROTOCOL_VERSION,
+                daemon: this.#config.configuration.version,
+            },
+        };
+    }
+
+    #sanitizedConfig(): Record<string, unknown> {
+        const values = this.#config.configuration.values;
+        const models = Object.fromEntries(
+            this.#config.models.map((model) => [
+                model.id,
+                {
+                    name: model.name,
+                    efforts: model.effortLevels,
+                    defaultEffort: model.defaultEffort,
+                    serviceTiers: model.serviceTiers ?? [],
+                },
+            ]),
+        );
+        const providers = Object.fromEntries(
+            Object.entries(values.providers).map(([id, provider]) => [
+                id,
+                {
+                    type: provider.type,
+                    enabled: provider.enabled !== false,
+                    models: this.#config.models
+                        .filter((model) => model.providerId === id)
+                        .map((model) => ({ id: model.id, enabled: provider.enabled !== false })),
+                },
+            ]),
+        );
+        return {
+            defaults: {
+                providerId: values.defaults.providerId ?? this.#config.models[0]?.providerId,
+                modelId: values.defaults.modelId,
+                effort: values.defaults.effort ?? this.#config.models[0]?.defaultEffort,
+                permissionMode: values.defaults.permissionMode,
+            },
+            features: values.features,
+            mcpServers: Object.fromEntries(
+                Object.entries(values.mcpServers).map(([name, server]) => [
+                    name,
+                    { enabled: server.enabled !== false, transport: server.transport },
+                ]),
+            ),
+            network: {
+                allowedDomains: values.network?.allowedDomains ?? [],
+                deniedDomains: values.network?.deniedDomains ?? [],
+                allowedPorts: values.network?.allowedPorts ?? [],
+                allowedLoopbackPorts: values.network?.allowedLoopbackPorts ?? [],
+                allowLocalBinding: values.network?.allowLocalBinding ?? false,
+            },
+            p2p: {
+                name: values.p2p.name,
+                role: values.p2p.role,
+                enableIroh: values.p2p.enableIroh,
+                enableDirect: values.p2p.enableDirect,
+                enableSsh: values.p2p.enableSsh,
+                exposeApi: values.p2p.exposeApi,
+            },
+            permissions: values.permissions,
+            presence: values.presence,
+            models,
+            providers,
+            settings: {
+                compactCompletedTurns: values.settings.compactCompletedTurns,
+                completionChime: values.settings.completionChime,
+                inferenceMaxRetries: values.settings.inferenceMaxRetries,
+                showReasoning: values.settings.showReasoning,
+                showUsage: values.settings.showUsage,
+                toolResultRetentionDays: values.settings.toolResultRetentionDays,
+            },
+            theme: values.theme,
+            workspace: values.workspace,
+        };
+    }
+
+    #authenticate(request: IncomingMessage): void {
+        if (!this.#authorized(request)) {
+            throw new ApiError(401, "unauthorized", "Unauthorized");
+        }
+    }
+
+    #authorized(request: IncomingMessage): boolean {
+        const token = this.#token;
+        if (token === undefined) return false;
+        const header = request.headers.authorization;
+        if (header === undefined || Array.isArray(header) || !header.startsWith("Bearer ")) {
+            return false;
+        }
+        const supplied = header.slice("Bearer ".length);
+        if (supplied.length !== token.length) return false;
+        return timingSafeEqual(Buffer.from(supplied), Buffer.from(token));
+    }
+
+    #sendError(ctx: Context, response: ServerResponse, error: unknown): void {
+        if (response.headersSent) {
+            response.end();
+            return;
+        }
+        if (error instanceof ApiError) {
+            if (error.status === 401) {
+                sendJson(response, 401, { error: "Unauthorized" });
+            } else {
+                sendJson(response, error.status, error.body());
+            }
+            return;
+        }
+        if (error instanceof ProjectFileError) {
+            const code =
+                error.code === "missing"
+                    ? "not_found"
+                    : error.code === "invalid" || error.code === "forbidden"
+                      ? "invalid_request"
+                      : error.code === "conflict"
+                        ? "hash_mismatch"
+                        : error.code === "unavailable"
+                          ? "not_initialized"
+                          : error.code;
+            sendJson(response, error.status, {
+                error: error.message,
+                code,
+                ...(error.code === "conflict" ? { hash: error.currentHash } : {}),
+            });
+            return;
+        }
+        if (error instanceof TerminalError) {
+            const status =
+                error.code === "not_found"
+                    ? 404
+                    : error.code === "invalid"
+                      ? 400
+                      : error.code === "conflict"
+                        ? 409
+                        : 503;
+            sendJson(response, status, {
+                error: error.message,
+                code:
+                    error.code === "not_found"
+                        ? "not_found"
+                        : error.code === "invalid"
+                          ? "invalid_request"
+                          : "conflict",
+            });
+            return;
+        }
+        if (error instanceof ProjectRegistrationError) {
+            sendJson(response, 400, {
+                error: error.message,
+                code: "invalid_request",
+            });
+            return;
+        }
+        if (error instanceof ProfileVersionConflictError) {
+            const profile = profileResource(error.current);
+            sendJson(response, 409, {
+                error: error.message,
+                code: "conflict",
+                currentVersion: profile["version"],
+                profile,
+            });
+            return;
+        }
+        ctx.log.error("The Happy Agent API request failed.", {}, error);
+        sendJson(response, 500, {
+            error: "The request could not be completed.",
+            code: "internal",
+        });
+    }
+
+    #writeSocketFailure(
+        ctx: Context,
+        socket: Socket,
+        error: unknown,
+        notFoundMessage: string,
+    ): void {
+        if (error instanceof ApiError) {
+            writeSocketError(socket, error.status, error.message, error.code);
+            return;
+        }
+        if (error instanceof TerminalError && error.code === "not_found") {
+            writeSocketError(socket, 404, notFoundMessage, "not_found");
+            return;
+        }
+        ctx.log.error("The Happy Agent socket attachment failed.", {}, error);
+        writeSocketError(socket, 500, "The attachment could not be completed.", "internal");
+    }
+}
+
+async function loadOrCreateToken(path: string): Promise<string> {
+    const existing = await readFile(path, "utf8").catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return undefined;
+        throw error;
+    });
+    if (existing !== undefined) {
+        const token = existing.trim();
+        if (!TOKEN_PATTERN.test(token)) {
+            throw new Error("The Happy Agent API token is invalid.");
+        }
+        await chmod(path, 0o600);
+        return token;
+    }
+    const token = randomBytes(32).toString("base64url");
+    const directory = dirname(path);
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await chmod(directory, 0o700);
+    const temporary = `${path}.${process.pid}.tmp`;
+    await writeFile(temporary, `${token}\n`, { flag: "wx", mode: 0o600 });
+    try {
+        await rename(temporary, path);
+    } catch (error) {
+        const raced = await readFile(path, "utf8").catch(() => undefined);
+        if (raced === undefined) throw error;
+        const value = raced.trim();
+        if (!TOKEN_PATTERN.test(value)) throw error;
+        return value;
+    }
+    await chmod(path, 0o600);
+    return token;
+}
+
+function requestUrl(request: IncomingMessage): URL {
+    try {
+        return new URL(request.url ?? "/", "http://happy-agent.invalid");
+    } catch {
+        throw invalidRequest("The request URL is invalid.");
+    }
+}
+
+async function readJson(request: IncomingMessage): Promise<unknown> {
+    const contentType = request.headers["content-type"]?.split(";")[0]?.trim();
+    if (contentType !== "application/json") {
+        throw invalidRequest("The request content type must be application/json.");
+    }
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    for await (const chunk of request) {
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+        bytes += buffer.byteLength;
+        if (bytes > MAX_JSON_BODY_BYTES) {
+            throw new ApiError(413, "too_large", "The request body is too large.");
+        }
+        chunks.push(buffer);
+    }
+    try {
+        return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+    } catch {
+        throw invalidRequest("The request body must be valid JSON.");
+    }
+}
+
+async function bodyAs<Schema extends TSchema>(
+    request: IncomingMessage,
+    schema: Schema,
+    name: string,
+): Promise<Static<Schema>> {
+    const value = await readJson(request);
+    if (!Value.Check(schema, value)) {
+        throw invalidRequest(`The ${name} is invalid.`);
+    }
+    return value as Static<Schema>;
+}
+
+function queryAs<Schema extends TSchema>(
+    value: unknown,
+    schema: Schema,
+    name: string,
+): Static<Schema> {
+    if (!Value.Check(schema, value)) {
+        throw invalidRequest(`The ${name} query is invalid.`);
+    }
+    return value as Static<Schema>;
+}
+
+async function readBytes(request: IncomingMessage, maximum: number): Promise<Buffer> {
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    for await (const chunk of request) {
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+        bytes += buffer.byteLength;
+        if (bytes > maximum) {
+            throw new ApiError(413, "too_large", "The request body is too large.");
+        }
+        chunks.push(buffer);
+    }
+    return Buffer.concat(chunks);
+}
+
+interface ApiUsageTokens {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+}
+
+/** @internal API event journal that inherits only the current async mutation scope. */
+export class MutationAwareApiEventJournal extends ApiEventJournal {
+    readonly #mutationIds: AsyncLocalStorage<string>;
+
+    constructor(mutationIds: AsyncLocalStorage<string>) {
+        super();
+        this.#mutationIds = mutationIds;
+    }
+
+    override append(type: string, payload: unknown, occurredAt?: number): ApiEvent {
+        const mutationId = this.#mutationIds.getStore();
+        if (
+            mutationId === undefined ||
+            payload === null ||
+            typeof payload !== "object" ||
+            Array.isArray(payload)
+        ) {
+            return super.append(type, payload, occurredAt);
+        }
+        return super.append(
+            type,
+            { ...(payload as Record<string, unknown>), mutationId },
+            occurredAt,
+        );
+    }
+}
+
+function usageRecordsSince(
+    records: readonly UsageInferenceRecord[],
+    since: number,
+): Record<string, Record<string, ApiUsageTokens>> {
+    const output: Record<string, Record<string, ApiUsageTokens>> = {};
+    for (const record of records) {
+        if (record.startedAt < since || record.model === undefined) continue;
+        const provider = (output[record.provider] ??= {});
+        const tokens = (provider[record.model] ??= {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+        });
+        tokens.input += record.tokens.input;
+        tokens.output += record.tokens.output;
+    }
+    return output;
+}
+
+function requireIfMatch(
+    request: IncomingMessage,
+    currentVersion: unknown,
+    details: Readonly<Record<string, unknown>>,
+): string {
+    const value = request.headers["if-match"];
+    if (
+        typeof value !== "string" ||
+        !Value.Check(eventIdSchema, value) ||
+        typeof currentVersion !== "string"
+    ) {
+        throw invalidRequest("A valid If-Match resource version is required.");
+    }
+    if (value !== currentVersion) {
+        throw new ApiError(409, "conflict", "The resource has changed.", details);
+    }
+    return value;
+}
+
+async function writeOwnerOnlyDocument(path: string, content: string): Promise<void> {
+    const directory = dirname(path);
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const temporary = `${path}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
+    await writeFile(temporary, content, { flag: "wx", mode: 0o600 });
+    await rename(temporary, path);
+    await chmod(path, 0o600);
+}
+
+function setCommonHeaders(response: ServerResponse): void {
+    response.setHeader("cache-control", "no-store");
+}
+
+function sendJson(response: ServerResponse, status: number, body: unknown): void {
+    const encoded = JSON.stringify(body);
+    response.writeHead(status, {
+        "cache-control": "no-store",
+        "content-length": Buffer.byteLength(encoded),
+        "content-type": "application/json; charset=utf-8",
+    });
+    response.end(encoded);
+}
+
+function writeSocketError(
+    socket: Socket,
+    status: number,
+    message: string,
+    code: ApiErrorCode = socketErrorCode(status),
+): void {
+    const body = JSON.stringify(
+        status === 401 ? { error: "Unauthorized" } : { error: message, code },
+    );
+    socket.end(
+        `HTTP/1.1 ${status} ${httpStatusText(status)}\r\n` +
+            "Content-Type: application/json; charset=utf-8\r\n" +
+            "Cache-Control: no-store\r\n" +
+            `Content-Length: ${Buffer.byteLength(body)}\r\n` +
+            "Connection: close\r\n\r\n" +
+            body,
+    );
+}
+
+function socketErrorCode(
+    status: number,
+): "internal" | "not_found" | "not_initialized" | "unauthorized" {
+    if (status === 401) return "unauthorized";
+    if (status === 404) return "not_found";
+    if (status === 503) return "not_initialized";
+    return "internal";
+}
+
+function httpStatusText(status: number): string {
+    if (status === 400) return "Bad Request";
+    if (status === 401) return "Unauthorized";
+    if (status === 404) return "Not Found";
+    if (status === 409) return "Conflict";
+    if (status === 413) return "Content Too Large";
+    if (status === 501) return "Not Implemented";
+    if (status === 503) return "Service Unavailable";
+    return "Internal Server Error";
+}
+
+function writeSseEvent(response: ServerResponse, event: ApiEvent): boolean {
+    return response.write(
+        `id: ${event.cursor}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+    );
+}
+
+function optionalCursor(value: string | null | undefined): string | undefined {
+    if (value === null || value === undefined || value === "") return undefined;
+    if (!Value.Check(eventIdSchema, value)) throw invalidRequest("The event cursor is invalid.");
+    return value;
+}
+
+function optionalApiId(value: string | null | undefined, resourceName: string): string | undefined {
+    if (value === null || value === undefined || value === "") return undefined;
+    if (!Value.Check(apiIdSchema, value)) {
+        throw invalidRequest(`The ${resourceName} identifier is invalid.`);
+    }
+    return value;
+}
+
+function integerParameter(
+    value: string | null,
+    fallback: number,
+    minimum: number,
+    maximum: number,
+): number {
+    if (value === null) return fallback;
+    if (!/^(0|[1-9][0-9]*)$/.test(value)) {
+        throw invalidRequest("A numeric query parameter is invalid.");
+    }
+    const parsed = Number(value);
+    if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
+        throw invalidRequest("A numeric query parameter is outside its allowed range.");
+    }
+    return parsed;
+}
+
+function booleanParameter(value: string | null, fallback: boolean): boolean {
+    if (value === null) return fallback;
+    if (value === "true") return true;
+    if (value === "false") return false;
+    throw invalidRequest("A boolean query parameter must be true or false.");
+}
+
+function boundedAdd(set: Set<string>, value: string, maximum: number): void {
+    set.add(value);
+    while (set.size > maximum) {
+        const oldest = set.values().next().value as string | undefined;
+        if (oldest === undefined) return;
+        set.delete(oldest);
+    }
+}
+
+function pendingMessageResource(pending: HistoryPendingMessage): Record<string, unknown> {
+    return {
+        ...messageResource({
+            recordId: pending.id,
+            role: "user",
+            blocks: pending.blocks,
+            at: pending.createdAt,
+            delivery: pending.delivery,
+            mode: pending.mode,
+        }),
+        status: "pending",
+        runId: null,
+    };
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+    return value !== null && typeof value === "object" && !Array.isArray(value)
+        ? (value as Record<string, unknown>)
+        : undefined;
+}
+
+function agentMetadataChanges(
+    update: Readonly<Record<string, unknown>>,
+    occurredAt: number,
+): Record<string, unknown> {
+    const changes: Record<string, unknown> = { updatedAt: occurredAt };
+    for (const key of [
+        "archivedAt",
+        "draft",
+        "lastMode",
+        "orderKey",
+        "pendingQuestionId",
+        "processes",
+        "subagents",
+        "title",
+        "unread",
+    ]) {
+        if (Object.hasOwn(update, key)) changes[key] = update[key];
+    }
+    if (Object.hasOwn(update, "title")) {
+        changes["titleStatus"] = typeof update["title"] === "string" ? "ready" : "idle";
+    }
+    return changes;
+}
+
+function statusForAgentEvent(
+    eventType: string,
+    payload: Readonly<Record<string, unknown>> | undefined,
+): string | undefined {
+    if (eventType === "tool.started") return "running_tools";
+    if (eventType === "tool.completed") return "working";
+    if (eventType === "inference.completed" || eventType === "turn.completed") {
+        return "working";
+    }
+    if (eventType !== "provider.event") return undefined;
+    const rigEvent = recordValue(payload?.["rigEvent"]);
+    const type = stringValue(rigEvent?.["type"]);
+    if (type === "toolcall_start" || type === "toolcall_delta" || type === "toolcall_end") {
+        return "generating_tools";
+    }
+    if (
+        type === "tool_execution_start" ||
+        type === "tool_execution_progress" ||
+        type === "tool_execution_end"
+    ) {
+        return "running_tools";
+    }
+    if (type === "thinking_start" || type === "thinking_delta") return "thinking";
+    if (type === "text_start" || type === "text_delta") return "working";
+    return undefined;
+}
+
+function apiAssistantMessageId(runId: string): string {
+    return `a${createHash("sha256").update(runId).digest("hex").slice(0, 24)}`;
+}
+
+function providerMessageContent(value: unknown): readonly Record<string, unknown>[] | undefined {
+    if (!Array.isArray(value)) return undefined;
+    const results = new Map<string, Record<string, unknown>>();
+    for (const candidate of value) {
+        const block = recordValue(candidate);
+        if (block?.["type"] !== "tool_result") continue;
+        const callId = stringValue(block["toolCallId"]);
+        if (callId !== undefined) results.set(callId, block);
+    }
+    return value.flatMap((candidate): Record<string, unknown>[] => {
+        const block = recordValue(candidate);
+        const type = stringValue(block?.["type"]);
+        if (block === undefined || type === undefined || type === "tool_result") return [];
+        if (type === "text") {
+            return [{ type: "text", text: stringValue(block["text"]) ?? "" }];
+        }
+        if (type === "thinking") {
+            return [
+                {
+                    type: "reasoning",
+                    text: stringValue(block["thinking"]) ?? "",
+                },
+            ];
+        }
+        if (type === "image") {
+            return [
+                {
+                    type: "image",
+                    mimeType:
+                        stringValue(block["mediaType"]) ??
+                        stringValue(block["mimeType"]) ??
+                        "application/octet-stream",
+                    data: stringValue(block["data"]) ?? "",
+                },
+            ];
+        }
+        if (type !== "toolCall") return [];
+        const callId = stringValue(block["id"]) ?? stringValue(block["callId"]) ?? "unknown";
+        const result = results.get(callId);
+        return [
+            {
+                type: "tool_call",
+                name: stringValue(block["name"]) ?? "tool",
+                status:
+                    result === undefined
+                        ? "running"
+                        : result["isError"] === true
+                          ? "failed"
+                          : "completed",
+                arguments: block["arguments"] ?? {},
+                ...(result === undefined
+                    ? {}
+                    : {
+                          result: {
+                              output:
+                                  stringValue(result["display"]) ??
+                                  JSON.stringify(result["rendered"] ?? []),
+                          },
+                      }),
+            },
+        ];
+    });
+}
+
+function resourceChanges(
+    previous: Readonly<Record<string, unknown>>,
+    current: Readonly<Record<string, unknown>>,
+): Record<string, unknown> {
+    const changes: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(current)) {
+        if (key === "version" || key === "agents") continue;
+        if (!sameJsonValue(previous[key], value)) changes[key] = value;
+    }
+    if (Object.hasOwn(current, "updatedAt")) changes["updatedAt"] = current["updatedAt"];
+    return changes;
+}
+
+function sameJsonValue(left: unknown, right: unknown): boolean {
+    if (Object.is(left, right)) return true;
+    try {
+        return JSON.stringify(left) === JSON.stringify(right);
+    } catch {
+        return false;
+    }
+}
+
+function stringValue(value: unknown): string | undefined {
+    return typeof value === "string" ? value : undefined;
+}
+
+function numericValue(value: unknown): number {
+    return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+}

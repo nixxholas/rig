@@ -1,4 +1,4 @@
-import { startHappyAgentDaemon, type StartHappyAgentDaemonOptions } from "@slopus/happy-agent";
+import { startHappyAgentDaemon } from "@slopus/happy-agent";
 
 import { getDaemonIdentity } from "./getDaemonIdentity.js";
 import { getHappyDaemonPaths } from "./getHappyDaemonPaths.js";
@@ -13,9 +13,6 @@ export async function runHappyAgentServer(): Promise<void> {
     const identity = getDaemonIdentity();
     const daemon = await startHappyAgentDaemon({
         happyHome: getHappyDaemonPaths().happyHome,
-        httpConfiguration: { identity } as NonNullable<
-            StartHappyAgentDaemonOptions["httpConfiguration"]
-        > & { readonly identity: typeof identity },
         version: identity.version,
     });
     const stop = () => {

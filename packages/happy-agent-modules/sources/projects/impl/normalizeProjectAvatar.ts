@@ -2,12 +2,18 @@ import { createHash } from "node:crypto";
 
 import sharp from "sharp";
 
+import { rgbaToProjectAvatarThumbHash } from "./rgbaToProjectAvatarThumbHash.js";
+
 export const MAX_AVATAR_BYTES = 8 * 1024 * 1024;
+const MAX_DECODED_PIXELS = 25_000_000;
+const ACCEPTED_FORMATS = new Set(["jpeg", "png", "webp"]);
 
 export interface NormalizedProjectAvatar {
     readonly bytes: Buffer;
-    readonly hash: string;
+    readonly contentHash: string;
+    readonly contentType: "image/webp";
     readonly height: number;
+    readonly thumbhash: string;
     readonly width: number;
 }
 
@@ -16,15 +22,35 @@ export interface NormalizedProjectAvatar {
  * square-fitting WebP addressed by the hash of its own bytes. Two projects that arrive at the
  * same picture therefore share one stored asset.
  */
-export async function normalizeProjectAvatar(bytes: Buffer): Promise<NormalizedProjectAvatar> {
+export async function normalizeProjectAvatar(
+    bytes: Uint8Array,
+    declaredContentType?: "image/jpeg" | "image/png" | "image/webp",
+): Promise<NormalizedProjectAvatar> {
+    if (bytes.byteLength === 0 || bytes.byteLength > MAX_AVATAR_BYTES) {
+        throw new Error("The project image must be no larger than 8 MiB.");
+    }
     const image = sharp(bytes, {
         animated: false,
         failOn: "error",
-        limitInputPixels: 25_000_000,
+        limitInputPixels: MAX_DECODED_PIXELS,
     }).rotate();
     const metadata = await image.metadata();
-    if (metadata.width === undefined || metadata.height === undefined) {
+    if (
+        metadata.width === undefined ||
+        metadata.height === undefined ||
+        metadata.format === undefined ||
+        !ACCEPTED_FORMATS.has(metadata.format)
+    ) {
         throw new Error("The project image does not contain a readable picture.");
+    }
+    const actualContentType =
+        metadata.format === "jpeg"
+            ? "image/jpeg"
+            : metadata.format === "png"
+              ? "image/png"
+              : "image/webp";
+    if (declaredContentType !== undefined && actualContentType !== declaredContentType) {
+        throw new Error("The project image does not match its content type.");
     }
     const result = await image
         .resize({
@@ -36,10 +62,33 @@ export async function normalizeProjectAvatar(bytes: Buffer): Promise<NormalizedP
         })
         .webp({ quality: 82 })
         .toBuffer({ resolveWithObject: true });
+    const placeholder = await sharp(result.data, {
+        animated: false,
+        failOn: "error",
+        limitInputPixels: MAX_DECODED_PIXELS,
+    })
+        .resize({
+            fit: "inside",
+            height: 100,
+            kernel: "lanczos3",
+            width: 100,
+            withoutEnlargement: true,
+        })
+        .ensureAlpha()
+        .raw()
+        .toBuffer({ resolveWithObject: true });
     return {
         bytes: result.data,
-        hash: createHash("sha256").update(result.data).digest("hex"),
+        contentHash: createHash("sha256").update(result.data).digest("hex"),
+        contentType: "image/webp",
         height: result.info.height,
+        thumbhash: Buffer.from(
+            rgbaToProjectAvatarThumbHash(
+                placeholder.info.width,
+                placeholder.info.height,
+                placeholder.data,
+            ),
+        ).toString("base64"),
         width: result.info.width,
     };
 }

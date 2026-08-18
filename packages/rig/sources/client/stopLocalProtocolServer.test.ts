@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { ProtocolHttpClient } from "./ProtocolHttpClient.js";
+import type { HappyAgentClient } from "@slopus/happy-agent-client";
 
 const mocks = vi.hoisted(() => ({
     waitForSocketRemoval: vi.fn(),
@@ -20,10 +20,11 @@ describe("stopLocalProtocolServer", () => {
                 pid: process.pid,
                 shuttingDown: true,
             }),
-            socketPath: "/tmp/rig/server.sock",
-        } as unknown as ProtocolHttpClient;
+        } as unknown as HappyAgentClient;
 
-        await expect(stopLocalProtocolServer(client)).resolves.toBeUndefined();
+        await expect(
+            stopLocalProtocolServer(client, "/tmp/rig/server.sock"),
+        ).resolves.toBeUndefined();
 
         expect(mocks.waitForSocketRemoval).toHaveBeenCalledWith("/tmp/rig/server.sock", 30_000);
     });

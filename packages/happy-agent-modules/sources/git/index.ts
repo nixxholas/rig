@@ -10,6 +10,7 @@ export { GitModule } from "./GitModule.js";
 export {
     gitCredentialRefSchema,
     gitEntitySchema,
+    gitTrackedEntitiesSchema,
     gitWatchSchema,
     type GitChangedFile,
     type GitCredentialRef,

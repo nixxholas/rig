@@ -9,6 +9,7 @@ import {
     MAX_TERMINALS_PER_SCOPE,
     TerminalError,
     TerminalsModule,
+    type TerminalEvent,
     type TerminalProcess,
     type TerminalProcessFactory,
     type TerminalProcessOptions,
@@ -43,6 +44,22 @@ describe("TerminalsModule", () => {
         expect(terminal.exitCode).toBeNull();
         expect(factory.started[0]?.cwd).toBe(project.repositoryRef);
         expect(await module.list(ctx, { projectId: project.id })).toEqual([terminal]);
+    });
+
+    it("publishes a full created resource with its root workspace and UUIDv7 version", async () => {
+        const { ctx, module, project } = await createWorld("terminals-created-event");
+        const events: TerminalEvent[] = [];
+        module.onEvent((event) => {
+            events.push(event);
+        });
+
+        const terminal = await module.create(ctx, { projectId: project.id }, {});
+
+        expect(terminal.workspaceId).toBe(project.id);
+        expect(terminal.version).toMatch(
+            /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+        );
+        expect(events).toEqual([{ terminal, type: "terminal_created" }]);
     });
 
     it("starts a workspace terminal in the worktree rather than inside the project", async () => {
@@ -115,24 +132,66 @@ describe("TerminalsModule", () => {
     it("resizes the process and the record together", async () => {
         const { ctx, factory, module, project } = await createWorld("terminals-resize");
         const scope = { projectId: project.id };
+        const events: TerminalEvent[] = [];
+        module.onEvent((event) => {
+            events.push(event);
+        });
         const created = await module.create(ctx, scope, {});
 
         const resized = await module.resize(ctx, scope, created.id, { cols: 100, rows: 30 });
 
         expect(resized).toMatchObject({ cols: 100, id: created.id, rows: 30 });
+        expect(resized.version > created.version).toBe(true);
         expect(factory.processes[0]?.sizes.at(-1)).toEqual([100, 30]);
+        expect(events).toContainEqual({
+            changes: { cols: 100, rows: 30 },
+            previousVersion: created.version,
+            terminalId: created.id,
+            type: "terminal_updated",
+            version: resized.version,
+        });
     });
 
     it("keeps a stopped terminal, holding what it exited with", async () => {
         const { ctx, factory, module, project } = await createWorld("terminals-exit-code");
         const scope = { projectId: project.id };
+        const events: TerminalEvent[] = [];
+        module.onEvent((event) => {
+            events.push(event);
+        });
         const created = await module.create(ctx, scope, {});
         factory.processes[0]?.exitWith(3);
 
         const stopped = await module.stop(ctx, scope, created.id);
 
         expect(stopped).toMatchObject({ exitCode: 3, id: created.id, status: "exited" });
+        expect(stopped.version > created.version).toBe(true);
         expect(await module.list(ctx, scope)).toEqual([stopped]);
+        expect(events).toContainEqual({
+            changes: { exitCode: 3, status: "exited" },
+            previousVersion: created.version,
+            terminalId: created.id,
+            type: "terminal_updated",
+            version: stopped.version,
+        });
+    });
+
+    it("does not mint a version or event for a resize that changes nothing", async () => {
+        const { ctx, module, project } = await createWorld("terminals-noop-resize");
+        const scope = { projectId: project.id };
+        const events: TerminalEvent[] = [];
+        module.onEvent((event) => {
+            events.push(event);
+        });
+        const created = await module.create(ctx, scope, {});
+
+        const unchanged = await module.resize(ctx, scope, created.id, {
+            cols: created.cols,
+            rows: created.rows,
+        });
+
+        expect(unchanged).toEqual(created);
+        expect(events).toEqual([{ terminal: created, type: "terminal_created" }]);
     });
 
     it("refuses one terminal past the limit, then reuses the place a finished one gave up", async () => {

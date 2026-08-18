@@ -16,6 +16,14 @@ export { FileReadLog } from "./impl/FileReadLog.js";
 export { createTimedSignal, type TimedSignal } from "./impl/createTimedSignal.js";
 export { quoteVisibleExact } from "./impl/quoteVisibleExact.js";
 
+// Files: safe, project- and workspace-rooted filesystem access.
+export * from "./files/index.js";
+
+// Happy: the optional mobile connection and its durable remote projection.
+export * from "./happy/index.js";
+export * from "./api/index.js";
+export * from "./runtime/index.js";
+
 // Config: the resolved filesystem layout and layered Happy Agent settings.
 export {
     ConfigModule,
@@ -266,10 +274,7 @@ export {
     type PermissionEventListener,
     type PermissionUnsubscribe,
 } from "./permissions/PermissionsModule.js";
-export {
-    permissionEventSchema,
-    type PermissionEvent,
-} from "./permissions/PermissionEvent.js";
+export { permissionEventSchema, type PermissionEvent } from "./permissions/PermissionEvent.js";
 export {
     type PermissionReviewDecision,
     type PermissionReviewer,

@@ -8,11 +8,14 @@ import {
     usageAggregateQuerySchema,
     usagePageQuerySchema,
     usagePageSchema,
+    usageRunIdSchema,
+    usageRunSummarySchema,
     usageSummarySchema,
     type UsageAggregateQuery,
     type UsagePage,
     type UsagePageQuery,
     type UsageRecord,
+    type UsageRunSummary,
     type UsageSummary,
 } from "../Usage.js";
 import { assertUsageRecord } from "./assertUsageRecord.js";
@@ -20,6 +23,49 @@ import { assertUsageRecord } from "./assertUsageRecord.js";
 const RECORDS_TABLE = "happy_agent_usage_records";
 
 export class UsageDatabase {
+    async run(ctx: Context, agentId: string, runId: string): Promise<UsageRunSummary> {
+        if (!Value.Check(usageRunIdSchema, runId)) {
+            throw new Error("Usage run ID is invalid.");
+        }
+        const rows = await agentDatabaseRows<{ record_json: string }>(
+            ctx.db,
+            sql`SELECT record_json
+                FROM ${sql.raw(RECORDS_TABLE)}
+                WHERE agent_id = ${agentId} AND run_id = ${runId} AND kind = 'inference'
+                ORDER BY finished_at, record_id
+                LIMIT ${MAX_USAGE_RECORDS}`,
+        );
+        const usage: UsageRunSummary["usage"] = {};
+        for (const row of rows) {
+            const record = this.#parseRecord(row.record_json);
+            if (record.kind !== "inference" || record.model === undefined) continue;
+            const models = usage[record.provider] ?? {};
+            const previous = models[record.model] ?? {
+                input: 0,
+                output: 0,
+                cacheRead: 0,
+                cacheWrite: 0,
+            };
+            models[record.model] = {
+                input: previous.input + record.tokens.input,
+                output: previous.output + record.tokens.output,
+                cacheRead: previous.cacheRead + (record.tokens.cacheRead ?? 0),
+                cacheWrite: previous.cacheWrite + (record.tokens.cacheWrite ?? 0),
+            };
+            usage[record.provider] = models;
+        }
+        const summary: UsageRunSummary = {
+            agentId,
+            runId,
+            usage,
+            costUsd: null,
+        };
+        if (!Value.Check(usageRunSummarySchema, summary)) {
+            throw new Error("Usage database returned invalid run usage.");
+        }
+        return structuredClone(summary);
+    }
+
     async read(
         ctx: Context,
         agentId: string,
@@ -207,8 +253,8 @@ export class UsageDatabase {
         await agentDatabaseRun(
             ctx.db,
             sql`INSERT INTO ${sql.raw(RECORDS_TABLE)}
-                    (record_id, agent_id, finished_at, kind, record_json)
-                VALUES (${record.id}, ${record.agentId}, ${record.finishedAt}, ${record.kind}, ${JSON.stringify(record)})`,
+                    (record_id, agent_id, run_id, finished_at, kind, record_json)
+                VALUES (${record.id}, ${record.agentId}, ${record.runId ?? null}, ${record.finishedAt}, ${record.kind}, ${JSON.stringify(record)})`,
         );
         await agentDatabaseRun(
             ctx.db,

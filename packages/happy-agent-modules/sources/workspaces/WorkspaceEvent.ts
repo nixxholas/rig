@@ -11,6 +11,7 @@ import {
     workspaceSchema,
     workspaceTimestampSchema,
 } from "./Workspace.js";
+import { workspaceAgentAssociationSchema } from "./WorkspaceAgent.js";
 
 /** Context is host-owned and opaque to this module. */
 export const workspaceContextSchema = Type.Unsafe<Context>(
@@ -58,6 +59,7 @@ export const workspaceEventSchema = Type.Union([
             type: Type.Literal("workspace_updated"),
             change: workspaceUpdateChangeSchema,
             workspace: workspaceSchema,
+            previousWorkspace: workspaceSchema,
         },
         { additionalProperties: false },
     ),
@@ -66,6 +68,7 @@ export const workspaceEventSchema = Type.Union([
             ...eventEnvelope,
             type: Type.Literal("workspace_transferred"),
             workspace: workspaceSchema,
+            previousWorkspace: workspaceSchema,
             previousProjectRef: Type.Optional(workspaceProjectRefSchema),
         },
         { additionalProperties: false },
@@ -75,6 +78,7 @@ export const workspaceEventSchema = Type.Union([
             ...eventEnvelope,
             type: Type.Literal("workspace_renamed"),
             workspace: workspaceSchema,
+            previousWorkspace: workspaceSchema,
             previousName: workspaceNameSchema,
         },
         { additionalProperties: false },
@@ -84,6 +88,7 @@ export const workspaceEventSchema = Type.Union([
             ...eventEnvelope,
             type: Type.Literal("workspace_reordered"),
             workspace: workspaceSchema,
+            previousWorkspace: workspaceSchema,
             previousOrderKey: workspaceOrderKeySchema,
         },
         { additionalProperties: false },
@@ -93,6 +98,7 @@ export const workspaceEventSchema = Type.Union([
             ...eventEnvelope,
             type: Type.Literal("workspace_archived"),
             workspace: workspaceSchema,
+            previousWorkspace: workspaceSchema,
         },
         { additionalProperties: false },
     ),
@@ -101,6 +107,39 @@ export const workspaceEventSchema = Type.Union([
             ...eventEnvelope,
             type: Type.Literal("workspace_transfer_scheduled"),
             targetWorkspaceId: workspaceIdSchema,
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            ...eventEnvelope,
+            type: Type.Literal("workspace_agent_attached"),
+            association: workspaceAgentAssociationSchema,
+            previousWorkspaceId: Type.Optional(workspaceIdSchema),
+            workspace: workspaceSchema,
+            previousWorkspace: workspaceSchema,
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            ...eventEnvelope,
+            type: Type.Literal("workspace_agent_detached"),
+            agentId: workspaceAgentIdSchema,
+            nextWorkspaceId: workspaceIdSchema,
+            workspace: workspaceSchema,
+            previousWorkspace: workspaceSchema,
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            ...eventEnvelope,
+            type: Type.Literal("workspace_agent_reordered"),
+            association: workspaceAgentAssociationSchema,
+            previousOrderKey: workspaceOrderKeySchema,
+            workspace: workspaceSchema,
+            previousWorkspace: workspaceSchema,
         },
         { additionalProperties: false },
     ),

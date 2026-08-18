@@ -172,9 +172,8 @@ export class GymEventStream {
 /**
  * The update a live frame carries.
  *
- * `/v0/events/live` names every frame `update` and wraps the durable event under `data.event`,
- * because that is the shape a Rig client consumes. `/v0/events/stream` instead names each frame
- * after the event's own type and carries the event directly.
+ * `/v0/events/stream` names each frame after the event's own type and carries the public event
+ * envelope directly.
  */
 export function frameEvent(frame: GymSseFrame): Record<string, unknown> | undefined {
     const data = frame.data;

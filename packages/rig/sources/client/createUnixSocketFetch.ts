@@ -2,9 +2,9 @@ import { request as httpRequest } from "node:http";
 import { Readable } from "node:stream";
 
 /**
- * Adapts the daemon's Unix socket to the standard Fetch API consumed by rig-connect.
+ * Adapts the daemon's Unix socket to the standard Fetch API consumed by HappyAgentClient.
  *
- * Platform transport stays outside rig-connect, so the connector itself remains
+ * Platform transport stays outside the client package, so the client itself remains
  * browser-safe while the local TUI can use exactly the same state implementation.
  */
 export function createUnixSocketFetch(socketPath: string): typeof globalThis.fetch {
@@ -38,12 +38,14 @@ export function createUnixSocketFetch(socketPath: string): typeof globalThis.fet
                 socketPath,
             });
             let settled = false;
+            let responseStream: import("node:http").IncomingMessage | undefined;
             const abort = () => {
-                request.destroy(
+                const reason =
                     signal?.reason instanceof Error
                         ? signal.reason
-                        : new DOMException("The request was aborted.", "AbortError"),
-                );
+                        : new DOMException("The request was aborted.", "AbortError");
+                request.destroy(reason);
+                responseStream?.destroy(reason);
             };
             signal?.addEventListener("abort", abort, { once: true });
             request.once("error", (error) => {
@@ -55,6 +57,7 @@ export function createUnixSocketFetch(socketPath: string): typeof globalThis.fet
             request.once("response", (response) => {
                 if (settled) return;
                 settled = true;
+                responseStream = response;
                 const responseHeaders = new Headers();
                 for (const [name, value] of Object.entries(response.headers)) {
                     for (const item of Array.isArray(value) ? value : [value]) {
