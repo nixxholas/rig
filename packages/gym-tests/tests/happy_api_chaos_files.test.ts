@@ -842,7 +842,9 @@ async function applyGit(gym: AgentGym, workspaceId: string): Promise<void> {
 async function applyWatch(gym: AgentGym, workspaceId: string): Promise<void> {
     const response = await gym.client.watchGit({ workspaceIds: [workspaceId] });
     expect(response.snapshots).toEqual(expect.any(Object));
-    expect(Object.prototype.hasOwnProperty.call(response.snapshots, workspaceId)).toBe(true);
+    expect(Object.keys(response.snapshots).every((id) => id === workspaceId)).toBe(true);
+    const snapshot = response.snapshots[workspaceId];
+    if (snapshot !== undefined) expect(snapshot.facts.head).toBeTruthy();
 }
 
 async function applyExternal(
