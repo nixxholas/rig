@@ -15,6 +15,16 @@ export const profileIdSchema = Type.String({
 });
 export type ProfileId = Static<typeof profileIdSchema>;
 
+/**
+ * The installation that owns a profile. Today this is the installation epoch, a UUID; older
+ * profiles carry the agent identifier that stood for the machine before epochs existed.
+ */
+export const instanceIdSchema = Type.String({
+    maxLength: 64,
+    minLength: 2,
+    pattern: "^[A-Za-z0-9][A-Za-z0-9-]*$",
+});
+
 export const profileNameSchema = Type.String({
     maxLength: 128,
     minLength: 1,
@@ -44,7 +54,7 @@ export const profileSchema = Type.Object(
         email: profileEmailSchema,
         id: profileIdSchema,
         name: profileNameSchema,
-        parentInstanceId: profileIdSchema,
+        parentInstanceId: instanceIdSchema,
         updatedAt: timestampSchema,
         version: Type.Integer({ maximum: Number.MAX_SAFE_INTEGER, minimum: 1 }),
     },
