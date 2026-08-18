@@ -45,6 +45,13 @@ that turned sharing on and named its own relay would give this machine an
 identity, and a place to reach, that nobody here asked for. See
 [`../murmur/README.md`](../murmur/README.md).
 
+Not everything in the snapshot comes from a file. `version` is the version this
+build reports as itself: nobody edits it, no `.happy` folder owns it, and it is
+handed to `ConfigModule.load` by whoever starts the agent, defaulting to
+`"development"`. It lives here because everything that has to say what this agent
+is — a span, a log line, the client header sent to a server — already reads the
+configuration and would otherwise be handed the version separately.
+
 Unknown TOML keys are ignored and retained in each source's `unknownSettings`
 list. `unknownSettingsTruncated` explicitly reports bounded metadata.
 Malformed TOML, invalid known values, inconsistent provider types, oversized

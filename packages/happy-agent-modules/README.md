@@ -162,7 +162,6 @@ its public methods, and its storage and event contracts.
 | [Presence](sources/presence/README.md)           | Configured versus effective availability, custom and temporary states, schedules, and status events. |
 | [Profile](sources/profile/README.md)             | The one person this installation belongs to, and the machine that may speak for them.                |
 | [Murmur](sources/murmur/README.md)               | Contacts over one Murmur identity, and the requests either side is waiting on.                       |
-| [Happy](sources/happy/README.md)                 | The narrow bridge to a connected Happy client: notifications and agent status.                       |
 
 ### Places and things
 
@@ -175,7 +174,7 @@ its public methods, and its storage and event contracts.
 
 ### Storage ownership
 
-Modules owning tables through their own migrations: auto, collaboration, events, goal, happy,
+Modules owning tables through their own migrations: auto, collaboration, events, goal,
 history, mcp, murmur, presence, profile, projects, scheduling, secrets, tasks, usage, user input,
 workflows, and workspaces. The rest own none: compute, config, gemini, git, image generation, model
 switch, observation, permissions, search, skills, and system prompt. Compute and system prompt use

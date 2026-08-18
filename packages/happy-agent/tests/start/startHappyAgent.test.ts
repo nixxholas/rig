@@ -28,6 +28,7 @@ describe("startHappyAgent", () => {
             "conversations",
             "events",
             "goal",
+            "happy",
             "history",
             "imageGeneration",
             "modelSwitch",
@@ -71,12 +72,15 @@ describe("startHappyAgent", () => {
         await expect(start(happyHome)).rejects.toThrow(/not served by any enabled provider/);
     });
 
-    it("has no module that would need a host integration", async () => {
+    it("connects Happy as its one host-backed module and needs no other integration", async () => {
         const agent = await start(await createHappyHome());
         const names = Object.keys(agent.modules);
-        for (const absent of ["happy", "mcp"]) {
-            expect(names).not.toContain(absent);
-        }
+        // Happy is the one module that speaks to something outside this process — the phone. It is
+        // wired in from the same start as everything else, through a host the daemon builds itself,
+        // so it is present here rather than injected from outside.
+        expect(names).toContain("happy");
+        // MCP is still not one of the daemon's modules.
+        expect(names).not.toContain("mcp");
         // Image generation asks no host for anything: it reads the configured Codex account itself.
         expect(agent.modules.imageGeneration.accountCount).toBe(1);
         // Workflows run here too, on the collaboration module rather than an injected runtime.

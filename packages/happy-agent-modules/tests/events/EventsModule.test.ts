@@ -330,10 +330,10 @@ describe("EventsModule", () => {
         const received: string[] = [];
         const events = new EventsModule({
             now: () => 200,
-            listener: {
-                onEvent: (_ctx, event) => {
-                    received.push(event.type);
-                },
+        });
+        events.observe({
+            onEvent: (_ctx, event) => {
+                received.push(event.type);
             },
         });
         const database = moduleDatabase(events.migrations ?? [], "events-rollback-test");
@@ -368,20 +368,18 @@ describe("EventsModule", () => {
         const ordinary: unknown[] = [];
         const events = new EventsModule({
             now: () => 300,
-            listener: {
-                onEventTransactional: (_ctx, event) => {
-                    transactional.push(event);
-                    expect(Object.isFrozen(event)).toBe(true);
-                    expect(Object.isFrozen(event.payload)).toBe(true);
-                    expect(Object.isFrozen((event.payload as { nested: object }).nested)).toBe(
-                        true,
-                    );
-                },
-                onEvent: (_ctx, event) => {
-                    postCommit.push(event);
-                    expect(Object.isFrozen(event)).toBe(true);
-                    expect(Object.isFrozen(event.payload)).toBe(true);
-                },
+        });
+        events.observe({
+            onEventTransactional: (_ctx, event) => {
+                transactional.push(event);
+                expect(Object.isFrozen(event)).toBe(true);
+                expect(Object.isFrozen(event.payload)).toBe(true);
+                expect(Object.isFrozen((event.payload as { nested: object }).nested)).toBe(true);
+            },
+            onEvent: (_ctx, event) => {
+                postCommit.push(event);
+                expect(Object.isFrozen(event)).toBe(true);
+                expect(Object.isFrozen(event.payload)).toBe(true);
             },
         });
         const database = moduleDatabase(events.migrations ?? [], "events-listener-test");
@@ -412,10 +410,10 @@ describe("EventsModule", () => {
         const ordinary: string[] = [];
         const events = new EventsModule({
             now: () => 300,
-            listener: {
-                onEvent: () => {
-                    throw new Error("post-commit observer failed");
-                },
+        });
+        events.observe({
+            onEvent: () => {
+                throw new Error("post-commit observer failed");
             },
         });
         const database = moduleDatabase(events.migrations ?? [], "events-listener-failure-test");
@@ -443,10 +441,10 @@ describe("EventsModule", () => {
     it("rolls back durable state when the transactional module listener rejects", async () => {
         const events = new EventsModule({
             now: () => 300,
-            listener: {
-                onEventTransactional: () => {
-                    throw new Error("transactional observer failed");
-                },
+        });
+        events.observe({
+            onEventTransactional: () => {
+                throw new Error("transactional observer failed");
             },
         });
         const database = moduleDatabase(
@@ -1162,10 +1160,10 @@ describe("EventsModule", () => {
         const observed: { readonly payload: unknown }[] = [];
         const events = new EventsModule({
             now: () => 950,
-            listener: {
-                onEvent: (_ctx, event) => {
-                    observed.push(event);
-                },
+        });
+        events.observe({
+            onEvent: (_ctx, event) => {
+                observed.push(event);
             },
         });
         const database = moduleDatabase(events.migrations ?? [], "events-payload-collections-test");

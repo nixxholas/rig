@@ -19,6 +19,7 @@ import {
     type PermissionReviewTranscript,
     type ResolvedProjectOwnership,
     type UsageSummary,
+    type WorkspacesModule,
 } from "@slopus/happy-agent-modules";
 import type { SessionInputBlock, SessionUserMessage } from "@slopus/happy-providers";
 
@@ -48,6 +49,15 @@ import {
     checkAgentSelection,
     type RequestedAgentSelection,
 } from "./agentMessageOptions.js";
+import {
+    catalogSelection,
+    permissionModeChangedPayloadSchema,
+    persistSessionSelection,
+    selectionFromMessageOptions,
+    sessionConfigurationChangedPayloadSchema,
+    sessionSelection,
+    type SessionSelection,
+} from "./sessionSelection.js";
 
 const MAX_SESSION_STREAM_PENDING_BYTES = 1_024 * 1_024;
 
@@ -224,39 +234,6 @@ const workflowStopSchema = Type.Object(
     { mutationId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })) },
     { additionalProperties: false },
 );
-const sessionConfigurationFieldSchema = Type.Union([
-    Type.Literal("model"),
-    Type.Literal("effort"),
-    Type.Literal("serviceTier"),
-]);
-const sessionSelectionSchema = Type.Object(
-    {
-        effort: Type.String({ minLength: 1, maxLength: 64 }),
-        modelId: Type.String({ minLength: 1, maxLength: 256 }),
-        permissionMode: agentPermissionModeSchema,
-        providerId: Type.String({ minLength: 1, maxLength: 256 }),
-        serviceTier: Type.Union([Type.Literal("fast"), Type.Null()]),
-    },
-    { additionalProperties: false },
-);
-const sessionConfigurationChangedPayloadSchema = Type.Object(
-    {
-        changed: Type.Array(sessionConfigurationFieldSchema, { minItems: 1, maxItems: 3 }),
-        effort: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
-        modelId: Type.String({ minLength: 1, maxLength: 256 }),
-        mutationId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
-        providerId: Type.String({ minLength: 1, maxLength: 256 }),
-        serviceTier: Type.Union([Type.Literal("fast"), Type.Null()]),
-    },
-    { additionalProperties: false },
-);
-const permissionModeChangedPayloadSchema = Type.Object(
-    {
-        mutationId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
-        permissionMode: agentPermissionModeSchema,
-    },
-    { additionalProperties: false },
-);
 const transferSessionSchema = Type.Object(
     {
         mutationId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
@@ -268,9 +245,6 @@ const unsupportedSchema = Type.Object({}, { additionalProperties: false });
 
 type SubmitMessage = Static<typeof submitMessageSchema>;
 type CreateSession = Static<typeof createSessionSchema>;
-type SessionSelection = Static<typeof sessionSelectionSchema>;
-type SessionConfigurationChangedPayload = Static<typeof sessionConfigurationChangedPayloadSchema>;
-type PermissionModeChangedPayload = Static<typeof permissionModeChangedPayloadSchema>;
 const unknownRecordSchema = Type.Record(Type.String(), Type.Unknown());
 type UnknownRecord = Static<typeof unknownRecordSchema>;
 type LoadedSessionDependencies = {
@@ -302,7 +276,14 @@ export function createSessionRoutes(): AgentHttpRouteGroup {
                 const rootConfig =
                     (await dependencies.agent.system.config(ctx, dependencies.agent.agent.id)) ??
                     {};
-                const owner = await resolveSessionOwner(ctx, dependencies, body);
+                const owner = await resolveSessionOwner(
+                    ctx,
+                    {
+                        rootAgentId: dependencies.agent.rootAgentId,
+                        workspaces: dependencies.agent.modules.workspaces,
+                    },
+                    body,
+                );
                 // Creating an agent writes the conversation that belongs to it, from defaults that
                 // know nothing about this request. The row has to exist with the resolved folder
                 // and scope before then, or the session would be recorded in the wrong place with
@@ -1087,7 +1068,7 @@ async function sessionResponse(
         })
     ).map(userInputRequestForProtocol);
     return {
-        ...sessionSummaryValue(session, catalog, catalogSelection(dependencies)),
+        ...sessionSummaryValue(session, catalog, sessionCatalogSelection(dependencies)),
         activity: activityFor(session, agent.active),
         agent: {
             depth: 0,
@@ -1142,7 +1123,7 @@ export async function sessionSummary(
         ),
     );
     return {
-        ...sessionSummaryValue(session, catalog, catalogSelection(dependencies)),
+        ...sessionSummaryValue(session, catalog, sessionCatalogSelection(dependencies)),
         ...(config?.metadata?.title === undefined ? {} : { title: config.metadata.title }),
         ...(dependencies.agent.modules.events.latestCursor(session.agentId) === undefined
             ? {}
@@ -1150,7 +1131,7 @@ export async function sessionSummary(
     };
 }
 
-function sessionSummaryValue(
+export function sessionSummaryValue(
     session: ConversationRecord,
     catalog = { defaultModelId: "", defaultProviderId: "" },
     fallback?: SessionSelection,
@@ -1390,7 +1371,7 @@ async function sendMessage(
 ): Promise<Record<string, unknown>> {
     await nameFromFirstMessage(ctx, dependencies, session, body.displayText ?? body.text);
     const resumeCursor = dependencies.agent.modules.events.cursor();
-    const current = sessionSelection(session, catalogSelection(dependencies));
+    const current = sessionSelection(session, sessionCatalogSelection(dependencies));
     const options = messageOptions(body, dependencies.agent.system.models, current);
     let acceptance;
     try {
@@ -1408,9 +1389,10 @@ async function sendMessage(
     dependencies.agent.modules.scheduling.interruptWaits(ctx, session.agentId);
     await persistSessionSelection(
         ctx,
-        dependencies,
+        selectionRecorders(dependencies),
         session,
         selectionFromMessageOptions(options, current),
+        sessionCatalogSelection(dependencies),
         body.mutationId,
     );
     return {
@@ -1488,7 +1470,7 @@ async function steerMessage(
     body: SubmitMessage,
 ): Promise<Record<string, unknown>> {
     const resumeCursor = dependencies.agent.modules.events.cursor();
-    const current = sessionSelection(session, catalogSelection(dependencies));
+    const current = sessionSelection(session, sessionCatalogSelection(dependencies));
     const options = messageOptions(body, dependencies.agent.system.models, current);
     const acceptance = await dependencies.agent.system.steer(
         ctx,
@@ -1499,9 +1481,10 @@ async function steerMessage(
     dependencies.agent.modules.scheduling.interruptWaits(ctx, session.agentId);
     await persistSessionSelection(
         ctx,
-        dependencies,
+        selectionRecorders(dependencies),
         session,
         selectionFromMessageOptions(options, current),
+        sessionCatalogSelection(dependencies),
         body.mutationId,
     );
     return {
@@ -1557,120 +1540,23 @@ function messageOptions(
     });
 }
 
-/**
- * What a session that was never given a selection reports.
- *
- * Every session created through this API names its own selection, and every message names one
- * again. The root chat is the exception: the agent creates it while starting, so it runs on the
- * first entry of the catalog exactly as Agent Base itself would.
- */
-function catalogSelection(dependencies: LoadedSessionDependencies): SessionSelection {
-    const first = dependencies.agent.system.models[0];
+/** This agent's catalog default selection, in the terms the shared selection helpers take. */
+function sessionCatalogSelection(dependencies: LoadedSessionDependencies): SessionSelection {
+    return catalogSelection(
+        dependencies.agent.system.models,
+        dependencies.agent.configuration.values.defaults.permissionMode,
+    );
+}
+
+/** The recorders `persistSessionSelection` writes a selection change through. */
+function selectionRecorders(dependencies: LoadedSessionDependencies): {
+    readonly conversations: LoadedSessionDependencies["agent"]["modules"]["conversations"];
+    readonly events: LoadedSessionDependencies["agent"]["modules"]["events"];
+} {
     return {
-        effort: first?.defaultEffort ?? "medium",
-        modelId: first?.id ?? "",
-        permissionMode: dependencies.agent.configuration.values.defaults.permissionMode,
-        providerId: first?.providerId ?? "",
-        serviceTier: null,
+        conversations: dependencies.agent.modules.conversations,
+        events: dependencies.agent.modules.events,
     };
-}
-
-function sessionSelection(
-    session: ConversationRecord,
-    fallback: SessionSelection,
-): SessionSelection {
-    const selection = {
-        effort: session.effort ?? fallback.effort,
-        modelId: session.modelId ?? fallback.modelId,
-        permissionMode: Value.Check(agentPermissionModeSchema, session.permissionMode)
-            ? session.permissionMode
-            : fallback.permissionMode,
-        providerId: session.providerId ?? fallback.providerId,
-        serviceTier: session.serviceTier ?? null,
-    };
-    if (!Value.Check(sessionSelectionSchema, selection)) {
-        throw new Error("The session has an invalid model selection.");
-    }
-    return selection;
-}
-
-function selectionFromMessageOptions(
-    options: AgentBaseMessageOptions,
-    current: SessionSelection,
-): SessionSelection {
-    return {
-        effort: options.effort ?? current.effort,
-        modelId: options.model ?? current.modelId,
-        permissionMode: options.permissionMode ?? current.permissionMode,
-        providerId: options.provider ?? current.providerId,
-        serviceTier: options.serviceTier === "priority" ? "fast" : null,
-    };
-}
-
-async function persistSessionSelection(
-    ctx: import("@steve.kite/stdlib").Context,
-    dependencies: LoadedSessionDependencies,
-    session: ConversationRecord,
-    next: SessionSelection,
-    mutationId?: string,
-): Promise<ConversationRecord> {
-    if (!Value.Check(sessionSelectionSchema, next)) {
-        throw new Error("The requested session selection is invalid.");
-    }
-    const current = sessionSelection(session, catalogSelection(dependencies));
-    const changed: SessionConfigurationChangedPayload["changed"][number][] = [];
-    if (current.modelId !== next.modelId || current.providerId !== next.providerId) {
-        changed.push("model");
-    }
-    if (current.effort !== next.effort) changed.push("effort");
-    if (current.serviceTier !== next.serviceTier) changed.push("serviceTier");
-    const permissionChanged = current.permissionMode !== next.permissionMode;
-    if (changed.length === 0 && !permissionChanged) return session;
-
-    return await ctx.inTx(async (txCtx) => {
-        const updated = await dependencies.agent.modules.conversations.update(txCtx, session.id, {
-            effort: next.effort,
-            modelId: next.modelId,
-            permissionMode: next.permissionMode,
-            providerId: next.providerId,
-            serviceTier: next.serviceTier,
-        });
-        if (changed.length > 0) {
-            const payload: SessionConfigurationChangedPayload = {
-                changed,
-                effort: next.effort,
-                modelId: next.modelId,
-                ...(mutationId === undefined ? {} : { mutationId }),
-                providerId: next.providerId,
-                serviceTier: next.serviceTier,
-            };
-            await dependencies.agent.modules.conversations.appendEvent(txCtx, session.id, {
-                payload,
-                type: "session_configuration_changed",
-            });
-            await dependencies.agent.modules.events.record(txCtx, {
-                agentId: session.agentId,
-                payload,
-                type: "session.configuration-changed",
-            });
-        }
-        if (permissionChanged) {
-            const payload: PermissionModeChangedPayload = {
-                ...(mutationId === undefined ? {} : { mutationId }),
-                permissionMode: next.permissionMode,
-            };
-            await dependencies.agent.modules.conversations.appendEvent(txCtx, session.id, {
-                payload,
-                type: "permission_mode_changed",
-            });
-            await dependencies.agent.modules.events.record(txCtx, {
-                agentId: session.agentId,
-                payload,
-                type: "session.permission-mode-changed",
-            });
-        }
-        return updated;
-    });
 }
 
 function parseListQuery(url: URL): { readonly archived?: boolean | "all"; readonly limit: number } {
@@ -1719,15 +1605,15 @@ function parseLimit(value: string | null, fallback: number, maximum: number): nu
  * The result is durable: the scope handed to the conversation is a project or workspace identity a
  * later run can still resolve, not an echo of what the request happened to send.
  */
-async function resolveSessionOwner(
+export async function resolveSessionOwner(
     ctx: import("@steve.kite/stdlib").Context,
-    dependencies: LoadedSessionDependencies,
-    body: CreateSession,
+    deps: { readonly workspaces: WorkspacesModule; readonly rootAgentId: string },
+    body: { readonly cwd: string; readonly projectId?: string; readonly workspaceId?: string },
 ): Promise<{ readonly cwd: string; readonly scope: ConversationScope }> {
     // The workspaces catalog answers for both: a folder that is a workspace resolves to it and its
     // project, and anything else it hands straight to the projects catalog.
-    const workspaces = dependencies.agent.modules.workspaces;
-    const agentId = dependencies.agent.rootAgentId;
+    const workspaces = deps.workspaces;
+    const agentId = deps.rootAgentId;
     let owner: ResolvedProjectOwnership;
     try {
         owner =
@@ -1770,7 +1656,7 @@ async function resolveSessionOwner(
  * shell, its file reads and the paths it prints all have to be that folder rather than the
  * daemon's own home.
  */
-function sessionAgentConfig(root: AgentConfig, cwd: string): AgentConfig {
+export function sessionAgentConfig(root: AgentConfig, cwd: string): AgentConfig {
     const compute = root.modules?.compute;
     return {
         ...root,

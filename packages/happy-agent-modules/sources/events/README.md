@@ -15,9 +15,6 @@ const agent = await Agent.create(ctx, { ...options, modules: [events] });
 
 - `capacity` — maximum number of events retained in the live window (default 10,000).
 - `now` — injectable clock for tests.
-- `listener` — optional `{ onEventTransactional?, onEvent? }` for host projection. The transactional
-  callback runs inside the mutation transaction; the ordinary callback is invoked after commit via
-  the queue's publication path.
 
 ## Public surface
 
@@ -30,6 +27,11 @@ const agent = await Agent.create(ctx, { ...options, modules: [events] });
 - `latestCursor(agentId)` — newest cursor for one agent.
 - `messageCursor(agentId, messageId)` — durable cursor assigned to one accepted message.
 - `subscribe(listener)` — register a post-commit observer. Returns an unsubscribe function.
+- `observe(listener)` — register the single `{ onEventTransactional?, onEvent? }` projection
+  listener. The transactional callback runs inside the mutation transaction, so its own writes
+  commit with the event or not at all; the ordinary callback is invoked after commit via the
+  queue's publication path. There is exactly one, because two would share a transaction neither
+  owns.
 - `cursor()` — current head (newest event id or the origin cursor).
 - `originCursor()` — the stable starting position for this instance.
 - `capacity()` — configured window size.

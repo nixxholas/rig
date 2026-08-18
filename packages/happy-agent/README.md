@@ -57,8 +57,7 @@ await daemon.close();
 `startHappyAgent` returns only what a host actually needs: the modules, the Agent System, the
 storage and database, and the resolved providers and model catalog.
 
-Only the modules that would have to reach an outside service are left out: there is no Happy app
-bridge, no MCP, and no worklet runtime. Everything else runs here, because each module does its own
+There is no MCP and no worklet runtime. Everything else runs here, because each module does its own
 work rather than delegating to a host — search and image generation ask the configured accounts
 directly, an image is written into the shared generated-files folder, and a workflow runs its script
 here and starts its agents through the collaboration module. Workflows follow the `features.workflows`

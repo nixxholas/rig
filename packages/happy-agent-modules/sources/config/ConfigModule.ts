@@ -827,6 +827,15 @@ export const happyAgentConfigurationSchema = Type.Object(
             { additionalProperties: false },
         ),
         values: happyAgentConfigValuesSchema,
+        /**
+         * The version this build of the agent reports as itself.
+         *
+         * It is not a setting: nobody edits it in a file, and no `.happy` folder owns it. It is a
+         * fact about the running program, and it belongs here because everything that has to say
+         * what this agent is — a span, a log line, the client header sent to a server — already
+         * reads the configuration and would otherwise be handed it separately.
+         */
+        version: Type.String({ minLength: 1, maxLength: MAX_CONFIG_STRING_LENGTH }),
     },
     { additionalProperties: false },
 );
@@ -912,6 +921,12 @@ const DEFAULT_VALUES: HappyAgentConfigValues = {
     },
 };
 
+/** What the caller knows that no file on disk does. */
+export interface ConfigModuleLoadOptions {
+    /** The version this build reports as itself. Defaults to `"development"`. */
+    readonly version?: string;
+}
+
 /**
  * The resolved Happy Agent configuration and filesystem layout. It is loaded before the agent
  * system and passed to every module that needs configuration.
@@ -932,7 +947,10 @@ export class ConfigModule implements AgentModule {
 
     readonly beforeStart = (): AgentModuleHooks => this.#hooks;
 
-    static async load(input?: HappyAgentConfigurationInput): Promise<ConfigModule> {
+    static async load(
+        input?: HappyAgentConfigurationInput,
+        options: ConfigModuleLoadOptions = {},
+    ): Promise<ConfigModule> {
         const paths = derivePaths(input);
         const [global, local, runtime] = await Promise.all([
             readConfigSource(paths.globalConfigPath, "global"),
@@ -950,6 +968,9 @@ export class ConfigModule implements AgentModule {
                 runtime: sourceSnapshot(runtime),
             },
             values,
+            // A build that was never stamped is a development build, and says so rather than
+            // reporting an empty version that reads as a bug wherever it is displayed.
+            version: options.version ?? "development",
         };
         if (!Value.Check(happyAgentConfigurationSchema, configuration)) {
             throw new Error("The Happy Agent configuration is invalid.");
@@ -960,8 +981,9 @@ export class ConfigModule implements AgentModule {
 
 export async function loadHappyAgentConfiguration(
     input?: HappyAgentConfigurationInput,
+    options: ConfigModuleLoadOptions = {},
 ): Promise<HappyAgentConfiguration> {
-    return (await ConfigModule.load(input)).configuration;
+    return (await ConfigModule.load(input, options)).configuration;
 }
 
 export function parseHappyAgentConfigToml(source: string): {

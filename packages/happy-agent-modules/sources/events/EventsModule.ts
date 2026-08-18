@@ -85,7 +85,6 @@ type ActiveRun = Static<typeof activeRunSchema>;
 export interface EventsModuleOptions {
     readonly capacity?: number;
     readonly now?: () => number;
-    readonly listener?: EventsModuleListener;
 }
 
 /**
@@ -101,7 +100,6 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
     readonly #capacity: number;
     readonly #entries: AgentEvent[] = [];
     readonly #listeners = new Set<EventListener>();
-    readonly #moduleListener: EventsModuleListener | undefined;
     readonly #now: () => number;
     /**
      * The loop each agent has opened and not yet had journaled, because the run it belongs to had
@@ -111,6 +109,7 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
     readonly #openingLoops = new Map<string, AgentBaseLoop>();
     readonly #runs = new Map<string, ActiveRun>();
     #createId: () => string;
+    #moduleListener: EventsModuleListener | undefined;
     #originCursor: string;
     #occurredAt = 0;
 
@@ -123,7 +122,21 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
         this.#now = options.now ?? Date.now;
         this.#createId = createUuidV7Factory(this.#now);
         this.#originCursor = this.#createId();
-        this.#moduleListener = options.listener;
+    }
+
+    /**
+     * Registers the one listener that sees an event as it is recorded.
+     *
+     * `subscribe` observes an event once it is durably part of history; this is the seam for
+     * something that must act inside the very transaction that records it, so its own writes commit
+     * with the event or not at all. There is exactly one, because two such listeners would share a
+     * transaction neither of them owns, and either could roll the other's work back.
+     */
+    observe(listener: EventsModuleListener): void {
+        if (this.#moduleListener !== undefined) {
+            throw new Error("The event journal already has a listener recording alongside it.");
+        }
+        this.#moduleListener = listener;
     }
 
     readonly beforeStart = async (ctx: Context): Promise<AgentModuleHooks> => {

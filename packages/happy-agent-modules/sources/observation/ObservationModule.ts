@@ -45,8 +45,6 @@ export interface ObservationModuleOptions {
     readonly environment?: NodeJS.ProcessEnv;
     /** The deployment spans are labeled with, such as `production` or `local-development`. */
     readonly deployment?: string;
-    /** The agent version spans are labeled with. */
-    readonly version?: string;
 }
 
 /**
@@ -116,7 +114,7 @@ export class ObservationModule implements AgentModule {
             ? startObservationTracing({
                   deployment: options.deployment ?? "production",
                   endpoint: settings.tracesEndpoint,
-                  version: options.version ?? "development",
+                  version: options.configuration.version,
               })
             : undefined;
         return new ObservationModule({ historyDump, logWriter, settings, tracing });

@@ -604,7 +604,6 @@ export * from "./userInput/index.js";
 export * from "./observation/index.js";
 
 // Integration modules: Happy clients, MCP servers, and skills.
-export * from "./happy/index.js";
 export * from "./mcp/index.js";
 export * from "./skills/index.js";
 

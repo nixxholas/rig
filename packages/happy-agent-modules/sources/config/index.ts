@@ -7,6 +7,7 @@ export {
     happyAgentConfigurationSchema,
     loadHappyAgentConfiguration,
     parseHappyAgentConfigToml,
+    type ConfigModuleLoadOptions,
     type HappyAgentConfigSource,
     type HappyAgentConfigValues,
     type HappyAgentConfiguration,

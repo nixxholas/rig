@@ -68,6 +68,7 @@ import { openHappyAgentDatabase } from "../modules/agent/HappyAgentDatabase.js";
 import { acquireHappyAgentStorageLock } from "../modules/agent/HappyAgentStorageLock.js";
 import { readGlobalInstructions } from "../modules/agent/readGlobalInstructions.js";
 import { ConversationModule } from "../modules/conversations/ConversationModule.js";
+import { HappyModule } from "../modules/happy/index.js";
 import { GitStateTracker, directGitCommandRunner } from "@slopus/happy-agent-modules";
 import type { ProjectCreatorProfile } from "@slopus/happy-agent-modules";
 
@@ -105,6 +106,7 @@ export interface HappyAgentModules {
     readonly conversations: ConversationModule;
     readonly events: EventsModule;
     readonly goal: GoalModule;
+    readonly happy: HappyModule;
     readonly history: HistoryModule;
     readonly imageGeneration: ImageGenerationModule;
     readonly modelSwitch: ModelSwitchModule;
@@ -166,16 +168,16 @@ export interface StartedHappyAgent {
 export async function startHappyAgent(
     options: StartHappyAgentOptions = {},
 ): Promise<StartedHappyAgent> {
-    const config = await ConfigModule.load(options.happyHome);
+    const config = await ConfigModule.load(
+        options.happyHome,
+        options.version === undefined ? {} : { version: options.version },
+    );
     const configuration = config.configuration;
     const paths = configuration.paths;
     // Observation starts before anything it should be able to watch, and the root it installs its
     // logger and tracer on becomes the root every lifetime below is derived from. Contexts are
     // immutable, so a module started on the bare root would log nowhere for ever.
-    const observation = await ObservationModule.start({
-        configuration,
-        ...(options.version === undefined ? {} : { version: options.version }),
-    });
+    const observation = await ObservationModule.start({ configuration });
     const ctx = observation.install(createRootContext());
     // Everything opened below is closed in the reverse order it opened, and observation closes
     // last, so the last thing the agent did is still in the file a person reads to find out why it
@@ -464,6 +466,62 @@ export async function startHappyAgent(
         // committed, so it cannot run on that transaction's context: writing needs a transaction of
         // its own. This lifetime is the daemon's, not the asking turn's.
         const userInputJournal = withDatabase(hostRoot.named("user-input-journal"));
+        const scheduling = new SchedulingModule();
+        const userInput = new UserInputModule({
+            presence: presence.userInputPolicy,
+            // Only a person's own answer becomes authorization evidence: the actor answering
+            // must be the agent that asked. An agent answering for another agent is a
+            // hand-off, not a human decision, and stays untrusted context.
+            listener: {
+                onEventTransactional: async (listenerCtx, event) => {
+                    if (event.type !== "user_input_answered") return;
+                    if (event.actingAgentId !== event.request.askingAgentId) return;
+                    await auto
+                        .recordUserInputEventTransactional(listenerCtx, {
+                            type: "user_input_answered",
+                            agentId: event.request.askingAgentId,
+                            requestId: event.requestId,
+                            answer: JSON.stringify(event.request.answers ?? event.request.answer),
+                        })
+                        // An unrecorded answer under-authorizes, which is the safe direction.
+                        // It must never break saving what the person said.
+                        .catch(() => undefined);
+                },
+                onEvent: async (_listenerCtx, event) => {
+                    await events
+                        .record(userInputJournal, {
+                            agentId: event.request.askingAgentId,
+                            // Hyphens, not underscores: the journal only accepts dotted,
+                            // hyphenated type names, so an underscored one is never stored.
+                            type: "user-input.event",
+                            payload: event,
+                        })
+                        .catch((error: unknown) => {
+                            userInputJournal.log.warn(
+                                "Failed to journal a user input event.",
+                                { agentId: event.request.askingAgentId, type: event.type },
+                                error,
+                            );
+                        });
+                },
+            },
+        });
+        // Happy is built here rather than beside the other modules because it works through them:
+        // the conversation catalog, the journal it also projects, the questions a person answers on
+        // their phone, and the folders a session may be started in. Everything else it needs — where
+        // the credentials live, what version to report, whether the integration is wanted at all —
+        // it reads from the configuration, so nothing about talking to Happy is decided here. The
+        // root agent's identity is the one thing still unsettled: the installation names it while
+        // these modules start, and Happy only asks once they have.
+        const happy = new HappyModule({
+            configuration,
+            conversations,
+            events,
+            rootAgentId: () => rootAgentId,
+            scheduling,
+            userInput,
+            workspaces,
+        });
         const modules: HappyAgentModules = {
             collaboration,
             compute: compute.computeModule,
@@ -471,6 +529,7 @@ export async function startHappyAgent(
             conversations,
             events,
             goal: new GoalModule({}),
+            happy,
             history,
             imageGeneration: new ImageGenerationModule({ config, providers }),
             modelSwitch: new ModelSwitchModule({ history }),
@@ -480,7 +539,7 @@ export async function startHappyAgent(
             presence,
             profile,
             projects,
-            scheduling: new SchedulingModule(),
+            scheduling,
             search: new SearchModule({
                 providers,
                 models,
@@ -494,47 +553,7 @@ export async function startHappyAgent(
             tasks: new TasksModule({}),
             terminals,
             usage: new UsageModule({}),
-            userInput: new UserInputModule({
-                presence: presence.userInputPolicy,
-                // Only a person's own answer becomes authorization evidence: the actor answering
-                // must be the agent that asked. An agent answering for another agent is a
-                // hand-off, not a human decision, and stays untrusted context.
-                listener: {
-                    onEventTransactional: async (listenerCtx, event) => {
-                        if (event.type !== "user_input_answered") return;
-                        if (event.actingAgentId !== event.request.askingAgentId) return;
-                        await auto
-                            .recordUserInputEventTransactional(listenerCtx, {
-                                type: "user_input_answered",
-                                agentId: event.request.askingAgentId,
-                                requestId: event.requestId,
-                                answer: JSON.stringify(
-                                    event.request.answers ?? event.request.answer,
-                                ),
-                            })
-                            // An unrecorded answer under-authorizes, which is the safe direction.
-                            // It must never break saving what the person said.
-                            .catch(() => undefined);
-                    },
-                    onEvent: async (_listenerCtx, event) => {
-                        await events
-                            .record(userInputJournal, {
-                                agentId: event.request.askingAgentId,
-                                // Hyphens, not underscores: the journal only accepts dotted,
-                                // hyphenated type names, so an underscored one is never stored.
-                                type: "user-input.event",
-                                payload: event,
-                            })
-                            .catch((error: unknown) => {
-                                userInputJournal.log.warn(
-                                    "Failed to journal a user input event.",
-                                    { agentId: event.request.askingAgentId, type: event.type },
-                                    error,
-                                );
-                            });
-                    },
-                },
-            }),
+            userInput,
             workflows: new WorkflowsModule({
                 enabled: configuration.values.features.workflows,
                 collaboration,
@@ -582,6 +601,9 @@ export async function startHappyAgent(
             modules.skills,
             modules.compute,
             modules.events,
+            // Happy declares no tools and no beforeStart; it is here so its own sync migrations run
+            // in the same pass as every other module's, and it is connected to the phone later.
+            modules.happy,
             installationModule((found) => {
                 installation = found;
             }),
@@ -614,6 +636,10 @@ export async function startHappyAgent(
             existing === undefined
                 ? await system.create(ctx, rootConfig, { id: rootAgentId })
                 : await system.resolve(ctx, rootAgentId);
+
+        // Happy connected itself as the collection started. It writes through the agent database,
+        // so it stops before that database closes.
+        unwind.unshift(async () => await happy.stop());
 
         // One watcher for the whole installation. Every reader that wants Git state registers here
         // and reads what the watcher already knows, instead of scanning repositories itself. What a
