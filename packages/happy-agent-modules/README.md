@@ -132,13 +132,15 @@ its public methods, and its storage and event contracts.
 | [Projects](sources/projects/README.md)     | Repositories registered on demand, with bounded settings and durable rename and archival.       |
 | [Workspaces](sources/workspaces/README.md) | Isolated workspaces created, inspected, transferred, and archived through a host manager.       |
 | [Secrets](sources/secrets/README.md)       | Safe secret metadata, attachments, and a host-only resolver that never shows the model a value. |
+| [Terminals](sources/terminals/README.md)   | Real pseudo-terminals on a project or workspace folder, shared by everyone looking at it.       |
 
 ### Storage ownership
 
 Thirteen modules own tables through their own migrations: goal, happy, history, mcp, presence,
-projects, scheduling, secrets, tasks, usage, user input, workflows, and workspaces. Eight own no
+projects, scheduling, secrets, tasks, usage, user input, workflows, and workspaces. Nine own no
 tables: collaboration, compute, image generation, model switch,
-permissions, search, skills, and system prompt. Compute and system prompt use Agent KV only, and
+permissions, search, skills, system prompt, and terminals. Compute and system prompt use Agent KV
+only, terminals stores nothing anywhere because a terminal ends with the process behind it, and
 collaboration's migrations exist only to retire the tables it used to keep.
 
 Migrations are immutable once released. A schema change is a new keyed migration, never an edit to
@@ -316,6 +318,12 @@ and `expectedVersion`.
 archive and transfer are reviewed in Auto with destructive descriptions and no full-access
 elevation, and `list_workspaces` includes archived rows by default again. Reconciling a transitional
 state to a terminal one is the host's responsibility.
+
+**Terminals** — Docker-backed terminals are missing. A project configured to run in a container
+still gets host pseudo-terminals, because the container process boundary is not wired here yet.
+Everything else has parity: project and workspace scoping, one canonical Ghostty emulator per
+terminal, the hybrid attach protocol with snapshot-then-deltas, resize barriers, scrollback paging,
+per-folder limits with exited-terminal eviction, and terminals ending with the folder they stand in.
 
 **Secrets** — no path from an attached secret into a running command, which is legacy's whole point.
 The catalog, attachment, and host-only resolution all work, but no compute shell tool has a

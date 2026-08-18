@@ -180,6 +180,9 @@ export function createWorkspaceRoutes(options: WorkspaceRouteOptions): AgentHttp
                 const workspace = await mutate(ctx, projectId, workspaceId, expectedVersion, () =>
                     catalog.archive(ctx, agentId, workspaceId, { expectedVersion }),
                 );
+                // The folder is about to be removed, so the shells standing in it end here rather
+                // than surviving into a directory that no longer exists.
+                await options.agent.modules.terminals.closeScope({ projectId, workspaceId });
                 await recordWorkspaceEvent(ctx, projectId, workspace, "workspace.updated");
                 sendJson(response, 202, { workspace: toWorkspace(workspace) });
             },

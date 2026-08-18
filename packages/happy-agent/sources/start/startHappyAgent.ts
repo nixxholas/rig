@@ -40,6 +40,7 @@ import {
     SkillsModule,
     SystemPromptModule,
     TasksModule,
+    TerminalsModule,
     UsageModule,
     UserInputModule,
     WorkflowsModule,
@@ -103,6 +104,7 @@ export interface HappyAgentModules {
     readonly skills: SkillsModule;
     readonly systemPrompt: SystemPromptModule;
     readonly tasks: TasksModule;
+    readonly terminals: TerminalsModule;
     readonly usage: UsageModule;
     readonly userInput: UserInputModule;
     readonly workflows: WorkflowsModule;
@@ -388,6 +390,12 @@ export async function startHappyAgent(
             },
         });
 
+        // Terminals stand in the folders both catalogs own, so they ask those catalogs where a
+        // project or workspace actually is rather than deriving a path of their own. They keep no
+        // record: a terminal is a running process and a live screen, and both end with this daemon.
+        const terminals = new TerminalsModule({ projects, workspaces });
+        unwind.unshift(async () => await terminals.close());
+
         // Gemini is not one of the accounts a chat runs on, so its search reads a key from the
         // environment rather than from a configured provider.
         const gemini = process.env.GEMINI_API_KEY?.trim() || undefined;
@@ -421,6 +429,7 @@ export async function startHappyAgent(
             skills: compute.skillsModule,
             systemPrompt,
             tasks: new TasksModule({}),
+            terminals,
             usage: new UsageModule({}),
             userInput: new UserInputModule({
                 presence: presence.userInputPolicy,

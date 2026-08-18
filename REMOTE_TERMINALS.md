@@ -2,9 +2,10 @@
 
 Rig exposes project- and workspace-scoped interactive terminals independently of agent runs and
 chats. Every chat in the same project or managed workspace sees the same terminal collection and
-execution environment. Each terminal owns a real host or Docker PTY and one canonical Ghostty
-emulator in the daemon. Lifecycle operations use the daemon's existing JSON-over-HTTP API;
-interactive display and input use the
+execution environment. Each terminal owns a real host PTY and one canonical Ghostty emulator in the
+daemon, both held by the
+[terminals module](packages/happy-agent-modules/sources/terminals/README.md). Lifecycle operations
+use the daemon's existing JSON-over-HTTP API; interactive display and input use the
 [`@slopus/ghostty-web`](packages/ghostty-web/README.md) hybrid binary protocol over WebSocket.
 
 HTTP Upgrade keeps terminal attachments on the daemon's existing routing and bearer-token rails.
@@ -18,19 +19,21 @@ project's root checkout; workspace routes target one managed worktree.
 
 ## Lifecycle over HTTP
 
-| Method   | Project path                                          | Workspace path                                                                 | Purpose                    |
-| -------- | ----------------------------------------------------- | ------------------------------------------------------------------------------ | -------------------------- |
-| `POST`   | `/projects/{projectId}/terminals`                     | `/projects/{projectId}/workspaces/{workspaceId}/terminals`                     | Create a terminal          |
-| `GET`    | `/projects/{projectId}/terminals`                     | `/projects/{projectId}/workspaces/{workspaceId}/terminals`                     | List terminal metadata     |
-| `PATCH`  | `/projects/{projectId}/terminals/{terminalId}`        | `/projects/{projectId}/workspaces/{workspaceId}/terminals/{terminalId}`        | Request a terminal resize  |
-| `DELETE` | `/projects/{projectId}/terminals/{terminalId}`        | `/projects/{projectId}/workspaces/{workspaceId}/terminals/{terminalId}`        | Stop the terminal          |
-| Upgrade  | `/projects/{projectId}/terminals/{terminalId}/attach` | `/projects/{projectId}/workspaces/{workspaceId}/terminals/{terminalId}/attach` | Attach the binary protocol |
+| Method   | Project path                                             | Workspace path                                                                    | Purpose                    |
+| -------- | -------------------------------------------------------- | --------------------------------------------------------------------------------- | -------------------------- |
+| `POST`   | `/v0/projects/{projectId}/terminals`                     | `/v0/projects/{projectId}/workspaces/{workspaceId}/terminals`                     | Create a terminal          |
+| `GET`    | `/v0/projects/{projectId}/terminals`                     | `/v0/projects/{projectId}/workspaces/{workspaceId}/terminals`                     | List terminal metadata     |
+| `PATCH`  | `/v0/projects/{projectId}/terminals/{terminalId}`        | `/v0/projects/{projectId}/workspaces/{workspaceId}/terminals/{terminalId}`        | Request a terminal resize  |
+| `DELETE` | `/v0/projects/{projectId}/terminals/{terminalId}`        | `/v0/projects/{projectId}/workspaces/{workspaceId}/terminals/{terminalId}`        | Stop the terminal          |
+| Upgrade  | `/v0/projects/{projectId}/terminals/{terminalId}/attach` | `/v0/projects/{projectId}/workspaces/{workspaceId}/terminals/{terminalId}/attach` | Attach the binary protocol |
 
 Create accepts `cols`, `rows`, `maxScrollback`, `cwd`, `shell`, `colorScheme` (`light` or `dark`),
-and an optional `command`. The working directory defaults to the project root or managed worktree
-in the scope's shared host or Docker execution environment. Dimensions default to 80 columns, 24
-rows, and 10,000 scrollback rows; the color scheme defaults to dark. Without a command, Rig starts
-the environment's interactive shell. The color scheme initializes the canonical emulator and
+and an optional `command`. The working directory defaults to the project root or managed worktree,
+and a relative `cwd` resolves against it. Dimensions default to 80 columns, 24 rows, and 10,000
+scrollback rows; the color scheme defaults to dark. Without a command, Rig starts the environment's
+interactive shell. One project or workspace holds at most 32 terminals; reaching that limit
+discards a terminal that has already exited, and is refused when every terminal is still running.
+Archiving a project or workspace ends the terminals standing in its folder. The color scheme initializes the canonical emulator and
 remains fixed for that terminal's lifetime. Lifecycle responses contain that scheme alongside the
 stable terminal ID and epoch, dimensions, running or exited status, and the exit code when known.
 They do not contain terminal screen snapshots.

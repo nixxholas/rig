@@ -164,8 +164,8 @@ import {
     RemoteTerminalProtocolClient,
 } from "/app/packages/rig/node_modules/@slopus/ghostty-web/dist/index.js";
 import WebSocket from "/app/packages/rig/node_modules/ws/wrapper.mjs";
-import { WebSocketDuplex } from "/app/packages/rig/dist/terminal/WebSocketDuplex.js";
-import { createNodeBinaryWebSocket } from "/app/packages/rig/dist/terminal/createNodeBinaryWebSocket.js";
+import { WebSocketDuplex } from "/app/packages/rig/node_modules/@slopus/happy-agent/dist/modules/terminal/WebSocketDuplex.js";
+import { createNodeBinaryWebSocket } from "/app/packages/rig/node_modules/@slopus/happy-agent/dist/modules/terminal/createNodeBinaryWebSocket.js";
 
 const directory = "/tmp/rig-" + process.getuid();
 const socketPath = directory + "/server.sock";
@@ -307,9 +307,9 @@ function rounded(value) {
     return Math.round(value * 100) / 100;
 }
 
-const sessions = await requestJson("GET", "/sessions");
+const sessions = await requestJson("GET", "/v0/sessions");
 const projectId = sessions.sessions[0].projectId;
-const terminalPath = "/projects/" + encodeURIComponent(projectId) + "/terminals";
+const terminalPath = "/v0/projects/" + encodeURIComponent(projectId) + "/terminals";
 const created = await requestJson("POST", terminalPath, {
     cols: 120,
     rows: 40,

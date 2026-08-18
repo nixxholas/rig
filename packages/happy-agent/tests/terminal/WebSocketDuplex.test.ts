@@ -6,8 +6,8 @@ import {
     type WirePacket,
 } from "@slopus/ghostty-web";
 
-import type { BinaryWebSocket, BinaryWebSocketHandlers } from "./BinaryWebSocket.js";
-import { WebSocketDuplex } from "./WebSocketDuplex.js";
+import type { BinaryWebSocket, BinaryWebSocketHandlers } from "../../sources/modules/terminal/BinaryWebSocket.js";
+import { WebSocketDuplex } from "../../sources/modules/terminal/WebSocketDuplex.js";
 
 describe("WebSocketDuplex", () => {
     it("maps binary messages to stream chunks and tears down both directions", async () => {

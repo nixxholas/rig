@@ -26,6 +26,8 @@ import { createPresenceRoutes } from "./presenceRoutes.js";
 import { createSecretRoutes } from "./secretRoutes.js";
 import { createSessionRoutes } from "./sessionRoutes.js";
 import { createSessionProcessRoutes } from "./sessionProcessRoutes.js";
+import { createTerminalRoutes } from "./terminalRoutes.js";
+import { attachTerminalWebSocketServer } from "./terminalAttach.js";
 import { createWorkspaceRoutes } from "./workspaceRoutes.js";
 import {
     prepareAgentSocket,
@@ -84,6 +86,15 @@ export async function startAgentHttpServer(
         connections.add(socket);
         socket.once("close", () => connections.delete(socket));
     });
+    // Attaching a terminal is an upgrade rather than a request: what it produces is a live screen,
+    // which is a stream. It runs on the daemon's own lifetime because the attachment outlives the
+    // upgrade, and it reads the same bearer token every other call on this socket does.
+    const closeTerminalAttachments = attachTerminalWebSocketServer({
+        agent: () => state.agent,
+        ctx: options.ctx,
+        server,
+        token,
+    });
 
     let listening = false;
     const previousUmask = process.umask(0o077);
@@ -92,6 +103,7 @@ export async function startAgentHttpServer(
         listening = true;
         await secureAgentSocket(paths.socketPath);
     } catch (error) {
+        closeTerminalAttachments();
         if (listening) {
             await closeServer(server, connections, paths.socketPath).catch(() => undefined);
         }
@@ -112,7 +124,10 @@ export async function startAgentHttpServer(
             state.groups ??= routeGroups(options, agent);
         },
         close: () => {
-            closePromise ??= closeServer(server, connections, paths.socketPath);
+            closePromise ??= (async () => {
+                closeTerminalAttachments();
+                await closeServer(server, connections, paths.socketPath);
+            })();
             return closePromise;
         },
     };
@@ -162,6 +177,7 @@ function routeGroups(
             files: projectFiles,
             git,
         }),
+        createTerminalRoutes({ agent }),
         createWorkspaceRoutes({
             agent,
             git,

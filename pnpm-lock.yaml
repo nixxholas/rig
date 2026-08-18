@@ -151,13 +151,22 @@ importers:
       sharp:
         specifier: ^0.35.3
         version: 0.35.3(@types/node@24.13.3)
+      ws:
+        specifier: ^8.21.1
+        version: 8.21.1
       zod:
         specifier: ^4.4.3
         version: 4.4.3
     devDependencies:
+      '@slopus/ghostty-web':
+        specifier: workspace:*
+        version: link:../ghostty-web
       '@types/node':
         specifier: ^24.0.10
         version: 24.13.3
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.1
       typescript:
         specifier: ^7.0.2
         version: 7.0.2
@@ -251,6 +260,9 @@ importers:
 
   packages/happy-agent-modules:
     dependencies:
+      '@lydell/node-pty':
+        specifier: 1.2.0-beta.12
+        version: 1.2.0-beta.12
       '@opentelemetry/api':
         specifier: ^1.9.1
         version: 1.9.1
@@ -278,6 +290,12 @@ importers:
       '@sinclair/typebox':
         specifier: ^0.34.49
         version: 0.34.49
+      '@slopus/ghostty-wasm':
+        specifier: 1.3.6
+        version: 1.3.6
+      '@slopus/ghostty-web':
+        specifier: workspace:*
+        version: link:../ghostty-web
       '@slopus/happy-agent-compute':
         specifier: npm:@slopus/happy-agent-compute@0.1.6
         version: 0.1.6

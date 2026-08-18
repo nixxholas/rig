@@ -268,6 +268,8 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
                     current.status === "archived"
                         ? current
                         : await catalog.archive(ctx, agentId, projectId);
+                // The project's folders go with it, and so do the terminals standing in them.
+                await options.agent.modules.terminals.closeProject(projectId);
                 await recordProjectEvent(ctx, options.agent, projectId, "project.updated", {
                     project: await toProject(ctx, project),
                 });

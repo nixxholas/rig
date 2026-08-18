@@ -593,6 +593,10 @@ export * from "./scheduling/index.js";
 // Projects: the durable places work happens, with their own settings.
 export * from "./projects/index.js";
 
+// Terminals: real pseudo-terminals on a project or workspace folder, shared by everyone looking
+// at that folder, each with one canonical Ghostty emulator behind it.
+export * from "./terminals/index.js";
+
 // User input: questions the agent asks a person, and the answers it waits for.
 export * from "./userInput/index.js";
 

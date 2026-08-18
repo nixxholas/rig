@@ -18,6 +18,13 @@ export { createGitRoutes, type GitRouteOptions } from "./gitRoutes.js";
 export { createInspectorRoutes } from "./inspectorRoutes.js";
 export { createProjectRoutes, type ProjectRouteOptions } from "./projectRoutes.js";
 export { createSessionRoutes } from "./sessionRoutes.js";
+export { createTerminalRoutes, type TerminalRouteOptions } from "./terminalRoutes.js";
+export {
+    attachTerminalWebSocketServer,
+    matchTerminalAttachRoute,
+    type TerminalAttachOptions,
+    type TerminalAttachRoute,
+} from "./terminalAttach.js";
 export { createSseWriter, type SseWriter, type SseWriterOptions } from "./sseWriter.js";
 export { createWorkspaceRoutes, type WorkspaceRouteOptions } from "./workspaceRoutes.js";
 export {

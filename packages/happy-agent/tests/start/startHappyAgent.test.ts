@@ -41,6 +41,7 @@ describe("startHappyAgent", () => {
             "skills",
             "systemPrompt",
             "tasks",
+            "terminals",
             "usage",
             "userInput",
             "workflows",
