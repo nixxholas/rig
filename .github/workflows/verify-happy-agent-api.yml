@@ -42,7 +42,7 @@ jobs:
         runs-on: ubuntu-22.04
         timeout-minutes: 45
         env:
-            HOME: ${{ runner.temp }}/happy-agent-api-home
+            HOME: ${{ github.workspace }}/.local/happy-agent-api-home
             NODE_OPTIONS: --max-old-space-size=6144
 
         steps:
