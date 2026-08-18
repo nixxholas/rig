@@ -3,10 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createHash } from "node:crypto";
+import { Value } from "@sinclair/typebox/value";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { GitModule } from "../../sources/git/index.js";
 import {
+    fileRevisionQuerySchema,
     ProjectFileError,
     ProjectFilesModule,
     type ProjectFileRoot,
@@ -99,6 +101,26 @@ describe("ProjectFilesModule writes", () => {
         } satisfies Partial<ProjectFileError>);
         await expect(readFile(join(directory, "note.txt"), "utf8")).resolves.toBe(
             winner.value.hash === hash("left") ? "left" : "right",
+        );
+    });
+});
+
+describe("ProjectFilesModule revision queries", () => {
+    it("accepts Git commit-ish selectors without accepting options or whitespace", () => {
+        expect(Value.Check(fileRevisionQuerySchema, { path: "note.txt", revision: "HEAD~1" })).toBe(
+            true,
+        );
+        expect(
+            Value.Check(fileRevisionQuerySchema, {
+                path: "note.txt",
+                revision: "main^{commit}",
+            }),
+        ).toBe(true);
+        expect(Value.Check(fileRevisionQuerySchema, { path: "note.txt", revision: "--help" })).toBe(
+            false,
+        );
+        expect(Value.Check(fileRevisionQuerySchema, { path: "note.txt", revision: "HEAD 1" })).toBe(
+            false,
         );
     });
 });

@@ -68,15 +68,18 @@ describe("the public files and Git API", () => {
         expect(Buffer.from(binaryRead.content, "base64")).toEqual(binary);
         expect(binaryRead.hash).toMatch(/^[0-9a-f]{64}$/);
 
+        await mkdir(join(gym.workspacePath, "outputs"));
         const created = await gym.client.writeFile(workspaceId, {
             content: Buffer.from("created through the API\n", "utf8").toString("base64"),
             expectedHash: null,
-            path: "generated/result.txt",
+            path: "outputs/result.txt",
         });
         expect(created.hash).toMatch(/^[0-9a-f]{64}$/);
-        await expect(
-            gym.client.readFile(workspaceId, "generated/result.txt"),
-        ).resolves.toMatchObject({ hash: created.hash });
+        await expect(gym.client.readFile(workspaceId, "outputs/result.txt")).resolves.toMatchObject(
+            {
+                hash: created.hash,
+            },
+        );
 
         const beforeUpdate = await gym.client.readFile(workspaceId, "README.md");
         const updated = await gym.client.writeFile(workspaceId, {
@@ -123,116 +126,111 @@ describe("the public files and Git API", () => {
         });
     });
 
-    it(
-        "reads Git revisions, publishes live snapshots, and replaces the watch set",
-        async () => {
-            const gym = await createAgentGym();
-            running.add(gym);
+    it("reads Git revisions, publishes live snapshots, and replaces the watch set", async () => {
+        const gym = await createAgentGym();
+        running.add(gym);
 
-            const repositoryPath = join(dirname(gym.workspacePath), "git-repository");
-            await mkdir(repositoryPath, { recursive: true });
-            await writeFs(join(repositoryPath, "tracked.txt"), "version one\n", "utf8");
-            await git(repositoryPath, ["init", "--initial-branch=main"]);
-            await git(repositoryPath, ["config", "user.email", "gym@example.invalid"]);
-            await git(repositoryPath, ["config", "user.name", "API Gym"]);
-            await git(repositoryPath, ["add", "tracked.txt"]);
-            await git(repositoryPath, ["commit", "-m", "initial"]);
+        const repositoryPath = join(dirname(gym.workspacePath), "git-repository");
+        await mkdir(repositoryPath, { recursive: true });
+        await writeFs(join(repositoryPath, "tracked.txt"), "version one\n", "utf8");
+        await git(repositoryPath, ["init", "--initial-branch=main"]);
+        await git(repositoryPath, ["config", "user.email", "gym@example.invalid"]);
+        await git(repositoryPath, ["config", "user.name", "API Gym"]);
+        await git(repositoryPath, ["add", "tracked.txt"]);
+        await git(repositoryPath, ["commit", "-m", "initial"]);
 
-            const registered = (
-                await gym.client.registerProject({
-                    path: repositoryPath,
-                })
-            ).project;
-            const ready = await gym.waitUntil(async () => {
-                const project = (await gym.client.getProject(registered.id)).project;
-                return project.initialization.status === "ready" ? project : undefined;
-            }, "the Git project to initialize");
-            expect(ready.git).not.toBeNull();
+        const registered = (
+            await gym.client.registerProject({
+                path: repositoryPath,
+            })
+        ).project;
+        const ready = await gym.waitUntil(async () => {
+            const project = (await gym.client.getProject(registered.id)).project;
+            return project.initialization.status === "ready" ? project : undefined;
+        }, "the Git project to initialize");
+        expect(ready.git).not.toBeNull();
 
-            const headRevision = await gym.client.readFileRevision(registered.id, {
-                path: "tracked.txt",
-                revision: "HEAD",
-            });
-            expect(Buffer.from(headRevision.content, "base64").toString("utf8")).toBe(
-                "version one\n",
-            );
+        const headRevision = await gym.client.readFileRevision(registered.id, {
+            path: "tracked.txt",
+            revision: "HEAD",
+        });
+        expect(Buffer.from(headRevision.content, "base64").toString("utf8")).toBe("version one\n");
 
-            await writeFs(join(repositoryPath, "tracked.txt"), "version two\n", "utf8");
-            await git(repositoryPath, ["add", "tracked.txt"]);
-            await git(repositoryPath, ["commit", "-m", "second"]);
-            const previousRevision = await gym.client.readFileRevision(registered.id, {
-                path: "tracked.txt",
-                revision: "HEAD~1",
-            });
-            expect(Buffer.from(previousRevision.content, "base64").toString("utf8")).toBe(
-                "version one\n",
-            );
+        await writeFs(join(repositoryPath, "tracked.txt"), "version two\n", "utf8");
+        await git(repositoryPath, ["add", "tracked.txt"]);
+        await git(repositoryPath, ["commit", "-m", "second"]);
+        const previousRevision = await gym.client.readFileRevision(registered.id, {
+            path: "tracked.txt",
+            revision: "HEAD~1",
+        });
+        expect(Buffer.from(previousRevision.content, "base64").toString("utf8")).toBe(
+            "version one\n",
+        );
 
-            const initialGit = await gym.client.getWorkspaceGit(registered.id);
-            expect(initialGit.git.changedFiles).toBe(0);
-            expect(initialGit.git.conflicted).toBe(false);
-            expect(["ready", "unavailable"]).toContain(initialGit.git.comparison);
+        const initialGit = await gym.client.getWorkspaceGit(registered.id);
+        expect(initialGit.git.changedFiles).toBe(0);
+        expect(initialGit.git.conflicted).toBe(false);
+        expect(["ready", "unavailable"]).toContain(initialGit.git.comparison);
 
-            const stream = gym.stream();
-            await stream.opened();
-            const watched = await gym.client.watchGit({ workspaceIds: [registered.id] });
-            expect(watched.snapshots).toEqual(expect.any(Object));
+        const stream = gym.stream();
+        await stream.opened();
+        const watched = await gym.client.watchGit({ workspaceIds: [registered.id] });
+        expect(watched.snapshots).toEqual(expect.any(Object));
 
-            await writeFs(join(repositoryPath, "untracked.txt"), "untracked\n", "utf8");
-            const untracked = await waitForGitEvent(stream, registered.id, (gitState) =>
-                gitState.files.some(
-                    (file) => file.path === "untracked.txt" && file.status === "untracked",
-                ),
-            );
-            expect(untracked.git.files).toEqual(
-                expect.arrayContaining([
-                    expect.objectContaining({
-                        path: "untracked.txt",
-                        staged: false,
-                        status: "untracked",
-                        unstaged: true,
-                    }),
-                ]),
-            );
+        await writeFs(join(repositoryPath, "untracked.txt"), "untracked\n", "utf8");
+        const untracked = await waitForGitEvent(stream, registered.id, (gitState) =>
+            gitState.files.some(
+                (file) => file.path === "untracked.txt" && file.status === "untracked",
+            ),
+        );
+        expect(untracked.git.files).toEqual(
+            expect.arrayContaining([
+                expect.objectContaining({
+                    path: "untracked.txt",
+                    staged: false,
+                    status: "untracked",
+                    unstaged: true,
+                }),
+            ]),
+        );
 
-            await git(repositoryPath, ["add", "untracked.txt"]);
-            const staged = await waitForGitEvent(stream, registered.id, (gitState) =>
-                gitState.files.some(
-                    (file) =>
-                        file.path === "untracked.txt" &&
-                        file.status === "added" &&
-                        file.staged === true,
-                ),
-            );
-            expect(staged.git.files).toEqual(
-                expect.arrayContaining([
-                    expect.objectContaining({
-                        path: "untracked.txt",
-                        status: "added",
-                        staged: true,
-                    }),
-                ]),
-            );
+        await git(repositoryPath, ["add", "untracked.txt"]);
+        const staged = await waitForGitEvent(stream, registered.id, (gitState) =>
+            gitState.files.some(
+                (file) =>
+                    file.path === "untracked.txt" &&
+                    file.status === "added" &&
+                    file.staged === true,
+            ),
+        );
+        expect(staged.git.files).toEqual(
+            expect.arrayContaining([
+                expect.objectContaining({
+                    path: "untracked.txt",
+                    status: "added",
+                    staged: true,
+                }),
+            ]),
+        );
 
-            const binary = Buffer.from([0, 1, 2, 3, 127, 128, 255]);
-            await writeFs(join(repositoryPath, "binary.dat"), binary);
-            const binaryEvent = await waitForGitEvent(stream, registered.id, (gitState) =>
-                gitState.files.some((file) => file.path === "binary.dat" && file.binary),
-            );
-            expect(binaryEvent.git.files).toEqual(
-                expect.arrayContaining([
-                    expect.objectContaining({
-                        binary: true,
-                        path: "binary.dat",
-                    }),
-                ]),
-            );
+        const binary = Buffer.from([0, 1, 2, 3, 127, 128, 255]);
+        await writeFs(join(repositoryPath, "binary.dat"), binary);
+        const binaryEvent = await waitForGitEvent(stream, registered.id, (gitState) =>
+            gitState.files.some((file) => file.path === "binary.dat" && file.binary),
+        );
+        expect(binaryEvent.git.files).toEqual(
+            expect.arrayContaining([
+                expect.objectContaining({
+                    binary: true,
+                    path: "binary.dat",
+                }),
+            ]),
+        );
 
-            const replacement = await gym.client.watchGit({ workspaceIds: [] });
-            expect(replacement.snapshots).toEqual({});
-            stream.close();
-        },
-    );
+        const replacement = await gym.client.watchGit({ workspaceIds: [] });
+        expect(replacement.snapshots).toEqual({});
+        stream.close();
+    });
 });
 
 async function rootWorkspaceId(gym: AgentGym): Promise<string> {

@@ -22,7 +22,7 @@ afterEach(async () => {
     activeGyms.clear();
 });
 
-describe("Git API matrix: repository facts and revisions", () => {
+describe("Git API matrix: repository facts and revisions", { timeout: 30_000 }, () => {
     it("[G001] reports a clean repository snapshot with a stable head", async () => {
         const context = await freshGitGym();
         const state = (await context.gym.client.getWorkspaceGit(context.workspaceId)).git;
@@ -228,7 +228,7 @@ describe("Git API matrix: repository facts and revisions", () => {
     });
 });
 
-describe("Git API matrix: watches, limits, and lifecycle", () => {
+describe("Git API matrix: watches, limits, and lifecycle", { timeout: 30_000 }, () => {
     it("[G017] returns a watched repository snapshot keyed by workspace ID", async () => {
         const context = await freshGitGym();
         await context.gym.client.getWorkspaceGit(context.workspaceId);

@@ -50,7 +50,11 @@ export const fileReadQuerySchema = Type.Object(
 export const fileRevisionQuerySchema = Type.Object(
     {
         path: relativeFilePathSchema,
-        revision: Type.String({ minLength: 1, maxLength: 256, pattern: "^[A-Za-z0-9_./:-]+$" }),
+        revision: Type.String({
+            minLength: 1,
+            maxLength: 256,
+            pattern: "^(?!-)[A-Za-z0-9_./:~^{}@-]+$",
+        }),
     },
     { additionalProperties: false },
 );
