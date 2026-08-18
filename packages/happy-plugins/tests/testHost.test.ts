@@ -529,6 +529,7 @@ describe("Happy plugin test host", () => {
                         checkedAt: 42,
                         error: null,
                         providerId: "provider-work",
+                        tokens: { inferences: 0, input: 0, output: 0, total: 0, turns: 0 },
                         usage: {
                             capturedAt: 40,
                             credits: null,

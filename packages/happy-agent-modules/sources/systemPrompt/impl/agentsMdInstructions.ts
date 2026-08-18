@@ -568,11 +568,21 @@ async function fileExists(
     }
 }
 
+const MISSING_PATH_CODES = new Set(["ENOENT", "ENOTDIR", "EISDIR"]);
+const MISSING_PATH_MESSAGE_PATTERN = /^(ENOENT|ENOTDIR|EISDIR): /;
+
 function isMissingPathError(error: unknown): boolean {
     if (error === null || typeof error !== "object") return false;
     const code = (error as { code?: unknown }).code;
-    if (code === "ENOENT" || code === "ENOTDIR" || code === "EISDIR") return true;
-    return error instanceof Error && error.message.startsWith("No such path:");
+    if (typeof code === "string") return MISSING_PATH_CODES.has(code);
+    if (!(error instanceof Error)) return false;
+    // Some computes write a missing-path errno into the message without setting `.code`. An
+    // optional file like AGENTS_SECURITY.md is the ordinary case, not a failure worth reporting,
+    // so this still recognizes it. Any other message is left as a genuine, reportable error.
+    return (
+        error.message.startsWith("No such path:") ||
+        MISSING_PATH_MESSAGE_PATTERN.test(error.message)
+    );
 }
 
 function createFingerprint(text: string): string {

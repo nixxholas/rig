@@ -75,7 +75,10 @@ export async function startAgentHttpServer(
         void span(options.ctx, "happy-agent-http-request", (requestCtx) =>
             handleRequest(requestCtx, request, response, options, token, state),
         ).catch((error: unknown) => {
-            options.configuration?.onUnexpectedError?.(error);
+            // An AgentHttpError is a chosen answer to a well-formed request, not a daemon
+            // fault, so it must not reach onUnexpectedError.
+            if (!(error instanceof AgentHttpError))
+                options.configuration?.onUnexpectedError?.(error);
             sendError(response, error);
         });
     });

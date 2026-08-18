@@ -18,7 +18,11 @@ import {
     type AgentProviders,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
-import { hostComputeProvider } from "@slopus/happy-agent-compute";
+import {
+    hostComputeProvider,
+    type Compute,
+    type HostComputeConfig,
+} from "@slopus/happy-agent-compute";
 import {
     AUTO_PERMISSION_REVIEW_BUDGET_MS,
     AutoModule,
@@ -81,6 +85,14 @@ export interface StartHappyAgentOptions {
         readonly models: readonly AgentModel[];
         readonly providers: AgentProviders;
     };
+    /**
+     * Replaces the machine every agent and the permission reviewer work on.
+     *
+     * This exists so a test can run the whole agent without handing it this computer. Nothing in
+     * the product supplies it: a started agent works on the host, and everything else about
+     * starting stays exactly the same.
+     */
+    readonly compute?: (ctx: Context, config: HostComputeConfig) => Promise<Compute>;
 }
 
 /** Every capability the agent runs with, addressable by name. */
@@ -243,11 +255,18 @@ export async function startHappyAgent(
             backgroundTasks.add(task);
         };
 
+        const createCompute =
+            options.compute ??
+            (async (computeCtx: Context, computeConfig: HostComputeConfig) =>
+                await hostComputeProvider.create(computeCtx, computeConfig));
         const compute = createComputeModules({
             provider: {
                 id: "host",
                 create: async (computeCtx, computeConfig) =>
-                    await hostComputeProvider.create(computeCtx, { ...computeConfig, hostPolicy }),
+                    (await createCompute(computeCtx, {
+                        ...computeConfig,
+                        hostPolicy,
+                    })) as HostCompute,
             },
         });
         unwind.unshift(async () => await compute.computeModule.dispose(ctx));
@@ -270,7 +289,7 @@ export async function startHappyAgent(
 
         // The reviewer investigates local state through its own read-only compute, behind the same
         // sandbox policy as the agent, with the reviewer's database treated as private.
-        const reviewerCompute = (await hostComputeProvider.create(ctx, {
+        const reviewerCompute = (await createCompute(ctx, {
             cwd: paths.publicHome,
             hostPolicy,
         })) as HostCompute;
@@ -403,6 +422,11 @@ export async function startHappyAgent(
         // A workflow starts its agents through collaboration, so it needs that very module rather
         // than one of its own.
         const collaboration = new CollaborationModule();
+
+        // Journaling a question and its answer happens after the transaction that saved them has
+        // committed, so it cannot run on that transaction's context: writing needs a transaction of
+        // its own. This lifetime is the daemon's, not the asking turn's.
+        const userInputJournal = withDatabase(hostRoot.named("user-input-journal"));
         const modules: HappyAgentModules = {
             collaboration,
             compute: compute.computeModule,
@@ -453,15 +477,17 @@ export async function startHappyAgent(
                             // It must never break saving what the person said.
                             .catch(() => undefined);
                     },
-                    onEvent: async (listenerCtx, event) => {
+                    onEvent: async (_listenerCtx, event) => {
                         await events
-                            .record(listenerCtx, {
+                            .record(userInputJournal, {
                                 agentId: event.request.askingAgentId,
-                                type: "user_input.event",
+                                // Hyphens, not underscores: the journal only accepts dotted,
+                                // hyphenated type names, so an underscored one is never stored.
+                                type: "user-input.event",
                                 payload: event,
                             })
                             .catch((error: unknown) => {
-                                listenerCtx.log.warn(
+                                userInputJournal.log.warn(
                                     "Failed to journal a user input event.",
                                     { agentId: event.request.askingAgentId, type: event.type },
                                     error,

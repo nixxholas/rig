@@ -100,6 +100,13 @@ export function createAgentRoutes(): AgentHttpRouteGroup {
             handle: async ({ ctx, dependencies, request, response }) => {
                 const body = await readValidatedBody(request, awaitRequestSchema);
                 await dependencies.agent.system.compact(ctx, dependencies.agent.agent.id, body);
+                // Compacting through the installation's own route replaces the same conversation
+                // the session route would have replaced, so it has to be just as visible.
+                await dependencies.agent.modules.events.record(ctx, {
+                    agentId: dependencies.agent.agent.id,
+                    payload: {},
+                    type: "session.compaction-requested",
+                });
                 sendJson(response, 202, { accepted: true });
             },
         },

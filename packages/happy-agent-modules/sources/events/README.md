@@ -62,6 +62,11 @@ The module implements the standard `AgentModule` lifecycle hooks and records raw
 
 Payloads are the values supplied by Agent Base at the hook boundary, stored verbatim.
 
+Every event belonging to a run also names it. A loop opens before its first message is accepted, so
+`loop.started` is journaled the moment the loop first names its run rather than at the hook that
+announced it: the start, the messages accepted into the run, and `loop.settled` therefore all carry
+one `runId`, and a loop that never accepts a message is bracketed by its own loop identity.
+
 ## Storage and lifetime
 
 The module owns migrations for its event journal, origin cursor, and active provider-run

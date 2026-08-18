@@ -94,9 +94,11 @@ remain unsupported.
 - `GET /v0/events/live` — live Server-Sent Events with replay and `Last-Event-ID`.
 - `GET /v0/events/stream` — durable global SSE replay.
 - `GET /v0/catalog` — a Rig-shaped catalog snapshot.
-- `GET /v0/folders`, `/v0/plugins`, `/v0/worklets`, `/v0/profiles`, `/v0/sharing`,
-  `/v0/provider-usage`, `/v0/secrets`, and `/v0/external-tool-calls` — protocol-valid empty or
-  unavailable snapshots for optional Rig views that Happy Agent does not host yet.
+- `GET /v0/folders`, `/v0/plugins`, `/v0/worklets`, `/v0/profiles`, `/v0/sharing`, `/v0/secrets`,
+  and `/v0/external-tool-calls` — protocol-valid empty or unavailable snapshots for optional Rig
+  views that Happy Agent does not host yet.
+- `GET /v0/provider-usage` — real per-provider token totals measured across every chat in the
+  installation.
 - `PUT|DELETE /v0/sessions/:sessionId/terminal-connections/:connectionId` — no-op terminal
   presence acknowledgements so an existing Rig client can open and close a Happy Agent chat.
 - `POST /v0/timeline` — global timeline snapshot; project/workspace/session timelines are not

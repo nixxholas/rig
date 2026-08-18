@@ -1,0 +1,46 @@
+/** Public surface of the Happy agent gym. */
+
+export {
+    createAgentGym,
+    removeWorkspacePath,
+    runIdOf,
+    type AgentGym,
+    type AgentGymOptions,
+    type GymAcceptance,
+    type GymCreateSessionOptions,
+    type GymSelection,
+    type GymSendOptions,
+    type GymSessionRecord,
+} from "./createAgentGym.js";
+export { createGymCompute } from "./createGymCompute.js";
+export {
+    createGymHome,
+    resolveFixturePath,
+    type GymFixture,
+    type GymHome,
+    type GymHomeOptions,
+} from "./createGymHome.js";
+export {
+    frameEvent,
+    GymEventStream,
+    type GymEventStreamOptions,
+    type GymSseFrame,
+} from "./GymEventStream.js";
+export { GymHttpClient, type GymHttpClientOptions, type GymHttpResponse } from "./GymHttpClient.js";
+export {
+    createScriptedInference,
+    GYM_MODEL_ID,
+    GYM_MODELS,
+    GYM_PROVIDER_ID,
+    GYM_SECOND_MODEL_ID,
+    type GymBlock,
+    type GymCompactionHandler,
+    type GymCompactionRequest,
+    type GymInference,
+    type GymInferenceHandler,
+    type GymInferenceLog,
+    type GymInferenceRequest,
+    type GymTurn,
+    type ScriptedInference,
+    type ScriptedInferenceOptions,
+} from "./scriptedInference.js";

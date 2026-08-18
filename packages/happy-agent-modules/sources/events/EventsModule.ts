@@ -102,6 +102,12 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
     readonly #listeners = new Set<EventListener>();
     readonly #moduleListener: EventsModuleListener | undefined;
     readonly #now: () => number;
+    /**
+     * The loop each agent has opened and not yet had journaled, because the run it belongs to had
+     * no identity at the time. It is live-process bookkeeping rather than a record of anything:
+     * a loop interrupted by a restart is announced again by the process that resumes it.
+     */
+    readonly #openingLoops = new Map<string, AgentBaseLoop>();
     readonly #runs = new Map<string, ActiveRun>();
     #createId: () => string;
     #originCursor: string;
@@ -145,6 +151,16 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
 
     capacity(): number {
         return this.#capacity;
+    }
+
+    /**
+     * The run this agent is working on, or undefined when it is not working on one.
+     *
+     * This is the same identity the journal writes and the client was handed when its message was
+     * accepted, which is what lets a caller name the run it means before acting on it.
+     */
+    activeRunId(agentId: string): string | undefined {
+        return this.#runs.get(agentId)?.runId;
     }
 
     async record(ctx: Context, input: AppendEventInput): Promise<AgentEvent> {
@@ -267,6 +283,7 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
             afterCommit(ctx, () => {
                 this.#runs.set(scope.agent.id, run);
             });
+            await this.openLoop(ctx, scope.agent.id, run.runId);
             await this.recordInDatabase(ctx, ctx.db, {
                 agentId: scope.agent.id,
                 payload: { ...accepted, runId: run.runId },
@@ -298,19 +315,16 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
             });
         },
 
-        beforeAgentLoopTransact: async (
-            ctx: Context,
+        beforeAgentLoopTransact: (
+            _ctx: Context,
             scope: AgentModuleScope,
             loop: AgentBaseLoop,
-        ): Promise<void> => {
-            await this.recordInDatabase(ctx, ctx.db, {
-                agentId: scope.agent.id,
-                payload: {
-                    ...loop,
-                    runId: this.#runs.get(scope.agent.id)?.runId ?? loop.loopId,
-                },
-                type: "loop.started",
-            });
+        ): void => {
+            // A loop opens before its first message is accepted, so at this point there is no run
+            // to name and inventing one here would name a run that never settles. The start is
+            // held until the loop first says which run it is answering, which is what lets a
+            // client pair it with the settlement of that same run.
+            this.#openingLoops.set(scope.agent.id, loop);
         },
 
         onEvent: async (
@@ -325,6 +339,7 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
                 afterCommit(txCtx, () => {
                     this.#runs.set(scope.agent.id, projected.run);
                 });
+                await this.openLoop(txCtx, scope.agent.id, projected.run.runId);
                 await this.recordInDatabase(txCtx, txCtx.db, {
                     agentId: scope.agent.id,
                     payload: {
@@ -344,6 +359,7 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
             call: SessionToolCallBlock,
         ): Promise<void> => {
             const runId = this.#runs.get(scope.agent.id)?.runId ?? call.callId;
+            await this.openLoop(ctx, scope.agent.id, runId);
             await this.recordInDatabase(ctx, ctx.db, {
                 agentId: scope.agent.id,
                 payload: {
@@ -364,6 +380,7 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
         ): Promise<void> => {
             const run = this.#runs.get(scope.agent.id);
             const toolName = toolNameForCall(run, result.callId);
+            if (run !== undefined) await this.openLoop(ctx, scope.agent.id, run.runId);
             await this.recordInDatabase(ctx, ctx.db, {
                 agentId: scope.agent.id,
                 payload: {
@@ -386,12 +403,14 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
             inference: AgentBaseInference,
         ): Promise<void> => {
             const run = this.#runs.get(scope.agent.id);
+            const runId = run?.runId ?? inference.loopId;
+            await this.openLoop(ctx, scope.agent.id, runId);
             await this.recordInDatabase(ctx, ctx.db, {
                 agentId: scope.agent.id,
                 payload: {
                     ...inference,
                     blocks: run?.blocks ?? [],
-                    runId: run?.runId ?? inference.loopId,
+                    runId,
                     text: run?.text ?? "",
                 },
                 type: "inference.completed",
@@ -414,9 +433,11 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
                     this.#runs.set(scope.agent.id, next);
                 });
             }
+            const runId = next?.runId ?? turn.loopId;
+            await this.openLoop(ctx, scope.agent.id, runId);
             await this.recordInDatabase(ctx, ctx.db, {
                 agentId: scope.agent.id,
-                payload: { ...turn, runId: next?.runId ?? turn.loopId },
+                payload: { ...turn, runId },
                 type: "turn.completed",
             });
         },
@@ -427,12 +448,17 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
             settlement: AgentBaseSettlement,
         ): Promise<void> => {
             const run = this.#runs.get(scope.agent.id);
+            const runId = run?.runId ?? settlement.loopId;
+            // A loop that never named a run — the one an agent opens on startup to look for work
+            // it was left owing — still opens here, so no settlement is ever journaled without
+            // the start it answers.
+            await this.openLoop(ctx, scope.agent.id, runId);
             await this.recordInDatabase(ctx, ctx.db, {
                 agentId: scope.agent.id,
                 payload: {
                     ...settlement,
                     ...(run?.errorMessage === undefined ? {} : { errorMessage: run.errorMessage }),
-                    runId: run?.runId ?? settlement.loopId,
+                    runId,
                     stopReason: run?.stopReason ?? "stop",
                 },
                 type: "loop.settled",
@@ -443,6 +469,25 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
             });
         },
     };
+
+    /**
+     * Journal the start of the loop an agent has open, under the identity of the run it turned
+     * out to be answering. Every event a loop records names its run, and the first of them is
+     * what finally says which run that is, so the start is written immediately before it — once
+     * per loop, and always ahead of everything the run goes on to record.
+     */
+    private async openLoop(ctx: Context, agentId: string, runId: string): Promise<void> {
+        const loop = this.#openingLoops.get(agentId);
+        if (loop === undefined) return;
+        // Given up before the append, so a second event naming the same run in the same
+        // transaction cannot open one loop twice.
+        this.#openingLoops.delete(agentId);
+        await this.recordInDatabase(ctx, ctx.db, {
+            agentId,
+            payload: { ...loop, runId },
+            type: "loop.started",
+        });
+    }
 
     private async recordInDatabase(
         ctx: Context,

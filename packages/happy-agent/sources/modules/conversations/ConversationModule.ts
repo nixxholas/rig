@@ -286,10 +286,10 @@ export class ConversationModule implements AgentModule<AnyAgentTool, LibSQLDatab
             throw new Error("Conversation list limit must be between 1 and 50.");
         }
         return await ctx.inTx(async (txCtx) => {
-            const archived =
-                query.archived === undefined || query.archived === "all"
-                    ? undefined
-                    : query.archived;
+            // Archiving a chat is how a person puts it away, so listing chats means the ones they
+            // have not put away. Asking for everything is what `all` is for; leaving the question
+            // unasked is not the same as asking for everything.
+            const archived = query.archived === "all" ? undefined : (query.archived ?? false);
             const rows = await agentDatabaseRows<ConversationRow>(
                 txCtx.db,
                 archived === undefined
@@ -497,6 +497,15 @@ export class ConversationModule implements AgentModule<AnyAgentTool, LibSQLDatab
             turn: AgentBaseTurn,
         ): Promise<readonly never[]> => {
             await this.recordAgentEvent(ctx, scope.agent.id, "turn_completed", turn);
+            // A cancelled turn is the only place the interruption is visible to this module: the
+            // settlement that follows describes a run that ended, not why it ended. Recording it
+            // here is what stops the settlement below from calling an interrupted run completed.
+            if (turn.aborted) {
+                const session = await this.getByAgent(ctx, scope.agent.id);
+                if (session !== undefined) {
+                    await this.update(ctx, session.id, { status: "aborted" });
+                }
+            }
             return [];
         },
 
@@ -507,7 +516,9 @@ export class ConversationModule implements AgentModule<AnyAgentTool, LibSQLDatab
         ): Promise<void> => {
             const session = await this.getByAgent(ctx, scope.agent.id);
             if (session === undefined) return;
-            if (session.status !== "error") {
+            // A run that failed or was interrupted already says so, and settling is not what makes
+            // it finished. The next run moves the session back to running when it starts.
+            if (session.status !== "error" && session.status !== "aborted") {
                 await this.update(ctx, session.id, { status: "completed" });
             }
             await this.appendEvent(ctx, session.id, {

@@ -3,6 +3,7 @@ import { createRouteGroup, type AgentHttpRouteGroup } from "./router.js";
 import {
     createRigModelCatalog,
     HAPPY_AGENT_RIG_PROTOCOL_VERSION,
+    readRigProviderCapabilities,
     type RigModelCatalog,
 } from "./rigProtocol.js";
 
@@ -12,7 +13,13 @@ export function createCoreDaemonRoutes(): AgentHttpRouteGroup {
             method: "GET",
             path: "/v0/health",
             handle: async ({ dependencies, response }) => {
-                const catalog = createRigModelCatalog(dependencies.agent.system.models);
+                const catalog = createRigModelCatalog(
+                    dependencies.agent.system.models,
+                    await readRigProviderCapabilities(
+                        dependencies.agent.providers,
+                        dependencies.agent.system.models,
+                    ),
+                );
                 sendJson(response, 200, {
                     catalog,
                     durableGlobalEventQueue:
@@ -48,7 +55,13 @@ export function createCoreDaemonRoutes(): AgentHttpRouteGroup {
             path: "/v0/models",
             handle: async ({ dependencies, response }) => {
                 sendJson(response, 200, {
-                    catalog: createRigModelCatalog(dependencies.agent.system.models),
+                    catalog: createRigModelCatalog(
+                        dependencies.agent.system.models,
+                        await readRigProviderCapabilities(
+                            dependencies.agent.providers,
+                            dependencies.agent.system.models,
+                        ),
+                    ),
                 });
             },
         },

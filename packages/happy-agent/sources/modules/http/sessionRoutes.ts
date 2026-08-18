@@ -32,7 +32,11 @@ import type { StartedHappyAgent } from "../../start/startHappyAgent.js";
 import { readValidatedBody } from "./body.js";
 import { AgentHttpError, sendJson, serializeJson } from "./errors.js";
 import { createRouteGroup, type AgentHttpRouteGroup } from "./router.js";
-import { createRigModelCatalog, type RigModelCatalog } from "./rigProtocol.js";
+import {
+    createRigModelCatalog,
+    readRigProviderCapabilities,
+    type RigModelCatalog,
+} from "./rigProtocol.js";
 import { createSseWriter } from "./sseWriter.js";
 import {
     userInputAnswerForModule,
@@ -568,6 +572,7 @@ function createMutationRoutes(): AgentHttpRouteGroup["routes"] {
             handle: async ({ ctx, dependencies, request, response, url }) => {
                 const body = await readValidatedBody(request, expectedRunSchema);
                 const session = await requireSession(ctx, dependencies, sessionId(url));
+                requireExpectedRun(dependencies, session, body.expectedRunId, "aborted");
                 await dependencies.agent.system.abort(ctx, session.agentId, {
                     await: body.await ?? true,
                 });
@@ -598,6 +603,7 @@ function createMutationRoutes(): AgentHttpRouteGroup["routes"] {
             handle: async ({ ctx, dependencies, request, response, url }) => {
                 const body = await readValidatedBody(request, expectedRunSchema);
                 const session = await requireSession(ctx, dependencies, sessionId(url));
+                requireExpectedRun(dependencies, session, body.expectedRunId, "compacted");
                 await dependencies.agent.system.compact(ctx, session.agentId, {
                     await: body.await ?? true,
                 });
@@ -609,6 +615,14 @@ function createMutationRoutes(): AgentHttpRouteGroup["routes"] {
                         type: "compaction_requested",
                     },
                 );
+                // Compaction replaces the conversation, which a person reading the chat would
+                // otherwise experience as their history silently disappearing. The journal is what
+                // a client reads, so the compaction has to be recorded there to be visible at all.
+                await dependencies.agent.modules.events.record(ctx, {
+                    agentId: session.agentId,
+                    payload: {},
+                    type: "session.compaction-requested",
+                });
                 sendJson(response, 200, {
                     eventId: event.id,
                     result: "completed",
@@ -964,6 +978,31 @@ async function transferFailure<T>(run: () => Promise<T>): Promise<T> {
     }
 }
 
+/**
+ * Refuses to act on a run other than the one the caller was looking at.
+ *
+ * A client watching a chat decides to stop or compact the run it can see, and by the time the
+ * request arrives that run may have finished and another may have started. Naming the run is how a
+ * client says which one it meant, so a mismatch is refused rather than applied to whatever happens
+ * to be running now. A caller that names nothing accepts whatever it finds.
+ */
+function requireExpectedRun(
+    dependencies: LoadedSessionDependencies,
+    session: ConversationRecord,
+    expectedRunId: string | undefined,
+    action: "aborted" | "compacted",
+): void {
+    if (expectedRunId === undefined) return;
+    const active = dependencies.agent.modules.events.activeRunId(session.agentId);
+    if (active === expectedRunId) return;
+    throw new AgentHttpError(
+        409,
+        active === undefined
+            ? `Run "${expectedRunId}" is no longer running, so nothing was ${action}.`
+            : `Run "${expectedRunId}" is no longer running; this chat is now on run "${active}", which was not ${action}.`,
+    );
+}
+
 function unsupportedMutations(): AgentHttpRouteGroup["routes"] {
     const paths = [
         "/v0/sessions/:sessionId/fork",
@@ -1033,7 +1072,13 @@ async function sessionResponse(
     const agent = await dependencies.agent.system.resolve(ctx, session.agentId);
     const config = await dependencies.agent.system.config(ctx, session.agentId);
     const transcript = await rigTranscript(dependencies, session, options.messageLimit ?? 20);
-    const catalog = createRigModelCatalog(dependencies.agent.system.models);
+    const catalog = createRigModelCatalog(
+        dependencies.agent.system.models,
+        await readRigProviderCapabilities(
+            dependencies.agent.providers,
+            dependencies.agent.system.models,
+        ),
+    );
     const tasks = await dependencies.agent.modules.tasks.list(ctx, session.agentId);
     const goal = await dependencies.agent.modules.goal.goal(ctx, session.agentId);
     const pendingUserInputs = (
@@ -1089,7 +1134,13 @@ export async function sessionSummary(
     session: ConversationRecord,
 ): Promise<Record<string, unknown>> {
     const config = await dependencies.agent.system.config(ctx, session.agentId);
-    const catalog = createRigModelCatalog(dependencies.agent.system.models);
+    const catalog = createRigModelCatalog(
+        dependencies.agent.system.models,
+        await readRigProviderCapabilities(
+            dependencies.agent.providers,
+            dependencies.agent.system.models,
+        ),
+    );
     return {
         ...sessionSummaryValue(session, catalog, catalogSelection(dependencies)),
         ...(config?.metadata?.title === undefined ? {} : { title: config.metadata.title }),
@@ -1322,7 +1373,10 @@ function protocolUsage(
         }),
         quotas: [],
         sessionTokenCount: {
-            lastContextTokens: 0,
+            // How big the conversation currently is, as the last response measured it. It reads as
+            // zero only until something has been measured; the costs above stay zero because the
+            // agent has no price table to turn tokens into money with.
+            lastContextTokens: summary.currentContext?.contextTokens ?? 0,
             totalTokens: summary.totalTokens,
         },
     };
@@ -1336,7 +1390,8 @@ async function sendMessage(
 ): Promise<Record<string, unknown>> {
     await nameFromFirstMessage(ctx, dependencies, session, body.displayText ?? body.text);
     const resumeCursor = dependencies.agent.modules.events.cursor();
-    const options = messageOptions(body, dependencies.agent.system.models);
+    const current = sessionSelection(session, catalogSelection(dependencies));
+    const options = messageOptions(body, dependencies.agent.system.models, current);
     let acceptance;
     try {
         acceptance = await dependencies.agent.system.send(
@@ -1355,10 +1410,7 @@ async function sendMessage(
         ctx,
         dependencies,
         session,
-        selectionFromMessageOptions(
-            options,
-            sessionSelection(session, catalogSelection(dependencies)),
-        ),
+        selectionFromMessageOptions(options, current),
         body.mutationId,
     );
     return {
@@ -1436,7 +1488,8 @@ async function steerMessage(
     body: SubmitMessage,
 ): Promise<Record<string, unknown>> {
     const resumeCursor = dependencies.agent.modules.events.cursor();
-    const options = messageOptions(body, dependencies.agent.system.models);
+    const current = sessionSelection(session, catalogSelection(dependencies));
+    const options = messageOptions(body, dependencies.agent.system.models, current);
     const acceptance = await dependencies.agent.system.steer(
         ctx,
         session.agentId,
@@ -1448,10 +1501,7 @@ async function steerMessage(
         ctx,
         dependencies,
         session,
-        selectionFromMessageOptions(
-            options,
-            sessionSelection(session, catalogSelection(dependencies)),
-        ),
+        selectionFromMessageOptions(options, current),
         body.mutationId,
     );
     return {
@@ -1474,22 +1524,34 @@ function messageFromBody(body: SubmitMessage): SessionUserMessage {
     return { content, role: "user" };
 }
 
-/** What one request named, in the shape the catalog check and the message options both take. */
-function requestedSelection(body: CreateSession | SubmitMessage): RequestedAgentSelection {
+/**
+ * What one request named, in the shape the catalog check and the message options both take.
+ *
+ * The permission mode is the one thing a request may leave out and still have decided for it. A
+ * session reports the mode it runs in, from its own record or from the installation's default, but
+ * an agent starts in Auto and learns any other mode only from a message. Carrying the session's
+ * mode on every message is what makes the reported mode the enforced one.
+ */
+function requestedSelection(
+    body: CreateSession | SubmitMessage,
+    current?: SessionSelection,
+): RequestedAgentSelection {
+    const permissionMode = body.permissionMode ?? current?.permissionMode;
     return {
         effort: body.effort,
         model: body.modelId,
         provider: body.providerId,
         serviceTier: body.serviceTier,
-        ...(body.permissionMode === undefined ? {} : { permissionMode: body.permissionMode }),
+        ...(permissionMode === undefined ? {} : { permissionMode }),
     };
 }
 
 function messageOptions(
     body: SubmitMessage,
     models: readonly AgentModel[],
+    current: SessionSelection,
 ): AgentBaseMessageOptions & { readonly await?: boolean } {
-    return agentMessageOptions(models, requestedSelection(body), {
+    return agentMessageOptions(models, requestedSelection(body, current), {
         ...(body.await === undefined ? {} : { await: body.await }),
         ...(body.clientSubmissionId === undefined ? {} : { id: body.clientSubmissionId }),
     });
@@ -1898,6 +1960,32 @@ export function projectSessionEvent(
             type: "permission_mode_changed",
         };
     }
+    if (event.type === "session.compaction-requested") {
+        return {
+            ...base,
+            data: {
+                message: {
+                    blocks: [
+                        {
+                            text: "The conversation was summarised to make room, so earlier messages are no longer part of it.",
+                            type: "text",
+                        },
+                    ],
+                    context: "excluded",
+                    id: base.id,
+                    role: "system",
+                    structured: {
+                        details:
+                            "The conversation was summarised to make room, so earlier messages are no longer part of it.",
+                        kind: "notice",
+                        level: "info",
+                        title: "Conversation compacted",
+                    },
+                },
+            },
+            type: "system_notice",
+        };
+    }
     const runId = typeof payload.runId === "string" ? payload.runId : undefined;
     if (event.type === "message.accepted" && runId !== undefined) {
         const message = recordValue(payload.message);
@@ -1990,7 +2078,7 @@ export function projectSessionEvent(
     if (event.type === "permission.event") {
         return projectPermissionEvent(payload, base);
     }
-    if (event.type === "user_input.event") {
+    if (event.type === "user-input.event") {
         return projectUserInputEvent(payload, base);
     }
     return undefined;

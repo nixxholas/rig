@@ -6,6 +6,7 @@ import type { ComputeFileStat, ComputeFileSystem } from "../../ComputeFileSystem
 import type { ComputeHostPolicy } from "../../ComputeHostPolicy.js";
 import type { ComputePermissions } from "../../ComputePermissions.js";
 import { JustBashPermissionFileSystem } from "./JustBashPermissionFileSystem.js";
+import { withNodeStyleFileSystemErrors } from "./withNodeStyleFileSystemErrors.js";
 
 /** Presents just-bash paths relative to one fixed working directory. */
 export function createJustBashFileSystem(
@@ -14,13 +15,14 @@ export function createJustBashFileSystem(
     home: string = cwd,
     hostPolicy: ComputeHostPolicy = {},
 ): ComputeFileSystem {
+    const normalizedFs = withNodeStyleFileSystemErrors(fs);
     const resolvePath = (path: string): string => {
         if (path === "~") return home;
-        if (path.startsWith("~/")) return fs.resolvePath(home, path.slice(2));
-        return fs.resolvePath(cwd, path);
+        if (path.startsWith("~/")) return normalizedFs.resolvePath(home, path.slice(2));
+        return normalizedFs.resolvePath(cwd, path);
     };
     const guarded = (permissions: ComputePermissions) =>
-        new JustBashPermissionFileSystem(fs, cwd, permissions, hostPolicy);
+        new JustBashPermissionFileSystem(normalizedFs, cwd, permissions, hostPolicy);
 
     return {
         cwd,

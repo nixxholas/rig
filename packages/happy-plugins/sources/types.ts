@@ -1276,11 +1276,24 @@ export const happyProviderUsageSchema = Type.Object(
 );
 export type HappyProviderUsage = Static<typeof happyProviderUsageSchema>;
 
+export const happyProviderUsageTokensSchema = Type.Object(
+    {
+        inferences: Type.Integer({ minimum: 0 }),
+        input: Type.Integer({ minimum: 0 }),
+        output: Type.Integer({ minimum: 0 }),
+        total: Type.Integer({ minimum: 0 }),
+        turns: Type.Integer({ minimum: 0 }),
+    },
+    exact,
+);
+export type HappyProviderUsageTokens = Static<typeof happyProviderUsageTokensSchema>;
+
 export const happyProviderUsageEntrySchema = Type.Object(
     {
         checkedAt: Type.Union([Type.Number(), Type.Null()]),
         error: Type.Union([Type.String(), Type.Null()]),
         providerId: nonEmptyText,
+        tokens: happyProviderUsageTokensSchema,
         usage: Type.Union([happyProviderUsageSchema, Type.Null()]),
     },
     exact,

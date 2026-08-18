@@ -1,0 +1,33 @@
+{
+    "name": "@slopus/happy-agent-gym",
+    "version": "0.0.0",
+    "private": true,
+    "description": "End-to-end harness that starts the Happy agent with scripted inference and no host machine.",
+    "type": "module",
+    "exports": {
+        ".": "./sources/index.ts"
+    },
+    "scripts": {
+        "check": "tsc --noEmit",
+        "test": "vitest run",
+        "test:watch": "vitest"
+    },
+    "dependencies": {
+        "@paralleldrive/cuid2": "^3.3.0",
+        "@sinclair/typebox": "^0.34.49",
+        "@slopus/happy-agent": "workspace:*",
+        "@slopus/happy-agent-base": "npm:@slopus/happy-agent-base@0.0.20",
+        "@slopus/happy-agent-compute": "npm:@slopus/happy-agent-compute@0.1.6",
+        "@slopus/happy-agent-modules": "workspace:*",
+        "@slopus/happy-providers": "0.0.10",
+        "@steve.kite/stdlib": "0.0.12"
+    },
+    "devDependencies": {
+        "@types/node": "^24.0.10",
+        "typescript": "^7.0.2",
+        "vitest": "^3.2.4"
+    },
+    "engines": {
+        "node": ">=22.19.0"
+    }
+}

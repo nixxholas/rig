@@ -3,7 +3,11 @@ import { Value } from "@sinclair/typebox/value";
 
 import { readValidatedBody } from "./body.js";
 import { AgentHttpError, sendJson } from "./errors.js";
-import { createRouteGroup, type AgentHttpRouteGroup } from "./router.js";
+import {
+    createRouteGroup,
+    type AgentHttpRouteContext,
+    type AgentHttpRouteGroup,
+} from "./router.js";
 
 const exact = { additionalProperties: false } as const;
 const emptyArray = Type.Array(Type.Never(), { maxItems: 0 });
@@ -120,8 +124,43 @@ export const unavailableHappyCloudResponseSchema = Type.Object(
     exact,
 );
 
-export const emptyProviderUsageResponseSchema = Type.Object({ providers: emptyArray }, exact);
 export const emptyExternalToolCallsResponseSchema = Type.Object({ calls: emptyArray }, exact);
+
+const providerUsageTokensSchema = Type.Object(
+    {
+        inferences: Type.Integer({ minimum: 0 }),
+        input: Type.Integer({ minimum: 0 }),
+        output: Type.Integer({ minimum: 0 }),
+        total: Type.Integer({ minimum: 0 }),
+        turns: Type.Integer({ minimum: 0 }),
+    },
+    exact,
+);
+
+/**
+ * One provider's usage, as this installation is able to answer it.
+ *
+ * `usage` carries a vendor's own plan and rate-limit reading, which Happy Agent never asks for,
+ * so it stays null and nothing failed to produce it. `tokens` is what the installation measured
+ * itself: every inference and turn recorded against that provider, across every chat.
+ */
+const providerUsageEntrySchema = Type.Object(
+    {
+        checkedAt: Type.Integer({ minimum: 0 }),
+        error: Type.Null(),
+        providerId: Type.String({ minLength: 1, maxLength: 256 }),
+        tokens: providerUsageTokensSchema,
+        usage: Type.Null(),
+    },
+    exact,
+);
+
+export const providerUsageResponseSchema = Type.Object(
+    { providers: Type.Array(providerUsageEntrySchema, { maxItems: 512 }) },
+    exact,
+);
+
+type ProviderUsageTokens = Static<typeof providerUsageTokensSchema>;
 
 const SHARING_IDENTITY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
@@ -169,7 +208,6 @@ export function createCompatibilitySnapshots(
             version: "empty",
         }),
         profiles: validateSnapshot(emptyProfilesResponseSchema, { profiles: [] }),
-        providerUsage: validateSnapshot(emptyProviderUsageResponseSchema, { providers: [] }),
         sharing: validateSnapshot(unavailableSharingResponseSchema, {
             connection: "disconnected",
             contacts: [],
@@ -199,7 +237,13 @@ export function createCompatibilityRoutes(): AgentHttpRouteGroup {
         readRoute("/v0/sharing", "sharing"),
         readRoute("/v0/onboarding", "onboarding"),
         readRoute("/v0/happy-cloud/status", "happyCloud"),
-        readRoute("/v0/provider-usage", "providerUsage"),
+        {
+            method: "GET",
+            path: "/v0/provider-usage",
+            handle: async (context) => {
+                sendJson(context.response, 200, await readProviderUsage(context));
+            },
+        },
         readRoute("/v0/external-tool-calls", "externalToolCalls"),
         readRoute("/v0/sessions/:sessionId/external-tool-calls", "externalToolCalls"),
         {
@@ -259,6 +303,48 @@ function readRoute(
             sendJson(response, 200, snapshots[snapshot]);
         },
     };
+}
+
+/**
+ * Every provider this installation can run on, with the tokens it has spent so far.
+ *
+ * The usage module records one row per inference and per turn, attributed to the provider that
+ * served it, for every agent in the installation. Summing those rows by provider is the whole
+ * answer; a configured provider that has never run reports zeroes rather than being left out.
+ */
+async function readProviderUsage(
+    context: Pick<AgentHttpRouteContext, "ctx" | "dependencies">,
+): Promise<Static<typeof providerUsageResponseSchema>> {
+    const { ctx, dependencies } = context;
+    const summary = await dependencies.agent.modules.usage.aggregate(ctx);
+    const totals = new Map<string, ProviderUsageTokens>();
+    for (const providerId of dependencies.agent.providers.ids) totals.set(providerId, noTokens());
+    for (const group of summary.groups) {
+        const spent = totals.get(group.provider) ?? noTokens();
+        totals.set(group.provider, {
+            inferences: spent.inferences + group.inferenceCount,
+            input: spent.input + group.inputTokens,
+            output: spent.output + group.outputTokens,
+            total: spent.total + group.totalTokens,
+            turns: spent.turns + group.turnCount,
+        });
+    }
+    const checkedAt = Date.now();
+    return validateSnapshot(providerUsageResponseSchema, {
+        providers: [...totals]
+            .sort(([left], [right]) => left.localeCompare(right))
+            .map(([providerId, tokens]) => ({
+                checkedAt,
+                error: null,
+                providerId,
+                tokens,
+                usage: null,
+            })),
+    });
+}
+
+function noTokens(): ProviderUsageTokens {
+    return { inferences: 0, input: 0, output: 0, total: 0, turns: 0 };
 }
 
 function validateSnapshot<Schema extends TSchema>(

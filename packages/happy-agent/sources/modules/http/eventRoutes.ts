@@ -8,7 +8,11 @@ import { readValidatedBody, parsePositiveLimit } from "./body.js";
 import { AgentHttpError, sendJson, serializeJson } from "./errors.js";
 import { readLiveRigPresence } from "./presenceRoutes.js";
 import { createRouteGroup, type AgentHttpRouteGroup } from "./router.js";
-import { createRigModelCatalog, HAPPY_AGENT_RIG_PROTOCOL_VERSION } from "./rigProtocol.js";
+import {
+    createRigModelCatalog,
+    HAPPY_AGENT_RIG_PROTOCOL_VERSION,
+    readRigProviderCapabilities,
+} from "./rigProtocol.js";
 import { sessionSummary } from "./sessionRoutes.js";
 import { createSseWriter } from "./sseWriter.js";
 
@@ -62,7 +66,13 @@ export function createEventRoutes(): AgentHttpRouteGroup {
                     limit: 50,
                 });
                 sendJson(response, 200, {
-                    catalog: createRigModelCatalog(dependencies.agent.system.models),
+                    catalog: createRigModelCatalog(
+                        dependencies.agent.system.models,
+                        await readRigProviderCapabilities(
+                            dependencies.agent.providers,
+                            dependencies.agent.system.models,
+                        ),
+                    ),
                     cursor,
                     folderItems: [],
                     folders: [],

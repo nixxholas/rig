@@ -34,7 +34,7 @@ function userInputEvent(payload: Record<string, unknown>): AgentEvent {
         id: "event-1",
         occurredAt: 2_000,
         payload,
-        type: "user_input.event",
+        type: "user-input.event",
     };
 }
 

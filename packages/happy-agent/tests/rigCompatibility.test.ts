@@ -129,7 +129,17 @@ describe("Happy Agent Rig compatibility", () => {
             enrollment: { state: "not_enrolled" },
             profile: { state: "not_created" },
         });
-        await expect(connection.client.listProviderUsage()).resolves.toEqual({ providers: [] });
+        await expect(connection.client.listProviderUsage()).resolves.toEqual({
+            providers: [
+                {
+                    checkedAt: expect.any(Number),
+                    error: null,
+                    providerId: "scripted",
+                    tokens: { inferences: 0, input: 0, output: 0, total: 0, turns: 0 },
+                    usage: null,
+                },
+            ],
+        });
         await expect(connection.client.listSecrets()).resolves.toEqual({ secrets: [] });
         await expect(connection.client.listPendingExternalToolCalls()).resolves.toEqual({
             calls: [],
