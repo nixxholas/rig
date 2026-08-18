@@ -85,7 +85,7 @@ describe("public message and history matrix", () => {
         expect(textOf(history.runs[1]?.messages[0])).toContain("queued");
     }, 30_000);
 
-    it("MH-04 accepts three queued messages in submission order", async () => {
+    it("MH-04 accepts three queued messages in submission order in one run", async () => {
         let release!: () => void;
         let providerStarted!: () => void;
         const providerReady = new Promise<void>((resolve) => {
@@ -124,15 +124,15 @@ describe("public message and history matrix", () => {
         await gym.waitForRun(first.runId);
         await gym.waitUntil(async () => {
             const history = await gym.client.getMessages(gym.defaultSessionId);
-            return history.pending.length === 0 && history.runs.length === 4 ? history : undefined;
+            return history.pending.length === 0 && history.runs.length === 2 ? history : undefined;
         }, "all queued messages to run");
         const history = await gym.client.getMessages(gym.defaultSessionId);
-        expect(history.runs.map((run) => textOf(run.messages[0]))).toEqual([
-            ["first"],
-            ["second"],
-            ["third"],
-            ["fourth"],
-        ]);
+        expect(textOf(history.runs[0]?.messages[0])).toEqual(["first"]);
+        expect(
+            history.runs[1]?.messages
+                .filter((message) => message.role === "user")
+                .flatMap((message) => textOf(message)),
+        ).toEqual(["second", "third", "fourth"]);
     }, 40_000);
 
     it("MH-05 returns the complete pending list even when a small limit is requested", async () => {

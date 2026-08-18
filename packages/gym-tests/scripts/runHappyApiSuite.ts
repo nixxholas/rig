@@ -72,6 +72,7 @@ const runResult = await runCommand(
         "exec",
         "vitest",
         "run",
+        "--maxWorkers=1",
         "--retry=0",
         "--reporter=json",
         `--outputFile=${reportPath}`,

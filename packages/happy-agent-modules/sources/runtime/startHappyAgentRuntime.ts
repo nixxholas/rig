@@ -386,6 +386,8 @@ export async function startHappyAgentRuntime(
             modules: ordered,
             provider,
             providers,
+            sendMode: "all",
+            steeringMode: "all",
         });
         unwind.unshift(async () => await system.close(ctx));
         unwind.unshift(async () => await happy.stop());

@@ -696,7 +696,7 @@ function modeFor(gym: AgentGym) {
 }
 
 async function runTurnForRequest(request: GymInferenceRequest): Promise<GymTurn> {
-    const hasToolResult = request.messages.some((message) => message.role === "tool");
+    const hasToolResult = request.messages.at(-1)?.role === "tool";
     const userText = latestUserText(request);
     if (hasToolResult) return textTurn(`tool-result-${String(request.callIndex)}`);
     if (userText.includes("[question]")) {
@@ -726,7 +726,7 @@ async function runTurnForRequest(request: GymInferenceRequest): Promise<GymTurn>
                             ],
                         },
                     },
-                    callId: `question-${String(request.callIndex)}`,
+                    callId: `question${String(request.callIndex)}`,
                     name: "request_user_input",
                     type: "tool_call",
                 },

@@ -1,0 +1,78 @@
+name: Verify Happy Agent API
+
+on:
+    pull_request:
+        paths:
+            - ".github/workflows/verify-happy-agent-api.yml"
+            - "packages/gym-tests/**"
+            - "packages/happy-agent/**"
+            - "packages/happy-agent-base/**"
+            - "packages/happy-agent-client/**"
+            - "packages/happy-agent-gym/**"
+            - "packages/happy-agent-modules/**"
+            - "package.json"
+            - "pnpm-lock.yaml"
+            - "pnpm-workspace.yaml"
+    push:
+        branches:
+            - main
+        paths:
+            - ".github/workflows/verify-happy-agent-api.yml"
+            - "packages/gym-tests/**"
+            - "packages/happy-agent/**"
+            - "packages/happy-agent-base/**"
+            - "packages/happy-agent-client/**"
+            - "packages/happy-agent-gym/**"
+            - "packages/happy-agent-modules/**"
+            - "package.json"
+            - "pnpm-lock.yaml"
+            - "pnpm-workspace.yaml"
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+concurrency:
+    group: verify-happy-agent-api-${{ github.ref }}
+    cancel-in-progress: true
+
+jobs:
+    test:
+        name: Unprivileged Linux
+        runs-on: ubuntu-22.04
+        timeout-minutes: 45
+        env:
+            HOME: ${{ runner.temp }}/happy-agent-api-home
+            NODE_OPTIONS: --max-old-space-size=6144
+
+        steps:
+            - name: Check out the repository
+              uses: actions/checkout@v6
+
+            - name: Set up pnpm
+              uses: pnpm/action-setup@v6
+
+            - name: Set up Node.js
+              uses: actions/setup-node@v6
+              with:
+                  node-version: "24"
+                  package-manager-cache: false
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Check the API packages
+              run: |
+                  pnpm --filter @slopus/happy-agent-client check
+                  pnpm --filter @slopus/happy-agent-modules check
+                  pnpm --filter @slopus/happy-agent check
+                  pnpm --filter @slopus/happy-agent-gym check
+                  pnpm --filter @slopus/rig-gym-tests check
+
+            - name: Build the daemon
+              run: |
+                  pnpm --filter @slopus/happy-agent-modules build
+                  pnpm --filter @slopus/happy-agent build
+
+            - name: Run the complete API gym
+              run: pnpm test:gym:api
