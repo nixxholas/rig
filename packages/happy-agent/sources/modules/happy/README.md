@@ -93,11 +93,15 @@ durable agent has been restored there is no honest answer to give — a phone wo
 be shown a row of sessions that all look idle and then watch them correct
 themselves.
 
-Nothing about talking to Happy is handed in. Where the credentials live and what
-version to report come from the configuration, and the socket is opened by
-`connectHappySocket`; a client accepts a socket factory only so a test can drive
-one by hand. A machine that has never been paired with Happy has no credentials,
-and that is the whole of the decision about whether to connect.
+Nothing about talking to Happy is handed in, and nothing it takes is anything
+other than another module. Where the credentials live and what version to report
+are asked of the config module; which agent this machine acts as is asked of the
+installation module that settles it; the conversation catalog, the journal, the
+questions a person answers and the folders a session may start in are the modules
+that own them. The socket is opened by `connectHappySocket`; a client accepts a
+socket factory only so a test can drive one by hand. A machine that has never
+been paired with Happy has no credentials, and that is the whole of the decision
+about whether to connect.
 
 ## The session client
 

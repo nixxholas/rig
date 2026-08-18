@@ -12,9 +12,9 @@ import {
 } from "@slopus/happy-agent-base";
 import type {
     AgentEvent,
+    ConfigModule,
     EventsModule,
     EventsModuleListener,
-    HappyAgentConfiguration,
     SchedulingModule,
     UserInputModule,
     UserInputRequest,
@@ -42,6 +42,7 @@ import {
     sessionSelection,
     type SessionSelection,
 } from "../http/sessionSelection.js";
+import type { InstallationModule } from "../installation/InstallationModule.js";
 import { importHappyCredentials } from "./credentials/importHappyCredentials.js";
 import type { HappySpawnOperations } from "./handleHappySpawnSession.js";
 import type { HappyConnectionConfiguration } from "./HappyCredentials.js";
@@ -61,24 +62,21 @@ import { HappyMessageMapper } from "./mapHappyMessages.js";
 const MAX_CONNECTED_AGENTS = 64;
 
 /**
- * Everything Happy works through, all of it settled before the agent collection opens.
+ * The modules Happy works through, all of them settled before the agent collection opens.
  *
- * The credentials folder and the version this build reports come out of the configuration rather
- * than from a caller, so nothing about talking to Happy has to be handed in from outside. The agent
- * collection is the one exception, because creating it is what starts these modules; it arrives at
- * `beforeStart`.
+ * Every one of these is a module, and nothing else is: the credentials folder and the version this
+ * build reports are asked of the configuration, and the root agent's identity is asked of the
+ * installation that settles it. The agent collection is the one thing that cannot be a constructor
+ * argument, because creating it is what starts these modules; it arrives at `beforeStart`.
  */
 export interface HappyModuleOptions {
-    readonly configuration: HappyAgentConfiguration;
+    /** Where the credentials live, what version to report, and how a session starts out. */
+    readonly config: ConfigModule;
     readonly conversations: ConversationModule;
     /** The journal Happy projects, and writes its own session events to. */
     readonly events: EventsModule;
-    readonly fetch?: typeof fetch;
-    /**
-     * The root agent's identity, which the installation only settles as these modules start,
-     * so it is asked for rather than captured.
-     */
-    readonly rootAgentId: () => string;
+    /** Which agent this machine acts as, which is who a session started from the phone belongs to. */
+    readonly installation: InstallationModule;
     readonly scheduling: SchedulingModule;
     readonly userInput: UserInputModule;
     readonly workspaces: WorkspacesModule;
@@ -187,7 +185,7 @@ export class HappyModule
         // Credentials are the switch: a machine that has never been paired with Happy has said
         // everything there is to say about whether it wants to talk to it.
         const configuration = await importHappyCredentials({
-            dataDirectory: this.#options.configuration.paths.agentHome,
+            dataDirectory: this.#options.config.configuration.paths.agentHome,
         });
         if (configuration === undefined) {
             ctx.log.debug("Happy is not connected on this machine.");
@@ -204,12 +202,11 @@ export class HappyModule
         this.#machine = new HappyMachineClient({
             configuration,
             context,
-            ...(this.#options.fetch === undefined ? {} : { fetch: this.#options.fetch }),
             models: () => this.models(),
             operations: this,
             remoteSessionId: async (agentId) =>
                 (await this.#sync.readSession(context, agentId))?.remoteSessionId,
-            version: this.#options.configuration.version,
+            version: this.#options.config.configuration.version,
         });
         this.#machine.start();
     }
@@ -355,10 +352,10 @@ export class HappyModule
         const existing = await options.conversations.get(ctx, request.sessionId);
         if (existing !== undefined) return { agentId: existing.agentId };
 
-        const rootConfig = (await system.config(ctx, options.rootAgentId())) ?? {};
+        const rootConfig = (await system.config(ctx, options.installation.rootAgentId)) ?? {};
         const owner = await resolveSessionOwner(
             ctx,
-            { rootAgentId: options.rootAgentId(), workspaces: options.workspaces },
+            { rootAgentId: options.installation.rootAgentId, workspaces: options.workspaces },
             { cwd: request.cwd },
         );
         // Creating an agent writes its own conversation from defaults that know nothing of this
@@ -420,11 +417,10 @@ export class HappyModule
                 agentId,
                 configuration,
                 context,
-                ...(this.#options.fetch === undefined ? {} : { fetch: this.#options.fetch }),
                 operations: this,
                 sessionId: session.sessionId,
                 sync: this.#sync,
-                version: this.#options.configuration.version,
+                version: this.#options.config.configuration.version,
             }),
             mapper: new HappyMessageMapper(),
         };
@@ -475,7 +471,7 @@ export class HappyModule
     #catalogSelection(): SessionSelection {
         return catalogSelection(
             this.#system().models,
-            this.#options.configuration.values.defaults.permissionMode,
+            this.#options.config.configuration.values.defaults.permissionMode,
         );
     }
 

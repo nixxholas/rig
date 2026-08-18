@@ -1,18 +1,13 @@
 import { chmod, mkdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
 
-import { createId } from "@paralleldrive/cuid2";
 import {
     AgentStorage,
     AgentSystemLocal,
-    agentDatabaseRows,
-    agentDatabaseRun,
     currentAgentEnvironment,
     withAgentDatabase,
     type Agent,
-    type AgentDatabase,
     type AgentModel,
     type AgentModule,
     type AgentProviders,
@@ -58,7 +53,6 @@ import {
     type HostCompute,
     type PresenceModuleOptions,
 } from "@slopus/happy-agent-modules";
-import { sql } from "drizzle-orm";
 import type { LibSQLDatabase } from "drizzle-orm/libsql";
 import { createRootContext, detach, type Context, type RootContext } from "@steve.kite/stdlib";
 
@@ -69,6 +63,7 @@ import { acquireHappyAgentStorageLock } from "../modules/agent/HappyAgentStorage
 import { readGlobalInstructions } from "../modules/agent/readGlobalInstructions.js";
 import { ConversationModule } from "../modules/conversations/ConversationModule.js";
 import { HappyModule } from "../modules/happy/index.js";
+import { InstallationModule } from "../modules/installation/InstallationModule.js";
 import { GitStateTracker, directGitCommandRunner } from "@slopus/happy-agent-modules";
 import type { ProjectCreatorProfile } from "@slopus/happy-agent-modules";
 
@@ -507,17 +502,16 @@ export async function startHappyAgent(
             },
         });
         // Happy is built here rather than beside the other modules because it works through them:
-        // the conversation catalog, the journal it also projects, the questions a person answers on
-        // their phone, and the folders a session may be started in. Everything else it needs — where
-        // the credentials live, what version to report, whether the integration is wanted at all —
-        // it reads from the configuration, so nothing about talking to Happy is decided here. The
-        // root agent's identity is the one thing still unsettled: the installation names it while
-        // these modules start, and Happy only asks once they have.
+        // the configuration that says where the credentials live and what version to report, the
+        // installation that knows which agent this machine acts as, the conversation catalog, the
+        // journal it also projects, the questions a person answers on their phone, and the folders
+        // a session may be started in. Nothing about talking to Happy is decided here.
+        const installation = new InstallationModule();
         const happy = new HappyModule({
-            configuration,
+            config,
             conversations,
             events,
-            rootAgentId: () => rootAgentId,
+            installation,
             scheduling,
             userInput,
             workspaces,
@@ -571,7 +565,6 @@ export async function startHappyAgent(
         // Order is dependency order: a module may rely on anything started before it. Permissions
         // precedes the reviewer's own archive, which observes the same hooks reviewed agents emit;
         // compute precedes events so a tool's effects are journaled after they exist.
-        let installation: Installation | undefined;
         const ordered: AgentModule<AnyAgentTool, LibSQLDatabase>[] = [
             modules.config,
             modules.observation,
@@ -604,9 +597,7 @@ export async function startHappyAgent(
             // Happy declares no tools and no beforeStart; it is here so its own sync migrations run
             // in the same pass as every other module's, and it is connected to the phone later.
             modules.happy,
-            installationModule((found) => {
-                installation = found;
-            }),
+            installation,
         ].map(checkModuleToolParameters);
 
         const storage = new AgentStorage({
@@ -620,9 +611,6 @@ export async function startHappyAgent(
             providers,
         });
         unwind.unshift(async () => await system.close(ctx));
-        if (installation === undefined) {
-            throw new Error("The Happy agent identity was not established while starting.");
-        }
         const rootAgentId = installation.rootAgentId;
 
         // The root agent is the conversation a person opens when they start Rig. It works in the
@@ -776,74 +764,6 @@ async function localGitProfile(instanceId: string): Promise<ProjectCreatorProfil
     const [email, name] = await Promise.all([read("user.email"), read("user.name")]);
     if (email === undefined || name === undefined) return undefined;
     return { email, name, parentInstanceId: instanceId };
-}
-
-interface Installation {
-    readonly epoch: string;
-    readonly rootAgentId: string;
-    readonly schemaVersion: number;
-}
-
-/**
- * Remembers what this `.happy` folder is: which conversation is its root, and which installation it
- * has been since the first time anyone started here.
- *
- * It is a module so that it is created by the same migration pass as everything else.
- */
-function installationModule(
-    found: (installation: Installation) => void,
-): AgentModule<AnyAgentTool, LibSQLDatabase> {
-    return {
-        name: "happy-agent-installation",
-        migrations: [
-            [
-                "001-root-agent",
-                async (_ctx, database) => {
-                    await agentDatabaseRun(
-                        database,
-                        sql`CREATE TABLE IF NOT EXISTS happy_agent_loader_state (
-                            key TEXT PRIMARY KEY,
-                            value TEXT NOT NULL
-                        )`,
-                    );
-                },
-            ],
-        ],
-        beforeStart: async (ctx) => {
-            found(await ctx.inTx(async (txCtx) => await readInstallation(txCtx.db)));
-        },
-    };
-}
-
-async function readInstallation(database: AgentDatabase): Promise<Installation> {
-    const rows = await agentDatabaseRows<{ key: string; value: string }>(
-        database,
-        sql`SELECT key, value FROM happy_agent_loader_state
-            WHERE key IN ('root_agent_id', 'installation_epoch', 'schema_version')`,
-    );
-    const values = new Map(rows.map((row) => [row.key, row.value]));
-    const rootAgentId = values.get("root_agent_id") ?? createId();
-    if (!/^[a-z][a-z0-9]+$/.test(rootAgentId)) {
-        throw new Error("The stored root agent identity is invalid.");
-    }
-    const epoch = values.get("installation_epoch") ?? randomUUID();
-    const storedVersion = values.get("schema_version");
-    const schemaVersion = storedVersion === undefined ? 1 : Number.parseInt(storedVersion, 10);
-    if (!Number.isSafeInteger(schemaVersion) || schemaVersion < 1) {
-        throw new Error("The stored Happy agent schema version is invalid.");
-    }
-    for (const [key, value] of [
-        ["root_agent_id", rootAgentId],
-        ["installation_epoch", epoch],
-        ["schema_version", String(schemaVersion)],
-    ] as const) {
-        if (values.has(key)) continue;
-        await agentDatabaseRun(
-            database,
-            sql`INSERT INTO happy_agent_loader_state (key, value) VALUES (${key}, ${value})`,
-        );
-    }
-    return { epoch, rootAgentId, schemaVersion };
 }
 
 type ConfiguredPresence = NonNullable<PresenceModuleOptions["catalog"]>[number];
