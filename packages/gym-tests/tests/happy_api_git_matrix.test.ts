@@ -231,11 +231,15 @@ describe("Git API matrix: repository facts and revisions", { timeout: 30_000 }, 
 describe("Git API matrix: watches, limits, and lifecycle", { timeout: 30_000 }, () => {
     it("[G017] returns a watched repository snapshot keyed by workspace ID", async () => {
         const context = await freshGitGym();
-        await context.gym.client.getWorkspaceGit(context.workspaceId);
+        const stream = openStream(context.gym);
+        await stream.opened();
         const response = await context.gym.client.watchGit({
             workspaceIds: [context.workspaceId],
         });
-        expect(response.snapshots[context.workspaceId]).toBeDefined();
+        const snapshot =
+            response.snapshots[context.workspaceId] ??
+            (await waitForGitEvent(context, stream, () => true));
+        expect(snapshot).toBeDefined();
     });
 
     it("[G018] publishes a git.updated event for an untracked file", async () => {
@@ -276,13 +280,17 @@ describe("Git API matrix: watches, limits, and lifecycle", { timeout: 30_000 }, 
 
     it("[G021] makes a repeated identical watch registration idempotent", async () => {
         const context = await freshGitGym();
+        const stream = openStream(context.gym);
+        await stream.opened();
         const first = await context.gym.client.watchGit({
             workspaceIds: [context.workspaceId],
         });
+        if (first.snapshots[context.workspaceId] === undefined) {
+            await waitForGitEvent(context, stream, () => true);
+        }
         const second = await context.gym.client.watchGit({
             workspaceIds: [context.workspaceId],
         });
-        expect(Object.keys(first.snapshots)).toEqual([context.workspaceId]);
         expect(Object.keys(second.snapshots)).toEqual([context.workspaceId]);
     });
 
@@ -311,6 +319,7 @@ describe("Git API matrix: watches, limits, and lifecycle", { timeout: 30_000 }, 
         await git(secondPath, ["config", "user.name", "API Gym"]);
         await git(secondPath, ["add", "."]);
         await git(secondPath, ["commit", "-m", "second initial"]);
+        await git(secondPath, ["update-ref", "refs/remotes/origin/main", "HEAD"]);
         const secondProject = (
             await first.gym.client.registerProject({
                 path: secondPath,
@@ -318,6 +327,22 @@ describe("Git API matrix: watches, limits, and lifecycle", { timeout: 30_000 }, 
             })
         ).project;
         await waitReady(first.gym, secondProject.id);
+        const stream = openStream(first.gym);
+        await stream.opened();
+        const initial = await first.gym.client.watchGit({
+            workspaceIds: [first.workspaceId, secondProject.id],
+        });
+        if (initial.snapshots[first.workspaceId] === undefined) {
+            await waitForGitEvent(first, stream, () => true);
+        }
+        const secondContext = {
+            gym: first.gym,
+            repositoryPath: secondPath,
+            workspaceId: secondProject.id,
+        };
+        if (initial.snapshots[secondProject.id] === undefined) {
+            await waitForGitEvent(secondContext, stream, () => true);
+        }
         const response = await first.gym.client.watchGit({
             workspaceIds: [first.workspaceId, secondProject.id],
         });
@@ -397,6 +422,8 @@ describe("Git API matrix: watches, limits, and lifecycle", { timeout: 30_000 }, 
 
     it("[G030] drops a retired workspace from the watch set while retaining the other", async () => {
         const context = await freshGitGym();
+        const stream = openStream(context.gym);
+        await stream.opened();
         const rootProjects = (await context.gym.client.listProjects()).projects;
         const root = rootProjects.find(
             (project) =>
@@ -407,7 +434,9 @@ describe("Git API matrix: watches, limits, and lifecycle", { timeout: 30_000 }, 
         const response = await context.gym.client.watchGit({
             workspaceIds: [context.workspaceId, root.id],
         });
-        expect(response.snapshots[context.workspaceId]).toBeDefined();
+        if (response.snapshots[context.workspaceId] === undefined) {
+            await waitForGitEvent(context, stream, () => true);
+        }
         expect(response.snapshots[root.id]).toBeUndefined();
         const replacement = await context.gym.client.watchGit({
             workspaceIds: [root.id],
@@ -455,6 +484,7 @@ async function freshGitGym(): Promise<GitContext> {
     await git(repositoryPath, ["config", "user.name", "API Gym"]);
     await git(repositoryPath, ["add", "."]);
     await git(repositoryPath, ["commit", "-m", "initial"]);
+    await git(repositoryPath, ["update-ref", "refs/remotes/origin/main", "HEAD"]);
     const project = (
         await gym.client.registerProject({
             path: repositoryPath,

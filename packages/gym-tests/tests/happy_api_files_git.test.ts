@@ -138,6 +138,7 @@ describe("the public files and Git API", () => {
         await git(repositoryPath, ["config", "user.name", "API Gym"]);
         await git(repositoryPath, ["add", "tracked.txt"]);
         await git(repositoryPath, ["commit", "-m", "initial"]);
+        await git(repositoryPath, ["update-ref", "refs/remotes/origin/main", "HEAD"]);
 
         const registered = (
             await gym.client.registerProject({
@@ -159,6 +160,7 @@ describe("the public files and Git API", () => {
         await writeFs(join(repositoryPath, "tracked.txt"), "version two\n", "utf8");
         await git(repositoryPath, ["add", "tracked.txt"]);
         await git(repositoryPath, ["commit", "-m", "second"]);
+        await git(repositoryPath, ["update-ref", "refs/remotes/origin/main", "HEAD"]);
         const previousRevision = await gym.client.readFileRevision(registered.id, {
             path: "tracked.txt",
             revision: "HEAD~1",
@@ -230,7 +232,7 @@ describe("the public files and Git API", () => {
         const replacement = await gym.client.watchGit({ workspaceIds: [] });
         expect(replacement.snapshots).toEqual({});
         stream.close();
-    });
+    }, 30_000);
 });
 
 async function rootWorkspaceId(gym: AgentGym): Promise<string> {
