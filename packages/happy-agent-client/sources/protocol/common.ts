@@ -1,122 +1,123 @@
 /**
  * The small values every chapter of the API shares.
  *
- * Types in this package are hand-written rather than derived from a schema
- * library: the client ships with zero runtime dependencies, so nothing here is
- * validated at runtime. Every shape is a compile-time promise about what the
- * daemon sends, kept faithful to `packages/happy-agent/API.md`.
+ * Everything the daemon sends is declared here as a TypeBox schema and the
+ * TypeScript type is derived from it with `Static`, so one declaration is both
+ * the compile-time contract and the runtime check the client validates
+ * responses and events against.
  *
- * Closed unions describe the values the specification names today. The
- * specification says several of these sets grow with the product, so a value
- * arriving from a newer daemon simply matches no variant: branch with `default`
- * rather than asserting exhaustiveness.
+ * Objects are deliberately not `additionalProperties: false`: the
+ * specification says its shapes grow, and a client must keep working when a
+ * newer daemon adds a field it has never heard of.
  */
 
+import { type Static, type TSchema, Type } from "@sinclair/typebox";
+
+/** A value that may be absent by being explicitly `null`. */
+export function Nullable<T extends TSchema>(schema: T) {
+    return Type.Union([schema, Type.Null()]);
+}
+
 /** A CUID2 identifier: opaque, URL-safe, and never ordered by the client. */
-export type Cuid2 = string;
+export const cuid2Schema = Type.String();
+export type Cuid2 = Static<typeof cuid2Schema>;
 
 /** A UUIDv7 position in the event journal; greater means newer. */
-export type EventCursor = string;
+export const eventCursorSchema = Type.String();
+export type EventCursor = Static<typeof eventCursorSchema>;
 
 /** A UUIDv7 resource version, minted at the moment the resource changed. */
-export type ResourceVersion = string;
+export const resourceVersionSchema = Type.String();
+export type ResourceVersion = Static<typeof resourceVersionSchema>;
 
 /** Unix epoch milliseconds. */
-export type Timestamp = number;
+export const timestampSchema = Type.Integer();
+export type Timestamp = Static<typeof timestampSchema>;
+
+/** The opaque echo a client attaches to a mutation to recognize its own change. */
+export const mutationIdSchema = Type.String();
+export type MutationId = Static<typeof mutationIdSchema>;
 
 /**
  * An effort level, named by the config catalog (`"medium"`, `"xhigh"`, …).
  *
- * The catalog is data the daemon serves rather than a fixed set, so the allowed
- * values for a model are read from its definition in `GET /v0/config`.
+ * The catalog is data the daemon serves rather than a fixed set, so the values
+ * a model allows are read from its definition in `GET /v0/config`.
  */
-export type Effort = string;
+export const effortSchema = Type.String();
+export type Effort = Static<typeof effortSchema>;
 
-/** A service tier, named by the config catalog; `null` means the default tier. */
-export type ServiceTier = string;
+/** A service tier, named by the config catalog. */
+export const serviceTierSchema = Type.String();
+export type ServiceTier = Static<typeof serviceTierSchema>;
 
 /** How much a run is allowed to do without asking. */
-export type PermissionMode = "read_only" | "workspace_write" | "auto" | "full_access";
+export const permissionModeSchema = Type.Union([
+    Type.Literal("read_only"),
+    Type.Literal("workspace_write"),
+    Type.Literal("auto"),
+    Type.Literal("full_access"),
+]);
+export type PermissionMode = Static<typeof permissionModeSchema>;
 
 /** The model selection and permission mode a message runs with. */
-export interface MessageMode {
-    providerId: string;
-    modelId: string;
-    effort: Effort;
-    serviceTier: ServiceTier | null;
-    permissionMode: PermissionMode;
-}
+export const messageModeSchema = Type.Object({
+    effort: effortSchema,
+    modelId: Type.String(),
+    permissionMode: permissionModeSchema,
+    providerId: Type.String(),
+    /** `null` means the provider's default tier. */
+    serviceTier: Nullable(serviceTierSchema),
+});
+export type MessageMode = Static<typeof messageModeSchema>;
+
+/** A folder on this machine. */
+export const hostComputeSchema = Type.Object({
+    path: Type.String(),
+    type: Type.Literal("host"),
+});
+export type HostCompute = Static<typeof hostComputeSchema>;
+
+/** A container the daemon runs work in. */
+export const dockerComputeSchema = Type.Object({
+    image: Type.String(),
+    type: Type.Literal("docker"),
+});
+export type DockerCompute = Static<typeof dockerComputeSchema>;
 
 /** Where files live and where work on them executes. */
-export type Compute = HostCompute | DockerCompute;
+export const computeSchema = Type.Union([hostComputeSchema, dockerComputeSchema]);
+export type Compute = Static<typeof computeSchema>;
 
-export interface HostCompute {
-    type: "host";
-    path: string;
-}
-
-export interface DockerCompute {
-    type: "docker";
-    image: string;
-}
-
-/** A compute choice made before anything runs, so it carries no addressing yet. */
-export type ComputeSelection = { type: "host" } | { type: "docker"; image: string };
+/** A compute chosen before anything runs, so it carries no addressing yet. */
+export const computeSelectionSchema = Type.Union([
+    Type.Object({ type: Type.Literal("host") }),
+    Type.Object({ image: Type.String(), type: Type.Literal("docker") }),
+]);
+export type ComputeSelection = Static<typeof computeSelectionSchema>;
 
 /** How far a project or workspace got through its setup. */
-export interface InitializationState {
-    status: "initializing" | "ready" | "failed";
+export const initializationStateSchema = Type.Object({
     /** How many setup runs have been attempted. */
-    attempt: number;
+    attempt: Type.Integer(),
     /** A human-readable message when setup failed. */
-    error: string | null;
-}
+    error: Nullable(Type.String()),
+    status: Type.Union([
+        Type.Literal("initializing"),
+        Type.Literal("ready"),
+        Type.Literal("failed"),
+    ]),
+});
+export type InitializationState = Static<typeof initializationStateSchema>;
 
 /** Where a repository stands, as reported on projects, workspaces, and git state. */
-export interface GitSummary {
+export const gitSummarySchema = Type.Object({
+    ahead: Type.Integer(),
+    behind: Type.Integer(),
     /** The current branch; absent or `null` on a detached HEAD. */
-    branch?: string | null;
-    detached: boolean;
-    head: string;
-    upstream: string | null;
-    ahead: number;
-    behind: number;
-}
-
-/** Options every request accepts. */
-export interface RequestOptions {
-    /** Cancels the request; the rejection is the signal's abort reason. */
-    signal?: AbortSignal | undefined;
-}
-
-/** Options for a mutation the daemon guards with `If-Match`. */
-export interface VersionedRequestOptions extends RequestOptions {
-    /** The `version` the client last saw, sent as the `If-Match` header. */
-    ifMatch: string;
-}
-
-/** Options for a mutation that honors `If-Match` without requiring it. */
-export interface OptionallyVersionedRequestOptions extends RequestOptions {
-    /** The `version` the client last saw, sent as the `If-Match` header. */
-    ifMatch?: string | undefined;
-}
-
-/** An image the daemon accepts as a picture. */
-export type ImageMimeType = "image/png" | "image/jpeg" | "image/webp";
-
-/** Bytes to upload, in whichever form the caller already holds them. */
-export type BinaryData = ArrayBuffer | ArrayBufferView<ArrayBuffer>;
-
-/** An image being uploaded. */
-export interface ImageUpload {
-    contentType: ImageMimeType;
-    data: BinaryData;
-}
-
-/** Image bytes served by the daemon. */
-export interface BinaryContent {
-    contentType: string;
-    data: ArrayBuffer;
-    /** The entity tag, when the endpoint serves conditional requests. */
-    etag: string | null;
-}
+    branch: Type.Optional(Nullable(Type.String())),
+    detached: Type.Boolean(),
+    head: Type.String(),
+    upstream: Nullable(Type.String()),
+});
+export type GitSummary = Static<typeof gitSummarySchema>;

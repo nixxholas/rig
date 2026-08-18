@@ -1,11 +1,12 @@
+import type { Cuid2 } from "./protocol/common.js";
 import type {
     BinaryContent,
-    Cuid2,
+    ConditionalRequestOptions,
     ImageUpload,
     OptionallyVersionedRequestOptions,
     RequestOptions,
     VersionedRequestOptions,
-} from "./protocol/common.js";
+} from "./requestOptions.js";
 import type {
     AbortAgentRequest,
     Agent,
@@ -1147,12 +1148,6 @@ export class HappyAgentClient {
         if (response.status === 304 && request.allowNotModified === true) return response;
         throw await readApiError(response);
     }
-}
-
-/** Options for a read that may answer `304 Not Modified`. */
-export interface ConditionalRequestOptions extends RequestOptions {
-    /** The `ETag` the client already holds, sent as `If-None-Match`. */
-    ifNoneMatch?: string | undefined;
 }
 
 /**

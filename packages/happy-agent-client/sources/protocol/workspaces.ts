@@ -1,98 +1,113 @@
 /** Workspaces: a checkout with its own folder, its own branch, and its place in a tree. */
 
-import type {
-    Compute,
-    Cuid2,
-    GitSummary,
-    InitializationState,
-    ResourceVersion,
-    Timestamp,
+import { type Static, Type } from "@sinclair/typebox";
+
+import {
+    computeSchema,
+    cuid2Schema,
+    gitSummarySchema,
+    initializationStateSchema,
+    mutationIdSchema,
+    Nullable,
+    resourceVersionSchema,
+    timestampSchema,
 } from "./common.js";
 
 /** What the workspace was created from. */
-export interface WorkspaceBase {
+export const workspaceBaseSchema = Type.Object({
+    /** The commit the ref resolved to at creation time. */
+    commit: Type.String(),
     /** The ref the caller named. */
-    ref: string;
-    /** The commit that ref resolved to at creation time. */
-    commit: string;
-}
+    ref: Type.String(),
+});
+export type WorkspaceBase = Static<typeof workspaceBaseSchema>;
 
 /** The workspace object. A project's root workspace shares the project's ID. */
-export interface Workspace {
-    id: Cuid2;
-    /** The root of this workspace's tree. */
-    projectId: Cuid2;
-    /** `null` on the root workspace. */
-    parentId: Cuid2 | null;
-    /** The display name, which is also the branch name behind the checkout. */
-    name: string;
-    nameSource: "user" | "generated";
-    /** How the checkout was made. */
-    kind: "root" | "worktree" | "copy";
-    compute: Compute;
-    /** `"archiving"` is the window where the decision is durable but cleanup runs. */
-    status: "active" | "archiving" | "archived";
-    initialization: InitializationState;
+export const workspaceSchema = Type.Object({
+    archivedAt: Nullable(timestampSchema),
     /** `null` on a root workspace, which was not branched from anything. */
-    base: WorkspaceBase | null;
-    git: GitSummary | null;
+    base: Nullable(workspaceBaseSchema),
+    compute: computeSchema,
+    createdAt: timestampSchema,
     /** The agent that created this workspace; `null` when a person did. */
-    creatorAgentId: Cuid2 | null;
+    creatorAgentId: Nullable(cuid2Schema),
+    git: Nullable(gitSummarySchema),
+    id: cuid2Schema,
+    initialization: initializationStateSchema,
+    /** How the checkout was made. */
+    kind: Type.Union([Type.Literal("root"), Type.Literal("worktree"), Type.Literal("copy")]),
+    /** The display name, which is also the branch name behind the checkout. */
+    name: Type.String(),
+    nameSource: Type.Union([Type.Literal("user"), Type.Literal("generated")]),
     /** Orders this workspace among the siblings sharing its parent. */
-    orderKey: string;
-    version: ResourceVersion;
-    createdAt: Timestamp;
-    updatedAt: Timestamp;
-    archivedAt: Timestamp | null;
-}
+    orderKey: Type.String(),
+    /** `null` on the root workspace. */
+    parentId: Nullable(cuid2Schema),
+    /** The root of this workspace's tree. */
+    projectId: cuid2Schema,
+    /** `"archiving"` is the window where the decision is durable but cleanup runs. */
+    status: Type.Union([
+        Type.Literal("active"),
+        Type.Literal("archiving"),
+        Type.Literal("archived"),
+    ]),
+    updatedAt: timestampSchema,
+    version: resourceVersionSchema,
+});
+export type Workspace = Static<typeof workspaceSchema>;
 
 /** `GET /v0/workspaces` — a flat array; clients build the tree from `parentId`. */
-export interface WorkspaceListResponse {
-    workspaces: Workspace[];
-}
+export const workspaceListResponseSchema = Type.Object({
+    workspaces: Type.Array(workspaceSchema),
+});
+export type WorkspaceListResponse = Static<typeof workspaceListResponseSchema>;
 
 /** Every single-workspace route answers with this. */
-export interface WorkspaceResponse {
-    workspace: Workspace;
-}
+export const workspaceResponseSchema = Type.Object({ workspace: workspaceSchema });
+export type WorkspaceResponse = Static<typeof workspaceResponseSchema>;
 
 /** `GET /v0/workspaces` query parameters. */
-export interface ListWorkspacesQuery {
-    /** Only this project's tree. */
-    projectId?: Cuid2;
+export const listWorkspacesQuerySchema = Type.Object({
     /** Archived and archiving workspaces are history; default `false`. */
-    includeArchived?: boolean;
-}
+    includeArchived: Type.Optional(Type.Boolean()),
+    /** Only this project's tree. */
+    projectId: Type.Optional(cuid2Schema),
+});
+export type ListWorkspacesQuery = Static<typeof listWorkspacesQuerySchema>;
 
 /** `POST /v0/workspaces` */
-export interface CreateWorkspaceRequest {
-    /** The workspace to nest under: a root workspace or any workspace in a tree. */
-    parentId: Cuid2;
-    /** The workspace name, which is also its branch name. */
-    name?: string;
-    /** The ref to branch from; defaults to the parent's current branch. */
-    baseRef?: string;
-    /** Optional client-supplied ID. */
-    id?: Cuid2;
+export const createWorkspaceRequestSchema = Type.Object({
     /** Records the creating agent as `creatorAgentId`. */
-    agentId?: Cuid2;
-    mutationId?: string;
-}
+    agentId: Type.Optional(cuid2Schema),
+    /** The ref to branch from; defaults to the parent's current branch. */
+    baseRef: Type.Optional(Type.String()),
+    /** Optional client-supplied ID. */
+    id: Type.Optional(cuid2Schema),
+    mutationId: Type.Optional(mutationIdSchema),
+    /** The workspace name, which is also its branch name. */
+    name: Type.Optional(Type.String()),
+    /** The workspace to nest under: a root workspace or any workspace in a tree. */
+    parentId: cuid2Schema,
+});
+export type CreateWorkspaceRequest = Static<typeof createWorkspaceRequestSchema>;
 
 /** `PATCH /v0/workspaces/:workspaceId` */
-export interface RenameWorkspaceRequest {
-    name: string;
-    mutationId?: string;
-}
+export const renameWorkspaceRequestSchema = Type.Object({
+    mutationId: Type.Optional(mutationIdSchema),
+    name: Type.String(),
+});
+export type RenameWorkspaceRequest = Static<typeof renameWorkspaceRequestSchema>;
 
 /** `POST /v0/workspaces/:workspaceId/archive` */
-export interface ArchiveWorkspaceRequest {
-    mutationId?: string;
-}
+export const archiveWorkspaceRequestSchema = Type.Object({
+    mutationId: Type.Optional(mutationIdSchema),
+});
+export type ArchiveWorkspaceRequest = Static<typeof archiveWorkspaceRequestSchema>;
 
 /** `POST /v0/workspaces/:workspaceId/reorder` */
-export interface ReorderWorkspaceRequest {
+export const reorderWorkspaceRequestSchema = Type.Object({
     /** The sibling to place this one after, or `null` to move it first. */
-    afterId: Cuid2 | null;
-    mutationId?: string;
-}
+    afterId: Nullable(cuid2Schema),
+    mutationId: Type.Optional(mutationIdSchema),
+});
+export type ReorderWorkspaceRequest = Static<typeof reorderWorkspaceRequestSchema>;

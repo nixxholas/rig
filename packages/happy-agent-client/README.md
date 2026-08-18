@@ -13,5 +13,5 @@ typed async iterator that a caller cancels with an `AbortSignal`. It keeps no st
 caching, version reconciliation, optimistic mutations, reconnection, and the live chat
 state land on top of it as the API takes shape.
 
-The package has no runtime dependencies, and every type is hand-written from the
-specification.
+Protocol values are declared once as TypeBox schemas, with their TypeScript types
+derived from those schemas.

@@ -1,6 +1,8 @@
 /** The daemon itself: its greeting, health, configuration, and debug surface. */
 
-import type { Effort, PermissionMode, ServiceTier } from "./common.js";
+import { type Static, Type } from "@sinclair/typebox";
+
+import { effortSchema, Nullable, permissionModeSchema, serviceTierSchema } from "./common.js";
 
 /**
  * The wire protocol this client was built for.
@@ -11,229 +13,256 @@ import type { Effort, PermissionMode, ServiceTier } from "./common.js";
 export const HAPPY_AGENT_PROTOCOL_VERSION = 17;
 
 /** `GET /` — a greeting confirming the caller reached a Happy agent. */
-export interface GreetingResponse {
-    text: string;
-}
+export const greetingResponseSchema = Type.Object({ text: Type.String() });
+export type GreetingResponse = Static<typeof greetingResponseSchema>;
 
 /** What a daemon says about itself. */
-export interface DaemonVersion {
-    /** The wire protocol number; the client's compatibility check. */
-    protocol: number;
+export const daemonVersionSchema = Type.Object({
     /** The product version string, for display and diagnostics. */
-    daemon: string;
-}
+    daemon: Type.String(),
+    /** The wire protocol number; the client's compatibility check. */
+    protocol: Type.Integer(),
+});
+export type DaemonVersion = Static<typeof daemonVersionSchema>;
 
 /** `GET /v0/health` */
-export interface HealthResponse {
+export const healthResponseSchema = Type.Object({
     /** Always `true`; a daemon that cannot answer does not answer. */
-    healthy: boolean;
+    healthy: Type.Boolean(),
     /** `false` while the agent system is still loading. */
-    ready: boolean;
-    status: "starting" | "ready";
-    version: DaemonVersion;
-}
+    ready: Type.Boolean(),
+    status: Type.Union([Type.Literal("starting"), Type.Literal("ready")]),
+    version: daemonVersionSchema,
+});
+export type HealthResponse = Static<typeof healthResponseSchema>;
 
 /** What a new agent gets when it names nothing. */
-export interface ConfigDefaults {
-    providerId: string;
-    modelId: string;
-    effort: Effort;
-    permissionMode: PermissionMode;
-}
+export const configDefaultsSchema = Type.Object({
+    effort: effortSchema,
+    modelId: Type.String(),
+    permissionMode: permissionModeSchema,
+    providerId: Type.String(),
+});
+export type ConfigDefaults = Static<typeof configDefaultsSchema>;
 
-export interface ConfigFeatures {
-    crossWorkspace: boolean;
-    workflows: boolean;
-    workspaces: boolean;
-}
+export const configFeaturesSchema = Type.Object({
+    crossWorkspace: Type.Boolean(),
+    workflows: Type.Boolean(),
+    workspaces: Type.Boolean(),
+});
+export type ConfigFeatures = Static<typeof configFeaturesSchema>;
 
 /** A configured MCP server, stripped of everything private. */
-export interface McpServerConfig {
-    enabled: boolean;
-    transport: "stdio" | "http";
-}
+export const mcpServerConfigSchema = Type.Object({
+    enabled: Type.Boolean(),
+    transport: Type.Union([Type.Literal("stdio"), Type.Literal("http")]),
+});
+export type McpServerConfig = Static<typeof mcpServerConfigSchema>;
 
 /** The sandbox network policy. */
-export interface NetworkConfig {
-    allowedDomains: string[];
-    deniedDomains: string[];
-    allowedPorts: number[];
-    allowedLoopbackPorts: number[];
-    allowLocalBinding: boolean;
-}
+export const networkConfigSchema = Type.Object({
+    allowedDomains: Type.Array(Type.String()),
+    allowedLoopbackPorts: Type.Array(Type.Integer()),
+    allowedPorts: Type.Array(Type.Integer()),
+    allowLocalBinding: Type.Boolean(),
+    deniedDomains: Type.Array(Type.String()),
+});
+export type NetworkConfig = Static<typeof networkConfigSchema>;
 
 /** Peer-to-peer identity and transports. */
-export interface P2pConfig {
-    name: string;
-    role: string;
-    enableIroh: boolean;
-    enableDirect: boolean;
-    enableSsh: boolean;
-    exposeApi: boolean;
-}
+export const p2pConfigSchema = Type.Object({
+    enableDirect: Type.Boolean(),
+    enableIroh: Type.Boolean(),
+    enableSsh: Type.Boolean(),
+    exposeApi: Type.Boolean(),
+    name: Type.String(),
+    role: Type.String(),
+});
+export type P2pConfig = Static<typeof p2pConfigSchema>;
 
-export interface PermissionsConfig {
+export const permissionsConfigSchema = Type.Object({
     /** Project-relative paths that mutations must not touch unattended. */
-    protectedPaths: string[];
-}
+    protectedPaths: Type.Array(Type.String()),
+});
+export type PermissionsConfig = Static<typeof permissionsConfigSchema>;
 
 /** One presence state the person can be in. */
-export interface PresenceState {
-    title: string;
-    emoji: string;
-    /** What the model is told about the person's availability. */
-    prompt: string;
+export const presenceStateSchema = Type.Object({
     /** How long a question waits for an answer; `null` waits indefinitely. */
-    answerWaitMs: number | null;
-}
+    answerWaitMs: Nullable(Type.Integer()),
+    emoji: Type.String(),
+    /** What the model is told about the person's availability. */
+    prompt: Type.String(),
+    title: Type.String(),
+});
+export type PresenceState = Static<typeof presenceStateSchema>;
 
-export interface PresenceConfig {
-    current: string;
-    fallback: string;
-    states: Record<string, PresenceState>;
-}
+export const presenceConfigSchema = Type.Object({
+    current: Type.String(),
+    fallback: Type.String(),
+    states: Type.Record(Type.String(), presenceStateSchema),
+});
+export type PresenceConfig = Static<typeof presenceConfigSchema>;
 
 /** Everything a client needs to present a model, defined once. */
-export interface ModelDefinition {
-    name: string;
-    efforts: Effort[];
-    defaultEffort: Effort;
+export const modelDefinitionSchema = Type.Object({
+    defaultEffort: effortSchema,
+    efforts: Type.Array(effortSchema),
+    name: Type.String(),
     /** Empty when the model has no service tiers. */
-    serviceTiers: ServiceTier[];
-}
+    serviceTiers: Type.Array(serviceTierSchema),
+});
+export type ModelDefinition = Static<typeof modelDefinitionSchema>;
 
 /**
  * A provider's reference to a model in the top-level catalog.
  *
- * A provider that serves a model with narrower capabilities than the shared
+ * A provider serving a model with narrower capabilities than the shared
  * definition overrides just those fields.
  */
-export interface ProviderModelReference {
-    id: string;
-    enabled: boolean;
-    name?: string;
-    efforts?: Effort[];
-    defaultEffort?: Effort;
-    serviceTiers?: ServiceTier[];
-}
+export const providerModelReferenceSchema = Type.Object({
+    defaultEffort: Type.Optional(effortSchema),
+    efforts: Type.Optional(Type.Array(effortSchema)),
+    enabled: Type.Boolean(),
+    id: Type.String(),
+    name: Type.Optional(Type.String()),
+    serviceTiers: Type.Optional(Type.Array(serviceTierSchema)),
+});
+export type ProviderModelReference = Static<typeof providerModelReferenceSchema>;
 
-export interface ProviderConfig {
+export const providerConfigSchema = Type.Object({
+    enabled: Type.Boolean(),
+    models: Type.Array(providerModelReferenceSchema),
     /** The canonical provider key: `"claude"`, `"codex"`, `"grok"`, … */
-    type: string;
-    enabled: boolean;
-    models: ProviderModelReference[];
-}
+    type: Type.String(),
+});
+export type ProviderConfig = Static<typeof providerConfigSchema>;
 
 /** Daemon behavior toggles and tunables. */
-export interface DaemonSettings {
-    compactCompletedTurns: boolean;
-    completionChime: boolean;
-    inferenceMaxRetries: number;
-    showReasoning: boolean;
-    showUsage: boolean;
-    toolResultRetentionDays: number;
-}
+export const daemonSettingsSchema = Type.Object({
+    compactCompletedTurns: Type.Boolean(),
+    completionChime: Type.Boolean(),
+    inferenceMaxRetries: Type.Integer(),
+    showReasoning: Type.Boolean(),
+    showUsage: Type.Boolean(),
+    toolResultRetentionDays: Type.Integer(),
+});
+export type DaemonSettings = Static<typeof daemonSettingsSchema>;
 
 /** Terminal color assignments. */
-export interface ThemeConfig {
-    primary: string;
-    secondary: string;
-    accent: string;
-    brand: string;
-    success: string;
-    warning: string;
-    error: string;
-}
+export const themeConfigSchema = Type.Object({
+    accent: Type.String(),
+    brand: Type.String(),
+    error: Type.String(),
+    primary: Type.String(),
+    secondary: Type.String(),
+    success: Type.String(),
+    warning: Type.String(),
+});
+export type ThemeConfig = Static<typeof themeConfigSchema>;
 
 /** Workspace lifecycle configuration. */
-export interface WorkspaceConfig {
-    keepCopiesOnArchive: boolean;
-    keepWorktreesOnArchive: boolean;
-    setupCommands: string[];
+export const workspaceConfigSchema = Type.Object({
+    keepCopiesOnArchive: Type.Boolean(),
+    keepWorktreesOnArchive: Type.Boolean(),
+    protectedSync: Type.Array(Type.String()),
+    setupCommands: Type.Array(Type.String()),
     /** Files copied into every new workspace. */
-    sync: string[];
-    protectedSync: string[];
-}
+    sync: Type.Array(Type.String()),
+});
+export type WorkspaceConfig = Static<typeof workspaceConfigSchema>;
 
 /** The daemon's effective configuration, with every secret removed. */
-export interface DaemonConfig {
-    defaults: ConfigDefaults;
-    features: ConfigFeatures;
-    mcpServers: Record<string, McpServerConfig>;
-    network: NetworkConfig;
-    p2p: P2pConfig;
-    permissions: PermissionsConfig;
-    presence: PresenceConfig;
+export const daemonConfigSchema = Type.Object({
+    defaults: configDefaultsSchema,
+    features: configFeaturesSchema,
+    mcpServers: Type.Record(Type.String(), mcpServerConfigSchema),
     /** Every model the daemon knows, keyed by model ID. */
-    models: Record<string, ModelDefinition>;
-    providers: Record<string, ProviderConfig>;
-    settings: DaemonSettings;
-    theme: ThemeConfig;
-    workspace: WorkspaceConfig;
-}
+    models: Type.Record(Type.String(), modelDefinitionSchema),
+    network: networkConfigSchema,
+    p2p: p2pConfigSchema,
+    permissions: permissionsConfigSchema,
+    presence: presenceConfigSchema,
+    providers: Type.Record(Type.String(), providerConfigSchema),
+    settings: daemonSettingsSchema,
+    theme: themeConfigSchema,
+    workspace: workspaceConfigSchema,
+});
+export type DaemonConfig = Static<typeof daemonConfigSchema>;
 
 /** `GET /v0/config` */
-export interface ConfigResponse {
-    config: DaemonConfig;
-}
+export const configResponseSchema = Type.Object({ config: daemonConfigSchema });
+export type ConfigResponse = Static<typeof configResponseSchema>;
 
 /**
  * `PATCH /v0/config` — a runtime settings change.
  *
  * The specification validates the body against "the mutable subset" without
- * enumerating it, so the type admits a partial of any group and leaves the
+ * enumerating it, so the request admits a partial of any group and leaves the
  * daemon to refuse what it will not change at runtime.
  */
-export type ConfigPatch = {
-    [Group in keyof DaemonConfig]?: Partial<DaemonConfig[Group]>;
-};
+export const configPatchSchema = Type.Partial(
+    Type.Object({
+        defaults: Type.Partial(configDefaultsSchema),
+        features: Type.Partial(configFeaturesSchema),
+        network: Type.Partial(networkConfigSchema),
+        p2p: Type.Partial(p2pConfigSchema),
+        permissions: Type.Partial(permissionsConfigSchema),
+        settings: Type.Partial(daemonSettingsSchema),
+        theme: Type.Partial(themeConfigSchema),
+        workspace: Type.Partial(workspaceConfigSchema),
+    }),
+);
+export type ConfigPatch = Static<typeof configPatchSchema>;
 
 /** `GET` and `PUT /v0/config/instructions` */
-export interface InstructionsResponse {
-    instructions: string;
-}
+export const instructionsResponseSchema = Type.Object({ instructions: Type.String() });
+export type InstructionsResponse = Static<typeof instructionsResponseSchema>;
 
 /** `GET` and `PUT /v0/config/security` */
-export interface SecurityPolicyResponse {
-    policy: string;
-}
+export const securityPolicyResponseSchema = Type.Object({ policy: Type.String() });
+export type SecurityPolicyResponse = Static<typeof securityPolicyResponseSchema>;
 
 /** `POST /v0/shutdown` */
-export interface ShutdownResponse {
-    shuttingDown: boolean;
+export const shutdownResponseSchema = Type.Object({
     /** The daemon's process ID, so the caller can confirm the process exited. */
-    pid: number;
-}
+    pid: Type.Integer(),
+    shuttingDown: Type.Boolean(),
+});
+export type ShutdownResponse = Static<typeof shutdownResponseSchema>;
 
 /** `POST /v0/debug/inspector` */
-export interface InspectorStartedResponse {
+export const inspectorStartedResponseSchema = Type.Object({
     /** The devtools websocket URL a debugger attaches to. */
-    inspectorUrl: string;
-}
+    inspectorUrl: Type.String(),
+});
+export type InspectorStartedResponse = Static<typeof inspectorStartedResponseSchema>;
 
 /** `DELETE /v0/debug/inspector` */
-export interface InspectorStoppedResponse {
+export const inspectorStoppedResponseSchema = Type.Object({
     /** `false` when no inspector was running. */
-    stopped: boolean;
-}
+    stopped: Type.Boolean(),
+});
+export type InspectorStoppedResponse = Static<typeof inspectorStoppedResponseSchema>;
 
 /** `GET /v0/onboarding` */
-export interface OnboardingState {
+export const onboardingStateSchema = Type.Object({
     /** Set explicitly when the person finished or dismissed onboarding. */
-    completed: boolean;
-    steps: OnboardingSteps;
-}
-
-export interface OnboardingSteps {
-    /** At least one provider has working credentials. */
-    providers: { done: boolean; signedIn: string[] };
-    /** The profile has a name. */
-    profile: { done: boolean };
-    /** At least one project exists. */
-    project: { done: boolean };
-}
+    completed: Type.Boolean(),
+    steps: Type.Object({
+        /** The profile has a name. */
+        profile: Type.Object({ done: Type.Boolean() }),
+        /** At least one project exists. */
+        project: Type.Object({ done: Type.Boolean() }),
+        /** At least one provider has working credentials. */
+        providers: Type.Object({
+            done: Type.Boolean(),
+            signedIn: Type.Array(Type.String()),
+        }),
+    }),
+});
+export type OnboardingState = Static<typeof onboardingStateSchema>;
 
 /** `POST /v0/onboarding/complete` */
-export interface OnboardingCompletedResponse {
-    completed: boolean;
-}
+export const onboardingCompletedResponseSchema = Type.Object({ completed: Type.Boolean() });
+export type OnboardingCompletedResponse = Static<typeof onboardingCompletedResponseSchema>;

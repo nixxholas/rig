@@ -1,5 +1,5 @@
 export { HappyAgentClient } from "./HappyAgentClient.js";
-export type { ConditionalRequestOptions, HappyAgentClientOptions } from "./HappyAgentClient.js";
+export type { HappyAgentClientOptions } from "./HappyAgentClient.js";
 export { HappyAgentApiError } from "./HappyAgentApiError.js";
 export type { ApiErrorBody } from "./HappyAgentApiError.js";
 export { EventStreamProtocolError, readEventStream } from "./readEventStream.js";
@@ -7,6 +7,7 @@ export { readSseFrames } from "./readSseFrames.js";
 export type { SseFrame } from "./readSseFrames.js";
 export { endpointUrl } from "./endpointUrl.js";
 export type { QueryParameters, QueryValue } from "./endpointUrl.js";
+export * from "./requestOptions.js";
 
 export * from "./protocol/agents.js";
 export * from "./protocol/bootstrap.js";

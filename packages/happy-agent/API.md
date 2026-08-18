@@ -1206,14 +1206,15 @@ Fields:
 - `title`, `titleStatus` — a generated human-readable title for the conversation.
   `titleStatus` is `"idle"` while none has been generated yet and `"ready"` once one has.
 - `status` — what the agent is doing right now, granularly:
-    - `"idle"` — no run in progress.
+    - `"idle"` — no run or maintenance work in progress.
     - `"thinking"` — the model is reasoning before it produces anything visible.
     - `"working"` — the model is producing output.
     - `"generating_tools"` — the model is emitting tool calls (streaming their arguments).
     - `"running_tools"` — tool calls are executing.
 
   During a run the status moves freely between the four working states, and every move is an
-  `agent.updated` event, so a client can show "Thinking…" / "Running tools…" live. Status is
+  `agent.updated` event, so a client can show "Thinking…" / "Running tools…" live. Maintenance
+  such as explicit compaction may also use `"working"` without creating a run. Status is
   orthogonal to archival, which is `archivedAt`.
 - `subagents` — how many subagents this agent has spawned over its life (`total`) and how many
   are running right now (`running`). Changes to either count are `agent.updated` events. The
@@ -1290,10 +1291,59 @@ Response — `200`: `{ "agent": { ... } }`; `404` when no such agent exists.
 ### Messages and runs
 
 A message is what the user sends; a **run** is the work the agent does in response — inference,
-tool calls, and everything until the agent goes idle again. Sending a message to an idle agent
+tool calls, and everything until the next explicit boundary. Sending a message to an idle agent
 starts a run immediately; sending to a working agent queues the message, and it starts its run
-when the current one ends. Steering is the exception: it interrupts the current run with new
-input instead of waiting behind it.
+when the current one ends. User steering is the only boundary that finishes one run and starts
+its successor without first going idle. Incoming messages, notifications, and compaction stay
+inside the current run and never create a turn.
+
+Every run has the same metadata:
+
+```json
+{
+    "id": "tz4a98xxat96iws9zmbrgj3a",
+    "status": "running",
+    "reason": null,
+    "startedAt": 1755400000000,
+    "endedAt": null,
+    "usage": {
+        "codex": {
+            "openai/gpt-5.6-sol": {
+                "input": 310000,
+                "output": 21000,
+                "cacheRead": 250000,
+                "cacheWrite": 30000
+            }
+        }
+    },
+    "costUsd": null
+}
+```
+
+- `status` — `"running"`, `"completed"`, `"aborted"`, or `"failed"`.
+- `reason` — `null` while running, then exactly one of `"completed"`, `"steering"`, `"abort"`,
+  or `"error"`. Status and reason answer different questions: `status` is the outcome; `reason`
+  is why this run ended. Steering and explicit abort have status `"aborted"` with their
+  respective reasons. Failure has status `"failed"` and reason `"error"`.
+- `startedAt`, `endedAt` — the turn's bounds, used directly for elapsed time.
+- `usage` — the inference usage accumulated inside this run, in the same provider-then-model
+  shape as the usage endpoints. It grows while the run is live and is final when the run ends.
+- `costUsd` — the provider-reported US-dollar cost accumulated inside this run, or `null` when
+  its providers do not report monetary cost. The daemon never invents a price from a local
+  table.
+
+The boundary transitions are atomic in the event journal:
+
+- Accepting one or more queued or idle user messages together emits `run.started` with the new
+  run and their ordered `acceptedMessageIds`. It does not also emit `message.updated` for those
+  acceptances.
+- Steering emits one `run.boundary` carrying the old run finished with reason `"steering"`,
+  its newly started successor, and the ordered IDs of every steering message accepted into the
+  successor.
+- A run that ends without an immediate successor emits `run.finished`.
+
+These compound events let a client close the old group, move the accepted messages, open the
+new group, and update activity in one frame without repeating message content.
 
 Every message carries its own mode — the full model selection and permission mode. There is no
 agent-level default; the client sends what its composer shows (typically prefilled from
@@ -1517,8 +1567,8 @@ Response — `202`: the durable message as it now stands, plus the event cursor 
 ```
 
 - `status` — `"pending"` or `"accepted"`; user messages only. `runId` is `null` while pending
-  and set at acceptance — the acceptance travels as a `message.updated` event, and the
-  `runId` it brings is the handle for `abort`.
+  and set at acceptance — the acceptance travels inside `run.started` or `run.boundary`, and
+  the `runId` it brings is the handle for `abort`.
 - `cursor` — the event cursor at send; streaming from it replays everything this message
   causes, from its acceptance through its run's completion.
 
@@ -1556,8 +1606,11 @@ Response — `200`:
         {
             "id": "tz4a98xxat96iws9zmbrgj3a",
             "status": "running",
+            "reason": null,
             "startedAt": 1755400000000,
             "endedAt": null,
+            "usage": {},
+            "costUsd": null,
             "messages": [
                 {
                     "id": "tz4a98xxat96iws9zmbrgj3a",
@@ -1601,17 +1654,16 @@ Response — `200`:
 }
 ```
 
-Runs are returned oldest first, and messages oldest first within each run. A run carries its
-`id` (the `runId` from message acceptance), a `status` of `"running"`, `"completed"`,
-`"aborted"`, or `"failed"`, and its timestamps. Messages are the shape defined in "Message
-content" above.
+Runs are returned oldest first, and messages oldest first within each run. A history run is the
+run metadata above plus `messages`, oldest first. Its `id` is the `runId` assigned at message
+acceptance.
 
 `pending` is the messages sent but not yet accepted by inference — queued behind the current
 run, or steering still on its way to the model. They belong to no run yet, so they live
 outside the `runs` grouping, ordered oldest first. Every history load returns the **complete**
 pending list regardless of cursors — it is current composer state, not pageable history. When
-a pending message is accepted it leaves `pending` and appears in its run, announced by a
-`message.updated` event carrying its assigned `runId`.
+a pending message is accepted it leaves `pending` and appears in its run, announced atomically
+by `run.started` or `run.boundary` with its assigned `runId`.
 
 ### Questions
 
@@ -1693,6 +1745,8 @@ late client renders the outcome instead. `404` when the ID never existed.
 Questions have their own events (`question.created`, `question.updated`) so watching clients
 show and clear the prompt in real time; aborting the run cancels an open question.
 
+### `POST /v0/agents/:agentId/abort`
+
 Stops the current run.
 
 Request:
@@ -1706,8 +1760,9 @@ Request:
   work.
 
 Response — `202`: `{ "agent": { ... }, "cursor": "..." }`. The abort is accepted; the run
-winding down and the agent going `"idle"` arrive through events from that cursor. Aborting an
-idle agent is a no-op and answers the same way.
+winding down and the agent going `"idle"` arrive through events from that cursor. Its terminal
+run has status `"aborted"` and reason `"abort"`. Aborting an idle agent is a no-op and answers
+the same way.
 
 ### `POST /v0/agents/:agentId/compact`
 
@@ -1715,9 +1770,14 @@ Compacts the conversation context: the daemon summarizes older history so the ne
 model's window. The transcript in history is unaffected — compaction changes what the model
 sees, not what the user can read.
 
-Response — `202`: `{ "agent": { ... } }`. Compaction runs like any other work: the agent is
-`"working"` while it runs, and completion arrives through events. Compacting a working agent is
-`409`.
+Explicit compaction is allowed only while the agent is idle. It is maintenance work, not a
+conversation turn: it creates no run and writes no transcript message. The agent is
+`"working"` while compaction runs and returns to `"idle"` through `agent.updated` events.
+
+Response — `202`: `{ "agent": { ... }, "cursor": "..." }`. Streaming from `cursor` follows
+the activity through completion. Compacting a working agent is `409`. Automatic compaction
+during a run remains inside that run and may add an ordinary service message; it never emits a
+run boundary.
 
 ### `POST /v0/agents/:agentId/read`
 
@@ -2020,21 +2080,32 @@ how a bootstrap snapshot and an event stream reconcile.
 
 **Runs and messages**
 
-- `run.started` — a run began; the agent left `"idle"`.
+- `run.started` — a standalone run began; the agent left `"idle"`. Message acceptance and the
+  visible start of work are one event.
     - `agentId` (ID string).
-    - `runId` (ID string) — names the run that history grouping and later run events refer to.
-- `run.finished` — the run reached a terminal state; the agent is `"idle"` again.
+    - `run` (full run metadata object) — status is `"running"`.
+    - `acceptedMessageIds` (array of ID strings) — every pending user message accepted into this
+      run, oldest first.
+- `run.boundary` — user steering atomically ended one run and began its successor; the agent
+  remains active.
     - `agentId` (ID string).
-    - `runId` (ID string).
-    - `status` (string) — `"completed"`, `"aborted"`, or `"failed"`.
+    - `finishedRun` (full run metadata object) — terminal with reason `"steering"`.
+    - `startedRun` (full run metadata object) — status `"running"`.
+    - `acceptedMessageIds` (array of ID strings) — every pending steering message accepted into
+      `startedRun`, oldest first.
+- `run.finished` — a run reached a terminal state without an immediate successor; the agent is
+  `"idle"` again.
+    - `agentId` (ID string).
+    - `run` (full run metadata object) — terminal, including its explicit `reason`, final usage,
+      cost, and timestamps.
 - `message.created` — a message came into being: a user message entering as `"pending"`
   (content complete, no run yet), or an agent/system/service message that may still grow.
     - `agentId` (ID string).
     - `runId` (ID string, or `null` for a pending user message) — the run it belongs to.
     - `message` (full message object) — role, content blocks, everything.
-- `message.updated` — a message changed structurally: a pending user message was **accepted**
-  (its `status` flips and `runId` is assigned), a block was added, a tool call changed
-  `status`, a result or presentation arrived.
+- `message.updated` — a message changed structurally after it entered a run: a block was added,
+  a tool call changed `status`, or a result or presentation arrived. Pending acceptance is
+  carried by `run.started` or `run.boundary`, not duplicated here.
     - `agentId` (ID string).
     - `runId` (ID string).
     - `message` (full message object) — the whole message as of now; not a diff.
