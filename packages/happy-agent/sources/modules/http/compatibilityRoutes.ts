@@ -55,26 +55,6 @@ export const unavailableP2pStatusSchema = Type.Object(
     exact,
 );
 
-export const emptyProfilesResponseSchema = Type.Object({ profiles: emptyArray }, exact);
-
-export const unavailableSharingResponseSchema = Type.Object(
-    {
-        connection: Type.Literal("disconnected"),
-        contacts: emptyArray,
-        folderShares: emptyArray,
-        identity: Type.String({
-            minLength: 43,
-            maxLength: 43,
-            pattern: "^[A-Za-z0-9_-]+$",
-        }),
-        incomingRequests: emptyArray,
-        outgoingRequests: emptyArray,
-        profileId: Type.Null(),
-        version: Type.Literal("empty"),
-    },
-    exact,
-);
-
 export const completedOnboardingResponseSchema = Type.Object(
     {
         onboardingVersion: Type.Literal(2),
@@ -162,8 +142,6 @@ export const providerUsageResponseSchema = Type.Object(
 
 type ProviderUsageTokens = Static<typeof providerUsageTokensSchema>;
 
-const SHARING_IDENTITY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-
 /** Protocol-valid read snapshots for Rig features Happy Agent does not host yet. */
 export function createCompatibilitySnapshots(
     cursor: string,
@@ -207,17 +185,6 @@ export function createCompatibilitySnapshots(
             plugins: [],
             version: "empty",
         }),
-        profiles: validateSnapshot(emptyProfilesResponseSchema, { profiles: [] }),
-        sharing: validateSnapshot(unavailableSharingResponseSchema, {
-            connection: "disconnected",
-            contacts: [],
-            folderShares: [],
-            identity: SHARING_IDENTITY,
-            incomingRequests: [],
-            outgoingRequests: [],
-            profileId: null,
-            version: "empty",
-        }),
         worklets: validateSnapshot(emptyWorkletsResponseSchema, {
             version: "empty",
             worklets: [],
@@ -233,8 +200,6 @@ export function createCompatibilityRoutes(): AgentHttpRouteGroup {
         readRoute("/v0/plugins", "plugins"),
         readRoute("/v0/worklets", "worklets"),
         readRoute("/v0/p2p/status", "p2p"),
-        readRoute("/v0/profiles", "profiles"),
-        readRoute("/v0/sharing", "sharing"),
         readRoute("/v0/onboarding", "onboarding"),
         readRoute("/v0/happy-cloud/status", "happyCloud"),
         {

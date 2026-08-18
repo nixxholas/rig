@@ -23,6 +23,8 @@ import { createFileRoutes } from "./fileRoutes.js";
 import { createGitRoutes } from "./gitRoutes.js";
 import { createProjectRoutes } from "./projectRoutes.js";
 import { createPresenceRoutes } from "./presenceRoutes.js";
+import { createProfileRoutes } from "./profileRoutes.js";
+import { createSharingRoutes } from "./sharingRoutes.js";
 import { createSecretRoutes } from "./secretRoutes.js";
 import { createSessionRoutes } from "./sessionRoutes.js";
 import { createSessionProcessRoutes } from "./sessionProcessRoutes.js";
@@ -172,6 +174,8 @@ function routeGroups(
         createInspectorRoutes(),
         createAgentRoutes(),
         createPresenceRoutes(),
+        createProfileRoutes(),
+        createSharingRoutes(),
         createSecretRoutes(),
         createSessionRoutes(),
         createSessionProcessRoutes(),

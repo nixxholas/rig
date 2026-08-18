@@ -43,6 +43,7 @@
         "@slopus/ghostty-web": "workspace:*",
         "@slopus/happy-agent-compute": "npm:@slopus/happy-agent-compute@0.1.6",
         "@slopus/happy-providers": "0.0.10",
+        "@slopus/murmur": "0.4.4",
         "@steve.kite/stdlib": "0.0.12",
         "drizzle-orm": "^0.45.2",
         "pino": "^10.3.1",

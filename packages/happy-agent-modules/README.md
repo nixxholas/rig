@@ -160,6 +160,8 @@ its public methods, and its storage and event contracts.
 | [Collaboration](sources/collaboration/README.md) | Create collaborators and message them asynchronously, with a report to the creator when one stops.   |
 | [User input](sources/userInput/README.md)        | Questions an agent asks a person, and a durable wait for the answer that survives a restart.         |
 | [Presence](sources/presence/README.md)           | Configured versus effective availability, custom and temporary states, schedules, and status events. |
+| [Profile](sources/profile/README.md)             | The one person this installation belongs to, and the machine that may speak for them.                |
+| [Murmur](sources/murmur/README.md)               | Contacts over one Murmur identity, and the requests either side is waiting on.                       |
 | [Happy](sources/happy/README.md)                 | The narrow bridge to a connected Happy client: notifications and agent status.                       |
 
 ### Places and things
@@ -174,11 +176,16 @@ its public methods, and its storage and event contracts.
 ### Storage ownership
 
 Modules owning tables through their own migrations: auto, collaboration, events, goal, happy,
-history, mcp, presence, projects, scheduling, secrets, tasks, usage, user input, workflows, and
-workspaces. The rest own none: compute, config, gemini, git, image generation, model switch,
-observation, permissions, search, skills, and system prompt. Compute and system prompt use Agent KV
-only, terminals stores nothing anywhere because a terminal ends with the process behind it, and
-collaboration's migrations exist only to retire the tables it used to keep.
+history, mcp, murmur, presence, profile, projects, scheduling, secrets, tasks, usage, user input,
+workflows, and workspaces. The rest own none: compute, config, gemini, git, image generation, model
+switch, observation, permissions, search, skills, and system prompt. Compute and system prompt use
+Agent KV only, terminals stores nothing anywhere because a terminal ends with the process behind it,
+and collaboration's migrations exist only to retire the tables it used to keep.
+
+Murmur owns two tables rather than one: a single row saying which person its identity belongs to,
+and the key–value table Murmur itself writes its cryptographic state into. They share a database
+so that a reset can throw both away in one transaction, leaving behind no record of an identity
+whose keys are gone.
 
 Migrations are immutable once released. A schema change is a new keyed migration, never an edit to
 an existing one.

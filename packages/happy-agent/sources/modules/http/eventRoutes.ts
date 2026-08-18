@@ -327,6 +327,18 @@ async function streamEvents(
                 })}\n\n`,
             );
         }
+        // Sharing and the profile carry the client's own event as their payload, so what a
+        // connected client reads is that event rather than the envelope it travelled in.
+        if (event.type === "sharing.changed" || event.type === "profile.changed") {
+            if (typeof event.payload === "object" && event.payload !== null) {
+                return writer.write(
+                    `id: ${event.id}\nevent: update\ndata: ${serializeJson({
+                        cursor: event.id,
+                        event: event.payload,
+                    })}\n\n`,
+                );
+            }
+        }
         return writer.write(
             `id: ${event.id}\nevent: update\ndata: ${serializeJson({
                 cursor: event.id,

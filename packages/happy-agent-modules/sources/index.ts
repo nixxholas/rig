@@ -608,6 +608,12 @@ export * from "./happy/index.js";
 export * from "./mcp/index.js";
 export * from "./skills/index.js";
 
+// Profile: the one person this installation belongs to.
+export * from "./profile/index.js";
+
+// Murmur: contacts over one shared identity, and the requests either side is waiting on.
+export * from "./murmur/index.js";
+
 export {
     assertHistoryReader,
     historyReaderSchema,

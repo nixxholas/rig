@@ -8,11 +8,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
     listFoldersResponseSchema,
     listPluginsResponseSchema,
-    listRigProfilesResponseSchema,
     listWorkletsResponseSchema,
     onboardingStatusSchema,
     p2pStatusSchema,
-    sharingSnapshotSchema,
     happyCloudStatusSchema,
 } from "../../rig-connect/sources/protocol.js";
 import { ProtocolHttpClient } from "../../rig/sources/client/ProtocolHttpClient.js";
@@ -55,8 +53,6 @@ describe("Happy Agent Rig compatibility", () => {
         expect(Value.Check(listPluginsResponseSchema, snapshots.plugins)).toBe(true);
         expect(Value.Check(listWorkletsResponseSchema, snapshots.worklets)).toBe(true);
         expect(Value.Check(p2pStatusSchema, snapshots.p2p)).toBe(true);
-        expect(Value.Check(listRigProfilesResponseSchema, snapshots.profiles)).toBe(true);
-        expect(Value.Check(sharingSnapshotSchema, snapshots.sharing)).toBe(true);
         expect(Value.Check(onboardingStatusSchema, snapshots.onboarding)).toBe(true);
         expect(Value.Check(happyCloudStatusSchema, snapshots.happyCloud)).toBe(true);
     });
@@ -206,14 +202,10 @@ describe("Happy Agent Rig compatibility", () => {
         await expect(
             requestJson(connection.socketPath, connection.token, "/v0/onboarding"),
         ).resolves.toEqual({ onboardingVersion: 2, state: "complete" });
+        // Sharing is a real capability now, and it is off unless the configuration turns it on.
         await expect(
             requestJson(connection.socketPath, connection.token, "/v0/sharing"),
-        ).resolves.toMatchObject({
-            connection: "disconnected",
-            contacts: [],
-            incomingRequests: [],
-            outgoingRequests: [],
-        });
+        ).rejects.toThrow(/503.*Sharing is unavailable\./u);
 
         const stateCursor = (state as { readonly cursor?: unknown }).cursor;
         if (typeof stateCursor !== "string") {

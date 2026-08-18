@@ -34,9 +34,11 @@ import {
     HistoryModule,
     ImageGenerationModule,
     ModelSwitchModule,
+    MurmurModule,
     ObservationModule,
     PermissionsModule,
     PresenceModule,
+    ProfileModule,
     ProjectsModule,
     SchedulingModule,
     SearchModule,
@@ -106,9 +108,11 @@ export interface HappyAgentModules {
     readonly history: HistoryModule;
     readonly imageGeneration: ImageGenerationModule;
     readonly modelSwitch: ModelSwitchModule;
+    readonly murmur: MurmurModule<LibSQLDatabase>;
     readonly observation: ObservationModule;
     readonly permissions: PermissionsModule;
     readonly presence: PresenceModule;
+    readonly profile: ProfileModule<LibSQLDatabase>;
     readonly projects: ProjectsModule;
     readonly scheduling: SchedulingModule;
     readonly search: SearchModule;
@@ -415,6 +419,39 @@ export async function startHappyAgent(
         const terminals = new TerminalsModule({ projects, workspaces });
         unwind.unshift(async () => await terminals.close());
 
+        // One person behind this installation, and the contacts they have accepted. Sharing is
+        // given the profile catalog itself, because whether this installation may act as that
+        // person is that catalog's decision rather than something to restate here.
+        const profile = new ProfileModule<LibSQLDatabase>({
+            listener: {
+                onEvent: async (listenerCtx, event) => {
+                    await events.record(listenerCtx, { type: "profile.changed", payload: event });
+                },
+            },
+        });
+        const sharing = configuration.values.sharing;
+        const murmur = new MurmurModule<LibSQLDatabase>({
+            enabled: sharing.enabled,
+            listener: {
+                onEvent: async (listenerCtx, event) => {
+                    // Murmur names its own event; sharing is what a client calls it, and the
+                    // client's name is what goes on the wire.
+                    await events.record(listenerCtx, {
+                        type: "sharing.changed",
+                        payload: { ...event, type: "sharing_changed" },
+                    });
+                },
+            },
+            profile,
+            relay: sharing.relayUrl,
+            // The relay connection and the store both outlive every request that touches them, so
+            // they run on the same application root the catalogs use, with the database attached.
+            rootContext: catalogRoot,
+            onError: (error: unknown) => {
+                ctx.log.warn("Sharing could not reach the relay.", {}, error);
+            },
+        });
+
         // Gemini is not one of the accounts a chat runs on, so its search reads a key from the
         // environment rather than from a configured provider.
         const gemini = process.env.GEMINI_API_KEY?.trim() || undefined;
@@ -437,9 +474,11 @@ export async function startHappyAgent(
             history,
             imageGeneration: new ImageGenerationModule({ config, providers }),
             modelSwitch: new ModelSwitchModule({ history }),
+            murmur,
             observation,
             permissions,
             presence,
+            profile,
             projects,
             scheduling: new SchedulingModule(),
             search: new SearchModule({
@@ -527,6 +566,9 @@ export async function startHappyAgent(
             modules.goal,
             modules.tasks,
             modules.usage,
+            modules.profile,
+            // Sharing puts the profile on the wire, so the person exists before the identity does.
+            modules.murmur,
             modules.projects,
             modules.workspaces,
             modules.secrets,
@@ -623,6 +665,17 @@ export async function startHappyAgent(
         // are from the agent they are opened for.
         await projects.open(withDatabase(ctx), rootAgentId);
         await workspaces.open(withDatabase(ctx), rootAgentId);
+
+        // Sharing is the same machine as everything else here, and it reconnects to the relay only
+        // when the configuration enabled it and a person has already been named. Its client holds a
+        // socket, so it stops before the database it reads the binding from.
+        profile.open(rootAgentId);
+        unwind.unshift(async () => await murmur.close(withDatabase(ctx)));
+        const person = await profile.get(withDatabase(ctx));
+        await murmur.open(
+            withDatabase(ctx),
+            ...(person === undefined ? [] : ([person.id] as const)),
+        );
 
         return {
             agent,

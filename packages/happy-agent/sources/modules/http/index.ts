@@ -16,7 +16,9 @@ export { createEventRoutes } from "./eventRoutes.js";
 export { createFileRoutes, type FileRouteOptions } from "./fileRoutes.js";
 export { createGitRoutes, type GitRouteOptions } from "./gitRoutes.js";
 export { createInspectorRoutes } from "./inspectorRoutes.js";
+export { createProfileRoutes } from "./profileRoutes.js";
 export { createProjectRoutes, type ProjectRouteOptions } from "./projectRoutes.js";
+export { bindSharingProfile, createSharingRoutes } from "./sharingRoutes.js";
 export { createSessionRoutes } from "./sessionRoutes.js";
 export { createTerminalRoutes, type TerminalRouteOptions } from "./terminalRoutes.js";
 export {
