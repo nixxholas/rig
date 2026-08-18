@@ -61,18 +61,21 @@ jobs:
             - name: Install dependencies
               run: pnpm install --frozen-lockfile
 
-            - name: Check the API packages
+            - name: Check the API libraries
               run: |
                   pnpm --filter @slopus/happy-agent-client check
                   pnpm --filter @slopus/happy-agent-modules check
-                  pnpm --filter @slopus/happy-agent check
-                  pnpm --filter @slopus/happy-agent-gym check
-                  pnpm --filter @slopus/rig-gym-tests check
 
             - name: Build the daemon
               run: |
                   pnpm --filter @slopus/happy-agent-modules build
                   pnpm --filter @slopus/happy-agent build
+
+            - name: Check the API consumers
+              run: |
+                  pnpm --filter @slopus/happy-agent check
+                  pnpm --filter @slopus/happy-agent-gym check
+                  pnpm --filter @slopus/rig-gym-tests check
 
             - name: Run the complete API gym
               run: pnpm test:gym:api
