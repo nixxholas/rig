@@ -30,6 +30,9 @@ const MAX_VISITED_ENTRIES = 20_000;
 /** How many files one search may carry back, whatever it then does with them. */
 const MAX_COLLECTED_FILES = 10_000;
 
+/** How many names one call asks the machine for at a time. */
+const DIRECTORY_PAGE_SIZE = 512;
+
 /**
  * Every file under a directory, breadth first, within a bound.
  *
@@ -37,7 +40,10 @@ const MAX_COLLECTED_FILES = 10_000;
  * tree, where the answer usually is, rather than deep inside the first branch it happened to
  * enter. Symbolic links are skipped and never followed, which keeps a cycle from turning the
  * walk into a loop. Git's own directory is skipped: it is large, it is never what was meant, and
- * finding a loose object by name helps nobody. The bounds belong to the walk rather than to what
+ * finding a loose object by name helps nobody. Each directory is read a page at a time and only
+ * as far as the walk's own budget reaches, so one enormous directory cannot be materialized in
+ * full before the bound that was supposed to contain it applies. The bounds belong to the walk
+ * rather than to what
  * the caller means to show, so a search keeps its whole budget for finding matches, and a walk
  * that stopped early says so — nothing should read a short answer as proof that nothing matches.
  */
@@ -59,13 +65,21 @@ export async function walkComputeFiles(
         },
     ];
     let visited = 0;
+    let truncated = false;
     while (directories.length > 0) {
         const entry = directories.shift();
         if (entry === undefined) break;
         const { directory, scopes } = entry;
         let names: readonly string[];
         try {
-            names = await fs.readdir(permissions, directory);
+            const page = await readDirectoryNames(
+                fs,
+                permissions,
+                directory,
+                MAX_VISITED_ENTRIES - visited + 1,
+            );
+            names = page.names;
+            if (page.incomplete) truncated = true;
         } catch {
             // A directory that cannot be read is one the search simply does not cover.
             continue;
@@ -104,5 +118,29 @@ export async function walkComputeFiles(
             if (files.length >= MAX_COLLECTED_FILES) return { files, truncated: true };
         }
     }
-    return { files, truncated: false };
+    return { files, truncated };
+}
+
+/**
+ * The names in one directory, read a page at a time and never beyond what the walk can still
+ * visit. A directory larger than that is reported as incomplete rather than held in full.
+ */
+async function readDirectoryNames(
+    fs: ComputeFileSystem,
+    permissions: ComputePermissions,
+    directory: string,
+    limit: number,
+): Promise<{ readonly names: readonly string[]; readonly incomplete: boolean }> {
+    const names: string[] = [];
+    let after: string | undefined;
+    while (names.length < limit) {
+        const page = await fs.readdirPage(permissions, directory, {
+            ...(after === undefined ? {} : { after }),
+            limit: Math.min(DIRECTORY_PAGE_SIZE, limit - names.length),
+        });
+        names.push(...page.entries);
+        after = page.entries.at(-1);
+        if (!page.hasMore || after === undefined) return { names, incomplete: false };
+    }
+    return { names, incomplete: true };
 }

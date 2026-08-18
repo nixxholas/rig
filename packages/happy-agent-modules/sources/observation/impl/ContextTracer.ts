@@ -41,7 +41,7 @@ export class OpenTelemetryTraceSpan implements TraceSpan {
     recordException(error: unknown): void {
         if (this.#ended) return;
         this.#failed = true;
-        this.span.recordException(error instanceof Error ? error : String(error));
+        this.span.recordException(error instanceof Error ? error : describeException(error));
         this.span.setStatus({ code: SpanStatusCode.ERROR });
     }
 
@@ -50,5 +50,19 @@ export class OpenTelemetryTraceSpan implements TraceSpan {
         this.#ended = true;
         if (!this.#failed) this.span.setStatus({ code: SpanStatusCode.OK });
         this.span.end();
+    }
+}
+
+/**
+ * What a thrown value that is not an `Error` is called on the span.
+ *
+ * Whatever failed is already the problem being recorded; a value whose own `toString` throws must
+ * not become a second, louder failure in the middle of reporting the first.
+ */
+function describeException(error: unknown): string {
+    try {
+        return String(error);
+    } catch {
+        return "An exception that cannot describe itself.";
     }
 }

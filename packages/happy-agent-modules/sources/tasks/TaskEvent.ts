@@ -142,17 +142,19 @@ export type TaskEventPayload = Static<typeof taskEventPayloadSchema>;
 /**
  * Whoever the task module reports to. The transactional callback runs before the task list's
  * transaction commits; the ordinary callback runs after it commits and cannot roll it back.
+ *
+ * This is a structural seam, so it asks only for the two callbacks and stays silent about anything
+ * else the listener is. A host is free to pass an object of its own that happens to keep state
+ * beside them, and a class instance whose methods live on its prototype is an ordinary listener
+ * rather than a malformed one.
  */
-export const taskModuleListenerSchema = Type.Object(
-    {
-        onEventTransactional: Type.Optional(
-            Type.Function([opaqueContextSchema, taskEventSchema], opaqueResultSchema),
-        ),
-        onEvent: Type.Optional(
-            Type.Function([opaqueContextSchema, taskEventSchema], opaqueResultSchema),
-        ),
-    },
-    { additionalProperties: false },
-);
+export const taskModuleListenerSchema = Type.Object({
+    onEventTransactional: Type.Optional(
+        Type.Function([opaqueContextSchema, taskEventSchema], opaqueResultSchema),
+    ),
+    onEvent: Type.Optional(
+        Type.Function([opaqueContextSchema, taskEventSchema], opaqueResultSchema),
+    ),
+});
 
 export type TaskModuleListener = Static<typeof taskModuleListenerSchema>;

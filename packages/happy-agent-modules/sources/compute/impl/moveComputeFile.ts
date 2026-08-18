@@ -58,6 +58,7 @@ export async function moveComputeFile(
     const isCaseOnlyMove =
         existingDestinationStat?.isFile === true &&
         existingDestinationStat.isSymbolicLink === false &&
+        canonicalSource !== undefined &&
         canonicalSource === canonicalDestination &&
         sourcePath !== destinationPath;
     if (destinationExists && !isCaseOnlyMove) {

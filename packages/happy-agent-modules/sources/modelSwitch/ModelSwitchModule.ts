@@ -244,7 +244,8 @@ function validateHistoryRecords(
  * Join the two bounded pages in source order.
  *
  * A short history appears in both pages. Position and record ID are both stable identities, so a
- * disagreement between them is malformed input rather than a reason to silently choose one side.
+ * disagreement between them — including one identity carrying two different messages — is
+ * malformed input rather than a reason to silently choose one side.
  */
 function mergeHistoryRecords(...pages: readonly (readonly HistoryRecord[])[]): HistoryRecord[] {
     const byPosition = new Map<number, HistoryRecord>();
@@ -256,7 +257,8 @@ function mergeHistoryRecords(...pages: readonly (readonly HistoryRecord[])[]): H
             if (
                 (positionMatch !== undefined &&
                     positionMatch.message.recordId !== record.message.recordId) ||
-                (recordIdMatch !== undefined && recordIdMatch.position !== record.position)
+                (recordIdMatch !== undefined && recordIdMatch.position !== record.position) ||
+                (positionMatch !== undefined && !Value.Equal(positionMatch.message, record.message))
             ) {
                 throw new Error("The history module returned conflicting record identities.");
             }

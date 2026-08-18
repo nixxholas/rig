@@ -90,9 +90,20 @@ function historyToolArgumentsAtDepth(depth: number): TSchema {
     return Type.Union([
         historyToolArgumentLeafSchema,
         Type.Array(child, { maxItems: MAX_HISTORY_ARGUMENT_ARRAY_ITEMS }),
-        Type.Record(Type.String({ maxLength: MAX_HISTORY_ARGUMENT_KEY_LENGTH }), child, {
-            maxProperties: MAX_HISTORY_ARGUMENT_OBJECT_PROPERTIES,
-        }),
+        // A record's key bound has to be written as a pattern, because a `Record` key schema
+        // becomes a JSON Schema property pattern and cannot carry its own `maxLength`. Closing the
+        // record is what makes the bound bite: an over-long key then matches no pattern at all and
+        // is refused rather than admitted as an extra property.
+        Type.Record(
+            Type.String({
+                pattern: `^[\\s\\S]{0,${MAX_HISTORY_ARGUMENT_KEY_LENGTH}}$`,
+            }),
+            child,
+            {
+                additionalProperties: false,
+                maxProperties: MAX_HISTORY_ARGUMENT_OBJECT_PROPERTIES,
+            },
+        ),
     ]);
 }
 

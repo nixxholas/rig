@@ -28,6 +28,7 @@ import {
     type WorkspaceGitFacts,
     type WorkspaceReserveHooks,
 } from "./Workspace.js";
+import { workspaceClockSchema, workspaceNow, type WorkspaceClock } from "./WorkspaceClock.js";
 import { workspaceBranchName, workspaceNameKey } from "./WorkspaceIdentity.js";
 import {
     workspaceBranchMetadataSchema,
@@ -62,6 +63,7 @@ import {
     sameJson,
     writeWorkspace,
 } from "./store/workspaceRecords.js";
+import { uniqueWorkspaceBranch, uniqueWorkspaceName } from "./store/workspaceNaming.js";
 import { reserveWorkspace } from "./store/workspaceReservation.js";
 
 export const workspaceMutationRequestSchema = Type.Object(
@@ -403,7 +405,7 @@ export const workspaceHostSchema = Type.Object(
 export type WorkspaceHost = Static<typeof workspaceHostSchema>;
 
 export const workspaceStoreOptionsSchema = Type.Object(
-    { host: Type.Optional(workspaceHostSchema) },
+    { host: Type.Optional(workspaceHostSchema), clock: Type.Optional(workspaceClockSchema) },
     { additionalProperties: false },
 );
 
@@ -414,6 +416,10 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
         throw new Error("Workspace store options are invalid.");
     }
     const host = options.host;
+    // Every timestamp the store writes comes from here, so a host that supplies a clock sees it in
+    // the reservation as well as in each later change.
+    const clock: WorkspaceClock = options.clock ?? (() => Date.now());
+    const now = (ctx: Context, agentId: string): number => workspaceNow(clock, ctx, agentId);
 
     /**
      * One durable write. The row the decision was read from is part of the update predicate, so a
@@ -443,7 +449,7 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
         const workspace: Workspace = {
             ...decided,
             version: before.version + 1,
-            updatedAt: Math.max(Date.now(), before.updatedAt + 1),
+            updatedAt: Math.max(now(ctx, agentId), before.updatedAt + 1),
         };
         assertWorkspace(workspace);
         const stored = await writeWorkspace(database, workspace, before.version);
@@ -458,7 +464,9 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
 
     return {
         reserve: async (ctx, actingAgentId, input, hooks, operation) =>
-            await reserveWorkspace(ctx.db, actingAgentId, input, hooks, host, operation),
+            await reserveWorkspace(ctx.db, actingAgentId, input, hooks, host, operation, () =>
+                now(ctx, actingAgentId),
+            ),
 
         list: async (ctx, _agentId, query) => {
             const cursor = query.cursor ?? 0;
@@ -615,7 +623,7 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
                 const next: Workspace = {
                     ...before,
                     status: "archived",
-                    archivedAt: Math.max(Date.now(), before.updatedAt + 1),
+                    archivedAt: Math.max(now(ctx, actingAgentId), before.updatedAt + 1),
                 };
                 delete next.initializationError;
                 return next;
@@ -646,7 +654,9 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
                     : await host.transfer(ctx, actingAgentId, input, operation);
             const result =
                 hostResult ??
-                (await defaultWorkspaceTransfer(ctx, actingAgentId, input, operation));
+                (await defaultWorkspaceTransfer(ctx, actingAgentId, input, operation, () =>
+                    now(ctx, actingAgentId),
+                ));
             if (Value.Check(workspaceSchema, result)) {
                 const current = await readWorkspace(database, result.id);
                 if (current === undefined) {
@@ -682,7 +692,7 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
                             ...current,
                             projectRef: result.workspace.projectRef,
                             version: current.version + 1,
-                            updatedAt: Math.max(Date.now(), current.updatedAt + 1),
+                            updatedAt: Math.max(now(ctx, actingAgentId), current.updatedAt + 1),
                         },
                         current.version,
                     );
@@ -716,10 +726,10 @@ async function renameTo(
     host: WorkspaceHost | undefined,
 ): Promise<Workspace | undefined> {
     const others = siblings.filter((row) => row.id !== before.id);
-    const name = uniqueName(requested, (candidate) =>
+    const name = uniqueWorkspaceName(requested, (candidate) =>
         others.some((row) => workspaceNameKey(row.name) === workspaceNameKey(candidate)),
     );
-    const branch = await uniqueBranch(workspaceBranchName(name), async (candidate) => {
+    const branch = await uniqueWorkspaceBranch(workspaceBranchName(name), async (candidate) => {
         // A workspace never collides with itself: Git already holds the branch it is on, so a
         // name that slugs back to it must not be pushed onto a suffix for nothing.
         if (candidate === before.branch) return false;
@@ -758,30 +768,12 @@ function assertExpectedVersion(
     }
 }
 
-function uniqueName(base: string, taken: (candidate: string) => boolean): string {
-    if (!taken(base)) return base;
-    for (let suffix = 2; ; suffix += 1) {
-        const candidate = `${base} (${String(suffix)})`;
-        if (!taken(candidate)) return candidate;
-    }
-}
-
-async function uniqueBranch(
-    base: string,
-    taken: (candidate: string) => Promise<boolean>,
-): Promise<string> {
-    if (!(await taken(base))) return base;
-    for (let suffix = 2; ; suffix += 1) {
-        const candidate = `${base}-${String(suffix)}`;
-        if (!(await taken(candidate))) return candidate;
-    }
-}
-
 async function defaultWorkspaceTransfer(
     ctx: Context,
     agentId: string,
     input: WorkspaceTransferInput,
     operation: WorkspaceMutationRequest,
+    now: () => number,
 ): Promise<WorkspaceTransferResult> {
     const database = ctx.db;
     if ("targetWorkspaceId" in input) {
@@ -794,7 +786,7 @@ async function defaultWorkspaceTransfer(
             {
                 ...target,
                 version: target.version + 1,
-                updatedAt: Math.max(Date.now(), target.updatedAt + 1),
+                updatedAt: Math.max(now(), target.updatedAt + 1),
             },
             target.version,
         );
@@ -816,7 +808,7 @@ async function defaultWorkspaceTransfer(
                 ...workspace,
                 projectRef: input.targetProjectRef,
                 version: workspace.version + 1,
-                updatedAt: Math.max(Date.now(), workspace.updatedAt + 1),
+                updatedAt: Math.max(now(), workspace.updatedAt + 1),
             },
             workspace.version,
         );

@@ -32,6 +32,7 @@ export async function shouldReviewComputePath(
     const permissions = computePermissionsForContext(ctx);
     const canonicalRoot = await canonicalComputePath(compute.fs, permissions, compute.cwd);
     const canonicalTarget = await canonicalComputePath(compute.fs, permissions, resolvedPath);
+    if (canonicalRoot === undefined || canonicalTarget === undefined) return true;
     if (!isPathInside(canonicalRoot, canonicalTarget)) return true;
     if (
         options.write &&

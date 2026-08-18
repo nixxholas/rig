@@ -62,9 +62,7 @@ export function mcpResultToContentBlocks(
             }
             if (budget.remainingTextBytes === 0) break;
         }
-        if (index < contentLength) {
-            appendWithinBudget(blocks, { type: "text", text: TRUNCATION_MARKER }, budget);
-        }
+        if (index < contentLength) appendTruncationMarker(blocks, budget);
     }
 
     if (blocks.length > 0) return blocks;
@@ -83,6 +81,21 @@ export function mcpResultToContentBlocks(
         ];
     }
     return [{ type: "text", text: "(empty result)" }];
+}
+
+/**
+ * Say that content was left out, without the notice itself pushing the result past its maximum.
+ *
+ * The declared block count is a ceiling on what the model receives, so a full result gives up its
+ * last block to make room for the marker rather than growing by one more.
+ */
+function appendTruncationMarker(blocks: SessionOutputBlock[], budget: ResultBudget): void {
+    if (budget.remainingTextBytes === 0) return;
+    if (blocks.length >= MAXIMUM_RESULT_BLOCKS) {
+        const displaced = blocks.pop();
+        if (displaced?.type === "image") budget.imageBlocks -= 1;
+    }
+    appendWithinBudget(blocks, { type: "text", text: TRUNCATION_MARKER }, budget);
 }
 
 function appendWithinBudget(

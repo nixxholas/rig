@@ -218,20 +218,33 @@ export class TaskValidationError extends Error {
  * the persistence boundary instead of relying on a formatter-time limit.
  */
 export function assertTaskMetadata(value: unknown): asserts value is TaskMetadata {
+    assertTaskMetadataStructure(value);
     if (!Value.Check(taskMetadataSchema, value)) {
         throw new TaskValidationError("Task metadata has an invalid shape.");
     }
-    assertMetadataValue(value, 0, new Set<object>());
     assertEncodedMetadataSize(value);
 }
 
 /** Validate an update patch before applying its null-as-delete semantics. */
 export function assertTaskMetadataPatch(value: unknown): asserts value is TaskMetadataPatch {
+    assertTaskMetadataStructure(value);
     if (!Value.Check(taskMetadataPatchSchema, value)) {
         throw new TaskValidationError("Task metadata patch has an invalid shape.");
     }
     assertMetadataPatchValue(value, 0, new Set<object>());
     assertEncodedMetadataSize(value);
+}
+
+/**
+ * Establish that a metadata value is a finite tree, before anything else walks it.
+ *
+ * Checking the schema, cloning the value, and encoding it all recurse. A caller can hand in an
+ * object that points back at itself, and every one of those would exhaust the stack instead of
+ * reporting a bad value, so the tree is shown to terminate first and the rest of validation then
+ * runs on something known to be finite.
+ */
+export function assertTaskMetadataStructure(value: unknown): void {
+    assertMetadataValue(value, 0, new Set<object>());
 }
 
 function assertMetadataValue(value: unknown, depth: number, seen: Set<object>): void {

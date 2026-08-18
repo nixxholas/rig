@@ -61,8 +61,9 @@ export function createObservationLogger(
 function loggableContext(context: LogContext): Record<string, boolean | number | string> {
     const fields: Record<string, boolean | number | string> = {};
     let kept = 0;
-    for (const [key, value] of Object.entries(context)) {
+    for (const key of Object.keys(context)) {
         if (kept >= MAX_CONTEXT_FIELDS) break;
+        const value = readField(context, key);
         if (typeof value === "boolean" || typeof value === "string") {
             fields[key] = value;
             kept += 1;
@@ -74,6 +75,15 @@ function loggableContext(context: LogContext): Record<string, boolean | number |
         }
     }
     return fields;
+}
+
+/** One context field, or nothing when reading it fails. A getter that throws is not a log line. */
+function readField(context: LogContext, key: string): unknown {
+    try {
+        return (context as Record<string, unknown>)[key];
+    } catch {
+        return undefined;
+    }
 }
 
 function formatMessage(args: readonly unknown[]): string {

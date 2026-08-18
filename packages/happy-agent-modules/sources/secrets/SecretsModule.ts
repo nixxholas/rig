@@ -1411,14 +1411,19 @@ function applyEnvironmentPatch(
     before: readonly string[],
     patch: SecretUpdateInput["environment"],
 ): readonly string[] {
-    const names = new Set(before);
+    // Kept by the comparison a process environment makes, so a patch naming an existing variable
+    // in another case changes that variable and keeps its stored spelling instead of adding a
+    // second variable that only some machines would tell apart.
+    const names = new Map<string, string>();
+    for (const name of before) names.set(name.toUpperCase(), name);
     if (patch !== undefined) {
         for (const [name, value] of Object.entries(patch)) {
-            if (value === null) names.delete(name);
-            else names.add(name);
+            const normalized = name.toUpperCase();
+            if (value === null) names.delete(normalized);
+            else if (!names.has(normalized)) names.set(normalized, name);
         }
     }
-    return sortEnvironmentNames([...names]);
+    return sortEnvironmentNames([...names.values()]);
 }
 
 function sortEnvironmentNames(names: readonly string[]): string[] {

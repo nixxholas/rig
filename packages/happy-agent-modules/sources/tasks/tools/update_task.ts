@@ -87,12 +87,13 @@ export function updateTaskTool(tasks: TasksModule, agentId: string) {
         toLLM: (result) => [
             {
                 type: "text",
-                text:
+                text: tasks.formatMutationForModel(
                     "task" in result
                         ? `Task updated: ${result.task.id}\n${result.task.title}`
                         : "removed" in result
                           ? `Task removed: ${result.taskId}`
                           : `Task ${result.taskId} could not be updated: ${result.error}`,
+                ),
             },
         ],
     });

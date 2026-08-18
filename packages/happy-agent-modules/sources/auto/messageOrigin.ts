@@ -40,11 +40,21 @@ export const AGENT_MESSAGE_ORIGIN_METADATA = Object.freeze({
  * an `"agent"` marker, or any other value is not human origin.
  */
 export function isUserOriginMetadata(metadata: AgentMessageMetadata | undefined): boolean {
-    return (
-        (metadata as { readonly [MESSAGE_ORIGIN_METADATA_KEY]?: unknown } | undefined)?.[
-            MESSAGE_ORIGIN_METADATA_KEY
-        ] === "user"
-    );
+    return ownMetadataValue(metadata, MESSAGE_ORIGIN_METADATA_KEY) === "user";
+}
+
+/**
+ * One metadata field, read only when the metadata itself carries it.
+ *
+ * A value reached through the prototype chain was never stamped on this message, and treating one
+ * as a stamp would let a shared or polluted prototype authorize every message that omits the
+ * marker — the exact forgery this module exists to prevent.
+ */
+function ownMetadataValue(metadata: AgentMessageMetadata | undefined, key: string): unknown {
+    if (metadata === undefined || metadata === null || typeof metadata !== "object") {
+        return undefined;
+    }
+    return Object.hasOwn(metadata, key) ? (metadata as Record<string, unknown>)[key] : undefined;
 }
 
 /**
@@ -76,8 +86,6 @@ export function senderAgentIdMetadata(agentId: string): {
  * carries something that is not a plausible agent identity.
  */
 export function senderAgentIdOf(metadata: AgentMessageMetadata | undefined): string | undefined {
-    const value = (metadata as { readonly [SENDER_AGENT_ID_METADATA_KEY]?: unknown } | undefined)?.[
-        SENDER_AGENT_ID_METADATA_KEY
-    ];
+    const value = ownMetadataValue(metadata, SENDER_AGENT_ID_METADATA_KEY);
     return Value.Check(senderAgentIdSchema, value) ? value : undefined;
 }

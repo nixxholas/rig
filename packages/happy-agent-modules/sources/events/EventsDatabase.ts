@@ -10,12 +10,20 @@ import { sql } from "drizzle-orm";
 
 import {
     appendEventInputSchema,
+    eventIdSchema,
     eventSchema,
     type AgentEvent,
     type AppendEventInput,
 } from "./types.js";
 
 const MAX_EVENT_PAYLOAD_BYTES = 5 * 1_024 * 1_024;
+
+/**
+ * A structured clone keeps a key whose value is `undefined`; JSON drops it. Payloads are recorded
+ * as clones, so the durable form tags those values and restores them on the way back rather than
+ * quietly losing a key the recorder set.
+ */
+const UNDEFINED_TAG = "$happyUndefined";
 
 const eventRowSchema = Type.Object(
     {
@@ -91,10 +99,37 @@ export async function loadEventState(
         database,
         sql`SELECT key, value FROM happy_agent_event_state WHERE key = 'origin_cursor'`,
     );
-    return {
-        events: [...rows].reverse().map(eventFromRow),
-        ...(state[0]?.value === undefined ? {} : { originCursor: state[0].value }),
-    };
+    const storedOrigin = state[0]?.value;
+    if (storedOrigin !== undefined && !Value.Check(eventIdSchema, storedOrigin)) {
+        throw new Error("The durable agent event origin cursor is invalid.");
+    }
+    const events = [...rows].reverse().map(eventFromRow);
+    let previousOccurredAt = 0;
+    for (const event of events) {
+        if (event.occurredAt < previousOccurredAt) {
+            throw new Error("The durable agent events are not ordered in time.");
+        }
+        previousOccurredAt = event.occurredAt;
+    }
+    const first = events[0];
+    if (first === undefined) {
+        return storedOrigin === undefined ? { events } : { events, originCursor: storedOrigin };
+    }
+    if (storedOrigin === undefined) {
+        throw new Error("The durable agent event origin cursor is missing.");
+    }
+    // A smaller configured capacity leaves durable events below the retained window. The origin is
+    // the newest of those, so a replay from the origin describes exactly what is still here.
+    const dropped = await agentDatabaseRows<{ event_id: string }>(
+        database,
+        sql`SELECT event_id FROM happy_agent_events
+            WHERE event_id < ${first.id} ORDER BY event_id DESC LIMIT 1`,
+    );
+    const originCursor = dropped[0]?.event_id ?? storedOrigin;
+    if (originCursor >= first.id) {
+        throw new Error("The durable agent event origin cursor is inside the retained window.");
+    }
+    return { events, originCursor };
 }
 
 export async function loadActiveRuns<State>(
@@ -105,7 +140,24 @@ export async function loadActiveRuns<State>(
         database,
         sql`SELECT agent_id, state_json FROM happy_agent_active_runs`,
     );
-    return new Map(rows.map((row) => [row.agent_id, parse(JSON.parse(row.state_json))]));
+    return new Map(rows.map((row) => [row.agent_id, parse(deserializePayload(row.state_json))]));
+}
+
+/**
+ * The run of one agent as the current transaction sees it, so work committing together shares one
+ * run identity even before that transaction's post-commit state lands.
+ */
+export async function loadActiveRun<State>(
+    database: AgentDatabase,
+    agentId: string,
+    parse: (value: unknown) => State,
+): Promise<State | undefined> {
+    const rows = await agentDatabaseRows<{ state_json: string }>(
+        database,
+        sql`SELECT state_json FROM happy_agent_active_runs WHERE agent_id = ${agentId} LIMIT 1`,
+    );
+    const row = rows[0];
+    return row === undefined ? undefined : parse(deserializePayload(row.state_json));
 }
 
 export async function insertEvent(
@@ -194,7 +246,7 @@ function eventFromRow(input: unknown): AgentEvent {
         ...(input.agent_id === null ? {} : { agentId: input.agent_id }),
         id: input.event_id,
         occurredAt: input.occurred_at,
-        payload: JSON.parse(input.payload_json) as unknown,
+        payload: deserializePayload(input.payload_json),
         type: input.type,
     };
     if (!Value.Check(eventSchema, event)) {
@@ -207,7 +259,11 @@ function serializePayload(payload: unknown): string {
     let encoded: string | undefined;
     try {
         encoded = JSON.stringify(payload, (_key, value: unknown) =>
-            typeof value === "bigint" ? value.toString() : value,
+            value === undefined
+                ? { [UNDEFINED_TAG]: true }
+                : typeof value === "bigint"
+                  ? value.toString()
+                  : value,
         );
     } catch {
         throw new Error("The agent event payload must be JSON serializable.");
@@ -216,6 +272,29 @@ function serializePayload(payload: unknown): string {
         throw new Error("The agent event payload exceeds the 5 MiB durable limit.");
     }
     return encoded;
+}
+
+function deserializePayload(encoded: string): unknown {
+    if (Buffer.byteLength(encoded, "utf8") > MAX_EVENT_PAYLOAD_BYTES) {
+        throw new Error("The agent event payload exceeds the 2 MiB durable limit.");
+    }
+    return restoreUndefined(JSON.parse(encoded));
+}
+
+function restoreUndefined(value: unknown): unknown {
+    if (Array.isArray(value)) {
+        const items = value as unknown[];
+        for (let index = 0; index < items.length; index += 1) {
+            items[index] = restoreUndefined(items[index]);
+        }
+        return items;
+    }
+    if (value === null || typeof value !== "object") return value;
+    const record = value as Record<string, unknown>;
+    const keys = Object.keys(record);
+    if (keys.length === 1 && record[UNDEFINED_TAG] === true) return undefined;
+    for (const key of keys) record[key] = restoreUndefined(record[key]);
+    return record;
 }
 
 async function saveState(database: AgentDatabase, key: string, value: string): Promise<void> {

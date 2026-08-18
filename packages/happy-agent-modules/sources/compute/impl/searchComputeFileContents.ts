@@ -135,22 +135,10 @@ export async function searchComputeFileContents(
         }
         const lines = content.split(/\r?\n/);
         if (lines.at(-1) === "") lines.pop();
-        const matchingLineNumbers: number[] = [];
-        let totalMatches = 0;
-        for (const [index, line] of lines.entries()) {
-            const matched = testSearchPattern(expression, line, ctx, regexBudget);
-            if (!matched) {
-                if (regexBudget.exhausted) {
-                    outputTruncated = true;
-                    break;
-                }
-                continue;
-            }
-            totalMatches += 1;
-            if (matchingLineNumbers.length < MAX_RETAINED_MATCHING_LINES_PER_FILE) {
-                matchingLineNumbers.push(index);
-            }
-        }
+        const { matchingLineNumbers, totalMatches } =
+            options.multiline === true
+                ? scanWholeFile(expression, content, ctx, regexBudget)
+                : scanLines(expression, lines, ctx, regexBudget);
         if (regexBudget.incomplete || regexBudget.exhausted) outputTruncated = true;
         if (totalMatches === 0) {
             if (regexBudget.exhausted) break;
@@ -194,6 +182,80 @@ export async function searchComputeFileContents(
         matchCount,
         truncated: walked.truncated || outputTruncated || offset + shown.length < rawMatches.length,
     };
+}
+
+/** What one file's contents matched, in the line numbers the output is built from. */
+interface FileScan {
+    readonly matchingLineNumbers: readonly number[];
+    readonly totalMatches: number;
+}
+
+/** One line at a time, which is what a search means unless the caller says otherwise. */
+function scanLines(
+    expression: RegExp,
+    lines: readonly string[],
+    ctx: Context,
+    budget: SearchRegexBudget,
+): FileScan {
+    const matchingLineNumbers: number[] = [];
+    let totalMatches = 0;
+    for (const [index, line] of lines.entries()) {
+        const matched = testSearchPattern(expression, line, ctx, budget);
+        if (!matched) {
+            if (budget.exhausted) break;
+            continue;
+        }
+        totalMatches += 1;
+        if (matchingLineNumbers.length < MAX_RETAINED_MATCHING_LINES_PER_FILE) {
+            matchingLineNumbers.push(index);
+        }
+    }
+    return { matchingLineNumbers, totalMatches };
+}
+
+/**
+ * The whole file at once, for a pattern the caller said spans lines.
+ *
+ * A pattern written across two lines cannot match a search that only ever sees one, so multiline
+ * search reads the file as the one string it is. Each match is reported at the line it starts on,
+ * which is where a reader looking at the output would go.
+ */
+function scanWholeFile(
+    expression: RegExp,
+    content: string,
+    ctx: Context,
+    budget: SearchRegexBudget,
+): FileScan {
+    if (ctx.lifetime?.aborted === true) throw new Error("Search aborted.");
+    if (budget.remaining <= 0) {
+        budget.exhausted = true;
+        return { matchingLineNumbers: [], totalMatches: 0 };
+    }
+    budget.remaining -= Math.max(1, content.length);
+    if (budget.remaining <= 0) budget.exhausted = true;
+    const everyMatch = new RegExp(
+        expression.source,
+        expression.flags.includes("g") ? expression.flags : `${expression.flags}g`,
+    );
+    const matchingLineNumbers: number[] = [];
+    let totalMatches = 0;
+    let scanned = 0;
+    let line = 0;
+    for (const match of content.matchAll(everyMatch)) {
+        const index = match.index ?? 0;
+        while (scanned < index) {
+            if (content[scanned] === "\n") line += 1;
+            scanned += 1;
+        }
+        totalMatches += 1;
+        if (
+            matchingLineNumbers.at(-1) !== line &&
+            matchingLineNumbers.length < MAX_RETAINED_MATCHING_LINES_PER_FILE
+        ) {
+            matchingLineNumbers.push(line);
+        }
+    }
+    return { matchingLineNumbers, totalMatches };
 }
 
 function contentOutput(

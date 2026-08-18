@@ -17,11 +17,17 @@ export const observationLogLevelSchema = Type.Union(
     OBSERVATION_LOG_LEVELS.map((level) => Type.Literal(level)),
 );
 
-/** The endpoint an OTLP/HTTP trace exporter posts to. */
+/**
+ * The endpoint an OTLP/HTTP trace exporter posts to.
+ *
+ * A scheme on its own is not an address, so the first character after `//` has to begin a host. A
+ * path, a query, or a fragment standing where the host belongs is rejected rather than handed to
+ * an exporter that could never reach anything.
+ */
 export const observationEndpointSchema = Type.String({
     minLength: 1,
     maxLength: MAX_ENDPOINT_LENGTH,
-    pattern: "^https?://[^\\s]+$",
+    pattern: "^https?://[^\\s/?#]+[^\\s]*$",
 });
 
 export const observationSettingsSchema = Type.Object(

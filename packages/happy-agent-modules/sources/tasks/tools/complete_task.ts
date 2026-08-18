@@ -2,9 +2,14 @@ import { Type } from "@sinclair/typebox";
 import { defineAgentTool } from "@slopus/happy-agent-base";
 
 import type { TasksModule } from "../TasksModule.js";
-import { taskIdSchema, taskSchema } from "../Task.js";
+import { taskIdSchema, taskMutationErrorSchema, taskSchema, TaskValidationError } from "../Task.js";
 
 const completeTaskInputSchema = Type.Object({ id: taskIdSchema }, { additionalProperties: false });
+
+const completeTaskResultSchema = Type.Union([
+    Type.Object({ task: taskSchema }, { additionalProperties: false }),
+    taskMutationErrorSchema,
+]);
 
 /** Mark one task complete. Repeating this call returns the same task. */
 export function completeTaskTool(tasks: TasksModule, agentId: string) {
@@ -12,18 +17,29 @@ export function completeTaskTool(tasks: TasksModule, agentId: string) {
         name: "complete_task",
         description: "Mark a task completed after its work has been finished and verified.",
         parameters: completeTaskInputSchema,
-        returnType: Type.Object({ task: taskSchema }),
+        returnType: completeTaskResultSchema,
         durable: true,
         transactional: true,
         shouldReviewInAutoMode: () => false,
         execute: async (ctx, { id }) => {
-            const task = await tasks.complete(ctx, agentId, id);
-            return { task };
+            try {
+                const task = await tasks.complete(ctx, agentId, id);
+                return { task };
+            } catch (error) {
+                // Naming a task that is not there is an ordinary answer to give a model, not a
+                // tool failure: it can read the list and try again.
+                if (!(error instanceof TaskValidationError)) throw error;
+                return { success: false, taskId: id, error: error.message };
+            }
         },
-        toLLM: ({ task }) => [
+        toLLM: (result) => [
             {
                 type: "text",
-                text: `Task completed: ${task.id}\n${task.title}`,
+                text: tasks.formatMutationForModel(
+                    "task" in result
+                        ? `Task completed: ${result.task.id}\n${result.task.title}`
+                        : `Task ${result.taskId} could not be completed: ${result.error}`,
+                ),
             },
         ],
     });

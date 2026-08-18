@@ -88,7 +88,10 @@ export function fitProjectPage(
         size = nextSize;
     }
     if (visible.length === 0) {
-        throw new Error("A project page cannot show one complete row within the output budget.");
+        // A legal folder path can be longer than the whole output budget. Keeping the first row
+        // and letting the text be truncated leaves the person something to act on, where an empty
+        // page would leave them nothing at all.
+        visible.push(page.projects[0]!);
     }
     const consumedAll = visible.length === page.projects.length;
     const nextCursor =

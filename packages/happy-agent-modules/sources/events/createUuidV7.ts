@@ -40,11 +40,12 @@ export function createUuidV7Factory(now: () => number = Date.now, after?: string
 }
 
 function parseUuidV7(value: string): { readonly randomTail: bigint; readonly timestamp: bigint } {
-    const hex = value.replaceAll("-", "");
-    if (!/^[0-9a-f]{12}7[0-9a-f]{3}[89ab][0-9a-f]{15}$/.test(hex)) {
+    // Only the canonical hyphenated form is a UUID. Accepting a bare hex string would let a cursor
+    // that no other reader can parse resume the sequence.
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value)) {
         throw new Error("The UUIDv7 high-water mark is invalid.");
     }
-    const parsed = BigInt(`0x${hex}`);
+    const parsed = BigInt(`0x${value.replaceAll("-", "")}`);
     return {
         randomTail: (((parsed >> 64n) & 0xfffn) << 62n) | (parsed & RAND_B_MASK),
         timestamp: parsed >> 80n,

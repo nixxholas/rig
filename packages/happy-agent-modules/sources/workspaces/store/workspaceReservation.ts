@@ -13,6 +13,11 @@ import type {
     WorkspaceMutationResult,
     WorkspaceStoreReserveInput,
 } from "../WorkspaceStore.js";
+import {
+    uniqueWorkspaceBranch,
+    uniqueWorkspaceName,
+    uniqueWorkspaceStorageKey,
+} from "./workspaceNaming.js";
 import { lowestOrderKey, orderKeyBetween } from "./workspaceOrdering.js";
 import {
     assertWorkspace,
@@ -48,6 +53,7 @@ export async function reserveWorkspace(
     hooks: WorkspaceReserveHooks,
     host: WorkspaceHost | undefined,
     operation: WorkspaceMutationRequest,
+    now: () => number,
 ): Promise<WorkspaceMutationResult> {
     const unchanged = (workspace: Workspace): WorkspaceMutationResult => ({
         agentId: actingAgentId,
@@ -68,10 +74,10 @@ export async function reserveWorkspace(
 
     for (let attempt = 1; ; attempt += 1) {
         const siblings = await readProjectWorkspaces(database, input.projectRef);
-        const name = uniqueName(input.name, (candidate) =>
+        const name = uniqueWorkspaceName(input.name, (candidate) =>
             siblings.some((row) => workspaceNameKey(row.name) === workspaceNameKey(candidate)),
         );
-        const storageKey = await uniqueKey(seed, async (candidate) => {
+        const storageKey = await uniqueWorkspaceStorageKey(seed, async (candidate) => {
             if (
                 siblings.some(
                     (row) =>
@@ -83,7 +89,7 @@ export async function reserveWorkspace(
             }
             return await probe.isStorageKeyUnavailable(candidate);
         });
-        const branch = await uniqueKey(
+        const branch = await uniqueWorkspaceBranch(
             workspaceBranchName(input.storageKeySeed ?? name),
             async (candidate) => {
                 if (siblings.some((row) => row.branch === candidate)) return true;
@@ -96,7 +102,7 @@ export async function reserveWorkspace(
                 "A workspace folder must be an absolute path the host already normalized.",
             );
         }
-        const at = Date.now();
+        const at = now();
         const workspace: Workspace = {
             id: input.id,
             ownerAgentId: input.ownerAgentId,
@@ -172,7 +178,21 @@ export function assertReservationStillMeans(
     if (existing.kind !== input.kind) {
         throw new Error("That workspace ID already names a workspace of another kind.");
     }
-    if (input.baseRef !== undefined && existing.baseRef !== input.baseRef) {
+    // A repeat that leaves the base out is asking for a workspace cut from the project's default,
+    // which is a different workspace from one cut from a named ref — so the comparison runs both
+    // ways rather than treating an absent base as "whatever was stored".
+    //
+    // Both ways is only meaningful while the row still is the reservation. Initialization records
+    // the ref Git actually resolved into the same field, so a workspace that asked for no base ends
+    // up storing the project default it was cut from. Past that point the stored base answers a
+    // different question than the input does, and only a repeat that positively names a conflicting
+    // base is a mistake; an absent one is the same request it always was.
+    const requestIsStillTheRow = existing.version === 1;
+    if (
+        requestIsStillTheRow
+            ? existing.baseRef !== input.baseRef
+            : input.baseRef !== undefined && existing.baseRef !== input.baseRef
+    ) {
         throw new Error("That workspace ID already names a workspace with a different base.");
     }
     if (input.baseCommit !== undefined && existing.baseCommit !== input.baseCommit) {
@@ -187,12 +207,17 @@ export function assertReservationStillMeans(
     ) {
         throw new Error("That workspace ID already names a workspace created by another session.");
     }
-    if (!answersTo(existing.name, input.name, (value) => workspaceNameKey(value))) {
+    if (existing.nameConfigured !== input.nameConfigured) {
+        throw new Error(
+            "That workspace ID already names a workspace whose name was configured differently.",
+        );
+    }
+    if (!answersTo(existing.name, input.name, / \(\d+\)$/u, (value) => workspaceNameKey(value))) {
         throw new Error("That workspace ID already names a workspace called something else.");
     }
     if (
         input.storageKeySeed !== undefined &&
-        !answersTo(existing.storageKey, input.storageKeySeed, (value) =>
+        !answersTo(existing.storageKey, input.storageKeySeed, /-\d+$/u, (value) =>
             value.toLocaleLowerCase("en-US"),
         )
     ) {
@@ -203,6 +228,10 @@ export function assertReservationStillMeans(
 /**
  * The host's three answers, or a clear refusal. A reservation cannot choose a branch or a folder
  * without them, so a missing probe stops the reservation rather than letting it guess.
+ *
+ * Each answer is called on the object that supplied it, because a host is free to write these as
+ * methods that read its own state, and each availability answer has to be a real yes or no: a
+ * truthy stand-in would quietly decide that a branch is taken.
  */
 function reservationProbe(
     projectRef: string,
@@ -213,12 +242,12 @@ function reservationProbe(
     isStorageKeyUnavailable: (storageKey: string) => Promise<boolean>;
     pathForStorageKey: (storageKey: string) => string;
 } {
-    const branch = hooks.isBranchUnavailable;
-    const storageKey = hooks.isStorageKeyUnavailable;
-    const path = hooks.pathForStorageKey;
-    const hostBranch = host?.isBranchUnavailable;
-    const hostStorageKey = host?.isStorageKeyUnavailable;
-    const hostPath = host?.pathForStorageKey;
+    const branch = hooks.isBranchUnavailable?.bind(hooks);
+    const storageKey = hooks.isStorageKeyUnavailable?.bind(hooks);
+    const path = hooks.pathForStorageKey?.bind(hooks);
+    const hostBranch = host?.isBranchUnavailable?.bind(host);
+    const hostStorageKey = host?.isStorageKeyUnavailable?.bind(host);
+    const hostPath = host?.pathForStorageKey?.bind(host);
     if (
         (branch === undefined && hostBranch === undefined) ||
         (storageKey === undefined && hostStorageKey === undefined) ||
@@ -231,48 +260,54 @@ function reservationProbe(
     }
     return {
         isBranchUnavailable: async (candidate) =>
-            (branch === undefined ? false : await branch(candidate)) ||
-            (hostBranch === undefined ? false : await hostBranch(projectRef, candidate)),
+            (branch === undefined ? false : await availability(branch(candidate), "branch")) ||
+            (hostBranch === undefined
+                ? false
+                : await availability(hostBranch(projectRef, candidate), "branch")),
         isStorageKeyUnavailable: async (candidate) =>
-            (storageKey === undefined ? false : await storageKey(candidate)) ||
-            (hostStorageKey === undefined ? false : await hostStorageKey(projectRef, candidate)),
+            (storageKey === undefined
+                ? false
+                : await availability(storageKey(candidate), "folder")) ||
+            (hostStorageKey === undefined
+                ? false
+                : await availability(hostStorageKey(projectRef, candidate), "folder")),
         pathForStorageKey: (candidate) =>
-            path === undefined ? hostPath!(projectRef, candidate) : path(candidate),
+            path === undefined
+                ? hostPath === undefined
+                    ? unreachablePath()
+                    : hostPath(projectRef, candidate)
+                : path(candidate),
     };
+}
+
+/** A yes or no about a name, or a refusal to read anything else as one. */
+async function availability(answer: boolean | Promise<boolean>, subject: string): Promise<boolean> {
+    const settled = await answer;
+    if (typeof settled !== "boolean") {
+        throw new Error(
+            `The answer about whether a ${subject} name is already taken must be a boolean.`,
+        );
+    }
+    return settled;
+}
+
+function unreachablePath(): never {
+    throw new Error("Reserving a workspace needs the host's answer for where it would live.");
 }
 
 /**
  * Whether a stored value is the requested one. The first reservation may have moved onto a counted
  * suffix because something else already answered to the name, so the suffix a reservation adds is
- * still the same request.
+ * still the same request — but only the suffix this kind of value takes. A name someone deliberately
+ * ended in `-2` is a different name, not a suffixed one.
  */
-function answersTo(stored: string, requested: string, key: (value: string) => string): boolean {
+function answersTo(
+    stored: string,
+    requested: string,
+    suffix: RegExp,
+    key: (value: string) => string,
+): boolean {
     const requestedKey = key(requested);
     if (key(stored) === requestedKey) return true;
-    return key(stored.replace(/ \(\d+\)$/u, "").replace(/-\d+$/u, "")) === requestedKey;
-}
-
-/**
- * Finds the first name nothing else in the project answers to.
- *
- * A name already in use gains a counted suffix rather than failing the request that asked for it.
- */
-function uniqueName(base: string, taken: (candidate: string) => boolean): string {
-    if (!taken(base)) return base;
-    for (let suffix = 2; ; suffix += 1) {
-        const candidate = `${base} (${String(suffix)})`;
-        if (!taken(candidate)) return candidate;
-    }
-}
-
-/** The same rule for the kebab-case values Git and the filesystem see. */
-async function uniqueKey(
-    base: string,
-    taken: (candidate: string) => Promise<boolean>,
-): Promise<string> {
-    if (!(await taken(base))) return base;
-    for (let suffix = 2; ; suffix += 1) {
-        const candidate = `${base}-${String(suffix)}`;
-        if (!(await taken(candidate))) return candidate;
-    }
+    return key(stored.replace(suffix, "")) === requestedKey;
 }

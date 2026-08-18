@@ -56,6 +56,16 @@ const discoveredRootSchema = Type.Object(
     exact,
 );
 type DiscoveredRoot = Static<typeof discoveredRootSchema>;
+/** One page of a directory listing, exactly as discovery insists on receiving it. */
+const directoryPageSchema = Type.Object(
+    {
+        entries: Type.Array(Type.String({ maxLength: 4_096 }), {
+            maxItems: SKILL_DIRECTORY_PAGE_SIZE,
+        }),
+        hasMore: Type.Boolean(),
+    },
+    { additionalProperties: true },
+);
 const discoveryBudgetSchema = Type.Object(
     {
         entries: Type.Integer({
@@ -67,6 +77,33 @@ const discoveryBudgetSchema = Type.Object(
     exact,
 );
 type DiscoveryBudget = Static<typeof discoveryBudgetSchema>;
+
+const callableSchema = Type.Function([], Type.Any());
+/**
+ * What discovery actually needs from a resolved compute.
+ *
+ * The resolver belongs to the host, so what comes back is checked before a machine that cannot
+ * answer these calls turns into a pile of undefined-property failures halfway through a walk. Only
+ * the parts skills use are named; the machine may carry anything else it likes.
+ */
+const skillsComputeSchema = Type.Object(
+    {
+        cwd: Type.String({ minLength: 1 }),
+        fs: Type.Object(
+            {
+                home: Type.Optional(Type.String()),
+                exists: callableSchema,
+                lstat: callableSchema,
+                readFileBuffer: callableSchema,
+                readdirPage: callableSchema,
+                realpath: callableSchema,
+                stat: callableSchema,
+            },
+            { additionalProperties: true },
+        ),
+    },
+    { additionalProperties: true },
+);
 
 const computeResolverSchema = Type.Unsafe<ComputeResolver>(
     Type.Object(
@@ -115,7 +152,7 @@ export class SkillsModule implements AgentModule {
         input: SkillListInput = {},
     ): Promise<SkillListResult> {
         assertValue(skillListInputSchema, input, "Skill list input");
-        const compute = await this.#compute.resolve(ctx, agentId);
+        const compute = await this.#resolveCompute(ctx, agentId);
         const entries = await discoverSkills(
             compute,
             compute === undefined ? undefined : computePermissionsForContext(ctx),
@@ -140,7 +177,7 @@ export class SkillsModule implements AgentModule {
     /** Read one currently discoverable skill by name. */
     async read(ctx: Context, agentId: string, input: SkillReadInput): Promise<SkillDocument> {
         assertValue(skillReadInputSchema, input, "Skill read input");
-        const compute = await this.#compute.resolve(ctx, agentId);
+        const compute = await this.#resolveCompute(ctx, agentId);
         const permissions = compute === undefined ? undefined : computePermissionsForContext(ctx);
         const entries = await discoverSkills(compute, permissions, this.#skillRoots);
         const entry = entries.find((candidate) => candidate.name === input.name);
@@ -164,9 +201,24 @@ export class SkillsModule implements AgentModule {
         return structuredClone(document);
     }
 
+    /**
+     * The agent's machine, or nothing when it has none.
+     *
+     * A machine that cannot answer the calls discovery makes is refused here, where the reason is
+     * still legible, rather than surfacing later as a missing-property failure mid-walk.
+     */
+    async #resolveCompute(ctx: Context, agentId: string): Promise<HostCompute | undefined> {
+        const compute = await this.#compute.resolve(ctx, agentId);
+        if (compute === undefined) return undefined;
+        if (!Value.Check(skillsComputeSchema, compute)) {
+            throw new Error("Skills resolver returned an invalid compute.");
+        }
+        return compute;
+    }
+
     readonly #hooks: AgentModuleHooks = {
         instructions: async (ctx: Context, scope: AgentModuleScope): Promise<string> => {
-            const compute = await this.#compute.resolve(ctx, scope.agent.id);
+            const compute = await this.#resolveCompute(ctx, scope.agent.id);
             const entries = await discoverSkills(
                 compute,
                 compute === undefined ? undefined : computePermissionsForContext(ctx),
@@ -178,7 +230,7 @@ export class SkillsModule implements AgentModule {
         tools: async (ctx: Context, scope: AgentModuleScope): Promise<readonly AnyAgentTool[]> => {
             const durableSkillsConfigured = hasDurableSkills(this.#skillRoots);
             if (
-                (await this.#compute.resolve(ctx, scope.agent.id)) === undefined &&
+                (await this.#resolveCompute(ctx, scope.agent.id)) === undefined &&
                 !durableSkillsConfigured
             ) {
                 return [];
@@ -224,12 +276,17 @@ export class SkillsModule implements AgentModule {
 function materializeOptions(options: SkillsModuleOptions): unknown {
     if (options === null || typeof options !== "object") return options;
     const compute = (options as { compute?: ComputeResolver }).compute;
-    return compute === undefined || compute === null || typeof compute !== "object"
-        ? options
-        : {
-              ...options,
-              compute: { resolve: compute.resolve },
-          };
+    if (compute === undefined || compute === null || typeof compute !== "object") return options;
+    // A resolver written as a plain object is exactly a resolver, so an unexpected property in it
+    // is a mistake worth refusing. A resolver that is an instance of something is a resolver among
+    // other things: its own state and methods are its business, and only `resolve` is taken from
+    // it, by name, so that one carried on a prototype is still seen.
+    const prototype = Object.getPrototypeOf(compute) as object | null;
+    const written = prototype === Object.prototype || prototype === null;
+    return {
+        ...options,
+        compute: written ? { ...compute, resolve: compute.resolve } : { resolve: compute.resolve },
+    };
 }
 
 function snapshotSkillRoots(roots: readonly SkillRoot[] | undefined): readonly SkillRoot[] {
@@ -372,20 +429,23 @@ async function discoverSkillRoot(
     } catch {
         return;
     }
-    if (root.kind === "plugin") {
-        try {
-            if ((await compute.fs.lstat(permissions, root.path)).isSymbolicLink) return;
-        } catch {
-            return;
-        }
+    let rootIsLink: boolean;
+    try {
+        rootIsLink = (await compute.fs.lstat(permissions, root.path)).isSymbolicLink;
+    } catch {
+        return;
     }
+    if (rootIsLink && root.kind === "plugin") return;
     let rootPath: string;
     try {
         rootPath = await compute.fs.realpath(permissions, root.path);
     } catch {
         return;
     }
-    const directories = [rootPath];
+    // A configured root is the container its skills sit in, so a SKILL.md lying directly inside it
+    // belongs to no skill. A root named by a link is a different thing: what the link points at is
+    // already one step in, and its own SKILL.md is that skill's document.
+    const directories = [{ path: rootPath, isContainer: !rootIsLink }];
     const visitedDirectories = new Set([rootPath]);
     for (
         let directoryIndex = 0;
@@ -395,7 +455,7 @@ async function discoverSkillRoot(
         byName.size < MAX_SKILL_COUNT;
         directoryIndex += 1
     ) {
-        const directory = directories[directoryIndex]!;
+        const { path: directory, isContainer } = directories[directoryIndex]!;
         let after: string | undefined;
         let hasMore = true;
         do {
@@ -411,8 +471,10 @@ async function discoverSkillRoot(
             } catch {
                 break;
             }
+            if (!Value.Check(directoryPageSchema, page)) break;
             for (const name of page.entries) {
                 if (name.startsWith(".") || name === "node_modules") continue;
+                if (!isPlainEntryName(name)) continue;
                 budget.entries += 1;
                 const path = join(directory, name);
                 try {
@@ -424,7 +486,7 @@ async function discoverSkillRoot(
                         const canonical = await compute.fs.realpath(permissions, path);
                         if (!visitedDirectories.has(canonical)) {
                             visitedDirectories.add(canonical);
-                            directories.push(canonical);
+                            directories.push({ path: canonical, isContainer: false });
                         }
                         continue;
                     }
@@ -432,11 +494,11 @@ async function discoverSkillRoot(
                         const canonical = await compute.fs.realpath(permissions, path);
                         if (!visitedDirectories.has(canonical)) {
                             visitedDirectories.add(canonical);
-                            directories.push(canonical);
+                            directories.push({ path: canonical, isContainer: false });
                         }
                         continue;
                     }
-                    if (!stat.isFile || name !== "SKILL.md") continue;
+                    if (!stat.isFile || name !== "SKILL.md" || isContainer) continue;
                     budget.files += 1;
                     if (budget.files > MAX_SKILL_FILES_INSPECTED) return;
                     const entry = await readSkillEntry(compute, permissions, path, root.source);
@@ -461,6 +523,24 @@ async function discoverSkillRoot(
             byName.size < MAX_SKILL_COUNT
         );
     }
+}
+
+/**
+ * Whether a directory entry is a name rather than a path.
+ *
+ * A listing is data from the machine, and a name carrying separators or dot segments would join
+ * into a path outside the root being walked. Such an entry is not a skill under this root, whatever
+ * else it may be, so discovery passes it by.
+ */
+function isPlainEntryName(name: string): boolean {
+    return (
+        name.length > 0 &&
+        name !== "." &&
+        name !== ".." &&
+        !name.includes("/") &&
+        !name.includes("\\") &&
+        !name.includes("\u0000")
+    );
 }
 
 async function readSkillEntry(

@@ -698,11 +698,14 @@ export class PermissionsModule implements AgentModule {
      * lost. It observes permissions; it never decides them.
      */
     async #announce(ctx: Context, event: PermissionEvent): Promise<void> {
-        const onEvent = this.#listener?.onEvent;
-        if (onEvent === undefined) return;
+        const listener = this.#listener;
+        const onEvent = listener?.onEvent;
+        if (listener === undefined || onEvent === undefined) return;
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
-            const settled = Promise.resolve(onEvent(ctx, event));
+            // Called on the listener rather than on its own, so an observer written as a class or
+            // an object with methods still sees itself and its own state.
+            const settled = Promise.resolve(onEvent.call(listener, ctx, event));
             // A listener that settles after the timeout must not become an unhandled rejection once
             // the decision has already moved on without it.
             void settled.catch(() => undefined);

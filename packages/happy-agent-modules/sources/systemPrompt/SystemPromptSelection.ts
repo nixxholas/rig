@@ -23,14 +23,16 @@ export const MAX_SYSTEM_PROMPT_MODEL_LENGTH = 256;
  */
 export const systemPromptSelectionSchema = Type.Object(
     {
-        model: Type.Union([
-            Type.String({
-                minLength: 1,
-                maxLength: MAX_SYSTEM_PROMPT_MODEL_LENGTH,
-                pattern: "^[^\\u0000\\r\\n]+$",
-            }),
-            Type.Undefined(),
-        ]),
+        model: Type.Optional(
+            Type.Union([
+                Type.String({
+                    minLength: 1,
+                    maxLength: MAX_SYSTEM_PROMPT_MODEL_LENGTH,
+                    pattern: "^[^\\u0000\\r\\n]+$",
+                }),
+                Type.Undefined(),
+            ]),
+        ),
         providerKind: Type.Optional(systemPromptProviderKindSchema),
     },
     { additionalProperties: false },

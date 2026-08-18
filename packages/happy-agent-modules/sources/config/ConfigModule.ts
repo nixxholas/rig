@@ -1078,6 +1078,9 @@ function normalizeSourceValues(values: PartialValues): Record<string, unknown> {
             ? {}
             : { mcpServers: normalizeMcpServers(values.mcp_servers) }),
         ...(values.network === undefined ? {} : { network: normalizeNetwork(values.network) }),
+        ...(values.observation === undefined
+            ? {}
+            : { observation: normalizeObservation(values.observation) }),
         ...(values.p2p === undefined ? {} : { p2p: normalizeP2p(values.p2p) }),
         ...(values.permissions === undefined
             ? {}
@@ -1133,9 +1136,10 @@ async function readConfigSource(path: string, _kind: ConfigSourceKind): Promise<
             };
         }
         if (error instanceof Error) {
-            throw new Error(`Could not read Happy Agent configuration '${path}'.`, {
-                cause: error,
-            });
+            throw new Error(
+                `Could not read Happy Agent configuration '${path}'. ${error.message}`,
+                { cause: error },
+            );
         }
         throw error;
     } finally {
@@ -2023,7 +2027,7 @@ function readP2p(
         }
         p2p.iroh = raw.relay_url === undefined ? {} : { relay_url: raw.relay_url };
     }
-    if (p2p.name !== undefined && (p2p.name.length === 0 || p2p.name.length > 128)) {
+    if (p2p.name !== undefined && !/^[^\p{C}]{1,128}$/u.test(p2p.name)) {
         throw new Error("p2p.name must be 1–128 printable characters.");
     }
     if (p2p.iroh?.relay_url !== undefined && !/^https?:\/\//u.test(p2p.iroh.relay_url)) {
@@ -2179,6 +2183,11 @@ function readMcpServers(
             parsed["transport"] !== "http"
         ) {
             throw new Error(`MCP server "${name}" uses unsupported transport.`);
+        }
+        if (command !== undefined && parsed["transport"] !== undefined) {
+            throw new Error(
+                `MCP server "${name}" runs a command, so it always speaks stdio and cannot set transport.`,
+            );
         }
     }
     if (!Value.Check(mcpInputSchema, result)) {

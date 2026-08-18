@@ -8,7 +8,6 @@ import {
     usageAggregateQuerySchema,
     usagePageQuerySchema,
     usagePageSchema,
-    usageRecordSchema,
     usageSummarySchema,
     type UsageAggregateQuery,
     type UsagePage,
@@ -16,6 +15,7 @@ import {
     type UsageRecord,
     type UsageSummary,
 } from "../Usage.js";
+import { assertUsageRecord } from "./assertUsageRecord.js";
 
 const RECORDS_TABLE = "happy_agent_usage_records";
 
@@ -179,9 +179,7 @@ export class UsageDatabase {
     }
 
     async record(ctx: Context, record: UsageRecord): Promise<void> {
-        if (!Value.Check(usageRecordSchema, record)) {
-            throw new Error("Usage record is invalid.");
-        }
+        assertUsageRecord(record);
         await agentDatabaseRun(
             ctx.db,
             sql`INSERT INTO ${sql.raw(RECORDS_TABLE)}
@@ -219,9 +217,7 @@ export class UsageDatabase {
 
     #parseRecord(encoded: string): UsageRecord {
         const value: unknown = JSON.parse(encoded);
-        if (!Value.Check(usageRecordSchema, value)) {
-            throw new Error("Stored usage record is invalid.");
-        }
+        assertUsageRecord(value);
         return structuredClone(value);
     }
 }

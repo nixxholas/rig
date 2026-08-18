@@ -57,6 +57,8 @@ export function parseCodexPatchDirective(line: string): CodexPatchDirective | un
  * of the format, so that a malformed patch is refused with a sentence naming what is wrong rather
  * than half-applied and then discovered. Every complaint names the file it is about, because a
  * patch touching several files otherwise leaves the model guessing which one it wrote badly.
+ * Anything written after `*** End Patch` is refused too: the model meant something by it, and
+ * applying the part before it while dropping the rest is the half-application this refuses.
  */
 export function parseCodexPatch(patch: string): readonly CodexPatchOperation[] {
     const lines = patch.replace(/\r\n/g, "\n").split("\n");
@@ -69,9 +71,13 @@ export function parseCodexPatch(patch: string): readonly CodexPatchOperation[] {
 
     const operations: CodexPatchOperation[] = [];
     let index = 1;
+    let endIndex: number | undefined;
     while (index < lines.length) {
         const line = lines[index] ?? "";
-        if (line === "*** End Patch") break;
+        if (line === "*** End Patch") {
+            endIndex = index;
+            break;
+        }
         const directive = parseCodexPatchDirective(line);
         if (directive === undefined || directive.kind === "move") {
             throw new Error(`This is not a patch directive: ${line}`);
@@ -145,6 +151,14 @@ export function parseCodexPatch(patch: string): readonly CodexPatchOperation[] {
         });
     }
 
+    if (endIndex !== undefined) {
+        const trailing = lines.slice(endIndex + 1).find((line) => line.trim().length > 0);
+        if (trailing !== undefined) {
+            throw new Error(
+                `This patch has content after its \`*** End Patch\` last line: ${trailing}`,
+            );
+        }
+    }
     if (operations.length === 0) throw new Error("This patch changes no files.");
     return operations;
 }

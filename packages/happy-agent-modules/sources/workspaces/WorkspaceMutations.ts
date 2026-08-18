@@ -1,12 +1,9 @@
 import { Value } from "@sinclair/typebox/value";
-import { afterCommit, type Context } from "@steve.kite/stdlib";
+import { afterCommit, asyncLock, type Context } from "@steve.kite/stdlib";
 
-import {
-    workspaceTimestampSchema,
-    type Workspace,
-    type WorkspaceMutationOperation,
-} from "./Workspace.js";
+import { type Workspace, type WorkspaceMutationOperation } from "./Workspace.js";
 import { assertWorkspaceOwner, assertWorkspaceRecord } from "./WorkspaceAccess.js";
+import { workspaceNow, type WorkspaceClock } from "./WorkspaceClock.js";
 import {
     workspaceEventIdSchema,
     workspaceEventSchema,
@@ -43,7 +40,7 @@ export type WorkspaceEventPayload = WorkspaceEvent extends infer TEvent
 export interface WorkspaceMutationsOptions {
     readonly store: WorkspaceStore;
     readonly eventIdFactory: (ctx: Context, agentId: string) => string | Promise<string>;
-    readonly clock: (ctx: Context, agentId: string) => number;
+    readonly clock: WorkspaceClock;
     readonly listener: WorkspaceModuleListener | undefined;
     readonly onPostCommitError:
         | ((ctx: Context, event: WorkspaceEvent, error: unknown) => void | Promise<void>)
@@ -64,6 +61,12 @@ export class WorkspaceMutations {
     readonly #clock: WorkspaceMutationsOptions["clock"];
     readonly #listener: WorkspaceModuleListener | undefined;
     readonly #onPostCommitError: WorkspaceMutationsOptions["onPostCommitError"];
+    /**
+     * One durable change at a time. Two callers that ask at the same moment would otherwise each open
+     * a root transaction, and a mutation already running inside one joins it instead of waiting on
+     * itself.
+     */
+    readonly #oneAtATime = asyncLock({ reentry: "allow" });
 
     constructor(options: WorkspaceMutationsOptions) {
         this.#store = options.store;
@@ -171,20 +174,22 @@ export class WorkspaceMutations {
         ctx: Context,
         work: (txCtx: Context) => Promise<WorkspaceTransactionChange>,
     ): Promise<WorkspaceTransactionChange> {
-        let expected: WorkspaceTransactionChange | undefined;
-        const raw = await requirePromise(
-            ctx.inTx(async (txCtx) => {
-                const change = await work(txCtx);
-                expected = deepFreeze(structuredClone(change));
-                return structuredClone(expected);
-            }),
-            "Workspace store transaction",
-        );
-        assertWorkspaceTransactionChange(raw);
-        if (expected === undefined || !sameJson(raw, expected)) {
-            throw new Error("Workspace transaction returned a substituted change.");
-        }
-        return raw;
+        return await this.#oneAtATime.runInLock(ctx, async (lockCtx) => {
+            let expected: WorkspaceTransactionChange | undefined;
+            const raw = await requirePromise(
+                lockCtx.inTx(async (txCtx) => {
+                    const change = await work(txCtx);
+                    expected = deepFreeze(structuredClone(change));
+                    return structuredClone(expected);
+                }),
+                "Workspace store transaction",
+            );
+            assertWorkspaceTransactionChange(raw);
+            if (expected === undefined || !sameJson(raw, expected)) {
+                throw new Error("Workspace transaction returned a substituted change.");
+            }
+            return raw;
+        });
     }
 
     async getRequired(ctx: Context, agentId: string, workspaceId: string): Promise<Workspace> {
@@ -223,10 +228,7 @@ export class WorkspaceMutations {
         if (!Value.Check(workspaceEventIdSchema, eventId)) {
             throw new Error("Workspace event ID factory returned an invalid ID.");
         }
-        const at = this.#clock(ctx, agentId);
-        if (!Value.Check(workspaceTimestampSchema, at)) {
-            throw new Error("Workspace clock must return a non-negative integer.");
-        }
+        const at = workspaceNow(this.#clock, ctx, agentId);
         const event = { ...payload, eventId, at };
         if (!Value.Check(workspaceEventSchema, event)) {
             throw new Error("Workspace module created an invalid event.");

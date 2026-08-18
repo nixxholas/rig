@@ -62,7 +62,17 @@ export async function startComputeCommand(
     } finally {
         watching?.removeEventListener("abort", stop);
     }
-    if (snapshot === undefined) throw new Error("The command could not be started.");
+    if (snapshot === undefined) {
+        // A host that cannot say how the command started leaves nothing the model could read from,
+        // type into, or stop, so the session goes down with the call instead of running on with
+        // no handle to it.
+        try {
+            await compute.shell.killSession(sessionId);
+        } catch {
+            // A host that has already lost the session has nothing left to stop.
+        }
+        throw new Error("The command could not be started.");
+    }
     // Handing back a session means the command is meant to go on running, so an interrupted turn
     // must no longer take it down.
     if (snapshot.status === "running" && ctx.lifetime?.aborted !== true) {

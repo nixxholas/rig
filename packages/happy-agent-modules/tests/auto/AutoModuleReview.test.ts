@@ -357,7 +357,10 @@ describe("AutoModule reviewer", () => {
         const requests = world.provider.sessions.flatMap((session) => session.requests);
         expect(requests).toHaveLength(2);
         expect(JSON.stringify(requests[0]?.context)).toContain("<conversation>");
-        expect(JSON.stringify(requests[1]?.context)).toContain('<conversation continued="true">');
+        // The marker is searched for inside serialized JSON, so its attribute quotes are escaped.
+        expect(JSON.stringify(requests[1]?.context)).toContain(
+            '<conversation continued=\\"true\\">',
+        );
         expect(JSON.stringify(requests[1]?.context)).toContain(
             "No new conversation since your last review.",
         );
@@ -436,7 +439,7 @@ describe("AutoModule reviewer", () => {
         const requests = world.provider.sessions.flatMap((session) => session.requests);
         expect(requests).toHaveLength(2);
         expect(JSON.stringify(requests[1]?.context)).not.toContain(
-            '<conversation continued="true">',
+            '<conversation continued=\\"true\\">',
         );
     });
 

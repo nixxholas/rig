@@ -260,8 +260,11 @@ export class AgentsMdInstructions {
      */
     async readFormatted(ctx: Context, agentId: string): Promise<string | undefined> {
         const snapshot = await this.read(ctx, agentId);
-        const text = formatInstructions(snapshot);
-        return text.trim().length === 0 ? undefined : text;
+        // The specification text explains a convention, not the project's intent. With no
+        // instruction document there is nothing for a reviewer to read, so say so plainly
+        // instead of handing back a specification for files that do not exist.
+        if (formatBody(snapshot).length === 0) return undefined;
+        return formatInstructions(snapshot);
     }
 
     readonly instructions = async (ctx: Context, scope: AgentModuleScope): Promise<string> => {
@@ -393,7 +396,7 @@ export class AgentsMdInstructions {
         if (cached === undefined) {
             return await this.#loadInstructions(ctx, scope.agent.id);
         }
-        if (!Value.Check(turnSnapshotSchema, cached)) {
+        if (!Value.Check(turnSnapshotSchema, cached) || !isSoundStoredSnapshot(cached)) {
             throw new Error("Stored AGENTS.md turn snapshot is invalid.");
         }
         return loadedInstructionsForSnapshot(cached === null ? undefined : structuredClone(cached));
@@ -420,6 +423,38 @@ export class AgentsMdInstructions {
         }
         return document;
     }
+}
+
+/**
+ * Check the facts about a persisted snapshot that a TypeBox shape cannot express.
+ *
+ * The schema counts characters, while every instruction bound is a UTF-8 byte bound, and it has no
+ * way to say that a snapshot names each document once. A snapshot this module wrote always
+ * satisfies both; one that does not was not written by discovery, so reject it rather than deliver
+ * it as this turn's instructions.
+ */
+function isSoundStoredSnapshot(snapshot: AgentsMdSnapshot | null): boolean {
+    if (snapshot === null) return true;
+    const encoder = new TextEncoder();
+    if (
+        snapshot.global !== undefined &&
+        encoder.encode(snapshot.global.text).byteLength > MAX_AGENTS_MD_GLOBAL_BYTES
+    ) {
+        return false;
+    }
+    if (
+        snapshot.security !== undefined &&
+        encoder.encode(snapshot.security.text).byteLength > MAX_AGENTS_SECURITY_MD_BYTES
+    ) {
+        return false;
+    }
+    const paths = new Set<string>();
+    for (const document of snapshot.documents) {
+        if (encoder.encode(document.text).byteLength > MAX_AGENTS_MD_DOCUMENT_BYTES) return false;
+        if (paths.has(document.path)) return false;
+        paths.add(document.path);
+    }
+    return true;
 }
 
 function loadedInstructionsForSnapshot(snapshot: AgentsMdSnapshot | undefined): LoadedInstructions {

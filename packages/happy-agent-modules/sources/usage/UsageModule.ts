@@ -58,6 +58,7 @@ import {
 } from "./UsageContracts.js";
 import { getAgentTreeUsageTool } from "./tools/get_agent_tree_usage.js";
 import { getUsageTool } from "./tools/get_usage.js";
+import { assertUsageRecord, assertUsageTokens } from "./impl/assertUsageRecord.js";
 import { UsageDatabase } from "./impl/usageDatabase.js";
 
 const DEFAULT_PAGE_SIZE = 50;
@@ -815,27 +816,6 @@ function assertPending(value: unknown): UsagePending {
 function assertAgentId(agentId: string): void {
     if (!Value.Check(usageAgentIdSchema, agentId)) {
         throw new Error("Usage agent ID is invalid.");
-    }
-}
-
-function assertUsageTokens(value: unknown): asserts value is UsageTokens {
-    if (!Value.Check(usageTokensSchema, value)) {
-        throw new Error("Usage provider token counts are invalid.");
-    }
-}
-
-function assertUsageRecord(value: unknown): asserts value is UsageRecord {
-    if (!Value.Check(usageRecordSchema, value)) {
-        throw new Error("Usage record is invalid.");
-    }
-    if (value.finishedAt < value.startedAt) {
-        throw new Error("Usage record timestamps are out of order.");
-    }
-    if (value.durationMs !== value.finishedAt - value.startedAt) {
-        throw new Error("Usage record duration does not match its timestamps.");
-    }
-    if (value.kind === "inference") {
-        assertUsageTokens(value.tokens);
     }
 }
 

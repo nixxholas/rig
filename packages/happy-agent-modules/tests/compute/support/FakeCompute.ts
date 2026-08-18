@@ -134,6 +134,21 @@ export class FakeCompute implements Compute {
             }
             return current;
         };
+        // Named here rather than through the published `readdir`, so a test that replaces one
+        // listing call to prove the other is used does not silently disable both.
+        const namesIn = (path: string): string[] => {
+            const prefix = path.endsWith("/") ? path : `${path}/`;
+            const names = new Set<string>();
+            for (const candidate of [
+                ...this.files.keys(),
+                ...this.directories,
+                ...this.links.keys(),
+            ]) {
+                if (!candidate.startsWith(prefix) || candidate === path) continue;
+                names.add(candidate.slice(prefix.length).split("/")[0] ?? "");
+            }
+            return [...names];
+        };
         const statOf = (path: string): ComputeFileStat | undefined => {
             const file = this.files.get(path);
             if (file !== undefined) {
@@ -207,26 +222,19 @@ export class FakeCompute implements Compute {
                 if (!this.directories.has(path)) {
                     return Promise.reject(new Error(`No such directory: ${path}`));
                 }
-                const prefix = path.endsWith("/") ? path : `${path}/`;
-                const names = new Set<string>();
-                for (const candidate of [
-                    ...this.files.keys(),
-                    ...this.directories,
-                    ...this.links.keys(),
-                ]) {
-                    if (!candidate.startsWith(prefix) || candidate === path) continue;
-                    names.add(candidate.slice(prefix.length).split("/")[0] ?? "");
-                }
-                return Promise.resolve([...names]);
+                return Promise.resolve(namesIn(path));
             },
-            readdirPage: async (_permissions, path, options) => {
-                const names = [...(await this.fs.readdir(_permissions, path))]
+            readdirPage: (_permissions, path, options) => {
+                if (!this.directories.has(path)) {
+                    return Promise.reject(new Error(`No such directory: ${path}`));
+                }
+                const names = namesIn(path)
                     .sort()
                     .filter((name) => options.after === undefined || name > options.after);
-                return {
+                return Promise.resolve({
                     entries: names.slice(0, options.limit),
                     hasMore: names.length > options.limit,
-                };
+                });
             },
             realpath: (_permissions, path) => {
                 const target = resolveLinkPath(path);

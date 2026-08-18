@@ -25,6 +25,11 @@ export function boundOutputText(
         return { text: value, truncated: false, omittedCharacters: 0 };
     }
     const omittedCharacters = value.length - options.maxCharacters;
+    if (options.maxCharacters <= 0) {
+        // A budget of nothing leaves no room for the note either, and a note that overflowed the
+        // budget it announces would be its own kind of untruth.
+        return { text: "", truncated: true, omittedCharacters };
+    }
     if (options.keep === "tail") {
         const note = `[Earlier output was truncated: ${String(omittedCharacters)} characters are not shown.]`;
         return {

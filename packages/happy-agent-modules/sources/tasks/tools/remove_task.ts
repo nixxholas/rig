@@ -46,10 +46,11 @@ export function removeTaskTool(tasks: TasksModule, agentId: string) {
         toLLM: (result) => [
             {
                 type: "text",
-                text:
+                text: tasks.formatMutationForModel(
                     "removed" in result
                         ? `Task removed: ${result.taskId}`
                         : `Task ${result.taskId} could not be removed: ${result.error}`,
+                ),
             },
         ],
     });

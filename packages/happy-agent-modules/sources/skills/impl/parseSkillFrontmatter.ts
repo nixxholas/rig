@@ -23,13 +23,15 @@ type ParsedSkillMetadata = Static<typeof parsedSkillMetadataSchema>;
  */
 export function parseSkillFrontmatter(content: string, directoryName: string): ParsedSkillMetadata {
     const normalized = content.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
-    if (!normalized.startsWith("---\n")) {
+    const lines = normalized.split("\n");
+    // A document marker may carry a trailing comment, on the line that opens frontmatter as well as
+    // the one that closes it.
+    if (lines.length < 2 || !/^---[ \t]*(?:#[^\n]*)?$/u.test(lines[0]!)) {
         return { name: directoryName, description: "" };
     }
 
-    const lines = normalized.split("\n");
     const closingLine = lines.findIndex(
-        (line, index) => index > 0 && /^[ \t]*---[ \t]*$/u.test(line),
+        (line, index) => index > 0 && /^[ \t]*---[ \t]*(?:#[^\n]*)?$/u.test(line),
     );
     if (closingLine < 0) {
         return { name: directoryName, description: "" };
@@ -138,7 +140,12 @@ function readBlockScalar(
     parentIndentation: number,
     indicator: string,
 ): { value: string | undefined; nextIndex: number } {
-    const explicitIndentation = indicator.match(/[1-9]/u)?.[0];
+    // The indicator arrives with its surrounding whitespace and any trailing comment still
+    // attached, so read the style and its modifiers rather than searching the whole fragment.
+    const header = /^[ \t]*([|>])((?:[+-]|[1-9])*)/u.exec(indicator);
+    const folded = header?.[1] === ">";
+    const modifiers = header?.[2] ?? "";
+    const explicitIndentation = modifiers.match(/[1-9]/u)?.[0];
     const minimumIndentation =
         explicitIndentation === undefined
             ? undefined
@@ -162,9 +169,8 @@ function readBlockScalar(
     }
     if (body.length === 0) return { nextIndex, value: "" };
 
-    const folded = indicator.startsWith(">");
     let value = folded ? foldBlockLines(body) : body.join("\n");
-    const chomping = indicator.includes("-") ? "strip" : indicator.includes("+") ? "keep" : "clip";
+    const chomping = modifiers.includes("-") ? "strip" : modifiers.includes("+") ? "keep" : "clip";
     if (chomping === "strip") {
         value = value.replace(/\n+$/u, "");
     } else if (chomping === "clip") {
@@ -313,16 +319,18 @@ function foldPlainLines(lines: readonly string[]): string {
     return result.trim();
 }
 
+/**
+ * Fold a block scalar's lines the way YAML does: every line ends in a break, a break between two
+ * non-empty lines becomes one space, and every other break is kept. Chomping then decides what
+ * happens to the breaks left at the end.
+ */
 function foldBlockLines(lines: readonly string[]): string {
     let result = "";
-    for (const line of lines) {
-        if (result.length === 0) {
-            result = line;
-        } else if (line.length === 0 || result.endsWith("\n")) {
-            result += `\n${line}`;
-        } else {
-            result += ` ${line}`;
-        }
+    for (let index = 0; index < lines.length; index += 1) {
+        const line = lines[index]!;
+        const next = lines[index + 1];
+        result += line;
+        result += next !== undefined && line.length > 0 && next.length > 0 ? " " : "\n";
     }
     return result;
 }

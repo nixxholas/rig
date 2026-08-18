@@ -20,6 +20,8 @@ export const OBSERVATION_TRACER_NAME = "happy.agent";
 const TRACE_EXPORT_DELAY_MS = 100;
 const TRACE_EXPORT_BATCH_SIZE = 4_096;
 const TRACE_EXPORT_QUEUE_SIZE = 65_536;
+/** How long a collector has to accept the final batch before shutdown stops waiting for it. */
+const TRACE_SHUTDOWN_GRACE_MS = 500;
 
 export interface ObservationTracingOptions {
     /** Where finished spans are posted, as OTLP over HTTP. */
@@ -67,8 +69,17 @@ export function startObservationTracing(options: ObservationTracingOptions): Obs
         contextTracer: new ContextTracer(provider.getTracer(OBSERVATION_TRACER_NAME)),
         shutdown: async () => {
             // Telemetry is optional. A collector that is not listening must not turn an otherwise
-            // clean shutdown into a failure.
-            await Promise.allSettled([provider.shutdown()]);
+            // clean shutdown into a failure, and must not hold one up either: the provider is given
+            // a moment to post what it still holds and then left to settle on its own.
+            const settled = provider.shutdown().catch(() => undefined);
+            await Promise.race([settled, grace(TRACE_SHUTDOWN_GRACE_MS)]);
         },
     };
+}
+
+/** A delay that never keeps the process alive on its own account. */
+async function grace(milliseconds: number): Promise<void> {
+    await new Promise<void>((resolve) => {
+        setTimeout(resolve, milliseconds).unref();
+    });
 }

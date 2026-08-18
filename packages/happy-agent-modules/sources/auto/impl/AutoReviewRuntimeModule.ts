@@ -91,7 +91,15 @@ export class AutoReviewRuntimeModule implements AgentModule {
         });
     }
 
-    /** Take and clear one reviewer's capture after its send has settled. */
+    /**
+     * Take and clear one reviewer's capture after its send has settled.
+     *
+     * Clearing is what makes a capture belong to exactly one review: a second read must find
+     * nothing, so a retry or a stray caller cannot attribute one review's reasoning, tool calls, and
+     * token usage to another review that never did that work. The reviewer itself is kept — its
+     * instructions must survive, and a hook that settles after the capture was taken still belongs
+     * to it — so the capture is reset in place rather than forgotten.
+     */
     takeCapture(reviewerAgentId: string): AutoReviewCapture {
         const state = this.#state.get(reviewerAgentId);
         if (state === undefined) {
@@ -102,12 +110,18 @@ export class AutoReviewRuntimeModule implements AgentModule {
                 doneState: undefined,
             };
         }
-        return {
+        const capture = {
             entries: state.entries,
             usage: state.usage,
             inferred: state.inferred,
             doneState: state.doneState,
         };
+        // Fresh containers, so the capture just returned is never mutated behind its holder.
+        state.entries = [];
+        state.usage = { ...EMPTY_USAGE };
+        state.inferred = false;
+        state.doneState = undefined;
+        return capture;
     }
 
     /** Bound this reviewer's capture into the transcript a decision carries. */

@@ -144,6 +144,7 @@ export class ProjectMutations {
                 await this.observe(
                     txCtx,
                     await this.newEvent(txCtx, agentId, spec.event(after, before)),
+                    ctx,
                 );
             }
             return structuredClone(raw);
@@ -231,8 +232,14 @@ export class ProjectMutations {
         return deepFreeze(structuredClone(event)) as ProjectEvent;
     }
 
-    /** Publishes one event: transactionally first, then again once the change is durable. */
-    async observe(ctx: Context, event: ProjectEvent): Promise<void> {
+    /**
+     * Publishes one event: transactionally first, then again once the change is durable.
+     *
+     * `publishCtx` is the context the caller handed the module. Registering the post-commit
+     * callback there is what makes an enclosing transaction the boundary: an event belonging to
+     * somebody else's larger write is delivered when that write commits, not when this one does.
+     */
+    async observe(ctx: Context, event: ProjectEvent, publishCtx: Context = ctx): Promise<void> {
         if (!Value.Check(projectEventSchema, event) || !isDeepFrozen(event)) {
             throw new Error("The project module created an invalid unfrozen event.");
         }
@@ -240,7 +247,7 @@ export class ProjectMutations {
             const transactional = listener.onEventTransactional;
             if (transactional !== undefined) await transactional.call(listener, ctx, event);
         }
-        afterCommit(ctx, (postCommitCtx) => this.#notifyPostCommit(postCommitCtx, event));
+        afterCommit(publishCtx, (postCommitCtx) => this.#notifyPostCommit(postCommitCtx, event));
     }
 
     async #notifyPostCommit(ctx: Context, event: ProjectEvent): Promise<void> {

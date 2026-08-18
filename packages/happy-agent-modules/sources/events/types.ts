@@ -12,13 +12,14 @@ export const eventIdSchema = Type.String({
 export const MAX_EVENT_TYPE_LENGTH = 128;
 
 /**
- * Event type identifier. Lowercase, dot-separated segments, starting with a letter.
+ * Event type identifier. Lowercase, dot-separated segments, each starting with a letter, so an
+ * empty segment or a trailing dot is rejected rather than stored as a type nothing can match.
  * Examples: "agent.created", "message.accepted", "tool.started".
  */
 export const eventTypeSchema = Type.String({
     minLength: 1,
     maxLength: MAX_EVENT_TYPE_LENGTH,
-    pattern: "^[a-z][a-z0-9.-]*$",
+    pattern: "^[a-z][a-z0-9_-]*(\\.[a-z][a-z0-9_-]*)*$",
 });
 
 /** Maximum length for an agent identifier carried on an event. */

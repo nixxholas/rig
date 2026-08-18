@@ -10,6 +10,7 @@ import {
     type ProjectSettingsRow,
 } from "../ProjectRow.js";
 import type { ProjectStore } from "../ProjectStore.js";
+import { sameJson } from "../ProjectTransition.js";
 import {
     assertExpectedProjectVersion,
     databaseFor,
@@ -156,7 +157,7 @@ export function createProjectCatalogEdits(): Pick<
                 input.expectedVersion,
                 "The project changed before the avatar could be saved.",
             );
-            if (JSON.stringify(before.avatar ?? null) === JSON.stringify(input.avatar)) {
+            if (sameJson(before.avatar, input.avatar)) {
                 return {
                     operation: "set_avatar",
                     agentId: actingAgentId,
@@ -232,7 +233,7 @@ export function createProjectCatalogEdits(): Pick<
             );
             const row = rows[0];
             const before = row === undefined ? {} : parseProjectSettings(row.settings_json);
-            const changed = JSON.stringify(before) !== JSON.stringify(input.settings);
+            const changed = !sameJson(before, input.settings);
             await agentDatabaseRun(
                 database,
                 sql`INSERT INTO ${sql.raw(PROJECT_SETTINGS_TABLE)} (project_id, settings_json)

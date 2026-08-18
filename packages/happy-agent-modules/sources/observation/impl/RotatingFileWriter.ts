@@ -105,7 +105,15 @@ export class RotatingFileWriter {
     async #append(chunk: string, size: number): Promise<void> {
         // Roll over before the write rather than after it, so the limit is a ceiling on the file
         // rather than a threshold it is allowed to cross once per line.
-        if (this.#bytes > 0 && this.#bytes + size > this.#maxBytes) await this.#rotate();
+        if (this.#bytes > 0 && this.#bytes + size > this.#maxBytes) {
+            await this.#rotate();
+        } else if (this.#bytes === 0 && size > this.#maxBytes) {
+            // Rolling over is the only way a line ever makes room for itself, and an empty file has
+            // nothing to roll aside. A line this large cannot be written whole without pushing the
+            // file past its ceiling, so it is dropped and counted instead.
+            this.#dropped += 1;
+            return;
+        }
         await this.#handle.write(chunk, null, "utf8");
         this.#bytes += size;
     }

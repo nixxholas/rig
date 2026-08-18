@@ -226,8 +226,8 @@ describe("SystemPromptModule corner cases", () => {
 
     it("treats an omitted model as valid selection input", () => {
         expect(Value.Check(systemPromptSelectionSchema, { providerKind: "codex" })).toBe(true);
-        expect(systemPromptForModel({ providerKind: "codex" } as never)).toContain(
-            "You are an expert coding assistant.",
+        expect(systemPromptForModel({ providerKind: "codex" } as never)).toBe(
+            systemPromptForModel({ model: "openai/gpt-5.6-sol" }),
         );
     });
 

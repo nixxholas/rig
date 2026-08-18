@@ -28,6 +28,7 @@ import {
     deleteActiveRun,
     eventsMigrations,
     insertEvent,
+    loadActiveRun,
     loadActiveRuns,
     loadEventState,
     saveActiveRun,
@@ -274,7 +275,10 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
             scope: AgentModuleScope,
             accepted: AgentBaseAcceptedMessage,
         ): Promise<void> => {
-            const previous = this.#runs.get(scope.agent.id);
+            // The run this message steers may have been accepted earlier in this very transaction,
+            // where the in-memory map has not been updated yet, so the transaction's own row is the
+            // authority on what is running.
+            const previous = await loadActiveRun(ctx.db, scope.agent.id, parseActiveRun);
             const run =
                 accepted.kind === "steering" && previous !== undefined
                     ? previous
@@ -732,6 +736,10 @@ function projectProviderEvent(
                     : "stop";
         if (event.state === "error") {
             run.errorMessage = event.message;
+        } else {
+            // A later successful end supersedes the failure a retry recovered from, so the
+            // settlement does not report an error the run no longer has.
+            delete run.errorMessage;
         }
     }
     return { ...(rigEvent === undefined ? {} : { rigEvent }), run };
@@ -833,5 +841,15 @@ function freezeEvent(event: AgentEvent): AgentEvent {
 function deepFreeze(value: unknown): void {
     if (value === null || typeof value !== "object" || Object.isFrozen(value)) return;
     Object.freeze(value);
+    // A structured clone keeps collections as collections, and their contents are part of the
+    // event a listener sees, so they are frozen alongside ordinary properties.
+    if (value instanceof Map) {
+        for (const [key, entry] of value) {
+            deepFreeze(key);
+            deepFreeze(entry);
+        }
+    } else if (value instanceof Set) {
+        for (const entry of value) deepFreeze(entry);
+    }
     for (const child of Object.values(value)) deepFreeze(child);
 }

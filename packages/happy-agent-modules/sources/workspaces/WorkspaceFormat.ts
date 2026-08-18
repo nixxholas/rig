@@ -35,10 +35,22 @@ export function workspaceKindText(workspace: Workspace): string {
     return workspace.kind === "git_worktree" ? "Git worktree" : "copied folder";
 }
 
-/** One list row: what it is called, how it is doing, and where to find it. */
-export function workspaceRow(workspace: Workspace): string {
-    const prefix = `${workspace.name} — ${workspaceStatusText(workspace)}`;
-    return `${prefix}\nBranch: ${workspace.branch} · Path: ${workspace.path} · ID: ${workspace.id}`;
+/**
+ * One list row: what it is called, how it is doing, and where to find it.
+ *
+ * When the budget is too small for all of that, the row gives up the parts a reader can look up
+ * again — the branch and the path, then the name — rather than the ID, which is the one thing every
+ * later call needs.
+ */
+export function workspaceRow(workspace: Workspace, maxCharacters: number): string {
+    const status = workspaceStatusText(workspace);
+    const prefix = `${workspace.name} — ${status}`;
+    const rows = [
+        `${prefix}\nBranch: ${workspace.branch} · Path: ${workspace.path} · ID: ${workspace.id}`,
+        `${prefix}\nID: ${workspace.id}`,
+        `ID: ${workspace.id} — ${status}`,
+    ];
+    return rows.find((row) => row.length <= maxCharacters) ?? rows[rows.length - 1]!;
 }
 
 export function workspaceDetailText(workspace: Workspace): string {
@@ -98,7 +110,7 @@ export function fitPageForModel(page: WorkspacePage, maxOutputCharacters: number
     const visible: Workspace[] = [];
     let size = 0;
     for (const workspace of page.workspaces) {
-        const row = workspaceRow(workspace);
+        const row = workspaceRow(workspace, maxOutputCharacters);
         const nextSize = size + row.length + (visible.length === 0 ? 0 : 1);
         const candidateCount = visible.length + 1;
         const needsContinuation =

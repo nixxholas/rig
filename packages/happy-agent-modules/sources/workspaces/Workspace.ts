@@ -38,12 +38,13 @@ const IDENTIFIER_PATTERN = "^[^\\u0000-\\u0020\\u007F-\\u009F]+$";
 
 /**
  * What `git check-ref-format` accepts: slash-separated components with no space and no control
- * character, none of the characters Git reserves, no `..`, no `@{`, no `.lock` component, and
- * nothing that begins or ends on a dot or a slash.
+ * character, none of the characters Git reserves, no `..`, no `@{`, no `.lock` component, and no
+ * component that begins or ends on a dot — including the components in the middle of a ref, which
+ * Git refuses just as firmly as the last one.
  */
 const GIT_REF_PATTERN =
     "^(?!@$)(?!/)(?!\\.)(?![\\s\\S]*//)(?![\\s\\S]*\\.\\.)(?![\\s\\S]*@\\{)" +
-    "(?![\\s\\S]*\\.lock(?:/|$))(?![\\s\\S]*/\\.)" +
+    "(?![\\s\\S]*\\.lock(?:/|$))(?![\\s\\S]*/\\.)(?![\\s\\S]*\\./)" +
     "[^\\u0000-\\u0020\\u007F~^:?*\\[\\\\]+(?<![./])$";
 
 /**

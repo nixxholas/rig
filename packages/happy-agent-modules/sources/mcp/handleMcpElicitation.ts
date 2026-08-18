@@ -62,9 +62,13 @@ export async function handleMcpElicitation(
     const { message, requestedSchema } = request.params;
     const entries = Object.entries(requestedSchema.properties);
     const valuesByLabel = new Map<string, Map<string, string | number | boolean>>();
+    /** Properties whose allowed values the server declared, and which no other answer satisfies. */
+    const declaredChoiceIds = new Set<string>();
     const questions: McpUserInputRequest["questions"][number][] = entries.map(([id, property]) => {
         const record = asRecord(property);
-        const enumValues = enumValuesFor(record);
+        const declaredChoices = declaredChoicesFor(record);
+        if (declaredChoices !== undefined) declaredChoiceIds.add(id);
+        const enumValues = declaredChoices ?? booleanChoicesFor(record);
         const enumNames = enumNamesFor(record, enumValues);
         valuesByLabel.set(
             id,
@@ -131,11 +135,21 @@ export async function handleMcpElicitation(
         return { action: "decline" };
     }
 
-    const content: Record<string, string | number | boolean | string[]> = {};
+    const content: Record<string, string | number | boolean | Array<string | number | boolean>> =
+        {};
     for (const [id, property] of entries) {
         const record = asRecord(property);
         const answers = response.answers?.[id] ?? [];
-        const normalized = answers.map((answer) => valuesByLabel.get(id)?.get(answer) ?? answer);
+        const labels = valuesByLabel.get(id);
+        /*
+         * A server that declared the values it accepts gets one of those values back or nothing at
+         * all.  An answer that matches no offered label is not a choice the server described, so
+         * the whole request is declined rather than passing an invented value through.
+         */
+        if (declaredChoiceIds.has(id) && answers.some((answer) => labels?.has(answer) !== true)) {
+            return { action: "decline" };
+        }
+        const normalized = answers.map((answer) => labels?.get(answer) ?? answer);
         const propertyType = typeof record?.type === "string" ? record.type : undefined;
         const raw = propertyType === "array" ? normalized : normalized[0];
         if (raw === undefined || (Array.isArray(raw) && raw.length === 0)) {
@@ -151,9 +165,15 @@ export async function handleMcpElicitation(
         ) {
             const number = Number(raw);
             if (!Number.isFinite(number)) return { action: "decline" };
+            // An integer property means a whole number; 1.5 replicas is not a value to hand back.
+            if (propertyType === "integer" && !Number.isInteger(number)) {
+                return { action: "decline" };
+            }
             content[id] = number;
         } else if (Array.isArray(raw)) {
-            content[id] = raw.map(String);
+            // Selections keep the type the server declared them with, so a numeric choice comes
+            // back as the number it was rather than as its label.
+            content[id] = [...raw];
         } else if (typeof raw === "string" || typeof raw === "number" || typeof raw === "boolean") {
             content[id] = raw;
         } else {
@@ -192,9 +212,15 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
         : undefined;
 }
 
-function enumValuesFor(
+/**
+ * The values the server said it accepts, or nothing when it named none.
+ *
+ * The distinction matters when the answer comes back: a declared set is the complete list of
+ * acceptable values, while a property with no declared set is parsed by its type instead.
+ */
+function declaredChoicesFor(
     record: Record<string, unknown> | undefined,
-): Array<string | number | boolean> {
+): Array<string | number | boolean> | undefined {
     if (Array.isArray(record?.enum)) return record.enum.filter(isPrimitive);
     if (Array.isArray(record?.oneOf)) {
         return record.oneOf
@@ -212,8 +238,14 @@ function enumValuesFor(
             .map((item) => item?.const)
             .filter(isPrimitive);
     }
-    if (record?.type === "boolean") return ["true", "false"];
-    return [];
+    return undefined;
+}
+
+/** Yes and no, which this module offers itself rather than reading from the server's schema. */
+function booleanChoicesFor(
+    record: Record<string, unknown> | undefined,
+): Array<string | number | boolean> {
+    return record?.type === "boolean" ? ["true", "false"] : [];
 }
 
 function enumNamesFor(

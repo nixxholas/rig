@@ -42,6 +42,16 @@ export async function readProjectByPath(
     return row === undefined ? undefined : projectFromRow(row);
 }
 
+/** The one home project, when the catalog already has it. */
+export async function readHomeProject(database: AgentDatabase): Promise<Project | undefined> {
+    const rows = await agentDatabaseRows<ProjectRow>(
+        database,
+        sql`SELECT * FROM ${sql.raw(PROJECTS_TABLE)} WHERE kind = 'home' LIMIT 1`,
+    );
+    const row = rows[0];
+    return row === undefined ? undefined : projectFromRow(row);
+}
+
 export async function takenStorageKeys(database: AgentDatabase): Promise<ReadonlySet<string>> {
     const rows = await agentDatabaseRows<{ readonly storage_key: string }>(
         database,

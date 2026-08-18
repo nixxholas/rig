@@ -35,6 +35,7 @@ import {
     taskOwnerSchema,
     assertTaskMetadata,
     assertTaskMetadataPatch,
+    assertTaskMetadataStructure,
     TaskValidationError,
     type Task,
     type TaskCreateInput,
@@ -151,6 +152,15 @@ export class TasksModule implements AgentModule {
         | ((ctx: Context, event: TaskEvent, error: unknown) => void | Promise<void>)
         | undefined;
     readonly #eventIdFactory: (ctx: Context, agentId: string) => string | Promise<string>;
+
+    /** Whether the injected event-ID factory has already been asked for one usable ID. */
+    #eventIdFactoryChecked = false;
+
+    /**
+     * In-flight mutation queues, one per agent. This is ordering, not state: nothing about a task
+     * lives here, and an idle agent leaves no entry behind.
+     */
+    readonly #mutations = new Map<string, Promise<void>>();
 
     constructor(options: TasksModuleOptions = {}) {
         assertTasksModuleOptions(options);
@@ -332,7 +342,7 @@ export class TasksModule implements AgentModule {
         this.#assertAgentId(agentId);
         this.#assertTaskId(taskId);
         this.#assertInput(taskUpdateInputSchema, changes, "update");
-        const change = await this.#change(ctx, agentId, (txCtx, tasks, eventId, at) => {
+        const change = await this.#change(ctx, agentId, async (txCtx, tasks, eventId, at) => {
             const existing = tasks.find((task) => task.id === taskId);
             if (existing === undefined) {
                 throw new TaskValidationError(`Task "${taskId}" does not exist.`);
@@ -366,7 +376,7 @@ export class TasksModule implements AgentModule {
     async complete(ctx: Context, agentId: string, taskId: string): Promise<Task> {
         this.#assertAgentId(agentId);
         this.#assertTaskId(taskId);
-        const change = await this.#change(ctx, agentId, (txCtx, tasks, eventId, at) => {
+        const change = await this.#change(ctx, agentId, async (txCtx, tasks, eventId, at) => {
             const existing = tasks.find((task) => task.id === taskId);
             if (existing === undefined) {
                 throw new TaskValidationError(`Task "${taskId}" does not exist.`);
@@ -381,7 +391,11 @@ export class TasksModule implements AgentModule {
             return {
                 result: task,
                 tasks: tasks.map((candidate) => (candidate.id === taskId ? task : candidate)),
-                event: this.#event({ type: "task_completed", agentId, task }, eventId, at),
+                event: this.#event(
+                    { type: "task_completed", agentId, task },
+                    eventId,
+                    at,
+                ),
             };
         });
         return change.result;
@@ -391,7 +405,7 @@ export class TasksModule implements AgentModule {
     async remove(ctx: Context, agentId: string, taskId: string): Promise<boolean> {
         this.#assertAgentId(agentId);
         this.#assertTaskId(taskId);
-        const change = await this.#change(ctx, agentId, (txCtx, tasks, eventId, at) => {
+        const change = await this.#change(ctx, agentId, async (txCtx, tasks, eventId, at) => {
             const existing = tasks.find((task) => task.id === taskId);
             if (existing === undefined) return { result: false };
             const remaining = compactOrdering(
@@ -412,7 +426,11 @@ export class TasksModule implements AgentModule {
             return {
                 result: true,
                 tasks: normalized,
-                event: this.#event({ type: "task_removed", agentId, taskId }, eventId, at),
+                event: this.#event(
+                    { type: "task_removed", agentId, taskId },
+                    eventId,
+                    at,
+                ),
             };
         });
         return change.result;
@@ -430,7 +448,7 @@ export class TasksModule implements AgentModule {
                 "Task reorder expects a unique bounded list of task IDs.",
             );
         }
-        const change = await this.#change(ctx, agentId, (txCtx, tasks, eventId, at) => {
+        const change = await this.#change(ctx, agentId, async (txCtx, tasks, eventId, at) => {
             if (taskIds.length !== tasks.length) {
                 throw new TaskValidationError(
                     "Task reorder must include every current task exactly once.",
@@ -466,7 +484,7 @@ export class TasksModule implements AgentModule {
     /** Clear all tasks for one agent and return how many were removed. */
     async reset(ctx: Context, agentId: string): Promise<number> {
         this.#assertAgentId(agentId);
-        const change = await this.#change(ctx, agentId, (txCtx, tasks, eventId, at) => {
+        const change = await this.#change(ctx, agentId, async (txCtx, tasks, eventId, at) => {
             if (tasks.length === 0) return { result: 0 };
             void txCtx;
             return {
@@ -545,6 +563,18 @@ export class TasksModule implements AgentModule {
         return output;
     }
 
+    /**
+     * Bound one rendered mutation result to the same model-output limit as every other rendering.
+     *
+     * A mutation answer echoes fields the caller supplied, and a title alone may be longer than a
+     * small configured bound, so the sentence a tool hands back is cut to fit and says that it was.
+     */
+    formatMutationForModel(text: string): string {
+        if (text.length <= this.#maxOutputCharacters) return text;
+        const suffix = "\n[truncated]";
+        return `${text.slice(0, this.#maxOutputCharacters - suffix.length)}${suffix}`;
+    }
+
     /** Render one bounded task lookup page and preserve every returned cursor. */
     formatDetailPageForModel(page: TaskDetailPage): string {
         if (!Value.Check(taskDetailPageSchema, page)) {
@@ -566,46 +596,82 @@ export class TasksModule implements AgentModule {
             tasks: readonly Task[],
             eventId: string,
             at: number,
-        ) =>
-            | Promise<TaskChange<Result> & { readonly tasks?: readonly Task[] }>
-            | (TaskChange<Result> & { readonly tasks?: readonly Task[] }),
+        ) => Promise<TaskChange<Result> & { readonly tasks?: readonly Task[] }>,
     ): Promise<TaskChange<Result>> {
-        const eventId = await this.#eventIdFactory(ctx, agentId);
+        // The injected factory names events for whoever is listening, so it is only asked when
+        // somebody is. With no listener the event is built, used to decide the write, and then
+        // discarded, and a host callback that may be asynchronous or durable has no reason to run.
+        // The very first mutation asks regardless, so a factory that cannot produce a usable ID is
+        // reported the moment the module is used rather than whenever a listener happens to attach.
+        const eventId =
+            this.#listener === undefined && this.#eventIdFactoryChecked
+                ? globalThis.crypto.randomUUID()
+                : await this.#eventIdFactory(ctx, agentId);
+        this.#eventIdFactoryChecked = true;
         this.#assertEventId(eventId);
         const at = this.#timestamp();
-        const changed = await ctx.inTx(async (txCtx) => {
-            const store = taskKV(agentId);
-            // The context transaction is the serialization boundary for the complete
-            // read-decide-write operation. The module deliberately keeps no authoritative
-            // per-agent state in memory.
-            const tasks = await this.#readFromKV(txCtx, store);
-            const decided = await decide(txCtx, tasks, eventId, at);
-            const event = decided.event;
-            if (decided.tasks !== undefined) {
-                this.#validateTasks(decided.tasks);
-                await this.#write(txCtx, store, decided.tasks);
-            } else if (event?.type === "task_created") {
-                await this.#write(txCtx, store, [...tasks, event.task]);
-            } else if (event?.type === "task_updated") {
-                await this.#write(
-                    txCtx,
-                    store,
-                    tasks.map((task) => (task.id === event.task.id ? event.task : task)),
-                );
-            } else if (event?.type === "task_completed") {
-                await this.#write(
-                    txCtx,
-                    store,
-                    tasks.map((task) => (task.id === event.task.id ? event.task : task)),
-                );
-            }
-            if (event !== undefined) {
-                await this.#listener?.onEventTransactional?.(txCtx, event);
-                afterCommit(txCtx, (postCommitCtx) => this.#notifyPostCommit(postCommitCtx, event));
-            }
-            return decided;
-        });
-        return changed;
+        return await this.#serialize(agentId, async () =>
+            ctx.inTx(async (txCtx) => {
+                const store = taskKV(agentId);
+                // The context transaction is the durable boundary for the complete
+                // read-decide-write operation. The module deliberately keeps no authoritative
+                // per-agent state in memory.
+                const tasks = await this.#readFromKV(txCtx, store);
+                const decided = await decide(txCtx, tasks, eventId, at);
+                const event = decided.event;
+                if (decided.tasks !== undefined) {
+                    this.#validateTasks(decided.tasks);
+                    await this.#write(txCtx, store, decided.tasks);
+                } else if (event?.type === "task_created") {
+                    await this.#write(txCtx, store, [...tasks, event.task]);
+                } else if (event?.type === "task_updated") {
+                    await this.#write(
+                        txCtx,
+                        store,
+                        tasks.map((task) => (task.id === event.task.id ? event.task : task)),
+                    );
+                } else if (event?.type === "task_completed") {
+                    await this.#write(
+                        txCtx,
+                        store,
+                        tasks.map((task) => (task.id === event.task.id ? event.task : task)),
+                    );
+                }
+                if (event !== undefined) {
+                    await this.#listener?.onEventTransactional?.(txCtx, event);
+                    // The post-commit observer is told about a change that has already landed, so
+                    // it is handed the caller's context rather than the transaction's: by the time
+                    // it runs, the transaction context has ended and cannot read anything back.
+                    afterCommit(txCtx, () => this.#notifyPostCommit(ctx, event));
+                }
+                return decided;
+            }),
+        );
+    }
+
+    /**
+     * Run one agent's mutations one at a time.
+     *
+     * A transaction orders durable writes, but it does not keep two concurrent mutations from both
+     * reading the same list before either has written: interleaved read-decide-write turns
+     * simultaneous creates into one surviving task and silently drops the rest. Mutations for one
+     * agent therefore queue behind each other in this process, while different agents stay
+     * independent.
+     */
+    async #serialize<Result>(agentId: string, work: () => Promise<Result>): Promise<Result> {
+        const previous = this.#mutations.get(agentId) ?? Promise.resolve();
+        const current = previous.then(work, work);
+        // The queue only orders work; a failed mutation must not fail the one waiting behind it.
+        const tail = current.then(
+            () => undefined,
+            () => undefined,
+        );
+        this.#mutations.set(agentId, tail);
+        try {
+            return await current;
+        } finally {
+            if (this.#mutations.get(agentId) === tail) this.#mutations.delete(agentId);
+        }
     }
 
     async #read(ctx: Context, agentId: string): Promise<readonly Task[]> {
@@ -829,6 +895,11 @@ export class TasksModule implements AgentModule {
         value: unknown,
         action: string,
     ): void {
+        // Metadata is the one field a caller can make self-referential, and the schema walk itself
+        // would recurse into it forever, so its shape is established before anything else looks.
+        if (typeof value === "object" && value !== null && "metadata" in value) {
+            assertTaskMetadataStructure((value as { readonly metadata: unknown }).metadata);
+        }
         if (!Value.Check(schema, value)) {
             throw new TaskValidationError(`Invalid task ${action} input.`);
         }

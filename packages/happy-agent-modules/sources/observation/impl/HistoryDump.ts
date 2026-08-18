@@ -92,10 +92,15 @@ export class HistoryDump {
  *
  * A message that will not serialize is a message the dump cannot describe. Writing a placeholder
  * would be a lie about what the agent said, so the line is simply not written.
+ *
+ * The file says which agent the record belongs to, so the owner is stamped over anything the
+ * message itself carried: a forged `agentId` field does not get to claim a different agent.
  */
 function encodeRecord(agentId: string, message: HistoryMessage): string | undefined {
     try {
-        return JSON.stringify({ agentId, ...message });
+        const record = { agentId, ...message };
+        record.agentId = agentId;
+        return JSON.stringify(record);
     } catch {
         return undefined;
     }

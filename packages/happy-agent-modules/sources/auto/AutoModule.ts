@@ -308,9 +308,13 @@ export class AutoModule implements AgentModule {
                     assistantTextEvidence(event.block.text),
                 );
             } else if (event.type === "toolcall_end") {
-                this.#callTools.set(callKey(scope.agent.id, event.block.callId), event.block.name);
+                // The label is the tool's full identity, namespace included, because that is what
+                // the model called and what the reviewer must recognize in the transcript. Two
+                // servers may expose the same bare name, and "search" says nothing about which.
+                const name = qualifiedToolName(event.block);
+                this.#callTools.set(callKey(scope.agent.id, event.block.callId), name);
                 await this.#appendEvidence(ctx, scope.agent.id, () =>
-                    assistantToolCallEvidence(event.block.name, event.block.arguments),
+                    assistantToolCallEvidence(name, event.block.arguments),
                 );
             }
         },
@@ -359,7 +363,7 @@ export class AutoModule implements AgentModule {
 
         /** A compaction erased the conversation the evidence described; start a new generation. */
         historyErasedTransact: async (ctx: Context, scope: AgentModuleScope): Promise<void> => {
-            await this.#evidence.bumpGeneration(this.#databaseOf(ctx), scope.agent.id);
+            await this.#startGeneration(ctx, scope.agent.id);
         },
 
         /** A (re)created identity may reuse an ID; clear any stale evidence under it atomically. */
@@ -368,9 +372,28 @@ export class AutoModule implements AgentModule {
             _scope: AgentModuleSystemScope,
             agent: AgentModuleAgentLifecycle,
         ): Promise<void> => {
-            await this.#evidence.bumpGeneration(this.#databaseOf(ctx), agent.id);
+            await this.#startGeneration(ctx, agent.id);
+            // The remembered route belongs to the agent that used to hold this ID. A new identity
+            // has not inferred yet, so its review must fail closed on an unknown route rather than
+            // pick the previous occupant's model. A compaction does not do this: the agent running
+            // the turn is the same one, and its route is still the live one.
+            this.#activeRoutes.delete(agent.id);
         },
     };
+
+    /**
+     * Begin a fresh evidence generation for one agent and forget everything the previous one left
+     * behind in memory. The pending call labels go with it: a recreated identity may reuse both an
+     * agent ID and a call ID, and a result labelled from the erased conversation would name a tool
+     * this conversation never called.
+     */
+    async #startGeneration(ctx: Context, agentId: string): Promise<void> {
+        await this.#evidence.bumpGeneration(this.#databaseOf(ctx), agentId);
+        const prefix = callKey(agentId, "");
+        for (const key of this.#callTools.keys()) {
+            if (key.startsWith(prefix)) this.#callTools.delete(key);
+        }
+    }
 
     /**
      * Record the human-owned answer to one interactive request as trusted evidence, keyed by the
@@ -407,6 +430,10 @@ export class AutoModule implements AgentModule {
         ctx: Context,
         request: PermissionReviewRequest,
     ): Promise<PermissionReviewDecision> {
+        // Reviews for one agent are strictly FIFO, so this one may have waited behind another while
+        // its turn was stopped. The signal is read again here, after the queue releases it, because
+        // a review whose turn is already gone must never reach the reviewer.
+        if (request.signal.aborted) throw new Error("Permission review was stopped.");
         const system = this.#requireSystem();
         const mainAgentId = request.agentId;
         const mainDatabase = this.#databaseOf(ctx);
@@ -445,7 +472,11 @@ export class AutoModule implements AgentModule {
             }
             activeCursor = cursor;
         }
-        const first = activeCursor.reviewedPosition === 0;
+        // "First" is a fact about the reviewer's own session, not about how far the cursor reached.
+        // A rebuilt reviewer has no history to continue; a reused one does even when the archive was
+        // empty both times, and sending it a fresh `<conversation>` would deny it the context it is
+        // still holding.
+        const first = rebuild;
 
         const whole = createAutoPermissionTranscript(entries);
         const delta = first

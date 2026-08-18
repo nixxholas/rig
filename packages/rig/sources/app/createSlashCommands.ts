@@ -57,6 +57,12 @@ export function createSlashCommands(
             aliases: ["todos"],
         },
         {
+            value: "plugins",
+            label: "/plugins",
+            description: "Show plugins, or add a name to read its current log.",
+            aliases: [],
+        },
+        {
             value: "presence",
             label: "/presence",
             description: "Say whether you are here to answer questions.",

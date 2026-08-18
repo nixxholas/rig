@@ -4,6 +4,7 @@ import {
     type AgentDatabase,
     type AgentModuleMigration,
 } from "@slopus/happy-agent-base";
+import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { sql } from "drizzle-orm";
 
@@ -50,15 +51,47 @@ export class AutoEvidenceOverflowError extends Error {
     }
 }
 
-interface StateRow {
-    generation: number | string;
-    next_position: number | string;
-    archive_healthy: number | string;
+/** Raised when the archive's rows do not form the sequence its own cursor claims. */
+class AutoEvidenceArchiveInvalidError extends Error {
+    constructor() {
+        super("The automatic permission review evidence archive is invalid.");
+        this.name = "AutoEvidenceArchiveInvalidError";
+    }
 }
 
-interface EntryRow {
-    entry_json: string;
-}
+/** How SQLite may hand back an integer column: as a number, or as its decimal text. */
+const storedIntegerSchema = Type.Union([
+    Type.Integer(),
+    Type.String({ pattern: "^-?[0-9]+$", maxLength: 32 }),
+]);
+/** A stored flag is exactly zero or one. Anything else is not a boolean this archive wrote. */
+const storedFlagSchema = Type.Union([
+    Type.Literal(0),
+    Type.Literal(1),
+    Type.Literal("0"),
+    Type.Literal("1"),
+]);
+const stateRowSchema = Type.Object(
+    {
+        generation: storedIntegerSchema,
+        next_position: storedIntegerSchema,
+        archive_healthy: storedFlagSchema,
+    },
+    { additionalProperties: false },
+);
+const entryRowSchema = Type.Object(
+    {
+        position: storedIntegerSchema,
+        category: autoEvidenceEntrySchema.properties.category,
+        entry_json: Type.String(),
+        trusted_user_evidence: storedFlagSchema,
+        trusted_user_evidence_truncated: storedFlagSchema,
+    },
+    { additionalProperties: false },
+);
+
+type StateRow = Static<typeof stateRowSchema>;
+type EntryRow = Static<typeof entryRowSchema>;
 
 interface CountRow {
     count: number | string;
@@ -121,7 +154,7 @@ export class AutoReviewEvidenceStore {
 
     /** The current cursor for an agent, defaulting to a fresh, healthy generation-zero archive. */
     async readState(database: AgentDatabase, agentId: string): Promise<AutoEvidenceState> {
-        const rows = await agentDatabaseRows<StateRow>(
+        const rows = await agentDatabaseRows<Record<string, unknown>>(
             database,
             sql`SELECT generation, next_position, archive_healthy
                 FROM happy_agent_auto_state WHERE agent_id = ${agentId}`,
@@ -141,10 +174,17 @@ export class AutoReviewEvidenceStore {
                 archiveHealthy: !hasEvidence && !poisoned,
             };
         }
+        // The columns are checked before they are coerced: `Number` turns anything unparseable into
+        // `NaN`, and a NaN health flag would read back as healthy. A row this store did not write
+        // must fail the review, never quietly widen the archive's trust.
+        if (!Value.Check(stateRowSchema, row)) {
+            throw new Error(`The stored auto-review state for agent "${agentId}" is invalid.`);
+        }
+        const stateRow: StateRow = row;
         const state = {
-            generation: Number(row.generation),
-            nextPosition: Number(row.next_position),
-            archiveHealthy: Number(row.archive_healthy) !== 0 && !poisoned,
+            generation: Number(stateRow.generation),
+            nextPosition: Number(stateRow.next_position),
+            archiveHealthy: Number(stateRow.archive_healthy) !== 0 && !poisoned,
         };
         if (!Value.Check(autoEvidenceStateSchema, state)) {
             throw new Error(`The stored auto-review state for agent "${agentId}" is invalid.`);
@@ -222,8 +262,10 @@ export class AutoReviewEvidenceStore {
         const state = await this.readState(database, agentId);
         await agentDatabaseRun(
             database,
-            sql`DELETE FROM happy_agent_auto_evidence
-                WHERE agent_id = ${agentId} AND generation = ${state.generation}`,
+            // Every generation goes, not only the one the cursor names. A stray row left behind by
+            // an interrupted bump would otherwise outlive the conversation it described and could
+            // be read back later as if it were this agent's evidence.
+            sql`DELETE FROM happy_agent_auto_evidence WHERE agent_id = ${agentId}`,
         );
         await agentDatabaseRun(
             database,
@@ -251,15 +293,28 @@ export class AutoReviewEvidenceStore {
         agentId: string,
         generation: number,
     ): Promise<AutoTranscriptMessage[]> {
-        const rows = await agentDatabaseRows<EntryRow>(
+        const rows = await agentDatabaseRows<Record<string, unknown>>(
             database,
-            sql`SELECT entry_json FROM happy_agent_auto_evidence
+            sql`SELECT position, category, entry_json,
+                       trusted_user_evidence, trusted_user_evidence_truncated
+                FROM happy_agent_auto_evidence
                 WHERE agent_id = ${agentId} AND generation = ${generation}
                 ORDER BY position ASC LIMIT ${MAX_EVIDENCE_ROWS + 1}`,
         );
         if (rows.length > MAX_EVIDENCE_ROWS) throw new AutoEvidenceOverflowError();
-        return rows.map((row) => {
-            const parsed: unknown = JSON.parse(row.entry_json);
+
+        const entries = rows.map((row, index) => {
+            // Both the payload and the columns the classification denormalized are checked. A row
+            // whose category or trust flag was not written by this store is corrupt even when its
+            // JSON parses, and trusting the JSON alone would let it into the transcript.
+            if (!Value.Check(entryRowSchema, row)) {
+                throw new Error(
+                    `A stored auto-review evidence entry for agent "${agentId}" is invalid.`,
+                );
+            }
+            const entryRow: EntryRow = row;
+            if (Number(entryRow.position) !== index) throw new AutoEvidenceArchiveInvalidError();
+            const parsed: unknown = JSON.parse(entryRow.entry_json);
             if (!Value.Check(autoTranscriptMessageSchema, parsed)) {
                 throw new Error(
                     `A stored auto-review evidence entry for agent "${agentId}" is invalid.`,
@@ -267,6 +322,14 @@ export class AutoReviewEvidenceStore {
             }
             return parsed;
         });
+
+        // The rows must be exactly the sequence the cursor claims. A gap, a duplicate, or a count
+        // the cursor disagrees with means evidence was lost or never committed, and a review built
+        // on it would judge from a conversation that never happened in that shape.
+        const state = await this.readState(database, agentId);
+        const expected = generation === state.generation ? state.nextPosition : 0;
+        if (entries.length !== expected) throw new AutoEvidenceArchiveInvalidError();
+        return entries;
     }
 
     /** Record the human-owned answer to one interactive request, keyed by its request/call ID. */

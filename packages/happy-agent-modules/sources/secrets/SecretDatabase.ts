@@ -229,18 +229,20 @@ export function createSecretDatabase(): SecretDatabase {
             const previous = await rowFor(ctx, agentId, registration.id);
             const existingEnvironment =
                 previous === undefined ? undefined : parseEnvironment(previous.environment_json);
+            const environmentChanged = !sameEnvironment(
+                existingEnvironment,
+                registration.environment,
+            );
             const changed =
                 previous === undefined ||
                 previous.description !== registration.description ||
-                JSON.stringify(existingEnvironment) !== JSON.stringify(registration.environment) ||
+                environmentChanged ||
                 registrationAvailableToModel(previous) !==
                     (registration.availableToModel ?? undefined);
             const revision =
                 previous === undefined
                     ? "1"
-                    : changed &&
-                        JSON.stringify(existingEnvironment) !==
-                            JSON.stringify(registration.environment)
+                    : environmentChanged
                       ? incrementRevision(previous.revision)
                       : previous.revision;
             await agentDatabaseRun(
@@ -283,13 +285,17 @@ export function createSecretDatabase(): SecretDatabase {
             const environment = parseEnvironment(previous.environment_json);
             let environmentChanged = false;
             for (const [name, value] of Object.entries(input.environment ?? {})) {
+                // A process environment tells TOKEN and token apart on one machine and not on
+                // another, so a variable already stored under one spelling is the same variable
+                // whichever spelling names it here, and it keeps the name it was stored under.
+                const storedName = storedEnvironmentName(environment, name) ?? name;
                 if (value === null) {
-                    if (Object.hasOwn(environment, name)) {
-                        delete environment[name];
+                    if (Object.hasOwn(environment, storedName)) {
+                        delete environment[storedName];
                         environmentChanged = true;
                     }
-                } else if (environment[name] !== value) {
-                    environment[name] = value;
+                } else if (environment[storedName] !== value) {
+                    environment[storedName] = value;
                     environmentChanged = true;
                 }
             }
@@ -537,6 +543,35 @@ function parseEnvironment(value: string): Record<string, string> {
         names.add(normalized);
     }
     return environment;
+}
+
+/** The name this variable is already stored under, whatever case it was named with here. */
+function storedEnvironmentName(
+    environment: Record<string, string>,
+    name: string,
+): string | undefined {
+    if (Object.hasOwn(environment, name)) return name;
+    const normalized = name.toUpperCase();
+    return Object.keys(environment).find((stored) => stored.toUpperCase() === normalized);
+}
+
+/**
+ * Whether a registration holds exactly what is already stored.
+ *
+ * Two environments with the same variables and the same values are the same environment, however
+ * the caller happened to order its keys; treating a reordered rewrite as a change would bump a
+ * revision every host restart and tell every listener something happened when nothing did.
+ */
+function sameEnvironment(
+    stored: Record<string, string> | undefined,
+    incoming: Record<string, string>,
+): boolean {
+    if (stored === undefined) return false;
+    const storedNames = Object.keys(stored);
+    if (storedNames.length !== Object.keys(incoming).length) return false;
+    return storedNames.every(
+        (name) => Object.hasOwn(incoming, name) && stored[name] === incoming[name],
+    );
 }
 
 function registrationAvailableToModel(row: SecretRow | undefined): boolean | undefined {

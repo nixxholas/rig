@@ -63,10 +63,12 @@ const PROJECT_ABSOLUTE_PATH_PATTERN =
 /**
  * An HTTPS remote with no credentials in it, which is the only thing the clone boundary will
  * actually run. A URL the catalog accepts but the clone refuses is a project that can never
- * finish being set up.
+ * finish being set up. The host may carry a port, and a port is digits: anything else there is a
+ * URL a clone cannot resolve.
  */
 const PROJECT_REMOTE_URL_PATTERN =
-    "^https://(?![^/?#]*@)[^\\u0000-\\u0020\\u007F/?#]+(?:[/?#][^\\u0000-\\u0020\\u007F]*)?$";
+    "^https://(?![^/?#]*@)[^\\u0000-\\u0020\\u007F/?#:@]+(?::[0-9]+)?" +
+    "(?:[/?#][^\\u0000-\\u0020\\u007F]*)?$";
 
 function projectVisibleIdentifierSchemaFor(maxLength: number) {
     return Type.String({
@@ -378,7 +380,10 @@ export const projectRenameInputSchema = Type.Object(
 
 /** Every operation that only needs to name one project shares this input. */
 export const projectByIdInputSchema = Type.Object(
-    { projectId: projectIdSchema },
+    {
+        expectedVersion: Type.Optional(projectVersionSchema),
+        projectId: projectIdSchema,
+    },
     { additionalProperties: false },
 );
 

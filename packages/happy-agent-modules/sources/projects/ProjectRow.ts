@@ -78,7 +78,7 @@ export function projectFromRow(row: ProjectRow): Project {
             : { requiredSecretKind: row.required_secret_kind as "github" }),
         gitAhead: Number(row.git_ahead),
         gitBehind: Number(row.git_behind),
-        gitDetached: Number(row.git_detached) !== 0,
+        gitDetached: storedBoolean(row.git_detached, "gitDetached"),
         ...(row.git_branch === null ? {} : { gitBranch: row.git_branch }),
         ...(row.git_head === null ? {} : { gitHead: row.git_head }),
         ...(row.git_upstream === null ? {} : { gitUpstream: row.git_upstream }),
@@ -92,6 +92,18 @@ export function projectFromRow(row: ProjectRow): Project {
     };
     assertProject(project);
     return project;
+}
+
+/**
+ * A stored flag is 0 or 1. Anything else is a value this catalog never wrote, so it is refused
+ * rather than coerced into a true that nobody recorded.
+ */
+function storedBoolean(value: number | string, field: string): boolean {
+    const numeric = typeof value === "string" ? Number(value) : value;
+    if (numeric !== 0 && numeric !== 1) {
+        throw new Error(`Project storage holds an invalid "${field}" value.`);
+    }
+    return numeric === 1;
 }
 
 export function assertProject(value: unknown): asserts value is Project {

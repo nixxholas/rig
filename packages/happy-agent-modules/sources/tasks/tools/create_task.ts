@@ -56,10 +56,11 @@ export function createTaskTool(tasks: TasksModule, agentId: string) {
         toLLM: (result) => [
             {
                 type: "text",
-                text:
+                text: tasks.formatMutationForModel(
                     "task" in result
                         ? `Task created: ${result.task.id}\n${result.task.title}`
                         : `Task ${result.taskId} could not be created: ${result.error}`,
+                ),
             },
         ],
     });

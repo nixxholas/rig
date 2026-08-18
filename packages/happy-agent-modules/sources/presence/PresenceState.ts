@@ -310,12 +310,12 @@ export function assertPresenceState(value: unknown): asserts value is PresenceSt
     if ((value.fallbackPresenceId === undefined) !== (value.fallback === undefined)) {
         throw new Error("Presence state fallback fields must be configured together.");
     }
-    if (
-        value.fallback !== undefined &&
-        "presenceId" in value.fallback &&
-        value.fallback.presenceId !== value.fallbackPresenceId
-    ) {
-        throw new Error("Presence state fallback identity does not match.");
+    if (value.fallback !== undefined) {
+        const identity =
+            "presenceId" in value.fallback ? value.fallback.presenceId : value.fallback.status;
+        if (identity !== value.fallbackPresenceId) {
+            throw new Error("Presence state fallback identity does not match.");
+        }
     }
 }
 

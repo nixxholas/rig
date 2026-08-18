@@ -639,7 +639,7 @@ export class HistoryModule implements AgentModule {
             query.from === "end"
                 ? await agentDatabaseRows<HistoryRow>(
                       ctx.db,
-                      sql`SELECT position, record_id, message_json
+                      sql`SELECT ${sql.raw(HISTORY_ROW_COLUMNS)}
                           FROM ${sql.raw(HISTORY_TABLE)}
                           WHERE ${filters}
                           ORDER BY position DESC
@@ -647,7 +647,7 @@ export class HistoryModule implements AgentModule {
                   )
                 : await agentDatabaseRows<HistoryRow>(
                       ctx.db,
-                      sql`SELECT position, record_id, message_json
+                      sql`SELECT ${sql.raw(HISTORY_ROW_COLUMNS)}
                           FROM ${sql.raw(HISTORY_TABLE)}
                           WHERE ${sql.join([filters, sql`position >= ${anchor}`], sql` AND `)}
                           ORDER BY position ASC
@@ -697,10 +697,14 @@ export class HistoryModule implements AgentModule {
         if (page.messages.length > page.matchedMessages) {
             throw new Error("The history module returned more records than matched.");
         }
+        // Only matches at or after the anchor can still be reached going forward: the ones before
+        // it were already passed, and comparing against the archive-wide total would demand a next
+        // cursor from a page that genuinely ends the archive.
+        const matchedFromAnchor = matchedMessages - startIndex;
         if (
             query.from !== "end" &&
             page.messages.length > 0 &&
-            page.matchedMessages > page.messages.length &&
+            matchedFromAnchor > page.messages.length &&
             page.nextCursor === undefined
         ) {
             throw new Error("The history module omitted a cursor for a nonterminal page.");
@@ -942,8 +946,29 @@ export class HistoryModule implements AgentModule {
 interface HistoryRow {
     readonly position: number | string;
     readonly record_id: string;
+    readonly role: string;
     readonly message_json: string;
+    readonly search_text: string;
+    readonly assistant_messages: number | string;
+    readonly user_messages: number | string;
+    readonly text_characters: number | string;
+    readonly thinking_blocks: number | string;
+    readonly tool_calls: number | string;
+    readonly tool_results: number | string;
 }
+
+/** Every column a selected archive row is read back with, so all of it can be checked. */
+const HISTORY_ROW_COLUMNS = `position,
+                             record_id,
+                             role,
+                             message_json,
+                             search_text,
+                             assistant_messages,
+                             user_messages,
+                             text_characters,
+                             thinking_blocks,
+                             tool_calls,
+                             tool_results`;
 
 interface HistoryStatsRow {
     readonly messages: number | string;
@@ -957,12 +982,16 @@ interface HistoryStatsRow {
 
 function historyWhere(agentId: string, query: HistoryStoreQuery): SQL {
     const conditions: SQL[] = [sql`agent_id = ${agentId}`];
-    if (query.roles !== undefined && query.roles.length > 0) {
+    if (query.roles !== undefined) {
+        // Asking for no roles at all asks for nothing, exactly as the in-memory selector reads it.
+        // Dropping the condition instead would quietly turn that into an unfiltered read.
         conditions.push(
-            sql`role IN (${sql.join(
-                query.roles.map((role) => sql`${role}`),
-                sql`, `,
-            )})`,
+            query.roles.length === 0
+                ? sql`1 = 0`
+                : sql`role IN (${sql.join(
+                      query.roles.map((role) => sql`${role}`),
+                      sql`, `,
+                  )})`,
         );
     }
     const foldedQuery = query.query === undefined ? "" : foldHistorySearchText(query.query.trim());
@@ -1051,11 +1080,38 @@ async function historyPositionAt(
     return rows[0] === undefined ? undefined : toSafeInteger(rows[0].position, "history cursor");
 }
 
+/**
+ * Rebuild one record from its row, and check the row against itself.
+ *
+ * Identity, role, search text, and the per-message counts are all denormalized copies of what the
+ * stored message already says. A reader answers from those copies — it filters on `role`, searches
+ * `search_text`, and sums the counts — so a row whose copies no longer agree with its own message
+ * answers questions about a message that was never recorded. There is no safe repair for that, so
+ * a disagreeing row fails the read rather than being quietly believed or quietly dropped.
+ */
 function toHistoryRecord(row: HistoryRow): HistoryRecord {
     const message = parseStoredMessage(row.message_json);
     const position = toSafeInteger(row.position, "history position");
     if (row.record_id !== message.recordId) {
         throw new Error("The history module found a mismatched record identity.");
+    }
+    if (row.role !== message.role) {
+        throw new Error("The history module found a mismatched persisted role.");
+    }
+    if (row.search_text !== foldHistorySearchText(historyMessageSearchParts(message).join("\n"))) {
+        throw new Error("The history module found a mismatched persisted search index.");
+    }
+    const stored: HistoryStats = {
+        assistantMessages: toSafeInteger(row.assistant_messages, "assistant message count"),
+        messages: 1,
+        textCharacters: toSafeInteger(row.text_characters, "history text count"),
+        thinkingBlocks: toSafeInteger(row.thinking_blocks, "history thinking count"),
+        toolCalls: toSafeInteger(row.tool_calls, "history tool-call count"),
+        toolResults: toSafeInteger(row.tool_results, "history tool-result count"),
+        userMessages: toSafeInteger(row.user_messages, "user message count"),
+    };
+    if (!statsEqual(stored, summarizeHistory([message]))) {
+        throw new Error("The history module found mismatched persisted statistics.");
     }
     const record: HistoryRecord = { message, position };
     if (!Value.Check(historyRecordSchema, record)) {

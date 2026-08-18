@@ -57,7 +57,9 @@ export class FileReadLog {
     /**
      * Refuse a change to a file this agent has not read, or has read and something else has
      * changed since. A file that does not exist yet is nobody's work to lose, so creating one
-     * needs no reading first.
+     * needs no reading first. Any modification time other than the remembered one counts as a
+     * change: a restored backup or a clock moved backwards leaves an older stamp on a file whose
+     * contents are no longer the ones that were read.
      */
     async assertRead(
         ctx: Context,
@@ -72,7 +74,7 @@ export class FileReadLog {
             throw new Error(`This file has not been read yet. Read it before changing it: ${path}`);
         }
         const stat = await fs.stat(permissions, path);
-        if (stat.mtimeMs > known.mtimeMs) {
+        if (stat.mtimeMs !== known.mtimeMs) {
             throw new Error(
                 `This file has changed since it was last read, so a change now would discard that work. Read it again first: ${path}`,
             );

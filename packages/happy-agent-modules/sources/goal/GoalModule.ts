@@ -158,6 +158,7 @@ export class GoalModule implements AgentModule {
     readonly #clock: NonNullable<GoalModuleOptions["clock"]>;
     readonly #maxOutputCharacters: number;
     readonly #onPostCommitError: NonNullable<GoalModuleOptions["onPostCommitError"]> | undefined;
+    readonly #mutations = new Map<string, Promise<void>>();
     #agents: AgentSystemRef | undefined;
 
     constructor(options: GoalModuleOptions) {
@@ -275,7 +276,9 @@ export class GoalModule implements AgentModule {
         objective: string,
         lifecycleId?: string,
     ): Promise<SessionGoal | GoalActivation> {
-        const activation = await ctx.inTx(
+        const activation = await this.#mutate(
+            ctx,
+            agentId,
             async (txCtx) => await this.#setGoal(txCtx, agentId, objective, lifecycleId),
         );
         return lifecycleId === undefined ? activation.goal : activation;
@@ -286,13 +289,46 @@ export class GoalModule implements AgentModule {
         agentId: string,
         status: GoalStatus,
     ): Promise<SessionGoal> {
-        return await ctx.inTx(
+        return await this.#mutate(
+            ctx,
+            agentId,
             async (txCtx) => await this.#changeGoalStatus(txCtx, agentId, status),
         );
     }
 
     async clearGoal(ctx: Context, agentId: string): Promise<boolean> {
-        return await ctx.inTx(async (txCtx) => await this.#clearGoal(txCtx, agentId));
+        return await this.#mutate(
+            ctx,
+            agentId,
+            async (txCtx) => await this.#clearGoal(txCtx, agentId),
+        );
+    }
+
+    /**
+     * Run one public goal mutation for an agent at a time.
+     *
+     * Each mutation reads the current goal and then writes a decision derived from it, so two
+     * overlapping callers would otherwise both read "no goal" and both create one. Queuing them
+     * makes the second caller observe the first caller's committed goal, which is what turns a
+     * competing objective into a clear rejection and an identical retry into the same goal.
+     */
+    async #mutate<Result>(
+        ctx: Context,
+        agentId: string,
+        work: (txCtx: Context) => Promise<Result>,
+    ): Promise<Result> {
+        const previous = this.#mutations.get(agentId) ?? Promise.resolve();
+        const run = previous.then(async () => await ctx.inTx(work));
+        const settled = run.then(
+            () => undefined,
+            () => undefined,
+        );
+        this.#mutations.set(agentId, settled);
+        try {
+            return await run;
+        } finally {
+            if (this.#mutations.get(agentId) === settled) this.#mutations.delete(agentId);
+        }
     }
 
     async #afterAgentLoop(
@@ -315,6 +351,9 @@ export class GoalModule implements AgentModule {
             if (!Value.Check(Type.Union([goalInferenceSchema, Type.Undefined()]), inference)) {
                 throw new Error("The stored Goal inference state is invalid.");
             }
+            // A cancelled inference is someone stopping the agent, not the goal failing. Stop
+            // driving the goal forward without counting it against the failure budget.
+            if (inference?.state === "cancelled") return undefined;
             const failed =
                 inference === undefined ||
                 inference.state === undefined ||
@@ -340,6 +379,7 @@ export class GoalModule implements AgentModule {
                         goal: blocked,
                     }),
                 );
+                this.#scheduleHostInterruption(txCtx, scope.agent.id, "goal_blocked");
                 return undefined;
             }
             await kv.delete(txCtx, GOAL_FAILURE_COUNT_KEY);
@@ -423,10 +463,13 @@ export class GoalModule implements AgentModule {
             updatedAt: at,
         };
         await writeGoal(ctx, kv, goal);
-        await this.#setSessionTitle(ctx, agentId, normalized);
         await this.#activate(ctx, kv, lifecycleId, goal, external);
         await this.#publishEvent(ctx, await this.#event(ctx, { type: "goal_set", agentId, goal }));
         await this.#wakeExternalActivation(ctx, agentId, lifecycleId, goal, external);
+        // The host title is the one externally visible side effect of a new goal, so it runs last:
+        // anything that can still reject the mutation has already run, and a rejected goal never
+        // leaves a renamed session behind.
+        await this.#setSessionTitle(ctx, agentId, normalized);
         return { goal: structuredClone(goal), lifecycleId };
     }
 
@@ -622,7 +665,16 @@ export class GoalModule implements AgentModule {
                 role: "user",
                 content: [{ type: "text", text: createGoalContinuationPrompt(goal) }],
             },
-            { id: continuationMessageId(agentId, lifecycleId, goal) },
+            {
+                id: continuationMessageId(agentId, lifecycleId, goal),
+                // The wake wears the user role only because that is the shape a provider accepts.
+                // It carries no human authority, so it is stamped agent-originated and attributed
+                // to the agent whose goal it pursues.
+                metadata: {
+                    ...AGENT_MESSAGE_ORIGIN_METADATA,
+                    ...senderAgentIdMetadata(agentId),
+                },
+            },
         );
     }
 

@@ -13,6 +13,7 @@ import {
     databaseFor,
     insertProjectRow,
     nextProjectOrderKey,
+    readHomeProject,
     readProject,
     readProjectByPath,
     takenStorageKeys,
@@ -78,6 +79,16 @@ async function newProjectRow(
     input: ProjectStoreCreateInput,
 ): Promise<Project> {
     const database = databaseFor(ctx);
+    // There is one home directory, so there is one home project. A second folder registered as
+    // home would leave the catalog with two rows nothing can tell apart.
+    if (input.kind === "home") {
+        const home = await readHomeProject(database);
+        if (home !== undefined) {
+            throw new Error(
+                `The catalog keeps a single home project, and "${home.repositoryRef}" already is it.`,
+            );
+        }
+    }
     const taken = await takenStorageKeys(database);
     const storageKey = uniqueProjectStorageKey(
         input.kind === "home" ? HOME_PROJECT_STORAGE_KEY : projectStorageKey(input.name),

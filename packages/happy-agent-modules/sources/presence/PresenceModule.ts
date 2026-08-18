@@ -333,6 +333,19 @@ export class PresenceModule implements AgentModule, PresenceReader {
             if (current?.presenceId === presenceId) {
                 throw new Error("The active presence definition cannot be cleared.");
             }
+            if (current?.fallbackPresenceId === presenceId) {
+                throw new Error(
+                    "This presence is the fallback of the current presence and cannot be cleared.",
+                );
+            }
+            const schedules = await this.#readSchedules(
+                txCtx,
+                this.#scheduleStore(),
+                this.#maxSchedules,
+            );
+            if (schedules.some((candidate) => referenceId(candidate.presence) === presenceId)) {
+                throw new Error("This presence is used by a schedule and cannot be cleared.");
+            }
             const removed = await this.#store.catalog.clear(txCtx, presenceId);
             return {
                 result: removed,
@@ -357,6 +370,7 @@ export class PresenceModule implements AgentModule, PresenceReader {
 
     async setSchedule(ctx: Context, input: PresenceScheduleInput): Promise<PresenceSchedule> {
         assertPresenceScheduleInput(input);
+        assertKnownTimeZone(input.timeZone);
         const scheduleStore = this.#scheduleStore();
         const requested = normalizeScheduleInput(input);
         const result = await this.#mutate(ctx, async (txCtx, eventId, at) => {
@@ -580,10 +594,34 @@ function validateOptions(options: unknown): PresenceModuleOptions {
     if (!Value.Check(presenceModuleOptionsSchema, options)) {
         throw new Error("Presence module options contain unknown or invalid keys.");
     }
+    const catalog = options.catalog ?? [];
     if (options.catalog !== undefined) {
         assertPresenceCatalog(options.catalog);
+        for (const definition of options.catalog) {
+            if (isBuiltInPresenceId(definition.id)) {
+                throw new Error("Built-in presence definitions cannot be replaced.");
+            }
+        }
+    }
+    const maxPresences = options.maxPresences ?? 64;
+    if (maxPresences < BUILT_IN_PRESENCES.length + catalog.length) {
+        throw new Error(
+            "The presence catalog limit is too small to hold the built-in and configured presences.",
+        );
     }
     return options as PresenceModuleOptions;
+}
+
+/**
+ * Reject a time zone the runtime cannot interpret before it reaches durable storage, so schedule
+ * evaluation never depends on a value that will throw later.
+ */
+function assertKnownTimeZone(timeZone: string): void {
+    try {
+        new Intl.DateTimeFormat("en-US", { timeZone });
+    } catch {
+        throw new Error(`"${timeZone}" is not a time zone this system recognizes.`);
+    }
 }
 
 function normalizeMutationInput(
@@ -657,11 +695,16 @@ function assertCatalogSelection(
     }
 }
 
+/** The catalog identity a schedule or fallback reference points at, in either reference form. */
+function referenceId(reference: PresenceSchedule["presence"]): string {
+    return "presenceId" in reference ? reference.presenceId : reference.status;
+}
+
 function assertCatalogReference(
     reference: PresenceSchedule["presence"],
     catalog: readonly PresenceDefinition[],
 ): void {
-    const id = "presenceId" in reference ? reference.presenceId : reference.status;
+    const id = referenceId(reference);
     if (!catalog.some((candidate) => candidate.id === id)) {
         throw new Error(`There is no presence called "${id}".`);
     }
