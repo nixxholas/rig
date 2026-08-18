@@ -12,6 +12,18 @@ Discussion notes that support or contextualize master plans must live only in
 `master-plans/notes/`. Do not create these notes in the `master-plans/` root,
 in another documentation directory, or anywhere else in the repository.
 
+## Modules
+
+A module is a self-contained feature. It carries everything that feature needs to work: it extends the agent loop through its own hooks, owns its tools, starts and supervises its background processes, and holds its connections to third-party services. Adding a module to an agent is the whole installation — nothing elsewhere should have to be wired up, registered, or branched on for the feature to function.
+
+A module may take only other modules as arguments. Not configuration objects, path strings, clients, callbacks, or loose handles. When a module needs something, it takes the module that owns that thing and asks it. This keeps the dependency graph a graph of features, and keeps a module's collaborators visible in its constructor rather than assembled by whoever happens to build it.
+
+The config module is what that rule leans on most. It is not merely parsed configuration: it resolves and owns the paths the product runs against, and it instantiates the providers. A module that needs a path or a provider depends on the config module and takes it from there, instead of deriving paths itself or constructing a provider of its own.
+
+There is no host object, and none may be introduced. A module is never handed a `HappyHost`, `McpHost`, `GoalHost`, `WorkspaceHost`, a resolver, a broker, a backend, a scheduler, or any other object standing in for the application around it. If a module needs to reach the filesystem, Git, a process, a socket, a clock, or a third-party API, it reaches it itself. A capability that a module cannot perform on its own is a capability that module does not have — the answer is to give it what it needs to do the work, not to inject something that does the work on its behalf and calls back.
+
+The host concept came from the Rig v2 migration plan written for the module rewrite, since deleted. It made Rig the host — owner of paths, providers, Git, files, processes, media, and clocks — and modules pure state machines over the database that received all external reach through injected structural contracts. That split is no longer the design. The `*Host` interfaces still present in `packages/happy-agent-modules/sources` are residue from it: remove one when its module is revisited, and never add, extend, or copy one.
+
 ## Module specs: SPEC.md and SPEC_LEARNINGS.md
 
 A module may carry a `SPEC.md` and a `SPEC_LEARNINGS.md` beside it. When working on a specific module, always read that module's `SPEC.md` and `SPEC_LEARNINGS.md` in full before making changes.
