@@ -500,6 +500,70 @@ describe("AgentSystemLocal", () => {
     });
 });
 
+describe("AgentSystemLocal queue modes", () => {
+    it("passes all-at-once steering and send modes to every loaded agent", async () => {
+        const provider = new ScriptedProvider([
+            textTurn("one"),
+            textTurn("two"),
+            textTurn("three"),
+        ]);
+        let queuedSteering = false;
+        let queuedSends = false;
+        const queueModule: AgentModule = {
+            name: "queue-mode-observer",
+            beforeStart: (_startCtx, agents) => ({
+                onEvent: (eventCtx, scope, event) => {
+                    if (event.type !== "text_delta") return;
+                    if (event.delta === "o" && !queuedSteering) {
+                        queuedSteering = true;
+                        void agents.steer(eventCtx, scope.agent.id, user("steer one"));
+                        void agents.steer(eventCtx, scope.agent.id, user("steer two"));
+                    }
+                    if (event.delta === "t" && !queuedSends) {
+                        queuedSends = true;
+                        void agents.send(eventCtx, scope.agent.id, user("send one"));
+                        void agents.send(eventCtx, scope.agent.id, user("send two"));
+                    }
+                },
+            }),
+        };
+        const system = await AgentSystemLocal.create(
+            ctx,
+            new InMemoryAgentStorage({
+                acquireLock: inMemoryStorageLock(),
+                kv: managerKV(new InMemoryPersistence()),
+                persistence: () => new InMemoryPersistence(),
+            }),
+            {
+                models: [],
+                modules: [queueModule],
+                providers: providersOf(provider),
+                provider: "scripted",
+                sendMode: "all",
+                steeringMode: "all",
+            },
+        );
+        try {
+            const agent = await system.create(ctx, {});
+            await agent.send(ctx, user("go"), { await: true });
+            await agent.waitForIdle();
+
+            const requests = provider.sessions[0]?.requests ?? [];
+            expect(requests).toHaveLength(3);
+            expect(requests[1]?.context.messages.slice(-2)).toEqual([
+                user("steer one"),
+                user("steer two"),
+            ]);
+            expect(requests[2]?.context.messages.slice(-2)).toEqual([
+                user("send one"),
+                user("send two"),
+            ]);
+        } finally {
+            await system.close(ctx);
+        }
+    });
+});
+
 describe("AgentSystemLocal configuration", () => {
     /**
      * A collection over the given manager storage, with one module that records what each

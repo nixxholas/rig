@@ -11,7 +11,11 @@ import {
 } from "@steve.kite/stdlib";
 
 import { Agent } from "./Agent.js";
-import { type AgentBaseAwaitOptions, type AgentBaseMessageOptions } from "./AgentBase.js";
+import {
+    type AgentBaseAwaitOptions,
+    type AgentBaseMessageOptions,
+    type AgentBaseQueueMode,
+} from "./AgentBase.js";
 import {
     agentDatabase,
     agentId as agentIdOf,
@@ -71,6 +75,10 @@ export interface AgentSystemLocalOptions<Database extends AgentDatabase = AgentD
     readonly provider: string;
     /** The models this collection offers its agents. */
     readonly models: readonly AgentModel[];
+    /** How every agent drains steering accepted before its next response. */
+    readonly steeringMode?: AgentBaseQueueMode;
+    /** How every agent drains sent follow-ups accepted before its next response. */
+    readonly sendMode?: AgentBaseQueueMode;
 }
 
 /**
@@ -112,6 +120,10 @@ export class AgentSystemLocal<
     readonly #providers: AgentProviders;
     /** The registry ID of the provider new agents are created with. */
     readonly #provider: string;
+    /** How every agent drains its steering queue. */
+    readonly #steeringMode: AgentBaseQueueMode;
+    /** How every agent drains its sent-message queue. */
+    readonly #sendMode: AgentBaseQueueMode;
     /** Exclusive database-backed ownership of this collection's whole durable store. */
     readonly #storageLock: AgentStorageLock;
     /** The identity index and creation-time config fallback; current config lives with the agent. */
@@ -201,6 +213,8 @@ export class AgentSystemLocal<
         this.#storageLock = storageLock;
         this.#providers = options.providers;
         this.#provider = options.provider;
+        this.#steeringMode = options.steeringMode ?? "one-at-a-time";
+        this.#sendMode = options.sendMode ?? "one-at-a-time";
         this.models = [...options.models];
         this.#configs = storage.kv.scoped("config");
         this.#parents = storage.kv.scoped("parent");
@@ -558,7 +572,9 @@ export class AgentSystemLocal<
             providers: this.#providers,
             provider: this.#provider,
             persistence: this.#persistenceFor(agentId),
+            sendMode: this.#sendMode,
             sharedKV: this.#sharedModuleKV,
+            steeringMode: this.#steeringMode,
             // The collection's modules come first, so the instructions they contribute — the
             // system prompt above all — open every agent's prompt.
             modules: this.#runtimes,

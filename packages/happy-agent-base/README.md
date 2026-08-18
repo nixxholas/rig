@@ -14,6 +14,11 @@ The package also provides the primitives needed to host that runtime:
 - `AgentProviders` for resolving provider/model routes;
 - `AgentTool` and lifecycle hooks for extending the loop.
 
+`AgentSystemLocal` accepts `steeringMode` and `sendMode` for the collection. Each is
+`"one-at-a-time"` by default or `"all"` when every message already waiting at that queue boundary
+should be injected before one response. The choice applies consistently to newly created and
+restored agents.
+
 One `AgentSystem` exclusively owns one durable store. `AgentStorage` requires an asynchronous
 Drizzle SQLite or PostgreSQL/PGlite database plus a hard database-level lock. It owns the agent
 record, key-value, and migration tables itself. `AgentSystem.close()` stops its agents and releases
