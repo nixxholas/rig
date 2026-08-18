@@ -42,3 +42,30 @@
 - A per-agent FIFO queue needs the abort signal checked twice: once before queueing and again when
   the queue releases the review. A review whose turn was stopped while it waited must never reach
   the reviewer.
+- The `messageOrigin` marker is no longer this module's file. Collaboration, goal, history and
+  scheduling all stamp or read it, so it now lives at the package's `sources/impl/messageOrigin.ts`
+  as a shared, module-neutral utility and is exported from the package index rather than from
+  `auto/index.ts`. The trust rule is unchanged and still belongs to this module; only the
+  definition moved. `SPEC.md` §"Trust" still points at `messageOrigin.ts` as if it were auto's own
+  and needs a dictated path update.
+- The module now takes only modules, plus the one structural argument `SPEC.md` §13.3 kept:
+  `constructor(config: ConfigModule, compute: ComputeModule, systemPrompt: SystemPromptModule,
+  storage: AgentStorage)`. The accounts, the catalog and the working folder come from
+  configuration; the private lifetime is derived in `beforeStart` from the context the base hands
+  the module, so nothing it starts is carried by a lifetime that ends before it does; the security
+  documents are `ConfigModule.readGlobalSecurity` / `readProjectSecurity`, because configuration is
+  what owns those paths; the project instructions are
+  `SystemPromptModule.readAgentsMdInstructions`; and the reviewer's read-only tools are
+  `ComputeModule.reviewerTools(ctx, scope)`, because the machine a reviewer investigates is the
+  compute module's to create, cache and dispose — the module asks for the tools rather than being
+  handed a closure that builds them.
+- The remaining `storage` argument is a real tension, and it is recorded here rather than resolved.
+  `SPEC.md` §13.3 records it as a deliberate, human-decided deviation: this package opens no
+  database anywhere, and duplicating the host's SQLite and single-owner-lock mechanics here would
+  buy nothing. The package-wide strictness rule says a module's constructor takes only other
+  modules. Both cannot be true at once, and the resolution is the user's to make. Two ways out
+  exist if it should be resolved: a storage-owning module in this package that opens and hands out
+  databases (which would make this package own SQLite, contradicting the reason for the deviation),
+  or configuration exposing `paths.autoDatabasePath` / `paths.autoAgentLockPath` — which it already
+  does — and this module opening its own store from them, which trades one deviation for a
+  different one. Until the user decides, `storage` stays, and `SPEC.md` is not edited.

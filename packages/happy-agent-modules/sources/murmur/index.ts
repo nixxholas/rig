@@ -1,9 +1,4 @@
-export {
-    DEFAULT_MURMUR_RELAY_URL,
-    MurmurModule,
-    murmurModuleOptionsSchema,
-    type MurmurModuleOptions,
-} from "./MurmurModule.js";
+export { MurmurModule } from "./MurmurModule.js";
 export { SqliteMurmurStore } from "./SqliteMurmurStore.js";
 export {
     MurmurService,
@@ -27,7 +22,6 @@ export {
     murmurIdentitySchema,
     murmurIncomingRequestSchema,
     murmurInvitationSchema,
-    murmurModuleListenerSchema,
     murmurOutgoingRequestSchema,
     murmurPeerProfileSchema,
     murmurProfileBindingSchema,
@@ -36,12 +30,13 @@ export {
     type MurmurChangedEvent,
     type MurmurConnection,
     type MurmurContactRecord,
+    type MurmurEventListener,
     type MurmurIdentity,
     type MurmurIncomingRequest,
     type MurmurInvitation,
-    type MurmurModuleListener,
     type MurmurOutgoingRequest,
     type MurmurPeerProfile,
     type MurmurProfileBinding,
     type MurmurSnapshot,
+    type MurmurUnsubscribe,
 } from "./MurmurTypes.js";

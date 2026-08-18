@@ -1,9 +1,8 @@
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type { AgentKV } from "@slopus/happy-agent-base";
+import type { ComputeFileSystem, ComputePermissions } from "@slopus/happy-agent-compute";
 import type { Context, MapAsyncLock } from "@steve.kite/stdlib";
-
-import type { ComputeFileSystem, ComputePermissions } from "../Compute.js";
 
 /** What one remembered read says: which file, and how old the copy that was read was. */
 const fileReadSchema = Type.Object({ path: Type.String(), mtimeMs: Type.Number() });

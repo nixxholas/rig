@@ -7,14 +7,12 @@ strict monotonic UUIDv7 identifier so cursors are time-ordered and lexicographic
 import { Agent } from "@slopus/happy-agent-base";
 import { EventsModule } from "@slopus/happy-agent-modules";
 
-const events = new EventsModule({ capacity: 10_000 });
+const events = new EventsModule();
 const agent = await Agent.create(ctx, { ...options, modules: [events] });
 ```
 
-`EventsModuleOptions`:
-
-- `capacity` — maximum number of events retained in the live window (default 10,000).
-- `now` — injectable clock for tests.
+The module takes nothing. The live window holds `EVENTS_CAPACITY` (10,000) events — a property of
+the journal rather than something a caller tunes — and the module reads the wall clock itself.
 
 ## Public surface
 
@@ -34,7 +32,7 @@ const agent = await Agent.create(ctx, { ...options, modules: [events] });
   owns.
 - `cursor()` — current head (newest event id or the origin cursor).
 - `originCursor()` — the stable starting position for this instance.
-- `capacity()` — configured window size.
+- `capacity()` — the window size, always `EVENTS_CAPACITY`.
 
 ## Event shape
 

@@ -1,5 +1,5 @@
 import { humanizeMcpName } from "./humanizeMcpName.js";
-import { quoteVisibleExact } from "./quoteVisibleExact.js";
+import { quoteVisibleExact } from "../impl/quoteVisibleExact.js";
 
 export function describeMcpAutoPermissionAction(options: {
     arguments: unknown;

@@ -4,7 +4,7 @@ import {
     AGENT_MESSAGE_ORIGIN_METADATA,
     USER_MESSAGE_ORIGIN_METADATA,
     senderAgentIdMetadata,
-} from "../../sources/auto/messageOrigin.js";
+} from "../../sources/impl/messageOrigin.js";
 import { HistoryModule } from "../../sources/history/HistoryModule.js";
 import { formatHistoryMessage } from "../../sources/history/impl/formatHistoryMessage.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
@@ -55,30 +55,9 @@ describe("HistoryModule durability", () => {
         }
     });
 
-    it("lists the session tree and resolves a canonical path through the host seam", async () => {
-        let resolvedTarget: string | undefined;
-        const history = new HistoryModule({
-            listAgents: (_ctx, requesterAgentId) => [
-                {
-                    agentId: requesterAgentId,
-                    messageCount: 0,
-                    path: "/root",
-                    status: "working",
-                },
-                {
-                    agentId: "agent-b",
-                    description: "Audit worker",
-                    messageCount: 1,
-                    path: "/root/audit",
-                    status: "finished",
-                },
-            ],
-            resolveTarget: (_ctx, _requesterAgentId, requestedTarget) => {
-                resolvedTarget = requestedTarget;
-                return "agent-b";
-            },
-        });
-        const database = moduleDatabase(history.migrations, "history-agent-tree-test");
+    it("describes the reader and the agent it reads, each with its own archive count", async () => {
+        const history = new HistoryModule();
+        const database = moduleDatabase(history.migrations, "history-agent-roster-test");
         await database.ready;
         const hooks = await resolveModuleHooks(database.context, history);
 
@@ -93,30 +72,50 @@ describe("HistoryModule durability", () => {
                 agent: { id: "agent-a" },
             } as Parameters<NonNullable<typeof hooks.tools>>[1];
             const [tool] = await hooks.tools!(database.context, scope);
-            const result = await tool!.execute(database.context, { target: "/root/audit" }, {
+            const result = await tool!.execute(database.context, { target: "agent-b" }, {
                 id: "call-history-tree",
                 providerCallId: "provider-history-tree",
                 kv: {},
             } as never);
 
-            expect(resolvedTarget).toBe("/root/audit");
             expect(result).toMatchObject({
                 agents: [
                     {
                         agent_id: "agent-a",
-                        path: "/root",
-                        status: "working",
+                        message_count: 0,
+                        path: "agent-a",
+                        status: "unknown",
                     },
                     {
                         agent_id: "agent-b",
-                        description: "Audit worker",
-                        path: "/root/audit",
-                        status: "finished",
+                        message_count: 1,
+                        path: "agent-b",
+                        status: "unknown",
                     },
                 ],
                 target: "agent-b",
                 total_messages: 1,
             });
+        } finally {
+            database.close();
+        }
+    });
+
+    it("refuses a target that is not a well-formed Agent ID", async () => {
+        const history = new HistoryModule();
+        const database = moduleDatabase(history.migrations, "history-agent-target-test");
+        await database.ready;
+
+        try {
+            await expect(
+                history.resolveTarget(database.context, "agent-a", "x".repeat(300)),
+            ).rejects.toThrow("is not an Agent ID.");
+            await expect(
+                history.resolveTarget(database.context, "agent-a", "agent-b"),
+            ).resolves.toBe("agent-b");
+            await expect(
+                history.resolveTarget(database.context, "agent-a", "agent-a"),
+            ).resolves.toBe("agent-a");
         } finally {
             database.close();
         }
@@ -232,15 +231,9 @@ describe("HistoryModule durability", () => {
         }
     });
 
-    it("records a one-line tool display summary through the injected formatter", async () => {
-        const displayInputs: unknown[] = [];
-        const history = new HistoryModule({
-            toolDisplay: (_ctx, input) => {
-                displayInputs.push(input);
-                return "Listed files.";
-            },
-        });
-        const database = moduleDatabase(history.migrations, "history-tool-display-test");
+    it("summarizes a failed tool result as a failure rather than as output", async () => {
+        const history = new HistoryModule();
+        const database = moduleDatabase(history.migrations, "history-tool-display-error-test");
         await database.ready;
         const hooks = await resolveModuleHooks(database.context, history);
 
@@ -259,28 +252,22 @@ describe("HistoryModule durability", () => {
         try {
             await hooks.beforeToolCallTransact!(database.context, scope, {
                 arguments: "{}",
-                callId: "call-display-1",
+                callId: "call-display-error",
                 name: "list_files",
                 type: "tool_call",
             });
             await hooks.afterToolCallTransact!(database.context, scope, {
-                callId: "call-display-1",
-                content: [{ text: "file.txt", type: "text" }],
+                callId: "call-display-error",
+                content: [{ text: "no such directory", type: "text" }],
+                isError: true,
                 role: "tool",
             });
 
             const page = await history.read(database.context, "agent-a");
-            const block = page.messages[0]?.message.blocks[0];
-            expect(displayInputs).toEqual([
-                {
-                    callId: "call-display-1",
-                    output: "file.txt",
-                    toolName: "list_files",
-                },
-            ]);
-            expect(block).toMatchObject({
-                display: "Listed files.",
-                output: "file.txt",
+            expect(page.messages[0]?.message.blocks[0]).toMatchObject({
+                display: "Tool list_files failed.",
+                isError: true,
+                output: "no such directory",
                 type: "tool_result",
             });
         } finally {
@@ -288,7 +275,7 @@ describe("HistoryModule durability", () => {
         }
     });
 
-    it("uses a bounded generic display when no formatter is configured", async () => {
+    it("uses the built-in bounded display for a tool result", async () => {
         const history = new HistoryModule();
         const database = moduleDatabase(history.migrations, "history-tool-display-fallback-test");
         await database.ready;

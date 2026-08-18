@@ -4,7 +4,6 @@ import type { Context } from "@steve.kite/stdlib";
 import { profileIdSchema, profileSchema } from "../profile/ProfileTypes.js";
 
 const exact = { additionalProperties: false } as const;
-const murmurContextSchema = Type.Unsafe<Context>(Type.Object({}, exact));
 
 /**
  * A 32-byte Murmur value in base64url: an identity key, a session id, or an invitation
@@ -135,17 +134,11 @@ export const murmurChangedEventSchema = Type.Object(
 );
 export type MurmurChangedEvent = Static<typeof murmurChangedEventSchema>;
 
-const murmurEventListenerCallbackSchema = Type.Function(
-    [murmurContextSchema, murmurChangedEventSchema],
-    Type.Union([Type.Void(), Type.Promise(Type.Void())]),
-);
+/** Told that sharing changed, after the change has happened. */
+export type MurmurEventListener = (ctx: Context, event: MurmurChangedEvent) => void;
 
-/** Post-commit notification for host protocol projection. */
-export const murmurModuleListenerSchema = Type.Object(
-    { onEvent: Type.Optional(murmurEventListenerCallbackSchema) },
-    exact,
-);
-export type MurmurModuleListener = Static<typeof murmurModuleListenerSchema>;
+/** Ends one subscription. Calling it twice is harmless. */
+export type MurmurUnsubscribe = () => void;
 
 /** The durable link between this installation's Murmur identity and the person behind it. */
 export const murmurProfileBindingSchema = Type.Object(

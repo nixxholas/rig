@@ -2,7 +2,7 @@ import { Type, type Static } from "@sinclair/typebox";
 import type { Context } from "@steve.kite/stdlib";
 
 import type { Compute } from "../Compute.js";
-import type { FileReadLog } from "./FileReadLog.js";
+import type { FileReadLog } from "../../impl/FileReadLog.js";
 import { basenameComputePath } from "./resolveComputePath.js";
 
 /** One bounded image read, ready to become a provider-neutral image block. */

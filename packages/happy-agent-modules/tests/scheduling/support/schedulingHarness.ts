@@ -1,12 +1,12 @@
 import type { AgentModuleHooks, AgentSystemRef } from "@slopus/happy-agent-base";
+import { vi } from "vitest";
 
-import {
-    SchedulingModule,
-    type SchedulingModuleOptions,
-} from "../../../sources/scheduling/SchedulingModule.js";
-import type { SchedulingTimers } from "../../../sources/scheduling/SchedulingTimers.js";
+import { SchedulingModule } from "../../../sources/scheduling/SchedulingModule.js";
 import { moduleDatabase, type ModuleDatabase } from "../../support/moduleDatabase.js";
 import { resolveModuleHooks } from "../../support/moduleHooks.js";
+
+/** The moment every scheduling test starts from, so due times are exact numbers to assert on. */
+export const START_TIME = 1_000;
 
 /** One message the fake collection was asked to deliver. */
 export interface DeliveredMessage {
@@ -17,53 +17,30 @@ export interface DeliveredMessage {
 }
 
 /**
- * Time under the test's control.
+ * Put time under the test's control.
  *
- * The clock and the timers move together, because scheduling only fires an alarm once its own
- * clock has really reached the moment asked for.
+ * Scheduling reads the clock and holds its timers itself, so the only way to move its time is to
+ * move the process's: fake timers advance `Date.now` and fire `setTimeout` together, which is
+ * exactly the relationship the module relies on.
  */
-export class TestClock {
-    #now: number;
-    #nextHandle = 1;
-    readonly #pending = new Map<number, { readonly at: number; readonly fire: () => void }>();
+export function useSchedulingClock(): void {
+    vi.useFakeTimers({ now: START_TIME });
+}
 
-    constructor(start = 1_000) {
-        this.#now = start;
-    }
+/** Move the clock forward, firing everything that becomes due on the way. */
+export async function advance(milliseconds: number): Promise<void> {
+    await vi.advanceTimersByTimeAsync(milliseconds);
+    await settle();
+}
 
-    now(): number {
-        return this.#now;
-    }
+/** Let every already-resolved promise run, without moving the clock. */
+export async function settle(): Promise<void> {
+    await vi.advanceTimersByTimeAsync(0);
+}
 
-    readonly timers: SchedulingTimers = {
-        start: (delay: number, fire: () => void): unknown => {
-            const handle = this.#nextHandle++;
-            this.#pending.set(handle, { at: this.#now + delay, fire });
-            return handle;
-        },
-        stop: (handle: unknown): void => {
-            this.#pending.delete(handle as number);
-        },
-    };
-
-    /** Move the clock forward, firing everything that becomes due on the way. */
-    async advance(milliseconds: number): Promise<void> {
-        this.#now += milliseconds;
-        for (;;) {
-            const due = [...this.#pending.entries()].filter(([, entry]) => entry.at <= this.#now);
-            if (due.length === 0) break;
-            for (const [handle, entry] of due) {
-                this.#pending.delete(handle);
-                entry.fire();
-            }
-            await settle();
-        }
-        await settle();
-    }
-
-    get armed(): number {
-        return this.#pending.size;
-    }
+/** How many alarms scheduling is currently holding. */
+export function armedAlarms(): number {
+    return vi.getTimerCount();
 }
 
 /** A stand-in for the agent collection: it records deliveries and answers about parentage. */
@@ -112,7 +89,6 @@ export class TestAgents {
 }
 
 export interface SchedulingHarness {
-    readonly clock: TestClock;
     readonly agents: TestAgents;
     readonly database: ModuleDatabase;
     readonly hooks: AgentModuleHooks;
@@ -122,37 +98,20 @@ export interface SchedulingHarness {
 
 export interface SchedulingHarnessOptions {
     readonly agents?: TestAgents;
-    readonly clock?: TestClock;
     readonly database?: ModuleDatabase;
-    readonly listener?: SchedulingModuleOptions["listener"];
-    readonly maxOutputCharacters?: number;
 }
 
-let ids = 0;
-
-/** A started scheduling module over a real SQLite database, with time and delivery in hand. */
+/** A started scheduling module over a real SQLite database, with delivery in hand. */
 export async function schedulingHarness(
     name: string,
     options: SchedulingHarnessOptions = {},
 ): Promise<SchedulingHarness> {
-    const clock = options.clock ?? new TestClock();
     const agents = options.agents ?? new TestAgents();
-    let eventIds = 0;
-    const module = new SchedulingModule({
-        clock: () => clock.now(),
-        timers: clock.timers,
-        idFactory: () => `generated${++ids}`,
-        eventIdFactory: () => `event${++eventIds}`,
-        ...(options.listener === undefined ? {} : { listener: options.listener }),
-        ...(options.maxOutputCharacters === undefined
-            ? {}
-            : { maxOutputCharacters: options.maxOutputCharacters }),
-    });
+    const module = new SchedulingModule();
     const database = options.database ?? moduleDatabase(module.migrations, name);
     await database.ready;
     const hooks = await resolveModuleHooks(database.context, module, agents.ref);
     return {
-        clock,
         agents,
         database,
         hooks,
@@ -162,10 +121,4 @@ export async function schedulingHarness(
             if (options.database === undefined) database.close();
         },
     };
-}
-
-/** Let every already-resolved promise run, without moving the clock. */
-export async function settle(): Promise<void> {
-    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
-    await new Promise((resolve) => setImmediate(resolve));
 }

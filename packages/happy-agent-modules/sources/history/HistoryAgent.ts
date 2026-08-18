@@ -8,11 +8,11 @@ import {
 
 /** Maximum number of related agents one history response may describe. */
 export const MAX_HISTORY_AGENT_SUMMARIES = 256;
-/** Maximum characters in a path supplied by the host roster. */
+/** Maximum characters in the path naming an agent in a roster. */
 export const MAX_HISTORY_AGENT_PATH_LENGTH = 1_024;
-/** Maximum characters in a host-provided agent description. */
+/** Maximum characters describing one agent in a roster. */
 export const MAX_HISTORY_AGENT_DESCRIPTION_LENGTH = 4_000;
-/** Maximum characters in a host-provided agent status. */
+/** Maximum characters in one agent's status. */
 export const MAX_HISTORY_AGENT_STATUS_LENGTH = 256;
 
 const historyAgentPathSchema = Type.String({
@@ -31,7 +31,7 @@ const historyAgentStatusSchema = Type.String({
     pattern: "^[^\\u0000\\r\\n]+$",
 });
 
-/** One agent in the session tree visible to a history reader. */
+/** One agent a history reader is told about. */
 export const historyAgentSummarySchema = Type.Object(
     {
         agentId: historyAgentIdSchema,
@@ -46,7 +46,7 @@ export const historyAgentSummarySchema = Type.Object(
     { additionalProperties: false },
 );
 
-/** A bounded roster page supplied by the host for one history response. */
+/** The bounded roster carried by one history response. */
 export const historyAgentSummariesSchema = Type.Array(historyAgentSummarySchema, {
     maxItems: MAX_HISTORY_AGENT_SUMMARIES,
 });
@@ -58,12 +58,13 @@ export type HistoryAgentSummary = Static<typeof historyAgentSummarySchema>;
 export type HistoryAgentSummaries = Static<typeof historyAgentSummariesSchema>;
 
 /**
- * A stable target accepted by the history tool. It may be an Agent ID or a canonical host path;
- * the host resolver decides which one it denotes.
+ * The agent a history read is about. Anything longer than an Agent ID may be is refused rather
+ * than guessed at; anything shaped like one is read as one, whether or not it has recorded
+ * anything yet.
  */
 export const historyAgentTargetSchema = Type.String({
     description:
-        "Stable Agent ID or canonical session-tree path. The host resolves paths and reports missing or ambiguous targets.",
+        "Stable Agent ID. Omitted means the calling agent; an agent that has recorded nothing simply has an empty history.",
     minLength: 1,
     maxLength: Math.max(MAX_HISTORY_AGENT_ID_LENGTH, MAX_HISTORY_AGENT_PATH_LENGTH),
     pattern: "^[^\\u0000\\r\\n]+$",

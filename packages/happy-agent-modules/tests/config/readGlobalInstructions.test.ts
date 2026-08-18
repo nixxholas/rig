@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { createRootContext } from "@steve.kite/stdlib";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { readGlobalInstructions } from "../sources/modules/agent/readGlobalInstructions.js";
+import { readGlobalInstructions } from "../../sources/config/impl/readGlobalInstructions.js";
 
 const createdDirectories = new Set<string>();
 const ctx = createRootContext().named("read-global-instructions-test");

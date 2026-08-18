@@ -1,8 +1,8 @@
 # System prompt
 
 `SystemPromptModule` is the single instruction module for an agent. It selects the native prompt
-for the model in force, substitutes the configured identity, appends truthful host environment
-details, and supplies the global, security, and project `AGENTS.md` instruction chain.
+for the model in force, substitutes Rig's own identity, appends truthful host environment details,
+and supplies the global, security, and project `AGENTS.md` instruction chain.
 
 ```text
 vendor/model prompt
@@ -16,34 +16,19 @@ vendor/model prompt
 ```
 
 ```ts
-const created = createComputeModules();
-const computeResolver = {
-    resolve: async (ctx, agentId) => await created.computeModule.resolve(ctx, agentId),
-};
-const systemPrompt = new SystemPromptModule({
-    identity: { name: "Scout", prompt: "You are Scout, built by Happy" },
-    availableModels: [{ name: "Claude Opus", id: "anthropic/opus-5", providerId: "anthropic" }],
-    compute: computeResolver,
-    globalInstructions: {
-        path: "/user/config/AGENTS.md",
-        read: async (ctx, path, maxBytes) => await readBounded(ctx, path, maxBytes),
-    },
-});
+const created = createComputeModules(new ComputeModule(config));
+const systemPrompt = new SystemPromptModule(config, created.computeModule);
 ```
 
-All options are optional. Without an identity the module uses
-`DEFAULT_SYSTEM_PROMPT_IDENTITY`; without compute or a global reader it still supplies the
-AGENTS.md semantics specification. Constructor options are closed TypeBox contracts. Identity and
-model-catalog values are cloned and frozen, while the injected compute resolver and reader remain
-host-owned services.
+The constructor takes modules and nothing else. Configuration owns the model catalog and the
+person's global `AGENTS.md`, and compute owns which machine an agent runs on, so neither a
+catalog, an identity, a path, nor a reader callback is passed in.
 
-The identity name must be non-blank, at most 128 characters, and free of NULs, carriage returns,
-line feeds, `{`, and `}`. The identity prompt must be non-blank, at most 4,096 characters, free
-of NULs, and must not contain `{{identity}}` or `{{name}}` markers. Invalid outer options,
-identity values, model catalogs, and catalog byte totals have distinct stable constructor errors:
-`"System prompt module options are invalid."`, `"System prompt identity is invalid."`,
-`"System prompt available models are invalid."`, and
-`"System prompt available models exceed the configured UTF-8 byte bound."`, respectively.
+There is one identity and it is Rig's own (`DEFAULT_SYSTEM_PROMPT_IDENTITY`): an installation that
+renamed itself would be telling the model it is something the rest of the product is not.
+`systemPromptIdentitySchema` still describes that value — a non-blank name of at most 128
+characters free of NULs, carriage returns, line feeds, `{`, and `}`, and a non-blank prompt of at
+most 4,096 characters free of NULs and of the `{{identity}}` and `{{name}}` markers.
 
 ## Prompt selection and assembly
 
@@ -64,34 +49,41 @@ the trimmed identity prompt, matching the legacy substitution order.
 order is the selected vendor prompt, the optional environment section, then the AGENTS.md
 specification and documents. The environment contains working directory, platform, shell, OS
 version, scratch-directory guidance, final-message visibility, workspace/worktree guidance, and
-the bounded host-supplied model catalog. The catalog accepts at most 1,000 routes, each with a
-non-empty name, model ID, and provider ID of at most 256 characters; its rendered UTF-8 section
-is capped at 512,000 bytes at construction.
+the model catalog `ConfigModule.models` reports.
 
-The complete UTF-8 output is capped by `MAX_SYSTEM_PROMPT_OUTPUT_BYTES`. Available-model fields,
-item count, and rendered UTF-8 bytes have their own constructor bounds. AGENTS.md discovery caps
+The catalog is read from configuration the first time the environment section is assembled and
+kept from then on, so every agent sees the same routes for the life of the installation. It
+accepts at most 1,000 routes, each with a non-empty name, model ID, and provider ID of at most 256
+characters, and its rendered UTF-8 section is capped at 512,000 bytes. A catalog that breaks
+either bound fails that assembly with a stable message —
+`"System prompt available models are invalid."` or
+`"System prompt available models exceed the configured UTF-8 byte bound."` — rather than at
+construction, so a bad catalog cannot stop the agent from starting.
+
+The complete UTF-8 output is capped by `MAX_SYSTEM_PROMPT_OUTPUT_BYTES`. AGENTS.md discovery caps
 each document, total bytes, document count, paths, and rendered characters. Oversized instruction
-documents become explicit bounded truncation records, and the final AGENTS.md instruction chain
-is truncated again at assembly when its UTF-8 bytes would exceed the remaining system-prompt
-budget. This keeps the live instruction chain from turning an otherwise valid turn into a
-permanent output-bound failure.
+documents become explicit bounded truncation records, and the final AGENTS.md instruction chain is
+truncated again at assembly when its UTF-8 bytes would exceed the remaining system-prompt budget.
+This keeps the live instruction chain from turning an otherwise valid turn into a permanent
+output-bound failure.
 
 ## AGENTS.md discovery and changes
 
-The injected compute resolver selects the current agent's compute, so one shared module instance
-can safely serve agents in different workspaces. Discovery reads from the nearest Git root down to
-the compute working directory. It refuses symbolic links at instruction document paths and reads
-through the compute filesystem with the current permission context. `readAgentsMd(ctx, agentId)`
-exposes the same validated snapshot to host callers.
+The compute module selects the current agent's machine, so one shared module instance can safely
+serve agents in different workspaces. Discovery reads from the nearest Git root down to the compute
+working directory. It refuses symbolic links at instruction document paths and reads through the
+compute filesystem with the current permission context. `readAgentsMd(ctx, agentId)` exposes the
+same validated snapshot to host callers, and works with no machine at all: an installation with
+only global instructions still has instructions.
 
-The optional global reader is called on every inference. It owns how the host's global
-`AGENTS.md` path is read; this module owns the requested byte bound and validates the result. A
-reader may return at most `maxBytes + 1` characters, where the extra character is only a
-truncation sentinel. Larger host results are rejected before encoding, and the module encodes
-only a bounded prefix.
+The person's own instructions come from `ConfigModule.readGlobalInstructions(ctx, maxBytes)` on
+every inference, so editing that file reaches the next turn. Configuration owns the path and the
+reading; this module owns the byte bound and checks what comes back, encoding only a bounded
+prefix and dropping a code point split at the boundary. A missing, blank, or whitespace-only
+document is no document at all.
 
 `readAgentsMd` accepts agent IDs up to `MAX_AGENTS_MD_AGENT_ID_LENGTH`, rejects blank IDs and
-control-line characters, and validates the ID before calling either injected host service.
+control-line characters, and validates the ID before reading configuration or looking up a machine.
 
 After first delivery, the module stores the last instruction fingerprint in its per-agent module
 KV. If a document changes or disappears, `beforeTurn` also persists a pending transition with a
@@ -107,14 +99,16 @@ mixing one notice version with another system-prompt version.
 ## Tools, storage, and concurrency
 
 The module exposes no tools and owns no database or filesystem. Its durable Agent Base KV state is
-the per-agent fingerprint plus any pending change notice. Immutable constructor configuration is
-safe to share; live per-agent values are resolved from `ctx`, `scope`, KV, and the injected compute
-on every call.
+the per-agent fingerprint plus any pending change notice. The module holds no tuning and takes no
+lock, so any number of agents may ask at once; live per-agent values are resolved from `ctx`,
+`scope`, KV, configuration, and compute on every call.
 
 Public operations are:
 
 - `promptFor(selection)` — render a vendor prompt with identity substitution.
 - `instructions(ctx, scope)` — assemble the complete system prompt.
 - `readAgentsMd(ctx, agentId)` — return the current validated instruction snapshot.
+- `readAgentsMdInstructions(ctx, agentId)` — the same snapshot formatted for the automatic
+  permission reviewer, without touching per-turn delivery state.
 - `systemPromptForModel(selection)` — select the raw prompt template without constructing the
   module.

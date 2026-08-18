@@ -1,7 +1,7 @@
 import type { AnyAgentTool } from "@slopus/happy-agent-base";
 
 import type { Compute } from "../../Compute.js";
-import type { FileReadLog } from "../../impl/FileReadLog.js";
+import type { FileReadLog } from "../../../impl/FileReadLog.js";
 import { codexApplyPatchTool } from "./apply_patch.js";
 import { codexExecCommandTool } from "./exec_command.js";
 import { codexKillSessionTool } from "./kill_session.js";

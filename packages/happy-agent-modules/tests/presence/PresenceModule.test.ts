@@ -1,6 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { PresenceModule } from "../../sources/presence/PresenceModule.js";
+import { MAX_PRESENCE_SCHEDULES, PresenceModule } from "../../sources/presence/PresenceModule.js";
 import {
     presenceMigrations,
     PRESENCE_CATALOG_MIGRATION_KEY,
@@ -8,14 +8,19 @@ import {
     PRESENCE_RECEIPTS_REMOVED_MIGRATION_KEY,
 } from "../../sources/presence/PresenceDatabase.js";
 import { AWAY_PRESENCE, ONLINE_PRESENCE } from "../../sources/presence/PresenceCatalog.js";
-import { presenceUserInputPolicySchema } from "../../sources/presence/PresencePolicy.js";
 import { presenceStateSchema } from "../../sources/presence/PresenceState.js";
 import { setPresenceTool } from "../../sources/presence/tools/set_presence.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
 import { resolveModuleHooks } from "../support/moduleHooks.js";
+import { testConfig } from "../support/computeModule.js";
+import { presenceConfig } from "./presenceTestSupport.js";
 import { Value } from "@sinclair/typebox/value";
 
 describe("PresenceModule", () => {
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
     it("owns stable migrations and persists state through Agent Base's database context", async () => {
         const database = moduleDatabase(presenceMigrations, "presence-test");
         await database.ready;
@@ -26,7 +31,7 @@ describe("PresenceModule", () => {
                 PRESENCE_CATALOG_MIGRATION_KEY,
             ]);
 
-            const module = new PresenceModule({ clock: () => 123 });
+            const module = new PresenceModule(testConfig);
             await module.setPresence(database.context, {
                 status: "away",
                 message: "back soon",
@@ -42,7 +47,7 @@ describe("PresenceModule", () => {
                 message: "back soon",
             });
 
-            const restarted = new PresenceModule({ clock: () => 123 });
+            const restarted = new PresenceModule(testConfig);
             expect(await restarted.read(database.context)).toEqual({
                 presenceId: "away",
                 status: "away",
@@ -57,20 +62,17 @@ describe("PresenceModule", () => {
         }
     });
 
-    it("uses stdlib afterCommit for committed events and rejects injected stores", async () => {
+    it("uses stdlib afterCommit for committed events and stops when a watcher leaves", async () => {
         const database = moduleDatabase(presenceMigrations, "presence-events-test");
         await database.ready;
         try {
             const events: string[] = [];
-            const module = new PresenceModule({
-                listener: {
-                    onEventTransactional: (_ctx, event) => {
-                        events.push(`transactional:${event.type}`);
-                    },
-                    onEvent: (_ctx, event) => {
-                        events.push(`committed:${event.type}`);
-                    },
-                },
+            const module = new PresenceModule(testConfig);
+            const stopTransactional = module.onEventTransactional((_ctx, event) => {
+                events.push(`transactional:${event.type}`);
+            });
+            const stopCommitted = module.onEvent((_ctx, event) => {
+                events.push(`committed:${event.type}`);
             });
 
             await module.setPresence(database.context, { status: "online" });
@@ -89,18 +91,28 @@ describe("PresenceModule", () => {
                 "committed:presence_cleared",
             ]);
 
-            expect(
-                () =>
-                    new PresenceModule({
-                        store: {},
-                    } as never),
-            ).toThrow("unknown or invalid keys");
+            stopTransactional();
+            stopCommitted();
+            await module.setPresence(database.context, { status: "away" });
+            expect(events).toHaveLength(4);
         } finally {
             database.close();
         }
     });
 
-    it("lists custom states, persists definitions, and exposes each wait/display field", async () => {
+    it("refuses a watcher that is not a function", async () => {
+        const module = new PresenceModule(testConfig);
+        for (const candidate of [undefined, null, 42, "listener", {}]) {
+            expect(() => module.onEvent(candidate as never)).toThrow(
+                "Presence event listener must be a function.",
+            );
+            expect(() => module.onEventTransactional(candidate as never)).toThrow(
+                "Presence event listener must be a function.",
+            );
+        }
+    });
+
+    it("lists the states the person configured, persists definitions, and shows every field", async () => {
         const database = moduleDatabase(presenceMigrations, "presence-catalog-test");
         await database.ready;
         try {
@@ -112,10 +124,14 @@ describe("PresenceModule", () => {
                 prompt: "Continue independently unless an answer is essential.",
                 answerWaitMs: 900_000,
             };
-            const module = new PresenceModule({
-                catalog: [focus],
-                clock: () => 10_000,
-            });
+            const module = new PresenceModule(
+                await presenceConfig(`[presence.states.focus]
+title = "Focus time"
+emoji = "🎧"
+prompt = "Continue independently unless an answer is essential."
+answer_wait = "15m"
+`),
+            );
 
             expect(await module.listPresences(database.context)).toEqual([
                 ...[
@@ -166,29 +182,51 @@ describe("PresenceModule", () => {
                 answerWaitMs: 0,
             };
             await module.setPresenceDefinition(database.context, persisted);
-            const restarted = new PresenceModule({ clock: () => 10_000 });
+            const restarted = new PresenceModule(testConfig);
             expect(await restarted.listPresences(database.context)).toContainEqual(persisted);
         } finally {
             database.close();
         }
     });
 
-    it("exposes the TypeBox user-input seam and re-arms subscribers after a change", async () => {
-        const database = moduleDatabase(presenceMigrations, "presence-policy-test");
+    it("starts in the state the settings name and leaves an existing state alone", async () => {
+        const database = moduleDatabase(presenceMigrations, "presence-initial-state-test");
         await database.ready;
         try {
-            let now = 1_000;
-            const postCommitErrors: unknown[] = [];
-            const module = new PresenceModule({
-                clock: () => now,
-                onPostCommitError: (_ctx, _event, error) => {
-                    postCommitErrors.push(error);
-                },
+            const config = await presenceConfig(`[presence]
+current = "dnd"
+`);
+            const module = new PresenceModule(config);
+            await resolveModuleHooks(database.context, module);
+            expect(await module.read(database.context)).toMatchObject({
+                presenceId: "dnd",
+                status: "dnd",
             });
-            expect(Value.Check(presenceUserInputPolicySchema, module.userInputPolicy)).toBe(true);
 
             await module.setPresence(database.context, { status: "away" });
-            expect(await module.userInputPolicy.state(database.context, "agent-1")).toEqual({
+            const restarted = new PresenceModule(config);
+            await resolveModuleHooks(database.context, restarted);
+            expect(await restarted.read(database.context)).toMatchObject({ presenceId: "away" });
+        } finally {
+            database.close();
+        }
+    });
+
+    it("refuses settings that name a state nobody defined", async () => {
+        await expect(
+            presenceConfig(`[presence]
+current = "nowhere"
+`).then((config) => new PresenceModule(config)),
+        ).rejects.toThrow('Configured current presence "nowhere" is not defined.');
+    });
+
+    it("hands user input the state now and again after every committed change", async () => {
+        const database = moduleDatabase(presenceMigrations, "presence-user-input-test");
+        await database.ready;
+        try {
+            const module = new PresenceModule(testConfig);
+            await module.setPresence(database.context, { status: "away" });
+            expect(await module.userInputState(database.context)).toEqual({
                 answerWaitMs: 0,
                 title: "Away",
                 emoji: "🌙",
@@ -196,25 +234,47 @@ describe("PresenceModule", () => {
             });
 
             const changes: unknown[] = [];
-            const unsubscribe = await module.userInputPolicy.subscribe(
+            const unsubscribe = await module.subscribeUserInput(
                 database.context,
-                "agent-1",
                 (_ctx, state) => {
                     changes.push(state);
                 },
             );
-            now = 2_000;
+            expect(changes).toHaveLength(1);
+
             await module.setPresence(database.context, { status: "online" });
             await vi.waitFor(() => expect(changes).toHaveLength(2));
-            expect(postCommitErrors).toEqual([]);
             expect(changes[1]).toEqual({
                 answerWaitMs: null,
                 title: "Online",
                 emoji: "🟢",
                 prompt: ONLINE_PRESENCE.prompt,
             });
-            const removed = await unsubscribe?.();
-            expect(removed).toBeUndefined();
+
+            unsubscribe();
+            await module.setPresence(database.context, { status: "dnd" });
+            expect(changes).toHaveLength(2);
+        } finally {
+            database.close();
+        }
+    });
+
+    it("keeps a saved change when a watcher fails only after the commit", async () => {
+        const database = moduleDatabase(presenceMigrations, "presence-post-commit-failure-test");
+        await database.ready;
+        try {
+            const module = new PresenceModule(testConfig);
+            const seen: string[] = [];
+            module.onEvent(() => {
+                throw new Error("watcher exploded");
+            });
+            module.onEvent((_ctx, event) => {
+                seen.push(event.type);
+            });
+
+            await module.setPresence(database.context, { status: "away" });
+            expect(await module.read(database.context)).toMatchObject({ presenceId: "away" });
+            expect(seen).toEqual(["presence_changed"]);
         } finally {
             database.close();
         }
@@ -224,11 +284,9 @@ describe("PresenceModule", () => {
         const database = moduleDatabase(presenceMigrations, "presence-tool-commit-test");
         await database.ready;
         try {
-            let now = 1_000;
-            const module = new PresenceModule({
-                allowModelMutation: true,
-                clock: () => now,
-            });
+            vi.useFakeTimers();
+            vi.setSystemTime(1_000);
+            const module = new PresenceModule(testConfig);
             const tool = setPresenceTool(module);
             const call = {
                 id: "call-presence-1",
@@ -260,12 +318,33 @@ describe("PresenceModule", () => {
             });
             expect(Value.Check(presenceStateSchema, result.presence)).toBe(true);
 
-            now = 2_000;
+            vi.setSystemTime(2_000);
             expect(await module.read(database.context)).toMatchObject({
                 presenceId: "online",
                 status: "online",
                 answerWaitMs: null,
             });
+        } finally {
+            database.close();
+        }
+    });
+
+    it("offers the same three tools to every agent and bounds its recurring windows", async () => {
+        const database = moduleDatabase(presenceMigrations, "presence-tools-test");
+        await database.ready;
+        try {
+            const module = new PresenceModule(testConfig);
+            const hooks = await resolveModuleHooks(database.context, module);
+            const tools = await hooks.tools!(database.context, {
+                agent: { id: "agent-1" },
+            } as never);
+
+            expect(tools.map((tool) => tool.name)).toEqual([
+                "get_presence",
+                "list_presences",
+                "set_presence",
+            ]);
+            expect(MAX_PRESENCE_SCHEDULES).toBe(64);
         } finally {
             database.close();
         }

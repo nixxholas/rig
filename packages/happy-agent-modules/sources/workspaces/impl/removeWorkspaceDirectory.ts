@@ -2,12 +2,9 @@ import { existsSync } from "node:fs";
 import { lstat, rm } from "node:fs/promises";
 import { basename, dirname } from "node:path";
 
-import type { Project } from "../../projects/Project.js";
+import type { GitCredentialRef, GitModule } from "../../git/index.js";
+import type { Project } from "../../projects/index.js";
 import type { Workspace } from "../Workspace.js";
-
-import type { GitCommandRunner } from "../../git/GitCommandRunner.js";
-import { removeGitWorktree } from "../../git/removeGitWorktree.js";
-import { normalizeFuturePath } from "../../git/normalizeFuturePath.js";
 
 const VALID_STORAGE_KEY = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/u;
 
@@ -22,7 +19,8 @@ const VALID_STORAGE_KEY = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/u;
  * the shared Git directory is gone too — otherwise something else still owns this checkout.
  */
 export async function removeWorkspaceDirectory(options: {
-    git: GitCommandRunner;
+    credential?: GitCredentialRef;
+    git: GitModule;
     keepCopiesOnArchive: boolean;
     keepWorktreesOnArchive: boolean;
     project: Project;
@@ -36,7 +34,7 @@ export async function removeWorkspaceDirectory(options: {
     ) {
         throw new Error("The workspace storage identity is invalid.");
     }
-    const workspacePath = normalizeFuturePath(workspace.path);
+    const workspacePath = options.git.normalizeFuturePath(workspace.path);
     if (
         workspace.path !== workspacePath ||
         basename(workspacePath) !== workspace.storageKey ||
@@ -76,9 +74,9 @@ export async function removeWorkspaceDirectory(options: {
     }
 
     if (existsSync(project.repositoryRef)) {
-        await removeGitWorktree({
+        await options.git.removeWorktree({
+            ...(options.credential === undefined ? {} : { credential: options.credential }),
             expectedCommonDir: commonDir,
-            git: options.git,
             projectPath: project.repositoryRef,
             removeDirectory: workspaceExists,
             workspacePath: workspace.path,

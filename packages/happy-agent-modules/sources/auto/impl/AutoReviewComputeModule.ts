@@ -6,6 +6,8 @@ import type {
 } from "@slopus/happy-agent-base";
 import type { Context } from "@steve.kite/stdlib";
 
+import type { ComputeModule } from "../../compute/index.js";
+
 /**
  * The private review system's inspection-only compute surface.
  *
@@ -17,28 +19,30 @@ import type { Context } from "@steve.kite/stdlib";
  * private send selects `read_only`, so the shell tools stay inside the sandbox that is the real
  * enforcement boundary for redirection and subprocesses.
  *
- * Deviation from the specification (deliberate, decided with the parent task): the read-only tools
- * are *injected* rather than constructed here. `AutoModule` imports no compute tool internals, so
- * the host supplies the reviewer array through `AutoModule`'s options, built from the real
- * `ComputeModule.reviewerTools`. The builder is called with the reviewer's own scope, so the vendor
- * of the reviewer's model route decides which fixed read-only array it receives — a Claude review
- * gets Claude's tools, a Codex review Codex's — exactly as Rig v1 gave its review side agent its own
- * provider's tools. This module only guarantees the array is presented unchanged and that nothing
- * widens it.
+ * The array itself belongs to the compute module, which owns the machine the reviewer looks at and
+ * the reviewer's own read bookkeeping. This module asks for it with the reviewer's own scope, so
+ * the vendor of the reviewer's model route decides which fixed read-only array it receives — a
+ * Claude review gets Claude's tools, a Codex review Codex's — exactly as Rig v1 gave its review
+ * side agent its own provider's tools. Nothing here widens what came back, and nothing caches it:
+ * each review is handed the array the compute module builds for that review.
+ *
+ * The machine outlives any one review, so it is created on the review system's own lifetime rather
+ * than on the turn that first needed it.
  */
 export class AutoReviewComputeModule implements AgentModule {
     readonly name = "autoReviewCompute";
 
-    /** Builds the reviewer's fixed read-only tools for the reviewer's own vendor, supplied by the host. */
-    readonly #reviewerTools: (scope: AgentModuleScope) => readonly AnyAgentTool[];
+    readonly #compute: ComputeModule;
+    readonly #lifetime: Context;
 
-    constructor(reviewerTools: (scope: AgentModuleScope) => readonly AnyAgentTool[]) {
-        this.#reviewerTools = reviewerTools;
+    constructor(compute: ComputeModule, lifetime: Context) {
+        this.#compute = compute;
+        this.#lifetime = lifetime;
     }
 
     readonly #hooks: AgentModuleHooks = {
-        tools: (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] =>
-            this.#reviewerTools(scope),
+        tools: async (_ctx: Context, scope: AgentModuleScope): Promise<readonly AnyAgentTool[]> =>
+            await this.#compute.reviewerTools(this.#lifetime, scope),
     };
 
     readonly beforeStart = (): AgentModuleHooks => this.#hooks;

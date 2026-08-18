@@ -1,7 +1,11 @@
 import type { AgentModuleScope, AnyAgentTool } from "@slopus/happy-agent-base";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
-import { SecretsModule } from "../../sources/secrets/SecretsModule.js";
+import {
+    SECRETS_OUTPUT_CHARACTERS,
+    SECRETS_PAGE_SIZE,
+    SecretsModule,
+} from "../../sources/secrets/SecretsModule.js";
 import { secretsMigrations } from "../../sources/secrets/SecretDatabase.js";
 import type { SecretEvent } from "../../sources/secrets/SecretEvent.js";
 import { moduleDatabase, type ModuleDatabase } from "../support/moduleDatabase.js";
@@ -36,28 +40,23 @@ function toolByName(tools: readonly AnyAgentTool[], name: string): AnyAgentTool 
 }
 
 describe("SecretsModule event and tool contracts", () => {
-    it("publishes one stable deeply frozen event to transactional and post-commit listeners", async () => {
+    it("publishes one stable deeply frozen event to transactional and post-commit subscribers", async () => {
         await withDatabase("secrets-events-freeze", async (database) => {
             let transactionalEvent: SecretEvent | undefined;
             let postCommitEvent: SecretEvent | undefined;
-            const module = new SecretsModule({
-                eventIdFactory: () => "event-stable",
-                clock: () => 123,
-                listener: {
-                    onEventTransactional: (_ctx, event) => {
-                        transactionalEvent = event;
-                        expect(Object.isFrozen(event)).toBe(true);
-                        if (event.type === "secret_registered") {
-                            expect(Object.isFrozen(event.secret)).toBe(true);
-                            expect(() => {
-                                event.secret.description = "changed";
-                            }).toThrow();
-                        }
-                    },
-                    onEvent: (_ctx, event) => {
-                        postCommitEvent = event;
-                    },
-                },
+            const module = new SecretsModule();
+            module.onEventTransactional((_ctx, event) => {
+                transactionalEvent = event;
+                expect(Object.isFrozen(event)).toBe(true);
+                if (event.type === "secret_registered") {
+                    expect(Object.isFrozen(event.secret)).toBe(true);
+                    expect(() => {
+                        event.secret.description = "changed";
+                    }).toThrow();
+                }
+            });
+            module.onEvent((_ctx, event) => {
+                postCommitEvent = event;
             });
 
             await module.register(database.context, AGENT, {
@@ -69,10 +68,8 @@ describe("SecretsModule event and tool contracts", () => {
             expect(transactionalEvent).toBeDefined();
             expect(postCommitEvent).toBeDefined();
             expect(postCommitEvent).toBe(transactionalEvent);
-            expect(postCommitEvent).toEqual({
+            expect(postCommitEvent).toMatchObject({
                 type: "secret_registered",
-                eventId: "event-stable",
-                at: 123,
                 agentId: AGENT,
                 secret: {
                     id: "frozen",
@@ -81,19 +78,58 @@ describe("SecretsModule event and tool contracts", () => {
                     revision: "1",
                 },
             });
+            // Identity and time are the module's own: unique and monotonic, never supplied.
+            expect(typeof postCommitEvent?.eventId).toBe("string");
+            expect(postCommitEvent?.eventId.length).toBeGreaterThan(0);
+            expect(typeof postCommitEvent?.at).toBe("number");
             expect(JSON.stringify(postCommitEvent)).not.toContain("never in event");
         });
+    });
+
+    it("gives every subscriber the same event and stops delivering after unsubscribe", async () => {
+        await withDatabase("secrets-events-subscribers", async (database) => {
+            const module = new SecretsModule();
+            const first: SecretEvent[] = [];
+            const second: SecretEvent[] = [];
+            module.onEvent((_ctx, event) => {
+                first.push(event);
+            });
+            const unsubscribe = module.onEvent((_ctx, event) => {
+                second.push(event);
+            });
+
+            await module.register(database.context, AGENT, {
+                id: "one",
+                description: "One",
+                environment: { TOKEN: "value" },
+            });
+            expect(first).toHaveLength(1);
+            expect(second).toEqual(first);
+
+            unsubscribe();
+            unsubscribe(); // Unsubscribing twice does nothing further.
+            await module.register(database.context, AGENT, {
+                id: "two",
+                description: "Two",
+                environment: { OTHER: "value" },
+            });
+            expect(first).toHaveLength(2);
+            expect(second).toHaveLength(1);
+        });
+    });
+
+    it("rejects a subscriber that is not a function", () => {
+        const module = new SecretsModule();
+        expect(() => module.onEvent({} as never)).toThrow();
+        expect(() => module.onEventTransactional({} as never)).toThrow();
     });
 
     it("defers post-commit events to the outer transaction and discards them on rollback", async () => {
         await withDatabase("secrets-events-outer-commit", async (database) => {
             const postCommit: SecretEvent[] = [];
-            const module = new SecretsModule({
-                listener: {
-                    onEvent: async (_ctx, event) => {
-                        postCommit.push(event);
-                    },
-                },
+            const module = new SecretsModule();
+            module.onEvent(async (_ctx, event) => {
+                postCommit.push(event);
             });
             await database.context.inTx(async (outer) => {
                 await module.register(outer, AGENT, {
@@ -105,15 +141,12 @@ describe("SecretsModule event and tool contracts", () => {
             });
             expect(postCommit).toHaveLength(1);
 
-            const failing = new SecretsModule({
-                listener: {
-                    onEventTransactional: async () => {
-                        throw new Error("transactional listener failed");
-                    },
-                    onEvent: async (_ctx, event) => {
-                        postCommit.push(event);
-                    },
-                },
+            const failing = new SecretsModule();
+            failing.onEventTransactional(async () => {
+                throw new Error("transactional subscriber failed");
+            });
+            failing.onEvent(async (_ctx, event) => {
+                postCommit.push(event);
             });
             await expect(
                 database.context.inTx(async (rollbackContext) => {
@@ -123,15 +156,14 @@ describe("SecretsModule event and tool contracts", () => {
                         environment: { TOKEN: "value" },
                     });
                 }),
-            ).rejects.toThrow("transactional listener failed");
+            ).rejects.toThrow("transactional subscriber failed");
             expect(await module.reference(database.context, AGENT, "rolled-back")).toBeUndefined();
             expect(postCommit).toHaveLength(1);
         });
     });
 
-    it("contains post-commit listener errors and invokes the advisory reporter", async () => {
+    it("contains post-commit subscriber errors and keeps the committed change", async () => {
         await withDatabase("secrets-events-post-commit-error", async (database) => {
-            const report = vi.fn(async () => undefined);
             const hostile = {
                 get message(): never {
                     throw new Error("message trap");
@@ -140,13 +172,13 @@ describe("SecretsModule event and tool contracts", () => {
                     throw new Error("primitive trap");
                 },
             };
-            const module = new SecretsModule({
-                listener: {
-                    onEvent: async () => {
-                        throw hostile;
-                    },
-                },
-                onPostCommitError: report,
+            const module = new SecretsModule();
+            const survivors: SecretEvent[] = [];
+            module.onEvent(async () => {
+                throw hostile;
+            });
+            module.onEvent(async (_ctx, event) => {
+                survivors.push(event);
             });
 
             await expect(
@@ -156,31 +188,11 @@ describe("SecretsModule event and tool contracts", () => {
                     environment: { TOKEN: "value" },
                 }),
             ).resolves.toMatchObject({ id: "post-commit" });
-            expect(report).toHaveBeenCalledOnce();
-            expect((report.mock.calls as unknown[][])[0]?.[2]).toBe(hostile);
-        });
-    });
-
-    it("calls listener methods with their owning receiver", async () => {
-        await withDatabase("secrets-events-receiver", async (database) => {
-            let transactionalReceiver: unknown;
-            let postCommitReceiver: unknown;
-            const listener = {
-                onEventTransactional(this: unknown) {
-                    transactionalReceiver = this;
-                },
-                onEvent(this: unknown) {
-                    postCommitReceiver = this;
-                },
-            };
-            const module = new SecretsModule({ listener });
-            await module.register(database.context, AGENT, {
-                id: "receiver",
-                description: "Receiver",
-                environment: { TOKEN: "value" },
-            });
-            expect(transactionalReceiver).toBe(listener);
-            expect(postCommitReceiver).toBe(listener);
+            // The failure did not stop the later subscriber and did not roll the change back.
+            expect(survivors).toHaveLength(1);
+            expect(
+                await module.reference(database.context, AGENT, "post-commit"),
+            ).toMatchObject({ id: "post-commit" });
         });
     });
 
@@ -273,29 +285,34 @@ describe("SecretsModule event and tool contracts", () => {
         });
     });
 
-    it("formats bounded pages and preserves actionable identity at the minimum output budget", async () => {
+    it("keeps a full page of long descriptions inside its own output budget without losing identity", async () => {
         await withDatabase("secrets-tools-formatting", async (database) => {
-            const module = new SecretsModule({
-                maxPageSize: 2,
-                maxOutputCharacters: 256,
-            });
-            await module.register(database.context, AGENT, {
-                id: "first",
-                description: "A".repeat(2_000),
-                environment: { TOKEN: "value" },
-            });
-            await module.register(database.context, AGENT, {
-                id: "second",
-                description: "Second",
-                environment: { OTHER: "value" },
-            });
-            const page = await module.list(database.context, AGENT, { limit: 2 });
+            const module = new SecretsModule();
+            const ids = Array.from({ length: 8 }, (_, index) => `secret-${index}`);
+            for (const id of ids) {
+                await module.register(database.context, AGENT, {
+                    id,
+                    // Long enough that the detailed rendering cannot fit the budget.
+                    description: "A".repeat(2_000),
+                    environment: { [`TOKEN_${id.replace("-", "_")}`]: "value" },
+                });
+            }
+
+            const page = await module.list(database.context, AGENT, {});
+            expect(page.limit).toBe(SECRETS_PAGE_SIZE);
             const formatted = module.formatPageForModel(page);
-            expect(formatted.length).toBeLessThanOrEqual(256);
-            expect(formatted).toContain("first");
-            expect(formatted).toContain("next=2");
-            expect(module.formatDetachForModel(false, "scope", "first")).toContain("first");
-            expect(module.formatAttachmentForModel("scope", page.secrets[0]!)).toContain("first");
+            expect(formatted.length).toBeLessThanOrEqual(SECRETS_OUTPUT_CHARACTERS);
+            // The compact fallback still names every secret the model could act on.
+            for (const id of ids) expect(formatted).toContain(id);
+
+            const short = await module.list(database.context, AGENT, { limit: 1 });
+            expect(module.formatPageForModel(short)).toContain(
+                `next=${short.nextCursor ?? ""}`,
+            );
+            expect(module.formatDetachForModel(false, "scope", ids[0]!)).toContain(ids[0]!);
+            expect(module.formatAttachmentForModel("scope", page.secrets[0]!)).toContain(
+                page.secrets[0]!.id,
+            );
         });
     });
 });

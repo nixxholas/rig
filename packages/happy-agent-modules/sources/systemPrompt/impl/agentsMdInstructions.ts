@@ -10,17 +10,20 @@ import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { type Context } from "@steve.kite/stdlib";
 
-import type { ComputeFileStat, ComputePermissions } from "../../compute/Compute.js";
-import { hostComputeSchema, type HostCompute } from "../../compute/ComputeModule.js";
-import type { ComputeResolver } from "../../compute/ComputeResolver.js";
-import { computePermissionsForContext } from "../../compute/impl/computePermissionsForContext.js";
+import type { ConfigModule } from "../../config/index.js";
+import {
+    hostComputeSchema,
+    type ComputeFileStat,
+    type ComputeModule,
+    type ComputePermissions,
+    type HostCompute,
+} from "../../compute/index.js";
 import {
     AGENTS_MD_SPEC,
     MAX_AGENTS_MD_DOCUMENT_BYTES,
     MAX_AGENTS_MD_DOCUMENTS,
     MAX_AGENTS_MD_GLOBAL_BYTES,
     MAX_AGENTS_MD_OUTPUT_CHARACTERS,
-    MAX_AGENTS_MD_PATH_LENGTH,
     MAX_AGENTS_MD_TOTAL_BYTES,
     MAX_AGENTS_SECURITY_MD_BYTES,
     agentsMdAgentIdSchema,
@@ -34,7 +37,6 @@ import {
 } from "../AgentsMd.js";
 
 const exact = { additionalProperties: false } as const;
-const contextSchema = Type.Unsafe<Context>(Type.Object({}, { additionalProperties: true }));
 const computeFileStatSchema = Type.Object(
     {
         isFile: Type.Boolean(),
@@ -76,46 +78,6 @@ const pendingNoticeSchema = Type.Object(
 );
 const turnSnapshotSchema = Type.Union([agentsMdSnapshotSchema, Type.Null()]);
 
-/**
- * The host-owned reader for the user's global `AGENTS.md`.
- *
- * The module owns the path and the bound, while the host owns how that path is read. The reader
- * is called on every instruction hook, so edits made while a session is open reach the next
- * inference without restarting the agent.
- */
-export const agentsMdGlobalInstructionsReaderSchema = Type.Object(
-    {
-        path: Type.String({ minLength: 1, maxLength: MAX_AGENTS_MD_PATH_LENGTH }),
-        read: Type.Function(
-            [
-                contextSchema,
-                agentsMdPathSchema,
-                Type.Integer({ minimum: 1, maximum: MAX_AGENTS_MD_GLOBAL_BYTES }),
-            ],
-            Type.Promise(optionalTextSchema),
-        ),
-    },
-    exact,
-);
-export type AgentsMdGlobalInstructionsReader = Omit<
-    Static<typeof agentsMdGlobalInstructionsReaderSchema>,
-    "read"
-> & {
-    readonly read: (ctx: Context, path: string, maxBytes: number) => Promise<string | undefined>;
-};
-
-export const systemPromptComputeResolverSchema = Type.Unsafe<ComputeResolver>(
-    Type.Object(
-        {
-            resolve: Type.Function(
-                [contextSchema, Type.String({ minLength: 1 })],
-                Type.Promise(Type.Union([hostComputeSchema, Type.Undefined()])),
-            ),
-        },
-        exact,
-    ),
-);
-
 const FINGERPRINT_KEY = "last-delivered-fingerprint";
 const PENDING_NOTICE_KEY = "pending-notice";
 const TURN_SNAPSHOT_KEY = "turn-instructions-snapshot";
@@ -149,15 +111,12 @@ interface LoadedInstructions {
 
 /** Supplies AGENTS.md instruction text and change notices to the system-prompt module. */
 export class AgentsMdInstructions {
-    readonly #compute: ComputeResolver | undefined;
-    readonly #globalInstructions: AgentsMdGlobalInstructionsReader | undefined;
+    readonly #config: ConfigModule;
+    readonly #compute: ComputeModule;
 
-    constructor(
-        compute: ComputeResolver | undefined,
-        globalInstructions: AgentsMdGlobalInstructionsReader | undefined,
-    ) {
+    constructor(config: ConfigModule, compute: ComputeModule) {
+        this.#config = config;
         this.#compute = compute;
-        this.#globalInstructions = globalInstructions;
     }
 
     /**
@@ -172,7 +131,8 @@ export class AgentsMdInstructions {
             throw new Error("AGENTS.md agent ID is invalid.");
         }
         const global = await this.#readGlobal(ctx);
-        const compute = await this.#compute?.resolve(ctx, agentId);
+        const computeModule = this.#compute;
+        const compute = await computeModule.resolve(ctx, agentId);
         if (compute === undefined) {
             if (global === undefined) return undefined;
             const snapshot = {
@@ -187,7 +147,7 @@ export class AgentsMdInstructions {
             return structuredClone(snapshot);
         }
         if (compute === null || typeof compute !== "object") {
-            throw new Error("Compute resolver returned an invalid compute.");
+            throw new Error("The compute module returned an invalid compute.");
         }
         const computeCandidate = {
             id: compute.id,
@@ -198,10 +158,10 @@ export class AgentsMdInstructions {
             dispose: compute.dispose,
         };
         if (!Value.Check(hostComputeSchema, computeCandidate)) {
-            throw new Error("Compute resolver returned an invalid compute.");
+            throw new Error("The compute module returned an invalid compute.");
         }
 
-        const permissions = computePermissionsForContext(ctx);
+        const permissions = computeModule.permissionsForContext(ctx);
         const directories = await relevantDirectories(compute, permissions);
         const security = await readBoundedDocument(
             compute,
@@ -402,10 +362,19 @@ export class AgentsMdInstructions {
         return loadedInstructionsForSnapshot(cached === null ? undefined : structuredClone(cached));
     }
 
+    /**
+     * The person's own instructions, read fresh on every call.
+     *
+     * Configuration owns both the path and the reading of it; this module owns the byte bound and
+     * checks what comes back, because an oversized or malformed document must not be able to turn
+     * a valid turn into a permanent failure.
+     */
     async #readGlobal(ctx: Context): Promise<AgentsMdGlobalDocument | undefined> {
-        const reader = this.#globalInstructions;
-        if (reader === undefined) return undefined;
-        const raw = await reader.read(ctx, reader.path, MAX_AGENTS_MD_GLOBAL_BYTES);
+        const path = this.#config.configuration.paths.instructionsPath;
+        if (!Value.Check(agentsMdPathSchema, path)) {
+            throw new Error("The configured global AGENTS.md path is invalid.");
+        }
+        const raw = await this.#config.readGlobalInstructions(ctx, MAX_AGENTS_MD_GLOBAL_BYTES);
         if (!Value.Check(optionalTextSchema, raw)) {
             throw new Error("Global AGENTS.md reader returned an invalid result.");
         }
@@ -414,7 +383,7 @@ export class AgentsMdInstructions {
         const text = bounded.text.trim();
         if (text.length === 0) return undefined;
         const document = {
-            path: reader.path,
+            path,
             text,
             ...(bounded.truncated ? { truncated: true } : {}),
         };

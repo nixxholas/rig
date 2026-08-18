@@ -1,19 +1,17 @@
 import { agentDatabaseRun } from "@slopus/happy-agent-base";
-import type { Context } from "@steve.kite/stdlib";
 import { sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 
 import {
-    UserInputModule,
     assertUserInputRequest,
     formatDetailPageForModel,
     type UserInputRequest,
-    type UserInputTerminalRequest,
 } from "../../sources/userInput/index.js";
 import {
     createUserInputDatabase,
     createUserInputModule,
     onlinePresence,
+    ScriptedPresenceModule,
     singularAsk,
 } from "./userInputTestSupport.js";
 
@@ -97,50 +95,18 @@ describe("UserInput persistence and boundary integrity", () => {
         }
     });
 
-    it.fails("passes the transaction-derived context to clocks during settlement", async () => {
-        const seen: Context[] = [];
-        const module = new UserInputModule({
-            idFactory: () => "clock-context",
-            eventIdFactory: () => "clock-event",
-            clock: (ctx) => {
-                seen.push(ctx);
-                return 100;
-            },
-        });
-        const database = createUserInputDatabase(module, "user-input-clock-context");
-        await database.ready;
-        try {
-            const request = await module.ask(
-                database.context,
-                agentId,
-                singularAsk(),
-                "clock-context",
-            );
-            const afterAsk = seen.length;
-            await module.answer(database.context, agentId, {
-                requestId: request.id,
-                answer: "The answer.",
-            });
-            expect(seen.slice(afterAsk).every((ctx) => ctx.db !== database.context.db)).toBe(true);
-        } finally {
-            database.close();
-        }
-    });
-
     it("settles away on a synchronous presence-away subscription callback", async () => {
-        const module = createUserInputModule({
-            presence: {
-                state: () => onlinePresence(),
-                subscribe: (ctx, _agentId, callback) => {
-                    void callback(ctx, {
-                        answerWaitMs: 0,
-                        title: "Away",
-                        emoji: "🌙",
-                        prompt: "Continue independently.",
-                    });
-                },
-            },
+        // Presence answers "online" when asked, then says "away" the moment anyone subscribes:
+        // the wait must take the answer the subscription gives it, synchronously.
+        const presence = new ScriptedPresenceModule(onlinePresence(), (_ctx, publish) => {
+            publish({
+                answerWaitMs: 0,
+                title: "Away",
+                emoji: "🌙",
+                prompt: "Continue independently.",
+            });
         });
+        const module = createUserInputModule(presence);
         const database = createUserInputDatabase(module, "user-input-sync-presence");
         await database.ready;
         try {
@@ -209,32 +175,8 @@ describe("UserInput persistence and boundary integrity", () => {
         }
     });
 
-    it("rejects invalid event IDs before committing a request", async () => {
-        const module = new UserInputModule({
-            idFactory: () => "invalid-event-id-request",
-            eventIdFactory: () => "",
-            clock: () => 100,
-        });
-        const database = createUserInputDatabase(module, "user-input-invalid-event-id");
-        await database.ready;
-        try {
-            await expect(
-                module.ask(database.context, agentId, singularAsk(), "invalid-event-id-request"),
-            ).rejects.toThrow("event identity");
-            await expect(
-                module.get(database.context, agentId, "invalid-event-id-request"),
-            ).resolves.toBeUndefined();
-        } finally {
-            database.close();
-        }
-    });
-
-    it("rejects non-boolean authorization results without exposing the request", async () => {
-        const module = createUserInputModule({
-            authorization: {
-                authorize: () => "yes" as never,
-            },
-        });
+    it("keeps a request private from an agent that is no relation", async () => {
+        const module = createUserInputModule();
         const database = createUserInputDatabase(module, "user-input-auth-result");
         await database.ready;
         try {
@@ -245,7 +187,7 @@ describe("UserInput persistence and boundary integrity", () => {
                 "auth-result",
             );
             await expect(module.get(database.context, "other-agent", request.id)).rejects.toThrow(
-                "non-boolean",
+                "not authorized",
             );
         } finally {
             database.close();

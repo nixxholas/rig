@@ -2,7 +2,7 @@ import type { Context } from "@steve.kite/stdlib";
 
 import type { Compute } from "../Compute.js";
 import { computePermissionsForContext } from "./computePermissionsForContext.js";
-import type { FileReadLog } from "./FileReadLog.js";
+import type { FileReadLog } from "../../impl/FileReadLog.js";
 import { resolveComputePath } from "./resolveComputePath.js";
 
 /** One page of a text file, as every vendor's read tool receives it before it is worded. */

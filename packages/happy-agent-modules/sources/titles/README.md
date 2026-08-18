@@ -57,14 +57,18 @@ that the first message did not already say is not asked about at all, and keeps 
 The workspace and the branch get no second look at all. A folder and a Git ref are named once,
 because renaming either would move it out from under agents already working there.
 
-## Options
+## What it depends on
 
-| Option       | Meaning                                                                             |
-| ------------ | ----------------------------------------------------------------------------------- |
-| `config`     | The accounts a name is written on and the catalog it picks the cheapest model from. |
-| `workspaces` | The catalog a named workspace is renamed through.                                   |
-| `timeoutMs`  | How long one name may take. Defaults to 10 seconds.                                 |
-| `clock`      | Time, for tests.                                                                    |
+`new TitlesModule(config, workspaces)`.
+
+| Module                                      | Why                                                                        |
+| ------------------------------------------- | -------------------------------------------------------------------------- |
+| [`ConfigModule`](../config/README.md)       | The accounts a name is written on, and the catalog the cheapest model comes from. |
+| [`WorkspacesModule`](../workspaces/README.md) | The catalog a named workspace is renamed through, and what knows how a workspace's own name is put together. |
+
+Nothing else is passed in. One name may take ten seconds, and that is a constant here rather than
+a setting: it is how long a person will wait on their own first message. The clock is the module's
+own.
 
 ## Public methods
 

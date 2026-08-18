@@ -10,9 +10,14 @@ import type {
 } from "@slopus/happy-agent-base";
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
+import type { Context } from "@steve.kite/stdlib";
 import { parse, TomlDate, type TomlTable, type TomlValue } from "smol-toml";
 
+import { getManagedProjectsDirectory } from "../impl/managedProjectsDirectory.js";
+import { getManagedWorkspacesDirectory } from "../impl/managedWorkspacesDirectory.js";
 import { agentModels, agentProviders } from "./impl/agentCatalog.js";
+import { readGlobalInstructions } from "./impl/readGlobalInstructions.js";
+import { readSecurityDocument } from "./impl/readSecurityDocument.js";
 
 const MAX_PATH_LENGTH = 4_096;
 const MAX_CONFIG_STRING_LENGTH = 16_384;
@@ -952,7 +957,9 @@ export class ConfigModule implements AgentModule {
 
     readonly #scripted: ConfigInferenceOverride | undefined;
     #models: readonly AgentModel[] | undefined;
+    #projectsHome: string | undefined;
     #providers: AgentProviders | undefined;
+    #workspacesHome: string | undefined;
 
     private constructor(
         configuration: HappyAgentConfiguration,
@@ -993,6 +1000,40 @@ export class ConfigModule implements AgentModule {
         return this.#providers;
     }
 
+    /**
+     * The Gemini key, when this installation's environment carries one.
+     *
+     * Gemini is not one of the accounts a chat runs on: it answers over its own HTTP API, so it has
+     * no `[providers.*]` entry and no setting of its own. The key is whatever `GEMINI_API_KEY` says,
+     * and it is read here because configuration is what owns credentials — a module that wants
+     * Gemini asks for this rather than reading the environment behind config's back. It is read on
+     * every call, so a key exported after startup reaches the next request. Blank, whitespace, or
+     * longer than any other configured string, and there is no Gemini key at all.
+     */
+    get geminiApiKey(): string | undefined {
+        const value = process.env["GEMINI_API_KEY"]?.trim();
+        if (value === undefined || value.length === 0) return undefined;
+        return value.length > MAX_CONFIG_STRING_LENGTH ? undefined : value;
+    }
+
+    /**
+     * The GitHub token this installation acts with, when its environment carries one.
+     *
+     * Cloning a private repository needs a credential, and the only one a local installation has is
+     * whatever the person's own tooling already exported — `GITHUB_TOKEN`, or `GH_TOKEN` under the
+     * name the GitHub CLI uses. It is read here because configuration is what owns credentials, and
+     * on every call, so a token exported after startup reaches the next clone. Blank, whitespace, or
+     * longer than any other configured string, and this installation has no GitHub token at all.
+     */
+    get githubToken(): string | undefined {
+        for (const name of ["GITHUB_TOKEN", "GH_TOKEN"] as const) {
+            const value = process.env[name]?.trim();
+            if (value === undefined || value.length === 0) continue;
+            return value.length > MAX_CONFIG_STRING_LENGTH ? undefined : value;
+        }
+        return undefined;
+    }
+
     /** Bedrock serves its hosted search index from particular models, so an account may name one. */
     get bedrockSearchModels(): Readonly<Record<string, string>> {
         const models: Record<string, string> = {};
@@ -1001,6 +1042,78 @@ export class ConfigModule implements AgentModule {
             if (provider.searchModelId !== undefined) models[id] = provider.searchModelId;
         }
         return models;
+    }
+
+    /**
+     * The folder projects Rig cloned for someone live under.
+     *
+     * A project records its own folder once it exists, so this only decides where the next clone
+     * lands. Like the rest of the layout it is settled once per installation.
+     */
+    get projectsHome(): string {
+        this.#projectsHome ??= getManagedProjectsDirectory();
+        return this.#projectsHome;
+    }
+
+    /**
+     * The folder managed workspaces live under.
+     *
+     * A workspace records its own path once it is created, so this only decides where the next
+     * one lands. It is settled once per installation, the way the rest of the layout is.
+     */
+    get workspacesHome(): string {
+        this.#workspacesHome ??= getManagedWorkspacesDirectory();
+        return this.#workspacesHome;
+    }
+
+    /**
+     * What a workspace folder does when it says nothing itself: what to sync, what to protect,
+     * what to run on setup, and what archiving leaves on disk.
+     */
+    get workspaceSettings(): HappyAgentConfigValues["workspace"] {
+        return this.configuration.values.workspace;
+    }
+
+    /**
+     * The person's own instructions, the ones that apply to every project.
+     *
+     * Configuration owns the path, so a module that wants the document asks for the text and is
+     * given at most `maxBytes` of it. A file that is not there is an absent document, not a
+     * failure, and the read happens on every call so an edit reaches the next turn.
+     */
+    async readGlobalInstructions(ctx: Context, maxBytes: number): Promise<string | undefined> {
+        return await readGlobalInstructions(
+            ctx,
+            this.configuration.paths.instructionsPath,
+            maxBytes,
+        );
+    }
+
+    /**
+     * The person's own security policy, the one that applies wherever this installation runs.
+     *
+     * Configuration owns the path, so a module that judges what an agent may do asks for the text
+     * and is given at most `maxBytes` of it. It is read on every call, so a policy edited while a
+     * session is open takes effect on the next decision that consults it. A file that is not there
+     * is an absent policy; anything else that goes wrong is raised, so a caller can refuse to act
+     * on a policy it could not read rather than act on half of one.
+     */
+    async readGlobalSecurity(_ctx: Context, maxBytes: number): Promise<string | undefined> {
+        return await readSecurityDocument(this.configuration.paths.securityPath, maxBytes);
+    }
+
+    /**
+     * The security policy written at the root of the folder the agent works in.
+     *
+     * It sits beside that folder's own instructions and is read the same way, under the same bound
+     * and with the same treatment of an absent file. Where the folder is, is the configuration's
+     * answer rather than the caller's.
+     */
+    async readProjectSecurity(_ctx: Context, maxBytes: number): Promise<string | undefined> {
+        return await readSecurityDocument(
+            join(this.configuration.paths.publicHome, "AGENTS_SECURITY.md"),
+            maxBytes,
+        );
     }
 
     static async load(

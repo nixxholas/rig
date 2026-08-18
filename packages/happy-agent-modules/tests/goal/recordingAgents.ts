@@ -12,7 +12,12 @@ export interface RecordedWake {
 export interface RecordingAgents {
     readonly ref: AgentSystemRef;
     readonly wakes: RecordedWake[];
+    /** Every agent Goal asked the collection to stop, in order. */
+    readonly aborts: string[];
 }
+
+/** What the fake does when Goal asks it to stop an agent. */
+export type InterceptAbort = (agentId: string) => void | Promise<void>;
 
 export type RecordWake = (wake: RecordedWake) => void;
 export type InterceptWake = (
@@ -35,12 +40,20 @@ interface RecordedMessage {
  * commits. This models the intended same-database wiring without claiming that the module can
  * force Agent Base's queue transaction to join.
  */
-export function recordingAgents(intercept?: InterceptWake): RecordingAgents {
+export function recordingAgents(
+    intercept?: InterceptWake,
+    interceptAbort?: InterceptAbort,
+): RecordingAgents {
     const wakes: RecordedWake[] = [];
+    const aborts: string[] = [];
     const record = (wake: RecordedWake): void => {
         wakes.push(structuredClone(wake));
     };
     const ref = {
+        abort: async (_ctx: Context, agentId: string): Promise<void> => {
+            aborts.push(agentId);
+            if (interceptAbort !== undefined) await interceptAbort(agentId);
+        },
         send: (
             ctx: Context,
             agentId: string,
@@ -65,5 +78,5 @@ export function recordingAgents(intercept?: InterceptWake): RecordingAgents {
             return Promise.resolve(intercept(ctx, structuredClone(wake), record));
         },
     } as unknown as AgentSystemRef;
-    return { ref, wakes };
+    return { ref, wakes, aborts };
 }

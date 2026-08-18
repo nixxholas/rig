@@ -11,14 +11,10 @@ import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type { Context } from "@steve.kite/stdlib";
 
-import type { ComputeResolver } from "../compute/ComputeResolver.js";
+import type { ConfigModule } from "../config/index.js";
+import type { ComputeModule } from "../compute/index.js";
 import type { AgentsMdSnapshot } from "./AgentsMd.js";
-import {
-    AgentsMdInstructions,
-    agentsMdGlobalInstructionsReaderSchema,
-    systemPromptComputeResolverSchema,
-    type AgentsMdGlobalInstructionsReader,
-} from "./impl/agentsMdInstructions.js";
+import { AgentsMdInstructions } from "./impl/agentsMdInstructions.js";
 import {
     assembleEnvironmentPrompt,
     formatAvailableModels,
@@ -47,8 +43,6 @@ const IDENTITY_MARKER = "{{identity}}";
 const NAME_MARKER = "{{name}}";
 const AGENTS_MD_OUTPUT_TRUNCATION_NOTICE =
     "[Some AGENTS.md instruction content was omitted to stay within the system prompt byte limit.]";
-const INVALID_MODULE_OPTIONS_ERROR = "System prompt module options are invalid.";
-const INVALID_IDENTITY_ERROR = "System prompt identity is invalid.";
 const INVALID_AVAILABLE_MODELS_ERROR = "System prompt available models are invalid.";
 const AVAILABLE_MODELS_BYTE_BOUND_ERROR =
     "System prompt available models exceed the configured UTF-8 byte bound.";
@@ -56,46 +50,7 @@ const AVAILABLE_MODELS_BYTE_BOUND_ERROR =
 /** The largest prompt output accepted after identity substitution. */
 export const MAX_SYSTEM_PROMPT_OUTPUT_BYTES = 1_000_000;
 
-/** What a system-prompt module is built with. */
-export const systemPromptModuleOptionsSchema = Type.Object(
-    {
-        /** Who the agent says it is. Defaults to Rig's own identity. */
-        identity: Type.Optional(systemPromptIdentitySchema),
-        /**
-         * The provider/model routes the host offers to agents. The environment section prints
-         * only their name, model ID, and provider ID.
-         */
-        availableModels: Type.Optional(systemPromptAvailableModelsSchema),
-        /** Resolves the current agent's compute for project instruction discovery. */
-        compute: Type.Optional(systemPromptComputeResolverSchema),
-        /** Reads the host-owned global AGENTS.md document on every inference. */
-        globalInstructions: Type.Optional(agentsMdGlobalInstructionsReaderSchema),
-    },
-    { additionalProperties: false },
-);
-
-const systemPromptModuleDiagnosticOptionsSchema = Type.Object(
-    {
-        identity: Type.Optional(Type.Unknown()),
-        availableModels: Type.Optional(Type.Unknown()),
-        compute: Type.Optional(Type.Unknown()),
-        globalInstructions: Type.Optional(Type.Unknown()),
-    },
-    { additionalProperties: false },
-);
-type SystemPromptModuleDiagnosticOptions = Static<typeof systemPromptModuleDiagnosticOptionsSchema>;
-
-/** The TypeScript type inferred from {@link systemPromptModuleOptionsSchema}. */
-export type SystemPromptModuleOptions = Omit<
-    Static<typeof systemPromptModuleOptionsSchema>,
-    "compute" | "globalInstructions"
-> & {
-    readonly compute?: ComputeResolver;
-    readonly globalInstructions?: AgentsMdGlobalInstructionsReader;
-};
-
 export {
-    agentsMdGlobalInstructionsReaderSchema,
     MAX_SYSTEM_PROMPT_AVAILABLE_MODEL_FIELD_LENGTH,
     MAX_SYSTEM_PROMPT_AVAILABLE_MODELS_BYTES,
     MAX_SYSTEM_PROMPT_AVAILABLE_MODELS,
@@ -106,7 +61,6 @@ export {
 };
 export type { SystemPromptSelection };
 export type { SystemPromptAvailableModel, SystemPromptAvailableModels };
-export type { AgentsMdGlobalInstructionsReader };
 
 /**
  * The instructions a model is written for.
@@ -117,41 +71,55 @@ export type { AgentsMdGlobalInstructionsReader };
  * given the new model's prompt on the very next inference without anything else changing. A model
  * nobody has written a prompt for gets the simple one, so there is always a prompt.
  *
- * It holds only immutable constructor data and takes no lock: the answer depends on the model in
- * force, the attached environment, and those constructor values, so any number of agents may ask
- * at once.
+ * It holds no tuning of its own and takes no lock: the answer depends on the model in force, the
+ * attached environment, and what configuration says, so any number of agents may ask at once.
  */
 export class SystemPromptModule implements AgentModule {
     readonly name = "system-prompt";
 
-    /** Who the agent says it is, substituted into whichever prompt is chosen. */
-    readonly #identity: SystemPromptIdentity;
-    /** The bounded host-supplied model catalog rendered in the environment section. */
-    readonly #availableModels: readonly SystemPromptAvailableModel[];
+    /**
+     * Who the agent says it is, substituted into whichever prompt is chosen.
+     *
+     * There is one identity, and it is Rig's own: an installation that renamed itself would be
+     * telling the model it is something the rest of the product is not.
+     */
+    readonly #identity: SystemPromptIdentity = DEFAULT_SYSTEM_PROMPT_IDENTITY;
+    /** Where the model catalog and the person's own instructions come from. */
+    readonly #config: ConfigModule;
     /** Live AGENTS.md discovery and durable change-notice behavior. */
     readonly #agentsMd: AgentsMdInstructions;
+    #availableModels: readonly SystemPromptAvailableModel[] | undefined;
 
-    constructor(options: SystemPromptModuleOptions = {}) {
-        if (!Value.Check(systemPromptModuleOptionsSchema, options)) {
-            throw invalidModuleOptionError(options);
-        }
-        const snapshot = structuredClone(options.identity ?? DEFAULT_SYSTEM_PROMPT_IDENTITY);
-        if (!Value.Check(systemPromptIdentitySchema, snapshot)) {
-            throw new Error(INVALID_IDENTITY_ERROR);
-        }
-        this.#identity = Object.freeze(snapshot);
-        const availableModels = structuredClone(options.availableModels ?? []);
-        if (!Value.Check(systemPromptAvailableModelsSchema, availableModels)) {
+    constructor(config: ConfigModule, compute: ComputeModule) {
+        this.#config = config;
+        this.#agentsMd = new AgentsMdInstructions(config, compute);
+    }
+
+    /**
+     * The routes the environment section prints, taken from configuration.
+     *
+     * Configuration owns which accounts exist and which models they serve, so the catalog is read
+     * from it rather than restated here. It is settled once per installation, so it is checked
+     * against the section's bounds the first time it is needed and kept.
+     */
+    get #models(): readonly SystemPromptAvailableModel[] {
+        if (this.#availableModels !== undefined) return this.#availableModels;
+        const models = this.#config.models.map(({ id, name, providerId }) => ({
+            id,
+            name,
+            providerId,
+        }));
+        if (!Value.Check(systemPromptAvailableModelsSchema, models)) {
             throw new Error(INVALID_AVAILABLE_MODELS_ERROR);
         }
         if (
-            new TextEncoder().encode(formatAvailableModels(availableModels)).byteLength >
+            new TextEncoder().encode(formatAvailableModels(models)).byteLength >
             MAX_SYSTEM_PROMPT_AVAILABLE_MODELS_BYTES
         ) {
             throw new Error(AVAILABLE_MODELS_BYTE_BOUND_ERROR);
         }
-        this.#availableModels = Object.freeze(availableModels.map((model) => Object.freeze(model)));
-        this.#agentsMd = new AgentsMdInstructions(options.compute, options.globalInstructions);
+        this.#availableModels = Object.freeze(models.map((model) => Object.freeze(model)));
+        return this.#availableModels;
     }
 
     /** The prompt this model is written for, ready to use. */
@@ -198,7 +166,7 @@ export class SystemPromptModule implements AgentModule {
             sections.push(
                 assembleEnvironmentPrompt({
                     environment,
-                    availableModels: this.#availableModels,
+                    availableModels: this.#models,
                     currentModel: scope.agent.model,
                 }),
             );
@@ -236,26 +204,6 @@ export class SystemPromptModule implements AgentModule {
     };
 
     readonly beforeStart = (): AgentModuleHooks => this.#hooks;
-}
-
-function invalidModuleOptionError(value: unknown): Error {
-    if (!Value.Check(systemPromptModuleDiagnosticOptionsSchema, value)) {
-        return new Error(INVALID_MODULE_OPTIONS_ERROR);
-    }
-    const options = value as SystemPromptModuleDiagnosticOptions;
-    if (
-        options.identity !== undefined &&
-        !Value.Check(systemPromptIdentitySchema, options.identity)
-    ) {
-        return new Error(INVALID_IDENTITY_ERROR);
-    }
-    if (
-        options.availableModels !== undefined &&
-        !Value.Check(systemPromptAvailableModelsSchema, options.availableModels)
-    ) {
-        return new Error(INVALID_AVAILABLE_MODELS_ERROR);
-    }
-    return new Error(INVALID_MODULE_OPTIONS_ERROR);
 }
 
 function truncateUtf8WithNotice(value: string, maxBytes: number): string {

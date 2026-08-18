@@ -7,23 +7,20 @@ import {
     type AgentSystemRef,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
-import { Type, type Static, type TSchema } from "@sinclair/typebox";
+import { type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { afterCommit, detach, type Context } from "@steve.kite/stdlib";
 
-import { senderAgentIdMetadata } from "../auto/messageOrigin.js";
+import { senderAgentIdMetadata } from "../impl/messageOrigin.js";
 import {
     MAX_SCHEDULING_FAILURE_LENGTH,
     MAX_SCHEDULING_MESSAGE_LENGTH,
     MAX_SCHEDULING_PAGE_SIZE,
-    MAX_SCHEDULING_TIMESTAMP,
     schedulingAgentIdSchema,
     schedulingCancelInputSchema,
-    schedulingEventIdSchema,
     schedulingMessageIdSchema,
     schedulingScheduleInputSchema,
     schedulingSchedulePageQuerySchema,
-    schedulingScheduledMessageSchema,
     schedulingTimestampSchema,
     schedulingWaitInputSchema,
     schedulingWaitUntilInputSchema,
@@ -39,29 +36,22 @@ import {
     type SchedulingWaitingRecord,
 } from "./Scheduling.js";
 import {
+    schedulingEventListenerSchema,
     schedulingEventSchema,
-    schedulingModuleListenerSchema,
     type SchedulingEvent,
-    type SchedulingModuleListener,
+    type SchedulingEventListener,
+    type SchedulingUnsubscribe,
 } from "./SchedulingEvent.js";
 import {
     assertSchedulingPage,
     assertSchedulingScheduledMessage,
     assertSchedulingWaitRecord,
     assertSchedulingWaitResult,
-    assertSchedulingVoid,
     MAX_SCHEDULING_RECOVERY_BATCH,
-    schedulingContextSchema,
     type SchedulingStore,
 } from "./SchedulingStore.js";
 import { SchedulingSuspensions } from "./SchedulingSuspensions.js";
-import {
-    assertSchedulingTimers,
-    nodeSchedulingTimers,
-    SchedulingAlarm,
-    schedulingTimersSchema,
-    type SchedulingTimers,
-} from "./SchedulingTimers.js";
+import { SchedulingAlarm } from "./SchedulingAlarm.js";
 import { cancellationText, schedulePageText, scheduleText, waitText } from "./schedulingFormat.js";
 import { durationMilliseconds, humanDuration, instantMilliseconds } from "./schedulingTime.js";
 import { createSqliteSchedulingStorage, schedulingMigrations } from "./SqliteSchedulingStorage.js";
@@ -72,42 +62,15 @@ import { waitTool } from "./tools/wait.js";
 import { waitUntilTool } from "./tools/wait_until.js";
 
 const DAY = 24 * 60 * 60 * 1_000;
-const DEFAULT_MAX_WAIT_DURATION = DAY;
-const DEFAULT_MAX_SCHEDULE_HORIZON = DAY;
-const DEFAULT_PAGE_SIZE = 50;
-const DEFAULT_OUTPUT_CHARACTERS = 8_000;
 
-export const schedulingIdFactorySchema = Type.Function([], schedulingMessageIdSchema);
-export const schedulingEventIdFactorySchema = Type.Function([], schedulingEventIdSchema);
-export const schedulingClockSchema = Type.Function([], schedulingTimestampSchema);
-
-export const schedulingPostCommitErrorSchema = Type.Function(
-    [schedulingContextSchema, schedulingEventSchema, Type.Unknown()],
-    Type.Union([Type.Void(), Type.Promise(Type.Void())]),
-);
-
-export const schedulingModuleOptionsSchema = Type.Object(
-    {
-        clock: Type.Optional(schedulingClockSchema),
-        timers: Type.Optional(schedulingTimersSchema),
-        idFactory: Type.Optional(schedulingIdFactorySchema),
-        eventIdFactory: Type.Optional(schedulingEventIdFactorySchema),
-        listener: Type.Optional(schedulingModuleListenerSchema),
-        maxWaitDuration: Type.Optional(Type.Integer({ minimum: 0, maximum: DAY })),
-        maxScheduleHorizon: Type.Optional(
-            Type.Integer({ minimum: 0, maximum: MAX_SCHEDULING_TIMESTAMP }),
-        ),
-        maxPageSize: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_SCHEDULING_PAGE_SIZE })),
-        maxOutputCharacters: Type.Optional(Type.Integer({ minimum: 256, maximum: 100_000 })),
-        maxMessageLength: Type.Optional(
-            Type.Integer({ minimum: 1, maximum: MAX_SCHEDULING_MESSAGE_LENGTH }),
-        ),
-        onPostCommitError: Type.Optional(schedulingPostCommitErrorSchema),
-    },
-    { additionalProperties: false },
-);
-
-export type SchedulingModuleOptions = Static<typeof schedulingModuleOptionsSchema>;
+/** The longest a single `wait` or `wait_until` may hold an agent. */
+export const MAX_SCHEDULING_WAIT_DURATION = DAY;
+/** The furthest ahead a message may be scheduled. */
+export const MAX_SCHEDULING_HORIZON = DAY;
+/** How many scheduled messages one page returns when the caller does not ask for fewer. */
+export const SCHEDULING_PAGE_SIZE = 50;
+/** The character budget every model-facing scheduling result is trimmed to fit. */
+export const SCHEDULING_OUTPUT_CHARACTERS = 8_000;
 
 /**
  * Waiting, and messages that arrive later.
@@ -127,19 +90,12 @@ export class SchedulingModule implements AgentModule {
     readonly name = "scheduling";
     readonly migrations = schedulingMigrations;
 
-    readonly #store: SchedulingStore;
-    readonly #timers: SchedulingTimers;
-    readonly #clock: () => number;
-    readonly #idFactory: () => string;
-    readonly #eventIdFactory: () => string;
-    readonly #listener: SchedulingModuleListener | undefined;
-    readonly #onPostCommitError: SchedulingModuleOptions["onPostCommitError"];
-    readonly #maxWaitDuration: number;
-    readonly #maxScheduleHorizon: number;
-    readonly #maxPageSize: number;
-    readonly #maxOutputCharacters: number;
-    readonly #maxMessageLength: number;
-    readonly #suspensions: SchedulingSuspensions;
+    readonly #store: SchedulingStore = createSqliteSchedulingStorage();
+    readonly #suspensions = new SchedulingSuspensions();
+
+    /** Subscribers taken after construction, inside and after the committing transaction. */
+    readonly #transactionalListeners = new Set<SchedulingEventListener>();
+    readonly #postCommitListeners = new Set<SchedulingEventListener>();
 
     /** Live alarms for pending messages, and the deliveries currently in flight. */
     readonly #alarms = new Map<string, SchedulingAlarm>();
@@ -147,24 +103,6 @@ export class SchedulingModule implements AgentModule {
 
     #agents: AgentSystemRef | undefined;
     #deliveryCtx: Context | undefined;
-
-    constructor(options: SchedulingModuleOptions = {}) {
-        const validated = validateOptions(options);
-        this.#store = createSqliteSchedulingStorage();
-        this.#timers = validated.timers ?? nodeSchedulingTimers;
-        assertSchedulingTimers(this.#timers);
-        this.#clock = validated.clock ?? (() => Date.now());
-        this.#idFactory = validated.idFactory ?? (() => randomSchedulingId());
-        this.#eventIdFactory = validated.eventIdFactory ?? (() => randomSchedulingId());
-        this.#listener = validated.listener;
-        this.#onPostCommitError = validated.onPostCommitError;
-        this.#maxWaitDuration = validated.maxWaitDuration ?? DEFAULT_MAX_WAIT_DURATION;
-        this.#maxScheduleHorizon = validated.maxScheduleHorizon ?? DEFAULT_MAX_SCHEDULE_HORIZON;
-        this.#maxPageSize = validated.maxPageSize ?? DEFAULT_PAGE_SIZE;
-        this.#maxOutputCharacters = validated.maxOutputCharacters ?? DEFAULT_OUTPUT_CHARACTERS;
-        this.#maxMessageLength = validated.maxMessageLength ?? MAX_SCHEDULING_MESSAGE_LENGTH;
-        this.#suspensions = new SchedulingSuspensions(this.#timers, () => this.#now());
-    }
 
     /**
      * Take the agent collection, then re-arm everything the last process left pending.
@@ -213,6 +151,26 @@ export class SchedulingModule implements AgentModule {
         },
     };
 
+    /**
+     * Watch scheduling inside the transaction that commits the change.
+     *
+     * A transactional subscriber runs before the commit, so throwing from one rejects the mutation
+     * that produced the event. Returns the function that ends the subscription.
+     */
+    onEventTransactional(listener: SchedulingEventListener): SchedulingUnsubscribe {
+        return this.#subscribe(this.#transactionalListeners, listener);
+    }
+
+    /**
+     * Watch scheduling after the outermost transaction has committed.
+     *
+     * A post-commit subscriber cannot undo anything, so a failure in one is logged and the
+     * remaining subscribers still see the event. Returns the function that ends the subscription.
+     */
+    onEvent(listener: SchedulingEventListener): SchedulingUnsubscribe {
+        return this.#subscribe(this.#postCommitListeners, listener);
+    }
+
     /** Pause an agent for a bounded duration. */
     async wait(
         ctx: Context,
@@ -257,9 +215,9 @@ export class SchedulingModule implements AgentModule {
     ): Promise<SchedulingScheduledMessage> {
         this.#assertAgentId(agentId, "acting agent");
         this.#assertInput(schedulingScheduleInputSchema, input, "schedule message");
-        if (input.message.length > this.#maxMessageLength) {
+        if (input.message.length > MAX_SCHEDULING_MESSAGE_LENGTH) {
             throw new Error(
-                `A scheduled message cannot exceed ${this.#maxMessageLength} characters.`,
+                `A scheduled message cannot exceed ${MAX_SCHEDULING_MESSAGE_LENGTH} characters.`,
             );
         }
         const targetAgentId = input.targetAgentId ?? agentId;
@@ -284,12 +242,12 @@ export class SchedulingModule implements AgentModule {
                     ? this.#dueFromDuration(
                           now,
                           durationMilliseconds(input.in),
-                          this.#maxScheduleHorizon,
+                          MAX_SCHEDULING_HORIZON,
                       )
                     : this.#dueFromInstant(
                           now,
                           instantMilliseconds(input.at),
-                          this.#maxScheduleHorizon,
+                          MAX_SCHEDULING_HORIZON,
                       );
             const created: SchedulingScheduledMessage = {
                 id,
@@ -361,7 +319,7 @@ export class SchedulingModule implements AgentModule {
     ): Promise<SchedulingSchedulePage> {
         this.#assertAgentId(agentId, "acting agent");
         this.#assertInput(schedulingSchedulePageQuerySchema, query, "schedule page query");
-        const limit = Math.min(query.limit ?? this.#maxPageSize, this.#maxPageSize);
+        const limit = Math.min(query.limit ?? SCHEDULING_PAGE_SIZE, SCHEDULING_PAGE_SIZE);
         return await ctx.inTx(async (txCtx) => {
             const page = await this.#store.listSchedules(txCtx, {
                 ...query,
@@ -420,7 +378,7 @@ export class SchedulingModule implements AgentModule {
 
     formatSchedulePageForModel(page: SchedulingSchedulePage): string {
         assertSchedulingPage(page, MAX_SCHEDULING_PAGE_SIZE);
-        return schedulePageText(page, this.#maxOutputCharacters).text;
+        return schedulePageText(page, SCHEDULING_OUTPUT_CHARACTERS).text;
     }
 
     /**
@@ -525,15 +483,10 @@ export class SchedulingModule implements AgentModule {
         if (schedule.status !== "pending") return;
         this.#alarms.set(
             schedule.id,
-            new SchedulingAlarm(
-                this.#timers,
-                () => this.#now(),
-                schedule.dueAt,
-                () => {
-                    this.#alarms.delete(schedule.id);
-                    void this.#deliver(schedule.id);
-                },
-            ),
+            new SchedulingAlarm(schedule.dueAt, () => {
+                this.#alarms.delete(schedule.id);
+                void this.#deliver(schedule.id);
+            }),
         );
     }
 
@@ -676,61 +629,60 @@ export class SchedulingModule implements AgentModule {
     }
 
     #event(payload: SchedulingEventPayload): SchedulingEvent {
-        const eventId = this.#eventIdFactory();
-        if (!Value.Check(schedulingEventIdSchema, eventId)) {
-            throw new Error("Scheduling event identity factory returned an invalid ID.");
-        }
-        const event = { ...payload, eventId, at: this.#now() };
+        const event = { ...payload, eventId: randomSchedulingId(), at: this.#now() };
         if (!Value.Check(schedulingEventSchema, event)) {
             throw new Error("Scheduling module created an invalid event.");
         }
         return deepFreeze(structuredClone(event as SchedulingEvent));
     }
 
-    async #announce(ctx: Context, event: SchedulingEvent): Promise<void> {
-        const transactional = this.#listener?.onEventTransactional;
-        if (transactional !== undefined) {
-            assertSchedulingVoid(
-                await transactional.call(this.#listener, ctx, event),
-                "transactional listener",
-            );
+    #subscribe(
+        listeners: Set<SchedulingEventListener>,
+        listener: SchedulingEventListener,
+    ): SchedulingUnsubscribe {
+        if (!Value.Check(schedulingEventListenerSchema, listener)) {
+            throw new Error("A scheduling subscriber must be a function.");
         }
+        listeners.add(listener);
+        return () => {
+            listeners.delete(listener);
+        };
+    }
+
+    async #announce(ctx: Context, event: SchedulingEvent): Promise<void> {
+        // A snapshot, so subscribing or unsubscribing from inside a subscriber cannot change who
+        // this event goes to.
+        for (const listener of [...this.#transactionalListeners]) await listener(ctx, event);
         afterCommit(ctx, (postCommitCtx) => this.#notifyPostCommit(postCommitCtx, event));
     }
 
     async #notifyPostCommit(ctx: Context, event: SchedulingEvent): Promise<void> {
-        try {
-            const listener = this.#listener?.onEvent;
-            if (listener !== undefined) {
-                assertSchedulingVoid(
-                    await listener.call(this.#listener, ctx, event),
-                    "post-commit listener",
-                );
-            }
-        } catch (error: unknown) {
+        for (const listener of [...this.#postCommitListeners]) {
             try {
-                const handler = this.#onPostCommitError;
-                if (handler !== undefined) {
-                    const result = handler(ctx, event, boundedFailure(error));
-                    assertSchedulingVoid(
-                        result instanceof Promise ? await result : result,
-                        "post-commit error handler",
-                    );
-                }
-            } catch {
-                // Post-commit observation cannot undo durable state.
+                await listener(ctx, event);
+            } catch (error: unknown) {
+                // Nothing here can undo a scheduling change the database has already committed,
+                // and one failing subscriber must not hide the event from the rest.
+                ctx.log.error(
+                    { error, eventId: event.eventId, type: event.type },
+                    "A scheduling subscriber failed after the change was committed.",
+                );
             }
         }
     }
 
-    #dueFromDuration(now: number, amount: number, horizon = this.#maxWaitDuration): number {
+    #dueFromDuration(now: number, amount: number, horizon = MAX_SCHEDULING_WAIT_DURATION): number {
         if (amount > horizon) {
             throw new Error(`That is longer than the ${humanDuration(horizon)} limit.`);
         }
         return this.#dueAt(now + amount);
     }
 
-    #dueFromInstant(now: number, requested: number, horizon = this.#maxWaitDuration): number {
+    #dueFromInstant(
+        now: number,
+        requested: number,
+        horizon = MAX_SCHEDULING_WAIT_DURATION,
+    ): number {
         const dueAt = Math.max(now, requested);
         if (dueAt - now > horizon) {
             throw new Error(`That is further away than the ${humanDuration(horizon)} limit.`);
@@ -746,19 +698,15 @@ export class SchedulingModule implements AgentModule {
     }
 
     #now(): number {
-        const now = this.#clock();
+        const now = Date.now();
         if (!Value.Check(schedulingTimestampSchema, now)) {
-            throw new Error("The scheduling clock returned an invalid time.");
+            throw new Error("The clock returned a time scheduling cannot represent.");
         }
         return now;
     }
 
     #newId(): string {
-        const id = this.#idFactory();
-        if (!Value.Check(schedulingMessageIdSchema, id)) {
-            throw new Error("Scheduling identity factory returned an invalid identity.");
-        }
-        return id;
+        return randomSchedulingId();
     }
 
     #requireAgents(): AgentSystemRef {
@@ -812,41 +760,6 @@ type SchedulingEventPayload =
           readonly agentId: string;
           readonly schedule: SchedulingScheduledMessage;
       };
-
-export function assertSchedulingModuleOptions(
-    value: unknown,
-): asserts value is SchedulingModuleOptions {
-    validateOptions(value);
-}
-
-function validateOptions(value: unknown): SchedulingModuleOptions {
-    if (typeof value !== "object" || value === null) {
-        throw new Error("Scheduling module options are invalid.");
-    }
-    const source = value as Record<string, unknown>;
-    const view = {
-        ...source,
-        ...(source.timers === undefined
-            ? {}
-            : { timers: methodView(source.timers, ["start", "stop"]) }),
-        ...(source.listener === undefined
-            ? {}
-            : { listener: methodView(source.listener, ["onEventTransactional", "onEvent"]) }),
-    };
-    if (!Value.Check(schedulingModuleOptionsSchema, view)) {
-        throw new Error("Scheduling module options are invalid.");
-    }
-    return value as SchedulingModuleOptions;
-}
-
-/** A class instance keeps its methods on a prototype, which a TypeBox object check cannot see. */
-function methodView(value: unknown, keys: readonly string[]): unknown {
-    if (typeof value !== "object" || value === null) return value;
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype === Object.prototype || prototype === null) return value;
-    const source = value as Record<string, unknown>;
-    return Object.fromEntries(keys.map((key) => [key, source[key]]));
-}
 
 function waitResult(wait: SchedulingWaitRecord): SchedulingWaitResult {
     if (wait.status === "waiting") throw new Error("A waiting record has no final result.");

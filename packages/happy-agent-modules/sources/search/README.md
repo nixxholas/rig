@@ -7,26 +7,25 @@ not lift a provider's server tool into Agent Base.
 
 ```ts
 import { Agent } from "@slopus/happy-agent-base";
-import { SearchModule } from "@slopus/happy-agent-modules";
+import { ConfigModule, SearchModule } from "@slopus/happy-agent-modules";
 
-const search = new SearchModule({
-    providers,
-    models,
-    currentProviderId: "codex",
-    maxCharacters: 40_000,
-    maxOutputCharacters: 12_000,
-});
+const config = await ConfigModule.load();
+const search = new SearchModule(config);
 const agent = await Agent.create(ctx, { ...options, modules: [search] });
 ```
 
-`providers` and `models` are required: together they name every account a vendor search may run on
-and the model each one searches with. `currentProviderId` is the account this chat itself uses, and
-is preferred whenever it serves the asked vendor. `bedrockSearchModels` lets a Bedrock account name
-the model that serves its hosted index. `geminiApiKey` is the only credential the module takes
-directly, because Gemini is not one of the accounts a chat runs on. `maxCharacters` caps fetched
-content before truncation (1,000–100,000, default 40,000) and `maxOutputCharacters` caps what the
-model actually sees per tool call (256–100,000, default 12,000). One `SearchModule` instance can
-serve every agent in a collection; `agentId` is threaded through on each call.
+The module takes only the configuration module, and asks it for everything a search needs: the
+accounts (`providers`), the catalog each vendor searches with (`models`), the model a Bedrock
+account serves its hosted index from (`bedrockSearchModels`), and the Gemini key
+(`geminiApiKey`) — Gemini is not one of the accounts a chat runs on, so it authenticates with a key
+of its own. The account this chat itself uses is the first model's, which is what a session gets
+when it names nothing; it is preferred whenever it serves the asked vendor.
+
+The bounds are the module's own constants rather than settings: `MAX_SEARCH_FETCH_CHARACTERS`
+(40,000) is how much of a fetched page is kept before truncation, and `MAX_SEARCH_OUTPUT_CHARACTERS`
+(12,000) is how much of an answer or a page one tool call may show the model. Both are exported so a
+caller can render or reason about the same limits. One `SearchModule` instance serves every agent in
+a collection; `agentId` is threaded through on each call.
 
 ## Tools
 
@@ -55,10 +54,10 @@ A vendor search is not paginated. Each search returns a bounded `SearchAnswer` (
   go is a permission decision, not a hardcoded list: the tool requests Auto review like every
   other search tool. HTML comes back as markdown, other text as it arrived, and bytes that are not text are
   reported rather than decoded. A redirect off the site is reported so following it stays a
-  deliberate second call. `maxCharacters` (1,000–100,000) is clamped to the module's
-  `maxCharacters`. The model sees the URL first, then the title and content as far as they fit
-  `maxOutputCharacters`, with a `[Content truncated.]` marker when the model-visible text or the
-  underlying content was cut.
+  deliberate second call. `maxCharacters` (1,000–100,000) is clamped to
+  `MAX_SEARCH_FETCH_CHARACTERS`. The model sees the URL first, then the title and content as far as
+  they fit `MAX_SEARCH_OUTPUT_CHARACTERS`, with a `[Content truncated.]` marker when the
+  model-visible text or the underlying content was cut.
 
 All tools are `durable: false` because retrying an interrupted vendor call could repeat billed or
 externally observable work. They require Auto or Full access and request Auto review because the
@@ -73,7 +72,7 @@ contrast, is prose and may be cut with an `[Answer truncated.]` marker to keep t
   vendor-routed request, runs that vendor's search, and validates the answer: it must echo the same
   vendor and (trimmed) query, report a finite non-negative duration, and cite canonical
   `http`/`https` sources with no duplicate URLs. It also confirms the answer can be rendered within
-  `maxOutputCharacters` before returning. A request that both allows and blocks domains, or that
+  `MAX_SEARCH_OUTPUT_CHARACTERS` before returning. A request that both allows and blocks domains, or that
   names an account the person has not configured, is rejected before any vendor is called.
 - **`search.fetch(ctx, agentId, input: FetchInput): Promise<FetchResult>`** — normalizes and
   lower-bounds `input.url` (protocol, canonical form, length), fetches the page,
@@ -90,6 +89,7 @@ single search or fetch it performs.
 
 ## Storage
 
-The module persists nothing. It is stateless between calls: `SearchModule` holds only its
-constructor-time bounds and the resolved routes, and every call is answered fresh from the vendor.
-Search results, fetched pages, and rate limits are not cached anywhere.
+The module persists nothing. It is stateless between calls: `SearchModule` holds only the
+configuration module, resolving the routes and the Gemini key from it each time a search runs, and
+every call is answered fresh from the vendor. Search results, fetched pages, and rate limits are not
+cached anywhere.

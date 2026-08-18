@@ -19,7 +19,6 @@ import {
 } from "../../sources/secrets/Secret.js";
 import {
     assertSecretCommandEnvironment,
-    assertSecretCommandResolverResult,
     assertSecretHostEnvironment,
     assertSecretReference,
 } from "../../sources/secrets/SecretStore.js";
@@ -128,11 +127,6 @@ describe("Secrets schemas and persistence boundaries", () => {
                 hiddenEnvironmentVariables: ["token"],
             }),
         ).not.toThrow();
-        expect(() =>
-            assertSecretCommandResolverResult([
-                { secretId: "one", environment: { TOKEN: "one", token: "two" } },
-            ]),
-        ).toThrow("colliding");
     });
 
     it("normalizes database pages, scopes, attachments, and owner isolation at the SQL boundary", async () => {
@@ -304,7 +298,7 @@ describe("Secrets schemas and persistence boundaries", () => {
         });
     });
 
-    it("returns cloned persistence values and rejects malformed resolver result shapes", async () => {
+    it("returns cloned persistence values and accepts empty environment shapes", async () => {
         await withDatabase("secrets-database-clones", async (database) => {
             const store = createSecretDatabase();
             await store.register(database.context, "agent", {

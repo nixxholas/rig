@@ -68,6 +68,40 @@ way for the models a Bedrock account serves its hosted search index from.
 `load` takes an `inference` override for tests, which replaces both. It belongs here rather than
 where the agent starts, because a scripted account has to reach every module that names one.
 
+### The Gemini key
+
+Gemini is the one vendor Rig reaches that is not an account a chat runs on: it answers over its own
+HTTP API rather than through a configured chat provider. So it has no `[providers.gemini]` entry, no
+TOML section of its own, and nothing was added to the configuration schema for it. `geminiApiKey` is
+a getter that reads `GEMINI_API_KEY` from the environment, trims it, and answers with nothing when
+it is missing, blank, or longer than any other configured string. It is read on each call, so a key
+exported after startup reaches the next request.
+
+It lives here for the same reason the accounts do: credentials are configuration's, and the search
+and Gemini modules ask this module for the key rather than reading the environment behind its back.
+If a person ever wants to write the key down instead of exporting it, this getter is the one place
+that has to learn a second source.
+
+## What else this module answers
+
+The same reasoning applies to anything else whose location or policy the configuration already
+settles. A module asks for the answer instead of being handed the path it would have read:
+
+- `readGlobalInstructions(ctx, maxBytes)` — the person's own instructions, the ones that apply to
+  every project, read fresh from `paths.instructionsPath` and bounded to `maxBytes`. A file that is
+  not there is an absent document rather than a failure.
+- `readGlobalSecurity(ctx, maxBytes)` / `readProjectSecurity(ctx, maxBytes)` — the two security
+  policies an automatic permission review judges against, read fresh from `paths.securityPath` and
+  from `AGENTS_SECURITY.md` at the root of `paths.publicHome`, each bounded to `maxBytes`. Reading
+  on every call is what makes a policy edited mid-session take effect on the next decision. A file
+  that is not there is an absent policy; any other read failure is raised, so a caller can refuse
+  to judge against a policy it could only read half of.
+- `workspacesHome` — the folder managed workspaces are created under, `RIG_WORKSPACES_DIRECTORY`
+  when it names an absolute path and `~/Happy/Workspaces` (`~/happy/workspaces` off macOS)
+  otherwise.
+- `workspaceSettings` — what a workspace folder does when it says nothing itself: what to sync,
+  what to protect, what to run on setup, and what archiving leaves on disk.
+
 Unknown TOML keys are ignored and retained in each source's `unknownSettings`
 list. `unknownSettingsTruncated` explicitly reports bounded metadata.
 Malformed TOML, invalid known values, inconsistent provider types, oversized

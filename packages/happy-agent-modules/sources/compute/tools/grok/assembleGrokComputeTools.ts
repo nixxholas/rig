@@ -1,7 +1,7 @@
 import type { AnyAgentTool } from "@slopus/happy-agent-base";
 
 import type { Compute } from "../../Compute.js";
-import type { FileReadLog } from "../../impl/FileReadLog.js";
+import type { FileReadLog } from "../../../impl/FileReadLog.js";
 import { grokGetCommandOrSubagentOutputTool } from "./get_command_or_subagent_output.js";
 import { grokGrepTool } from "./grep.js";
 import { grokKillCommandOrSubagentTool } from "./kill_command_or_subagent.js";

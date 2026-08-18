@@ -7,57 +7,40 @@ import type {
 } from "@slopus/happy-agent-base";
 import type { Context } from "@steve.kite/stdlib";
 
-import type {
-    HistoryBlock,
-    HistoryMessage,
-    HistoryRole,
-} from "../../sources/history/HistoryMessage.js";
-import type { HistoryReader } from "../../sources/history/HistoryReader.js";
-import type { HistoryRecord } from "../../sources/history/HistoryStore.js";
-import { summarizeHistory } from "../../sources/history/impl/summarizeHistory.js";
+import { HistoryModule } from "../../sources/history/HistoryModule.js";
+import type { HistoryBlock, HistoryRole } from "../../sources/history/HistoryMessage.js";
 import { ModelSwitchModule } from "../../sources/modelSwitch/ModelSwitchModule.js";
+import { moduleDatabase, type ModuleDatabase } from "../support/moduleDatabase.js";
 import { sharedKV, providersOf } from "../support/fixtures.js";
 import { ScriptedProvider } from "../support/ScriptedProvider.js";
 
 export const DEFAULT_AGENT_ID = "model-switch-test-agent";
 
-export function historyMessage(
-    position: number,
-    role: HistoryRole = "user",
-    blocks: readonly HistoryBlock[] = [{ type: "text", text: `message ${position}` }],
-    overrides: Partial<HistoryMessage> = {},
-): HistoryMessage {
-    return {
-        role,
-        blocks: [...blocks],
-        recordId: `record-${position}`,
-        at: position,
-        ...overrides,
-    };
-}
-
-export function historyRecord(
-    position: number,
-    role: HistoryRole = "user",
-    blocks?: readonly HistoryBlock[],
-    overrides: Partial<HistoryMessage> = {},
-): HistoryRecord {
-    return {
-        position,
-        message: historyMessage(position, role, blocks, overrides),
-    };
-}
-
-export function readerFor(
-    beginning: readonly HistoryRecord[],
-    recent: readonly HistoryRecord[] = beginning,
-    stats = summarizeHistory(beginning.map((record) => record.message)),
-): HistoryReader {
-    return {
-        messages: async (_ctx, _agentId, query) =>
-            query.from === "end" ? [...recent] : [...beginning],
-        stats: async () => stats,
-    };
+/**
+ * A real history module over its own in-memory database.
+ *
+ * The model-switch module reads the history through `HistoryModule` itself, so a test gives it
+ * one and records into it rather than standing a reader in its place.
+ */
+export async function historyWith(
+    name: string,
+    messages: readonly {
+        readonly role?: HistoryRole;
+        readonly blocks?: readonly HistoryBlock[];
+    }[],
+    agentId = DEFAULT_AGENT_ID,
+): Promise<{ readonly history: HistoryModule; readonly database: ModuleDatabase }> {
+    const history = new HistoryModule();
+    const database = moduleDatabase(history.migrations, name);
+    await database.ready;
+    for (const [index, message] of messages.entries()) {
+        await history.record(database.context, agentId, {
+            blocks: [...(message.blocks ?? [{ type: "text", text: `message ${index}` }])],
+            recordId: `record-${index}`,
+            role: message.role ?? "user",
+        });
+    }
+    return { history, database };
 }
 
 export function modelSwitchScope(agentId = DEFAULT_AGENT_ID): AgentModuleScope {
@@ -115,4 +98,14 @@ export async function modelSwitchNoticeFromHook(
         modelSwitchScope(options.agentId),
         options.change ?? modelChange(),
     );
+}
+
+/** Read the text of a notice, failing the test when there is no notice or it is not text. */
+export function textFromNotice(
+    result: Awaited<ReturnType<typeof modelSwitchNoticeFromHook>>,
+): string {
+    if (result === undefined) throw new Error("Expected a model-switch notice.");
+    const block = result.content[0];
+    if (block?.type !== "text") throw new Error("Expected a text model-switch notice.");
+    return block.text;
 }

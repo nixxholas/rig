@@ -1,5 +1,5 @@
 import { SkillsModule } from "../skills/SkillsModule.js";
-import { ComputeModule, type ComputeModuleOptions } from "./ComputeModule.js";
+import { ComputeModule } from "./ComputeModule.js";
 
 export interface CreatedComputeModules {
     readonly computeModule: ComputeModule;
@@ -7,10 +7,16 @@ export interface CreatedComputeModules {
     readonly modules: readonly [ComputeModule, SkillsModule];
 }
 
-/** Create one shared module set; each configured agent receives its own cached compute. */
-export function createComputeModules(options: ComputeModuleOptions = {}): CreatedComputeModules {
-    const computeModule = new ComputeModule(options);
-    const skillsModule = new SkillsModule({ compute: computeModule });
+/**
+ * The module set a machine brings with it.
+ *
+ * Skills are discovered on the agent's own machine, so a compute module always arrives with the
+ * skills module reading through it. The compute module is built by its caller — ordinarily
+ * `new ComputeModule(config)`, or `ComputeModule.withProvider(...)` where the machine is swapped —
+ * and this puts the pair in the order an agent collection wants them.
+ */
+export function createComputeModules(computeModule: ComputeModule): CreatedComputeModules {
+    const skillsModule = new SkillsModule(computeModule);
     return {
         computeModule,
         skillsModule,

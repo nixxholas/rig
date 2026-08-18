@@ -2,9 +2,7 @@ import { constants } from "node:fs";
 import { access, stat } from "node:fs/promises";
 import { join } from "node:path";
 
-import { normalizeProjectCwd } from "../../git/normalizeProjectCwd.js";
-import { readGitTopLevel } from "../../git/readGitTopLevel.js";
-import type { GitCommandRunner } from "../../git/GitCommandRunner.js";
+import type { GitModule } from "../../git/index.js";
 import { ProjectRegistrationError } from "../ProjectRegistrationError.js";
 
 /**
@@ -15,7 +13,7 @@ import { ProjectRegistrationError } from "../ProjectRegistrationError.js";
  * linked worktree is its own valid top-level folder.
  */
 export async function validateRegistrationPath(
-    git: GitCommandRunner,
+    git: GitModule,
     requestedPath: string,
 ): Promise<string> {
     let details;
@@ -45,7 +43,7 @@ export async function validateRegistrationPath(
         );
     }
 
-    const path = normalizeProjectCwd(requestedPath);
+    const path = git.normalizeProjectCwd(requestedPath);
     try {
         const gitMetadata = await stat(join(path, ".git"));
         await access(
@@ -62,7 +60,7 @@ export async function validateRegistrationPath(
     }
     let topLevel: string;
     try {
-        topLevel = await readGitTopLevel(git, path);
+        topLevel = await git.topLevel(path);
     } catch (error) {
         if (isInaccessiblePathError(error)) {
             throw new ProjectRegistrationError(
@@ -93,6 +91,11 @@ function isInaccessiblePathError(error: unknown): boolean {
     const code = (error as NodeJS.ErrnoException | null)?.code;
     if (code === "EACCES" || code === "EPERM") return true;
     const message = error instanceof Error ? error.message : String(error);
+    // Git's own verdict wins. A read-only scan runs Git inside the shared sandbox, and the shell
+    // that carries it may complain about a start-up file of the person's it is not allowed to
+    // read. That complaint rides along on the same stream and must not turn "this folder is not a
+    // repository" into "this repository cannot be reached".
+    if (/not a git repository/iu.test(message)) return false;
     return /(?:permission denied|operation not permitted|could not open|unable to access|unsafe repository|dubious ownership)/iu.test(
         message,
     );

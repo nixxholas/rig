@@ -239,19 +239,6 @@ export const secretCommandEnvironmentSchema = Type.Object(
     { additionalProperties: false },
 );
 
-/** Per-secret values returned by an injected command resolver before module-owned merging. */
-export const secretCommandResolverEntrySchema = Type.Object(
-    {
-        secretId: secretIdSchema,
-        environment: secretHostEnvironmentSchema,
-    },
-    { additionalProperties: false },
-);
-
-export const secretCommandResolverResultSchema = Type.Array(secretCommandResolverEntrySchema, {
-    maxItems: 256,
-});
-
 /** The kind of mutation a store applied; a tag on store mutation results. */
 export const secretMutationOperationSchema = Type.Union([
     Type.Literal("register"),
@@ -283,6 +270,4 @@ export type SecretListQuery = Static<typeof secretListQuerySchema>;
 export type SecretPage = Static<typeof secretPageSchema>;
 export type SecretHostEnvironment = Static<typeof secretHostEnvironmentSchema>;
 export type SecretCommandEnvironment = Static<typeof secretCommandEnvironmentSchema>;
-export type SecretCommandResolverEntry = Static<typeof secretCommandResolverEntrySchema>;
-export type SecretCommandResolverResult = Static<typeof secretCommandResolverResultSchema>;
 export type SecretMutationOperation = Static<typeof secretMutationOperationSchema>;

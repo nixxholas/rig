@@ -76,18 +76,14 @@ export {
     MAX_WORKFLOW_POST_COMMIT_ERROR_LENGTH,
     workflowEventIdSchema,
     workflowEventSchema,
-    workflowModuleListenerSchema,
     workflowPostCommitErrorSchema,
     type WorkflowEvent,
-    type WorkflowModuleListener,
+    type WorkflowEventListener,
     type WorkflowPostCommitError,
+    type WorkflowUnsubscribe,
 } from "./WorkflowEvent.js";
 export { assertWorkflowLogPage, assertWorkflowPage, assertWorkflowRun } from "./WorkflowStore.js";
-export {
-    workflowModuleOptionsSchema,
-    WorkflowsModule,
-    type WorkflowModuleOptions,
-} from "./WorkflowsModule.js";
+export { WorkflowsModule } from "./WorkflowsModule.js";
 export { cancelWorkflowTool } from "./tools/cancel_workflow.js";
 export { listWorkflowsTool } from "./tools/list_workflows.js";
 export { runWorkflowTool } from "./tools/run_workflow.js";

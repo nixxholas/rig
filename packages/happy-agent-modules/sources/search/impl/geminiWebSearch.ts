@@ -2,7 +2,7 @@ import type { SearchAnswer, SearchProviderRequest, SearchSource } from "../Searc
 import type { Context } from "@steve.kite/stdlib";
 
 import { boundedSources } from "./boundedSources.js";
-import { createTimedSignal } from "./webFetch/createTimedSignal.js";
+import { createTimedSignal } from "../../impl/createTimedSignal.js";
 import type { VendorSearchContext } from "./VendorSearchContext.js";
 
 const GEMINI_INTERACTIONS_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";

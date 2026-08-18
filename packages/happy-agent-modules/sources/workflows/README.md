@@ -6,18 +6,27 @@ network of its own, and starts every agent the script asks for as an ordinary co
 is no host runtime behind it: execution, checkpointing, and the durable run catalog all live here.
 
 ```ts
-const workflows = new WorkflowsModule({
-    runContext: backgroundLifetime,
-    collaboration,
-    compute: { resolve: async (ctx, agentId) => await computeModule.resolve(ctx, agentId) },
-});
+const workflows = new WorkflowsModule(config, collaboration, computeModule);
 ```
 
-`runContext` is where a run lives once the tool call that started it has returned — a workflow
-outlives its turn, so it cannot be owned by that turn's context. `collaboration` is the module that
-starts the agents. `compute` is optional and used for one thing only: reading a script the model
-named by path. Optional `clock`, `eventIdFactory`, `collaboratorIdFactory`, `listener`, the page and
-log bounds, and `onPostCommitError` behave as in the other modules.
+`config` says whether workflows are turned on at all — `[features] workflows` — and the module reads
+it rather than being told. `collaboration` is the module that starts the agents. `compute` is used
+for one thing only: reading a script the model named by path.
+
+A run outlives the tool call that started it, so it cannot execute on that call's context. The
+module derives its own lifetime the first time a run starts: it detaches the context it was handed,
+names it `workflow-run`, and carries the agent database across. Starting a run without an agent
+database in context is an error, because there would be nothing for the run to be written to.
+
+Bounds are constants here, not settings: a page holds at most 50 runs, a log read at most 200 lines,
+and a script's output is elided past 12,000 characters.
+
+## Events
+
+`onEventTransactional(listener)` runs the listener inside the mutation transaction, so throwing from
+it rejects the change. `onEvent(listener)` runs after the change has committed and is advisory: a
+failure there is logged with a bounded reason and the run carries on. Both return the function that
+ends that one subscription; calling it twice is harmless.
 
 ## How a run executes
 
@@ -70,7 +79,3 @@ The current tables are:
 Migrations `001-workflows-runs` and `002-workflows-drop-replay-evidence` remain immutable.
 `003-workflows-execution` adds the checkpoint, agent-call and launch tables this module needs to
 run and resume a script itself.
-
-Transactional listeners run inside the mutation transaction. Post-commit listeners are advisory:
-their failures are bounded and reported through `onPostCommitError` without changing the already
-committed result.

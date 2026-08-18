@@ -3,9 +3,11 @@ import { afterCommit, type Context } from "@steve.kite/stdlib";
 
 import { projectEventIdSchema, projectTimestampSchema, type Project } from "./Project.js";
 import {
+    projectEventListenerSchema,
     projectEventSchema,
     type ProjectEvent,
-    type ProjectModuleListener,
+    type ProjectEventListener,
+    type ProjectUnsubscribe,
 } from "./ProjectEvent.js";
 import { assertProject } from "./ProjectRow.js";
 import { type ProjectSettings } from "./ProjectSettings.js";
@@ -20,13 +22,7 @@ import {
     assertProjectTransition,
     sameJson,
 } from "./ProjectTransition.js";
-import {
-    deepFreeze,
-    isDeepFrozen,
-    isPromiseLike,
-    requirePromise,
-    safeError,
-} from "./projectRuntime.js";
+import { deepFreeze, isDeepFrozen, requirePromise } from "./projectRuntime.js";
 
 /** Distributes over the event union, so each event keeps its own fields. */
 export type ProjectEventPayload = ProjectEvent extends infer TEvent
@@ -44,47 +40,44 @@ export type ProjectMutationSpec<Result extends ProjectStoreMutationResult> = {
     readonly run: (txCtx: Context, before: Project | undefined) => Promise<Result>;
 };
 
-export interface ProjectMutationsOptions {
-    readonly store: ProjectStore;
-    readonly eventIdFactory: (ctx: Context) => string | Promise<string>;
-    readonly clock: (ctx: Context) => number;
-    readonly listener: ProjectModuleListener | undefined;
-    readonly onPostCommitError:
-        | ((ctx: Context, event: ProjectEvent, error: unknown) => void | Promise<void>)
-        | undefined;
-}
-
 /**
  * The path every durable project change takes, and the reads it is decided from.
  *
  * A mutation runs in one transaction: the row is read, the store decides, and the answer is checked
  * against what is actually stored before anything is told about it. One event describes one change,
- * the transactional observer sees
- * it inside that transaction, and the post-commit observer only after the change is durable. An
- * observer that fails cannot undo a committed change.
+ * the transactional subscriber sees it inside that transaction, and the post-commit subscriber only
+ * after the change is durable. A subscriber that fails cannot undo a committed change.
  */
 export class ProjectMutations {
     readonly #store: ProjectStore;
-    readonly #eventIdFactory: ProjectMutationsOptions["eventIdFactory"];
-    readonly #clock: ProjectMutationsOptions["clock"];
-    readonly #listeners: ProjectModuleListener[] = [];
-    readonly #onPostCommitError: ProjectMutationsOptions["onPostCommitError"];
+    readonly #transactionalListeners = new Set<ProjectEventListener>();
+    readonly #postCommitListeners = new Set<ProjectEventListener>();
 
-    constructor(options: ProjectMutationsOptions) {
-        this.#store = options.store;
-        this.#eventIdFactory = options.eventIdFactory;
-        this.#clock = options.clock;
-        if (options.listener !== undefined) this.#listeners.push(options.listener);
-        this.#onPostCommitError = options.onPostCommitError;
+    constructor(store: ProjectStore) {
+        this.#store = store;
     }
 
-    /**
-     * Adds another observer of the catalog. Another module that has to react to a project change —
-     * the workspaces catalog archiving what was cut from an archived project, for instance — asks
-     * for its own place in the fan-out rather than replacing the host's listener.
-     */
-    addListener(listener: ProjectModuleListener): void {
-        this.#listeners.push(listener);
+    /** Takes a subscriber that runs inside the transaction the change commits in. */
+    onEventTransactional(listener: ProjectEventListener): ProjectUnsubscribe {
+        return this.#subscribe(this.#transactionalListeners, listener);
+    }
+
+    /** Takes a subscriber that runs once the change is durable. */
+    onEvent(listener: ProjectEventListener): ProjectUnsubscribe {
+        return this.#subscribe(this.#postCommitListeners, listener);
+    }
+
+    #subscribe(
+        listeners: Set<ProjectEventListener>,
+        listener: ProjectEventListener,
+    ): ProjectUnsubscribe {
+        if (!Value.Check(projectEventListenerSchema, listener)) {
+            throw new Error("A project subscriber must be a function.");
+        }
+        listeners.add(listener);
+        return () => {
+            listeners.delete(listener);
+        };
     }
 
     /**
@@ -127,24 +120,14 @@ export class ProjectMutations {
                 }
             }
             if (raw.changed) {
-                await this.observe(
-                    txCtx,
-                    await this.newEvent(txCtx, spec.event(after, before)),
-                    ctx,
-                );
+                await this.observe(txCtx, this.newEvent(spec.event(after, before)), ctx);
             }
             return structuredClone(raw);
         });
     }
 
-    async getOptional(
-        ctx: Context,
-        projectId: string,
-    ): Promise<Project | undefined> {
-        const raw = await requirePromise(
-            this.#store.get(ctx, projectId),
-            "Project store get",
-        );
+    async getOptional(ctx: Context, projectId: string): Promise<Project | undefined> {
+        const raw = await requirePromise(this.#store.get(ctx, projectId), "Project store get");
         if (raw === undefined) return undefined;
         assertProject(raw);
         assertProjectRecord(raw);
@@ -160,10 +143,7 @@ export class ProjectMutations {
         return project;
     }
 
-    async findByPath(
-        ctx: Context,
-        repositoryRef: string,
-    ): Promise<Project | undefined> {
+    async findByPath(ctx: Context, repositoryRef: string): Promise<Project | undefined> {
         const raw = await requirePromise(
             this.#store.findByPath(ctx, repositoryRef),
             "Project store find by folder",
@@ -186,18 +166,14 @@ export class ProjectMutations {
         return structuredClone(raw);
     }
 
-    async newEvent(
-        ctx: Context,
-        payload: ProjectEventPayload,
-    ): Promise<ProjectEvent> {
-        const rawId = this.#eventIdFactory(ctx);
-        const eventId = isPromiseLike(rawId) ? await rawId : rawId;
+    newEvent(payload: ProjectEventPayload): ProjectEvent {
+        const eventId = globalThis.crypto.randomUUID();
         if (!Value.Check(projectEventIdSchema, eventId)) {
-            throw new Error("The project event ID factory returned an invalid ID.");
+            throw new Error("The project catalog minted an identity it cannot represent.");
         }
-        const at = this.#clock(ctx);
+        const at = Date.now();
         if (!Value.Check(projectTimestampSchema, at)) {
-            throw new Error("The project clock must return a non-negative integer.");
+            throw new Error("The clock is outside the range a project timestamp can hold.");
         }
         const event = { ...payload, eventId, at };
         if (!Value.Check(projectEventSchema, event)) {
@@ -217,25 +193,21 @@ export class ProjectMutations {
         if (!Value.Check(projectEventSchema, event) || !isDeepFrozen(event)) {
             throw new Error("The project module created an invalid unfrozen event.");
         }
-        for (const listener of this.#listeners) {
-            const transactional = listener.onEventTransactional;
-            if (transactional !== undefined) await transactional.call(listener, ctx, event);
-        }
+        // A snapshot, so subscribing or unsubscribing from inside a subscriber cannot change who
+        // this event goes to.
+        for (const listener of [...this.#transactionalListeners]) await listener(ctx, event);
         afterCommit(publishCtx, (postCommitCtx) => this.#notifyPostCommit(postCommitCtx, event));
     }
 
     async #notifyPostCommit(ctx: Context, event: ProjectEvent): Promise<void> {
-        for (const listener of this.#listeners) {
-            const notify = listener.onEvent;
-            if (notify === undefined) continue;
+        for (const listener of [...this.#postCommitListeners]) {
             try {
-                await notify.call(listener, ctx, event);
+                await listener(ctx, event);
             } catch (error: unknown) {
-                try {
-                    await this.#onPostCommitError?.(ctx, event, safeError(error));
-                } catch {
-                    // Observer reporting is advisory after durable state has settled.
-                }
+                ctx.log.error(
+                    { error, eventId: event.eventId, type: event.type },
+                    "A project subscriber failed after the change was committed.",
+                );
             }
         }
     }

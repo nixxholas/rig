@@ -45,7 +45,7 @@ const goalClearedEventSchema = Type.Object(
     { additionalProperties: false },
 );
 
-/** Stable event identity and timestamp are attached before either listener sees the event. */
+/** Stable event identity and timestamp are attached before any subscriber sees the event. */
 export const goalEventSchema = Type.Union([
     goalSetEventSchema,
     goalStatusEventSchema,
@@ -54,18 +54,14 @@ export const goalEventSchema = Type.Union([
 
 export type GoalEvent = Static<typeof goalEventSchema>;
 
-/** Structural listener contract; methods may live on a class prototype. */
-export const goalModuleListenerSchema = Type.Object(
-    {
-        onEventTransactional: Type.Optional(
-            Type.Function([goalContextSchema, goalEventSchema], goalVoidOrPromiseVoidSchema),
-        ),
-        onEvent: Type.Optional(
-            Type.Function([goalContextSchema, goalEventSchema], goalVoidOrPromiseVoidSchema),
-        ),
-    },
-    { additionalProperties: false },
+/** One subscriber taken after construction. */
+export const goalEventListenerSchema = Type.Function(
+    [goalContextSchema, goalEventSchema],
+    goalVoidOrPromiseVoidSchema,
 );
 
-export type GoalModuleListener = Static<typeof goalModuleListenerSchema>;
+export type GoalEventListener = Static<typeof goalEventListenerSchema>;
+
+/** Ends a subscription. Calling it more than once does nothing further. */
+export type GoalUnsubscribe = () => void;
 export { goalContextSchema, goalVoidOrPromiseVoidSchema };

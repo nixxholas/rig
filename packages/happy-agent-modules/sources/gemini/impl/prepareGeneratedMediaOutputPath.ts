@@ -1,9 +1,7 @@
 import type { Context } from "@steve.kite/stdlib";
 
-import type { Compute } from "../../compute/Compute.js";
-import { computePermissionsForContext } from "../../compute/impl/computePermissionsForContext.js";
-import type { FileReadLog } from "../../compute/impl/FileReadLog.js";
-import { resolveComputePath } from "../../compute/impl/resolveComputePath.js";
+import type { Compute, ComputeModule } from "../../compute/index.js";
+import type { FileReadLog } from "../../impl/FileReadLog.js";
 
 /**
  * Settle where generated media will land, before Gemini is asked to make it.
@@ -13,12 +11,13 @@ import { resolveComputePath } from "../../compute/impl/resolveComputePath.js";
  * nobody's work to lose.
  */
 export async function prepareGeneratedMediaOutputPath(
+    computeModule: ComputeModule,
     compute: Compute,
     reads: FileReadLog,
     ctx: Context,
     path: string,
 ): Promise<string> {
-    const resolvedPath = resolveComputePath(path, compute.cwd, compute.fs.home);
-    await reads.assertRead(ctx, compute.fs, computePermissionsForContext(ctx), resolvedPath);
+    const resolvedPath = computeModule.resolvePath(compute, path);
+    await reads.assertRead(ctx, compute.fs, computeModule.permissionsForContext(ctx), resolvedPath);
     return resolvedPath;
 }

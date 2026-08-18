@@ -60,3 +60,24 @@ between the two neighbours the row lands amongst, one guarded write, no whole-li
 
 The remote URL pattern accepted `https://github.com:bad/repo`, a URL no clone can resolve. The host
 may carry a port, and a port is digits.
+
+## Detached background work must restore its database
+
+The catalog's background work runs on a lifetime detached from the first caller. Detaching removes
+the agent database deliberately, so a transaction facade cannot escape the transaction that owns
+it. The module keeps the underlying database separately and restores it with `withAgentDatabase`
+before background work writes.
+
+## Construction names only module dependencies
+
+The catalog takes `ConfigModule` and `GitModule`, not an options object or loose collaborators.
+Configuration owns its durable paths and credentials; Git owns repository operations. The catalog
+mints IDs and timestamps itself, keeps page bounds as constants, and accepts event subscribers
+after construction through `onEventTransactional` and `onEvent`.
+
+## Sibling vocabulary crosses through the module
+
+A sibling may import the project module class and public types from `index.ts`, but not project
+helpers or internals. Rules another feature needs—validating names and client IDs, normalizing base
+references, deriving storage keys, and reducing Git facts—are public methods on `ProjectsModule`,
+so the owning module remains the single source of that behavior.

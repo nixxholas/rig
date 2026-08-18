@@ -1,68 +1,27 @@
 import { MurmurClient, type MurmurStore } from "@slopus/murmur";
-import type { AgentDatabase, AgentModule, AgentModuleMigration } from "@slopus/happy-agent-base";
-import { Type, type Static } from "@sinclair/typebox";
-import { Value } from "@sinclair/typebox/value";
-import type { Context, RootContext } from "@steve.kite/stdlib";
+import {
+    agentDatabase,
+    withAgentDatabase,
+    type AgentDatabase,
+    type AgentModule,
+    type AgentModuleMigration,
+} from "@slopus/happy-agent-base";
+import { detach, type Context, type RootContext } from "@steve.kite/stdlib";
 
+import type { ConfigModule } from "../config/index.js";
 import type { ProfileModule } from "../profile/ProfileModule.js";
 
 import { discardMurmurIdentity, murmurMigrations, readMurmurBinding } from "./MurmurDatabase.js";
 import { MurmurService, type MurmurClientFacade } from "./MurmurService.js";
 import { SqliteMurmurStore } from "./SqliteMurmurStore.js";
-import {
-    murmurModuleListenerSchema,
-    type MurmurInvitation,
-    type MurmurOutgoingRequest,
-    type MurmurSnapshot,
+import type {
+    MurmurChangedEvent,
+    MurmurEventListener,
+    MurmurInvitation,
+    MurmurOutgoingRequest,
+    MurmurSnapshot,
+    MurmurUnsubscribe,
 } from "./MurmurTypes.js";
-
-export const DEFAULT_MURMUR_RELAY_URL = "https://murmur.cluster-fluster.com/";
-
-const exact = { additionalProperties: false } as const;
-// Whole objects this module is handed rather than told about: a live catalog, a lifetime, a
-// client. Their shape is their own, so the schema stands for the type without describing it.
-const opaque = { additionalProperties: true } as const;
-const murmurContextSchema = Type.Unsafe<Context>(Type.Object({}, opaque));
-const murmurRootContextSchema = Type.Unsafe<RootContext>(Type.Object({}, opaque));
-const murmurProfileModuleSchema = Type.Unsafe<ProfileModule>(Type.Object({}, opaque));
-const murmurStoreSchema = Type.Unsafe<MurmurStore>(Type.Object({}, opaque));
-const murmurClientFacadeSchema = Type.Unsafe<MurmurClientFacade>(Type.Object({}, opaque));
-
-export const murmurModuleOptionsSchema = Type.Object(
-    {
-        /** Off unless the configuration turns it on. Nothing connects to a relay by default. */
-        enabled: Type.Boolean(),
-        listener: Type.Optional(murmurModuleListenerSchema),
-        now: Type.Optional(Type.Function([], Type.Integer({ minimum: 0 }))),
-        onError: Type.Optional(
-            Type.Function([Type.Unknown()], Type.Union([Type.Void(), Type.Promise(Type.Void())])),
-        ),
-        /** Opens a fresh Murmur client over the store this module opened. */
-        openClient: Type.Optional(
-            Type.Function(
-                [murmurContextSchema, murmurStoreSchema],
-                Type.Promise(murmurClientFacadeSchema),
-            ),
-        ),
-        /**
-         * The catalog holding the one person this installation shares as.
-         *
-         * Sharing puts a person on the wire so a contact sees a name rather than a key, and it is
-         * that catalog which decides whether this installation may act as them at all.
-         */
-        profile: murmurProfileModuleSchema,
-        relay: Type.Optional(Type.String({ minLength: 1, maxLength: 2_048 })),
-        /**
-         * The lifetime the relay connection and the store run on, with the agent database attached.
-         *
-         * Both outlive every call that touches them, so neither may borrow the context of the
-         * request that happened to start it.
-         */
-        rootContext: murmurRootContextSchema,
-    },
-    exact,
-);
-export type MurmurModuleOptions = Static<typeof murmurModuleOptionsSchema>;
 
 interface OpenMurmur {
     readonly service: MurmurService;
@@ -76,33 +35,51 @@ interface OpenMurmur {
  * The module owns no file and no socket. Murmur's cryptographic state is kept in the agent
  * database like everything else this agent knows, next to one row saying which person the
  * identity belongs to, so the two can never disagree about who this installation is.
+ *
+ * Whether sharing runs at all, and which relay it reaches, are configuration decisions: an
+ * identity on a relay is not something an installation should acquire because a caller passed a
+ * flag.
  */
 export class MurmurModule<Database extends AgentDatabase = AgentDatabase>
     implements AgentModule<never, Database>
 {
     readonly name = "murmur";
     readonly migrations: readonly AgentModuleMigration<Database>[];
-    readonly #options: MurmurModuleOptions;
+    readonly #config: ConfigModule;
+    readonly #listeners = new Set<MurmurEventListener>();
+    readonly #profile: ProfileModule;
     #closing = false;
+    #lifetime: RootContext | undefined;
     #open: OpenMurmur | undefined;
     #tail: Promise<void> = Promise.resolve();
 
-    constructor(options: MurmurModuleOptions) {
-        if (!Value.Check(murmurModuleOptionsSchema, options)) {
-            throw new Error("Murmur module options are invalid.");
-        }
-        this.#options = options;
+    constructor(config: ConfigModule, profile: ProfileModule) {
+        this.#config = config;
+        this.#profile = profile;
         this.migrations = murmurMigrations as readonly AgentModuleMigration<Database>[];
     }
 
     /** Whether the configuration turned sharing on at all. */
     get enabled(): boolean {
-        return this.#options.enabled;
+        return this.#config.configuration.values.sharing.enabled;
     }
 
     /** Whether a client is live right now. */
     get running(): boolean {
         return this.#open !== undefined;
+    }
+
+    /**
+     * Watch sharing after something about it has changed.
+     *
+     * A subscriber cannot undo the change it is told about, so a failing one is logged and the
+     * others still hear it. Returns the function that ends the subscription.
+     */
+    onEvent(listener: MurmurEventListener): MurmurUnsubscribe {
+        this.#listeners.add(listener);
+        return () => {
+            this.#listeners.delete(listener);
+        };
     }
 
     /**
@@ -114,7 +91,7 @@ export class MurmurModule<Database extends AgentDatabase = AgentDatabase>
      * setting and naming the person, and it resolves the moment `bindProfile` is called.
      */
     async open(ctx: Context, profileId?: string): Promise<void> {
-        if (!this.#options.enabled) return;
+        if (!this.enabled) return;
         await this.#transition(async () => {
             if (this.#closing || this.#open !== undefined) return;
             const bound = await readMurmurBinding(ctx);
@@ -219,21 +196,33 @@ export class MurmurModule<Database extends AgentDatabase = AgentDatabase>
         });
     }
 
+    /**
+     * Opens a client on the relay the configuration names.
+     *
+     * This is the one seam a test replaces, by subclassing and overriding it: there is no relay
+     * to reach from a test, and a client is the only thing here that would need one. Nothing in
+     * the product overrides it.
+     */
+    protected async openClient(_ctx: Context, store: MurmurStore): Promise<MurmurClientFacade> {
+        return await MurmurClient.open({
+            relay: this.#config.configuration.values.sharing.relayUrl,
+            store,
+        });
+    }
+
     async #start(ctx: Context, bindProfileId?: string): Promise<OpenMurmur> {
-        const store = new SqliteMurmurStore(this.#options.rootContext);
+        const lifetime = this.#lifetimeFrom(ctx);
+        const store = new SqliteMurmurStore(lifetime);
         let service: MurmurService | undefined;
         try {
-            const client = await this.#openClient(ctx, store);
-            const listener = this.#options.listener;
+            const client = await this.openClient(ctx, store);
             service = new MurmurService({
                 client,
-                ...(this.#options.now === undefined ? {} : { now: this.#options.now }),
-                ...(this.#options.onError === undefined ? {} : { onError: this.#options.onError }),
-                profile: this.#options.profile,
+                lifetime,
+                profile: this.#profile,
                 publish: (publishCtx, event) => {
-                    void listener?.onEvent?.(publishCtx, event);
+                    this.#publish(publishCtx, event);
                 },
-                rootContext: this.#options.rootContext,
             });
             if (bindProfileId === undefined) {
                 await service.initializeBinding(ctx);
@@ -260,18 +249,40 @@ export class MurmurModule<Database extends AgentDatabase = AgentDatabase>
         }
     }
 
-    async #openClient(ctx: Context, store: MurmurStore): Promise<MurmurClientFacade> {
-        if (this.#options.openClient !== undefined) {
-            return await this.#options.openClient(ctx, store);
+    /**
+     * The lifetime the relay connection and the store run on.
+     *
+     * Both outlive every call that touches them, so neither may borrow the context of the request
+     * that happened to start it. Detaching drops the caller's lifetime and the database with it,
+     * so the database is carried back on: sharing needs it for as long as it is open. It is taken
+     * once, from whichever call opens sharing first, and reused for every later one.
+     *
+     * It stays a root because the store and the relay loop each name their own work off it, and
+     * only a root can be named again; deriving from a root keeps the root, which the signature of
+     * `withAgentDatabase` does not say.
+     */
+    #lifetimeFrom(ctx: Context): RootContext {
+        if (this.#lifetime !== undefined) return this.#lifetime;
+        const database = agentDatabase(ctx);
+        if (database === undefined) {
+            throw new Error("Sharing was opened without an agent database.");
         }
-        return await MurmurClient.open({
-            relay: this.#options.relay ?? DEFAULT_MURMUR_RELAY_URL,
-            store,
-        });
+        this.#lifetime = withAgentDatabase(detach(ctx), database) as RootContext;
+        return this.#lifetime;
+    }
+
+    #publish(ctx: Context, event: MurmurChangedEvent): void {
+        for (const listener of [...this.#listeners]) {
+            try {
+                listener(ctx, event);
+            } catch (error: unknown) {
+                ctx.log.warn("A sharing subscriber failed.", {}, error);
+            }
+        }
     }
 
     #requireEnabled(): void {
-        if (!this.#options.enabled) throw new Error("Sharing is disabled.");
+        if (!this.enabled) throw new Error("Sharing is disabled.");
     }
 
     #requireOpen(): OpenMurmur {

@@ -6,57 +6,19 @@ import type {
     AgentSystemRef,
 } from "@slopus/happy-agent-base";
 import type { SessionSystemMessage } from "@slopus/happy-providers";
-import { Type, type Static } from "@sinclair/typebox";
-import { Value } from "@sinclair/typebox/value";
 import type { Context } from "@steve.kite/stdlib";
 
-import {
-    assertHistoryReader,
-    historyReaderSchema,
-    type HistoryReader,
-} from "../history/HistoryReader.js";
-import { historyRecordSchema, type HistoryRecord } from "../history/HistoryStore.js";
-import { MAX_HISTORY_PAGE_SIZE } from "../history/HistoryMessage.js";
-import {
-    summarizeHistory,
-    historyStatsSchema,
-    type HistoryStats,
-} from "../history/impl/summarizeHistory.js";
-import { createHistoryExcerpt } from "./impl/createHistoryExcerpt.js";
+import type { HistoryExcerpt, HistoryModule } from "../history/index.js";
 import { createModelSwitchNotice } from "./impl/createModelSwitchNotice.js";
 
 /** How much of the erased conversation the notice may carry. */
 const MAX_EXCERPT_CHARACTERS = 32_000;
-/** How many records one side of the bounded history excerpt may contribute. */
-const EXCERPT_READ_PAGE_SIZE = 100;
-/** The hard cap on records held while assembling an excerpt. */
-const MAX_EXCERPT_RECORDS = EXCERPT_READ_PAGE_SIZE * 2;
 /**
  * The name of the one tool `HistoryModule` exposes. Fixed rather than configurable: a
- * `HistoryModule` reference always offers exactly `read_agent_history` (see
- * `history/tools/read_agent_history.ts`), so there is nothing for a host to name separately.
+ * `HistoryModule` always offers exactly `read_agent_history` (see
+ * `history/tools/read_agent_history.ts`), so there is nothing to name separately.
  */
 const HISTORY_TOOL_NAME = "read_agent_history";
-
-/**
- * A runtime-checkable identity for a `HistoryModule` reference.
- *
- * `HistoryModule`'s only genuinely enumerable own property is its `name` field (every other
- * field is a true private `#` member and every method lives on the prototype), so checking for
- * `name: "history"` is what a structural TypeBox schema can actually observe about the instance.
- */
-const modelSwitchModuleOptionsSchema = Type.Object(
-    {
-        history: Type.Optional(historyReaderSchema),
-    },
-    { additionalProperties: false },
-);
-
-/** Runtime contract for a model-switch module. */
-export { modelSwitchModuleOptionsSchema };
-
-/** What a model-switch module is built with. */
-export type ModelSwitchModuleOptions = Static<typeof modelSwitchModuleOptionsSchema>;
 
 /**
  * The notice a model gets when it inherits a conversation it cannot see.
@@ -72,24 +34,20 @@ export type ModelSwitchModuleOptions = Static<typeof modelSwitchModuleOptionsSch
  * new agent's first message, which settles a model rather than replacing one.
  *
  * Model switching itself never requires a history: the notice degrades to saying plainly that an
- * invisible conversation came before, which is honest and sufficient on its own. A `HistoryModule`
- * reference is therefore optional; when supplied, the notice also quotes both ends of the erased
- * conversation and names the tool that can read the rest.
+ * invisible conversation came before, which is honest and sufficient on its own. The
+ * `HistoryModule` is therefore an optional dependency; when it is given, the notice also quotes
+ * both ends of the erased conversation and names the tool that can read the rest.
  */
 export class ModelSwitchModule implements AgentModule {
     readonly name = "model-switch";
 
     /** The history the notice quotes and points the model at, when the agent keeps one. */
-    readonly #history: HistoryReader | undefined;
+    readonly #history: HistoryModule | undefined;
     /** The collection this module belongs to, which is where model labels come from. */
     #agents: AgentSystemRef | undefined;
 
-    constructor(options: ModelSwitchModuleOptions = {}) {
-        if (!Value.Check(modelSwitchModuleOptionsSchema, options)) {
-            throw new Error("Model switch module options are invalid.");
-        }
-        if (options.history !== undefined) assertHistoryReader(options.history);
-        this.#history = options.history;
+    constructor(history?: HistoryModule) {
+        this.#history = history;
     }
 
     /** Keep the collection, so a model can be named the way a person would name it. */
@@ -130,44 +88,16 @@ export class ModelSwitchModule implements AgentModule {
      * rejects the switch itself and leaves the agent on the old model, which is far worse than a
      * notice that quotes nothing. So an unreadable history costs the excerpt and nothing else.
      */
-    async #excerpt(ctx: Context, agentId: string) {
+    async #excerpt(
+        ctx: Context,
+        agentId: string,
+    ): Promise<{ readonly excerpt?: HistoryExcerpt | undefined }> {
         if (this.#history === undefined) return {};
         try {
-            const [beginning, recent] = await Promise.all([
-                this.#history.messages(ctx, agentId, {
-                    from: "start",
-                    limit: EXCERPT_READ_PAGE_SIZE,
-                }),
-                this.#history.messages(ctx, agentId, {
-                    from: "end",
-                    limit: EXCERPT_READ_PAGE_SIZE,
-                }),
-            ]);
-            validateHistoryRecords(beginning, EXCERPT_READ_PAGE_SIZE);
-            validateHistoryRecords(recent, EXCERPT_READ_PAGE_SIZE);
-            const records = mergeHistoryRecords(beginning, recent);
-            if (records.length > MAX_EXCERPT_RECORDS) {
-                throw new Error("The history excerpt exceeded its bounded read limit.");
-            }
-            if (records.length === 0) return {};
-            const sampledStats = summarizeHistory(records.map((record) => record.message));
-            let exactStats: HistoryStats | undefined;
-            try {
-                const stats = await this.#history.stats(ctx, agentId);
-                if (
-                    Value.Check(historyStatsSchema, stats) &&
-                    validHistoryStats(stats) &&
-                    statsAtLeast(stats, sampledStats)
-                ) {
-                    exactStats = stats;
-                }
-            } catch {
-                // The bounded sample remains useful, but its counts must be labeled as such.
-            }
-            return {
-                excerpt: createHistoryExcerpt(records, MAX_EXCERPT_CHARACTERS, exactStats),
-            };
-        } catch {
+            const excerpt = await this.#history.readExcerpt(ctx, agentId, MAX_EXCERPT_CHARACTERS);
+            return excerpt === undefined ? {} : { excerpt };
+        } catch (error: unknown) {
+            ctx.log.warn("A model switch could not quote the history it is replacing.", error);
             return {};
         }
     }
@@ -180,93 +110,4 @@ export class ModelSwitchModule implements AgentModule {
         );
         return offered?.name ?? model;
     }
-}
-
-function validHistoryStats(stats: HistoryStats): boolean {
-    return (
-        stats.assistantMessages + stats.userMessages <= stats.messages &&
-        (stats.messages > 0 ||
-            (stats.assistantMessages === 0 &&
-                stats.textCharacters === 0 &&
-                stats.thinkingBlocks === 0 &&
-                stats.toolCalls === 0 &&
-                stats.toolResults === 0 &&
-                stats.userMessages === 0))
-    );
-}
-
-/** An archive-wide aggregate must account for every item in the validated bounded sample. */
-function statsAtLeast(actual: HistoryStats, expected: HistoryStats): boolean {
-    return (
-        actual.assistantMessages >= expected.assistantMessages &&
-        actual.messages >= expected.messages &&
-        actual.textCharacters >= expected.textCharacters &&
-        actual.thinkingBlocks >= expected.thinkingBlocks &&
-        actual.toolCalls >= expected.toolCalls &&
-        actual.toolResults >= expected.toolResults &&
-        actual.userMessages >= expected.userMessages
-    );
-}
-
-/**
- * Validate one bounded side of a `HistoryModule.messages` result before it enters the excerpt.
- *
- * `HistoryModule.messages` already validates its own output internally, but this module does not
- * assume that holds for every value a host could pass as `history` — a subclass, a test double, or
- * an instrumented wrapper around a real instance could still return something malformed.
- */
-function validateHistoryRecords(
-    records: readonly unknown[],
-    requestedLimit: number,
-): asserts records is readonly HistoryRecord[] {
-    if (
-        !Value.Check(
-            Type.Array(historyRecordSchema, {
-                maxItems: Math.min(requestedLimit, MAX_HISTORY_PAGE_SIZE),
-            }),
-            records,
-        )
-    ) {
-        throw new Error("The history module returned invalid records.");
-    }
-    const recordIds = new Set<string>();
-    let previousPosition = -1;
-    for (const record of records) {
-        if (record.position <= previousPosition || recordIds.has(record.message.recordId)) {
-            throw new Error("The history module returned unstable records.");
-        }
-        recordIds.add(record.message.recordId);
-        previousPosition = record.position;
-    }
-}
-
-/**
- * Join the two bounded pages in source order.
- *
- * A short history appears in both pages. Position and record ID are both stable identities, so a
- * disagreement between them — including one identity carrying two different messages — is
- * malformed input rather than a reason to silently choose one side.
- */
-function mergeHistoryRecords(...pages: readonly (readonly HistoryRecord[])[]): HistoryRecord[] {
-    const byPosition = new Map<number, HistoryRecord>();
-    const byRecordId = new Map<string, HistoryRecord>();
-    for (const page of pages) {
-        for (const record of page) {
-            const positionMatch = byPosition.get(record.position);
-            const recordIdMatch = byRecordId.get(record.message.recordId);
-            if (
-                (positionMatch !== undefined &&
-                    positionMatch.message.recordId !== record.message.recordId) ||
-                (recordIdMatch !== undefined && recordIdMatch.position !== record.position) ||
-                (positionMatch !== undefined && !Value.Equal(positionMatch.message, record.message))
-            ) {
-                throw new Error("The history module returned conflicting record identities.");
-            }
-            if (positionMatch === undefined) {
-                byPosition.set(record.position, record);
-                byRecordId.set(record.message.recordId, record);
-            }
-        }
-    }
-    return [...byPosition.values()].sort((left, right) => left.position - right.position);
 }

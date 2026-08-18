@@ -6,17 +6,27 @@ compute module so a generated file lands where every other file tool would put i
 
 ```ts
 import { Agent } from "@slopus/happy-agent-base";
-import { GeminiModule } from "@slopus/happy-agent-modules";
+import { ComputeModule, ConfigModule, GeminiModule } from "@slopus/happy-agent-modules";
 
-const gemini = new GeminiModule({ apiKey, compute: computeModule });
+const config = await ConfigModule.load();
+const gemini = new GeminiModule(config, new ComputeModule(config));
 const agent = await Agent.create(ctx, { ...options, modules: [gemini] });
 ```
 
-`apiKey` is required — construct the module only when a Gemini key exists. `compute` is the
-`ComputeResolver` the compute module already implements; it is how the module reads and writes
-files for one agent, not a host integration. `fetch` is optional and replaces the transport the
-requests go out on. One instance serves every agent; an agent with no compute configured receives
-no Gemini tools at all, because all three of them touch the filesystem.
+`config` is where the key comes from: Gemini is not one of the accounts a chat runs on, so it has no
+provider entry, and `ConfigModule.geminiApiKey` resolves `GEMINI_API_KEY` on behalf of every module
+that needs it. `compute` is the compute module itself: it is how this module finds one agent's
+machine and works through that machine's boundary — permissions, resolved paths, whether a path
+needs review — rather than a host integration.
+
+The module is always safe to install. An installation with no Gemini key gets no Gemini tools, and
+so does an agent with no compute configured, because all three tools touch the filesystem. One
+instance serves every agent.
+
+`GeminiModule.transport()` is the module's one seam, and it exists for tests: it answers with
+nothing, which means the global `fetch`, and a test subclass overrides it to answer without a
+network (see `tests/gemini/support/geminiTools.ts`). There is no constructor option for it and the
+product never overrides it.
 
 ## Tools
 

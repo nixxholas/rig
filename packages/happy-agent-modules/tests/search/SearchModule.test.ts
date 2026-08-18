@@ -1,8 +1,19 @@
-import { Value } from "@sinclair/typebox/value";
-import type { AgentModel, AgentModuleScope, AgentProviders } from "@slopus/happy-agent-base";
-import { createRootContext } from "@steve.kite/stdlib";
-import { describe, expect, it } from "vitest";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
+import { Value } from "@sinclair/typebox/value";
+import { AgentProviders, type AgentModel, type AgentModuleScope } from "@slopus/happy-agent-base";
+import {
+    AnthropicProvider,
+    ClaudeApiKeyCredential,
+    CodexApiKeyCredential,
+    CodexProvider,
+} from "@slopus/happy-providers";
+import { createRootContext } from "@steve.kite/stdlib";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { ConfigModule } from "../../sources/config/index.js";
 import {
     MAX_FETCH_URL_LENGTH,
     searchAnswerSchema,
@@ -10,42 +21,54 @@ import {
     type FetchResult,
     type SearchAnswer,
 } from "../../sources/search/Search.js";
-import { SearchModule, type SearchModuleOptions } from "../../sources/search/SearchModule.js";
+import { MAX_SEARCH_OUTPUT_CHARACTERS, SearchModule } from "../../sources/search/SearchModule.js";
 import { resolveModuleHooks } from "../support/moduleHooks.js";
 
 const ctx = createRootContext().named("happy-agent-modules-search");
 const AGENT_ID = "agent-one";
 
 /**
- * Every account the person configured, as the module reads it. The module only ever asks which
- * accounts exist and what vendor each one is, so this is the whole surface a test has to stand in
- * for.
+ * The accounts a person configured, as real provider registrations.
+ *
+ * Nothing here is ever resolved — every test stops before a vendor is called — but the registry,
+ * the catalog and the configuration around them are the product's own, so the module reads the
+ * same accounts it would read in a running agent.
  */
-function providers(accounts: Readonly<Record<string, string>> = {}): AgentProviders {
-    return {
-        ids: Object.keys(accounts),
-        typeOf: (id: string) => accounts[id] ?? null,
-    } as unknown as AgentProviders;
-}
-
-function models(accounts: Readonly<Record<string, string>> = {}): AgentModel[] {
-    return Object.keys(accounts).map((providerId) => ({
-        providerId,
-        id: `${providerId}-model`,
-        name: `${providerId} model`,
-        effortLevels: ["medium"],
-        defaultEffort: "medium",
-    })) as AgentModel[];
-}
-
-function module(options: Partial<SearchModuleOptions> = {}): SearchModule {
-    const accounts = { codex: "codex", claude: "claude" };
-    return new SearchModule({
-        providers: providers(accounts),
-        models: models(accounts),
-        currentProviderId: "codex",
-        ...options,
+async function configWith(accounts: readonly (readonly [string, "claude" | "codex"])[]) {
+    const providers = new AgentProviders();
+    const models: AgentModel[] = [];
+    for (const [id, vendor] of accounts) {
+        providers.add(id, await account(vendor), vendor);
+        models.push({
+            providerId: id,
+            id: `${id}-model`,
+            name: `${id} model`,
+            effortLevels: ["medium"],
+            defaultEffort: "medium",
+        });
+    }
+    return await ConfigModule.load(await mkdtemp(join(tmpdir(), "rig-search-")), {
+        inference: { models, providers },
     });
+}
+
+async function account(vendor: "claude" | "codex") {
+    if (vendor === "codex") {
+        const credential = await CodexApiKeyCredential.tryLoad({ apiKey: "test-key" });
+        return new CodexProvider({ credential: credential! });
+    }
+    const credential = await ClaudeApiKeyCredential.tryLoad({ apiKey: "test-key" });
+    return new AnthropicProvider({ credential: credential! });
+}
+
+/** The module as an agent gets it: the first model's account is the one this chat runs on. */
+async function module(): Promise<SearchModule> {
+    return new SearchModule(
+        await configWith([
+            ["codex", "codex"],
+            ["claude", "claude"],
+        ]),
+    );
 }
 
 function scope(agentId: string): AgentModuleScope {
@@ -68,9 +91,13 @@ async function toolsFor(search: SearchModule) {
     return await hooks.tools!(ctx, scope(AGENT_ID));
 }
 
+afterEach(() => {
+    vi.unstubAllEnvs();
+});
+
 describe("SearchModule", () => {
     it("exposes every vendor tool with explicit Auto network permissions", async () => {
-        const tools = await toolsFor(module());
+        const tools = await toolsFor(await module());
         expect(tools.map((tool) => tool.name)).toEqual([
             "web_fetch",
             "gemini_web_search",
@@ -96,7 +123,8 @@ describe("SearchModule", () => {
     });
 
     it("says which vendor has no configured account instead of searching nowhere", async () => {
-        const tools = await toolsFor(module());
+        vi.stubEnv("GEMINI_API_KEY", "");
+        const tools = await toolsFor(await module());
         const byName = new Map(tools.map((tool) => [tool.name, tool]));
 
         await expect(
@@ -111,7 +139,7 @@ describe("SearchModule", () => {
     });
 
     it("names the account a vendor search was asked for when that account does not exist", async () => {
-        const tools = await toolsFor(module());
+        const tools = await toolsFor(await module());
         const codex = tools.find((tool) => tool.name === "codex_web_search")!;
 
         await expect(
@@ -120,7 +148,7 @@ describe("SearchModule", () => {
     });
 
     it("rejects a routed request before it reaches a vendor", async () => {
-        const search = module();
+        const search = await module();
 
         await expect(
             search.providerSearch(ctx, AGENT_ID, {
@@ -145,7 +173,7 @@ describe("SearchModule", () => {
     });
 
     it("rejects a fetch destination that is not a plain web address", async () => {
-        const search = module();
+        const search = await module();
         for (const url of [
             "file:///tmp/example",
             "javascript:alert(1)",
@@ -159,7 +187,7 @@ describe("SearchModule", () => {
     });
 
     it("rejects a fetch URL that is malformed or past the documented length bound", async () => {
-        const search = module();
+        const search = await module();
         const prefix = "https://example.test/";
         const tooLong = `${prefix}${"x".repeat(MAX_FETCH_URL_LENGTH)}`;
 
@@ -167,11 +195,11 @@ describe("SearchModule", () => {
         await expect(search.fetch(ctx, AGENT_ID, { url: "not a url" })).rejects.toThrow();
     });
 
-    it("renders a vendor answer with its sources, and keeps every URL whole under pressure", () => {
-        const search = module({ maxOutputCharacters: 256 });
+    it("renders a vendor answer with its sources, and keeps every URL whole under pressure", async () => {
+        const search = await module();
         const output = search.formatSearchAnswerForModel(
             answer({
-                answer: "x".repeat(5_000),
+                answer: "x".repeat(MAX_SEARCH_OUTPUT_CHARACTERS * 2),
                 sources: [
                     { title: "First", url: "https://example.test/one" },
                     { title: "Second", url: "https://example.test/two" },
@@ -179,21 +207,23 @@ describe("SearchModule", () => {
             }),
         );
 
-        expect(output.length).toBeLessThanOrEqual(256);
+        expect(output.length).toBeLessThanOrEqual(MAX_SEARCH_OUTPUT_CHARACTERS);
         expect(output).toContain("[Answer truncated.]");
         expect(output).toContain("https://example.test/one");
         expect(output).toContain("https://example.test/two");
     });
 
-    it("counts the sources that did not fit rather than writing half of one", () => {
-        const search = module({ maxOutputCharacters: 256 });
-        const many = Array.from({ length: 20 }, (_unused, index) => ({
+    it("counts the sources that did not fit rather than writing half of one", async () => {
+        const search = await module();
+        // The answer schema allows a hundred sources, and a hundred long URLs is more than the
+        // half of the output budget the sources block is allowed to take.
+        const many = Array.from({ length: 100 }, (_unused, index) => ({
             title: `Source ${String(index)}`,
-            url: `https://example.test/${"path".repeat(8)}/${String(index)}`,
+            url: `https://example.test/${"path".repeat(40)}/${String(index)}`,
         }));
 
         const output = search.formatSearchAnswerForModel(answer({ sources: many }));
-        expect(output.length).toBeLessThanOrEqual(256);
+        expect(output.length).toBeLessThanOrEqual(MAX_SEARCH_OUTPUT_CHARACTERS);
         expect(output).toMatch(/\[\d+ more sources? omitted\.\]/u);
         for (const line of output.split("\n")) {
             if (!line.startsWith("https://")) continue;
@@ -201,8 +231,8 @@ describe("SearchModule", () => {
         }
     });
 
-    it("refuses to format an answer it cannot stand behind", () => {
-        const search = module();
+    it("refuses to format an answer it cannot stand behind", async () => {
+        const search = await module();
         expect(() => search.formatSearchAnswerForModel({ ...answer(), answer: "" })).toThrow(
             "invalid search answer",
         );
@@ -211,23 +241,23 @@ describe("SearchModule", () => {
         ).toThrow("invalid search answer");
     });
 
-    it("bounds fetch output and marks what was cut", () => {
-        const search = module({ maxOutputCharacters: 256 });
+    it("bounds fetch output and marks what was cut", async () => {
+        const search = await module();
         const result: FetchResult = {
             url: "https://example.test/",
             title: "Title",
-            content: "x".repeat(5_000),
+            content: "x".repeat(MAX_SEARCH_OUTPUT_CHARACTERS * 2),
             truncated: true,
         };
 
         const output = search.formatFetchForModel(result);
-        expect(output.length).toBeLessThanOrEqual(256);
+        expect(output.length).toBeLessThanOrEqual(MAX_SEARCH_OUTPUT_CHARACTERS);
         expect(output.startsWith("https://example.test/")).toBe(true);
         expect(output).toContain("[Content truncated.]");
     });
 
     it("lets every vendor search tool render its answer and cited sources", async () => {
-        const search = module({ maxOutputCharacters: 256 });
+        const search = await module();
         const tools = await toolsFor(search);
         const result = answer();
         for (const tool of tools.filter((candidate) => candidate.name !== "web_fetch")) {
@@ -275,8 +305,14 @@ describe("SearchModule", () => {
         expect(Value.Check(searchAnswerSchema, { ...answer(), durationMs: -1 })).toBe(false);
     });
 
-    it("refuses options it cannot run a search with", () => {
-        expect(() => new SearchModule({ models: [] } as never)).toThrow("options are invalid");
-        expect(() => module({ maxOutputCharacters: 1 })).toThrow("options are invalid");
+    it("has no accounts to search on when the configuration enables none", async () => {
+        const search = new SearchModule(await configWith([]));
+        const tools = await toolsFor(search);
+
+        await expect(
+            tools
+                .find((tool) => tool.name === "codex_web_search")!
+                .execute(ctx, { query: "rig" }, undefined as never),
+        ).rejects.toThrow("No Codex account is configured");
     });
 });

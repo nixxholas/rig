@@ -15,11 +15,7 @@ import { dirname, join, resolve, sep } from "node:path";
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type { Context } from "@steve.kite/stdlib";
-import type {
-    GitCommandRunner,
-    ProjectsModule,
-    WorkspacesModule,
-} from "@slopus/happy-agent-modules";
+import type { GitModule, ProjectsModule, WorkspacesModule } from "@slopus/happy-agent-modules";
 
 const MAX_FILE_BYTES = 44 * 1024 * 1024;
 const MAX_SEARCH_RESULTS = 50;
@@ -122,14 +118,14 @@ export class ProjectFileError extends Error {
 }
 
 export interface ProjectFilesModuleOptions {
-    readonly git?: GitCommandRunner;
+    readonly git?: GitModule;
     readonly protectedPaths?: readonly string[];
     readonly projects: ProjectsModule;
     readonly workspaces: WorkspacesModule;
 }
 
 export class ProjectFilesModule {
-    readonly #git: GitCommandRunner | undefined;
+    readonly #git: GitModule | undefined;
     readonly #protectedPaths: readonly string[];
     readonly #projects: ProjectsModule;
     readonly #workspaces: WorkspacesModule;
@@ -289,11 +285,19 @@ export class ProjectFilesModule {
             throw new ProjectFileError(503, "unavailable", "Git revision reads are unavailable.");
         }
         await this.#assertSafeRelative(query.path);
-        const result = await this.#git.run(root.root, ["show", `${query.revision}:${query.path}`], {
-            maxOutputBytes: MAX_FILE_BYTES,
-        });
-        if (result.code !== 0) return { content: null, hash: null };
-        const bytes = Buffer.from(result.stdout);
+        // Git answering with nothing — an unknown revision, a path that was not a file there, or
+        // content past the bound — is "this file has no content at that revision", which is what a
+        // client asking to see an older version needs to be told.
+        const file = await this.#git
+            .readFileAtRevision({
+                maximumBytes: MAX_FILE_BYTES,
+                path: root.root,
+                relativePath: query.path,
+                revision: query.revision,
+            })
+            .catch(() => ({ found: false }) as const);
+        if (!file.found) return { content: null, hash: null };
+        const bytes = Buffer.from(file.content);
         this.#assertSize(bytes.byteLength);
         return { content: bytes.toString("base64"), hash: sha256(bytes) };
     }

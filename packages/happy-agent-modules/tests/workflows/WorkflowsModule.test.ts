@@ -1,5 +1,11 @@
+import { Value } from "@sinclair/typebox/value";
 import { describe, expect, it } from "vitest";
 
+import {
+    WorkflowsModule,
+    workflowEventSchema,
+    type WorkflowEvent,
+} from "../../sources/workflows/index.js";
 import {
     agentOptions,
     agentRequest,
@@ -473,4 +479,117 @@ describe("workflow execution", () => {
         },
         RUN_TIMEOUT,
     );
+});
+
+describe("workflow subscriptions", () => {
+    it(
+        "tells a subscriber a run started, moved and finished, and stops when it unsubscribes",
+        async () => {
+            const world = await workflowWorld("workflows-subscribers");
+            try {
+                const heard: WorkflowEvent[] = [];
+                const unsubscribe = world.module.onEvent((_ctx, event) => {
+                    heard.push(event);
+                });
+
+                await world.module.launch(
+                    world.ctx,
+                    WORKFLOW_OWNER,
+                    { script: '"done"', name: "report" },
+                    "run-heard",
+                );
+                await world.module.whenRunsSettle();
+
+                expect(heard.map((event) => event.type)).toEqual([
+                    "workflow_started",
+                    "workflow_finished",
+                ]);
+                expect(heard.every((event) => Value.Check(workflowEventSchema, event))).toBe(true);
+                expect(heard.every((event) => event.agentId === WORKFLOW_OWNER)).toBe(true);
+                expect(new Set(heard.map((event) => event.eventId)).size).toBe(heard.length);
+
+                unsubscribe();
+                unsubscribe();
+                const before = heard.length;
+                await world.module.launch(
+                    world.ctx,
+                    WORKFLOW_OWNER,
+                    { script: '"done"', name: "report" },
+                    "run-unheard",
+                );
+                await world.module.whenRunsSettle();
+                expect(heard).toHaveLength(before);
+            } finally {
+                world.close();
+            }
+        },
+        RUN_TIMEOUT,
+    );
+
+    it(
+        "keeps the run moving when a subscriber that ran after the change failed",
+        async () => {
+            const world = await workflowWorld("workflows-subscriber-failure");
+            try {
+                const heard: string[] = [];
+                world.module.onEvent(() => {
+                    throw new Error("This subscriber is broken.");
+                });
+                world.module.onEvent((_ctx, event) => {
+                    heard.push(event.type);
+                });
+
+                await world.module.launch(
+                    world.ctx,
+                    WORKFLOW_OWNER,
+                    { script: '"done"', name: "report" },
+                    "run-broken-subscriber",
+                );
+                await world.module.whenRunsSettle();
+
+                const run = await world.module.status(
+                    world.ctx,
+                    WORKFLOW_OWNER,
+                    "run-broken-subscriber",
+                );
+                expect(run?.status).toBe("completed");
+                expect(heard).toEqual(["workflow_started", "workflow_finished"]);
+            } finally {
+                world.close();
+            }
+        },
+        RUN_TIMEOUT,
+    );
+
+    it(
+        "rejects the change when a transactional subscriber refuses it",
+        async () => {
+            const world = await workflowWorld("workflows-transactional-refusal");
+            try {
+                world.module.onEventTransactional((_ctx, event) => {
+                    if (event.type === "workflow_started") throw new Error("Not this one.");
+                });
+
+                await expect(
+                    world.module.launch(
+                        world.ctx,
+                        WORKFLOW_OWNER,
+                        { script: '"done"', name: "report" },
+                        "run-refused",
+                    ),
+                ).rejects.toThrow("Not this one.");
+
+                expect(
+                    await world.module.status(world.ctx, WORKFLOW_OWNER, "run-refused"),
+                ).toBeUndefined();
+            } finally {
+                world.close();
+            }
+        },
+        RUN_TIMEOUT,
+    );
+
+    it("takes only modules, with no options bag left to pass", async () => {
+        expect(WorkflowsModule.length).toBe(3);
+    });
 });

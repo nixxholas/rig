@@ -1,3 +1,7 @@
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import {
     ensureAgentDatabaseConnection,
     type AgentModuleHooks,
@@ -7,7 +11,9 @@ import {
 import type { Context } from "@steve.kite/stdlib";
 
 import type { CollaborationModule } from "../../../sources/collaboration/CollaborationModule.js";
-import { WorkflowsModule, type WorkflowModuleOptions } from "../../../sources/workflows/index.js";
+import { ConfigModule } from "../../../sources/config/index.js";
+import { WorkflowsModule } from "../../../sources/workflows/index.js";
+import { scriptedComputeModule, testConfig } from "../../support/computeModule.js";
 import { moduleDatabase } from "../../support/moduleDatabase.js";
 import { resolveModuleHooks } from "../../support/moduleHooks.js";
 
@@ -45,19 +51,7 @@ export class Collaborators {
     /** Who was told to stop, in the order they were told. */
     readonly interrupted: string[] = [];
 
-    readonly #prefix: string;
     readonly #waiting: (() => void)[] = [];
-    #issued = 0;
-
-    constructor(prefix: string) {
-        this.#prefix = prefix;
-    }
-
-    /** The identity the module gives its next collaborator, in the shape Agent Base accepts. */
-    nextId(): string {
-        this.#issued += 1;
-        return `${this.#prefix}${String(this.#issued)}`;
-    }
 
     async createAgent(
         _ctx: Context,
@@ -117,10 +111,25 @@ export interface WorkflowWorld {
     close(): void;
 }
 
-type WorkflowWorldOptions = Omit<
-    Partial<WorkflowModuleOptions>,
-    "runContext" | "collaboration" | "collaboratorIdFactory"
->;
+interface WorkflowWorldOptions {
+    /** Whether the configuration this module reads turns workflows on. Defaults to on. */
+    readonly enabled?: boolean;
+}
+
+/**
+ * Configuration with workflows turned off, written the way an installation turns them off.
+ *
+ * The module has no switch of its own any more, so a test that wants the feature dark has to say
+ * so where the product says it: in `happy.toml`.
+ */
+async function configWithWorkflows(enabled: boolean): Promise<ConfigModule> {
+    if (enabled) return testConfig;
+    const root = await mkdtemp(join(tmpdir(), "happy-workflows-"));
+    const configHome = join(root, "Happy", "Config");
+    await mkdir(configHome, { recursive: true });
+    await writeFile(join(configHome, "happy.toml"), "[features]\nworkflows = false\n", "utf8");
+    return await ConfigModule.load(join(root, ".happy"));
+}
 
 /** One module, its database, and the collaboration it starts agents through. */
 export async function workflowWorld(
@@ -131,21 +140,21 @@ export async function workflowWorld(
     // Production hands every agent database this scheduling boundary. Without it the concurrent
     // transactions a fanned-out script opens would collide on the one in-memory connection.
     ensureAgentDatabaseConnection(database.database);
-    return await buildWorld(database, "a", options);
+    const config = await configWithWorkflows(options.enabled ?? true);
+    return await buildWorld(database, config);
 }
 
 async function buildWorld(
     database: ReturnType<typeof moduleDatabase>,
-    prefix: string,
-    options: WorkflowWorldOptions,
+    config: ConfigModule,
 ): Promise<WorkflowWorld> {
-    const collaborators = new Collaborators(prefix);
-    const module = new WorkflowsModule({
-        runContext: database.context,
-        collaboration: collaborators.asModule(),
-        collaboratorIdFactory: () => collaborators.nextId(),
-        ...options,
-    });
+    const collaborators = new Collaborators();
+    const module = new WorkflowsModule(
+        config,
+        collaborators.asModule(),
+        // No test here reaches a machine: a script named by path has nowhere to be read from.
+        scriptedComputeModule(async () => undefined),
+    );
     // A run executes on the database's own context, so the module cannot be built before the
     // database is: its migrations are applied here rather than through `moduleDatabase`.
     for (const [, migrate] of module.migrations) {
@@ -185,7 +194,7 @@ async function buildWorld(
                 settlement(collaborator.agentId),
             );
         },
-        restart: async () => await buildWorld(database, `${prefix}r`, options),
+        restart: async () => await buildWorld(database, config),
         close: database.close,
     };
 }

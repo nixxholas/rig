@@ -71,25 +71,27 @@ export const userInputEventSchema = Type.Union([
     ),
 ]);
 
-const listenerReturnSchema = Type.Union([Type.Void(), Type.Promise(Type.Void())]);
-
-export const userInputModuleListenerSchema = Type.Object(
-    {
-        onEventTransactional: Type.Optional(
-            Type.Function([userInputContextSchema, userInputEventSchema], listenerReturnSchema),
-        ),
-        onEvent: Type.Optional(
-            Type.Function([userInputContextSchema, userInputEventSchema], listenerReturnSchema),
-        ),
-    },
-    { additionalProperties: false },
+/** What one subscriber is handed, either inside the transaction or once it commits. */
+export const userInputEventListenerSchema = Type.Function(
+    [userInputContextSchema, userInputEventSchema],
+    Type.Union([Type.Void(), Type.Promise(Type.Void())]),
 );
 
 export type UserInputEvent = Static<typeof userInputEventSchema>;
-export type UserInputModuleListener = Static<typeof userInputModuleListenerSchema>;
+export type UserInputEventListener = Static<typeof userInputEventListenerSchema>;
+/** Called once to stop delivery; calling it twice is harmless. */
+export type UserInputUnsubscribe = () => void;
 
 export function assertUserInputEvent(value: unknown): asserts value is UserInputEvent {
     if (!Value.Check(userInputEventSchema, value)) {
         throw new Error("User input event is invalid.");
+    }
+}
+
+export function assertUserInputEventListener(
+    value: unknown,
+): asserts value is UserInputEventListener {
+    if (typeof value !== "function") {
+        throw new Error("User input event listener must be a function.");
     }
 }

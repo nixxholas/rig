@@ -87,7 +87,7 @@ describe("startHappyAgent", () => {
         expect(agent.modules.workflows.name).toBe("workflows");
         // Everything the daemon serves over its socket comes from the same start, with no host.
         expect(typeof agent.background).toBe("function");
-        expect(agent.gitTracker).toBeDefined();
+        expect(agent.git.name).toBe("git");
         // The catalogs do their own Git, folders and clones, so there is no service between them
         // and the disk any more — only the installation they were opened for.
         expect(agent.installation.schemaVersion).toBe(1);

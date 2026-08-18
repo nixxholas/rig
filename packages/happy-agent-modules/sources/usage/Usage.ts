@@ -3,15 +3,20 @@ import { Type, type Static } from "@sinclair/typebox";
 /** Bounds applied at every UsageModule storage and presentation boundary. */
 export const MAX_USAGE_RECORDS = 500;
 export const MAX_USAGE_GROUPS = 500;
-export const MAX_USAGE_TREE_SESSIONS = 10_000;
+/**
+ * How many agents one subtree snapshot may describe.
+ *
+ * The snapshot is walked agent by agent and rendered into one answer, so this is the size past
+ * which the read is refused rather than quietly cut short and reported as complete.
+ */
+export const MAX_USAGE_TREE_SESSIONS = 1_000;
 export const MAX_USAGE_PAGE_SIZE = 100;
 export const MAX_USAGE_OUTPUT_CHARACTERS = 20_000;
 export const MAX_USAGE_AGENT_ID_LENGTH = 256;
 export const MAX_USAGE_PROVIDER_LENGTH = 256;
 export const MAX_USAGE_MODEL_LENGTH = 512;
-export const MAX_USAGE_TREE_DESCRIPTION_LENGTH = 512;
+export const MAX_USAGE_TREE_TITLE_LENGTH = 512;
 export const MAX_USAGE_TREE_PATH_LENGTH = 1_024;
-export const MAX_USAGE_TREE_STATUS_LENGTH = 128;
 export const MAX_USAGE_ID_LENGTH = 128;
 export const MAX_USAGE_TOKEN_COUNT = 1_000_000_000;
 export const MAX_USAGE_DURATION_MS = 31_536_000_000;
@@ -229,31 +234,31 @@ export const usageAgentTreeRelationSchema = Type.Union([
 ]);
 
 /**
- * A bounded host-provided agent-tree row.  The host owns relationships and
- * lifecycle status; Usage only validates and returns the snapshot.
+ * One agent in a subtree, as the usage module can honestly describe it.
+ *
+ * Every field is something the module either reads from the agent collection it was started with
+ * or counts in its own records. A running agent's lifecycle status and the provider it is
+ * currently configured for are the collection's business and change under the reader's feet, so
+ * they are not claimed here; the provider and model a cost was actually spent on live on the
+ * records themselves and are read through `readPage` or `aggregate`.
  */
 export const usageAgentTreeSessionSchema = Type.Object(
     {
         agentId: usageAgentIdSchema,
-        description: Type.Optional(
+        /** The agent's own title, when its metadata carries one. */
+        title: Type.Optional(
             Type.String({
-                maxLength: MAX_USAGE_TREE_DESCRIPTION_LENGTH,
+                maxLength: MAX_USAGE_TREE_TITLE_LENGTH,
             }),
         ),
-        modelId: usageModelSchema,
         parentAgentId: Type.Optional(usageAgentIdSchema),
+        /** The chain of agent IDs from the root of the snapshot down to this agent. */
         path: Type.String({
             minLength: 1,
             maxLength: MAX_USAGE_TREE_PATH_LENGTH,
             pattern: "^[^\\u0000\\r\\n]+$",
         }),
-        providerId: usageProviderSchema,
         relation: usageAgentTreeRelationSchema,
-        status: Type.String({
-            minLength: 1,
-            maxLength: MAX_USAGE_TREE_STATUS_LENGTH,
-            pattern: "^[^\\u0000\\r\\n]+$",
-        }),
         totalTokens: Type.Integer({
             minimum: 0,
             maximum: MAX_USAGE_TOTAL_TOKENS,

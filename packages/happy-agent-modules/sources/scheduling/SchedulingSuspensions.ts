@@ -1,4 +1,4 @@
-import { SchedulingAlarm, type SchedulingTimers } from "./SchedulingTimers.js";
+import { SchedulingAlarm } from "./SchedulingAlarm.js";
 
 /** Why a suspended agent woke up: its time came, or something arrived for it first. */
 export type SchedulingSuspensionOutcome = "elapsed" | "interrupted";
@@ -12,14 +12,7 @@ export type SchedulingSuspensionOutcome = "elapsed" | "interrupted";
  * owns it.
  */
 export class SchedulingSuspensions {
-    readonly #timers: SchedulingTimers;
-    readonly #now: () => number;
     readonly #suspended = new Map<string, Set<(outcome: SchedulingSuspensionOutcome) => void>>();
-
-    constructor(timers: SchedulingTimers, now: () => number) {
-        this.#timers = timers;
-        this.#now = now;
-    }
 
     /**
      * Hold this agent until its due time, until something arrives for it, or until its turn is
@@ -31,7 +24,7 @@ export class SchedulingSuspensions {
         lifetime: AbortSignal | undefined,
     ): Promise<SchedulingSuspensionOutcome> {
         if (lifetime?.aborted === true) return "interrupted";
-        if (dueAt <= this.#now()) return "elapsed";
+        if (dueAt <= Date.now()) return "elapsed";
         return await new Promise<SchedulingSuspensionOutcome>((resolve) => {
             const waiting = this.#suspended.get(agentId) ?? new Set();
             this.#suspended.set(agentId, waiting);
@@ -46,7 +39,7 @@ export class SchedulingSuspensions {
             const onAbort = (): void => wake("interrupted");
             waiting.add(wake);
             lifetime?.addEventListener("abort", onAbort, { once: true });
-            alarm = new SchedulingAlarm(this.#timers, this.#now, dueAt, () => wake("elapsed"));
+            alarm = new SchedulingAlarm(dueAt, () => wake("elapsed"));
         });
     }
 

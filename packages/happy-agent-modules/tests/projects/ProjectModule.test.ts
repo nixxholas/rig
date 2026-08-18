@@ -7,12 +7,12 @@ import { Value } from "@sinclair/typebox/value";
 import { agentDatabaseRows } from "@slopus/happy-agent-base";
 import { describe, expect, it } from "vitest";
 
+import { GitModule } from "../../sources/git/index.js";
 import {
     MAX_PROJECT_ERROR_LENGTH,
     projectCreateInputSchema,
     projectEnsureInputSchema,
     projectMigrations,
-    projectModuleOptionsSchema,
     projectSetAvatarInputSchema,
     projectRemoteSourceSchema,
     projectRenameInputSchema,
@@ -22,25 +22,23 @@ import {
     ProjectsModule,
 } from "../../sources/projects/index.js";
 import { writeGuardedProject } from "../../sources/projects/store/projectRecords.js";
+import { temporaryTestConfig } from "../support/configModule.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
 
+/** Cross-workspace work is a feature a person turns on, so a test turns it on the same way. */
+const CROSS_WORKSPACE_TOML = "[features]\ncross_workspace = true\n";
+
 describe("ProjectsModule", () => {
-    it("owns its catalog migration and does not require an injected store", () => {
-        const module = new ProjectsModule({});
+    it("owns its catalog migration and is built from the modules it depends on", async () => {
+        const module = await projectsModule();
 
         expect(module.name).toBe("projects");
         expect(module.migrations).toEqual(projectMigrations);
-        expect(Value.Check(projectModuleOptionsSchema, {})).toBe(true);
-        expect(Value.Check(projectModuleOptionsSchema, { store: {} })).toBe(false);
-        expect(Value.Check(projectModuleOptionsSchema, { transaction: () => undefined })).toBe(
-            false,
-        );
     });
 
     it("keeps project rows runtime-validated around the real folder record", () => {
         const record = {
             id: "project-1",
-            ownerAgentId: "agent-1",
             repositoryRef: "/tmp/projects/one",
             kind: "regular",
             storageKey: "one",
@@ -125,54 +123,49 @@ describe("ProjectsModule", () => {
     });
 
     it("offers the catalog only when the user asked for cross-workspace work", async () => {
-        expect(await projectToolNames(new ProjectsModule({}), "agent-a")).toEqual([]);
+        expect(await projectToolNames(await projectsModule(), "agent-a")).toEqual([]);
         expect(
-            await projectToolNames(new ProjectsModule({ crossWorkspace: true }), "agent-a"),
+            await projectToolNames(await projectsModule(CROSS_WORKSPACE_TOML), "agent-a"),
         ).toEqual(["list_projects"]);
     });
 
     it("keeps the catalog out of a subagent", async () => {
         expect(
-            await projectToolNames(new ProjectsModule({ crossWorkspace: true }), "subagent-a"),
+            await projectToolNames(await projectsModule(CROSS_WORKSPACE_TOML), "subagent-a"),
         ).toEqual([]);
     });
 
     it("uses the context transaction for direct catalog mutations", async () => {
         const database = await migratedProjectDatabase("projects-tool-commit-test");
-        let identity = 0;
-        const projects = new ProjectsModule({
-            idFactory: () => `project-${++identity}`,
-            eventIdFactory: () => `event-${identity}`,
-            clock: () => 123,
-        });
+        const projects = await projectsModule();
 
         try {
-            const created = await projects.create(database.context, "agent-a", {
+            const created = await projects.create(database.context, {
                 repositoryRef: "/tmp/projects/one",
                 name: "Project",
             });
-            await projects.ensure(database.context, "agent-a", {
+            await projects.ensure(database.context, {
                 repositoryRef: "/tmp/projects/one",
             });
             while (Date.now() <= created.updatedAt) {
                 // The store timestamps catalog updates with wall-clock milliseconds.
             }
-            await projects.rename(database.context, "agent-a", {
+            await projects.rename(database.context, {
                 projectId: created.id,
                 name: "Renamed",
             });
-            await projects.updateSettings(database.context, "agent-a", {
+            await projects.updateSettings(database.context, {
                 projectId: created.id,
                 settings: { defaultWorkspaceCompute: { type: "local" } },
             });
-            await projects.archive(database.context, "agent-a", created.id);
+            await projects.archive(database.context, created.id);
 
-            expect(await projects.get(database.context, "agent-a", created.id)).toMatchObject({
+            expect(await projects.get(database.context, created.id)).toMatchObject({
                 name: "Renamed",
                 nameSource: "user",
                 status: "archived",
             });
-            expect(await projects.readSettings(database.context, "agent-a", created.id)).toEqual({
+            expect(await projects.readSettings(database.context, created.id)).toEqual({
                 defaultWorkspaceCompute: { type: "local" },
             });
         } finally {
@@ -198,6 +191,7 @@ describe("ProjectsModule", () => {
                 "002-drop-project-idempotency-tables",
                 "003-project-order-version-avatar",
                 "004-project-folder-record",
+                "005-project-without-owner",
             ]);
         } finally {
             database.close();
@@ -207,25 +201,21 @@ describe("ProjectsModule", () => {
     it("finds a project by its folder and refuses anything that is not a path", async () => {
         const database = await migratedProjectDatabase("projects-by-path-test");
         try {
-            const projects = new ProjectsModule({
-                idFactory: () => "project-path",
-                eventIdFactory: () => "event-path",
-                clock: () => 1,
-            });
-            const created = await projects.create(database.context, "agent-a", {
+            const projects = await projectsModule();
+            const created = await projects.create(database.context, {
                 repositoryRef: "/tmp/projects/by-path",
                 name: "By path",
             });
 
             expect(
-                await projects.getByPath(database.context, "agent-a", "/tmp/projects/by-path"),
+                await projects.getByPath(database.context, "/tmp/projects/by-path"),
             ).toMatchObject({ id: created.id, repositoryRef: "/tmp/projects/by-path" });
             expect(
-                await projects.getByPath(database.context, "agent-a", "/tmp/projects/elsewhere"),
+                await projects.getByPath(database.context, "/tmp/projects/elsewhere"),
             ).toBeUndefined();
-            await expect(
-                projects.getByPath(database.context, "agent-a", "repo:by-path"),
-            ).rejects.toThrow("absolute path");
+            await expect(projects.getByPath(database.context, "repo:by-path")).rejects.toThrow(
+                "absolute path",
+            );
         } finally {
             database.close();
         }
@@ -234,12 +224,8 @@ describe("ProjectsModule", () => {
     it("registers the home directory as the never-initialized home project", async () => {
         const database = await migratedProjectDatabase("projects-home-test");
         try {
-            const projects = new ProjectsModule({
-                idFactory: () => "project-home",
-                eventIdFactory: () => "event-home",
-                clock: () => 1,
-            });
-            const home = await projects.ensure(database.context, "agent-a", {
+            const projects = await projectsModule();
+            const home = await projects.ensure(database.context, {
                 kind: "home",
                 repositoryRef: "/Users/person",
             });
@@ -253,7 +239,7 @@ describe("ProjectsModule", () => {
                 presence: "present",
             });
             // Nothing sets the home directory up, so a refresh is a no-op.
-            const refreshed = await projects.refresh(database.context, "agent-a", home.project.id);
+            const refreshed = await projects.refresh(database.context, home.project.id);
             expect(refreshed).toEqual(home.project);
         } finally {
             database.close();
@@ -264,28 +250,24 @@ describe("ProjectsModule", () => {
         const database = await migratedProjectDatabase("projects-restore-test");
         try {
             let nextId = 0;
-            const projects = new ProjectsModule({
-                idFactory: () => `project-${++nextId}`,
-                eventIdFactory: () => `event-${nextId}`,
-                clock: () => 1,
-            });
-            const created = await projects.create(database.context, "agent-a", {
+            const projects = await projectsModule();
+            const created = await projects.create(database.context, {
                 repositoryRef: "/tmp/projects/restore",
                 name: "Restore me",
             });
 
-            const converged = await projects.ensure(database.context, "agent-a", {
+            const converged = await projects.ensure(database.context, {
                 repositoryRef: "/tmp/projects/restore",
             });
             expect(converged.created).toBe(false);
             expect(converged.changed).toBe(false);
             expect(converged.project.version).toBe(created.version);
 
-            const archived = await projects.archive(database.context, "agent-a", created.id);
+            const archived = await projects.archive(database.context, created.id);
             expect(archived.status).toBe("archived");
             expect(archived.version).toBe(created.version + 1);
 
-            const ensured = await projects.ensure(database.context, "agent-a", {
+            const ensured = await projects.ensure(database.context, {
                 repositoryRef: "/tmp/projects/restore",
             });
             expect(ensured.created).toBe(false);
@@ -294,13 +276,11 @@ describe("ProjectsModule", () => {
             expect(ensured.project.status).toBe("active");
             expect(ensured.project.version).toBe(archived.version + 1);
 
-            const archivedAgain = await projects.archive(database.context, "agent-a", created.id);
-            const restored = await projects.restore(database.context, "agent-a", created.id);
+            const archivedAgain = await projects.archive(database.context, created.id);
+            const restored = await projects.restore(database.context, created.id);
             expect(restored.status).toBe("active");
             expect(restored.version).toBe(archivedAgain.version + 1);
-            await expect(
-                projects.restore(database.context, "agent-a", created.id),
-            ).resolves.toEqual(restored);
+            await expect(projects.restore(database.context, created.id)).resolves.toEqual(restored);
         } finally {
             database.close();
         }
@@ -310,18 +290,14 @@ describe("ProjectsModule", () => {
         const database = await migratedProjectDatabase("projects-name-source-test");
         try {
             let nextId = 0;
-            const projects = new ProjectsModule({
-                idFactory: () => `project-${++nextId}`,
-                eventIdFactory: () => `event-${nextId}`,
-                clock: () => 1,
-            });
-            const derived = await projects.ensure(database.context, "agent-a", {
+            const projects = await projectsModule();
+            const derived = await projects.ensure(database.context, {
                 repositoryRef: "/tmp/projects/happy-agent",
             });
             expect(derived.project.name).toBe("happy-agent");
             expect(derived.project.nameSource).toBe("folder");
 
-            const adopted = await projects.adoptRemoteName(database.context, "agent-a", {
+            const adopted = await projects.adoptRemoteName(database.context, {
                 name: "Happy Agent",
                 projectId: derived.project.id,
             });
@@ -329,18 +305,18 @@ describe("ProjectsModule", () => {
             expect(adopted.nameSource).toBe("remote");
 
             // A remote name is not a folder name, so the next remote does not win.
-            const ignored = await projects.adoptRemoteName(database.context, "agent-a", {
+            const ignored = await projects.adoptRemoteName(database.context, {
                 name: "Something else",
                 projectId: derived.project.id,
             });
             expect(ignored).toEqual(adopted);
 
-            const chosen = await projects.rename(database.context, "agent-a", {
+            const chosen = await projects.rename(database.context, {
                 name: "My project",
                 projectId: derived.project.id,
             });
             expect(chosen.nameSource).toBe("user");
-            const stillChosen = await projects.adoptRemoteName(database.context, "agent-a", {
+            const stillChosen = await projects.adoptRemoteName(database.context, {
                 name: "Remote name",
                 projectId: derived.project.id,
             });
@@ -354,12 +330,8 @@ describe("ProjectsModule", () => {
         const database = await migratedProjectDatabase("projects-initialization-test");
         try {
             let nextId = 0;
-            const projects = new ProjectsModule({
-                idFactory: () => `project-${++nextId}`,
-                eventIdFactory: () => `event-${nextId}`,
-                clock: () => 1,
-            });
-            const cloned = await projects.create(database.context, "agent-a", {
+            const projects = await projectsModule();
+            const cloned = await projects.create(database.context, {
                 name: "Cloned",
                 remoteSource: { kind: "github", repository: "slopus/happy" },
                 repositoryRef: "/tmp/projects/cloned",
@@ -371,10 +343,10 @@ describe("ProjectsModule", () => {
                 initializationAttempt: 0,
             });
 
-            const landed = await projects.markCloneReady(database.context, "agent-a", cloned.id);
+            const landed = await projects.markCloneReady(database.context, cloned.id);
             expect(landed.presence).toBe("present");
 
-            const failed = await projects.markInitializationFailed(database.context, "agent-a", {
+            const failed = await projects.markInitializationFailed(database.context, {
                 error: "The install script exited with status 1.",
                 projectId: cloned.id,
             });
@@ -386,42 +358,32 @@ describe("ProjectsModule", () => {
 
             // A failure is only recorded while the project is still initializing.
             expect(
-                await projects.markInitializationFailed(database.context, "agent-a", {
+                await projects.markInitializationFailed(database.context, {
                     error: "A second failure.",
                     projectId: cloned.id,
                 }),
             ).toEqual(failed);
 
-            const retried = await projects.retryInitialization(
-                database.context,
-                "agent-a",
-                cloned.id,
-            );
+            const retried = await projects.retryInitialization(database.context, cloned.id);
             expect(retried.initializationStatus).toBe("initializing");
             expect(retried.initializationError).toBeUndefined();
 
-            const ready = await projects.markInitializationReady(
-                database.context,
-                "agent-a",
-                cloned.id,
-            );
+            const ready = await projects.markInitializationReady(database.context, cloned.id);
             expect(ready).toMatchObject({
                 initializationStatus: "ready",
                 initializationAttempt: 2,
             });
             expect(ready.initializationError).toBeUndefined();
-            expect(await projects.markCloneReady(database.context, "agent-a", cloned.id)).toEqual(
-                ready,
-            );
+            expect(await projects.markCloneReady(database.context, cloned.id)).toEqual(ready);
 
-            const refreshed = await projects.refresh(database.context, "agent-a", cloned.id);
+            const refreshed = await projects.refresh(database.context, cloned.id);
             expect(refreshed).toMatchObject({
                 initializationStatus: "initializing",
                 initializationAttempt: 3,
             });
 
             await expect(
-                projects.markInitializationFailed(database.context, "agent-a", {
+                projects.markInitializationFailed(database.context, {
                     error: "e".repeat(MAX_PROJECT_ERROR_LENGTH + 1),
                     projectId: cloned.id,
                 }),
@@ -435,25 +397,21 @@ describe("ProjectsModule", () => {
         const database = await migratedProjectDatabase("projects-probe-test");
         try {
             let nextId = 0;
-            const projects = new ProjectsModule({
-                idFactory: () => `project-${++nextId}`,
-                eventIdFactory: () => `event-${nextId}`,
-                clock: () => 1,
-            });
-            const created = await projects.create(database.context, "agent-a", {
+            const projects = await projectsModule();
+            const created = await projects.create(database.context, {
                 name: "Probed",
                 repositoryRef: "/tmp/projects/probed",
             });
 
             // The project already looks like this, so the probe writes nothing.
-            const unchanged = await projects.applyProbe(database.context, "agent-a", {
+            const unchanged = await projects.applyProbe(database.context, {
                 presence: "present",
                 projectId: created.id,
                 worktreeSupport: "unknown",
             });
             expect(unchanged).toEqual(created);
 
-            const probed = await projects.applyProbe(database.context, "agent-a", {
+            const probed = await projects.applyProbe(database.context, {
                 presence: "present",
                 projectId: created.id,
                 worktreeSupport: "unsupported",
@@ -463,7 +421,7 @@ describe("ProjectsModule", () => {
             expect(probed.worktreeSupport).toBe("unsupported");
             expect(probed.worktreeUnsupportedReason).toBe("The folder is not a Git repository.");
             expect(
-                await projects.applyProbe(database.context, "agent-a", {
+                await projects.applyProbe(database.context, {
                     presence: "present",
                     projectId: created.id,
                     worktreeSupport: "unsupported",
@@ -479,13 +437,13 @@ describe("ProjectsModule", () => {
                 head: "0123456789abcdef",
                 upstream: "origin/main",
             } as const;
-            const untouched = await projects.applyGitFacts(database.context, "agent-a", {
+            const untouched = await projects.applyGitFacts(database.context, {
                 git: { ahead: 0, behind: 0, detached: false },
                 projectId: created.id,
             });
             expect(untouched).toEqual(probed);
 
-            const withFacts = await projects.applyGitFacts(database.context, "agent-a", {
+            const withFacts = await projects.applyGitFacts(database.context, {
                 git: facts,
                 projectId: created.id,
             });
@@ -499,29 +457,29 @@ describe("ProjectsModule", () => {
                 gitUpstream: "origin/main",
             });
             expect(
-                await projects.applyGitFacts(database.context, "agent-a", {
+                await projects.applyGitFacts(database.context, {
                     git: facts,
                     projectId: created.id,
                 }),
             ).toEqual(withFacts);
 
             // The trunk workspaces fork from is decided once.
-            const branched = await projects.setDefaultBranch(database.context, "agent-a", {
+            const branched = await projects.setDefaultBranch(database.context, {
                 branch: "main",
                 projectId: created.id,
             });
             expect(branched.defaultBranch).toBe("main");
             expect(
-                await projects.setDefaultBranch(database.context, "agent-a", {
+                await projects.setDefaultBranch(database.context, {
                     branch: "develop",
                     projectId: created.id,
                 }),
             ).toEqual(branched);
 
             // An archived project no longer takes host observations.
-            const archived = await projects.archive(database.context, "agent-a", created.id);
+            const archived = await projects.archive(database.context, created.id);
             expect(
-                await projects.applyProbe(database.context, "agent-a", {
+                await projects.applyProbe(database.context, {
                     presence: "missing",
                     projectId: created.id,
                     worktreeSupport: "supported",
@@ -536,20 +494,16 @@ describe("ProjectsModule", () => {
         const database = await migratedProjectDatabase("projects-order-test");
         try {
             let nextId = 0;
-            const projects = new ProjectsModule({
-                idFactory: () => `project-${++nextId}`,
-                eventIdFactory: () => `event-${nextId}`,
-                clock: () => 1,
-            });
-            const first = await projects.ensure(database.context, "agent-a", {
+            const projects = await projectsModule();
+            const first = await projects.ensure(database.context, {
                 repositoryRef: "/tmp/projects/first",
                 name: "First",
             });
-            const second = await projects.ensure(database.context, "agent-a", {
+            const second = await projects.ensure(database.context, {
                 repositoryRef: "/tmp/projects/second",
                 name: "Second",
             });
-            const third = await projects.ensure(database.context, "agent-a", {
+            const third = await projects.ensure(database.context, {
                 repositoryRef: "/tmp/projects/third",
                 name: "Third",
             });
@@ -559,7 +513,7 @@ describe("ProjectsModule", () => {
                 second.project.id,
                 third.project.id,
             ]);
-            await projects.reorder(database.context, "agent-a", {
+            await projects.reorder(database.context, {
                 afterId: null,
                 projectId: third.project.id,
             });
@@ -568,7 +522,7 @@ describe("ProjectsModule", () => {
                 first.project.id,
                 second.project.id,
             ]);
-            await projects.reorder(database.context, "agent-a", {
+            await projects.reorder(database.context, {
                 afterId: second.project.id,
                 expectedVersion: first.project.version,
                 projectId: first.project.id,
@@ -585,7 +539,7 @@ describe("ProjectsModule", () => {
 
     it("stores avatar metadata, reads the bytes it kept, and clears the avatar", async () => {
         const database = await migratedProjectDatabase("projects-avatar-test");
-        const stateDirectory = await mkdtemp(join(tmpdir(), "rig-project-avatars-"));
+        const config = await temporaryTestConfig();
         try {
             const hash = "a".repeat(64);
             const avatar = {
@@ -602,17 +556,12 @@ describe("ProjectsModule", () => {
                     projectId: "project-avatar",
                 }),
             ).toBe(true);
-            const projects = new ProjectsModule({
-                idFactory: () => "project-avatar",
-                eventIdFactory: () => "event-avatar",
-                clock: () => 1,
-                stateDirectory,
-            });
-            const created = await projects.create(database.context, "agent-a", {
+            const projects = new ProjectsModule(config, new GitModule());
+            const created = await projects.create(database.context, {
                 repositoryRef: "/tmp/projects/avatar",
                 name: "Avatar",
             });
-            const updated = await projects.setAvatar(database.context, "agent-a", {
+            const updated = await projects.setAvatar(database.context, {
                 avatar,
                 expectedVersion: created.version,
                 projectId: created.id,
@@ -620,12 +569,13 @@ describe("ProjectsModule", () => {
             expect(updated.avatar).toEqual(avatar);
             // The catalog records what an avatar is; the picture is a file beside the agent's own
             // state, and nothing has written one yet.
-            await expect(
-                projects.avatarAsset(database.context, "agent-a", hash),
-            ).resolves.toBeUndefined();
+            await expect(projects.avatarAsset(database.context, hash)).resolves.toBeUndefined();
 
+            // Configuration owns where the agent keeps its own state, so the picture lands beside
+            // it rather than anywhere the catalog was told about.
             const assetPath = join(
-                stateDirectory,
+                config.configuration.paths.agentHome,
+                "projects",
                 "assets",
                 "project-avatars",
                 hash.slice(0, 2),
@@ -634,57 +584,56 @@ describe("ProjectsModule", () => {
             await mkdir(dirname(assetPath), { recursive: true });
             await writeFile(assetPath, Buffer.from([1, 2, 3]));
 
-            await expect(
-                projects.avatarAsset(database.context, "agent-a", hash),
-            ).resolves.toMatchObject({ hash, mediaType: "image/webp" });
-            await expect(projects.avatarAsset(database.context, "agent-b", hash)).rejects.toThrow(
-                "not authorized",
-            );
+            await expect(projects.avatarAsset(database.context, hash)).resolves.toMatchObject({
+                hash,
+                mediaType: "image/webp",
+            });
+            // The catalog is shared for this installation, so avatar bytes are likewise shared.
+            await expect(projects.avatarAsset(database.context, hash)).resolves.toMatchObject({
+                hash,
+                mediaType: "image/webp",
+            });
 
-            const cleared = await projects.clearAvatar(database.context, "agent-a", {
+            const cleared = await projects.clearAvatar(database.context, {
                 expectedVersion: updated.version,
                 projectId: created.id,
             });
             expect(cleared.avatar).toBeUndefined();
         } finally {
             database.close();
-            await rm(stateDirectory, { force: true, recursive: true });
+            await rm(config.configuration.paths.happyHome, { force: true, recursive: true });
         }
     });
 
     it("rejects stale rename and settings writes with expected versions", async () => {
         const database = await migratedProjectDatabase("projects-concurrency-test");
         try {
-            const projects = new ProjectsModule({
-                idFactory: () => "project-concurrency",
-                eventIdFactory: () => "event-concurrency",
-                clock: () => 1,
-            });
-            const created = await projects.create(database.context, "agent-a", {
+            const projects = await projectsModule();
+            const created = await projects.create(database.context, {
                 repositoryRef: "/tmp/projects/concurrency",
                 name: "Original",
             });
-            const renamed = await projects.rename(database.context, "agent-a", {
+            const renamed = await projects.rename(database.context, {
                 expectedVersion: created.version,
                 name: "Renamed",
                 projectId: created.id,
             });
             await expect(
-                projects.rename(database.context, "agent-a", {
+                projects.rename(database.context, {
                     expectedVersion: created.version,
                     name: "Stale rename",
                     projectId: created.id,
                 }),
             ).rejects.toThrow("changed before it could be renamed");
 
-            const configured = await projects.updateSettings(database.context, "agent-a", {
+            const configured = await projects.updateSettings(database.context, {
                 expectedVersion: renamed.version,
                 projectId: created.id,
                 settings: { defaultWorkspaceCompute: { image: "node:22", type: "docker" } },
             });
             expect(configured.changed).toBe(true);
             await expect(
-                projects.updateSettings(database.context, "agent-a", {
+                projects.updateSettings(database.context, {
                     expectedVersion: renamed.version,
                     projectId: created.id,
                     settings: { defaultWorkspaceCompute: { type: "local" } },
@@ -697,45 +646,41 @@ describe("ProjectsModule", () => {
 
     it("ignores every observation that arrives after a project was archived", async () => {
         const events: string[] = [];
-        const projects = new ProjectsModule({
-            eventIdFactory: () => `event-${String(events.length + 1)}`,
-            listener: {
-                onEventTransactional: (_ctx, event) => {
-                    events.push(event.type);
-                },
-            },
+        const projects = await projectsModule();
+        projects.onEventTransactional((_ctx, event) => {
+            events.push(event.type);
         });
         const database = await migratedProjectDatabase("projects-late-observation-test");
 
         try {
-            const created = await projects.create(database.context, "agent-a", {
+            const created = await projects.create(database.context, {
                 repositoryRef: "/tmp/projects/late",
                 name: "Late",
             });
-            const archived = await projects.archive(database.context, "agent-a", created.id);
+            const archived = await projects.archive(database.context, created.id);
             const settledEvents = [...events];
 
             // Setup, probes and refreshes that were already running describe a project nobody has
             // any more. None of them may touch the row, its version, or the log.
             const late = [
-                await projects.markCloneReady(database.context, "agent-a", created.id),
-                await projects.markInitializationReady(database.context, "agent-a", created.id),
-                await projects.markInitializationFailed(database.context, "agent-a", {
+                await projects.markCloneReady(database.context, created.id),
+                await projects.markInitializationReady(database.context, created.id),
+                await projects.markInitializationFailed(database.context, {
                     projectId: created.id,
                     error: "The clone gave up.",
                 }),
-                await projects.retryInitialization(database.context, "agent-a", created.id),
-                await projects.refresh(database.context, "agent-a", created.id),
-                await projects.applyProbe(database.context, "agent-a", {
+                await projects.retryInitialization(database.context, created.id),
+                await projects.refresh(database.context, created.id),
+                await projects.applyProbe(database.context, {
                     projectId: created.id,
                     presence: "missing",
                     worktreeSupport: "unsupported",
                 }),
-                await projects.applyGitFacts(database.context, "agent-a", {
+                await projects.applyGitFacts(database.context, {
                     projectId: created.id,
                     git: { ahead: 4, behind: 2, detached: true },
                 }),
-                await projects.adoptRemoteName(database.context, "agent-a", {
+                await projects.adoptRemoteName(database.context, {
                     projectId: created.id,
                     name: "Named too late",
                 }),
@@ -749,11 +694,11 @@ describe("ProjectsModule", () => {
     });
 
     it("refuses a guarded write that would land on a row something else moved", async () => {
-        const projects = new ProjectsModule({});
+        const projects = await projectsModule();
         const database = await migratedProjectDatabase("projects-guarded-write-test");
 
         try {
-            const created = await projects.create(database.context, "agent-a", {
+            const created = await projects.create(database.context, {
                 repositoryRef: "/tmp/projects/guarded",
                 name: "Guarded",
             });
@@ -775,9 +720,7 @@ describe("ProjectsModule", () => {
             await expect(rename(created.version + 5)).rejects.toThrow(
                 "changed before it could be renamed",
             );
-            await expect(projects.get(database.context, "agent-a", created.id)).resolves.toEqual(
-                created,
-            );
+            await expect(projects.get(database.context, created.id)).resolves.toEqual(created);
 
             const stored = await rename(created.version);
             expect(stored).toMatchObject({ name: "Renamed", version: created.version + 1 });
@@ -787,23 +730,23 @@ describe("ProjectsModule", () => {
     });
 
     it("does not offer a cursor to a page that has already shown everything", async () => {
-        const projects = new ProjectsModule({});
+        const projects = await projectsModule();
         const database = await migratedProjectDatabase("projects-exact-page-test");
 
         try {
             for (const folder of ["/tmp/projects/one", "/tmp/projects/two"]) {
-                await projects.create(database.context, "agent-a", {
+                await projects.create(database.context, {
                     repositoryRef: folder,
                     name: folder,
                 });
             }
 
-            const exact = await projects.list(database.context, "agent-a", { limit: 2 });
+            const exact = await projects.list(database.context, { limit: 2 });
             expect(exact.projects).toHaveLength(2);
             expect(exact.nextCursor).toBeUndefined();
             expect(projects.formatPageForModel(exact)).not.toContain("More projects");
 
-            const partial = await projects.list(database.context, "agent-a", { limit: 1 });
+            const partial = await projects.list(database.context, { limit: 1 });
             expect(partial.nextCursor).toBe("1");
         } finally {
             database.close();
@@ -831,7 +774,6 @@ describe("ProjectsModule", () => {
     it("refuses text a person could not have typed and folders a host did not normalize", () => {
         const record = {
             id: "project-1",
-            ownerAgentId: "agent-1",
             repositoryRef: "/tmp/projects/one",
             kind: "regular",
             storageKey: "one",
@@ -877,6 +819,15 @@ describe("ProjectsModule", () => {
     });
 });
 
+/**
+ * The catalog as the product builds it: configuration rooted in a folder this test owns, and Git
+ * itself. Identities, event identities and timestamps are the module's own, so nothing here asserts
+ * on them.
+ */
+async function projectsModule(toml?: string): Promise<ProjectsModule> {
+    return new ProjectsModule(await temporaryTestConfig(toml), new GitModule());
+}
+
 async function migratedProjectDatabase(name: string) {
     const database = moduleDatabase([], name);
     for (const [, migrate] of projectMigrations) {
@@ -903,6 +854,6 @@ async function projectIds(
     projects: ProjectsModule,
     context: Parameters<ProjectsModule["list"]>[0],
 ): Promise<readonly string[]> {
-    const page = await projects.list(context, "agent-a");
+    const page = await projects.list(context);
     return page.projects.map((project) => project.id);
 }

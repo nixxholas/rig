@@ -214,24 +214,14 @@ describe("read_agent_history", () => {
         }
     });
 
-    it("includes a resolved target in the roster even when the host roster omits it", async () => {
-        const history = new HistoryModule({
-            listAgents: (_ctx, requesterAgentId) => [
-                {
-                    agentId: requesterAgentId,
-                    messageCount: 0,
-                    path: "/root",
-                    status: "working",
-                },
-            ],
-            resolveTarget: () => "agent-b",
-        });
+    it("includes both the reader and the agent it read in the roster", async () => {
+        const history = new HistoryModule();
         const database = moduleDatabase(history.migrations, "history-tool-target-fallback");
         await database.ready;
         try {
             await history.record(database.context, "agent-b", textMessage("record-b", "from b"));
             const tool = await toolFor(history, database);
-            const result = (await tool.execute(database.context, { target: "/root/b" }, {
+            const result = (await tool.execute(database.context, { target: "agent-b" }, {
                 id: "call-target",
                 providerCallId: "provider-target",
                 kv: {},
@@ -241,10 +231,32 @@ describe("read_agent_history", () => {
             expect(result.history).toContain("from b");
             expect(result.agents).toEqual(
                 expect.arrayContaining([
-                    expect.objectContaining({ agent_id: "agent-a" }),
-                    expect.objectContaining({ agent_id: "agent-b", path: "agent-b" }),
+                    expect.objectContaining({ agent_id: "agent-a", message_count: 0 }),
+                    expect.objectContaining({
+                        agent_id: "agent-b",
+                        message_count: 1,
+                        path: "agent-b",
+                    }),
                 ]),
             );
+        } finally {
+            database.close();
+        }
+    });
+
+    it("refuses a target that is not an Agent ID rather than reading something else", async () => {
+        const history = new HistoryModule();
+        const database = moduleDatabase(history.migrations, "history-tool-target-refusal");
+        await database.ready;
+        try {
+            const tool = await toolFor(history, database);
+            await expect(
+                tool.execute(database.context, { target: "x".repeat(300) }, {
+                    id: "call-bad-target",
+                    providerCallId: "provider-bad-target",
+                    kv: {},
+                } as never),
+            ).rejects.toThrow("is not an Agent ID");
         } finally {
             database.close();
         }

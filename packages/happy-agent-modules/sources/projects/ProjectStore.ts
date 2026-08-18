@@ -2,7 +2,6 @@ import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
 import {
-    projectAgentIdSchema,
     projectAvatarSchema,
     projectAvatarHashSchema,
     projectDescriptionSchema,

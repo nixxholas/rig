@@ -1,68 +1,88 @@
-import type { AgentModuleAgent, AgentModuleScope, AnyAgentTool } from "@slopus/happy-agent-base";
+import type { AgentModuleAgent, AgentModuleScope } from "@slopus/happy-agent-base";
 import { createRootContext, type Context } from "@steve.kite/stdlib";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { AutoReviewComputeModule } from "../../sources/auto/impl/AutoReviewComputeModule.js";
+import { autoWorld, type AutoWorld } from "../support/autoWorld.js";
 import { resolveModuleHooks } from "../support/moduleHooks.js";
 
 const context: Context = createRootContext().named("auto-review-compute-test");
 
-function scope(): AgentModuleScope {
+function scope(model: string): AgentModuleScope {
     const agent: AgentModuleAgent = {
         id: "reviewer",
         metadata: undefined,
-        model: "openai/codex-auto-review",
+        model,
         provider: "codex",
         providerKind: "codex",
         effort: "low",
         permissionMode: "read_only",
         tier: undefined,
     };
-    return { agent } as AgentModuleScope;
+    return { agent, kv: undefined } as unknown as AgentModuleScope;
 }
 
+const worlds: AutoWorld[] = [];
+
+afterEach(async () => {
+    while (worlds.length > 0) {
+        await worlds.pop()?.compute.dispose(context);
+    }
+});
+
 describe("AutoReviewComputeModule", () => {
-    it("exposes exactly the host-provided read-only tools", async () => {
-        const tools = [
-            { name: "read_file", namespace: "codex" },
-            { name: "list_dir", namespace: "codex" },
-        ] as unknown as readonly AnyAgentTool[];
-        const seenScopes: AgentModuleScope[] = [];
-        const module = new AutoReviewComputeModule((received) => {
-            seenScopes.push(received);
-            return tools;
-        });
+    it("hands the reviewer the compute module's own read-only tools, and nothing that writes", async () => {
+        const world = await autoWorld();
+        worlds.push(world);
+        const module = new AutoReviewComputeModule(world.compute, context);
         const hooks = await resolveModuleHooks(context, module);
 
-        const received = hooks.tools?.(context, scope());
+        const tools = await hooks.tools?.(context, scope("openai/gpt-5.6-sol"));
 
-        expect(received).toBe(tools);
-        expect(seenScopes).toHaveLength(1);
-        expect(seenScopes[0]?.agent.id).toBe("reviewer");
+        expect(tools?.map((tool) => tool.name)).toEqual(["exec_command", "write_stdin"]);
     });
 
-    it("invokes the builder for each request rather than caching a mutable tool array", async () => {
-        const first = [{ name: "first" }] as unknown as readonly AnyAgentTool[];
-        const second = [{ name: "second" }] as unknown as readonly AnyAgentTool[];
-        let calls = 0;
-        const module = new AutoReviewComputeModule(() => {
-            calls += 1;
-            return calls === 1 ? first : second;
-        });
+    it("asks for the tools of the vendor the reviewer's own route runs on", async () => {
+        const world = await autoWorld();
+        worlds.push(world);
+        const module = new AutoReviewComputeModule(world.compute, context);
         const hooks = await resolveModuleHooks(context, module);
-        const reviewerScope = scope();
 
-        expect(hooks.tools?.(context, reviewerScope)).toBe(first);
-        expect(hooks.tools?.(context, reviewerScope)).toBe(second);
-        expect(calls).toBe(2);
+        expect((await hooks.tools?.(context, scope("anthropic/opus-5")))?.map((t) => t.name)).toEqual(
+            ["Bash", "Read", "Glob", "Grep", "BashInput"],
+        );
+        expect((await hooks.tools?.(context, scope("xai/grok-4.5")))?.map((t) => t.name)).toEqual([
+            "run_terminal_command",
+            "read_file",
+            "list_dir",
+            "grep",
+            "send_command_input",
+        ]);
     });
 
-    it("lets a host builder failure propagate as a correctness-hook failure", async () => {
-        const module = new AutoReviewComputeModule(() => {
-            throw new Error("tool catalog unavailable");
-        });
+    it("asks the compute module on every request rather than caching one array", async () => {
+        const world = await autoWorld();
+        worlds.push(world);
+        const module = new AutoReviewComputeModule(world.compute, context);
         const hooks = await resolveModuleHooks(context, module);
+        const reviewerScope = scope("openai/gpt-5.6-sol");
 
-        expect(() => hooks.tools?.(context, scope())).toThrow("tool catalog unavailable");
+        const first = await hooks.tools?.(context, reviewerScope);
+        const second = await hooks.tools?.(context, reviewerScope);
+
+        expect(first).not.toBe(second);
+        expect(first?.map((tool) => tool.name)).toEqual(second?.map((tool) => tool.name));
+    });
+
+    it("lets a compute failure propagate as a correctness-hook failure", async () => {
+        const world = await autoWorld();
+        worlds.push(world);
+        const module = new AutoReviewComputeModule(world.compute, context);
+        const hooks = await resolveModuleHooks(context, module);
+        await world.compute.dispose(context);
+
+        await expect(hooks.tools?.(context, scope("openai/gpt-5.6-sol"))).rejects.toThrow(
+            "Compute module is closed.",
+        );
     });
 });

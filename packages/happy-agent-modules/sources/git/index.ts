@@ -1,49 +1,74 @@
+/**
+ * The Git module's public surface.
+ *
+ * `GitModule` is the whole feature: every repository read, mutation, credential, and live watch
+ * goes through an instance of it. The names below are only the module class and the types callers
+ * need to speak about what its methods take and return. The commands themselves stay private —
+ * ask the module instead of importing a file out of this folder.
+ */
+export { GitModule } from "./GitModule.js";
+export {
+    gitCredentialRefSchema,
+    gitEntitySchema,
+    gitWatchSchema,
+    type GitChangedFile,
+    type GitCredentialRef,
+    type GitEntity,
+    type GitOperationOptions,
+    type GitSnapshotObserver,
+    type GitWatchInput,
+} from "./GitModule.js";
+
+export {
+    gitChangeSnapshotSchema,
+    gitChangeStateSchema,
+    gitFileChangeSchema,
+    gitFileChangeStatusSchema,
+    gitLiveSnapshotSchema,
+    gitRemoteSourceSchema,
+    gitRepositoryFactsSchema,
+    gitTrackedEntitySchema,
+    projectCreatorSchema,
+    type GitChangeSnapshot,
+    type GitChangeState,
+    type GitFileChange,
+    type GitFileChangeStatus,
+    type GitLiveSnapshot,
+    type GitRemoteSource,
+    type GitRepositoryFacts,
+    type GitTrackedEntity,
+    type ProjectCreator,
+} from "./types.js";
+
+export { gitRepositoryProbeSchema, type GitRepositoryProbe } from "./probeGitRepository.js";
+export { type GitWorktreeIdentity } from "./readGitWorktreeIdentity.js";
+export { type GitComparisonBase } from "./resolveGitComparisonBase.js";
+export { workspaceBaseSchema, type WorkspaceBase } from "./resolveWorkspaceBase.js";
+export { type GitRevisionFile } from "./readGitFileAtRevision.js";
+export { type GitWorkingTreeFiles } from "./listGitWorkingTreeFiles.js";
+export { type UntrackedFileCount } from "./countUntrackedFileLines.js";
+export { type HostingRepository } from "./parseHostingRepository.js";
+export {
+    WorkspaceTransferTargetRestoreError,
+    type PreparedWorkspaceTransfer,
+    type WorkspaceTransferState,
+} from "./prepareWorkspaceTransfer.js";
+export {
+    type GitAuthentication,
+    type GitCommandAuthentication,
+    type GitCommandAuthenticationLease,
+    type RegisterGitCredential,
+} from "./GitCredentialBroker.js";
+
+/**
+ * Still published only because callers outside this package have not moved to `GitModule` yet.
+ *
+ * `.context/wiring/git.md` lists what each of these becomes. Do not add new uses of them.
+ */
 export {
     gitCommandResultSchema,
-    runGitCommandOrThrow,
     type GitCommandOptions,
     type GitCommandResult,
     type GitCommandRunner,
 } from "./GitCommandRunner.js";
-export {
-    GitStateTracker,
-    entityKey,
-    gitLiveSnapshotSchema,
-    gitStateTrackerTuningSchema,
-    type GitLiveSnapshot,
-    type GitStateTrackerOptions,
-    type GitStateTrackerTuning,
-} from "./GitStateTracker.js";
-export * from "./types.js";
-export * from "./GitModule.js";
-export * from "./GitCredentialBroker.js";
-export * from "./cloneRemoteRepository.js";
-export * from "./countUntrackedFileLines.js";
-export * from "./createGitWorktree.js";
-export * from "./detectGitDefaultBranch.js";
-export * from "./isGitWorktreeAt.js";
-export * from "./listGitWorkingTreeFiles.js";
-export * from "./parseGitRawNumstat.js";
-export * from "./parseGitStatusV2.js";
-export * from "./parseHostingRepository.js";
-export * from "./prepareWorkspaceTransfer.js";
-export * from "./probeGitRepository.js";
-export * from "./projectGitCommandSecret.js";
-export * from "./readGitCommonDir.js";
-export * from "./readGitFileAtRevision.js";
-export * from "./readGitTopLevel.js";
-export * from "./readGitWorktreeIdentity.js";
-export * from "./remoteProjectName.js";
-export * from "./removeGitWorktree.js";
-export * from "./renameGitBranch.js";
-export * from "./resolveGitCommit.js";
-export * from "./resolveGitComparisonBase.js";
-export * from "./resolveGitExecutable.js";
-export * from "./resolveGitTrackedEntity.js";
-export * from "./resolveWorkspaceBase.js";
-export * from "./runGitCommand.js";
-export * from "./runSandboxedGitCommand.js";
-export * from "./runScanGit.js";
-export * from "./scanGitRepository.js";
-export * from "./selectGitRemoteUrl.js";
-export * from "./watchGitRepositoryChanges.js";
+export { directGitCommandRunner } from "./runGitCommand.js";

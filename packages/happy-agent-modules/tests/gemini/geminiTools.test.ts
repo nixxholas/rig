@@ -1,12 +1,23 @@
 import { createRootContext } from "@steve.kite/stdlib";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { GeminiModule } from "../../sources/index.js";
+import { GeminiModule } from "../../sources/gemini/index.js";
 import { FakeCompute } from "../compute/support/FakeCompute.js";
 import { resolveModuleHooks } from "../support/moduleHooks.js";
 import { geminiToolset } from "./support/geminiTools.js";
+import { scriptedComputeModule, testConfig } from "../support/computeModule.js";
 
 const ctx = createRootContext().named("happy-agent-modules-gemini-tools");
+
+// The key is configuration's to resolve, and it resolves it from the environment. Every test here
+// runs as an installation that has one; the last one runs as an installation that does not.
+beforeEach(() => {
+    vi.stubEnv("GEMINI_API_KEY", "secret-key");
+});
+
+afterEach(() => {
+    vi.unstubAllEnvs();
+});
 
 /** A Gemini interaction response, as the API would answer it. */
 function interaction(...content: readonly Record<string, unknown>[]): Response {
@@ -49,10 +60,22 @@ describe("the Gemini module's tools", () => {
     });
 
     it("has no tools at all when the agent has no machine to write to", async () => {
-        const module = new GeminiModule({
-            apiKey: "secret-key",
-            compute: { resolve: async () => undefined },
-        });
+        const module = new GeminiModule(
+            testConfig,
+            scriptedComputeModule(async () => undefined),
+        );
+
+        const hooks = await resolveModuleHooks(ctx, module);
+        expect(await hooks.tools!(ctx, { agent: { id: "a" }, kv: undefined } as never)).toEqual([]);
+    });
+
+    it("has no tools at all when the installation has no Gemini key", async () => {
+        vi.stubEnv("GEMINI_API_KEY", "");
+        const compute = new FakeCompute();
+        const module = new GeminiModule(
+            testConfig,
+            scriptedComputeModule(async () => compute),
+        );
 
         const hooks = await resolveModuleHooks(ctx, module);
         expect(await hooks.tools!(ctx, { agent: { id: "a" }, kv: undefined } as never)).toEqual([]);

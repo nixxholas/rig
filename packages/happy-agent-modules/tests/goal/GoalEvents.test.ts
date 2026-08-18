@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { Context } from "@steve.kite/stdlib";
 
 import { GoalModule } from "../../sources/goal/GoalModule.js";
+import type { GoalEvent } from "../../sources/goal/GoalEvent.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
 
 function ownerContext(context: Context, agentId: string): Context {
@@ -14,62 +15,87 @@ function ownerContext(context: Context, agentId: string): Context {
 }
 
 describe("Goal events and transaction boundaries", () => {
-    it("delivers one deeply frozen event to both listeners with stable identity", async () => {
-        let transactionalEvent: object | undefined;
-        let postCommitEvent: object | undefined;
-        const module = new GoalModule({
-            listener: {
-                onEventTransactional: (_ctx, event) => {
-                    transactionalEvent = event;
-                    expect(Object.isFrozen(event)).toBe(true);
-                    if (event.type === "goal_set") {
-                        expect(Object.isFrozen(event.goal)).toBe(true);
-                    }
-                },
-                onEvent: (_ctx, event) => {
-                    postCommitEvent = event;
-                    expect(Object.isFrozen(event)).toBe(true);
-                    if (event.type === "goal_set") {
-                        expect(Object.isFrozen(event.goal)).toBe(true);
-                    }
-                },
-            },
-            idFactory: () => "lifecycle-a",
-            eventIdFactory: () => "event-a",
-            clock: () => 100,
+    it("delivers one deeply frozen event to both kinds of subscriber with stable identity", async () => {
+        let transactionalEvent: GoalEvent | undefined;
+        let postCommitEvent: GoalEvent | undefined;
+        const module = new GoalModule();
+        module.onEventTransactional((_ctx, event) => {
+            transactionalEvent = event;
+            expect(Object.isFrozen(event)).toBe(true);
+            if (event.type === "goal_set") {
+                expect(Object.isFrozen(event.goal)).toBe(true);
+            }
+        });
+        module.onEvent((_ctx, event) => {
+            postCommitEvent = event;
+            expect(Object.isFrozen(event)).toBe(true);
+            if (event.type === "goal_set") {
+                expect(Object.isFrozen(event.goal)).toBe(true);
+            }
         });
         const database = moduleDatabase(module.migrations, "goal-event-identity-test");
         await database.ready;
         try {
+            const before = Date.now();
             await module.setGoal(ownerContext(database.context, "agent-a"), "agent-a", "ship it");
 
             expect(postCommitEvent).toBe(transactionalEvent);
             expect(transactionalEvent).toMatchObject({
                 type: "goal_set",
-                eventId: "event-a",
-                at: 100,
                 agentId: "agent-a",
             });
+            // Identity and time are the module's own.
+            expect(transactionalEvent?.eventId.length).toBeGreaterThan(0);
+            expect(transactionalEvent?.at).toBeGreaterThanOrEqual(before);
+            expect(transactionalEvent?.at).toBeLessThanOrEqual(Date.now());
         } finally {
             database.close();
         }
     });
 
+    it("gives every subscriber the same event and stops delivering after unsubscribe", async () => {
+        const module = new GoalModule();
+        const first: string[] = [];
+        const second: string[] = [];
+        module.onEvent((_ctx, event) => {
+            first.push(event.type);
+        });
+        const unsubscribe = module.onEvent((_ctx, event) => {
+            second.push(event.type);
+        });
+        const database = moduleDatabase(module.migrations, "goal-event-subscribers-test");
+        await database.ready;
+        try {
+            const ctx = ownerContext(database.context, "agent-a");
+            await module.setGoal(ctx, "agent-a", "ship it");
+            expect(first).toEqual(["goal_set"]);
+            expect(second).toEqual(["goal_set"]);
+
+            unsubscribe();
+            unsubscribe(); // Unsubscribing twice does nothing further.
+            await module.clearGoal(ctx, "agent-a");
+            expect(first).toEqual(["goal_set", "goal_cleared"]);
+            expect(second).toEqual(["goal_set"]);
+        } finally {
+            database.close();
+        }
+    });
+
+    it("rejects a subscriber that is not a function", () => {
+        const module = new GoalModule();
+        expect(() => module.onEvent({} as never)).toThrow();
+        expect(() => module.onEventTransactional({} as never)).toThrow();
+    });
+
     it("does not publish post-commit events or durable state after an outer rollback", async () => {
         const transactionalEvents: string[] = [];
         const postCommitEvents: string[] = [];
-        const module = new GoalModule({
-            listener: {
-                onEventTransactional: (_ctx, event) => {
-                    transactionalEvents.push(event.type);
-                },
-                onEvent: (_ctx, event) => {
-                    postCommitEvents.push(event.type);
-                },
-            },
-            idFactory: () => "lifecycle-a",
-            eventIdFactory: () => "event-a",
-            clock: () => 100,
+        const module = new GoalModule();
+        module.onEventTransactional((_ctx, event) => {
+            transactionalEvents.push(event.type);
+        });
+        module.onEvent((_ctx, event) => {
+            postCommitEvents.push(event.type);
         });
         const database = moduleDatabase(module.migrations, "goal-event-rollback-test");
         await database.ready;
@@ -90,20 +116,31 @@ describe("Goal events and transaction boundaries", () => {
         }
     });
 
-    it("contains post-commit listener failures and reports bounded error text", async () => {
-        const reports: { readonly eventId: string; readonly message: string }[] = [];
-        const module = new GoalModule({
-            listener: {
-                onEvent: () => {
-                    throw new Error("post-commit observer failed");
-                },
-            },
-            onPostCommitError: (_ctx, event, message) => {
-                reports.push({ eventId: event.eventId, message });
-            },
-            idFactory: () => "lifecycle-a",
-            eventIdFactory: () => "event-a",
-            clock: () => 100,
+    it("rolls the mutation back when a transactional subscriber throws", async () => {
+        const module = new GoalModule();
+        module.onEventTransactional(() => {
+            throw new Error("reject goal");
+        });
+        const database = moduleDatabase(module.migrations, "goal-event-transactional-throw-test");
+        await database.ready;
+        try {
+            await expect(
+                module.setGoal(ownerContext(database.context, "agent-a"), "agent-a", "ship it"),
+            ).rejects.toThrow("reject goal");
+            await expect(module.goal(database.context, "agent-a")).resolves.toBeUndefined();
+        } finally {
+            database.close();
+        }
+    });
+
+    it("contains post-commit subscriber failures and keeps the committed goal", async () => {
+        const module = new GoalModule();
+        const survivors: string[] = [];
+        module.onEvent(() => {
+            throw new Error("post-commit observer failed");
+        });
+        module.onEvent((_ctx, event) => {
+            survivors.push(event.type);
         });
         const database = moduleDatabase(module.migrations, "goal-event-observer-error-test");
         await database.ready;
@@ -113,94 +150,29 @@ describe("Goal events and transaction boundaries", () => {
             await expect(module.goal(database.context, "agent-a")).resolves.toMatchObject({
                 status: "active",
             });
-            expect(reports).toEqual([
-                { eventId: "event-a", message: "post-commit observer failed" },
-            ]);
+            // The failure did not stop the later subscriber.
+            expect(survivors).toEqual(["goal_set"]);
         } finally {
             database.close();
         }
     });
 
-    it("uses class-backed listener methods with their owning this value", async () => {
-        class Listener {
-            readonly #seen: string[] = [];
-
-            onEventTransactional(_ctx: Context, event: { readonly type: string }): void {
-                this.#seen.push(event.type);
-            }
-
-            get seen(): readonly string[] {
-                return this.#seen;
-            }
-        }
-        const listener = new Listener();
-        const module = new GoalModule({
-            listener,
-            idFactory: () => "lifecycle-a",
-            eventIdFactory: () => "event-a",
-            clock: () => 100,
+    it("mints a distinct identity for every event it publishes", async () => {
+        const module = new GoalModule();
+        const eventIds: string[] = [];
+        module.onEvent((_ctx, event) => {
+            eventIds.push(event.eventId);
         });
-        const database = moduleDatabase(module.migrations, "goal-event-class-listener-test");
+        const database = moduleDatabase(module.migrations, "goal-event-identity-unique-test");
         await database.ready;
         try {
-            await module.setGoal(ownerContext(database.context, "agent-a"), "agent-a", "ship it");
-            expect(listener.seen).toEqual(["goal_set"]);
-        } finally {
-            database.close();
-        }
-    });
+            const ctx = ownerContext(database.context, "agent-a");
+            await module.setGoal(ctx, "agent-a", "ship it");
+            await module.changeGoalStatus(ctx, "agent-a", "paused");
+            await module.clearGoal(ctx, "agent-a");
 
-    it("rejects invalid factory outputs before writing durable state", async () => {
-        const invalidId = new GoalModule({ idFactory: () => "" });
-        const invalidClock = new GoalModule({ clock: () => -1 });
-        const invalidEvent = new GoalModule({ eventIdFactory: () => "" });
-        const cases = [
-            ["goal-event-invalid-lifecycle-test", invalidId, "lifecycle ID"],
-            ["goal-event-invalid-clock-test", invalidClock, "clock"],
-            ["goal-event-invalid-id-test", invalidEvent, "event ID"],
-        ] as const;
-
-        for (const [name, candidate, message] of cases) {
-            const database = moduleDatabase(candidate.migrations, name);
-            await database.ready;
-            try {
-                await expect(
-                    candidate.setGoal(
-                        ownerContext(database.context, "agent-a"),
-                        "agent-a",
-                        "ship it",
-                    ),
-                ).rejects.toThrow(message);
-                await expect(candidate.goal(database.context, "agent-a")).resolves.toBeUndefined();
-            } finally {
-                database.close();
-            }
-        }
-    });
-
-    it("does not leave a host title behind when the enclosing mutation rolls back", async () => {
-        const titles: string[] = [];
-        const module = new GoalModule({
-            host: {
-                setSessionTitle: (_ctx, _agentId, title) => {
-                    titles.push(title);
-                },
-            },
-            listener: {
-                onEventTransactional: () => {
-                    throw new Error("reject goal");
-                },
-            },
-            idFactory: () => "lifecycle-a",
-            clock: () => 100,
-        });
-        const database = moduleDatabase(module.migrations, "goal-title-rollback-test");
-        await database.ready;
-        try {
-            await expect(
-                module.setGoal(ownerContext(database.context, "agent-a"), "agent-a", "ship it"),
-            ).rejects.toThrow("reject goal");
-            expect(titles).toEqual([]);
+            expect(eventIds).toHaveLength(3);
+            expect(new Set(eventIds).size).toBe(3);
         } finally {
             database.close();
         }

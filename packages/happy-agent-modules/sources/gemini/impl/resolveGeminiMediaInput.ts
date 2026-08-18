@@ -1,3 +1,4 @@
+import type { ComputeModule } from "../../compute/index.js";
 import type { GeminiMediaInput } from "../Gemini.js";
 import { computePathExtension } from "./computePathExtension.js";
 
@@ -30,8 +31,8 @@ const MEDIA_BY_EXTENSION: Readonly<Record<string, GeminiMediaInput>> = {
  * How Gemini should read one local file, decided by its extension. Gemini is told the media type
  * explicitly, so a file whose kind cannot be named is refused before its bytes are uploaded.
  */
-export function resolveGeminiMediaInput(path: string): GeminiMediaInput {
-    const media = MEDIA_BY_EXTENSION[computePathExtension(path)];
+export function resolveGeminiMediaInput(compute: ComputeModule, path: string): GeminiMediaInput {
+    const media = MEDIA_BY_EXTENSION[computePathExtension(compute, path)];
     if (media === undefined) {
         throw new Error(
             `Unsupported Gemini media file extension for '${path}'. Use an image, audio, video, or PDF file.`,

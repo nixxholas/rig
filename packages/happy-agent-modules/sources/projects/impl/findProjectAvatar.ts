@@ -1,7 +1,7 @@
 import { lstat, readdir, readFile } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 
-import { parseHostingRepository } from "../../git/parseHostingRepository.js";
+import type { GitModule } from "../../git/index.js";
 import {
     MAX_AVATAR_BYTES,
     normalizeProjectAvatar,
@@ -112,8 +112,11 @@ export async function findRepositoryAvatar(root: string): Promise<Buffer | undef
  * and only for an image served from that host's own avatar domain. Failure is ordinary: a project
  * without a picture is perfectly usable.
  */
-export async function findHostingAvatar(remote: string): Promise<Buffer | undefined> {
-    const repository = parseHostingRepository(remote);
+export async function findHostingAvatar(
+    git: GitModule,
+    remote: string,
+): Promise<Buffer | undefined> {
+    const repository = git.parseHostingRepository(remote);
     if (repository === undefined) return undefined;
     const controller = new AbortController();
     const timeout = setTimeout(() => {

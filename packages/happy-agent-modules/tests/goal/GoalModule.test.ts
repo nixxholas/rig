@@ -10,17 +10,11 @@ import { recordingAgents } from "./recordingAgents.js";
 
 function goalTestModule(name: string) {
     let rejectStatusChange = false;
-    const module = new GoalModule({
-        listener: {
-            onEventTransactional: (_ctx, event) => {
-                if (rejectStatusChange && event.type === "goal_status_changed") {
-                    throw new Error("reject status change");
-                }
-            },
-        },
-        idFactory: () => "public-lifecycle",
-        eventIdFactory: () => "event-id",
-        clock: () => 123,
+    const module = new GoalModule();
+    module.onEventTransactional((_ctx, event) => {
+        if (rejectStatusChange && event.type === "goal_status_changed") {
+            throw new Error("reject status change");
+        }
     });
     const database = moduleDatabase(module.migrations, name);
     return {
@@ -37,15 +31,13 @@ describe("GoalModule", () => {
         const test = goalTestModule("goal-state-test");
         await test.database.ready;
         const agents = recordingAgents();
-        await test.module.beforeStart(test.database.context, agents.ref);
+        test.module.beforeStart(test.database.context, agents.ref);
         try {
+            const before = Date.now();
             const goal = await test.module.setGoal(test.database.context, "agent-a", "  ship it  ");
-            expect(goal).toEqual({
-                createdAt: 123,
-                objective: "ship it",
-                status: "active",
-                updatedAt: 123,
-            });
+            expect(goal).toMatchObject({ objective: "ship it", status: "active" });
+            expect(goal.createdAt).toBeGreaterThanOrEqual(before);
+            expect(goal.updatedAt).toBe(goal.createdAt);
             test.rejectStatusChanges();
             await expect(
                 test.module.changeGoalStatus(test.database.context, "agent-a", "complete"),
@@ -111,7 +103,7 @@ describe("GoalModule", () => {
         const test = goalTestModule("goal-completed-resume-test");
         await test.database.ready;
         const agents = recordingAgents();
-        await test.module.beforeStart(test.database.context, agents.ref);
+        test.module.beforeStart(test.database.context, agents.ref);
         try {
             await test.module.setGoal(test.database.context, "agent-complete", "ship it");
             await test.module.changeGoalStatus(test.database.context, "agent-complete", "complete");
@@ -127,60 +119,34 @@ describe("GoalModule", () => {
         }
     });
 
-    it("uses the optional host seam for primary identity, titles, and post-commit interruption", async () => {
-        const titles: { readonly agentId: string; readonly title: string }[] = [];
-        const interruptions: { readonly agentId: string; readonly reason: string }[] = [];
-        const module = new GoalModule({
-            host: {
-                isPrimaryAgent: async (_ctx, agentId) => agentId === "primary-agent",
-                setSessionTitle: (_ctx, agentId, title) => {
-                    titles.push({ agentId, title });
-                },
-                interruptGoalWork: (_ctx, agentId, reason) => {
-                    interruptions.push({ agentId, reason });
-                },
-            },
-            idFactory: () => "host-lifecycle",
-            eventIdFactory: () => "host-event",
-            clock: () => 456,
-        });
-        const database = moduleDatabase(module.migrations, "goal-host-seam-test");
-        await database.ready;
+    it("keeps one agent's goal entirely separate from another's", async () => {
+        const test = goalTestModule("goal-agent-scope-test");
+        await test.database.ready;
         const agents = recordingAgents();
-        await module.beforeStart(database.context, agents.ref);
+        test.module.beforeStart(test.database.context, agents.ref);
         try {
+            await test.module.setGoal(test.database.context, "agent-one", "first");
+            await test.module.setGoal(test.database.context, "agent-two", "second");
+
             await expect(
-                module.setGoal(database.context, "subagent", "not allowed"),
-            ).rejects.toThrow("Goals can only be managed from the primary session.");
+                test.module.goal(test.database.context, "agent-one"),
+            ).resolves.toMatchObject({ objective: "first", status: "active" });
+            await expect(
+                test.module.goal(test.database.context, "agent-two"),
+            ).resolves.toMatchObject({ objective: "second", status: "active" });
 
-            await module.setGoal(database.context, "primary-agent", "  first line\nsecond line  ");
-            expect(titles).toEqual([{ agentId: "primary-agent", title: "first line second line" }]);
-
-            await module.changeGoalStatus(database.context, "primary-agent", "blocked");
-            expect(interruptions).toEqual([{ agentId: "primary-agent", reason: "goal_blocked" }]);
-
-            await module.clearGoal(database.context, "primary-agent");
-            expect(interruptions).toEqual([
-                { agentId: "primary-agent", reason: "goal_blocked" },
-                { agentId: "primary-agent", reason: "goal_cleared" },
-            ]);
+            await test.module.clearGoal(test.database.context, "agent-one");
+            await expect(test.module.goal(test.database.context, "agent-one")).resolves.toBeUndefined();
+            await expect(
+                test.module.goal(test.database.context, "agent-two"),
+            ).resolves.toMatchObject({ objective: "second" });
         } finally {
-            database.close();
+            test.database.close();
         }
     });
 
     it("pauses an active goal after a failed turn and after archival", async () => {
-        const interruptions: string[] = [];
-        const module = new GoalModule({
-            host: {
-                interruptGoalWork: (_ctx, _agentId, reason) => {
-                    interruptions.push(reason);
-                },
-            },
-            idFactory: () => "pause-lifecycle",
-            eventIdFactory: () => "pause-event",
-            clock: () => 789,
-        });
+        const module = new GoalModule();
         const database = moduleDatabase(module.migrations, "goal-auto-pause-test");
         await database.ready;
         const agents = recordingAgents();
@@ -214,7 +180,8 @@ describe("GoalModule", () => {
             await expect(module.goal(database.context, "agent-failed")).resolves.toMatchObject({
                 status: "paused",
             });
-            expect(interruptions).toEqual(["session_failed"]);
+            // The turn already ended, so there is nothing left to abort.
+            expect(agents.aborts).toEqual([]);
 
             await module.setGoal(database.context, "agent-archived", "archive me");
             await hooks.agentArchivedTransact!(database.context, { sharedKV: {} } as never, {
@@ -224,7 +191,7 @@ describe("GoalModule", () => {
             await expect(module.goal(database.context, "agent-archived")).resolves.toMatchObject({
                 status: "paused",
             });
-            expect(interruptions).toEqual(["session_failed", "session_archived"]);
+            expect(agents.aborts).toEqual([]);
         } finally {
             database.close();
         }

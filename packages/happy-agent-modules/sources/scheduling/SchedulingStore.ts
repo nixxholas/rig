@@ -77,7 +77,6 @@ export function assertSchedulingStore(value: unknown): asserts value is Scheduli
         throw new Error("Scheduling module received an invalid internal storage adapter.");
     }
 }
-
 export function assertSchedulingWaitRecord(value: unknown): asserts value is SchedulingWaitRecord {
     if (!Value.Check(schedulingWaitRecordSchema, value)) {
         throw new Error("Scheduling store returned an invalid durable wait.");
@@ -166,8 +165,4 @@ export function assertSchedulingPage(
     ) {
         throw new Error("Scheduling store returned more records than requested.");
     }
-}
-
-export function assertSchedulingVoid(value: unknown, label: string): asserts value is void {
-    if (value !== undefined) throw new Error(`Scheduling ${label} must return void.`);
 }

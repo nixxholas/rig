@@ -1,5 +1,5 @@
-export { permissionEventSchema, permissionModuleListenerSchema } from "./PermissionEvent.js";
-export type { PermissionModuleListener, PermissionEvent } from "./PermissionEvent.js";
+export { permissionEventSchema } from "./PermissionEvent.js";
+export type { PermissionEvent } from "./PermissionEvent.js";
 export {
     MAX_PERMISSION_ACTION,
     MAX_PERMISSION_ARGUMENT_BYTES,
@@ -38,9 +38,12 @@ export type {
     PermissionToolGuidances,
 } from "./PermissionToolGuidance.js";
 export {
+    PERMISSION_ANNOUNCE_TIMEOUT_MS,
+    PERMISSION_REFUSALS_BEFORE_STOPPING,
+    PERMISSION_REVIEW_TIMEOUT_MS,
     PermissionsModule,
-    permissionsModuleOptionsSchema,
-    type PermissionsModuleOptions,
+    type PermissionEventListener,
+    type PermissionUnsubscribe,
 } from "./PermissionsModule.js";
 export {
     MAX_PERMISSION_GUIDANCE_CHARACTERS,

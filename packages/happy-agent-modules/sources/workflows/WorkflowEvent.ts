@@ -40,28 +40,8 @@ export const workflowEventSchema = Type.Object(
 export type WorkflowEvent = Static<typeof workflowEventSchema>;
 export type WorkflowPostCommitError = Static<typeof workflowPostCommitErrorSchema>;
 
-export const workflowModuleListenerSchema = Type.Object(
-    {
-        onEventTransactional: Type.Optional(
-            Type.Function(
-                [
-                    Type.Unsafe<Context>(Type.Object({}, { additionalProperties: false })),
-                    workflowEventSchema,
-                ],
-                Type.Union([Type.Void(), Type.Promise(Type.Void())]),
-            ),
-        ),
-        onEvent: Type.Optional(
-            Type.Function(
-                [
-                    Type.Unsafe<Context>(Type.Object({}, { additionalProperties: false })),
-                    workflowEventSchema,
-                ],
-                Type.Union([Type.Void(), Type.Promise(Type.Void())]),
-            ),
-        ),
-    },
-    { additionalProperties: false },
-);
+/** Told what happened to a run. Throwing from a transactional one rejects the change. */
+export type WorkflowEventListener = (ctx: Context, event: WorkflowEvent) => void | Promise<void>;
 
-export type WorkflowModuleListener = Static<typeof workflowModuleListenerSchema>;
+/** Ends one subscription. Calling it twice is harmless. */
+export type WorkflowUnsubscribe = () => void;

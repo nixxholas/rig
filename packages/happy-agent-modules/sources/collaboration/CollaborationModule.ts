@@ -15,7 +15,7 @@ import { type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type { Context } from "@steve.kite/stdlib";
 
-import { senderAgentIdMetadata } from "../auto/messageOrigin.js";
+import { senderAgentIdMetadata } from "../impl/messageOrigin.js";
 import {
     collaborationAgentIdSchema,
     collaborationCreateInputSchema,

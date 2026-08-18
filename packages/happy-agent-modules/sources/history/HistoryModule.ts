@@ -15,7 +15,7 @@ import type {
 import { sql, type SQL } from "drizzle-orm";
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import { afterCommit, type Context } from "@steve.kite/stdlib";
+import { afterCommit, withLogContext, type Context } from "@steve.kite/stdlib";
 import {
     agentDatabaseRows,
     agentDatabaseRun,
@@ -24,7 +24,7 @@ import {
     type AgentModuleMigration,
 } from "@slopus/happy-agent-base";
 
-import { isUserOriginMetadata, senderAgentIdOf } from "../auto/messageOrigin.js";
+import { isUserOriginMetadata, senderAgentIdOf } from "../impl/messageOrigin.js";
 import {
     historyBlockSchema,
     historyMessageSchema,
@@ -32,18 +32,15 @@ import {
     historyMessageWithinPersistenceBounds,
     historyAgentIdSchema,
     MAX_HISTORY_BLOCKS_PER_PAGE,
-    MAX_HISTORY_CALL_ID_LENGTH,
     MAX_HISTORY_MESSAGES_PER_APPEND,
     MAX_HISTORY_PAGE_SIZE,
     MAX_HISTORY_PENDING_BLOCKS,
     MAX_HISTORY_POSITION,
     MAX_HISTORY_TOTAL_MESSAGES,
-    MAX_HISTORY_TOOL_NAME_LENGTH,
     historyToolArgumentsSchema,
     historyToolCallBlockSchema,
     historyToolResultBlockSchema,
     historyToolArgumentsWithinByteLimit,
-    MAX_HISTORY_TOOL_DISPLAY_LENGTH,
     MAX_HISTORY_TOOL_OUTPUT_LENGTH,
     type HistoryBlock,
     type HistoryMessage,
@@ -61,12 +58,12 @@ import {
     type HistoryAgentSummaries,
 } from "./HistoryAgent.js";
 import {
-    historyContextSchema,
     historyRecordSchema,
     historyStoreQuerySchema,
     type HistoryRecord,
     type HistoryStoreQuery,
 } from "./HistoryStore.js";
+import { createHistoryExcerpt, type HistoryExcerpt } from "./impl/createHistoryExcerpt.js";
 import {
     historyMessageSearchParts,
     foldHistorySearchText,
@@ -85,91 +82,29 @@ const TOOL_NAME_KEY = "tool_name";
 const pendingBlocksSchema = Type.Array(historyBlockSchema, { maxItems: 2_048 });
 const DEFAULT_READER_LIMIT = 200;
 const positiveIntegerSchema = Type.Integer({ minimum: 1 });
-const nonNegativeIntegerSchema = Type.Integer({ maximum: 1_000_000, minimum: 0 });
 /** How much tool output is recorded before the rest is dropped as not worth keeping. */
-const DEFAULT_TOOL_OUTPUT_LIMIT = 16_000;
+const TOOL_OUTPUT_LIMIT = 16_000;
+/** How many records one end of a two-ended excerpt may contribute. */
+const EXCERPT_END_PAGE_SIZE = 100;
+/** The most characters one excerpt may be asked to render into. */
+export const MAX_HISTORY_EXCERPT_CHARACTERS = 200_000;
+const excerptBudgetSchema = Type.Integer({
+    minimum: 1,
+    maximum: MAX_HISTORY_EXCERPT_CHARACTERS,
+});
 const HISTORY_TABLE = "happy_agent_module_history";
 
-const historyAppendListenerSchema = Type.Function(
-    [
-        historyContextSchema,
-        historyAgentIdSchema,
-        Type.Array(historyMessageSchema, { maxItems: MAX_HISTORY_MESSAGES_PER_APPEND }),
-    ],
-    Type.Unknown(),
-);
-
-const historyToolDisplayTextSchema = Type.String({
-    minLength: 1,
-    maxLength: MAX_HISTORY_TOOL_DISPLAY_LENGTH,
-    pattern: "^[^\\u0000\\r\\n]+$",
-});
-
-/** The bounded information available to a host-provided tool-result summary formatter. */
-export const historyToolDisplayInputSchema = Type.Object(
-    {
-        callId: Type.String({
-            minLength: 1,
-            maxLength: MAX_HISTORY_CALL_ID_LENGTH,
-            pattern: "^[^\\u0000\\r\\n]+$",
-        }),
-        isError: Type.Optional(Type.Boolean()),
-        output: Type.String({ maxLength: MAX_HISTORY_TOOL_OUTPUT_LENGTH }),
-        toolName: Type.String({
-            minLength: 1,
-            maxLength: MAX_HISTORY_TOOL_NAME_LENGTH,
-            pattern: "^[^\\u0000\\r\\n]+$",
-        }),
-    },
-    { additionalProperties: false },
-);
-
-/** The TypeScript type inferred from {@link historyToolDisplayInputSchema}. */
-export type HistoryToolDisplayInput = Static<typeof historyToolDisplayInputSchema>;
-
-const historyToolDisplaySchema = Type.Function(
-    [historyContextSchema, historyToolDisplayInputSchema],
-    Type.Union([historyToolDisplayTextSchema, Type.Promise(historyToolDisplayTextSchema)]),
-);
-
-const historyModuleOptionsSchema = Type.Object(
-    {
-        resolveTarget: Type.Optional(
-            Type.Function(
-                [historyContextSchema, historyAgentIdSchema, historyAgentTargetSchema],
-                Type.Union([
-                    historyAgentIdSchema,
-                    Type.Undefined(),
-                    Type.Promise(Type.Union([historyAgentIdSchema, Type.Undefined()])),
-                ]),
-            ),
-        ),
-        listAgents: Type.Optional(
-            Type.Function(
-                [historyContextSchema, historyAgentIdSchema],
-                Type.Union([
-                    historyAgentSummariesSchema,
-                    Type.Promise(historyAgentSummariesSchema),
-                ]),
-            ),
-        ),
-        toolDisplay: Type.Optional(historyToolDisplaySchema),
-        toolOutputLimit: Type.Optional(nonNegativeIntegerSchema),
-        failureMode: Type.Optional(
-            Type.Union([Type.Literal("best-effort"), Type.Literal("propagate")]),
-        ),
-        onAppend: Type.Optional(historyAppendListenerSchema),
-        onPostCommitError: Type.Optional(
-            Type.Function([historyContextSchema, Type.Unknown()], Type.Unknown()),
-        ),
-    },
-    { additionalProperties: false },
-);
-
-/** Runtime contract for a configured history module. */
-export { historyModuleOptionsSchema };
-/** What a history module is built with. */
-export type HistoryModuleOptions = Static<typeof historyModuleOptionsSchema>;
+/**
+ * What a subscriber is handed once an append has committed.
+ *
+ * It runs after the outermost commit, so the archive it describes is already durable and nothing
+ * the subscriber does can undo it. Each subscriber receives its own copy of the messages.
+ */
+export type HistoryAppendListener = (
+    ctx: Context,
+    agentId: string,
+    messages: readonly HistoryMessage[],
+) => void | Promise<void>;
 
 /**
  * The agent's own record of what happened, which it can read back.
@@ -192,15 +127,8 @@ export type HistoryModuleOptions = Static<typeof historyModuleOptionsSchema>;
 export class HistoryModule implements AgentModule {
     readonly name = "history";
 
-    readonly #resolveTarget: HistoryModuleOptions["resolveTarget"];
-    readonly #listAgents: HistoryModuleOptions["listAgents"];
-    readonly #toolDisplay: HistoryModuleOptions["toolDisplay"];
-    /** How much of a tool's output is worth recording. */
-    readonly #toolOutputLimit: number;
-    /** Whether archive failures are deliberately contained. */
-    readonly #failureMode: "best-effort" | "propagate";
-    readonly #onAppend: HistoryModuleOptions["onAppend"];
-    readonly #onPostCommitError: HistoryModuleOptions["onPostCommitError"];
+    /** Who is watching the archive: the live subscriptions this module supervises. */
+    readonly #appendListeners = new Set<HistoryAppendListener>();
 
     readonly migrations: readonly AgentModuleMigration[] = [
         [
@@ -231,24 +159,21 @@ export class HistoryModule implements AgentModule {
         ],
     ];
 
-    constructor(options: HistoryModuleOptions = {}) {
-        if (!Value.Check(historyModuleOptionsSchema, options)) {
-            throw new Error("History module options are invalid.");
-        }
-        this.#resolveTarget = options.resolveTarget;
-        this.#listAgents = options.listAgents;
-        this.#toolDisplay = options.toolDisplay;
-        const toolOutputLimit = options.toolOutputLimit ?? DEFAULT_TOOL_OUTPUT_LIMIT;
-        if (!Value.Check(nonNegativeIntegerSchema, toolOutputLimit)) {
-            throw new Error("History tool output retention must be a non-negative integer.");
-        }
-        this.#toolOutputLimit = toolOutputLimit;
-        this.#failureMode = options.failureMode ?? "propagate";
-        this.#onAppend = options.onAppend;
-        this.#onPostCommitError = options.onPostCommitError;
+    /**
+     * Watch every append this module commits, and stop watching by calling what is returned.
+     *
+     * A subscriber is called once the outermost transaction has committed, so what it is told
+     * about is already durable. A subscriber that fails is reported through the context log and
+     * never turns a committed archive into a failure.
+     */
+    onAppend(listener: HistoryAppendListener): () => void {
+        this.#appendListeners.add(listener);
+        return () => {
+            this.#appendListeners.delete(listener);
+        };
     }
 
-    /** Add a message to an agent's history. This is how a host records what it sent. */
+    /** Add a message to an agent's history. This is how a caller records what it sent. */
     async record(ctx: Context, agentId: string, message: HistoryMessageInput): Promise<void> {
         if (
             !Value.Check(historyAgentIdSchema, agentId) ||
@@ -320,9 +245,11 @@ export class HistoryModule implements AgentModule {
     }
 
     /**
-     * Return the bounded session-tree roster supplied by the host. Without a roster adapter the
-     * module still describes the requesting agent, so the response contract remains useful for
-     * self-history reads while cross-agent composition is being wired.
+     * The agents a reader may be told about: itself, and the agent it is reading.
+     *
+     * Every agent may read every agent's history, so this describes the two the request actually
+     * concerns, each with the size of its own archive. An agent that has never recorded anything
+     * is still described, with a count of zero, rather than left out of the answer.
      */
     async listAgents(
         ctx: Context,
@@ -336,64 +263,37 @@ export class HistoryModule implements AgentModule {
             throw new Error("The history roster identity is invalid.");
         }
         return await this.#direct(ctx, async (txCtx) => {
-            let summaries: HistoryAgentSummaries;
-            if (this.#listAgents !== undefined) {
-                summaries = await this.#listAgents(txCtx, requesterAgentId);
-            } else {
-                summaries = [];
-                for (const agentId of new Set([requesterAgentId, targetAgentId])) {
-                    const stats = await readHistoryStats(txCtx.db, sql`agent_id = ${agentId}`);
-                    summaries.push({
-                        agentId,
-                        messageCount: stats.messages,
-                        path: agentId,
-                        status: "unknown",
-                    });
-                }
-            }
-            if (!Value.Check(historyAgentSummariesSchema, summaries)) {
-                throw new Error("The history agent roster returned invalid summaries.");
-            }
-            const snapshot = structuredClone(summaries) as HistoryAgentSummaries;
-            const ids = new Set<string>();
-            for (const summary of snapshot) {
-                if (ids.has(summary.agentId)) {
-                    throw new Error("The history agent roster returned duplicate agent IDs.");
-                }
-                ids.add(summary.agentId);
-            }
-            if (!ids.has(requesterAgentId)) {
-                throw new Error("The history agent roster omitted the requesting agent.");
-            }
-            // Any agent may be read, so a target outside the host's roster is still described,
-            // from its own archive count, rather than refused.
-            if (!ids.has(targetAgentId)) {
-                const stats = await readHistoryStats(txCtx.db, sql`agent_id = ${targetAgentId}`);
-                snapshot.push({
-                    agentId: targetAgentId,
+            const summaries: HistoryAgentSummaries = [];
+            for (const agentId of new Set([requesterAgentId, targetAgentId])) {
+                const stats = await readHistoryStats(txCtx.db, sql`agent_id = ${agentId}`);
+                summaries.push({
+                    agentId,
                     messageCount: stats.messages,
-                    path: targetAgentId,
+                    path: agentId,
                     status: "unknown",
                 });
             }
-            snapshot.sort(
+            summaries.sort(
                 (left, right) =>
                     left.path.localeCompare(right.path) ||
                     left.agentId.localeCompare(right.agentId),
             );
-            return snapshot;
+            if (!Value.Check(historyAgentSummariesSchema, summaries)) {
+                throw new Error("The history module produced an invalid agent roster.");
+            }
+            return summaries;
         });
     }
 
     /**
-     * Resolve a tool target. Any agent may read any agent's history: the host resolver, when one
-     * is configured, only maps canonical session-tree paths to Agent IDs and may raise its own
-     * ambiguous-path error; a target it does not recognize is read as a raw Agent ID. A target
-     * that exists nowhere simply has an empty archive — reading grants nothing and reaches
-     * nothing outside the collection's own store.
+     * Resolve a tool target. Any agent may read any agent's history, so a target is simply the
+     * Agent ID to read: its own, or another's. A target that exists nowhere is still a valid
+     * request and simply has an empty archive — reading grants nothing and reaches nothing
+     * outside the collection's own store. Anything that is not a well-formed Agent ID is refused
+     * rather than guessed at.
      */
     async resolveTarget(
-        ctx: Context,
+        _ctx: Context,
         requesterAgentId: string,
         requestedTarget: string,
     ): Promise<string> {
@@ -404,17 +304,55 @@ export class HistoryModule implements AgentModule {
             throw new Error("The history target identity is invalid.");
         }
         if (requestedTarget === requesterAgentId) return requestedTarget;
-        const resolved = await this.#resolveTarget?.(ctx, requesterAgentId, requestedTarget);
-        if (resolved !== undefined && !Value.Check(historyAgentIdSchema, resolved)) {
-            throw new Error("The history target resolver returned an invalid agent ID.");
-        }
-        if (resolved !== undefined) return resolved;
         if (!Value.Check(historyAgentIdSchema, requestedTarget)) {
-            throw new Error(
-                `Target '${requestedTarget}' is not an Agent ID and no session-tree path matched it.`,
-            );
+            throw new Error(`Target '${requestedTarget}' is not an Agent ID.`);
         }
         return requestedTarget;
+    }
+
+    /**
+     * The two ends of an agent's history, rendered within a character budget, with what the whole
+     * archive amounts to.
+     *
+     * Both ends matter and the middle rarely does: the beginning is where the work was asked for,
+     * and the end is where it was left. The two bounded reads are merged and deduplicated, so a
+     * history short enough to appear in both is quoted once. The counts are the archive's exact
+     * totals, and fall back to counting only the sample — saying so — in the degenerate case where
+     * the totals cannot account for what was sampled.
+     *
+     * Returns nothing when the agent has no history at all, which is not an error: an agent that
+     * recorded nothing has nothing to excerpt.
+     */
+    async readExcerpt(
+        ctx: Context,
+        agentId: string,
+        maxCharacters: number,
+    ): Promise<HistoryExcerpt | undefined> {
+        if (!Value.Check(historyAgentIdSchema, agentId)) {
+            throw new Error("The history excerpt received an invalid agent ID.");
+        }
+        if (!Value.Check(excerptBudgetSchema, maxCharacters)) {
+            throw new Error("A history excerpt budget must be a bounded positive integer.");
+        }
+        return await this.#direct(ctx, async (txCtx) => {
+            const beginning = await this.#readPage(txCtx, agentId, {
+                from: "start",
+                limit: EXCERPT_END_PAGE_SIZE,
+            });
+            const recent = await this.#readPage(txCtx, agentId, {
+                from: "end",
+                limit: EXCERPT_END_PAGE_SIZE,
+            });
+            const records = mergeHistoryRecords(beginning.messages, recent.messages);
+            if (records.length === 0) return undefined;
+            const sampled = summarizeHistory(records.map((record) => record.message));
+            const total = beginning.totalStats;
+            return createHistoryExcerpt(
+                records,
+                maxCharacters,
+                statsAtLeast(total, sampled) ? total : undefined,
+            );
+        });
     }
 
     async #afterToolCall(
@@ -424,27 +362,11 @@ export class HistoryModule implements AgentModule {
     ): Promise<void> {
         const storedName = await scope.runKV.read(ctx, TOOL_NAME_KEY);
         const toolName = typeof storedName === "string" ? storedName : "unknown tool";
-        const output = renderOutput(result.content, this.#toolOutputLimit);
-        const displayInput = {
-            callId: result.callId,
-            ...(result.isError === undefined ? {} : { isError: result.isError }),
-            output,
-            toolName,
-        };
-        if (!Value.Check(historyToolDisplayInputSchema, displayInput)) {
-            throw new Error("History module received an invalid tool-result display input.");
-        }
-        const display =
-            this.#toolDisplay === undefined
-                ? defaultToolDisplay(displayInput)
-                : await this.#toolDisplay(ctx, displayInput);
-        if (!Value.Check(historyToolDisplayTextSchema, display)) {
-            throw new Error("History module received an invalid tool-result display.");
-        }
+        const output = renderOutput(result.content, TOOL_OUTPUT_LIMIT);
         const toolResultBlock: HistoryBlock = {
             type: "tool_result",
             callId: result.callId,
-            display,
+            display: toolDisplay(toolName, output, result.isError === true),
             output,
             toolName,
             ...(result.isError === true ? { isError: true } : {}),
@@ -539,70 +461,63 @@ export class HistoryModule implements AgentModule {
         ) {
             throw new Error("The history module produced an invalid archive append.");
         }
-        try {
-            const countRows = await agentDatabaseRows<{ count: number | string }>(
-                ctx.db,
-                sql`SELECT COUNT(*) AS count
-                    FROM ${sql.raw(HISTORY_TABLE)}
-                    WHERE agent_id = ${agentId}`,
-            );
-            const count = toSafeInteger(countRows[0]?.count, "history record count");
-            if (count + messages.length > MAX_HISTORY_TOTAL_MESSAGES) {
-                throw new Error("The history module reached its record limit.");
-            }
-            const positionRows = await agentDatabaseRows<{ position: number | string }>(
-                ctx.db,
-                sql`SELECT COALESCE(MAX(position), -1) + 1 AS position
-                    FROM ${sql.raw(HISTORY_TABLE)}
-                    WHERE agent_id = ${agentId}`,
-            );
-            let position = toSafeInteger(positionRows[0]?.position, "history record position");
-            for (const message of messages) {
-                const encoded = JSON.stringify(message);
-                if (encoded === undefined) {
-                    throw new Error("The history module could not serialize a message.");
-                }
-                const stats = summarizeHistory([message]);
-                const searchText = foldHistorySearchText(
-                    historyMessageSearchParts(message).join("\n"),
-                );
-                await agentDatabaseRun(
-                    ctx.db,
-                    sql`INSERT INTO ${sql.raw(HISTORY_TABLE)} (
-                            agent_id,
-                            position,
-                            record_id,
-                            role,
-                            message_json,
-                            search_text,
-                            assistant_messages,
-                            user_messages,
-                            text_characters,
-                            thinking_blocks,
-                            tool_calls,
-                            tool_results
-                        ) VALUES (
-                            ${agentId},
-                            ${position},
-                            ${message.recordId},
-                            ${message.role},
-                            ${encoded},
-                            ${searchText},
-                            ${stats.assistantMessages},
-                            ${stats.userMessages},
-                            ${stats.textCharacters},
-                            ${stats.thinkingBlocks},
-                            ${stats.toolCalls},
-                            ${stats.toolResults}
-                        )`,
-                );
-                position += 1;
-            }
-            this.#scheduleAppendNotification(ctx, agentId, messages);
-        } catch (error: unknown) {
-            if (this.#failureMode === "best-effort") return;
-            throw error;
+        const countRows = await agentDatabaseRows<{ count: number | string }>(
+            ctx.db,
+            sql`SELECT COUNT(*) AS count
+                FROM ${sql.raw(HISTORY_TABLE)}
+                WHERE agent_id = ${agentId}`,
+        );
+        const count = toSafeInteger(countRows[0]?.count, "history record count");
+        if (count + messages.length > MAX_HISTORY_TOTAL_MESSAGES) {
+            throw new Error("The history module reached its record limit.");
         }
+        const positionRows = await agentDatabaseRows<{ position: number | string }>(
+            ctx.db,
+            sql`SELECT COALESCE(MAX(position), -1) + 1 AS position
+                FROM ${sql.raw(HISTORY_TABLE)}
+                WHERE agent_id = ${agentId}`,
+        );
+        let position = toSafeInteger(positionRows[0]?.position, "history record position");
+        for (const message of messages) {
+            const encoded = JSON.stringify(message);
+            if (encoded === undefined) {
+                throw new Error("The history module could not serialize a message.");
+            }
+            const stats = summarizeHistory([message]);
+            const searchText = foldHistorySearchText(historyMessageSearchParts(message).join("\n"));
+            await agentDatabaseRun(
+                ctx.db,
+                sql`INSERT INTO ${sql.raw(HISTORY_TABLE)} (
+                        agent_id,
+                        position,
+                        record_id,
+                        role,
+                        message_json,
+                        search_text,
+                        assistant_messages,
+                        user_messages,
+                        text_characters,
+                        thinking_blocks,
+                        tool_calls,
+                        tool_results
+                    ) VALUES (
+                        ${agentId},
+                        ${position},
+                        ${message.recordId},
+                        ${message.role},
+                        ${encoded},
+                        ${searchText},
+                        ${stats.assistantMessages},
+                        ${stats.userMessages},
+                        ${stats.textCharacters},
+                        ${stats.thinkingBlocks},
+                        ${stats.toolCalls},
+                        ${stats.toolResults}
+                    )`,
+            );
+            position += 1;
+        }
+        this.#scheduleAppendNotification(ctx, agentId, messages);
     }
 
     async #readPage(ctx: Context, agentId: string, query: HistoryStoreQuery): Promise<HistoryPage> {
@@ -806,16 +721,24 @@ export class HistoryModule implements AgentModule {
         agentId: string,
         messages: readonly HistoryMessage[],
     ): void {
-        if (this.#onAppend === undefined) return;
+        if (this.#appendListeners.size === 0) return;
+        // Who is subscribed is settled here, before the commit, so a subscription taken or dropped
+        // while the transaction was still open decides this notification once rather than racing it.
+        const listeners = [...this.#appendListeners];
         const snapshot = structuredClone(messages) as HistoryMessage[];
         afterCommit(ctx, async (postCommitCtx) => {
-            try {
-                await this.#onAppend?.(postCommitCtx, agentId, snapshot);
-            } catch (error: unknown) {
+            for (const listener of listeners) {
                 try {
-                    await this.#onPostCommitError?.(postCommitCtx, error);
-                } catch {
-                    // Post-commit observation cannot turn a committed archive into a failure.
+                    // Each subscriber gets its own copy, so one that keeps or edits what it was
+                    // handed cannot change what the next one sees, or what the archive holds.
+                    await listener(postCommitCtx, agentId, structuredClone(snapshot));
+                } catch (error: unknown) {
+                    // The archive is already durable. Observation cannot undo it, so a failing
+                    // subscriber is reported and the rest are still told.
+                    withLogContext(postCommitCtx, { agentId }).log.error(
+                        "A history append subscriber failed.",
+                        error,
+                    );
                 }
             }
         });
@@ -845,7 +768,7 @@ export class HistoryModule implements AgentModule {
         /**
          * Record an accepted incoming message beside the Agent Base message transaction. Who
          * sent it is recorded from the message's provenance metadata while it still exists: only
-         * a message the host positively stamped as an end-user submission is recorded as
+         * a message positively stamped as an end-user submission is recorded as
          * `role: "user"`, and everything else — a goal continuation, a collaboration delivery, an
          * unstamped message — is recorded as `role: "agent"`, naming the specific sender when the
          * metadata named one. This fails closed: a forgetful path under-attributes rather than a
@@ -909,8 +832,9 @@ export class HistoryModule implements AgentModule {
          * Write the finished response as one message, and the failure as one of its own when the
          * response failed. Both land in the transaction that commits the inference, so the
          * record and the thing recorded become durable together. A response that produced
-         * nothing records nothing. In strict mode a store failure propagates and rolls back the
-         * inference transaction; best-effort mode is an explicit opt-in and drops the record.
+         * nothing records nothing. A store failure propagates and rolls back the inference
+         * transaction, because a conversation the archive could not record is not one the agent
+         * should go on to claim it remembers.
          */
         afterInferenceTransact: (
             ctx: Context,
@@ -921,9 +845,8 @@ export class HistoryModule implements AgentModule {
         /**
          * Finish an archive that was interrupted after its response blocks were committed.
          *
-         * The settling transaction is the last place the run KV is available. A strict archive
-         * failure therefore rolls settlement back and leaves the pending blocks for the next
-         * restart.
+         * The settling transaction is the last place the run KV is available. An archive failure
+         * therefore rolls settlement back and leaves the pending blocks for the next restart.
          */
         afterAgentSettledTransact: async (ctx: Context, scope: AgentModuleScope): Promise<void> => {
             const blocks = await this.#pendingBlocks(ctx, scope);
@@ -1236,10 +1159,25 @@ function renderOutput(blocks: readonly SessionOutputBlock[], limit: number): str
     return `${text.slice(0, retained)}${suffix}`;
 }
 
-function defaultToolDisplay(input: HistoryToolDisplayInput): string {
-    return input.isError === true
-        ? `Tool ${input.toolName} failed.`
-        : `Tool ${input.toolName} returned ${input.output.length} characters.`;
+/** The one line a person reading the history sees in place of a tool's whole answer. */
+function toolDisplay(toolName: string, output: string, isError: boolean): string {
+    return isError
+        ? `Tool ${toolName} failed.`
+        : `Tool ${toolName} returned ${output.length} characters.`;
+}
+
+/**
+ * Join bounded pages read from opposite ends of one archive, in position order.
+ *
+ * A history short enough to appear in both pages is kept once. Both pages come from this module's
+ * own validated read, so a position identifies the same record in either of them.
+ */
+function mergeHistoryRecords(...pages: readonly (readonly HistoryRecord[])[]): HistoryRecord[] {
+    const byPosition = new Map<number, HistoryRecord>();
+    for (const page of pages) {
+        for (const record of page) byPosition.set(record.position, record);
+    }
+    return [...byPosition.values()].sort((left, right) => left.position - right.position);
 }
 
 function boundedLimit(limit: number): number {

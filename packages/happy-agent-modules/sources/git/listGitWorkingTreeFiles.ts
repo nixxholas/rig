@@ -1,6 +1,6 @@
 import { Type, type Static } from "@sinclair/typebox";
 
-import { runScanGit } from "./runScanGit.js";
+import { runScanGit, type ScanGitRunner } from "./runScanGit.js";
 
 const WORKING_TREE_FILE_LIMIT = 20_000;
 
@@ -15,11 +15,12 @@ export type GitWorkingTreeFiles = Static<typeof gitWorkingTreeFilesSchema>;
 
 export async function listGitWorkingTreeFiles(options: {
     path: string;
+    runGit?: ScanGitRunner;
     signal?: AbortSignal;
 }): Promise<GitWorkingTreeFiles> {
     let result;
     try {
-        result = await runScanGit({
+        result = await (options.runGit ?? runScanGit)({
             args: ["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
             cwd: options.path,
             ...(options.signal === undefined ? {} : { signal: options.signal }),

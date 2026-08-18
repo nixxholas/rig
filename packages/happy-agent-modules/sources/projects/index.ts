@@ -107,12 +107,13 @@ export {
 } from "./Project.js";
 export {
     projectContextSchema,
+    projectEventListenerSchema,
     projectEventSchema,
-    projectModuleListenerSchema,
     projectStateChangeReasonSchema,
     type ProjectEvent,
-    type ProjectModuleListener,
+    type ProjectEventListener,
     type ProjectStateChangeReason,
+    type ProjectUnsubscribe,
 } from "./ProjectEvent.js";
 export { projectMigrations } from "./ProjectMigrations.js";
 export {
@@ -140,15 +141,10 @@ export {
     type ProjectWorkspaceCompute,
 } from "./ProjectSettings.js";
 export {
-    assertProjectModuleOptions,
     assertProjectAvatarAsset,
-    projectClockSchema,
-    projectEventIdFactorySchema,
-    projectModuleOptionsSchema,
-    projectIdFactorySchema,
-    projectPostCommitErrorSchema,
+    MAX_PROJECT_OUTPUT_CHARACTERS,
+    PROJECT_PAGE_SIZE,
     ProjectsModule,
-    type ProjectModuleOptions,
 } from "./ProjectsModule.js";
 export { projectGitFactsFrom } from "./projectGitFacts.js";
 export {
@@ -220,7 +216,6 @@ export {
     assertProjectSettings,
     assertProjectTransition,
 } from "./ProjectTransition.js";
-export { getManagedProjectsDirectory } from "./impl/getManagedProjectsDirectory.js";
 export {
     folderProjectName,
     HOME_PROJECT_NAME,

@@ -22,12 +22,13 @@ import {
     workspaceCommitSchema,
     workspaceErrorSchema,
     workspaceInitializationFactsSchema,
+    workspaceTimestampSchema,
     workspaceVersionSchema,
     type Workspace,
     type WorkspaceGitFacts,
     type WorkspaceReserveHooks,
 } from "./Workspace.js";
-import { workspaceClockSchema, workspaceNow, type WorkspaceClock } from "./WorkspaceClock.js";
+import type { WorkspacesModule } from "./WorkspacesModule.js";
 import { workspaceBranchName, workspaceNameKey } from "./WorkspaceIdentity.js";
 import {
     workspaceBranchMetadataSchema,
@@ -51,7 +52,7 @@ import {
     type WorkspaceTransferResult,
     type WorkspaceTransferStoreResult,
 } from "./WorkspaceTransfer.js";
-import { byOrder, lowestOrderKey, orderKeyBetween } from "./store/workspaceOrdering.js";
+import { byOrder, orderKeyBetween } from "./store/workspaceOrdering.js";
 import {
     assertWorkspace,
     readProjectWorkspaces,
@@ -186,8 +187,8 @@ const mutation = <TInput extends TSchema>(input: TInput) =>
     );
 
 /**
- * This contract is private to the module-owned SQLite adapter. Callers
- * configure a narrow host operation service instead of injecting a store.
+ * This contract is private to the module-owned SQLite adapter. A caller never injects a store: the
+ * catalog opens its own and answers the questions the store has to ask while it decides.
  */
 export const workspaceStoreSchema = Type.Object(
     {
@@ -225,16 +226,8 @@ export const workspaceStoreSchema = Type.Object(
         applyGitFacts: mutation(workspaceStoreApplyGitFactsInputSchema),
         applyProbe: mutation(workspaceStoreApplyProbeInputSchema),
         transfer: Type.Function(
-            [
-                workspaceContextSchema,
-                workspaceTransferInputSchema,
-                workspaceMutationRequestSchema,
-            ],
+            [workspaceContextSchema, workspaceTransferInputSchema, workspaceMutationRequestSchema],
             Type.Promise(workspaceTransferStoreResultSchema),
-        ),
-        branchMetadata: Type.Function(
-            [workspaceContextSchema, workspaceIdSchema],
-            Type.Promise(workspaceBranchMetadataSchema),
         ),
     },
     { additionalProperties: false },
@@ -274,7 +267,7 @@ export { orderKeyBetween, sameJson, workspaceMigrations, assertWorkspace };
 
 export function assertWorkspaceStore(value: unknown): asserts value is WorkspaceStore {
     if (!Value.Check(workspaceStoreSchema, value)) {
-        throw new Error("Workspace module received an invalid host store.");
+        throw new Error("The workspace store is invalid.");
     }
 }
 
@@ -322,74 +315,14 @@ export function assertWorkspaceTransactionChange(
     }
 }
 
-const workspaceHostAvailabilitySchema = Type.Union([Type.Boolean(), Type.Promise(Type.Boolean())]);
-
-/**
- * What the store may ask the catalog around it while it decides. Reservation stays inside the store
- * — it is a durable decision about names — but only the catalog knows which folders and branches
- * are already spoken for, and where a workspace lives.
- *
- * The two availability answers are a real look at Git: a reservation refuses to invent a branch
- * when nothing can tell it which refs, loose or packed, already exist.
- */
-export const workspaceHostSchema = Type.Object(
-    {
-        pathForStorageKey: Type.Optional(
-            Type.Function(
-                [workspaceProjectRefSchema, workspaceStorageKeySchema],
-                workspacePathSchema,
-            ),
-        ),
-        isBranchUnavailable: Type.Optional(
-            Type.Function(
-                [workspaceProjectRefSchema, workspaceBranchSchema],
-                workspaceHostAvailabilitySchema,
-            ),
-        ),
-        isStorageKeyUnavailable: Type.Optional(
-            Type.Function(
-                [workspaceProjectRefSchema, workspaceStorageKeySchema],
-                workspaceHostAvailabilitySchema,
-            ),
-        ),
-        branchMetadata: Type.Optional(
-            Type.Function(
-                [workspaceContextSchema, workspaceIdSchema],
-                Type.Promise(workspaceBranchMetadataSchema),
-            ),
-        ),
-        transfer: Type.Optional(
-            Type.Function(
-                [
-                    workspaceContextSchema,
-                        workspaceTransferInputSchema,
-                    workspaceMutationRequestSchema,
-                ],
-                Type.Promise(workspaceTransferStoreResultSchema),
-            ),
-        ),
-    },
-    { additionalProperties: false },
-);
-
-export type WorkspaceHost = Static<typeof workspaceHostSchema>;
-
-export const workspaceStoreOptionsSchema = Type.Object(
-    { host: Type.Optional(workspaceHostSchema), clock: Type.Optional(workspaceClockSchema) },
-    { additionalProperties: false },
-);
-
-export type WorkspaceStoreOptions = Static<typeof workspaceStoreOptionsSchema>;
-
-export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): WorkspaceStore {
-    if (!Value.Check(workspaceStoreOptionsSchema, options)) {
-        throw new Error("Workspace store options are invalid.");
-    }
-    const host = options.host;
-    // Every timestamp the store writes comes from here, so a host that supplies a clock sees it in
-    // the reservation as well as in each later change.
-    const clock: WorkspaceClock = options.clock ?? (() => Date.now());
-    const now = (ctx: Context): number => workspaceNow(clock, ctx);
+export function createWorkspaceStore(catalog: WorkspacesModule): WorkspaceStore {
+    const now = (): number => {
+        const at = Date.now();
+        if (!Value.Check(workspaceTimestampSchema, at)) {
+            throw new Error("The clock is outside the range a workspace timestamp can hold.");
+        }
+        return at;
+    };
 
     /**
      * One durable write. The row the decision was read from is part of the update predicate, so a
@@ -417,7 +350,7 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
         const workspace: Workspace = {
             ...decided,
             version: before.version + 1,
-            updatedAt: Math.max(now(ctx), before.updatedAt + 1),
+            updatedAt: Math.max(now(), before.updatedAt + 1),
         };
         assertWorkspace(workspace);
         const stored = await writeWorkspace(database, workspace, before.version);
@@ -431,9 +364,7 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
 
     return {
         reserve: async (ctx, input, hooks, operation) =>
-            await reserveWorkspace(ctx.db, input, hooks, host, operation, () =>
-                now(ctx),
-            ),
+            await reserveWorkspace(ctx.db, input, hooks, catalog, operation, now),
 
         list: async (ctx, query) => {
             const cursor = query.cursor ?? 0;
@@ -458,51 +389,40 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
 
         rename: async (ctx, input, operation) => {
             const siblings = await readProjectWorkspacesFor(ctx.db, input.workspaceId);
-            return await update(
-                ctx,
-                input.workspaceId,
-                operation,
-                async (before) => {
-                    assertExpectedVersion(
-                        before,
-                        input.expectedVersion,
-                        "The workspace changed before it could be renamed.",
-                    );
-                    if (isSettled(before)) return undefined;
-                    const named = await renameTo(before, input.name, siblings, host);
-                    // A person naming a workspace settles the question: a first chat never renames it
-                    // again, even when the name it chose happens to match.
-                    return named === undefined && before.nameConfigured
-                        ? undefined
-                        : { ...(named ?? before), nameConfigured: true };
-                },
-            );
+            return await update(ctx, input.workspaceId, operation, async (before) => {
+                assertExpectedVersion(
+                    before,
+                    input.expectedVersion,
+                    "The workspace changed before it could be renamed.",
+                );
+                if (isSettled(before)) return undefined;
+                const named = await renameTo(before, input.name, siblings, catalog);
+                // A person naming a workspace settles the question: a first chat never renames it
+                // again, even when the name it chose happens to match.
+                return named === undefined && before.nameConfigured
+                    ? undefined
+                    : { ...(named ?? before), nameConfigured: true };
+            });
         },
 
         inheritName: async (ctx, input, operation) => {
             const siblings = await readProjectWorkspacesFor(ctx.db, input.workspaceId);
-            return await update(
-                ctx,
-                input.workspaceId, operation, async (before) =>
+            return await update(ctx, input.workspaceId, operation, async (before) =>
                 before.nameConfigured || isSettled(before)
                     ? undefined
-                    : await renameTo(before, input.name, siblings, host),
+                    : await renameTo(before, input.name, siblings, catalog),
             );
         },
 
         setBranch: async (ctx, input, operation) =>
-            await update(
-                ctx,
-                input.workspaceId, operation, (before) =>
+            await update(ctx, input.workspaceId, operation, (before) =>
                 isSettled(before) || before.branch === input.branch
                     ? undefined
                     : { ...before, branch: input.branch },
             ),
 
         recordInitialization: async (ctx, input, operation) =>
-            await update(
-                ctx,
-                input.workspaceId, operation, (before) => {
+            await update(ctx, input.workspaceId, operation, (before) => {
                 // A workspace archived or failed while Git discovery was running keeps its
                 // terminal state and ignores the late result.
                 if (before.status !== "initializing") return undefined;
@@ -516,9 +436,7 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
             }),
 
         markReady: async (ctx, input, operation) =>
-            await update(
-                ctx,
-                input.workspaceId, operation, (before) => {
+            await update(ctx, input.workspaceId, operation, (before) => {
                 if (before.status !== "initializing") return undefined;
                 const next = { ...before, presence: "present" as const, status: "ready" as const };
                 delete next.initializationError;
@@ -526,18 +444,14 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
             }),
 
         markFailed: async (ctx, input, operation) =>
-            await update(
-                ctx,
-                input.workspaceId, operation, (before) =>
+            await update(ctx, input.workspaceId, operation, (before) =>
                 before.status === "ready"
                     ? { ...before, status: "failed", initializationError: input.error }
                     : undefined,
             ),
 
         markInitializationFailed: async (ctx, input, operation) =>
-            await update(
-                ctx,
-                input.workspaceId, operation, (before) =>
+            await update(ctx, input.workspaceId, operation, (before) =>
                 before.status === "initializing"
                     ? {
                           ...before,
@@ -572,9 +486,7 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
                 afterIndex === -1 ? null : (ordered[afterIndex]?.orderKey ?? null),
                 ordered[afterIndex + 1]?.orderKey ?? null,
             );
-            return await update(
-                ctx,
-                input.workspaceId, operation, (before) => {
+            return await update(ctx, input.workspaceId, operation, (before) => {
                 assertExpectedVersion(
                     before,
                     input.expectedVersion,
@@ -585,9 +497,7 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
         },
 
         beginArchive: async (ctx, input, operation) =>
-            await update(
-                ctx,
-                input.workspaceId, operation, (before) => {
+            await update(ctx, input.workspaceId, operation, (before) => {
                 assertExpectedVersion(
                     before,
                     input.expectedVersion,
@@ -600,32 +510,26 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
             }),
 
         completeArchive: async (ctx, input, operation) =>
-            await update(
-                ctx,
-                input.workspaceId, operation, (before) => {
+            await update(ctx, input.workspaceId, operation, (before) => {
                 if (before.status !== "archiving") return undefined;
                 const next: Workspace = {
                     ...before,
                     status: "archived",
-                    archivedAt: Math.max(now(ctx), before.updatedAt + 1),
+                    archivedAt: Math.max(now(), before.updatedAt + 1),
                 };
                 delete next.initializationError;
                 return next;
             }),
 
         applyGitFacts: async (ctx, input, operation) =>
-            await update(
-                ctx,
-                input.workspaceId, operation, (before) =>
+            await update(ctx, input.workspaceId, operation, (before) =>
                 // Archival is the terminal decision. A scan that was already running when it was
                 // made describes a workspace nobody has any more.
                 isSettled(before) ? undefined : withGitFacts(before, input.facts),
             ),
 
         applyProbe: async (ctx, input, operation) =>
-            await update(
-                ctx,
-                input.workspaceId, operation, (before) => {
+            await update(ctx, input.workspaceId, operation, (before) => {
                 // A probe describes a workspace someone can use. Anything still being built or
                 // taken down is described by its own lifecycle transition instead.
                 if (before.status !== "ready") return undefined;
@@ -636,19 +540,11 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
 
         transfer: async (ctx, input, operation) => {
             const database = ctx.db;
-            const hostResult =
-                host?.transfer === undefined
-                    ? undefined
-                    : await host.transfer(ctx, input, operation);
-            const result =
-                hostResult ??
-                (await defaultWorkspaceTransfer(ctx, input, operation, () =>
-                    now(ctx),
-                ));
+            const result = await defaultWorkspaceTransfer(ctx, input, operation, now);
             if (Value.Check(workspaceSchema, result)) {
                 const current = await readWorkspace(database, result.id);
                 if (current === undefined) {
-                    throw new Error("Workspace transfer host returned a missing workspace.");
+                    throw new Error("Workspace transfer named a workspace that is not there.");
                 }
                 const stored = await writeWorkspace(
                     database,
@@ -669,7 +565,7 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
             if (result.state === "transferred") {
                 const current = await readWorkspace(database, result.workspace.id);
                 if (current === undefined) {
-                    throw new Error("Workspace transfer host returned a missing workspace.");
+                    throw new Error("Workspace transfer named a workspace that is not there.");
                 }
                 if (current.projectRef !== result.workspace.projectRef) {
                     await writeWorkspace(
@@ -678,20 +574,13 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
                             ...current,
                             projectRef: result.workspace.projectRef,
                             version: current.version + 1,
-                            updatedAt: Math.max(now(ctx), current.updatedAt + 1),
+                            updatedAt: Math.max(now(), current.updatedAt + 1),
                         },
                         current.version,
                     );
                 }
             }
             return result;
-        },
-
-        branchMetadata: async (ctx, workspaceId) => {
-            if (host?.branchMetadata === undefined) {
-                throw new Error("Workspace branch metadata requires an injected host service.");
-            }
-            return await host.branchMetadata(ctx, workspaceId);
         },
     };
 }
@@ -709,7 +598,7 @@ async function renameTo(
     before: Workspace,
     requested: string,
     siblings: readonly Workspace[],
-    host: WorkspaceHost | undefined,
+    catalog: WorkspacesModule,
 ): Promise<Workspace | undefined> {
     const others = siblings.filter((row) => row.id !== before.id);
     const name = uniqueWorkspaceName(requested, (candidate) =>
@@ -720,9 +609,7 @@ async function renameTo(
         // name that slugs back to it must not be pushed onto a suffix for nothing.
         if (candidate === before.branch) return false;
         if (others.some((row) => row.branch === candidate)) return true;
-        return host?.isBranchUnavailable === undefined
-            ? false
-            : await host.isBranchUnavailable(before.projectRef, candidate);
+        return catalog.isBranchUnavailable(before.projectRef, candidate);
     });
     return name === before.name && branch === before.branch
         ? undefined

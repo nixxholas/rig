@@ -15,7 +15,6 @@ import {
     humanizeMcpName,
     mergeMcpTools,
     normalizeMcpName,
-    quoteVisibleExact,
     type McpHost,
     type McpServerConfigEntry,
     type McpToolResult,
@@ -30,6 +29,7 @@ import {
     mcpUriSchema,
 } from "../../sources/mcp/Mcp.js";
 import { listMcpServersTool } from "../../sources/mcp/tools/list_mcp_servers.js";
+import { quoteVisibleExact } from "../../sources/impl/quoteVisibleExact.js";
 
 const ctx = createRootContext().named("mcp-utility-corner-case-test");
 

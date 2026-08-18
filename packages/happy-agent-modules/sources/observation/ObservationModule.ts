@@ -21,8 +21,8 @@ import {
     type RootContext,
 } from "@steve.kite/stdlib";
 
-import type { HappyAgentConfiguration } from "../config/ConfigModule.js";
-import type { HistoryMessage } from "../history/HistoryMessage.js";
+import type { ConfigModule } from "../config/index.js";
+import type { HistoryMessage } from "../history/index.js";
 import {
     MAX_OBSERVATION_FILE_BYTES,
     MAX_OBSERVATION_PENDING_BYTES,
@@ -36,16 +36,6 @@ import {
     startObservationTracing,
     type ObservationTracing,
 } from "./impl/startObservationTracing.js";
-
-/** What the observation module needs to know before it can watch anything. */
-export interface ObservationModuleOptions {
-    /** The resolved configuration, which supplies both the settings and the paths. */
-    readonly configuration: HappyAgentConfiguration;
-    /** The environment whose `HAPPY_OBSERVATION_*` overrides apply. Defaults to the process's. */
-    readonly environment?: NodeJS.ProcessEnv;
-    /** The deployment spans are labeled with, such as `production` or `local-development`. */
-    readonly deployment?: string;
-}
 
 /**
  * What the agent records about itself: logs, traces, and a readable copy of its history.
@@ -92,12 +82,16 @@ export class ObservationModule implements AgentModule {
     /**
      * Open everything the configured settings ask for, and nothing they do not.
      *
+     * The configuration module owns both the settings and the paths this writes to, so it is what
+     * this takes. The `HAPPY_OBSERVATION_*` overrides are read from the process environment here,
+     * where the decision is made, rather than handed in.
+     *
      * This runs before the agent system exists, because the logger it produces has to be on the
      * context that system is created with.
      */
-    static async start(options: ObservationModuleOptions): Promise<ObservationModule> {
-        const { paths, values } = options.configuration;
-        const settings = resolveObservationSettings(values.observation, options.environment);
+    static async start(config: ConfigModule, deployment?: string): Promise<ObservationModule> {
+        const { paths, values, version } = config.configuration;
+        const settings = resolveObservationSettings(values.observation);
         const logWriter = settings.logs
             ? await RotatingFileWriter.open({
                   maxBytes: MAX_OBSERVATION_FILE_BYTES,
@@ -112,9 +106,9 @@ export class ObservationModule implements AgentModule {
         }
         const tracing = settings.traces
             ? startObservationTracing({
-                  deployment: options.deployment ?? "production",
+                  deployment: deployment ?? "production",
                   endpoint: settings.tracesEndpoint,
-                  version: options.configuration.version,
+                  version,
               })
             : undefined;
         return new ObservationModule({ historyDump, logWriter, settings, tracing });
@@ -140,10 +134,11 @@ export class ObservationModule implements AgentModule {
     }
 
     /**
-     * The listener `HistoryModule` calls once each history append has committed.
+     * The subscriber `HistoryModule` calls once each history append has committed.
      *
-     * Pass it as that module's `onAppend`. It is deliberately a bound property rather than a
-     * method, so the host can hand it over without binding it and without exposing this module.
+     * Hand it to that module with `history.onAppend(observation.recordHistory)`. It is
+     * deliberately a bound property rather than a method, so it can be subscribed without binding
+     * it and without exposing anything else of this module.
      */
     readonly recordHistory = async (
         _ctx: Context,

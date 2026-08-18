@@ -10,22 +10,11 @@
  */
 
 export {
-    AGENT_MESSAGE_ORIGIN_METADATA,
-    MESSAGE_ORIGIN_METADATA_KEY,
-    SENDER_AGENT_ID_METADATA_KEY,
-    USER_MESSAGE_ORIGIN_METADATA,
-    isUserOriginMetadata,
-    senderAgentIdMetadata,
-    senderAgentIdOf,
-} from "./messageOrigin.js";
-
-export {
     AUTO_PERMISSION_REVIEW_BUDGET_MS,
     AutoModule,
-    autoModuleOptionsSchema,
     userInputAnsweredSchema,
 } from "./AutoModule.js";
-export type { AutoModuleOptions, UserInputAnsweredEvent } from "./AutoModule.js";
+export type { UserInputAnsweredEvent } from "./AutoModule.js";
 
 export {
     autoEvidenceEntrySchema,
@@ -89,8 +78,5 @@ export {
     AUTO_SECURITY_MD_MAX_BYTES,
     GLOBAL_SECURITY_HEADING,
     PROJECT_SECURITY_HEADING,
-    SECURITY_MISSING_FILE_CODES,
-    boundSecurityFileText,
-    isMissingSecurityFileError,
     readAutoSecurityPolicy,
 } from "./impl/readAutoSecurityPolicy.js";

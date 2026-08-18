@@ -80,20 +80,17 @@ export const secretEventSchema = Type.Union([
 
 export type SecretEvent = Static<typeof secretEventSchema>;
 
-const listenerResultSchema = Type.Union([Type.Void(), Type.Promise(Type.Unknown())]);
-
-/** Transactional and outermost post-commit observers. */
-export const secretModuleListenerSchema = Type.Object(
-    {
-        onEventTransactional: Type.Optional(
-            Type.Function([secretContextSchema, secretEventSchema], listenerResultSchema),
-        ),
-        onEvent: Type.Optional(
-            Type.Function([secretContextSchema, secretEventSchema], listenerResultSchema),
-        ),
-    },
-    { additionalProperties: false },
+/**
+ * One subscriber to the stream above. Subscriptions are taken after construction through
+ * `SecretsModule.onEventTransactional` and `SecretsModule.onEvent`, each of which returns the
+ * function that ends the subscription.
+ */
+export const secretEventListenerSchema = Type.Function(
+    [secretContextSchema, secretEventSchema],
+    Type.Union([Type.Void(), Type.Promise(Type.Unknown())]),
 );
 
-/** Listener type is inferred directly from the runtime TypeBox contract. */
-export type SecretModuleListener = Static<typeof secretModuleListenerSchema>;
+export type SecretEventListener = Static<typeof secretEventListenerSchema>;
+
+/** Ends a subscription. Calling it more than once does nothing further. */
+export type SecretUnsubscribe = () => void;

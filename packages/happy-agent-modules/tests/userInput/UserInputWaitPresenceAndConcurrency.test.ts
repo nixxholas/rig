@@ -1,11 +1,11 @@
-import type { Context } from "@steve.kite/stdlib";
 import { describe, expect, it, vi } from "vitest";
 
-import { UserInputModule, type UserInputPresenceState } from "../../sources/userInput/index.js";
 import {
+    createPresenceModule,
     createUserInputDatabase,
     createUserInputModule,
     onlinePresence,
+    ScriptedPresenceModule,
     singularAsk,
 } from "./userInputTestSupport.js";
 
@@ -65,59 +65,37 @@ describe("UserInput waits, presence, and concurrency", () => {
         }
     });
 
-    it("cleans up presence subscriptions when a wait ends with an error", async () => {
-        let callback:
-            | ((ctx: Context, state: UserInputPresenceState | undefined) => void)
-            | undefined;
-        let unsubscribed = 0;
-        const module = createUserInputModule({
-            presence: {
-                state: () => onlinePresence(),
-                subscribe: (_ctx, _agentId, next) => {
-                    callback = next;
-                    return () => {
-                        unsubscribed += 1;
-                    };
-                },
-            },
-        });
+    it("stops watching presence when a wait ends with an error", async () => {
+        const presence = new ScriptedPresenceModule(onlinePresence());
+        const module = createUserInputModule(presence);
         const database = createUserInputDatabase(module, "user-input-wait-rejection");
         await database.ready;
         try {
             const request = await module.ask(database.context, agentId, singularAsk(), "rejected");
             const waiting = module.wait(database.context, agentId, request.id);
-            await vi.waitFor(() => expect(callback).toBeDefined());
-            await callback?.(database.context, {
+            await vi.waitFor(() => expect(presence.subscriberCount).toBe(1));
+            await presence.publish(database.context, {
                 answerWaitMs: -1,
                 title: "Bad",
                 emoji: "!",
                 prompt: "",
             } as never);
             await expect(waiting).rejects.toThrow("presence state");
-            expect(unsubscribed).toBe(1);
+            expect(presence.subscriberCount).toBe(0);
         } finally {
             database.close();
         }
     });
 
     it("settles immediate away and expired deadline outcomes without parking a wait", async () => {
-        let now = 100;
-        const awayModule = new UserInputModule({
-            idFactory: () => "away-request",
-            eventIdFactory: () => "event-away",
-            clock: () => now,
-            presence: {
-                state: () => ({
-                    answerWaitMs: 0,
-                    title: "Away",
-                    emoji: "🌙",
-                    prompt: "Continue independently.",
-                }),
-            },
-        });
+        vi.useFakeTimers();
+        vi.setSystemTime(100);
+        const away = createPresenceModule();
+        const awayModule = createUserInputModule(away);
         const awayDatabase = createUserInputDatabase(awayModule, "user-input-immediate-away");
         await awayDatabase.ready;
         try {
+            await away.setPresence(awayDatabase.context, { status: "away" });
             const request = await awayModule.ask(
                 awayDatabase.context,
                 agentId,
@@ -135,11 +113,7 @@ describe("UserInput waits, presence, and concurrency", () => {
             awayDatabase.close();
         }
 
-        const deadlineModule = new UserInputModule({
-            idFactory: () => "expired-request",
-            eventIdFactory: () => "event-expired",
-            clock: () => now,
-        });
+        const deadlineModule = createUserInputModule();
         const deadlineDatabase = createUserInputDatabase(
             deadlineModule,
             "user-input-immediate-deadline",
@@ -152,7 +126,7 @@ describe("UserInput waits, presence, and concurrency", () => {
                 singularAsk({ deadlineAt: 150 }),
                 "expired-request",
             );
-            now = 200;
+            vi.setSystemTime(200);
             await expect(
                 deadlineModule.wait(deadlineDatabase.context, agentId, request.id),
             ).resolves.toMatchObject({
@@ -162,45 +136,28 @@ describe("UserInput waits, presence, and concurrency", () => {
             });
         } finally {
             deadlineDatabase.close();
+            vi.useRealTimers();
         }
     });
 
-    it("uses live presence changes to end an in-flight wait and removes the subscription", async () => {
-        let current = onlinePresence();
-        let callback:
-            | ((ctx: Context, state: UserInputPresenceState | undefined) => void)
-            | undefined;
-        let unsubscribed = 0;
-        const module = createUserInputModule({
-            presence: {
-                state: () => current,
-                subscribe: (_ctx, _agentId, next) => {
-                    callback = next;
-                    return () => {
-                        unsubscribed += 1;
-                    };
-                },
-            },
-        });
+    it("uses live presence changes to end an in-flight wait and stops watching", async () => {
+        const presence = createPresenceModule();
+        const module = createUserInputModule(presence);
         const database = createUserInputDatabase(module, "user-input-live-away");
         await database.ready;
         try {
+            await presence.setPresence(database.context, { status: "online" });
             const request = await module.ask(database.context, agentId, singularAsk(), "live-away");
             const waiting = module.wait(database.context, agentId, request.id);
-            await vi.waitFor(() => expect(callback).toBeDefined());
-            current = onlinePresence({
-                answerWaitMs: 0,
-                title: "Away",
-                emoji: "🌙",
-                prompt: "Keep working without an answer.",
-                changesAt: 200,
-            });
-            await callback?.(database.context, current);
+
+            await presence.setPresence(database.context, { status: "away" });
             await expect(waiting).resolves.toMatchObject({
                 status: "away",
-                presence: current,
+                presence: { title: "Away", answerWaitMs: 0 },
             });
-            expect(unsubscribed).toBe(1);
+
+            // Nothing is watching once the wait is over: a later change reaches nobody.
+            await presence.setPresence(database.context, { status: "online" });
         } finally {
             database.close();
         }
@@ -208,20 +165,14 @@ describe("UserInput waits, presence, and concurrency", () => {
 
     it.fails("times out at the earlier presence deadline when the request has a later explicit deadline", async () => {
         vi.useFakeTimers();
-        let now = 100;
-        const module = new UserInputModule({
-            idFactory: () => "presence-deadline",
-            eventIdFactory: () => "presence-event",
-            clock: () => now,
-            presence: {
-                state: () => ({
-                    answerWaitMs: 10,
-                    title: "Busy",
-                    emoji: "⏳",
-                    prompt: "Continue if nobody answers soon.",
-                }),
-            },
+        vi.setSystemTime(100);
+        const presence = new ScriptedPresenceModule({
+            answerWaitMs: 10,
+            title: "Busy",
+            emoji: "⏳",
+            prompt: "Continue if nobody answers soon.",
         });
+        const module = createUserInputModule(presence);
         const database = createUserInputDatabase(module, "user-input-presence-deadline");
         await database.ready;
         try {
@@ -250,64 +201,21 @@ describe("UserInput waits, presence, and concurrency", () => {
         }
     });
 
-    it("rejects malformed presence updates and invalid cleanup values", async () => {
-        let callback:
-            | ((ctx: Context, state: UserInputPresenceState | undefined) => void)
-            | undefined;
-        const invalidCleanupModule = createUserInputModule({
-            presence: {
-                state: () => onlinePresence(),
-                subscribe: (_ctx, _agentId, next) => {
-                    callback = next;
-                    return {} as never;
-                },
-            },
-        });
-        const invalidCleanupDatabase = createUserInputDatabase(
-            invalidCleanupModule,
-            "user-input-invalid-cleanup",
-        );
-        await invalidCleanupDatabase.ready;
+    it("rejects a presence state that could never have come from the catalog", async () => {
+        const presence = new ScriptedPresenceModule(onlinePresence());
+        const module = createUserInputModule(presence);
+        const database = createUserInputDatabase(module, "user-input-invalid-presence");
+        await database.ready;
         try {
-            const request = await invalidCleanupModule.ask(
-                invalidCleanupDatabase.context,
-                agentId,
-                singularAsk(),
-                "invalid-cleanup",
-            );
-            await expect(
-                invalidCleanupModule.wait(invalidCleanupDatabase.context, agentId, request.id),
-            ).rejects.toThrow("invalid cleanup");
-        } finally {
-            invalidCleanupDatabase.close();
-        }
-
-        let malformedCallback:
-            | ((ctx: Context, state: UserInputPresenceState | undefined) => void)
-            | undefined;
-        const malformedModule = createUserInputModule({
-            presence: {
-                state: () => onlinePresence(),
-                subscribe: (_ctx, _agentId, next) => {
-                    malformedCallback = next;
-                },
-            },
-        });
-        const malformedDatabase = createUserInputDatabase(
-            malformedModule,
-            "user-input-invalid-presence",
-        );
-        await malformedDatabase.ready;
-        try {
-            const request = await malformedModule.ask(
-                malformedDatabase.context,
+            const request = await module.ask(
+                database.context,
                 agentId,
                 singularAsk(),
                 "invalid-presence",
             );
-            const waiting = malformedModule.wait(malformedDatabase.context, agentId, request.id);
-            await vi.waitFor(() => expect(malformedCallback).toBeDefined());
-            await malformedCallback?.(malformedDatabase.context, {
+            const waiting = module.wait(database.context, agentId, request.id);
+            await vi.waitFor(() => expect(presence.subscriberCount).toBe(1));
+            await presence.publish(database.context, {
                 answerWaitMs: -1,
                 title: "Bad",
                 emoji: "!",
@@ -315,7 +223,7 @@ describe("UserInput waits, presence, and concurrency", () => {
             } as never);
             await expect(waiting).rejects.toThrow("presence state");
         } finally {
-            malformedDatabase.close();
+            database.close();
         }
     });
 

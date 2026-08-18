@@ -10,8 +10,10 @@ import {
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { createRootContext, type Context } from "@steve.kite/stdlib";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { AutoModule } from "../../sources/auto/index.js";
+import type { ComputeModule } from "../../sources/compute/index.js";
 import {
     MAX_PERMISSION_ACTION,
     MAX_PERMISSION_ARGUMENT_BYTES,
@@ -19,6 +21,9 @@ import {
     MAX_PERMISSION_ARGUMENT_ITEMS,
     MAX_PERMISSION_ARGUMENT_STRING,
     MAX_PERMISSION_GUIDANCE_CHARACTERS,
+    PERMISSION_ANNOUNCE_TIMEOUT_MS,
+    PERMISSION_REFUSALS_BEFORE_STOPPING,
+    PERMISSION_REVIEW_TIMEOUT_MS,
     PermissionsModule,
     mergePermissionToolGuidances,
     permissionEventSchema,
@@ -26,24 +31,30 @@ import {
     permissionModeGuidance,
     permissionReviewDecisionSchema,
     permissionReviewRequestSchema,
-    permissionsModuleOptionsSchema,
     permissionTurnStoppedReason,
     shouldAllowAutoPermissionReview,
     type PermissionEvent,
+    type PermissionEventListener,
     type PermissionReviewDecision,
     type PermissionReviewRequest,
     type PermissionReviewer,
+    type PermissionToolGuidanceProvider,
 } from "../../sources/permissions/index.js";
 import { permissionReviewArgumentsSchema as reviewArgumentsSchema } from "../../sources/permissions/PermissionReviewer.js";
 import { snapshotPermissionArguments } from "../../sources/permissions/impl/snapshotPermissionArguments.js";
 import { autoPermissionPolicyDenialReason } from "../../sources/permissions/impl/shouldAllowAutoPermissionReview.js";
 import { PermissionRefusalCircuitBreaker } from "../../sources/permissions/impl/permissionRefusalCircuitBreaker.js";
 import { agentWorld } from "../support/agentWorld.js";
+import { ScriptedCommandsComputeModule } from "../support/computeModule.js";
 import { providersOf, textTurn } from "../support/fixtures.js";
 import { resolveModuleRuntime } from "../support/moduleHooks.js";
 import { ScriptedProvider } from "../support/ScriptedProvider.js";
 
 const ctx = createRootContext().named("happy-agent-modules-permissions-boundary");
+
+afterEach(() => {
+    vi.useRealTimers();
+});
 
 const emptyResult = Type.Object({}, { additionalProperties: false });
 
@@ -118,14 +129,42 @@ function reviewerAnswering(
     };
 }
 
-async function resolvedHooks(
-    options: ConstructorParameters<typeof PermissionsModule>[0] = {
-        killAllSessions: () => {},
-    },
-) {
-    const permissions = new PermissionsModule(options);
+/**
+ * The automatic reviewer, as the one member `PermissionsModule` reads of it.
+ *
+ * The module holds an `AutoModule` and reads `reviewer` off it at the moment of each review, so a
+ * test about the permission boundary supplies exactly that member instead of standing up a private
+ * review system with its own database, lock, and provider registry. `AutoModule`'s own behavior,
+ * including that the reviewer it publishes really is its review system, is proven in `tests/auto`;
+ * that the two classes fit together is proven once, against the real class, in
+ * `PermissionsModule.test.ts`.
+ */
+function autoWith(reviewer: PermissionReviewer): AutoModule {
+    return { reviewer } as unknown as AutoModule;
+}
+
+/** How one test composes the module: the machine, the reviewer, and who is told. */
+interface PermissionsSetup {
+    readonly compute?: ComputeModule;
+    readonly reviewer?: PermissionReviewer;
+    readonly onEvent?: PermissionEventListener;
+    readonly onEventTransactional?: PermissionEventListener;
+    readonly toolGuidance?: readonly PermissionToolGuidanceProvider[];
+}
+
+async function resolvedHooks(setup: PermissionsSetup = {}) {
+    const compute = setup.compute ?? new ScriptedCommandsComputeModule();
+    const permissions =
+        setup.reviewer === undefined
+            ? new PermissionsModule(compute)
+            : new PermissionsModule(compute, autoWith(setup.reviewer));
+    if (setup.onEvent !== undefined) permissions.onEvent(setup.onEvent);
+    if (setup.onEventTransactional !== undefined) {
+        permissions.onEventTransactional(setup.onEventTransactional);
+    }
+    for (const provider of setup.toolGuidance ?? []) permissions.provideToolGuidance(provider);
     const hooks = await resolveModuleRuntime(ctx, permissions).then((runtime) => runtime.hooks);
-    return { permissions, hooks };
+    return { compute, permissions, hooks };
 }
 
 function deniedDecision(reason = "not allowed"): PermissionReviewDecision {
@@ -149,34 +188,47 @@ function allowedDecision(
 }
 
 describe("permissions boundary contracts", () => {
-    it("accepts the minimal options shape and rejects malformed constructor bounds", () => {
-        const minimal = { killAllSessions: () => {} };
-        expect(Value.Check(permissionsModuleOptionsSchema, minimal)).toBe(true);
-        expect(() => new PermissionsModule(minimal)).not.toThrow();
+    it("holds its bounds as module constants rather than as tunable construction arguments", () => {
+        // The three bounds a host used to be able to set are the product's own decisions now, so
+        // what a test can assert about them is what they are, and that they are the values Rig v1
+        // enforced.
+        expect(PERMISSION_REVIEW_TIMEOUT_MS).toBe(90_000);
+        expect(PERMISSION_REFUSALS_BEFORE_STOPPING).toBe(3);
+        expect(PERMISSION_ANNOUNCE_TIMEOUT_MS).toBe(5_000);
+    });
 
-        expect(() => new PermissionsModule({} as never)).toThrow();
-        expect(
-            () => new PermissionsModule({ killAllSessions: () => {}, reviewTimeoutMs: 0 }),
-        ).toThrow();
-        expect(
-            () => new PermissionsModule({ killAllSessions: () => {}, reviewTimeoutMs: 600_001 }),
-        ).toThrow();
-        expect(
-            () => new PermissionsModule({ killAllSessions: () => {}, announceTimeoutMs: 0 }),
-        ).toThrow();
-        expect(
-            () => new PermissionsModule({ killAllSessions: () => {}, announceTimeoutMs: 600_001 }),
-        ).toThrow();
-        expect(
-            () => new PermissionsModule({ killAllSessions: () => {}, refusalsBeforeStopping: 0 }),
-        ).toThrow();
-        expect(
-            () =>
-                new PermissionsModule({
-                    killAllSessions: () => {},
-                    unexpected: true,
-                } as never),
-        ).toThrow();
+    it("subscribes and unsubscribes each observer independently", async () => {
+        const first: PermissionEvent[] = [];
+        const second: PermissionEvent[] = [];
+        const permissions = new PermissionsModule(new ScriptedCommandsComputeModule());
+        const stopFirst = permissions.onEvent((_eventCtx, event) => {
+            first.push(event);
+        });
+        permissions.onEvent((_eventCtx, event) => {
+            second.push(event);
+        });
+        const hooks = await resolveModuleRuntime(ctx, permissions).then((runtime) => runtime.hooks);
+        const change = { previousMode: "auto", mode: "read_only" } as const;
+
+        await hooks.permissionModeChanged?.(ctx, scope("subscriber-agent", "read_only"), change);
+        expect(first).toHaveLength(1);
+        expect(second).toHaveLength(1);
+
+        stopFirst();
+        // Ending a subscription twice is not an error, and does not end anyone else's.
+        stopFirst();
+        await hooks.permissionModeChanged?.(ctx, scope("subscriber-agent", "read_only"), change);
+        expect(first).toHaveLength(1);
+        expect(second).toHaveLength(2);
+    });
+
+    it("refuses a tool guidance source that is not a function", () => {
+        const permissions = new PermissionsModule(new ScriptedCommandsComputeModule());
+
+        expect(() => permissions.provideToolGuidance([] as never)).toThrow(
+            "A permission tool guidance provider must be a function.",
+        );
+        expect(() => permissions.provideToolGuidance(undefined as never)).toThrow();
     });
 
     it("validates review requests, verdicts, events, and their string/collection bounds", () => {
@@ -298,18 +350,19 @@ describe("permissions boundary contracts", () => {
         );
     });
 
-    it("merges static and dynamic guidance with a bounded, stable first-seen order", async () => {
+    it("merges every registered guidance source with a bounded, stable first-seen order", async () => {
         const providerCalls: string[] = [];
         const { hooks } = await resolvedHooks({
-            killAllSessions: () => {},
-            toolGuidance: [{ autoPermissionInstructions: "static" }],
-            toolGuidanceProvider: async (_providerCtx, agentId) => {
-                providerCalls.push(agentId);
-                return [
-                    { autoPermissionInstructions: "static" },
-                    { autoPermissionInstructions: "dynamic" },
-                ];
-            },
+            toolGuidance: [
+                () => [{ autoPermissionInstructions: "static" }],
+                async (_providerCtx, agentId) => {
+                    providerCalls.push(agentId);
+                    return [
+                        { autoPermissionInstructions: "static" },
+                        { autoPermissionInstructions: "dynamic" },
+                    ];
+                },
+            ],
         });
 
         const instructions = await hooks.instructions?.(ctx, scope("guidance-agent", "auto"));
@@ -319,8 +372,7 @@ describe("permissions boundary contracts", () => {
         expect(instructions?.match(/static/gu)).toHaveLength(1);
 
         const malformed = await resolvedHooks({
-            killAllSessions: () => {},
-            toolGuidanceProvider: () => [{ invalid: true }] as never,
+            toolGuidance: [() => [{ invalid: true }] as never],
         });
         await expect(
             malformed.hooks.instructions?.(ctx, scope("malformed-guidance-agent", "auto")),
@@ -344,7 +396,7 @@ describe("permissions boundary contracts", () => {
                 return Promise.resolve(allowedDecision());
             },
         };
-        const { hooks } = await resolvedHooks({ killAllSessions: () => {}, reviewer });
+        const { hooks } = await resolvedHooks({ reviewer });
         const reviewTool = testTool("review", {
             shouldReviewInAutoMode: () => {
                 throw new Error("must not inspect this predicate outside auto");
@@ -370,13 +422,9 @@ describe("permissions boundary contracts", () => {
         const events: PermissionEvent[] = [];
         const reviewer = reviewerAnswering(() => allowedDecision());
         const { hooks } = await resolvedHooks({
-            killAllSessions: () => {},
             reviewer,
-            refusalsBeforeStopping: 1,
-            listener: {
-                onEvent: (_eventCtx, event) => {
-                    events.push(event);
-                },
+            onEvent: (_eventCtx, event) => {
+                events.push(event);
             },
         });
         const external = testTool("server", {
@@ -414,12 +462,9 @@ describe("permissions boundary contracts", () => {
         const events: PermissionEvent[] = [];
         const reviewer = reviewerAnswering(() => allowedDecision({ risk: "medium" }));
         const { hooks } = await resolvedHooks({
-            killAllSessions: () => {},
             reviewer,
-            listener: {
-                onEvent: (_eventCtx, event) => {
-                    events.push(event);
-                },
+            onEvent: (_eventCtx, event) => {
+                events.push(event);
             },
         });
         const reviewTool = testTool("inside", {
@@ -457,7 +502,7 @@ describe("permissions boundary contracts", () => {
                 return Promise.resolve(allowedDecision());
             },
         };
-        const { hooks } = await resolvedHooks({ killAllSessions: () => {}, reviewer });
+        const { hooks } = await resolvedHooks({ reviewer });
         const throwingReview = testTool("throwing-review", {
             shouldReviewInAutoMode: () => {
                 throw new Error("predicate failed");
@@ -503,12 +548,9 @@ describe("permissions boundary contracts", () => {
         const events: PermissionEvent[] = [];
         const reviewer = reviewerAnswering(() => allowedDecision());
         const { hooks } = await resolvedHooks({
-            killAllSessions: () => {},
             reviewer,
-            listener: {
-                onEvent: (_eventCtx, event) => {
-                    events.push(event);
-                },
+            onEvent: (_eventCtx, event) => {
+                events.push(event);
             },
         });
         const tool = testTool("trimmed", {
@@ -535,12 +577,9 @@ describe("permissions boundary contracts", () => {
                 review: () => Promise.resolve(verdict as never),
             };
             const { hooks } = await resolvedHooks({
-                killAllSessions: () => {},
                 reviewer,
-                listener: {
-                    onEvent: (_eventCtx, event) => {
-                        events.push(event);
-                    },
+                onEvent: (_eventCtx, event) => {
+                    events.push(event);
                 },
             });
             const tool = testTool(`invalid-${index}`, {
@@ -567,12 +606,9 @@ describe("permissions boundary contracts", () => {
             review: () => Promise.reject(new Error(huge)),
         };
         const { hooks } = await resolvedHooks({
-            killAllSessions: () => {},
             reviewer,
-            listener: {
-                onEvent: (_eventCtx, event) => {
-                    events.push(event);
-                },
+            onEvent: (_eventCtx, event) => {
+                events.push(event);
             },
         });
         const tool = testTool("failing-reviewer", {
@@ -670,13 +706,9 @@ describe("permissions boundary contracts", () => {
         const events: PermissionEvent[] = [];
         const reviewer = reviewerAnswering(() => deniedDecision());
         const { hooks } = await resolvedHooks({
-            killAllSessions: () => {},
             reviewer,
-            refusalsBeforeStopping: 2,
-            listener: {
-                onEvent: (_eventCtx, event) => {
-                    events.push(event);
-                },
+            onEvent: (_eventCtx, event) => {
+                events.push(event);
             },
         });
         const tool = testTool("reset", {
@@ -684,9 +716,15 @@ describe("permissions boundary contracts", () => {
             describeAutoPermissionAction: () => "Reset circuit.",
         });
         const testScope = scope("reset-agent", "auto");
-        await hooks.beforeToolCall?.(ctx, testScope, call(tool, {}, "reset-1"));
+        // One refusal short of the bound, twice over, with a settlement between: the second run
+        // starts from nothing, so together they never reach the bound a single run would.
+        for (let index = 0; index < PERMISSION_REFUSALS_BEFORE_STOPPING - 1; index += 1) {
+            await hooks.beforeToolCall?.(ctx, testScope, call(tool, {}, `first-${index}`));
+        }
         await hooks.afterAgentSettled?.(ctx, testScope, {} as never);
-        await hooks.beforeToolCall?.(ctx, testScope, call(tool, {}, "reset-2"));
+        for (let index = 0; index < PERMISSION_REFUSALS_BEFORE_STOPPING - 1; index += 1) {
+            await hooks.beforeToolCall?.(ctx, testScope, call(tool, {}, `second-${index}`));
+        }
 
         expect(events.filter((event) => event.type === "permission_turn_stopped")).toHaveLength(0);
     });
@@ -719,7 +757,7 @@ describe("permissions boundary contracts", () => {
                 return allowedDecision();
             },
         };
-        const { hooks } = await resolvedHooks({ killAllSessions: () => {}, reviewer });
+        const { hooks } = await resolvedHooks({ reviewer });
         const tool = testTool("concurrent", {
             shouldReviewInAutoMode: () => true,
             describeAutoPermissionAction: () => "Review concurrent action.",
@@ -752,13 +790,9 @@ describe("permissions boundary contracts", () => {
         const events: PermissionEvent[] = [];
         const reviewer = reviewerAnswering(() => deniedDecision());
         const { hooks } = await resolvedHooks({
-            killAllSessions: () => {},
             reviewer,
-            refusalsBeforeStopping: 1,
-            listener: {
-                onEvent: (_eventCtx, event) => {
-                    events.push(event);
-                },
+            onEvent: (_eventCtx, event) => {
+                events.push(event);
             },
         });
         const malformed = testTool("predicate", {
@@ -767,49 +801,55 @@ describe("permissions boundary contracts", () => {
             },
             describeAutoPermissionAction: () => "Never reviewed.",
         });
-        await hooks.beforeToolCall?.(
-            ctx,
-            scope("circuit-agent", "auto"),
-            call(malformed, {}, "malformed-call"),
-        );
         const restricted = testTool("restricted", {
             requiresAutoOrFullAccess: true,
             shouldReviewInAutoMode: () => true,
             describeAutoPermissionAction: () => "Restricted.",
         });
-        await hooks.beforeToolCall?.(
-            ctx,
-            scope("circuit-agent", "read_only"),
-            call(restricted, {}, "restricted-call"),
-        );
+        // Far more of both than the bound, so a circuit that charged them would have tripped long
+        // before the reviewed refusals below.
+        for (let index = 0; index < PERMISSION_REFUSALS_BEFORE_STOPPING + 2; index += 1) {
+            await hooks.beforeToolCall?.(
+                ctx,
+                scope("circuit-agent", "auto"),
+                call(malformed, {}, `malformed-call-${index}`),
+            );
+            await hooks.beforeToolCall?.(
+                ctx,
+                scope("circuit-agent", "read_only"),
+                call(restricted, {}, `restricted-call-${index}`),
+            );
+        }
         expect(events.some((event) => event.type === "permission_turn_stopped")).toBe(false);
 
         const reviewable = testTool("reviewable", {
             shouldReviewInAutoMode: () => true,
             describeAutoPermissionAction: () => "Actually reviewed.",
         });
-        const decision = await hooks.beforeToolCall?.(
-            ctx,
-            scope("circuit-agent", "auto"),
-            call(reviewable, {}, "reviewed-call"),
-        );
+        let decision;
+        for (let index = 0; index < PERMISSION_REFUSALS_BEFORE_STOPPING; index += 1) {
+            decision = await hooks.beforeToolCall?.(
+                ctx,
+                scope("circuit-agent", "auto"),
+                call(reviewable, {}, `reviewed-call-${index}`),
+            );
+        }
         expect(decision?.type).toBe("answer");
         expect(events.filter((event) => event.type === "permission_turn_stopped")).toHaveLength(1);
     });
 
-    it("kills elevated sessions only on permission reductions and keeps the full change event order", async () => {
-        const killed: string[] = [];
+    it("ends running commands only on permission reductions and keeps the full change event order", async () => {
         const events: PermissionEvent[] = [];
+        const compute = new ScriptedCommandsComputeModule();
         const { hooks } = await resolvedHooks({
-            killAllSessions: async (_killCtx, agentId) => {
-                killed.push(agentId);
-            },
-            listener: {
-                onEvent: (_eventCtx, event) => {
-                    events.push(event);
-                },
+            compute,
+            onEvent: (_eventCtx, event) => {
+                events.push(event);
             },
         });
+        // Every agent in this test has two commands running under the wider mode.
+        for (const suffix of [0, 1, 2]) compute.running(`reduction-${suffix}`, [11, 12]);
+        for (const suffix of [0, 1, 2, 3]) compute.running(`no-reduction-${suffix}`, [21]);
         const reductions: readonly AgentBasePermissionModeChange[] = [
             { previousMode: "full_access", mode: "auto" },
             { previousMode: "auto", mode: "workspace_write" },
@@ -836,7 +876,15 @@ describe("permissions boundary contracts", () => {
                 change,
             );
         }
-        expect(killed).toEqual(["reduction-0", "reduction-1", "reduction-2"]);
+        // Every command of every reduced agent was ended, and no command of any other agent was.
+        expect(compute.stopped).toEqual([
+            { agentId: "reduction-0", commandId: 11 },
+            { agentId: "reduction-0", commandId: 12 },
+            { agentId: "reduction-1", commandId: 11 },
+            { agentId: "reduction-1", commandId: 12 },
+            { agentId: "reduction-2", commandId: 11 },
+            { agentId: "reduction-2", commandId: 12 },
+        ]);
         expect(events.map((event) => event.type)).toEqual([
             "permission_mode_changed",
             "permission_mode_changed",
@@ -856,14 +904,12 @@ describe("permissions boundary contracts", () => {
                 throw new Error("message getter failed");
             },
         });
+        const compute = new ScriptedCommandsComputeModule();
+        compute.listFailure = hostile;
         const { hooks } = await resolvedHooks({
-            killAllSessions: () => {
-                throw hostile;
-            },
-            listener: {
-                onEvent: (_eventCtx, event) => {
-                    events.push(event);
-                },
+            compute,
+            onEvent: (_eventCtx, event) => {
+                events.push(event);
             },
         });
 
@@ -885,15 +931,12 @@ describe("permissions boundary contracts", () => {
         const observed: PermissionEvent[] = [];
         const reviewer = reviewerAnswering(() => allowedDecision());
         const { hooks } = await resolvedHooks({
-            killAllSessions: () => {},
             reviewer,
-            listener: {
-                onEventTransactional: (_eventCtx, event) => {
-                    transactional.push(event);
-                },
-                onEvent: (_eventCtx, event) => {
-                    observed.push(event);
-                },
+            onEventTransactional: (_eventCtx, event) => {
+                transactional.push(event);
+            },
+            onEvent: (_eventCtx, event) => {
+                observed.push(event);
             },
         });
         const testScope = scope("phase-agent", "read_only");
@@ -914,32 +957,117 @@ describe("permissions boundary contracts", () => {
         expect(observed[0]?.type).toBe("permission_action_reviewed");
     });
 
-    it("invokes prototype listeners with their owning object as receiver", async () => {
-        let transactionalReceiver: unknown;
-        let postCommitReceiver: unknown;
-        const listener = {
-            onEventTransactional(_eventCtx: Context, _event: PermissionEvent): void {
-                transactionalReceiver = this;
+    it("keeps a subscriber's own receiver, so a host can subscribe an object's method", async () => {
+        // A subscription is a function, so a host that keeps its own state subscribes a bound
+        // method. The module must not call it in a way that loses what it was bound to.
+        const journal = {
+            written: [] as PermissionEvent[],
+            transacted: [] as PermissionEvent[],
+            record(_eventCtx: Context, event: PermissionEvent): void {
+                this.written.push(event);
             },
-            onEvent(_eventCtx: Context, _event: PermissionEvent): void {
-                postCommitReceiver = this;
+            recordTransactional(_eventCtx: Context, event: PermissionEvent): void {
+                this.transacted.push(event);
             },
         };
         const { hooks } = await resolvedHooks({
-            killAllSessions: () => {},
-            listener,
+            onEvent: journal.record.bind(journal),
+            onEventTransactional: journal.recordTransactional.bind(journal),
         });
         const testScope = scope("receiver-agent", "read_only");
-        await hooks.permissionModeChangedTransact?.(ctx, testScope, {
-            previousMode: "auto",
-            mode: "read_only",
+        const change = { previousMode: "auto", mode: "read_only" } as const;
+
+        await hooks.permissionModeChangedTransact?.(ctx, testScope, change);
+        await hooks.permissionModeChanged?.(ctx, testScope, change);
+
+        expect(journal.transacted).toHaveLength(1);
+        expect(journal.written).toHaveLength(1);
+    });
+
+    it("stops awaiting a listener that never settles, and lets the decision continue", async () => {
+        vi.useFakeTimers();
+        const warnings: string[] = [];
+        const loggingContext = Object.create(ctx) as Context;
+        Object.defineProperty(loggingContext, "log", {
+            configurable: true,
+            value: {
+                ...ctx.log,
+                warn: (message: string) => {
+                    warnings.push(message);
+                },
+            },
         });
-        await hooks.permissionModeChanged?.(ctx, testScope, {
-            previousMode: "auto",
-            mode: "read_only",
+        let started!: () => void;
+        const listenerEntered = new Promise<void>((resolve) => {
+            started = resolve;
         });
-        expect(transactionalReceiver).toBe(listener);
-        expect(postCommitReceiver).toBe(listener);
+        const { hooks } = await resolvedHooks({
+            onEvent: () => {
+                started();
+                // Never settles. Without the ceiling this would hold the mode change open forever.
+                return new Promise<void>(() => {});
+            },
+        });
+
+        const changed = hooks.permissionModeChanged?.(
+            loggingContext,
+            scope("wedged-listener-agent", "read_only"),
+            { previousMode: "auto", mode: "read_only" },
+        );
+        await listenerEntered;
+        await vi.advanceTimersByTimeAsync(PERMISSION_ANNOUNCE_TIMEOUT_MS);
+
+        // Settling at all is the proof: the wedged observer no longer holds the decision.
+        await expect(changed).resolves.toBeUndefined();
+        expect(warnings.join("\n")).toContain("was not durably recorded");
+    });
+
+    it("treats a review that outlasts the budget as unproven rather than as unsafe", async () => {
+        vi.useFakeTimers();
+        const events: PermissionEvent[] = [];
+        let reviewSignal: AbortSignal | undefined;
+        let started!: () => void;
+        const reviewEntered = new Promise<void>((resolve) => {
+            started = resolve;
+        });
+        const reviewer: PermissionReviewer = {
+            review: (_reviewCtx, request) =>
+                new Promise<PermissionReviewDecision>((resolve) => {
+                    reviewSignal = request.signal;
+                    started();
+                    // A cooperative reviewer that answers when cancelled. Once the budget closed,
+                    // that answer is a timeout rather than a late verdict.
+                    request.signal.addEventListener("abort", () => resolve(allowedDecision()));
+                }),
+        };
+        const { hooks } = await resolvedHooks({
+            reviewer,
+            onEvent: (_eventCtx, event) => {
+                events.push(event);
+            },
+        });
+        const tool = testTool("slow-review", {
+            shouldReviewInAutoMode: () => true,
+            describeAutoPermissionAction: () => "Take too long about it.",
+        });
+
+        const pending = hooks.beforeToolCall?.(ctx, scope("timeout-agent", "auto"), call(tool));
+        await reviewEntered;
+        await vi.advanceTimersByTimeAsync(PERMISSION_REVIEW_TIMEOUT_MS);
+        const decision = await pending;
+
+        expect(reviewSignal?.aborted).toBe(true);
+        expect(decision?.type).toBe("answer");
+        // Unproven, not unsafe: the model is told the timeout is not a verdict, and may retry once.
+        expect(JSON.stringify(decision)).toContain("did not finish in time");
+        expect(JSON.stringify(decision)).toContain(
+            "do not treat the timeout by itself as a verdict",
+        );
+        expect(events[0]).toMatchObject({
+            type: "permission_action_unproven",
+            kind: "timed_out",
+            reason: "The reviewer did not answer within 90 seconds.",
+        });
     });
 
     it("rolls back a permission-mode change when its transactional listener fails", async () => {
@@ -947,17 +1075,13 @@ describe("permissions boundary contracts", () => {
         const provider = new ScriptedProvider([textTurn("noted")]);
         const events: PermissionEvent[] = [];
         let transactionalCalls = 0;
-        const permissions = new PermissionsModule({
-            killAllSessions: () => {},
-            listener: {
-                onEventTransactional: () => {
-                    transactionalCalls += 1;
-                    throw new Error("transactional listener failed");
-                },
-                onEvent: (_eventCtx, event) => {
-                    events.push(event);
-                },
-            },
+        const permissions = new PermissionsModule(new ScriptedCommandsComputeModule());
+        permissions.onEventTransactional(() => {
+            transactionalCalls += 1;
+            throw new Error("transactional listener failed");
+        });
+        permissions.onEvent((_eventCtx, event) => {
+            events.push(event);
         });
         const system = await AgentSystemLocal.create(ctx, world.storage, {
             providers: providersOf(provider),
@@ -999,12 +1123,9 @@ describe("permissions boundary contracts", () => {
                 }),
         };
         const { hooks } = await resolvedHooks({
-            killAllSessions: () => {},
             reviewer,
-            listener: {
-                onEvent: (_eventCtx, event) => {
-                    events.push(event);
-                },
+            onEvent: (_eventCtx, event) => {
+                events.push(event);
             },
         });
         const controller = new AbortController();
@@ -1036,15 +1157,12 @@ describe("permissions boundary contracts", () => {
         const events: PermissionEvent[] = [];
         const aborted: string[] = [];
         const reviewer = reviewerAnswering(() => deniedDecision());
-        const permissions = new PermissionsModule({
-            killAllSessions: () => {},
-            reviewer,
-            refusalsBeforeStopping: 1,
-            listener: {
-                onEvent: (_eventCtx, event) => {
-                    events.push(event);
-                },
-            },
+        const permissions = new PermissionsModule(
+            new ScriptedCommandsComputeModule(),
+            autoWith(reviewer),
+        );
+        permissions.onEvent((_eventCtx, event) => {
+            events.push(event);
         });
         const agents = {
             abort: async (_abortCtx: Context, agentId: string) => {
@@ -1056,15 +1174,22 @@ describe("permissions boundary contracts", () => {
             shouldReviewInAutoMode: () => true,
             describeAutoPermissionAction: () => "Stop direct.",
         });
-        await hooks?.beforeToolCall?.(ctx, scope("stop-direct-agent", "auto"), call(tool));
+        const bound = PERMISSION_REFUSALS_BEFORE_STOPPING;
+        for (let index = 0; index < bound; index += 1) {
+            await hooks?.beforeToolCall?.(
+                ctx,
+                scope("stop-direct-agent", "auto"),
+                call(tool, {}, `stop-direct-${index}`),
+            );
+        }
         expect(aborted).toEqual(["stop-direct-agent"]);
         expect(events).toContainEqual(
             expect.objectContaining({
                 type: "permission_turn_stopped",
-                consecutiveRefusals: 1,
-                recentRefusals: 1,
-                recentWindowLength: 1,
-                reason: permissionTurnStoppedReason(1, 1, 1),
+                consecutiveRefusals: bound,
+                recentRefusals: bound,
+                recentWindowLength: bound,
+                reason: permissionTurnStoppedReason(bound, bound, bound),
             }),
         );
     });

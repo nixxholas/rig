@@ -6,9 +6,32 @@ import {
 } from "@slopus/happy-agent-base";
 import type { Context } from "@steve.kite/stdlib";
 
-import { GeminiModule, type HostCompute } from "../../../sources/index.js";
+import type { ComputeModule, HostCompute } from "../../../sources/compute/index.js";
+import type { ConfigModule } from "../../../sources/config/index.js";
+import { GeminiModule } from "../../../sources/gemini/index.js";
 import { InMemoryPersistence } from "../../support/InMemoryPersistence.js";
 import { resolveModuleHooks } from "../../support/moduleHooks.js";
+import { scriptedComputeModule, testConfig } from "../../support/computeModule.js";
+
+/**
+ * The Gemini module answering over a scripted transport.
+ *
+ * `GeminiModule.transport()` is the module's one documented seam: the product never overrides it
+ * and there is no constructor option for it, so a test that must answer without a network says so
+ * by subclassing, exactly as the README describes.
+ */
+export class ScriptedGeminiModule extends GeminiModule {
+    readonly #fetch: typeof fetch | undefined;
+
+    constructor(config: ConfigModule, compute: ComputeModule, transport?: typeof fetch) {
+        super(config, compute);
+        this.#fetch = transport;
+    }
+
+    protected override transport(): typeof fetch | undefined {
+        return this.#fetch;
+    }
+}
 
 /** One agent's Gemini tools, with a way to reach one by name and the call they run under. */
 export interface GeminiToolset {
@@ -22,23 +45,23 @@ export interface GeminiToolset {
 
 /**
  * The tools as an agent would receive them: one module over one machine, one agent's own store,
- * and a `fetch` that answers instead of a network.
+ * and a `fetch` that answers instead of a network. The key comes from the configuration module,
+ * so a caller stubs `GEMINI_API_KEY` before asking for a toolset.
  */
 export async function geminiToolset(
     ctx: Context,
     compute: HostCompute,
     options: {
         readonly agentId?: string;
-        readonly apiKey?: string;
         readonly fetch?: typeof fetch;
     } = {},
 ): Promise<GeminiToolset> {
     const agentId = options.agentId ?? "gemini-agent";
-    const module = new GeminiModule({
-        apiKey: options.apiKey ?? "secret-key",
-        compute: { resolve: async () => compute },
-        ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
-    });
+    const module = new ScriptedGeminiModule(
+        testConfig,
+        scriptedComputeModule(async () => compute),
+        options.fetch,
+    );
     const kv = new AgentKV(new InMemoryPersistence(), `kv.${agentId}.`).scoped("module", "gemini");
     const scope = { agent: { id: agentId }, kv } as AgentModuleScope;
     const hooks = await resolveModuleHooks(ctx, module);

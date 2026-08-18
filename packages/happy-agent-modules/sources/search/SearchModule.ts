@@ -1,19 +1,16 @@
 import {
-    type AgentModel,
     type AgentModule,
     type AgentModuleHooks,
     type AgentModuleScope,
-    type AgentProviders,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
-import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type { Context } from "@steve.kite/stdlib";
 
+import type { ConfigModule } from "../config/index.js";
 import {
     fetchInputSchema,
     fetchResultSchema,
-    MAX_FETCH_CONTENT_CHARACTERS,
     MAX_FETCH_URL_LENGTH,
     searchAgentIdSchema,
     searchAnswerSchema,
@@ -40,85 +37,53 @@ import { grokWebSearchTool } from "./tools/grok_web_search.js";
 import { grokXSearchTool } from "./tools/grok_x_search.js";
 import { webFetchTool } from "./tools/web_fetch.js";
 
-const DEFAULT_MAX_CHARACTERS = 40_000;
-const DEFAULT_MAX_OUTPUT_CHARACTERS = 12_000;
-const MIN_MAX_OUTPUT_CHARACTERS = 256;
-const MAX_MAX_OUTPUT_CHARACTERS = 100_000;
+/** How much of a fetched page is kept before it is truncated. */
+export const MAX_SEARCH_FETCH_CHARACTERS = 40_000;
+/** How much of an answer or a fetched page one tool call may show the model. */
+export const MAX_SEARCH_OUTPUT_CHARACTERS = 12_000;
 const FETCH_TRUNCATION_MARKER = "\n[Content truncated.]";
 const ANSWER_TRUNCATION_MARKER = "\n[Answer truncated.]";
 const SOURCES_HEADING = "\n\nSources:\n";
-
-const providersSchema = Type.Unsafe<AgentProviders>(
-    Type.Object({}, { additionalProperties: true }),
-);
-const agentModelSchema = Type.Unsafe<AgentModel>(
-    Type.Object(
-        {
-            providerId: Type.String({ minLength: 1 }),
-            id: Type.String({ minLength: 1 }),
-            name: Type.String(),
-            effortLevels: Type.Array(Type.String()),
-            defaultEffort: Type.String(),
-        },
-        { additionalProperties: true },
-    ),
-);
-
-const searchModuleOptionsSchema = Type.Object(
-    {
-        /** The accounts a vendor search may run on, and the credentials that reach them. */
-        providers: providersSchema,
-        /** The catalog the routes are drawn from; a vendor search uses its provider's first model. */
-        models: Type.Unsafe<readonly AgentModel[]>(Type.Array(agentModelSchema)),
-        /** The account this chat itself runs on, preferred whenever it serves the asked vendor. */
-        currentProviderId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
-        /** Bedrock serves its hosted index from particular models, so an account may name its own. */
-        bedrockSearchModels: Type.Optional(Type.Record(Type.String(), Type.String())),
-        /** Gemini answers over its own HTTP API rather than through a configured chat provider. */
-        geminiApiKey: Type.Optional(Type.String({ minLength: 1 })),
-        maxCharacters: Type.Optional(
-            Type.Integer({
-                minimum: 1_000,
-                maximum: MAX_FETCH_CONTENT_CHARACTERS,
-            }),
-        ),
-        maxOutputCharacters: Type.Optional(
-            Type.Integer({
-                minimum: MIN_MAX_OUTPUT_CHARACTERS,
-                maximum: MAX_MAX_OUTPUT_CHARACTERS,
-            }),
-        ),
-    },
-    { additionalProperties: false },
-);
-
-export { searchModuleOptionsSchema };
-export type SearchModuleOptions = Static<typeof searchModuleOptionsSchema>;
 
 /**
  * Web search and page fetch, run by the module itself.
  *
  * Each vendor tool spends one bounded call on that vendor's own search, on an account the person
  * already configured, and comes back with the answer it wrote and the sources it cited. Nothing
- * is delegated to a host: the module owns the routing, the inference, and the fetch.
+ * is delegated to a host: the module owns the routing, the inference, and the fetch, and it takes
+ * the accounts, the catalog and the Gemini key from the module that owns them.
  */
 export class SearchModule implements AgentModule {
     readonly name = "search";
-    readonly #search: VendorSearchContext;
-    readonly #maxCharacters: number;
-    readonly #maxOutputCharacters: number;
+    readonly #config: ConfigModule;
 
-    constructor(options: SearchModuleOptions) {
-        if (!Value.Check(searchModuleOptionsSchema, options)) {
-            throw new Error("Search module options are invalid.");
-        }
-        this.#search = {
-            providers: options.providers,
-            routes: resolveSearchRoutes(options),
-            ...(options.geminiApiKey === undefined ? {} : { geminiApiKey: options.geminiApiKey }),
+    constructor(config: ConfigModule) {
+        this.#config = config;
+    }
+
+    /**
+     * The accounts every vendor search runs on, resolved per call.
+     *
+     * The catalog and the accounts are settled once by configuration, but the Gemini key is read
+     * from the environment each time it is asked for, so this is assembled when a search needs it
+     * rather than frozen at construction.
+     */
+    get #search(): VendorSearchContext {
+        const models = this.#config.models;
+        // The account this chat itself runs on is the first model's: that is what a session gets
+        // when it names nothing, and it is the one known to be signed in and paid for.
+        const currentProviderId = models[0]?.providerId;
+        const geminiApiKey = this.#config.geminiApiKey;
+        return {
+            providers: this.#config.providers,
+            routes: resolveSearchRoutes({
+                providers: this.#config.providers,
+                models,
+                bedrockSearchModels: this.#config.bedrockSearchModels,
+                ...(currentProviderId === undefined ? {} : { currentProviderId }),
+            }),
+            ...(geminiApiKey === undefined ? {} : { geminiApiKey }),
         };
-        this.#maxCharacters = options.maxCharacters ?? DEFAULT_MAX_CHARACTERS;
-        this.#maxOutputCharacters = options.maxOutputCharacters ?? DEFAULT_MAX_OUTPUT_CHARACTERS;
     }
 
     async providerSearch(
@@ -167,8 +132,8 @@ export class SearchModule implements AgentModule {
         assertAgentId(agentId);
         const normalizedInput = normalizeFetchInput(input);
         const requestedCharacters = Math.min(
-            normalizedInput.maxCharacters ?? this.#maxCharacters,
-            this.#maxCharacters,
+            normalizedInput.maxCharacters ?? MAX_SEARCH_FETCH_CHARACTERS,
+            MAX_SEARCH_FETCH_CHARACTERS,
         );
         const normalized: FetchInput = {
             url: normalizedInput.url,
@@ -214,7 +179,7 @@ export class SearchModule implements AgentModule {
         if (!Value.Check(searchAnswerSchema, answer)) {
             throw new Error("Cannot format an invalid search answer.");
         }
-        const sourcesBudget = Math.floor(this.#maxOutputCharacters / 2);
+        const sourcesBudget = Math.floor(MAX_SEARCH_OUTPUT_CHARACTERS / 2);
         const rows: string[] = [];
         for (const source of answer.sources) {
             const remaining = answer.sources.length - rows.length - 1;
@@ -223,7 +188,7 @@ export class SearchModule implements AgentModule {
         }
         const omitted = answer.sources.length - rows.length;
         let sources = rows.length === 0 && omitted > 0 ? "" : sourcesBlock(rows, omitted);
-        const answerBudget = this.#maxOutputCharacters - sources.length;
+        const answerBudget = MAX_SEARCH_OUTPUT_CHARACTERS - sources.length;
         const text =
             answer.answer.length <= answerBudget
                 ? answer.answer
@@ -240,7 +205,7 @@ export class SearchModule implements AgentModule {
             const candidateRows = [...rows];
             candidateRows[index] = `${source.url} — ${source.title}`;
             const candidate = sourcesBlock(candidateRows, omitted);
-            if (text.length + candidate.length <= this.#maxOutputCharacters) {
+            if (text.length + candidate.length <= MAX_SEARCH_OUTPUT_CHARACTERS) {
                 rows[index] = candidateRows[index]!;
                 sources = candidate;
             }
@@ -252,7 +217,7 @@ export class SearchModule implements AgentModule {
         if (!Value.Check(fetchResultSchema, result)) {
             throw new Error("Cannot format an invalid fetch result.");
         }
-        if (result.url.length > this.#maxOutputCharacters) {
+        if (result.url.length > MAX_SEARCH_OUTPUT_CHARACTERS) {
             throw new Error("Fetch result URL cannot fit within the model output limit.");
         }
 
@@ -260,7 +225,7 @@ export class SearchModule implements AgentModule {
         const content = result.content.length === 0 ? "" : `\n${result.content}`;
         const marker = result.truncated ? FETCH_TRUNCATION_MARKER : "";
         const full = `${result.url}${title}${content}${marker}`;
-        if (full.length <= this.#maxOutputCharacters) return full;
+        if (full.length <= MAX_SEARCH_OUTPUT_CHARACTERS) return full;
 
         /*
          * The URL is deliberately emitted first and never passed through a truncator.  Preserve
@@ -268,7 +233,7 @@ export class SearchModule implements AgentModule {
          * the complete output within the configured model budget.
          */
         let output = result.url;
-        let remaining = this.#maxOutputCharacters - output.length;
+        let remaining = MAX_SEARCH_OUTPUT_CHARACTERS - output.length;
         const hasContent = result.content.length > 0;
         const minimumAfterTitle = hasContent ? FETCH_TRUNCATION_MARKER.length + 2 : marker.length;
         if (

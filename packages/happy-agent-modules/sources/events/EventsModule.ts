@@ -82,10 +82,13 @@ const activeRunSchema = Type.Object(
 );
 type ActiveRun = Static<typeof activeRunSchema>;
 
-export interface EventsModuleOptions {
-    readonly capacity?: number;
-    readonly now?: () => number;
-}
+/**
+ * How many events the live window keeps before its oldest durable prefix is dropped.
+ *
+ * The journal is a replay buffer for clients catching up, not the record of everything that ever
+ * happened, so the bound is a property of the feature rather than something a caller tunes.
+ */
+export const EVENTS_CAPACITY = 10_000;
 
 /**
  * The daemon's durable, bounded event journal.
@@ -97,10 +100,8 @@ export interface EventsModuleOptions {
 export class EventsModule implements AgentModule<AnyAgentTool> {
     readonly name = "events";
     readonly migrations = eventsMigrations;
-    readonly #capacity: number;
     readonly #entries: AgentEvent[] = [];
     readonly #listeners = new Set<EventListener>();
-    readonly #now: () => number;
     /**
      * The loop each agent has opened and not yet had journaled, because the run it belongs to had
      * no identity at the time. It is live-process bookkeeping rather than a record of anything:
@@ -108,21 +109,10 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
      */
     readonly #openingLoops = new Map<string, AgentBaseLoop>();
     readonly #runs = new Map<string, ActiveRun>();
-    #createId: () => string;
+    #createId: () => string = createUuidV7Factory(Date.now);
     #moduleListener: EventsModuleListener | undefined;
-    #originCursor: string;
+    #originCursor: string = this.#createId();
     #occurredAt = 0;
-
-    constructor(options: EventsModuleOptions = {}) {
-        const capacity = options.capacity ?? 10_000;
-        if (!Number.isSafeInteger(capacity) || capacity < 1 || capacity > 100_000) {
-            throw new Error("The event queue capacity must be between 1 and 100,000.");
-        }
-        this.#capacity = capacity;
-        this.#now = options.now ?? Date.now;
-        this.#createId = createUuidV7Factory(this.#now);
-        this.#originCursor = this.#createId();
-    }
 
     /**
      * Registers the one listener that sees an event as it is recorded.
@@ -140,12 +130,12 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
     }
 
     readonly beforeStart = async (ctx: Context): Promise<AgentModuleHooks> => {
-        const loaded = await loadEventState(ctx.db, this.#capacity);
+        const loaded = await loadEventState(ctx.db, this.capacity());
         this.#entries.push(...loaded.events.map(freezeEvent));
         this.#occurredAt = this.#entries.at(-1)?.occurredAt ?? 0;
         this.#originCursor = loaded.originCursor ?? this.#originCursor;
         const highWater = this.#entries.at(-1)?.id ?? this.#originCursor;
-        this.#createId = createUuidV7Factory(this.#now, highWater);
+        this.#createId = createUuidV7Factory(Date.now, highWater);
         const runs = await loadActiveRuns(ctx.db, parseActiveRun);
         for (const [agentId, run] of runs) this.#runs.set(agentId, run);
         return this.#hooks;
@@ -163,8 +153,13 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
         return this.#entries.findLast((event) => event.agentId === agentId)?.id;
     }
 
+    /**
+     * How many events the live window keeps. Every bound inside the journal reads it from here, so
+     * a subclass that answers differently really does get a smaller window — which is how a test
+     * exercises retention without recording ten thousand events.
+     */
     capacity(): number {
-        return this.#capacity;
+        return EVENTS_CAPACITY;
     }
 
     /**
@@ -183,9 +178,9 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
         });
     }
 
-    replay(after?: string, limit = this.#capacity): EventReplay | undefined {
-        if (!Number.isSafeInteger(limit) || limit < 1 || limit > this.#capacity) {
-            throw new Error(`The event replay limit must be between 1 and ${this.#capacity}.`);
+    replay(after?: string, limit = this.capacity()): EventReplay | undefined {
+        if (!Number.isSafeInteger(limit) || limit < 1 || limit > this.capacity()) {
+            throw new Error(`The event replay limit must be between 1 and ${this.capacity()}.`);
         }
         const latestCursor = this.cursor();
         if (after === undefined) return { cursor: latestCursor, events: [], latestCursor };
@@ -256,7 +251,7 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
             });
             const run = this.#runs.get(agent.id);
             if (run !== undefined) {
-                const projected = projectProviderEvent(run, { type: "block_reset" }, this.#now());
+                const projected = projectProviderEvent(run, { type: "block_reset" }, Date.now());
                 await saveActiveRun(ctx.db, agent.id, projected.run);
                 await this.recordInDatabase(ctx, ctx.db, {
                     agentId: agent.id,
@@ -351,7 +346,7 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
         ): Promise<void> => {
             await ctx.inTx(async (txCtx) => {
                 const current = this.#runs.get(scope.agent.id) ?? emptyRun(this.#createId());
-                const projected = projectProviderEvent(current, event, this.#now());
+                const projected = projectProviderEvent(current, event, Date.now());
                 await saveActiveRun(txCtx.db, scope.agent.id, projected.run);
                 afterCommit(txCtx, () => {
                     this.#runs.set(scope.agent.id, projected.run);
@@ -515,7 +510,7 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
         const event = freezeEvent({
             ...(input.agentId === undefined ? {} : { agentId: input.agentId }),
             id: this.#createId(),
-            occurredAt: Math.max(this.#occurredAt, Math.max(0, Math.trunc(this.#now()))),
+            occurredAt: Math.max(this.#occurredAt, Math.max(0, Math.trunc(Date.now()))),
             payload: snapshotPayload(input.payload),
             type: input.type,
         });
@@ -523,7 +518,7 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
             throw new Error("The Happy agent event is invalid.");
         }
         await saveOriginCursor(database, this.#originCursor);
-        await insertEvent(database, event, this.#capacity);
+        await insertEvent(database, event, this.capacity());
         if (this.#moduleListener?.onEventTransactional !== undefined) {
             await this.#moduleListener.onEventTransactional(ctx, event);
         }
@@ -543,7 +538,7 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
         if (this.#entries.some((candidate) => candidate.id === event.id)) return;
         this.#occurredAt = Math.max(this.#occurredAt, event.occurredAt);
         this.#entries.push(event);
-        while (this.#entries.length > this.#capacity) {
+        while (this.#entries.length > this.capacity()) {
             const removed = this.#entries.shift();
             if (removed !== undefined) this.#originCursor = removed.id;
         }

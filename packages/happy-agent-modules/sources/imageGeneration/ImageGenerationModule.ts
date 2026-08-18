@@ -3,14 +3,12 @@ import type {
     AgentModule,
     AgentModuleHooks,
     AgentModuleScope,
-    AgentProviders,
     AnyAgentTool,
 } from "@slopus/happy-agent-base";
-import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { mapAsyncLock, type Context, type MapAsyncLock } from "@steve.kite/stdlib";
 
-import type { ConfigModule } from "../config/ConfigModule.js";
+import type { ConfigModule } from "../config/index.js";
 import {
     imageGenerationArgumentsSchema,
     selectedPaths,
@@ -28,27 +26,6 @@ import { RecentImages } from "./impl/RecentImages.js";
 import { writeGeneratedImageFile } from "./impl/writeGeneratedImageFile.js";
 import { codexImageGenerationTool } from "./tools/codex_imagegen.js";
 
-const providersSchema = Type.Unsafe<AgentProviders>(
-    Type.Object({}, { additionalProperties: true }),
-);
-
-const configSchema = Type.Unsafe<ConfigModule>(
-    Type.Object({ configuration: Type.Unknown() }, { additionalProperties: true }),
-);
-
-const imageGenerationModuleOptionsSchema = Type.Object(
-    {
-        /** Names the generated-files folder finished images are written into. */
-        config: configSchema,
-        /** The accounts an image may be generated on, and the credentials that reach them. */
-        providers: providersSchema,
-    },
-    { additionalProperties: false },
-);
-
-export { imageGenerationModuleOptionsSchema };
-export type ImageGenerationModuleOptions = Static<typeof imageGenerationModuleOptionsSchema>;
-
 /** What one generation needs to know beyond the model's own arguments. */
 export interface ImageGenerationRequest {
     /** The tool call this image belongs to; the provider takes it as the turn identity. */
@@ -64,29 +41,24 @@ export interface ImageGenerationRequest {
  * One prompt becomes one PNG on the configured Codex accounts, saved into the shared
  * generated-files folder and handed back to the model so it can look at what it made. Nothing is
  * delegated to a host: the module owns the account order, the request, the validation, and the
- * file.
+ * file, and it takes the accounts and that folder from the module that owns them.
  */
 export class ImageGenerationModule implements AgentModule {
     readonly name = "image-generation";
 
-    readonly #providers: AgentProviders;
     readonly #config: ConfigModule;
     readonly #recentImages = new RecentImages();
     /** One image at a time per agent: each generation is billed, and each picks an account. */
     readonly #locks: MapAsyncLock<string> = mapAsyncLock<string>();
     #roundRobinOffset = 0;
 
-    constructor(options: ImageGenerationModuleOptions) {
-        if (!Value.Check(imageGenerationModuleOptionsSchema, options)) {
-            throw new Error("Image generation module options are invalid.");
-        }
-        this.#providers = options.providers;
-        this.#config = options.config;
+    constructor(config: ConfigModule) {
+        this.#config = config;
     }
 
     /** How many accounts this agent's request could be sent to, for an approval to disclose. */
     get accountCount(): number {
-        return codexImageProviderIds(this.#providers).length;
+        return codexImageProviderIds(this.#config.providers).length;
     }
 
     /** Generate one image, write it to the shared generated-files folder, and return it. */
@@ -128,7 +100,7 @@ export class ImageGenerationModule implements AgentModule {
         assertAggregateImageSize(images);
 
         const generated = await generateImageWithCodex({
-            providers: this.#providers,
+            providers: this.#config.providers,
             order: this.#accountOrder(request.preferredProviderId),
             prompt: args.prompt,
             images,
@@ -160,7 +132,7 @@ export class ImageGenerationModule implements AgentModule {
      * the same second account.
      */
     #accountOrder(preferredProviderId: string | undefined): readonly string[] {
-        const accounts = codexImageProviderIds(this.#providers);
+        const accounts = codexImageProviderIds(this.#config.providers);
         if (accounts.length === 0) return accounts;
         const offset = this.#roundRobinOffset++ % accounts.length;
         const rotated = [...accounts.slice(offset), ...accounts.slice(0, offset)];

@@ -8,14 +8,14 @@ surface, so a model sees the tool names, argument names, and escalation syntax i
 
 ```ts
 import { AgentSystemLocal } from "@slopus/happy-agent-base";
-import { SystemPromptModule, createComputeModules } from "@slopus/happy-agent-modules";
+import {
+    ComputeModule,
+    SystemPromptModule,
+    createComputeModules,
+} from "@slopus/happy-agent-modules";
 
-const created = createComputeModules();
-const systemPrompt = new SystemPromptModule({
-    compute: {
-        resolve: async (ctx, agentId) => await created.computeModule.resolve(ctx, agentId),
-    },
-});
+const created = createComputeModules(new ComputeModule(config));
+const systemPrompt = new SystemPromptModule({ compute: created.computeModule });
 const system = await AgentSystemLocal.create(ctx, storage, {
     ...systemOptions,
     modules: [systemPrompt, ...created.modules],
@@ -30,8 +30,12 @@ const agent = await system.create(ctx, {
 });
 ```
 
-`createComputeModules` creates one shared `ComputeModule` and `SkillsModule` set for the whole
-agent system. The compute module owns one global host provider. The first time a configured agent
+`createComputeModules` pairs the one `ComputeModule` with the `SkillsModule` that reads its
+machines, as the set the whole agent system installs. `ComputeModule` takes only `ConfigModule`:
+it derives its host policy — the agent's private directories, the project files a write must be
+reviewed for — from the configuration itself, and uses the published default host provider.
+`ComputeModule.withProvider(config, provider)` is the one alternate construction, for a test or a
+deployment that genuinely swaps how a machine is created. The first time a configured agent
 needs compute, it creates a separate host compute for that agent, caches it by agent ID, and gives
 that exact instance to the compute tools and skills discovery. A host injects the same
 `ComputeModule` into `SystemPromptModule` for AGENTS.md discovery. This package depends on
@@ -101,8 +105,8 @@ vendor-shaped skin over one shared helper in `impl/`, so behavior cannot drift b
   path, each enforcing the read requirement unless a caller proves the file's contents another way.
 - `startComputeCommand`, `readComputeCommand`, `writeComputeCommandInput`, `stopComputeCommand` —
   the command lifecycle, including the background grace period and delta-only reads.
-- `shouldReviewComputePath`, `canonicalComputePath`, `boundOutputText`, `FileReadLog` — permission,
-  bounding, and read-tracking mechanics.
+- `shouldReviewComputePath`, `canonicalComputePath`, `boundOutputText` — permission and bounding
+  mechanics. `FileReadLog` is shared beyond this module and lives in the package's `sources/impl/`.
 
 A vendor tool's own `impl/` directory holds only what is genuinely that vendor's: parsing Claude's
 shell IDs, Codex's patch format, Grok's task IDs. Nothing there is shared across vendors.
@@ -146,9 +150,11 @@ top) and the tail for a command (whose newest lines say how it went).
 
 `ComputeModule` (`ComputeModule.ts`) implements `AgentModule`:
 
-- `constructor(options?: ComputeModuleOptions)` — accepts one optional global host provider and
-  otherwise uses the published default.
+- `constructor(config: ConfigModule)` — takes the configuration it derives its host policy from.
+- `static withProvider(config, provider)` — the same module over a caller-supplied host provider.
 - `readonly name = "compute"`.
+- `hostPolicy` — the private directories and protected project files this installation's
+  configuration asks for, which is what every machine it creates is created behind.
 - `resolve(ctx, agentId)` — validates `AgentConfig.modules.compute`, creates once, and returns the
   exact cached compute for that agent.
 - `instructions(ctx, scope)` and `tools(ctx, scope)` — return nothing when the agent has no
@@ -158,7 +164,19 @@ top) and the tail for a command (whose newest lines say how it went).
   command's state and output without consuming it (`peek: true`), so a person watching does not
   take output the model has not been given yet.
 - `stopCommand(agentId, commandId)` — stops a command by hand; answers whether
-  there was one still running to stop.
+  there was one still running to stop. These two together are how a module that tightens an
+  agent's permission mode ends what is still running under the wider one: it asks for the commands
+  and asks for them to be stopped, rather than being handed a way to end them.
+- `reviewerTools(ctx, scope)` — the fixed read-only tool array the automatic permission reviewer
+  investigates local state with, built for the vendor the reviewer's own model route selects. The
+  reviewer's machine is one per installation, created in this installation's working folder on
+  first use, cached here, and disposed with everything else; it is not any agent's, so it is never
+  reachable through `resolve`. There is no writing tool in the array, and every reviewer send is
+  `read_only`, so a review can look but never change the workspace.
+- `permissionsForContext(ctx)`, `resolvePath(compute, path)`, `parentPath(path)`, `pathName(path)`,
+  `shouldReviewPath(ctx, compute, path, { write })`, `describePathAction(compute, path, operation)`
+  — the boundary a machine is worked through, for the modules that hold one. A sibling asks for
+  these rather than reaching into `impl/`.
 - `dispose(ctx)` — disposes every cached compute at host shutdown.
 
 Also exported from the package: `computeToolVendor`, `computeToolSelectionSchema`,
@@ -171,7 +189,7 @@ not dispose it.
 
 ## Storage
 
-The only state this module persists is `FileReadLog` (`impl/FileReadLog.ts`), one per agent, kept
+The only state this module persists is `FileReadLog` (`../impl/FileReadLog.ts`), one per agent, kept
 in the `AgentKV` the agent lends the module through `scope.kv` (`module.compute` scope). It holds
 a single key:
 

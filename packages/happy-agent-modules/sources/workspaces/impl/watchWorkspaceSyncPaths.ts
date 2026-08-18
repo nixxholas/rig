@@ -1,7 +1,6 @@
 import { statSync, watch, type FSWatcher } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 
-import { supportsRecursiveWorktreeWatch } from "../../git/watchGitRepositoryChanges.js";
 import { PROJECT_CONFIG_FILE_NAMES } from "./loadWorkspaceFolderSettings.js";
 
 /**
@@ -14,14 +13,16 @@ import { PROJECT_CONFIG_FILE_NAMES } from "./loadWorkspaceFolderSettings.js";
  * sharing a parent share one watch. The project configuration files are watched the same way so
  * a changed sync list is picked up without a restart.
  *
- * A synced directory's contents are watched recursively only where the kernel backs recursive
- * watching; on Linux, Node emulates it with one inotify watch per directory, which an arbitrarily
- * large tree would turn into real resource use. There, and for a path that cannot be watched at
- * all, sync degrades to catching up when some watched path fires.
+ * A synced directory's contents are watched recursively only when the caller says the kernel backs
+ * recursive watching; on Linux, Node emulates it with one inotify watch per directory, which an
+ * arbitrarily large tree would turn into real resource use. There, and for a path that cannot be
+ * watched at all, sync degrades to catching up when some watched path fires.
  */
 export function watchWorkspaceSyncPaths(options: {
     onChange: () => void;
     projectPath: string;
+    /** Whether this platform's kernel backs recursive directory watching. */
+    recursive: boolean;
     syncPaths: readonly string[];
 }): () => void {
     const watchers: FSWatcher[] = [];
@@ -51,7 +52,7 @@ export function watchWorkspaceSyncPaths(options: {
     for (const path of new Set(options.syncPaths)) {
         const source = resolve(options.projectPath, path);
         observe(dirname(source), basename(source));
-        if (supportsRecursiveWorktreeWatch() && isDirectory(source)) arm(source, true);
+        if (options.recursive && isDirectory(source)) arm(source, true);
     }
     for (const [directory, entries] of parentEntries) {
         arm(directory, false, (entry) => entries.has(entry));

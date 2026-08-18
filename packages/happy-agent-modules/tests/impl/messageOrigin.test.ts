@@ -8,7 +8,7 @@ import {
     isUserOriginMetadata,
     senderAgentIdMetadata,
     senderAgentIdOf,
-} from "../../sources/auto/messageOrigin.js";
+} from "../../sources/impl/messageOrigin.js";
 
 describe("message origin metadata", () => {
     it("exports frozen, exact origin stamps", () => {

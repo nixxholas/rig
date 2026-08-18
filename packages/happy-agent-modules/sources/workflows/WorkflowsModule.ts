@@ -1,7 +1,9 @@
 import { createId } from "@paralleldrive/cuid2";
 import { sql } from "drizzle-orm";
 import {
+    agentDatabase,
     agentDatabaseRun,
+    withAgentDatabase,
     type AgentBasePersistedEvent,
     type AgentBaseSettlement,
     type AgentMetadata,
@@ -12,14 +14,12 @@ import {
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
 import { isSessionErrorDone, type SessionEvent } from "@slopus/happy-providers";
-import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import { afterCommit, type Context } from "@steve.kite/stdlib";
+import { afterCommit, detach, type Context } from "@steve.kite/stdlib";
 
 import type { CollaborationModule } from "../collaboration/CollaborationModule.js";
-import type { ComputeResolver } from "../compute/ComputeResolver.js";
-import { computePermissionsForContext } from "../compute/impl/computePermissionsForContext.js";
-import { resolveComputePath } from "../compute/impl/resolveComputePath.js";
+import type { ComputeModule } from "../compute/index.js";
+import type { ConfigModule } from "../config/index.js";
 import {
     MAX_WORKFLOW_ARGS_BYTES,
     MAX_WORKFLOW_DESCRIPTION_LENGTH,
@@ -50,10 +50,9 @@ import {
 } from "./Workflow.js";
 import {
     MAX_WORKFLOW_POST_COMMIT_ERROR_LENGTH,
-    workflowEventIdSchema,
-    workflowModuleListenerSchema,
-    workflowPostCommitErrorSchema,
     type WorkflowEvent,
+    type WorkflowEventListener,
+    type WorkflowUnsubscribe,
 } from "./WorkflowEvent.js";
 import {
     WORKFLOWS_MIGRATION_KEY,
@@ -94,48 +93,12 @@ import { waitWorkflowTool } from "./tools/wait_workflow.js";
 import { workflowLogsTool } from "./tools/workflow_logs.js";
 import { workflowStatusTool } from "./tools/workflow_status.js";
 
-const workflowModuleOptionsSchema = Type.Object(
-    {
-        enabled: Type.Optional(Type.Boolean()),
-        /** Where a run lives once the tool call that started it has returned. */
-        runContext: Type.Unsafe<Context>(Type.Object({}, { additionalProperties: true })),
-        /** How this module starts the agents a script asks for. */
-        collaboration: Type.Unsafe<CollaborationModule>(
-            Type.Object({}, { additionalProperties: true }),
-        ),
-        /** The agent's own filesystem, used only to read a script the model named by path. */
-        compute: Type.Optional(
-            Type.Unsafe<ComputeResolver>(Type.Object({}, { additionalProperties: true })),
-        ),
-        clock: Type.Optional(Type.Function([], workflowTimestampSchema)),
-        listener: Type.Optional(workflowModuleListenerSchema),
-        eventIdFactory: Type.Optional(Type.Function([], workflowEventIdSchema)),
-        collaboratorIdFactory: Type.Optional(Type.Function([], Type.String())),
-        maxPageSize: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_WORKFLOW_PAGE_SIZE })),
-        maxLogLines: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_WORKFLOW_LOG_LINES })),
-        maxOutputCharacters: Type.Optional(
-            Type.Integer({ minimum: 256, maximum: MAX_WORKFLOW_OUTPUT_CHARACTERS }),
-        ),
-        onPostCommitError: Type.Optional(
-            Type.Function(
-                [
-                    Type.Unsafe<Context>(Type.Object({}, { additionalProperties: true })),
-                    Type.Unsafe<WorkflowEvent>(Type.Object({}, { additionalProperties: true })),
-                    workflowPostCommitErrorSchema,
-                ],
-                Type.Union([Type.Void(), Type.Promise(Type.Void())]),
-            ),
-        ),
-    },
-    { additionalProperties: false },
-);
-
-export { workflowModuleOptionsSchema };
-export type WorkflowModuleOptions = Static<typeof workflowModuleOptionsSchema>;
-
-const DEFAULT_PAGE_SIZE = 50;
-const DEFAULT_MAX_LOG_LINES = 200;
-const DEFAULT_MAX_OUTPUT = 12_000;
+/** The largest page this module hands back, whatever a caller asks for. */
+const PAGE_SIZE = 50;
+/** The largest number of log lines one read returns. */
+const LOG_LINES = 200;
+/** The point past which a script's output is elided rather than carried whole. */
+const OUTPUT_CHARACTERS = 12_000;
 const EXECUTION_MIGRATION_KEY = "003-workflows-execution";
 const DROP_WORKFLOW_REPLAY_TABLES_MIGRATION_KEY = "002-workflows-drop-replay-evidence";
 
@@ -170,17 +133,15 @@ interface WorkflowAgentWaiter {
 export class WorkflowsModule implements AgentModule {
     readonly name = "workflows";
 
-    readonly #options: WorkflowModuleOptions;
-    readonly #enabled: boolean;
+    readonly #config: ConfigModule;
     readonly #collaboration: CollaborationModule;
-    readonly #compute: ComputeResolver | undefined;
-    readonly #runContext: Context;
-    readonly #maxPageSize: number;
-    readonly #maxLogLines: number;
-    readonly #maxOutputCharacters: number;
+    readonly #compute: ComputeModule;
 
     readonly #live = new Map<string, LiveWorkflowRun>();
     readonly #waiters = new Map<string, WorkflowAgentWaiter>();
+    readonly #postCommitListeners = new Set<WorkflowEventListener>();
+    readonly #transactionalListeners = new Set<WorkflowEventListener>();
+    #runLifetime: Context | undefined;
 
     readonly migrations: readonly AgentModuleMigration[] = [
         [
@@ -292,18 +253,35 @@ export class WorkflowsModule implements AgentModule {
         ],
     ];
 
-    constructor(options: WorkflowModuleOptions) {
-        if (!Value.Check(workflowModuleOptionsSchema, options)) {
-            throw new Error("The workflow module options are not valid.");
-        }
-        this.#options = options;
-        this.#enabled = options.enabled ?? true;
-        this.#collaboration = options.collaboration;
-        this.#compute = options.compute;
-        this.#runContext = options.runContext;
-        this.#maxPageSize = options.maxPageSize ?? DEFAULT_PAGE_SIZE;
-        this.#maxLogLines = options.maxLogLines ?? DEFAULT_MAX_LOG_LINES;
-        this.#maxOutputCharacters = options.maxOutputCharacters ?? DEFAULT_MAX_OUTPUT;
+    constructor(config: ConfigModule, collaboration: CollaborationModule, compute: ComputeModule) {
+        this.#config = config;
+        this.#collaboration = collaboration;
+        this.#compute = compute;
+    }
+
+    /** Whether the configuration turned workflows on for this installation. */
+    get #enabled(): boolean {
+        return this.#config.configuration.values.features.workflows;
+    }
+
+    /**
+     * Watch a run inside the transaction that commits the change.
+     *
+     * A transactional subscriber runs before the commit, so throwing from one rejects the change
+     * that produced the event. Returns the function that ends the subscription.
+     */
+    onEventTransactional(listener: WorkflowEventListener): WorkflowUnsubscribe {
+        return subscribe(this.#transactionalListeners, listener);
+    }
+
+    /**
+     * Watch a run once the change is durable.
+     *
+     * A post-commit subscriber cannot move the run back, so a failure in one is logged and the
+     * remaining subscribers still see the event. Returns the function that ends the subscription.
+     */
+    onEvent(listener: WorkflowEventListener): WorkflowUnsubscribe {
+        return subscribe(this.#postCommitListeners, listener);
     }
 
     readonly #hooks: AgentModuleHooks = {
@@ -312,9 +290,9 @@ export class WorkflowsModule implements AgentModule {
             // A script named by path is read through the agent's own filesystem, and the reviewer
             // is told exactly which boundary that crossing is, so the compute is resolved here
             // where the tools are built rather than at every call.
-            const compute = await this.#compute?.resolve(ctx, scope.agent.id);
+            const compute = await this.#compute.resolve(ctx, scope.agent.id);
             return [
-                runWorkflowTool(this, scope.agent.id, compute),
+                runWorkflowTool(this, scope.agent.id, this.#compute, compute),
                 listWorkflowsTool(this, scope.agent.id),
                 workflowStatusTool(this, scope.agent.id),
                 cancelWorkflowTool(this, scope.agent.id),
@@ -449,7 +427,7 @@ export class WorkflowsModule implements AgentModule {
             await this.#store(txCtx, run);
             await this.#publish(txCtx, "workflow_started", run);
         });
-        this.#start(agentId, request, request.resumeFromRunId);
+        this.#start(ctx, agentId, request, request.resumeFromRunId);
         return run;
     }
 
@@ -469,7 +447,7 @@ export class WorkflowsModule implements AgentModule {
         if (!Value.Check(workflowPageQuerySchema, query)) {
             throw new Error("The workflow page query is not valid.");
         }
-        const limit = Math.min(query.limit ?? this.#maxPageSize, this.#maxPageSize);
+        const limit = Math.min(query.limit ?? PAGE_SIZE, PAGE_SIZE);
         return await readWorkflowPage(ctx, agentId, { ...query, limit });
     }
 
@@ -482,7 +460,7 @@ export class WorkflowsModule implements AgentModule {
         if ((await readWorkflowRun(ctx, agentId, query.id)) === undefined) {
             throw new Error(`Workflow run "${query.id}" was not found.`);
         }
-        const limit = Math.min(query.limit ?? this.#maxLogLines, this.#maxLogLines);
+        const limit = Math.min(query.limit ?? LOG_LINES, LOG_LINES);
         return await readWorkflowLogPage(ctx, agentId, { ...query, limit });
     }
 
@@ -540,7 +518,7 @@ export class WorkflowsModule implements AgentModule {
             await this.#store(txCtx, resumed);
             await this.#publish(txCtx, "workflow_updated", resumed);
         });
-        this.#start(agentId, request, id);
+        this.#start(ctx, agentId, request, id);
         return resumed;
     }
 
@@ -643,12 +621,13 @@ export class WorkflowsModule implements AgentModule {
     }
 
     async #readScript(ctx: Context, agentId: string, scriptPath: string): Promise<string> {
-        const compute = await this.#compute?.resolve(ctx, agentId);
+        const computeModule = this.#compute;
+        const compute = await computeModule.resolve(ctx, agentId);
         if (compute === undefined) {
             throw new Error("This agent cannot read workflow scripts from disk.");
         }
-        const resolved = resolveComputePath(scriptPath, compute.cwd, compute.fs.home);
-        return await compute.fs.readFile(computePermissionsForContext(ctx), resolved);
+        const resolved = computeModule.resolvePath(compute, scriptPath);
+        return await compute.fs.readFile(computeModule.permissionsForContext(ctx), resolved);
     }
 
     /** What a paused run was launched with, so resuming does not need the model to say it again. */
@@ -669,13 +648,14 @@ export class WorkflowsModule implements AgentModule {
      * cannot be owned by that turn's context: the tool call returns, and the run keeps going.
      */
     #start(
+        ctx: Context,
         agentId: string,
         request: WorkflowLaunchRequest,
         resumeFromRunId: string | undefined,
     ): void {
         const controller = new AbortController();
         const finished = this.#execute(
-            this.#runContext,
+            this.#lifetimeFrom(ctx),
             agentId,
             request,
             controller,
@@ -686,6 +666,24 @@ export class WorkflowsModule implements AgentModule {
                 this.#live.delete(request.id);
             });
         this.#live.set(request.id, { controller, finished });
+    }
+
+    /**
+     * Where a run lives once the tool call that started it has returned.
+     *
+     * Detaching drops the caller's lifetime and the agent database with it, so the database is
+     * carried back on: a run writes its logs and checkpoints for as long as it lasts. It is taken
+     * from the first call that starts a run and reused by every later one, because every run
+     * belongs to the same process rather than to the turn that happened to ask.
+     */
+    #lifetimeFrom(ctx: Context): Context {
+        if (this.#runLifetime !== undefined) return this.#runLifetime;
+        const database = agentDatabase(ctx);
+        if (database === undefined) {
+            throw new Error("A workflow was started without an agent database.");
+        }
+        this.#runLifetime = withAgentDatabase(detach(ctx).named("workflow-run"), database);
+        return this.#runLifetime;
     }
 
     /** Waits for the runs this module started. Closing the host and tests both need it. */
@@ -911,50 +909,62 @@ export class WorkflowsModule implements AgentModule {
      * problem: the run has already moved and cannot be moved back.
      */
     async #publish(ctx: Context, type: WorkflowEvent["type"], run: WorkflowRun): Promise<void> {
-        const listener = this.#options.listener;
-        if (listener === undefined) return;
+        if (this.#transactionalListeners.size === 0 && this.#postCommitListeners.size === 0) return;
         const event: WorkflowEvent = {
             type,
             agentId: run.agentId,
-            eventId: this.#options.eventIdFactory?.() ?? createId(),
+            eventId: createId(),
             at: this.#now(),
             run: structuredClone(run),
         };
-        await listener.onEventTransactional?.(ctx, event);
+        for (const listener of [...this.#transactionalListeners]) {
+            await listener(ctx, event);
+        }
+        if (this.#postCommitListeners.size === 0) return;
+        const subscribers = [...this.#postCommitListeners];
         afterCommit(ctx, async (postCommitCtx) => {
-            try {
-                await listener.onEvent?.(postCommitCtx, event);
-            } catch (error: unknown) {
+            for (const listener of subscribers) {
                 try {
-                    await this.#options.onPostCommitError?.(
-                        postCommitCtx,
-                        event,
-                        boundedReason(describeError(error)),
+                    await listener(postCommitCtx, event);
+                } catch (error: unknown) {
+                    // A watcher cannot turn a committed run into a failure.
+                    postCommitCtx.log.warn(
+                        "A workflow subscriber failed after the run had already moved.",
+                        { reason: boundedReason(describeError(error)) },
                     );
-                } catch {
-                    // An observer cannot turn a committed run into a failure.
                 }
             }
         });
     }
 
     #bound(text: string): string {
-        return text.length <= this.#maxOutputCharacters
+        return text.length <= OUTPUT_CHARACTERS
             ? text
-            : `${text.slice(0, this.#maxOutputCharacters - 1)}…`;
+            : `${text.slice(0, OUTPUT_CHARACTERS - 1)}…`;
     }
 
     #newCollaboratorId(): string {
-        return this.#options.collaboratorIdFactory?.() ?? createId();
+        return createId();
     }
 
     #now(): number {
-        return this.#options.clock?.() ?? Date.now();
+        return Date.now();
     }
 
     #assertEnabled(): void {
         if (!this.#enabled) throw new Error("Workflows are turned off for this agent.");
     }
+}
+
+/** Add one subscriber and hand back the only way to remove it. */
+function subscribe(
+    listeners: Set<WorkflowEventListener>,
+    listener: WorkflowEventListener,
+): WorkflowUnsubscribe {
+    listeners.add(listener);
+    return () => {
+        listeners.delete(listener);
+    };
 }
 
 /** Where a workflow collaborator keeps the last thing it said, until its run ends. */

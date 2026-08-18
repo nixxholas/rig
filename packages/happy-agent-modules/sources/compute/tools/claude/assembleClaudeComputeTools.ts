@@ -1,7 +1,7 @@
 import type { AnyAgentTool } from "@slopus/happy-agent-base";
 
 import type { Compute } from "../../Compute.js";
-import type { FileReadLog } from "../../impl/FileReadLog.js";
+import type { FileReadLog } from "../../../impl/FileReadLog.js";
 import { claudeBashTool } from "./Bash.js";
 import { claudeBashInputTool } from "./BashInput.js";
 import { claudeBashOutputTool } from "./BashOutput.js";

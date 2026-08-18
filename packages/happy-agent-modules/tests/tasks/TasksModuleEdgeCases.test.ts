@@ -1,4 +1,5 @@
 import { agentDatabaseRun } from "@slopus/happy-agent-base";
+import { type Context, withLogger } from "@steve.kite/stdlib";
 import { sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 
@@ -10,7 +11,12 @@ import {
     MAX_TASK_METADATA_STRING_LENGTH,
     TaskValidationError,
 } from "../../sources/tasks/Task.js";
-import { TasksModule, MAX_TASKS } from "../../sources/tasks/TasksModule.js";
+import {
+    MAX_TASKS_PER_AGENT,
+    MAX_TASK_OUTPUT_CHARACTERS,
+    MAX_TASK_PAGE_SIZE,
+    TasksModule,
+} from "../../sources/tasks/TasksModule.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
 import { resolveModuleHooks } from "../support/moduleHooks.js";
 
@@ -43,46 +49,42 @@ function baseTask(overrides: Record<string, unknown> = {}) {
 }
 
 describe("TasksModule edge cases", () => {
-    it("validates constructor options and factory outputs at their boundaries", async () => {
-        expect(() => new TasksModule({ maxTasks: 0 })).toThrow();
-        expect(() => new TasksModule({ maxTasks: MAX_TASKS + 1 })).toThrow();
-        expect(() => new TasksModule({ defaultPriority: "urgent" as never })).toThrow();
-        expect(() => new TasksModule({ maxOutputCharacters: 255 })).toThrow();
-        expect(() => new TasksModule({ maxOutputCharacters: 100_001 })).toThrow();
-        expect(() => new TasksModule({ maxPageSize: 0 })).toThrow();
-        expect(() => new TasksModule({ maxPageSize: 101 })).toThrow();
-        expect(() => new TasksModule({ unknown: true } as never)).toThrow();
+    it("mints its own task identities, event identities, and timestamps", async () => {
+        const tasks = new TasksModule();
+        const announced: { readonly eventId: string; readonly at: number }[] = [];
+        tasks.onEvent((_ctx, event) => {
+            announced.push({ at: event.at, eventId: event.eventId });
+        });
+        const database = moduleDatabase(tasks.migrations, "tasks-own-identities-test");
+        await database.ready;
+        try {
+            const before = Date.now();
+            const first = await tasks.create(database.context, "agent-a", { title: "first" });
+            const second = await tasks.create(database.context, "agent-a", { title: "second" });
+            const after = Date.now();
 
-        const cases = [
-            [new TasksModule({ idFactory: () => "" }), "Task ID is invalid"],
-            [new TasksModule({ clock: () => -1 }), "clock"],
-            [new TasksModule({ eventIdFactory: () => "" }), "event ID"],
-        ] as const;
-        for (const [tasks, message] of cases) {
-            const database = moduleDatabase(tasks.migrations, `tasks-invalid-factory-${message}`);
-            await database.ready;
-            try {
-                await expect(
-                    tasks.create(database.context, "agent-a", { title: "task" }),
-                ).rejects.toThrow(message);
-                await expect(tasks.list(database.context, "agent-a")).resolves.toEqual([]);
-            } finally {
-                database.close();
+            expect(first.id).not.toBe(second.id);
+            expect(first.createdAt).toBe(first.updatedAt);
+            expect(first.createdAt).toBeGreaterThanOrEqual(before);
+            expect(second.createdAt).toBeLessThanOrEqual(after);
+            expect(announced).toHaveLength(2);
+            expect(new Set(announced.map((event) => event.eventId)).size).toBe(2);
+            for (const event of announced) {
+                expect(event.eventId.length).toBeGreaterThan(0);
+                expect(event.at).toBeGreaterThanOrEqual(before);
             }
+        } finally {
+            database.close();
         }
     });
 
     it("normalizes bounded scalar fields and clears optional values explicitly", async () => {
-        let now = 10;
-        const tasks = new TasksModule({
-            clock: () => now++,
-            idFactory: () => "generated",
-            eventIdFactory: () => `event-${now}`,
-        });
+        const tasks = new TasksModule();
         const database = moduleDatabase(tasks.migrations, "tasks-normalization-test");
         await database.ready;
         try {
             const created = await tasks.create(database.context, "agent-a", {
+                id: "generated",
                 title: "  Ship it  ",
                 detail: "  some detail  ",
                 activeForm: "  Shipping it  ",
@@ -94,9 +96,8 @@ describe("TasksModule edge cases", () => {
                 detail: "some detail",
                 activeForm: "Shipping it",
                 owner: "worker",
-                createdAt: 10,
-                updatedAt: 10,
             });
+            expect(created.createdAt).toBe(created.updatedAt);
             const cleared = await tasks.update(database.context, "agent-a", created.id, {
                 detail: null,
                 activeForm: null,
@@ -117,12 +118,8 @@ describe("TasksModule edge cases", () => {
 
     it("rejects invalid scalar values, IDs, and dependency mutations without partial writes", async () => {
         const events: unknown[] = [];
-        const tasks = new TasksModule({
-            listener: { onEvent: (_ctx, event) => events.push(event) },
-            idFactory: () => "generated",
-            eventIdFactory: () => `event-${events.length + 1}`,
-            clock: () => 10,
-        });
+        const tasks = new TasksModule();
+        tasks.onEvent((_ctx, event) => events.push(event));
         const database = moduleDatabase(tasks.migrations, "tasks-invalid-input-test");
         await database.ready;
         try {
@@ -163,7 +160,7 @@ describe("TasksModule edge cases", () => {
     });
 
     it("enforces metadata shape, key, item, string, and byte bounds", async () => {
-        const tasks = new TasksModule({ idFactory: () => "task", eventIdFactory: () => "event" });
+        const tasks = new TasksModule();
         const database = moduleDatabase(tasks.migrations, "tasks-metadata-bounds-test");
         await database.ready;
         try {
@@ -241,36 +238,40 @@ describe("TasksModule edge cases", () => {
         }
     });
 
-    it("enforces the configured task count and keeps the rejected mutation durable-state free", async () => {
+    it("enforces its task count and keeps the rejected mutation durable-state free", async () => {
         const events: string[] = [];
-        const tasks = new TasksModule({
-            maxTasks: 2,
-            eventIdFactory: () => `event-${events.length + 1}`,
-            listener: { onEvent: (_ctx, event) => events.push(event.type) },
-        });
+        const tasks = new TasksModule();
+        tasks.onEvent((_ctx, event) => events.push(event.type));
         const database = moduleDatabase(tasks.migrations, "tasks-max-count-test");
         await database.ready;
         try {
-            await tasks.create(database.context, "agent-a", { id: "a", title: "A" });
-            await tasks.create(database.context, "agent-a", { id: "b", title: "B" });
+            for (let index = 0; index < MAX_TASKS_PER_AGENT; index += 1) {
+                await tasks.create(database.context, "agent-a", {
+                    id: `task-${index}`,
+                    title: `Task ${index}`,
+                });
+            }
             await expect(
-                tasks.create(database.context, "agent-a", { id: "c", title: "C" }),
-            ).rejects.toThrow("maximum of 2");
-            expect(await tasks.list(database.context, "agent-a")).toHaveLength(2);
-            expect(events).toEqual(["task_created", "task_created"]);
+                tasks.create(database.context, "agent-a", { id: "one-too-many", title: "C" }),
+            ).rejects.toThrow(`maximum of ${MAX_TASKS_PER_AGENT}`);
+            expect(await tasks.list(database.context, "agent-a")).toHaveLength(
+                MAX_TASKS_PER_AGENT,
+            );
+            expect(events).toHaveLength(MAX_TASKS_PER_AGENT);
+            expect(new Set(events)).toEqual(new Set(["task_created"]));
         } finally {
             database.close();
         }
     });
 
     it("survives a fresh module instance and isolates each agent's task list", async () => {
-        const first = new TasksModule({ clock: () => 1, eventIdFactory: () => "first" });
+        const first = new TasksModule();
         const database = moduleDatabase(first.migrations, "tasks-restart-isolation-test");
         await database.ready;
         try {
             await first.create(database.context, "agent-a", { id: "a", title: "A" });
             await first.create(database.context, "agent-b", { id: "b", title: "B" });
-            const restarted = new TasksModule({ clock: () => 2, eventIdFactory: () => "second" });
+            const restarted = new TasksModule();
             await expect(restarted.list(database.context, "agent-a")).resolves.toMatchObject([
                 { id: "a", title: "A" },
             ]);
@@ -326,12 +327,8 @@ describe("TasksModule edge cases", () => {
 
     it("supports reorder, exact no-op detection, reset, and contiguous removal ordering", async () => {
         const events: string[] = [];
-        let at = 1;
-        const tasks = new TasksModule({
-            clock: () => at++,
-            eventIdFactory: () => `event-${events.length + 1}`,
-            listener: { onEvent: (_ctx, event) => events.push(event.type) },
-        });
+        const tasks = new TasksModule();
+        tasks.onEvent((_ctx, event) => events.push(event.type));
         const database = moduleDatabase(tasks.migrations, "tasks-order-reset-test");
         await database.ready;
         try {
@@ -379,7 +376,7 @@ describe("TasksModule edge cases", () => {
     });
 
     it("keeps dependency graph operations acyclic and bidirectional under incremental changes", async () => {
-        const tasks = new TasksModule({ clock: () => 1, eventIdFactory: () => "event" });
+        const tasks = new TasksModule();
         const database = moduleDatabase(tasks.migrations, "tasks-dependency-graph-test");
         await database.ready;
         try {
@@ -413,7 +410,7 @@ describe("TasksModule edge cases", () => {
     });
 
     it("hides completed blockers only in list pages while detail retains the complete dependency record", async () => {
-        const tasks = new TasksModule({ clock: () => 1, eventIdFactory: () => "event" });
+        const tasks = new TasksModule();
         const database = moduleDatabase(tasks.migrations, "tasks-completed-blocker-test");
         await database.ready;
         try {
@@ -441,14 +438,7 @@ describe("TasksModule edge cases", () => {
     });
 
     it("pages list and detail cursors with bounded output while preserving progress", async () => {
-        let id = 0;
-        const tasks = new TasksModule({
-            maxOutputCharacters: 256,
-            maxPageSize: 2,
-            idFactory: () => `generated-${++id}`,
-            eventIdFactory: () => `event-${id}`,
-            clock: () => 1,
-        });
+        const tasks = new TasksModule();
         const database = moduleDatabase(tasks.migrations, "tasks-paging-output-test");
         await database.ready;
         try {
@@ -466,18 +456,24 @@ describe("TasksModule edge cases", () => {
                     offset,
                     limit: 2,
                 });
-                expect(tasks.formatPageForModel(page).length).toBeLessThanOrEqual(256);
+                expect(tasks.formatPageForModel(page).length).toBeLessThanOrEqual(
+                    MAX_TASK_OUTPUT_CHARACTERS,
+                );
                 offsets.push(page.offset);
                 if (page.nextOffset === undefined) break;
                 expect(page.nextOffset).toBeGreaterThan(offset);
                 offset = page.nextOffset;
             }
-            expect(offsets).toEqual([0, 1, 2, 3, 4]);
+            // Compact rows are capped at 200 characters, so a page of the requested size always
+            // fits the output bound and the cursor advances by the size the caller asked for.
+            expect(offsets).toEqual([0, 2, 4]);
 
             const first = await tasks.getPage(database.context, "agent-a", "task-0", {
                 detailLimit: 100,
             });
-            expect(tasks.formatDetailPageForModel(first).length).toBeLessThanOrEqual(256);
+            expect(tasks.formatDetailPageForModel(first).length).toBeLessThanOrEqual(
+                MAX_TASK_OUTPUT_CHARACTERS,
+            );
             expect(first).toMatchObject({
                 detailOffset: 0,
                 detailTotal: 3_989,
@@ -497,7 +493,7 @@ describe("TasksModule edge cases", () => {
     });
 
     it("uses one tool surface with durable flags, correct scope, and no Auto review", async () => {
-        const tasks = new TasksModule({ idFactory: () => "tool-task" });
+        const tasks = new TasksModule();
         const database = moduleDatabase(tasks.migrations, "tasks-tool-surface-test");
         await database.ready;
         try {
@@ -532,16 +528,15 @@ describe("TasksModule edge cases", () => {
         }
     });
 
-    it("does not publish task events or state after an outer rollback or transactional listener failure", async () => {
+    it("does not publish task events or state after an outer rollback or transactional subscriber failure", async () => {
         const transactional: unknown[] = [];
         const postCommit: unknown[] = [];
-        const tasks = new TasksModule({
-            idFactory: () => "task",
-            eventIdFactory: () => "event",
-            listener: {
-                onEventTransactional: (_ctx, event) => transactional.push(event),
-                onEvent: (_ctx, event) => postCommit.push(event),
-            },
+        const tasks = new TasksModule();
+        tasks.onEventTransactional((_ctx, event) => {
+            transactional.push(event);
+        });
+        tasks.onEvent((_ctx, event) => {
+            postCommit.push(event);
         });
         const database = moduleDatabase(tasks.migrations, "tasks-rollback-events-test");
         await database.ready;
@@ -556,14 +551,9 @@ describe("TasksModule edge cases", () => {
             expect(postCommit).toHaveLength(0);
             await expect(tasks.list(database.context, "agent-a")).resolves.toEqual([]);
 
-            const rejected = new TasksModule({
-                idFactory: () => "rejected",
-                eventIdFactory: () => "rejected-event",
-                listener: {
-                    onEventTransactional: () => {
-                        throw new Error("reject task");
-                    },
-                },
+            const rejected = new TasksModule();
+            rejected.onEventTransactional(() => {
+                throw new Error("reject task");
             });
             await expect(
                 rejected.create(database.context, "agent-a", { title: "rejected" }),
@@ -574,26 +564,20 @@ describe("TasksModule edge cases", () => {
         }
     });
 
-    it("delivers one deeply frozen event to transactional and post-commit listeners", async () => {
+    it("delivers one deeply frozen event to transactional and post-commit subscribers", async () => {
         let transactionalEvent: unknown;
         let postCommitEvent: unknown;
-        const listener = {
-            onEventTransactional: (_ctx: unknown, event: unknown) => {
-                transactionalEvent = event;
-            },
-            onEvent: (_ctx: unknown, event: unknown) => {
-                postCommitEvent = event;
-            },
-        };
-        const tasks = new TasksModule({
-            listener,
-            idFactory: () => "task",
-            eventIdFactory: () => "event",
-            clock: () => 100,
+        const tasks = new TasksModule();
+        tasks.onEventTransactional((_ctx, event) => {
+            transactionalEvent = event;
+        });
+        tasks.onEvent((_ctx, event) => {
+            postCommitEvent = event;
         });
         const database = moduleDatabase(tasks.migrations, "tasks-event-freeze-test");
         await database.ready;
         try {
+            const before = Date.now();
             await tasks.create(database.context, "agent-a", {
                 title: "task",
                 metadata: { nested: { values: ["x"] } },
@@ -601,9 +585,14 @@ describe("TasksModule edge cases", () => {
             expect(postCommitEvent).toBe(transactionalEvent);
             expect(transactionalEvent).toMatchObject({
                 type: "task_created",
-                eventId: "event",
-                at: 100,
+                eventId: expect.any(String),
+                at: expect.any(Number),
             });
+            // The module reads the wall clock itself, so the only honest claim about the stamp is
+            // that it belongs to the moment the mutation ran.
+            const at = (transactionalEvent as { readonly at: number }).at;
+            expect(at).toBeGreaterThanOrEqual(before);
+            expect(at).toBeLessThanOrEqual(Date.now());
             expect(Object.isFrozen(transactionalEvent)).toBe(true);
             if (
                 typeof transactionalEvent === "object" &&
@@ -627,35 +616,43 @@ describe("TasksModule edge cases", () => {
         }
     });
 
-    it("contains post-commit listener and error-reporter failures after durable commit", async () => {
-        const reports: unknown[] = [];
-        const tasks = new TasksModule({
-            idFactory: () => "task",
-            eventIdFactory: () => "event",
-            onPostCommitError: (_ctx, event, error) => {
-                reports.push({ event, error });
-                throw {
-                    toString: () => {
-                        throw new Error("hostile");
-                    },
-                };
-            },
-            listener: {
-                onEvent: () => {
-                    throw new Error("observer failed");
-                },
-            },
+    it("contains a failing post-commit subscriber, logs it, and still serves the ones behind it", async () => {
+        const warnings: readonly unknown[][] = [];
+        const announced: string[] = [];
+        const tasks = new TasksModule();
+        tasks.onEvent(() => {
+            throw new Error("observer failed");
+        });
+        tasks.onEvent((_ctx, event) => {
+            announced.push(event.type);
         });
         const database = moduleDatabase(tasks.migrations, "tasks-post-commit-errors-test");
         await database.ready;
+        // The module reports a post-commit failure through the context log, so the log is where a
+        // test can see it. Nothing else about the context changes.
+        const context = withLogger(database.context, {
+            trace: () => {},
+            debug: () => {},
+            info: () => {},
+            warn: (_logContext, ...args) => {
+                (warnings as unknown[][]).push(args);
+            },
+            error: () => {},
+            fatal: () => {},
+        });
         try {
             await expect(
-                tasks.create(database.context, "agent-a", { title: "persisted" }),
+                tasks.create(context, "agent-a", { id: "task", title: "persisted" }),
             ).resolves.toMatchObject({
                 id: "task",
             });
-            expect(reports).toHaveLength(1);
-            await expect(tasks.get(database.context, "agent-a", "task")).resolves.toMatchObject({
+            expect(warnings).toHaveLength(1);
+            expect(warnings[0]?.[0]).toBe(
+                "A task subscriber failed after the change was already committed.",
+            );
+            expect(warnings[0]?.[1]).toMatchObject({ agentId: "agent-a", type: "task_created" });
+            expect(announced).toEqual(["task_created"]);
+            await expect(tasks.get(context, "agent-a", "task")).resolves.toMatchObject({
                 title: "persisted",
             });
         } finally {
@@ -664,14 +661,7 @@ describe("TasksModule edge cases", () => {
     });
 
     it("serializes concurrent mutations through the transaction boundary without losing tasks", async () => {
-        const tasks = new TasksModule({
-            maxTasks: 20,
-            clock: () => 1,
-            eventIdFactory: (() => {
-                let id = 0;
-                return () => `event-${++id}`;
-            })(),
-        });
+        const tasks = new TasksModule();
         const database = moduleDatabase(tasks.migrations, "tasks-concurrency-test");
         await database.ready;
         try {
@@ -697,7 +687,7 @@ describe("TasksModule edge cases", () => {
     });
 
     it("keeps mutation return values detached from durable storage", async () => {
-        const tasks = new TasksModule({ clock: () => 1, eventIdFactory: () => "event" });
+        const tasks = new TasksModule();
         const database = moduleDatabase(tasks.migrations, "tasks-return-clone-test");
         await database.ready;
         try {
@@ -718,7 +708,7 @@ describe("TasksModule edge cases", () => {
     });
 
     it("reports typed failures for unknown and invalid tool mutations", async () => {
-        const tasks = new TasksModule({ idFactory: () => "tool-task" });
+        const tasks = new TasksModule();
         const database = moduleDatabase(tasks.migrations, "tasks-typed-tool-failures-test");
         await database.ready;
         try {
@@ -761,27 +751,19 @@ describe("TasksModule edge cases", () => {
     });
 
     it("emits the correct event variant for every changing mutation and no event for no-ops", async () => {
-        const transactional: { type: string; eventId: string }[] = [];
-        const committed: { type: string; eventId: string }[] = [];
-        let eventNumber = 0;
-        let clock = 0;
-        const tasks = new TasksModule({
-            idFactory: () => "task",
-            eventIdFactory: () => `event-${++eventNumber}`,
-            clock: () => ++clock,
-            listener: {
-                onEventTransactional: (_ctx, event) => {
-                    transactional.push(event);
-                },
-                onEvent: (_ctx, event) => {
-                    committed.push(event);
-                },
-            },
+        const transactional: { type: string; eventId: string; at: number }[] = [];
+        const committed: { type: string; eventId: string; at: number }[] = [];
+        const tasks = new TasksModule();
+        tasks.onEventTransactional((_ctx, event) => {
+            transactional.push(event);
+        });
+        tasks.onEvent((_ctx, event) => {
+            committed.push(event);
         });
         const database = moduleDatabase(tasks.migrations, "tasks-event-variants-test");
         await database.ready;
         try {
-            await tasks.create(database.context, "agent-a", { title: "task" });
+            await tasks.create(database.context, "agent-a", { id: "task", title: "task" });
             await tasks.update(database.context, "agent-a", "task", { priority: "high" });
             await tasks.update(database.context, "agent-a", "task", { status: "completed" });
             await tasks.complete(database.context, "agent-a", "task");
@@ -799,31 +781,26 @@ describe("TasksModule edge cases", () => {
                 "tasks_reset",
             ]);
             expect(committed).toEqual(transactional);
-            expect(committed.map((event) => event.eventId)).toEqual([
-                "event-1",
-                "event-2",
-                "event-3",
-                "event-5",
-                "event-8",
-            ]);
+            // Every announced change carries its own identity and a stamp no earlier than the one
+            // before it; the module mints both, so shape and order are all a caller can rely on.
+            expect(new Set(committed.map((event) => event.eventId)).size).toBe(committed.length);
+            expect([...committed].sort((left, right) => left.at - right.at)).toEqual(committed);
         } finally {
             database.close();
         }
     });
 
-    it("does not require event identity allocation for no-op mutations", async () => {
-        let eventFactoryCalls = 0;
-        const tasks = new TasksModule({
-            idFactory: () => "task",
-            eventIdFactory: () => `event-${++eventFactoryCalls}`,
-            clock: () => 1,
+    it("announces nothing for mutations that change nothing", async () => {
+        const announced: string[] = [];
+        const tasks = new TasksModule();
+        tasks.onEvent((_ctx, event) => {
+            announced.push(event.type);
         });
-        const database = moduleDatabase(tasks.migrations, "tasks-no-op-factory-test");
+        const database = moduleDatabase(tasks.migrations, "tasks-no-op-events-test");
         await database.ready;
         try {
-            await tasks.create(database.context, "agent-a", { title: "task" });
+            await tasks.create(database.context, "agent-a", { id: "task", title: "task" });
             await tasks.complete(database.context, "agent-a", "task");
-            const callsAfterChange = eventFactoryCalls;
             await expect(
                 tasks.complete(database.context, "agent-a", "task"),
             ).resolves.toMatchObject({
@@ -831,39 +808,30 @@ describe("TasksModule edge cases", () => {
             });
             await expect(tasks.remove(database.context, "agent-a", "missing")).resolves.toBe(false);
             await expect(tasks.reset(database.context, "agent-a")).resolves.toBe(1);
-            await tasks.reset(database.context, "agent-a");
-            expect(eventFactoryCalls).toBe(callsAfterChange);
+            await expect(tasks.reset(database.context, "agent-a")).resolves.toBe(0);
+            expect(announced).toEqual(["task_created", "task_completed", "tasks_reset"]);
         } finally {
             database.close();
         }
     });
 
-    it("supports asynchronous ID and event factories", async () => {
+    it("waits for asynchronous subscribers before the mutation returns", async () => {
         const seen: string[] = [];
-        const tasks = new TasksModule({
-            idFactory: async (_ctx, agentId) => {
-                expect(agentId).toBe("agent-a");
-                return "async-task";
-            },
-            eventIdFactory: async (_ctx, agentId) => {
-                expect(agentId).toBe("agent-a");
-                return "async-event";
-            },
-            listener: {
-                onEventTransactional: (_ctx, event) => {
-                    seen.push(`tx:${event.type}`);
-                },
-                onEvent: (_ctx, event) => {
-                    seen.push(`post:${event.type}`);
-                },
-            },
+        const tasks = new TasksModule();
+        tasks.onEventTransactional(async (_ctx, event) => {
+            await Promise.resolve();
+            seen.push(`tx:${event.type}`);
         });
-        const database = moduleDatabase(tasks.migrations, "tasks-async-factories-test");
+        tasks.onEvent(async (_ctx, event) => {
+            await Promise.resolve();
+            seen.push(`post:${event.type}`);
+        });
+        const database = moduleDatabase(tasks.migrations, "tasks-async-subscribers-test");
         await database.ready;
         try {
             await expect(
                 tasks.create(database.context, "agent-a", { title: "task" }),
-            ).resolves.toMatchObject({ id: "async-task" });
+            ).resolves.toMatchObject({ id: expect.any(String) });
             expect(seen).toEqual(["tx:task_created", "post:task_created"]);
         } finally {
             database.close();
@@ -876,24 +844,19 @@ describe("TasksModule edge cases", () => {
         let postCommitTask: unknown;
         let transactionalContext: unknown;
         let postCommitContext: unknown;
-        module = new TasksModule({
-            idFactory: () => "task",
-            eventIdFactory: () => "event",
-            listener: {
-                onEventTransactional: async (ctx) => {
-                    transactionalContext = ctx;
-                    transactionalTask = await module.get(ctx, "agent-a", "task");
-                },
-                onEvent: async (ctx) => {
-                    postCommitContext = ctx;
-                    postCommitTask = await module.get(ctx, "agent-a", "task");
-                },
-            },
+        module = new TasksModule();
+        module.onEventTransactional(async (ctx) => {
+            transactionalContext = ctx;
+            transactionalTask = await module.get(ctx as Context, "agent-a", "task");
+        });
+        module.onEvent(async (ctx) => {
+            postCommitContext = ctx;
+            postCommitTask = await module.get(ctx as Context, "agent-a", "task");
         });
         const database = moduleDatabase(module.migrations, "tasks-event-context-test");
         await database.ready;
         try {
-            await module.create(database.context, "agent-a", { title: "task" });
+            await module.create(database.context, "agent-a", { id: "task", title: "task" });
             expect(transactionalTask).toMatchObject({ id: "task", title: "task" });
             expect(postCommitTask).toMatchObject({ id: "task", title: "task" });
             expect(transactionalContext).toBeDefined();
@@ -904,34 +867,39 @@ describe("TasksModule edge cases", () => {
         }
     });
 
-    it("accepts class-backed listeners and invokes their methods with the owning receiver", async () => {
-        class Listener {
-            readonly seen: string[] = [];
-
-            onEventTransactional(_ctx: unknown, event: { readonly type: string }): void {
-                this.seen.push(`tx:${event.type}`);
-            }
-
-            onEvent(_ctx: unknown, event: { readonly type: string }): void {
-                this.seen.push(`post:${event.type}`);
-            }
-        }
-        const listener = new Listener();
-        const tasks = new TasksModule({ listener });
-        const database = moduleDatabase(tasks.migrations, "tasks-class-listener-test");
+    it("stops delivering events once a subscription ends and takes only functions", async () => {
+        const transactional: string[] = [];
+        const committed: string[] = [];
+        const tasks = new TasksModule();
+        const endTransactional = tasks.onEventTransactional((_ctx, event) => {
+            transactional.push(`tx:${event.type}`);
+        });
+        const endCommitted = tasks.onEvent((_ctx, event) => {
+            committed.push(`post:${event.type}`);
+        });
+        expect(() => tasks.onEvent({} as never)).toThrow("A task subscriber must be a function");
+        expect(() => tasks.onEventTransactional(null as never)).toThrow(
+            "A task subscriber must be a function",
+        );
+        const database = moduleDatabase(tasks.migrations, "tasks-subscription-test");
         await database.ready;
         try {
-            await expect(
-                tasks.create(database.context, "agent-a", { title: "task" }),
-            ).resolves.toMatchObject({ id: expect.any(String) });
-            expect(listener.seen).toEqual(["tx:task_created", "post:task_created"]);
+            await tasks.create(database.context, "agent-a", { id: "task", title: "task" });
+            expect(transactional).toEqual(["tx:task_created"]);
+            expect(committed).toEqual(["post:task_created"]);
+
+            endTransactional();
+            endCommitted();
+            await tasks.complete(database.context, "agent-a", "task");
+            expect(transactional).toEqual(["tx:task_created"]);
+            expect(committed).toEqual(["post:task_created"]);
         } finally {
             database.close();
         }
     });
 
-    it("rejects persisted lists over the configured maximum and re-runs migrations idempotently", async () => {
-        const tasks = new TasksModule({ maxTasks: 2 });
+    it("rejects persisted lists over the maximum one agent may keep and re-runs migrations idempotently", async () => {
+        const tasks = new TasksModule();
         const database = moduleDatabase(tasks.migrations, "tasks-persisted-max-test");
         await database.ready;
         try {
@@ -941,14 +909,14 @@ describe("TasksModule edge cases", () => {
             await seedTasks(
                 database,
                 "agent-a",
-                JSON.stringify([
-                    baseTask(),
-                    baseTask({ id: "task-b", ordering: 1 }),
-                    baseTask({ id: "task-c", ordering: 2 }),
-                ]),
+                JSON.stringify(
+                    Array.from({ length: MAX_TASKS_PER_AGENT + 1 }, (_, index) =>
+                        baseTask({ id: `task-${index}`, ordering: index }),
+                    ),
+                ),
             );
             await expect(tasks.list(database.context, "agent-a")).rejects.toThrow(
-                "configured bounds",
+                "exceeds its bounds",
             );
         } finally {
             database.close();
@@ -956,16 +924,18 @@ describe("TasksModule edge cases", () => {
     });
 
     it("validates bounded list and detail queries before reading storage", async () => {
-        const tasks = new TasksModule({ maxPageSize: 2 });
+        const tasks = new TasksModule();
         const database = moduleDatabase(tasks.migrations, "tasks-query-validation-test");
         await database.ready;
         try {
             await expect(tasks.listPage(database.context, "agent-a", { limit: 0 })).rejects.toThrow(
                 "Invalid task page query",
             );
-            await expect(tasks.listPage(database.context, "agent-a", { limit: 3 })).rejects.toThrow(
-                "cannot exceed 2",
-            );
+            await expect(
+                tasks.listPage(database.context, "agent-a", {
+                    limit: MAX_TASK_PAGE_SIZE + 1,
+                }),
+            ).rejects.toThrow(`cannot exceed ${MAX_TASK_PAGE_SIZE}`);
             await expect(
                 tasks.listPage(database.context, "agent-a", { offset: -1 }),
             ).rejects.toThrow("Invalid task page query");
@@ -1009,7 +979,7 @@ describe("TasksModule edge cases", () => {
     });
 
     it("binds every tool to its requested agent scope", async () => {
-        const tasks = new TasksModule({ idFactory: () => "tool-task" });
+        const tasks = new TasksModule();
         const database = moduleDatabase(tasks.migrations, "tasks-tool-scope-test");
         await database.ready;
         try {
@@ -1044,29 +1014,27 @@ describe("TasksModule edge cases", () => {
         }
     });
 
-    it("keeps direct model formatting bounded while preserving the task identity", async () => {
-        const tasks = new TasksModule({ maxOutputCharacters: 256 });
-        const task = {
-            ...baseTask({
-                id: "task-id",
+    it("keeps direct model formatting bounded while preserving the task identity", () => {
+        const tasks = new TasksModule();
+        // Rows are capped at 200 characters each, so a full agent's list is the smallest thing that
+        // can outgrow the output bound at all.
+        const rendered = Array.from({ length: MAX_TASKS_PER_AGENT }, (_, index) =>
+            baseTask({
+                id: `task-${index}`,
+                ordering: index,
                 title: "x".repeat(500),
                 detail: "detail ".repeat(500),
                 metadata: { value: "metadata" },
             }),
-        } as never;
-        const output = tasks.formatForModel([task]);
-        expect(output.length).toBeLessThanOrEqual(256);
-        expect(output).toContain("task-id");
+        ) as never;
+        const output = tasks.formatForModel(rendered);
+        expect(output.length).toBeLessThanOrEqual(MAX_TASK_OUTPUT_CHARACTERS);
+        expect(output).toContain("task-0");
         expect(output).toContain("[task list truncated]");
     });
 
-    it("keeps maximum-length dependency identities actionable under the minimum output bound", async () => {
-        const tasks = new TasksModule({
-            maxTasks: 100,
-            maxOutputCharacters: 256,
-            clock: () => 1,
-            eventIdFactory: () => "event",
-        });
+    it("keeps maximum-length dependency identities actionable inside the output bound", async () => {
+        const tasks = new TasksModule();
         const database = moduleDatabase(tasks.migrations, "tasks-max-id-detail-output-test");
         await database.ready;
         try {
@@ -1084,23 +1052,25 @@ describe("TasksModule edge cases", () => {
             });
             const page = await tasks.getPage(database.context, "agent-a", target);
             expect(page.task).not.toBeNull();
-            expect(tasks.formatDetailPageForModel(page).length).toBeLessThanOrEqual(256);
+            const rendered = tasks.formatDetailPageForModel(page);
+            expect(rendered.length).toBeLessThanOrEqual(MAX_TASK_OUTPUT_CHARACTERS);
             if (page.task !== null) {
+                expect(page.dependencyTotal).toBe(dependencies.length);
                 expect(page.dependencies.length).toBeGreaterThan(0);
-                expect(page.nextDependencyOffset).toBe(1);
                 expect(page.dependencies[0]).toBe(dependencies[0]);
+                // Whatever the page has room for, it names in full: a truncated identity is not
+                // something a model can act on.
+                for (const dependency of page.dependencies) {
+                    expect(rendered).toContain(dependency);
+                }
             }
         } finally {
             database.close();
         }
     });
 
-    it("does not let rendered mutation results exceed the configured model-output bound", async () => {
-        const tasks = new TasksModule({
-            maxOutputCharacters: 256,
-            idFactory: () => "task",
-            eventIdFactory: () => "event",
-        });
+    it("does not let rendered mutation results exceed the model-output bound", async () => {
+        const tasks = new TasksModule();
         const database = moduleDatabase(tasks.migrations, "tasks-mutation-output-bound-test");
         await database.ready;
         try {
@@ -1140,7 +1110,7 @@ describe("TasksModule edge cases", () => {
                     .map((block) => ("text" in block ? block.text.length : 0))
                     .reduce((a, b) => a + b, 0),
             );
-            expect(Math.max(...lengths)).toBeLessThanOrEqual(256);
+            expect(Math.max(...lengths)).toBeLessThanOrEqual(MAX_TASK_OUTPUT_CHARACTERS);
         } finally {
             database.close();
         }

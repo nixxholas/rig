@@ -18,7 +18,6 @@ import {
     type AgentModuleSystemScope,
     type AgentStorage,
     type AgentSystemRef,
-    type AnyAgentTool,
 } from "@slopus/happy-agent-base";
 import type {
     SessionEvent,
@@ -27,8 +26,11 @@ import type {
 } from "@slopus/happy-providers";
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import type { Context } from "@steve.kite/stdlib";
+import { detach, type Context } from "@steve.kite/stdlib";
 
+import type { ComputeModule } from "../compute/index.js";
+import type { ConfigModule } from "../config/index.js";
+import type { SystemPromptModule } from "../systemPrompt/index.js";
 import type {
     PermissionReviewDecision,
     PermissionReviewRequest,
@@ -40,7 +42,10 @@ import {
 } from "./impl/createAutoPermissionTranscript.js";
 import { createPermissionReviewInstructions } from "./impl/createPermissionReviewInstructions.js";
 import { createPermissionReviewPrompt } from "./impl/createPermissionReviewPrompt.js";
-import { readAutoSecurityPolicy } from "./impl/readAutoSecurityPolicy.js";
+import {
+    AUTO_SECURITY_MD_MAX_BYTES,
+    readAutoSecurityPolicy,
+} from "./impl/readAutoSecurityPolicy.js";
 import { reviewerModelForAgent, type AutoReviewerRoute } from "./impl/reviewerModelForAgent.js";
 import { buildAutoReviewCatalog } from "./impl/buildAutoReviewCatalog.js";
 import { reviewerAgentId } from "./impl/reviewerAgentId.js";
@@ -71,93 +76,23 @@ import { type AutoReviewerCursor, autoReviewerCursorSchema } from "./AutoReviewT
  * in the product can reach. Only `reviewer` leaves the module; the private system, its storage, the
  * reviewer IDs, and the catalog are unpublished, so guessing a reviewer ID addresses nothing.
  *
- * Two deliberate deviations from the specification, decided with the parent task:
- *
- * 1. Storage is injected, not opened here. `happy-agent-modules` opens no database anywhere, so
- *    rather than duplicate the host's SQLite and lock mechanics, `AutoModule` receives an
- *    already-constructed private `AgentStorage` — built by the host from a separate `auto-agent`
- *    database file and lock — and passes it to `AgentSystemLocal.create`. The isolation the
- *    specification requires (separate file, separate lock, separate schema, no shared state) is
- *    preserved; only the file-opening lives with the host that already owns that mechanism.
- * 2. The reviewer's read-only compute tools are injected. `AutoModule` owns no compute and imports
- *    no compute tool internals, so the host supplies a `reviewerTools` builder through the options;
- *    `AutoReviewComputeModule` calls it with the reviewer's own scope and presents the result
- *    unchanged. The vendor is chosen from the reviewer's own model route inside that builder — a
- *    Claude review gets Claude's read-only tools, a Codex review gets Codex's — exactly as Rig v1
- *    gave its review side agent its own provider's tools.
+ * What it takes is the modules it works through: the configuration that owns the accounts, the
+ * catalog and the folder the product runs in; the compute module that owns the machine a reviewer
+ * investigates local state on; and the system-prompt module that owns the project instructions in
+ * force where an action was proposed. The one thing that is not a module is the private review
+ * system's `AgentStorage`, and that is deliberate: `SPEC.md` §13.3 records it as a human-decided
+ * deviation, because this package opens no database anywhere and duplicating the host's SQLite and
+ * lock mechanics here would buy nothing. The isolation the specification requires — separate file,
+ * separate lock, separate schema, no shared state — is preserved either way.
  *
  * The 90-second review budget is owned by `PermissionsModule`, which creates the abort controller
  * and the timer and derives timed-out/unavailable from a review that does not return. `AutoModule`
  * honors the request's abort signal, exports the exact v1 budget as `AUTO_PERMISSION_REVIEW_BUDGET_MS`
- * for the host to wire as that timeout, and never converts a cancellation into a verdict.
+ * for that module to bound reviews with, and never converts a cancellation into a verdict.
  */
 
-/** The wall-clock budget for one review, exactly as Rig v1. The host wires this as the timeout. */
+/** The wall-clock budget for one review, exactly as Rig v1. `PermissionsModule` bounds reviews by it. */
 export const AUTO_PERMISSION_REVIEW_BUDGET_MS = 90_000;
-
-const contextSchema = Type.Unsafe<Context>(Type.Object({}, { additionalProperties: true }));
-const storageSchema = Type.Unsafe<AgentStorage>(Type.Object({}, { additionalProperties: true }));
-const providersSchema = Type.Unsafe<AgentProviders>(
-    Type.Object({}, { additionalProperties: true }),
-);
-const agentModelSchema = Type.Unsafe<AgentModel>(
-    Type.Object(
-        {
-            providerId: Type.String({ minLength: 1 }),
-            id: Type.String({ minLength: 1 }),
-            name: Type.String(),
-            effortLevels: Type.Array(Type.String()),
-            defaultEffort: Type.String(),
-        },
-        { additionalProperties: true },
-    ),
-);
-const reviewerToolsSchema = Type.Unsafe<(scope: AgentModuleScope) => readonly AnyAgentTool[]>(
-    Type.Function([Type.Any()], Type.Any()),
-);
-const securityReaderSchema = Type.Unsafe<() => Promise<string | undefined>>(
-    Type.Function([], Type.Any()),
-);
-const agentsMdReaderSchema = Type.Unsafe<
-    (ctx: Context, agentId: string) => Promise<string | undefined>
->(Type.Function([Type.Any(), Type.Any()], Type.Any()));
-
-/**
- * The runtime construction boundary for the module, kept TypeBox-first. The injected objects and
- * functions are described only enough to reject a plainly wrong shape; their real contracts are the
- * happy-agent-base types the `Static` derivation carries.
- */
-export const autoModuleOptionsSchema = Type.Object(
-    {
-        /** The private review system's storage, opened by the host from a separate database/lock. */
-        storage: storageSchema,
-        /** The main provider registry, from which private, read-only resolving copies are made. */
-        providers: providersSchema,
-        /** The registry ID of the provider the private system creates reviewer agents with. */
-        provider: Type.String({ minLength: 1, maxLength: 256 }),
-        /** The main model catalog, copied and extended into the private reviewer catalog. */
-        models: Type.Array(agentModelSchema, { minItems: 1 }),
-        /** The absolute directory reviewer agents work under. */
-        workingDirectory: Type.String({ minLength: 1, maxLength: 4_096 }),
-        /** The application/agent-loader lifetime the private system and its lock belong to. */
-        lifetimeContext: contextSchema,
-        /** Builds the reviewer's fixed read-only tools for the reviewer's own vendor (deviation 2). */
-        reviewerTools: reviewerToolsSchema,
-        /** Reads and bounds the global `SECURITY.md`, or resolves undefined when absent. */
-        readGlobalSecurity: securityReaderSchema,
-        /** Reads and bounds the project-root `AGENTS_SECURITY.md`, or undefined when absent. */
-        readProjectSecurity: securityReaderSchema,
-        /**
-         * Reads the formatted global/project `AGENTS.md` context for the reviewed agent, resolved
-         * against that agent's own compute so the reviewer sees the project instructions in force
-         * where the action was proposed. Resolves undefined when there is none.
-         */
-        readAgentsMd: Type.Optional(agentsMdReaderSchema),
-    },
-    { additionalProperties: false },
-);
-
-export type AutoModuleOptions = Static<typeof autoModuleOptionsSchema>;
 
 /** A minimal validated shape for the only user-input event this module trusts as evidence. */
 export const userInputAnsweredSchema = Type.Object(
@@ -175,11 +110,21 @@ export type UserInputAnsweredEvent = Static<typeof userInputAnsweredSchema>;
 export class AutoModule implements AgentModule {
     readonly name = "auto";
 
-    readonly #options: AutoModuleOptions;
+    readonly #config: ConfigModule;
+    readonly #compute: ComputeModule;
+    readonly #systemPrompt: SystemPromptModule;
+    readonly #storage: AgentStorage;
     readonly #evidence = new AutoReviewEvidenceStore();
     readonly #runtime = new AutoReviewRuntimeModule();
-    readonly #compute: AutoReviewComputeModule;
 
+    /**
+     * The lifetime the private review system, its lock, and the reviewer's machine belong to.
+     *
+     * A review outlives the tool call that asked for it and the reviewer outlives the review, so
+     * this is derived once, in `beforeStart`, from the collection's own context rather than kept
+     * from whichever turn happened to be running.
+     */
+    #lifetime: Context | undefined;
     /** The private review system, built in `beforeStart` and closed in `close`. */
     #system: AgentSystemLocal | undefined;
     /** The private catalog the reviewer resolves its model from. */
@@ -211,21 +156,30 @@ export class AutoModule implements AgentModule {
         ): Promise<PermissionReviewDecision> => this.#review(ctx, request),
     };
 
-    constructor(options: AutoModuleOptions) {
-        if (!Value.Check(autoModuleOptionsSchema, options)) {
-            throw new Error("Auto module options are invalid.");
-        }
-        this.#options = options;
-        this.#compute = new AutoReviewComputeModule(options.reviewerTools);
+    constructor(
+        config: ConfigModule,
+        compute: ComputeModule,
+        systemPrompt: SystemPromptModule,
+        storage: AgentStorage,
+    ) {
+        this.#config = config;
+        this.#compute = compute;
+        this.#systemPrompt = systemPrompt;
+        this.#storage = storage;
     }
 
     // ---- Private review system lifecycle ------------------------------------------------------
 
     readonly beforeStart = async (
-        _ctx: Context,
+        ctx: Context,
         _agents: AgentSystemRef,
     ): Promise<AgentModuleHooks> => {
-        const main = this.#options.providers;
+        // The private system is not this turn's, this request's, or this collection's context: it
+        // is its own, so nothing it starts can be carried by a lifetime that ends before it does,
+        // and nothing it does reaches the reviewed agents' database.
+        const lifetime = detach(ctx).named("auto-review");
+        this.#lifetime = lifetime;
+        const main = this.#config.providers;
         const privateProviders = new AgentProviders();
         for (const id of main.ids) {
             const type = main.typeOf(id);
@@ -244,27 +198,34 @@ export class AutoModule implements AgentModule {
                 type,
             );
         }
+        const models = this.#config.models;
+        // The account a reviewer agent is created on is the one every agent starts on: the first
+        // entry of the configured catalog. Without one there is nothing to review with, and saying
+        // so here is better than a review that fails closed on every action from then on.
+        const provider = models[0]?.providerId;
+        if (provider === undefined) {
+            throw new Error(
+                "Automatic permission review cannot start because no model is enabled by the configuration.",
+            );
+        }
         this.#catalog = buildAutoReviewCatalog({
-            models: this.#options.models,
+            models,
             typeOf: (id) => privateProviders.typeOf(id),
         });
-        this.#system = await AgentSystemLocal.create(
-            this.#options.lifetimeContext,
-            this.#options.storage,
-            {
-                models: this.#catalog,
-                modules: [this.#runtime, this.#compute],
-                provider: this.#options.provider,
-                providers: privateProviders,
-            },
-        );
+        this.#system = await AgentSystemLocal.create(lifetime, this.#storage, {
+            models: this.#catalog,
+            modules: [this.#runtime, new AutoReviewComputeModule(this.#compute, lifetime)],
+            provider,
+            providers: privateProviders,
+        });
         return this.#hooks;
     };
 
-    readonly close = async (_ctx: Context): Promise<void> => {
+    readonly close = async (ctx: Context): Promise<void> => {
         if (this.#closePromise === undefined) {
+            const lifetime = this.#lifetime ?? ctx;
             this.#closePromise = (async () => {
-                await this.#system?.close(this.#options.lifetimeContext);
+                await this.#system?.close(lifetime);
             })();
         }
         await this.#closePromise;
@@ -498,11 +459,11 @@ export class AutoModule implements AgentModule {
 
         const reviewerAgent = this.#reviewers.get(mainAgentId);
         const onAbort = (): void => {
-            void system.abort(this.#options.lifetimeContext, reviewerId).catch(() => undefined);
+            void system.abort(this.#privateDbContext(), reviewerId).catch(() => undefined);
         };
         request.signal.addEventListener("abort", onAbort, { once: true });
         try {
-            await system.send(this.#options.lifetimeContext, reviewerId, message, {
+            await system.send(this.#privateDbContext(), reviewerId, message, {
                 await: true,
                 permissionMode: "read_only",
                 provider: route.providerId,
@@ -560,13 +521,13 @@ export class AutoModule implements AgentModule {
         reviewerId: string,
     ): Promise<void> {
         if (this.#reviewers.has(mainAgentId)) return;
-        const existing = await system.config(this.#options.lifetimeContext, reviewerId);
+        const existing = await system.config(this.#privateDbContext(), reviewerId);
         const agent =
             existing === undefined
-                ? await system.create(this.#options.lifetimeContext, this.#reviewerConfig(), {
+                ? await system.create(this.#privateDbContext(), this.#reviewerConfig(), {
                       id: reviewerId,
                   })
-                : await system.resolve(this.#options.lifetimeContext, reviewerId);
+                : await system.resolve(this.#privateDbContext(), reviewerId);
         this.#reviewers.set(mainAgentId, agent);
     }
 
@@ -576,11 +537,11 @@ export class AutoModule implements AgentModule {
         reviewerId: string,
     ): Promise<void> {
         this.#reviewers.delete(mainAgentId);
-        const existing = await system.config(this.#options.lifetimeContext, reviewerId);
+        const existing = await system.config(this.#privateDbContext(), reviewerId);
         if (existing !== undefined) {
-            await system.delete(this.#options.lifetimeContext, reviewerId);
+            await system.delete(this.#privateDbContext(), reviewerId);
         }
-        const agent = await system.create(this.#options.lifetimeContext, this.#reviewerConfig(), {
+        const agent = await system.create(this.#privateDbContext(), this.#reviewerConfig(), {
             id: reviewerId,
         });
         this.#reviewers.set(mainAgentId, agent);
@@ -602,10 +563,10 @@ export class AutoModule implements AgentModule {
             lastReviewNormal: false,
         });
         const existing = await system
-            .config(this.#options.lifetimeContext, reviewerId)
+            .config(this.#privateDbContext(), reviewerId)
             .catch(() => undefined);
         if (existing !== undefined) {
-            await system.delete(this.#options.lifetimeContext, reviewerId).catch(() => undefined);
+            await system.delete(this.#privateDbContext(), reviewerId).catch(() => undefined);
         }
     }
 
@@ -613,7 +574,9 @@ export class AutoModule implements AgentModule {
         return {
             environment: {
                 ...currentAgentEnvironment(),
-                workingDirectory: this.#options.workingDirectory,
+                // A reviewer works where the agents it reviews work, so the folder is the one this
+                // installation runs in rather than one named at the seam.
+                workingDirectory: this.#config.configuration.paths.publicHome,
             },
             modules: { autoReviewCompute: {}, autoReviewRuntime: {} },
             metadata: { title: "Automatic permission reviewer" },
@@ -622,16 +585,24 @@ export class AutoModule implements AgentModule {
 
     // ---- Helpers ------------------------------------------------------------------------------
 
+    /**
+     * The reviewer's instructions, rebuilt before every review.
+     *
+     * Both security documents are reread each time, so a policy edited while a session is open
+     * takes effect on the next decision; a document that cannot be read fails the review rather
+     * than quietly judging against half a policy. The reviewed agent's own `AGENTS.md` context is
+     * appended so the reviewer sees the project instructions in force where the action was
+     * proposed.
+     */
     async #buildInstructions(ctx: Context, mainAgentId: string): Promise<string> {
         const securityPolicy = await readAutoSecurityPolicy({
-            readGlobalSecurity: this.#options.readGlobalSecurity,
-            readProjectSecurity: this.#options.readProjectSecurity,
+            readGlobalSecurity: async () =>
+                await this.#config.readGlobalSecurity(ctx, AUTO_SECURITY_MD_MAX_BYTES),
+            readProjectSecurity: async () =>
+                await this.#config.readProjectSecurity(ctx, AUTO_SECURITY_MD_MAX_BYTES),
         });
         const guardian = createPermissionReviewInstructions(securityPolicy);
-        const projectContext =
-            this.#options.readAgentsMd === undefined
-                ? undefined
-                : await this.#options.readAgentsMd(ctx, mainAgentId);
+        const projectContext = await this.#systemPrompt.readAgentsMdInstructions(ctx, mainAgentId);
         return projectContext === undefined || projectContext.trim().length === 0
             ? guardian
             : `${guardian}\n\n${projectContext.trim()}`;
@@ -713,7 +684,7 @@ export class AutoModule implements AgentModule {
     }
 
     async #readCursor(reviewerId: string): Promise<AutoReviewerCursor | undefined> {
-        const kv = this.#options.storage.kv.scoped("autoCursor");
+        const kv = this.#storage.kv.scoped("autoCursor");
         const stored = await kv.read(this.#privateDbContext(), reviewerId);
         if (stored === undefined) return undefined;
         if (!Value.Check(autoReviewerCursorSchema, stored)) {
@@ -723,12 +694,20 @@ export class AutoModule implements AgentModule {
     }
 
     async #writeCursor(reviewerId: string, cursor: AutoReviewerCursor): Promise<void> {
-        const kv = this.#options.storage.kv.scoped("autoCursor");
+        const kv = this.#storage.kv.scoped("autoCursor");
         await kv.write(this.#privateDbContext(), reviewerId, cursor);
     }
 
+    /**
+     * The review system's own lifetime, which carries neither the reviewed agent's database nor
+     * the turn that asked for the review.
+     */
     #privateDbContext(): Context {
-        return this.#options.lifetimeContext;
+        const lifetime = this.#lifetime;
+        if (lifetime === undefined) {
+            throw new Error("The automatic permission review system is not running.");
+        }
+        return lifetime;
     }
 }
 

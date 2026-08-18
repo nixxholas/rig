@@ -38,17 +38,17 @@ export const usageEventSchema = Type.Union([
 
 export type UsageEvent = Static<typeof usageEventSchema>;
 
-/** Optional host projection callbacks. Usage accounting remains advisory if they fail. */
-export const usageModuleListenerSchema = Type.Object(
-    {
-        onEventTransactional: Type.Optional(
-            Type.Function([usageContextSchema, usageEventSchema], usageVoidOrPromiseVoidSchema),
-        ),
-        onEvent: Type.Optional(
-            Type.Function([usageContextSchema, usageEventSchema], usageVoidOrPromiseVoidSchema),
-        ),
-    },
-    { additionalProperties: false },
+/**
+ * Someone watching usage change, registered through `UsageModule.onEvent` or
+ * `UsageModule.onEventTransactional` after the module has been built.
+ *
+ * A transactional subscriber runs inside the recording transaction and can fail it; a
+ * post-commit one is told about work that is already durable, and usage accounting stays
+ * advisory whether or not it succeeds.
+ */
+export const usageEventListenerSchema = Type.Function(
+    [usageContextSchema, usageEventSchema],
+    usageVoidOrPromiseVoidSchema,
 );
 
-export type UsageModuleListener = Static<typeof usageModuleListenerSchema>;
+export type UsageEventListener = Static<typeof usageEventListenerSchema>;

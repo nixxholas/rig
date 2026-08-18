@@ -14,11 +14,14 @@ const tasks = new TasksModule();
 const agent = await Agent.create(ctx, { ...options, modules: [tasks] });
 ```
 
-Every option — `maxTasks`, `defaultPriority`, `listener`, `idFactory`, `clock`,
-`maxOutputCharacters`, `maxPageSize`, `onPostCommitError`, and `eventIdFactory` — is optional and
-defaulted. One `TasksModule` instance serves every agent in a
-collection; each agent's list lives under its module-owned table, so different agents never see
-each other's tasks.
+The module takes nothing. Its bounds are constants — `MAX_TASKS_PER_AGENT` (100) tasks per agent,
+`MAX_TASKS` (500) in the stored shape, `MAX_TASK_PAGE_SIZE` (50) rows per page, and
+`MAX_TASK_OUTPUT_CHARACTERS` (12,000) for anything a model reads — and the module reads the clock
+and mints task and event identities itself. Anyone who wants to watch changes subscribes after
+construction with `onEvent` or `onEventTransactional`.
+
+One `TasksModule` instance serves every agent in a collection; each agent's list lives under its
+module-owned table, so different agents never see each other's tasks.
 
 ## Tools it provides to the model
 
@@ -30,15 +33,16 @@ machine, so nothing here needs Auto review.
 - **`create_task`** — `{ title, detail?, activeForm?, owner?, metadata?, priority?, dependsOn? }`.
   Creates one task and returns `{ task }`. The stable tool-call ID becomes the task ID. The task
   write and durable tool result are committed by Agent Base in the same transaction; an existing
-  task ID is always a conflict. Creation is refused past the configured `maxTasks`, for an
+  task ID is always a conflict. Creation is refused past `MAX_TASKS_PER_AGENT`, for an
   unknown dependency, a self-dependency, or a dependency cycle. Validation failures are returned
   as a bounded `{ success: false, taskId, error }` result.
-- **`list_tasks`** — `{ offset?, limit? }`, both optional and bounded (`limit` up to `maxPageSize`,
-  50 by default, 100 at most). Returns a `TaskPage`: `tasks`, `offset`, `limit`, `total`, and an
-  optional `nextOffset` the model should follow until every task has been read. The compact rows in
-  the returned page are trimmed further, at read time, so the rendered output never exceeds
-  `maxOutputCharacters` (12,000 by default). They show only unresolved dependencies; the page is a
-  genuine short read, not a promise that gets truncated after the fact.
+- **`list_tasks`** — `{ offset?, limit? }`, both optional and bounded by `MAX_TASK_PAGE_SIZE` (50),
+  which is also the size of a page the caller does not size. Returns a `TaskPage`: `tasks`,
+  `offset`, `limit`, `total`, and an optional `nextOffset` the model should follow until every task
+  has been read. The compact rows in the returned page are trimmed further, at read time, so the
+  rendered output never exceeds `MAX_TASK_OUTPUT_CHARACTERS` (12,000). They show only unresolved
+  dependencies; the page is a genuine short read, not a promise that gets truncated after the
+  fact.
 - **`get_task`** — `{ id, detailOffset?, detailLimit?, dependencyOffset?, dependencyLimit? }`.
   Returns a `TaskDetailPage`: the full task (including `owner`, `activeForm`, `metadata`, and the
   reverse `blocks` links) plus bounded slices of its `detail` (up to 1,024 characters at once, out
@@ -62,11 +66,11 @@ dependsOn?, addBlocks?, addBlockedBy?, removeBlocks?, removeBlockedBy? }`, requi
 
 Every tool's `toLLM` renders through the module's own formatting (`formatForModel`,
 `formatPageForModel`, `formatDetailPageForModel`), so the text a model reads is exactly what the
-structured result says and never exceeds `maxOutputCharacters`. `list_tasks` and `get_task` shrink
-their own page — fewer rows, a shorter detail slice, fewer dependency ids — until the rendered text
-fits, always keeping at least one task or one character visible so a cursor never repeats forever;
-if the bound is configured too small to show even that, they throw rather than return truncated
-garbage silently.
+structured result says and never exceeds `MAX_TASK_OUTPUT_CHARACTERS`. `list_tasks` and `get_task`
+shrink their own page — fewer rows, a shorter detail slice, fewer dependency ids — until the
+rendered text fits, always keeping at least one task or one character visible so a cursor never
+repeats forever; if even that will not fit, they throw rather than quietly return truncated
+garbage.
 
 ## External functions
 
@@ -87,6 +91,8 @@ All methods take `(ctx: Context, agentId: string, ...)` and operate on that one 
   exact order; the given list must name every current task exactly once.
 - `reset(ctx, agentId) => Promise<number>` — not exposed as a tool. Clears the whole list and
   returns how many tasks were removed.
+- `onEvent(listener) => () => void`, `onEventTransactional(listener) => () => void` — subscribe to
+  every change, after or inside its committing transaction. Each returns its own unsubscribe.
 - `tools(ctx, scope) => readonly AnyAgentTool[]` — the six tools above, bound to
   `scope.agent.id`; this is what a host passes into `Agent.create`'s module wiring.
 - `formatForModel`, `formatPageForModel`, `formatDetailPageForModel` — the bounded text renderers
@@ -95,12 +101,15 @@ All methods take `(ctx: Context, agentId: string, ...)` and operate on that one 
 Every mutating call (`create`, `update`, `complete`, `remove`, `reorder`, `reset`) that actually
 changes the list produces one `TaskEvent` — `task_created`, `task_updated`, `task_completed`,
 `task_removed`, `tasks_reordered`, or `tasks_reset` — carrying a stable `eventId`, a timestamp, and
-the `agentId`. If `listener.onEventTransactional` is set it runs inside the same transaction as the
-write, so it can still see the change roll back on failure. `afterCommit` schedules
-`listener.onEvent` to run once that transaction has actually committed; a failure there does not
-undo the mutation, it is only reported through `onPostCommitError` (best-effort — a failure in that
-handler is itself swallowed, since a committed task must never be turned into a failed call by
-advisory reporting).
+the `agentId`.
+
+- `onEventTransactional(listener)` runs the subscriber inside the same transaction as the write, so
+  its own writes commit with the change and a subscriber that throws rolls the mutation back.
+- `onEvent(listener)` runs it once that transaction has actually committed. A failure there cannot
+  undo the mutation and cannot starve the subscribers behind it; it is logged through `ctx.log.warn`
+  and the mutation stays successful.
+
+Both return the function that ends the subscription.
 
 ## Storage
 
@@ -110,7 +119,7 @@ or database client is injected.
 
 - **Task list** — one bounded JSON row in `happy_agent_task_state`. The value
   is the complete `Task[]` for the agent, matching `taskListSchema` (at most `MAX_TASKS`, 500,
-  items; the configured `maxTasks`, 100 by default, is enforced on top of that). Every mutation
+  items; `MAX_TASKS_PER_AGENT`, 100, is enforced on top of that). Every mutation
   reads and writes it inside the context transaction. Mutating tools declare
   `transactional: true`, so Agent Base commits the state and tool result together.
 

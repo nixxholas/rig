@@ -342,10 +342,7 @@ describe("archiving a workspace", () => {
     });
 
     it("keeps the workspace archived even when the folder cannot be removed", async () => {
-        const cleanupErrors: string[] = [];
-        const test = await harness("workspace-archive-failure", {
-            onWorkspaceHostError: (_workspaceId, _kind, message) => cleanupErrors.push(message),
-        });
+        const test = await harness("workspace-archive-failure");
         const project = await readyProject(test);
         const reserved = await test.workspaces.createWorkspace(test.ctx, project.id, {
             name: "Login flow",
@@ -364,7 +361,12 @@ describe("archiving a workspace", () => {
         );
 
         expect(archived!.status).toBe("archived");
-        expect(cleanupErrors.length).toBe(1);
+        // The catalog says so on its own logger rather than through a callback the caller passed.
+        expect(
+            test.warnings.filter((warning) =>
+                warning.includes("The archived workspace's folder could not be removed."),
+            ).length,
+        ).toBe(1);
         expect(existsSync(workspace.path)).toBe(true);
         await rm(workspace.path, { force: true });
     });

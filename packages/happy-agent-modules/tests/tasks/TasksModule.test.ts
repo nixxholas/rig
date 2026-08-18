@@ -7,11 +7,7 @@ import { resolveModuleHooks } from "../support/moduleHooks.js";
 
 describe("TasksModule durable tools", () => {
     it("uses the tool-call ID and marks each mutation transactional", async () => {
-        let eventId = 0;
-        const tasks = new TasksModule({
-            clock: () => 123,
-            eventIdFactory: () => `event-${++eventId}`,
-        });
+        const tasks = new TasksModule();
         const database = moduleDatabase(tasks.migrations, "tasks-tool-commit-test");
         await database.ready;
 
@@ -67,10 +63,7 @@ describe("TasksModule durable tools", () => {
     });
 
     it("treats an existing public task ID as a conflict even for identical input", async () => {
-        const tasks = new TasksModule({
-            clock: () => 123,
-            eventIdFactory: () => "event-1",
-        });
+        const tasks = new TasksModule();
         const database = moduleDatabase(tasks.migrations, "tasks-existing-id-test");
         await database.ready;
 
@@ -86,13 +79,7 @@ describe("TasksModule durable tools", () => {
     });
 
     it("keeps task metadata, assignments, and both dependency directions in sync", async () => {
-        const tasks = new TasksModule({
-            clock: () => 123,
-            eventIdFactory: (() => {
-                let id = 0;
-                return () => `event-${++id}`;
-            })(),
-        });
+        const tasks = new TasksModule();
         const database = moduleDatabase(tasks.migrations, "tasks-parity-fields-test");
         await database.ready;
 
@@ -149,13 +136,7 @@ describe("TasksModule durable tools", () => {
     });
 
     it("returns normal tool results for validation failures, filters completed blockers, and removes tasks", async () => {
-        const tasks = new TasksModule({
-            clock: () => 123,
-            eventIdFactory: (() => {
-                let id = 0;
-                return () => `event-${++id}`;
-            })(),
-        });
+        const tasks = new TasksModule();
         const database = moduleDatabase(tasks.migrations, "tasks-tool-parity-test");
         await database.ready;
 

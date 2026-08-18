@@ -7,9 +7,9 @@ discover that a secret exists, read its safe description, and attach or detach i
 scope the host defines — while the value stays entirely on the host side, reachable only through a
 trusted-host method the module deliberately does not expose as a tool.
 
-The module never opens a database, edits `process.env`, starts a process, or decides how a host
-applies a resolved value to a command. Values are confined to the module's host-only storage and
-resolver path; they never enter an event, model-facing result, or tool argument.
+The module never edits `process.env`, starts a process, or decides how a host applies a resolved
+value to a command. Values are confined to the module's own SQLite-backed catalog; they never enter
+an event, model-facing result, or tool argument.
 
 A mutation simply overwrites. Calling `register`, `update`, `attach`, or `detach` again — with the
 same value or a different one — applies again and succeeds; the store carries no retry ledger, and
@@ -20,16 +20,26 @@ input." A retried tool call is safe by construction: it just re-runs the write.
 import { Agent } from "@slopus/happy-agent-base";
 import { SecretsModule } from "@slopus/happy-agent-modules";
 
-const secrets = new SecretsModule({ resolveForHost: hostSecretResolver });
+const secrets = new SecretsModule();
 const agent = await Agent.create(ctx, { ...options, modules: [secrets] });
 ```
 
-`resolveForHost` and `resolveForCommand` are optional trusted-host capabilities. The module's
-database resolver is used when neither is supplied. Everything else — `idFactory`, `eventIdFactory`,
-`clock`, `listener`, `authorize`, `onPostCommitError`, `maxPageSize`, and `maxOutputCharacters` —
-has a working default and only needs to be supplied when the host wants to control identity
-generation, subscribe to events, enforce scope-level authorization, or tighten the bounds on list
-pages and model-facing text.
+The constructor takes nothing. The catalog, the clock, and identity generation are the module's own,
+and its bounds are fixed constants it exports so a caller can read them but not change them:
+
+- `SECRETS_PAGE_SIZE` (50) — how many references one page returns when the caller does not ask for
+  fewer.
+- `SECRETS_OUTPUT_CHARACTERS` (12,000) — the character budget every model-facing secrets result is
+  trimmed to fit.
+
+## Authorization
+
+There is no authorization policy and no policy seam. Every method takes the acting agent's ID, and
+that ID is the whole of the policy: an agent sees, mutates, and resolves only the secrets registered
+under its own ID. Another agent's `reference` returns `undefined`, its `list` returns an empty page,
+its `resolveForHost` returns an empty environment, and its `attach` fails because the reference does
+not exist for it. Beyond that, and beyond the `availableToModel` flag that keeps host-only
+credentials out of agent commands and the reserved `github` / `project-git` IDs, nothing is denied.
 
 ```text
 model ── safe references/attachments ──> SecretsModule ── host-only values ──> command host
@@ -40,23 +50,23 @@ model ── safe references/attachments ──> SecretsModule ── host-only 
 ## Tools it provides to the model
 
 The module offers four tools, all common (provider-neutral) and all `durable: true`, so a retried
-tool call simply re-runs the underlying overwrite. None of them can reach the raw host resolvers:
+tool call simply re-runs the underlying overwrite. None of them can reach the value-bearing methods:
 `resolveForHost` and `resolveForCommand` are intentionally not tools. Every tool sets
 `shouldReviewInAutoMode: () => false`,
 since none of them can leak a value or touch anything outside the secret catalog.
 
-- **`list_secrets`** — lists a bounded page of safe metadata. Arguments: `limit` (1–`maxPageSize`,
-  defaults to `maxPageSize`), `cursor` (an integer offset into the host's filtered result set), and
+- **`list_secrets`** — lists a bounded page of safe metadata. Arguments: `limit`
+  (1–`SECRETS_PAGE_SIZE`, defaults to `SECRETS_PAGE_SIZE`), `cursor` (an integer offset into the
+  filtered result set), and
   `scopeRef` (restrict the page to secrets attached to one opaque scope). The model sees each
   secret's `id`, `description`, sorted-and-deduplicated `environmentVariables` names, `revision`,
   and, when the host marked it, `availableToModel` and `kind`. A reference marked
   `availableToModel: false` is host-only and cannot be attached by an agent. If a page's rendered
-  text would exceed `maxOutputCharacters`, the module retries with a smaller `limit` before giving
-  up, so the model never receives a page it cannot read in full; a truncated `next=<cursor>` line is
-  appended only when a further page still fits.
+  text would exceed `SECRETS_OUTPUT_CHARACTERS`, the module falls back to a compact rendering that
+  still names every secret, so the model never loses an identity it could act on; a `next=<cursor>`
+  line is appended only when a further page exists.
 - **`reference_secret`** — reads one safe reference by `id` and returns `{ secret: reference | null }`.
-  `null` means no such secret is registered; the tool never distinguishes "does not exist" from "you
-  are not authorized" beyond what `authorize` decides.
+  `null` means no such secret is registered under the acting agent's ID.
 - **`attach_secret`** — attaches a registered model-available secret to a `scopeRef`, changing what
   is _available_, never returning a value. Arguments are `scopeRef` and `secretId`. On success the
   model is told which secret was attached to which scope and shown that secret's reference; the
@@ -65,10 +75,9 @@ since none of them can leak a value or touch anything outside the secret catalog
 - **`detach_secret`** — detaches a `{ scopeRef, secretId }` pair and reports only `detached: boolean`
   plus the two identifiers, never a value.
 
-Governing principles across all four: permissions are enforced only by the optional host
-`authorize` callback plus whatever the host's own `SecretStore` does, since the module has no
-notion of ownership itself; every list and lookup is bounded by `maxPageSize` and
-`maxOutputCharacters`; paging is a monotonically progressing integer cursor the store must advance
+Governing principles across all four: ownership is the acting agent's ID and nothing else; every
+list and lookup is bounded by `SECRETS_PAGE_SIZE` and
+`SECRETS_OUTPUT_CHARACTERS`; paging is a monotonically progressing integer cursor the store advances
 by exactly the number of rows returned; and no schema, tool result, or formatted string produced
 for the model carries a secret value — `secretReferenceSchema` has, by design, no value-bearing
 property.
@@ -106,51 +115,58 @@ and the acting agent's ID, the same way the tools do internally.
   — the compute seam. It returns `{ environment, hiddenEnvironmentVariables }`; the host must remove
   every hidden name case-insensitively from its ambient environment before adding the resolved
   values. Explicit IDs must already be attached to the scope and still be available to the model.
-  A host may inject `resolveForCommand` to provide one environment map per selected secret; the
-  module performs the collision-safe merge and validates the final bounded contract.
+  The module performs the collision-safe merge itself and validates the final bounded contract.
 - `formatForModel`, `formatPageForModel`, `formatAttachmentForModel`, `formatDetachForModel` —
   render results to the exact bounded text the tools send back, available to a host building its
   own presentation on top of the same methods.
 
-The resolver rejects a case-insensitive environment-name collision between selected secrets rather
+Resolution rejects a case-insensitive environment-name collision between selected secrets rather
 than applying silent last-write-wins. The command host owns the final merge with its ambient
 environment; the module supplies the names that must be hidden first.
 
 Every mutating method (`register`, `update`, `remove`, `attach`/`attachWithReference`, `detach`)
 runs inside the Agent Base transaction, emitting one `SecretEvent` (`secret_registered`, `secret_updated`,
 `secret_removed`, `secret_attached`, or `secret_detached`) only when the mutation actually changed
-something. A `SecretModuleListener` passed as `listener` gets `onEventTransactional` inside that
-same transaction and `onEvent` after it commits; `onPostCommitError` is
-invoked, best-effort, if `onEvent` throws.
+something.
+
+Subscribe after construction. `onEventTransactional(listener)` runs the listener inside the
+committing transaction — throwing there rolls the mutation back — and `onEvent(listener)` runs it
+after the outer transaction commits. Both return an unsubscribe function, and calling it more than
+once does nothing further.
+
+```ts
+const unsubscribe = secrets.onEvent((ctx, event) => {
+    ctx.log.info({ type: event.type }, "a secret changed");
+});
+```
+
+A post-commit listener that throws is logged through `ctx.log.error` and cannot roll the committed
+change back or stop the remaining listeners.
 
 ## Storage
 
-The module keeps the catalog in its Agent Base database. `SecretStore` is the validated structural
-boundary for database result shapes and trusted host resolver callbacks. Its shape:
+The module keeps the catalog in its Agent Base database, and its SQLite-backed store is the only
+resolution path — there is no injectable resolver. `SecretStore` is the validated structural
+boundary for those database result shapes. Its shape:
 
 - `list`, `reference`, `attachment` — bounded reads of the catalog.
 - `register`, `update`, `remove`, `attach`, `detach` — mutations. Each simply applies against the
   current state and returns the outcome (`changed`/`removed`/`detached`, plus the resulting
   reference or attachment where relevant); the store does not need to remember anything about a
   call once it returns.
-- `resolveForHost` — the optional resolver the host implements to produce values (a
-  `SecretHostEnvironment`, i.e. a map of environment-variable name to string value, at most 256
-  entries, values up to 65,536 characters) for a given scope. This is the only place a value ever
-  appears in a host callback.
-- `secretCommandResolverSchema` — the optional command-facing callback contract. It returns one
-  bounded environment per selected secret; the module merges them with case-insensitive collision
-  rejection before the compute host hides names and adds values to a process environment.
+- `resolveForHost` — reads values (a `SecretHostEnvironment`, i.e. a map of environment-variable
+  name to string value, at most 256 entries, values up to 65,536 characters) for a given scope. This
+  is the only place a value leaves storage.
 - Agent Base's transaction and `afterCommit` boundary — used for every mutation and for delivering
   `SecretEvent`s after the outer transaction commits.
 
-Identities are generated fresh on every call: `idFactory` (default `crypto.randomUUID()`) supplies a
-new `SecretId` whenever `register` is called without an explicit `id`, and `eventIdFactory` (default
-`crypto.randomUUID()`) supplies a fresh ID for each emitted `SecretEvent`, with `clock` (default
-`Date.now()`) supplying its timestamp. There is no persisted call identity and nothing keyed to a
+Identities are minted by the module on every call: `crypto.randomUUID()` supplies a new `SecretId`
+whenever `register` is called without an explicit `id` and a fresh ID for each emitted
+`SecretEvent`, with `Date.now()` supplying its timestamp. There is no persisted call identity and nothing keyed to a
 tool call's retry history: the module does not need `AgentKV` and does not read or write it.
 
 Every value that crosses into an event or model-facing string is validated against its TypeBox
-schema and deep-frozen before an event is handed to a listener, so nothing malformed or mutable
+schema and deep-frozen before an event is handed to a subscriber, so nothing malformed or mutable
 escapes the module's boundary. Registrations under `github` and `project-git` are rejected because
 those IDs belong to managed host credentials.
 

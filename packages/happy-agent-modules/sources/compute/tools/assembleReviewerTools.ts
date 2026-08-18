@@ -2,7 +2,7 @@ import type { AnyAgentTool } from "@slopus/happy-agent-base";
 
 import type { Compute } from "../Compute.js";
 import type { ComputeToolVendor } from "../ComputeToolVendor.js";
-import type { FileReadLog } from "../impl/FileReadLog.js";
+import type { FileReadLog } from "../../impl/FileReadLog.js";
 import { assembleClaudeReviewerTools } from "./claude/assembleClaudeReviewerTools.js";
 import { assembleCodexReviewerTools } from "./codex/assembleCodexReviewerTools.js";
 import { assembleGrokReviewerTools } from "./grok/assembleGrokReviewerTools.js";

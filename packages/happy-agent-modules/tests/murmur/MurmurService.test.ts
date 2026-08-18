@@ -24,24 +24,20 @@ import {
 } from "./fakeMurmurClient.js";
 
 const LOCAL_INSTANCE_ID = "alocalinstance000000001";
-const NOW = 1_000;
 
 async function createFixture(name: string, client = new FakeMurmurClient()) {
-    const profiles = new ProfileModule({ now: () => NOW });
+    const profiles = new ProfileModule();
     const test = moduleDatabase([...murmurMigrations, ...profiles.migrations], name);
     await test.ready;
     profiles.open(LOCAL_INSTANCE_ID);
-    const errors: unknown[] = [];
     const events: MurmurChangedEvent[] = [];
     const service = new MurmurService({
         client,
-        now: () => NOW,
-        onError: (error) => errors.push(error),
+        lifetime: test.rootContext,
         profile: profiles,
         publish: (_ctx, event) => events.push(event),
-        rootContext: test.rootContext,
     });
-    return { client, errors, events, profiles, service, test };
+    return { client, events, profiles, service, test };
 }
 
 async function createLocalProfile(fixture: Awaited<ReturnType<typeof createFixture>>) {
@@ -133,13 +129,20 @@ describe("MurmurService", () => {
 
             const profile = await createLocalProfile(fixture);
             await fixture.service.bindProfile(fixture.test.context, profile.id);
+            const before = Date.now();
             const invitation = await fixture.service.createInvitation(fixture.test.context);
+            const after = Date.now();
 
             expect(Value.Check(murmurInvitationSchema, invitation)).toBe(true);
-            expect(invitation).toEqual({
-                expiresAt: NOW + DISCOVERY_INVITATION_TTL_MILLISECONDS,
-                invitation: encodeIdentity(INVITATION),
-            });
+            expect(invitation.invitation).toBe(encodeIdentity(INVITATION));
+            // The clock is the module's own, so the expiry is checked against the wall clock the
+            // call ran on rather than against a number a test handed in.
+            expect(invitation.expiresAt).toBeGreaterThanOrEqual(
+                before + DISCOVERY_INVITATION_TTL_MILLISECONDS,
+            );
+            expect(invitation.expiresAt).toBeLessThanOrEqual(
+                after + DISCOVERY_INVITATION_TTL_MILLISECONDS,
+            );
             expect(invitation.invitation).toHaveLength(43);
         } finally {
             await fixture.service.close(fixture.test.context);
@@ -262,9 +265,9 @@ describe("MurmurService", () => {
 
             const impostor = new MurmurService({
                 client: new FakeMurmurClient({ identity: REMOTE }),
+                lifetime: fixture.test.rootContext,
                 profile: fixture.profiles,
                 publish: () => undefined,
-                rootContext: fixture.test.rootContext,
             });
             try {
                 await expect(impostor.initializeBinding(ctx)).rejects.toThrow(
@@ -326,7 +329,6 @@ describe("MurmurService", () => {
             await expect(fixture.service.snapshot(ctx)).resolves.toMatchObject({
                 connection: "disconnected",
             });
-            expect(fixture.errors).toHaveLength(1);
 
             await vi.advanceTimersByTimeAsync(1_000);
             await vi.waitFor(() => expect(client.syncCalls).toBe(2));

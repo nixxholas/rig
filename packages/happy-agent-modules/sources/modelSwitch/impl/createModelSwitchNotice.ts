@@ -1,4 +1,4 @@
-import type { HistoryExcerpt } from "./createHistoryExcerpt.js";
+import type { HistoryExcerpt } from "../../history/index.js";
 
 /** What the notice needs to say: where the conversation came from, and where it is now. */
 export interface ModelSwitchNotice {

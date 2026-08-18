@@ -1,7 +1,6 @@
 /** Public surface of the Goal module. */
 
 export * from "./GoalEvent.js";
-export * from "./GoalHost.js";
 export * from "./GoalModule.js";
 export * from "./SessionGoal.js";
 export {

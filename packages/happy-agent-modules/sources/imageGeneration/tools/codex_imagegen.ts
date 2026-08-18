@@ -6,7 +6,7 @@ import {
     selectedPaths,
 } from "../ImageGeneration.js";
 import type { ImageGenerationModule } from "../ImageGenerationModule.js";
-import { quoteVisibleExact } from "../../mcp/quoteVisibleExact.js";
+import { quoteVisibleExact } from "../../impl/quoteVisibleExact.js";
 import { selectedRecentCount } from "../ImageGeneration.js";
 
 /**

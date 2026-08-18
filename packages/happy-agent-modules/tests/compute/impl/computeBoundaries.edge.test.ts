@@ -6,7 +6,7 @@ import { FakeCompute } from "../support/FakeCompute.js";
 import { boundOutputText } from "../../../sources/compute/impl/boundOutputText.js";
 import { canonicalComputePath } from "../../../sources/compute/impl/canonicalComputePath.js";
 import { shouldReviewComputePath } from "../../../sources/compute/impl/shouldReviewComputePath.js";
-import { FileReadLog } from "../../../sources/compute/impl/FileReadLog.js";
+import { FileReadLog } from "../../../sources/impl/FileReadLog.js";
 import {
     isPathInside,
     joinComputePath,

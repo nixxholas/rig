@@ -1,6 +1,7 @@
 import {
     agentId as contextAgentId,
     agentDatabaseRun,
+    type AgentConfig,
     type AgentDatabase,
     type AgentDatabaseFacade,
     type AgentBaseInference,
@@ -10,6 +11,7 @@ import {
     type AgentModule,
     type AgentModuleHooks,
     type AgentModuleScope,
+    type AgentSystemRef,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
@@ -17,15 +19,18 @@ import { Value } from "@sinclair/typebox/value";
 import { afterCommit, type Context } from "@steve.kite/stdlib";
 import { sql } from "drizzle-orm";
 
-import { usageEventSchema, usageModuleListenerSchema, type UsageEvent } from "./UsageEvent.js";
+import {
+    usageEventListenerSchema,
+    usageEventSchema,
+    type UsageEvent,
+    type UsageEventListener,
+} from "./UsageEvent.js";
 import {
     MAX_USAGE_DURATION_MS,
-    MAX_USAGE_GROUPS,
-    MAX_USAGE_OUTPUT_CHARACTERS,
-    MAX_USAGE_PAGE_SIZE,
     MAX_USAGE_RECORDS,
     MAX_USAGE_TREE_PATH_LENGTH,
     MAX_USAGE_TREE_SESSIONS,
+    MAX_USAGE_TREE_TITLE_LENGTH,
     MAX_USAGE_TOKEN_COUNT,
     usageAggregateQuerySchema,
     usageAgentIdSchema,
@@ -39,6 +44,8 @@ import {
     usageTokensSchema,
     type UsageAggregateQuery,
     type UsageAgentTree,
+    type UsageAgentTreeRelation,
+    type UsageAgentTreeSession,
     type UsageInferenceRecord,
     type UsagePage,
     type UsagePageQuery,
@@ -48,23 +55,29 @@ import {
     type UsageTokens,
     type UsageTurnRecord,
 } from "./Usage.js";
-import {
-    usageAgentTreeAuthorizationSchema,
-    usageAgentTreeReaderSchema,
-    usageContextSchema,
-    usageVoidOrPromiseVoidSchema,
-    type UsageAgentTreeAuthorization,
-    type UsageAgentTreeReader,
-} from "./UsageContracts.js";
+import { usageVoidOrPromiseVoidSchema } from "./UsageContracts.js";
 import { getAgentTreeUsageTool } from "./tools/get_agent_tree_usage.js";
 import { getUsageTool } from "./tools/get_usage.js";
 import { assertUsageRecord, assertUsageTokens } from "./impl/assertUsageRecord.js";
 import { UsageDatabase } from "./impl/usageDatabase.js";
 
-const DEFAULT_PAGE_SIZE = 50;
-const DEFAULT_MAX_GROUPS = 100;
-const DEFAULT_MAX_OUTPUT_CHARACTERS = 8_000;
-const DEFAULT_MAX_OBSERVER_ERROR_LENGTH = 512;
+/**
+ * How many raw records one page returns, and the largest page any caller may ask for.
+ *
+ * Paging exists so a reader can walk the records without holding all of them at once; how wide
+ * one step is is a property of the feature rather than something a caller tunes.
+ */
+export const USAGE_PAGE_SIZE = 50;
+
+/** How many provider/model/effort/tier groups one aggregate page holds. */
+export const USAGE_GROUP_PAGE_SIZE = 100;
+
+/** The character budget every rendering of a summary or an agent tree is cut to fit. */
+export const USAGE_OUTPUT_CHARACTERS = 8_000;
+
+/** How far the ancestry walk authorizing a subtree read climbs before it gives up. */
+const MAX_USAGE_ANCESTRY_DEPTH = 64;
+
 const INFERENCE_PENDING_KEY = "pending_inference";
 const TURN_PENDING_KEY = "pending_turn";
 
@@ -75,13 +88,6 @@ const usagePendingSchema = Type.Object(
     },
     { additionalProperties: false },
 );
-const usageFactoryKindSchema = Type.Literal("reset");
-const usageFactoryResultSchema = Type.Union([usageIdSchema, Type.Promise(usageIdSchema)]);
-const usageIdFactorySchema = Type.Function(
-    [usageContextSchema, usageAgentIdSchema, usageFactoryKindSchema],
-    usageFactoryResultSchema,
-);
-const usageClockSchema = Type.Function([], usageTimestampSchema);
 const usageReadQuerySchema = Type.Object(
     {
         cursor: usageAggregateQuerySchema.properties.cursor,
@@ -89,41 +95,16 @@ const usageReadQuerySchema = Type.Object(
     },
     { additionalProperties: false },
 );
-const usageModuleOptionsSchema = Type.Object(
-    {
-        clock: Type.Optional(usageClockSchema),
-        idFactory: Type.Optional(usageIdFactorySchema),
-        listener: Type.Optional(usageModuleListenerSchema),
-        maxPageSize: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_USAGE_PAGE_SIZE })),
-        maxGroups: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_USAGE_GROUPS })),
-        maxOutputCharacters: Type.Optional(
-            Type.Integer({ minimum: 256, maximum: MAX_USAGE_OUTPUT_CHARACTERS }),
-        ),
-        agentTreeReader: Type.Optional(usageAgentTreeReaderSchema),
-        agentTreeAuthorization: Type.Optional(usageAgentTreeAuthorizationSchema),
-        onObserverError: Type.Optional(
-            Type.Function(
-                [
-                    usageContextSchema,
-                    Type.String({ minLength: 1, maxLength: 64 }),
-                    Type.String({
-                        minLength: 1,
-                        maxLength: DEFAULT_MAX_OBSERVER_ERROR_LENGTH,
-                    }),
-                ],
-                usageVoidOrPromiseVoidSchema,
-            ),
-        ),
-    },
-    { additionalProperties: false },
-);
 
-export { usageModuleOptionsSchema };
-export type UsageModuleOptions = Static<typeof usageModuleOptionsSchema>;
-
-type UsageFactoryKind = Static<typeof usageFactoryKindSchema>;
 type UsagePendingKind = Static<typeof usagePendingKindSchema>;
 type UsagePending = Static<typeof usagePendingSchema>;
+
+/** One agent still to be visited while a subtree snapshot is being built. */
+interface UsageTreeNode {
+    readonly agentId: string;
+    readonly parentAgentId?: string;
+    readonly path: string;
+}
 
 /**
  * Advisory provider usage accounting for one AgentSystem.
@@ -173,31 +154,33 @@ export class UsageModule implements AgentModule {
             },
         ],
     ] as const;
-    readonly #clock: NonNullable<UsageModuleOptions["clock"]>;
-    readonly #idFactory: NonNullable<UsageModuleOptions["idFactory"]>;
-    readonly #listener: UsageModuleOptions["listener"];
-    readonly #maxPageSize: number;
-    readonly #maxGroups: number;
-    readonly #maxOutputCharacters: number;
-    readonly #agentTreeReader: UsageAgentTreeReader | undefined;
-    readonly #agentTreeAuthorization: UsageAgentTreeAuthorization | undefined;
-    readonly #onObserverError: UsageModuleOptions["onObserverError"];
+    readonly #transactionalListeners = new Set<UsageEventListener>();
+    readonly #listeners = new Set<UsageEventListener>();
+    #agents: AgentSystemRef | undefined;
 
-    constructor(options: UsageModuleOptions) {
-        const validated = validateOptions(options);
-        this.#clock = validated.clock ?? (() => Date.now());
-        this.#idFactory =
-            validated.idFactory ??
-            (() => {
-                return globalThis.crypto.randomUUID();
-            });
-        this.#listener = validated.listener;
-        this.#maxPageSize = validated.maxPageSize ?? DEFAULT_PAGE_SIZE;
-        this.#maxGroups = validated.maxGroups ?? DEFAULT_MAX_GROUPS;
-        this.#maxOutputCharacters = validated.maxOutputCharacters ?? DEFAULT_MAX_OUTPUT_CHARACTERS;
-        this.#agentTreeReader = validated.agentTreeReader;
-        this.#agentTreeAuthorization = validated.agentTreeAuthorization;
-        this.#onObserverError = validated.onObserverError;
+    /**
+     * Watch committed usage inside the transaction that records it.
+     *
+     * A subscriber here runs before the change is durable, so a failure fails the mutation with
+     * it. Returns the function that stops the subscription.
+     */
+    onEventTransactional(listener: UsageEventListener): () => void {
+        assertUsageEventListener(listener);
+        this.#transactionalListeners.add(listener);
+        return () => this.#transactionalListeners.delete(listener);
+    }
+
+    /**
+     * Watch usage that has already been recorded.
+     *
+     * A subscriber here runs after the change is durable. Usage accounting is advisory, so its
+     * failure is logged and the next subscriber still hears about the change. Returns the
+     * function that stops the subscription.
+     */
+    onEvent(listener: UsageEventListener): () => void {
+        assertUsageEventListener(listener);
+        this.#listeners.add(listener);
+        return () => this.#listeners.delete(listener);
     }
 
     /** Read one agent's bounded aggregate. */
@@ -247,17 +230,12 @@ export class UsageModule implements AgentModule {
         if (!Value.Check(usagePageQuerySchema, query)) {
             throw new Error("Usage page query is invalid.");
         }
-        const limit = query.limit ?? this.#maxPageSize;
-        if (limit > this.#maxPageSize) {
-            throw new Error(`Usage page limit cannot exceed ${this.#maxPageSize}.`);
+        const limit = query.limit ?? USAGE_PAGE_SIZE;
+        if (limit > USAGE_PAGE_SIZE) {
+            throw new Error(`Usage page limit cannot exceed ${USAGE_PAGE_SIZE}.`);
         }
         const cursor = query.cursor ?? 0;
-        const page = await new UsageDatabase().read(
-            ctx,
-            agentId,
-            { cursor, limit },
-            this.#maxPageSize,
-        );
+        const page = await new UsageDatabase().read(ctx, agentId, { cursor, limit }, USAGE_PAGE_SIZE);
         assertUsagePage(page, agentId, cursor, limit);
         return cloneValue(page);
     }
@@ -268,9 +246,9 @@ export class UsageModule implements AgentModule {
             throw new Error("Usage aggregate query is invalid.");
         }
         this.#assertAgentAccess(ctx, query.agentId);
-        const maxGroups = query.maxGroups ?? this.#maxGroups;
-        if (maxGroups > this.#maxGroups) {
-            throw new Error(`Usage group limit cannot exceed ${this.#maxGroups}.`);
+        const maxGroups = query.maxGroups ?? USAGE_GROUP_PAGE_SIZE;
+        if (maxGroups > USAGE_GROUP_PAGE_SIZE) {
+            throw new Error(`Usage group limit cannot exceed ${USAGE_GROUP_PAGE_SIZE}.`);
         }
         const cursor = query.cursor ?? 0;
         const summary = await new UsageDatabase().aggregate(
@@ -303,47 +281,28 @@ export class UsageModule implements AgentModule {
     }
 
     /**
-     * Read a complete bounded subtree snapshot supplied by the host.  A
-     * context with an owning agent requires the explicit authorization seam;
-     * an unscoped host context is already outside model-facing access policy.
+     * The complete subtree rooted at one agent: what it started, how deep that goes, and what
+     * every agent in it has cost.
+     *
+     * The shape comes from the collection of agents the module was started with, and every token
+     * count comes from the module's own records, so the answer is the module's own rather than
+     * something a host handed it. An agent may ask about itself and about the agents it started,
+     * and about nothing else; a context that names no agent is host code, already outside
+     * model-facing access policy.
      */
     async readAgentTreeUsage(ctx: Context, agentId: string): Promise<UsageAgentTree> {
         assertAgentId(agentId);
-        const owner = contextAgentId(ctx);
-        if (owner !== undefined && owner !== agentId) {
-            throw new Error("Usage access is limited to the current agent.");
+        const agents = this.#agents;
+        if (agents === undefined) {
+            throw new Error("The usage module was asked for an agent tree before it started.");
         }
-        const reader = this.#agentTreeReader;
-        if (reader === undefined) {
-            throw new Error("Usage agent tree is unavailable without host wiring.");
-        }
-        if (owner !== undefined) {
-            const authorize = this.#agentTreeAuthorization;
-            if (authorize === undefined) {
-                throw new Error("Usage agent tree access is not authorized.");
-            }
-            const decision = authorize(ctx, agentId);
-            const allowed = await resolveMaybePromise(
-                decision,
-                Type.Boolean(),
-                "Usage agent tree authorization",
-            );
-            if (allowed !== true) {
-                throw new Error("Usage agent tree access is not authorized.");
-            }
-        }
-        const raw = reader(ctx, agentId);
-        const tree = await resolveMaybePromise(
-            raw,
-            usageAgentTreeSchema,
-            "Usage agent tree reader",
-        );
-        const detached = cloneValue(tree);
-        assertUsageAgentTree(detached, agentId);
-        return detached;
+        await this.#assertSubtreeAccess(ctx, agents, agentId);
+        const tree = await this.#buildAgentTree(ctx, agents, agentId);
+        assertUsageAgentTree(tree, agentId);
+        return tree;
     }
 
-    /** Alias retained for hosts that use a shorter tree-reader name. */
+    /** Alias retained for callers that use the shorter name. */
     async readAgentTree(ctx: Context, agentId: string): Promise<UsageAgentTree> {
         return await this.readAgentTreeUsage(ctx, agentId);
     }
@@ -370,16 +329,21 @@ export class UsageModule implements AgentModule {
         return await this.resetAll(ctx);
     }
 
-    /** Render a bounded subtree snapshot for a model-facing tool result. */
+    /**
+     * Render a bounded subtree snapshot for a model-facing tool result.
+     *
+     * `maxCharacters` is the budget one rendering has to fit; it defaults to the module's own and
+     * exists so a caller with a tighter answer to fill can ask for less, never more.
+     */
     formatAgentTreeUsageForModel(
         tree: UsageAgentTree,
-        maxCharacters = this.#maxOutputCharacters,
+        maxCharacters = USAGE_OUTPUT_CHARACTERS,
     ): string {
         assertUsageAgentTree(tree);
         if (
             !Number.isInteger(maxCharacters) ||
             maxCharacters < 256 ||
-            maxCharacters > this.#maxOutputCharacters
+            maxCharacters > USAGE_OUTPUT_CHARACTERS
         ) {
             throw new Error("Usage output bound is invalid.");
         }
@@ -389,9 +353,9 @@ export class UsageModule implements AgentModule {
             const line = [
                 session.agentId,
                 session.relation,
-                session.status,
                 session.path,
                 `${session.totalTokens} tokens`,
+                ...(session.title === undefined ? [] : [session.title]),
             ].join(" | ");
             if (lines.join("\n").length + 1 + line.length > maxCharacters) {
                 lines.push(
@@ -413,13 +377,16 @@ export class UsageModule implements AgentModule {
      * Render a bounded model-facing summary.  Group rows are admitted one at
      * a time and the continuation cursor is computed from the last visible
      * row, so output truncation never skips an unseen group.
+     *
+     * `maxCharacters` is the budget one rendering has to fit; it defaults to the module's own and
+     * exists so a caller with a tighter answer to fill can ask for less, never more.
      */
-    formatForModel(summary: UsageSummary, maxCharacters = this.#maxOutputCharacters): string {
-        assertUsageSummary(summary, summary.agentId, summary.cursor, this.#maxGroups);
+    formatForModel(summary: UsageSummary, maxCharacters = USAGE_OUTPUT_CHARACTERS): string {
+        assertUsageSummary(summary, summary.agentId, summary.cursor, USAGE_GROUP_PAGE_SIZE);
         if (
             !Number.isInteger(maxCharacters) ||
             maxCharacters < 256 ||
-            maxCharacters > this.#maxOutputCharacters
+            maxCharacters > USAGE_OUTPUT_CHARACTERS
         ) {
             throw new Error("Usage output bound is invalid.");
         }
@@ -520,7 +487,7 @@ export class UsageModule implements AgentModule {
             };
             await scope.runKV.write(ctx, key, cloneValue(pending));
         } catch (error: unknown) {
-            await this.#reportObserverError(ctx, "begin", error);
+            this.#reportObserverError(ctx, "begin", error);
         }
     }
 
@@ -610,11 +577,11 @@ export class UsageModule implements AgentModule {
             await write(startedAt, finishedAt, durationMs);
             await scope.runKV.delete(ctx, key);
         } catch (error: unknown) {
-            await this.#reportObserverError(ctx, `after_${kind}`, error);
+            this.#reportObserverError(ctx, `after_${kind}`, error);
             try {
                 await scope.runKV.delete(ctx, key);
             } catch (cleanupError: unknown) {
-                await this.#reportObserverError(ctx, `clear_${kind}`, cleanupError);
+                this.#reportObserverError(ctx, `clear_${kind}`, cleanupError);
             }
         }
     }
@@ -636,7 +603,7 @@ export class UsageModule implements AgentModule {
     async #reset(ctx: Context, agentId: string | undefined): Promise<number> {
         if (agentId !== undefined) assertAgentId(agentId);
         const target: UsageResetTarget = agentId ?? null;
-        const eventId = await this.#newId(ctx, target ?? "all-agents", "reset");
+        const eventId = this.#newId();
         return await ctx.inTx(async (txCtx) => {
             const removed = await new UsageDatabase().reset(txCtx, target);
             const event =
@@ -662,56 +629,123 @@ export class UsageModule implements AgentModule {
     }
 
     async #notifyTransactional(ctx: Context, event: UsageEvent): Promise<void> {
-        const listener = this.#listener;
-        if (listener?.onEventTransactional === undefined) return;
-        await invokeVoid(listener.onEventTransactional(ctx, event), "Usage transactional listener");
+        for (const listener of this.#transactionalListeners) {
+            await invokeVoid(listener(ctx, event), "Usage transactional subscriber");
+        }
     }
 
     async #notifyPostCommit(ctx: Context, event: UsageEvent): Promise<void> {
-        const listener = this.#listener;
-        if (listener?.onEvent === undefined) return;
-        try {
-            await invokeVoid(listener.onEvent(ctx, event), "Usage post-commit listener");
-        } catch (error: unknown) {
-            await this.#reportObserverError(ctx, "post_commit_listener", error);
+        for (const listener of this.#listeners) {
+            try {
+                await invokeVoid(listener(ctx, event), "Usage post-commit subscriber");
+            } catch (error: unknown) {
+                this.#reportObserverError(ctx, "post_commit_subscriber", error);
+            }
         }
     }
 
-    async #reportObserverError(ctx: Context, phase: string, error: unknown): Promise<void> {
-        const boundedMessage = normalizeObserverError(error);
-        const callback = this.#onObserverError;
-        if (callback === undefined) return;
-        try {
-            await invokeVoid(
-                callback(ctx, phase.slice(0, 64), boundedMessage),
-                "Usage observer error handler",
-            );
-        } catch {
-            // Optional reporting is deliberately non-fatal.
-        }
+    /**
+     * Report an accounting failure without failing the work it was accounting for.
+     *
+     * Usage says what a turn cost. A turn that ran is not made to look failed because the number
+     * could not be written down, so every one of these paths ends here rather than in a throw.
+     */
+    #reportObserverError(ctx: Context, phase: string, error: unknown): void {
+        ctx.log.warn("Usage accounting failed and was skipped.", { phase }, error);
     }
 
-    async #newId(ctx: Context, agentId: string, kind: UsageFactoryKind): Promise<string> {
-        const produced = this.#idFactory(ctx, agentId, kind);
-        if (!Value.Check(usageFactoryResultSchema, produced)) {
-            throw new Error("Usage ID factory returned an invalid result.");
-        }
-        const id =
-            produced instanceof Promise
-                ? await resolvePromise(produced, usageIdSchema, "Usage ID factory")
-                : produced;
+    #newId(): string {
+        const id = globalThis.crypto.randomUUID();
         if (!Value.Check(usageIdSchema, id)) {
-            throw new Error("Usage ID factory returned an invalid ID.");
+            throw new Error("Usage produced an invalid event ID.");
         }
         return id;
     }
 
     #now(): number {
-        const now = this.#clock();
+        const now = Date.now();
         if (!Value.Check(usageTimestampSchema, now)) {
-            throw new Error("Usage clock must return a bounded non-negative integer.");
+            throw new Error("The system clock is outside the range a usage timestamp can hold.");
         }
         return now;
+    }
+
+    /**
+     * Allow a subtree read only from inside that subtree's root.
+     *
+     * An agent may account for itself and for the work it started, however deep that goes. The
+     * ancestry walk is what makes "the work it started" a fact about the collection rather than a
+     * policy someone wired in, and it is bounded so a broken chain cannot spin.
+     */
+    async #assertSubtreeAccess(
+        ctx: Context,
+        agents: AgentSystemRef,
+        agentId: string,
+    ): Promise<void> {
+        const owner = contextAgentId(ctx);
+        if (owner === undefined || owner === agentId) return;
+        let current = await agents.parentOf(ctx, agentId);
+        for (let depth = 0; current !== null && depth < MAX_USAGE_ANCESTRY_DEPTH; depth += 1) {
+            if (current === owner) return;
+            current = await agents.parentOf(ctx, current);
+        }
+        throw new Error("Usage access is limited to the current agent and the agents it started.");
+    }
+
+    async #buildAgentTree(
+        ctx: Context,
+        agents: AgentSystemRef,
+        rootAgentId: string,
+    ): Promise<UsageAgentTree> {
+        // One pass over the records answers every agent in the snapshot; asking per agent would
+        // read the same bounded table once for each of them.
+        const totals = await new UsageDatabase().totalTokensByAgent(ctx);
+        const sessions: UsageAgentTreeSession[] = [];
+        const visited = new Set<string>();
+        let frontier: readonly UsageTreeNode[] = [
+            { agentId: rootAgentId, path: `/${rootAgentId}` },
+        ];
+        while (frontier.length > 0) {
+            const next: UsageTreeNode[] = [];
+            for (const node of frontier) {
+                if (visited.has(node.agentId)) continue;
+                visited.add(node.agentId);
+                if (sessions.length >= MAX_USAGE_TREE_SESSIONS) {
+                    throw new Error("Usage agent tree is larger than one snapshot can hold.");
+                }
+                sessions.push(await this.#treeSession(ctx, agents, node, totals));
+                for (const childAgentId of await agents.childOf(ctx, node.agentId)) {
+                    const path = `${node.path}/${childAgentId}`;
+                    if (path.length > MAX_USAGE_TREE_PATH_LENGTH) {
+                        throw new Error("Usage agent tree is deeper than one snapshot can name.");
+                    }
+                    next.push({ agentId: childAgentId, parentAgentId: node.agentId, path });
+                }
+            }
+            frontier = next;
+        }
+        return {
+            sessions,
+            totalTokens: sessions.reduce((sum, session) => sum + session.totalTokens, 0),
+        };
+    }
+
+    async #treeSession(
+        ctx: Context,
+        agents: AgentSystemRef,
+        node: UsageTreeNode,
+        totals: ReadonlyMap<string, number>,
+    ): Promise<UsageAgentTreeSession> {
+        const config = await agents.config(ctx, node.agentId);
+        const title = agentTitle(config);
+        return {
+            agentId: node.agentId,
+            ...(title === undefined ? {} : { title }),
+            ...(node.parentAgentId === undefined ? {} : { parentAgentId: node.parentAgentId }),
+            path: node.path,
+            relation: treeRelation(node.parentAgentId, config),
+            totalTokens: totals.get(node.agentId) ?? 0,
+        };
     }
 
     #assertAgentAccess(ctx: Context, requested: string | undefined): void {
@@ -769,41 +803,40 @@ export class UsageModule implements AgentModule {
         },
     };
 
-    readonly beforeStart = (): AgentModuleHooks => this.#hooks;
-}
-
-function validateOptions(options: unknown): UsageModuleOptions {
-    if (typeof options !== "object" || options === null) {
-        throw new Error("Usage module options contain unknown or invalid keys.");
-    }
-    const source = options as Record<string, unknown>;
-    const view = {
-        ...source,
-        ...(source.listener === undefined
-            ? {}
-            : { listener: usageListenerMethodView(source.listener) }),
-    };
-    if (!Value.Check(usageModuleOptionsSchema, view)) {
-        throw new Error("Usage module options contain unknown or invalid keys.");
-    }
-    return options as UsageModuleOptions;
-}
-
-function usageListenerMethodView(value: unknown): unknown {
-    if (typeof value !== "object" || value === null) return value;
-    const source = value as Record<string, unknown>;
-    if (isPlainObject(value)) return value;
-    return {
-        ...(source.onEventTransactional === undefined
-            ? {}
-            : { onEventTransactional: source.onEventTransactional }),
-        ...(source.onEvent === undefined ? {} : { onEvent: source.onEvent }),
+    readonly beforeStart = (_ctx: Context, agents: AgentSystemRef): AgentModuleHooks => {
+        this.#agents = agents;
+        return this.#hooks;
     };
 }
 
-function isPlainObject(value: object): boolean {
-    const prototype = Object.getPrototypeOf(value);
-    return prototype === Object.prototype || prototype === null;
+function assertUsageEventListener(value: unknown): asserts value is UsageEventListener {
+    if (!Value.Check(usageEventListenerSchema, value)) {
+        throw new Error("A usage subscriber must be a function taking a context and an event.");
+    }
+}
+
+/**
+ * How an agent came to sit under its parent.
+ *
+ * An agent whose creation names its parent was started by that parent, with a tool: a subagent
+ * doing part of the parent's own work. One that sits under an agent it does not name as its
+ * creator was put there by someone else, and that is what "delegated" means here.
+ */
+function treeRelation(
+    parentAgentId: string | undefined,
+    config: AgentConfig | undefined,
+): UsageAgentTreeRelation {
+    if (parentAgentId === undefined) return "root";
+    return config?.provenance?.createdBy === parentAgentId ? "subagent" : "delegated";
+}
+
+/** An agent's own title, bounded and on one line, when its metadata carries one. */
+function agentTitle(config: AgentConfig | undefined): string | undefined {
+    const title = config?.metadata?.title;
+    if (typeof title !== "string") return undefined;
+    const oneLine = title.replaceAll(/[\u0000\r\n]/gu, " ").trim();
+    if (oneLine.length === 0) return undefined;
+    return truncate(oneLine, MAX_USAGE_TREE_TITLE_LENGTH);
 }
 
 function assertPending(value: unknown): UsagePending {
@@ -828,7 +861,7 @@ function assertUsageAgentTree(
     }
     const tree = value as UsageAgentTree;
     if (tree.sessions.length === 0 || tree.sessions.length > MAX_USAGE_TREE_SESSIONS) {
-        throw new Error("Usage agent tree is outside its configured bounds.");
+        throw new Error("Usage agent tree is outside its bounds.");
     }
     const byAgentId = new Map<string, UsageAgentTree["sessions"][number]>();
     for (const session of tree.sessions) {
@@ -1064,20 +1097,6 @@ async function resolvePromise<T>(value: unknown, schema: TSchema, operation: str
     return resolved as T;
 }
 
-async function resolveMaybePromise<T>(
-    value: unknown,
-    schema: TSchema,
-    operation: string,
-): Promise<T> {
-    if (Value.Check(Type.Promise(Type.Void()), value)) {
-        return await resolvePromise(value, schema, operation);
-    }
-    if (!Value.Check(schema, value)) {
-        throw new Error(`${operation} returned an invalid result.`);
-    }
-    return value as T;
-}
-
 async function invokeVoid(value: unknown, operation: string): Promise<void> {
     if (!Value.Check(usageVoidOrPromiseVoidSchema, value)) {
         throw new Error(`${operation} must return void or Promise<void>.`);
@@ -1087,30 +1106,4 @@ async function invokeVoid(value: unknown, operation: string): Promise<void> {
     if (resolved !== undefined) {
         throw new Error(`${operation} Promise must resolve to undefined.`);
     }
-}
-
-function normalizeObserverError(error: unknown): string {
-    let message: unknown;
-    try {
-        if (error instanceof Error) {
-            try {
-                message = error.message;
-            } catch {
-                // Fall through to the safer string conversion.
-            }
-        }
-        if (typeof message !== "string") {
-            try {
-                message = String(error);
-            } catch {
-                // Keep the bounded fallback below.
-            }
-        }
-    } catch {
-        // Hostile values can even throw while being inspected.
-    }
-    if (typeof message !== "string" || message.length === 0) {
-        return "Unknown usage observer error.";
-    }
-    return message.slice(0, DEFAULT_MAX_OBSERVER_ERROR_LENGTH);
 }

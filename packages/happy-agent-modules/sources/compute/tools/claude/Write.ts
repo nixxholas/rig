@@ -3,7 +3,7 @@ import { defineAgentTool } from "@slopus/happy-agent-base";
 
 import type { Compute } from "../../Compute.js";
 import { describeComputePathAction } from "../../impl/describeComputePathAction.js";
-import type { FileReadLog } from "../../impl/FileReadLog.js";
+import type { FileReadLog } from "../../../impl/FileReadLog.js";
 import { shouldReviewComputePath } from "../../impl/shouldReviewComputePath.js";
 import { writeComputeTextFile } from "../../impl/writeComputeTextFile.js";
 

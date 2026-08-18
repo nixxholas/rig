@@ -2,7 +2,7 @@ import type { Context } from "@steve.kite/stdlib";
 
 import type { Compute } from "../Compute.js";
 import { computePermissionsForContext } from "./computePermissionsForContext.js";
-import type { FileReadLog } from "./FileReadLog.js";
+import type { FileReadLog } from "../../impl/FileReadLog.js";
 import { resolveComputePath } from "./resolveComputePath.js";
 
 /**

@@ -8,11 +8,11 @@ import {
     workspaceStorageKey,
 } from "../WorkspaceIdentity.js";
 import type {
-    WorkspaceHost,
     WorkspaceMutationRequest,
     WorkspaceMutationResult,
     WorkspaceStoreReserveInput,
 } from "../WorkspaceStore.js";
+import type { WorkspacesModule } from "../WorkspacesModule.js";
 import {
     uniqueWorkspaceBranch,
     uniqueWorkspaceName,
@@ -38,19 +38,18 @@ const RESERVATION_ATTEMPTS = 8;
  * Reserves one workspace: a name, a folder key, a branch, and the folder they live in, written
  * before any Git or filesystem work starts.
  *
- * Two things make the reservation trustworthy. The names are chosen against the host's live view of
- * Git and the filesystem, and a reservation without that view fails rather than allocating a branch
- * nobody checked. And the choice is only provisional until the row is written: the unique indexes
- * decide the winner, and the loser picks again from a fresh snapshot instead of failing the person
- * who asked for it.
+ * Two things make the reservation trustworthy. The names are chosen against the catalog's live view
+ * of Git and the filesystem rather than against the table alone. And the choice is only provisional
+ * until the row is written: the unique indexes decide the winner, and the loser picks again from a
+ * fresh snapshot instead of failing the person who asked for it.
  *
- * The folder is recorded as missing. It becomes present when the host says it created it.
+ * The folder is recorded as missing. It becomes present once the checkout is really there.
  */
 export async function reserveWorkspace(
     database: AgentDatabase,
     input: WorkspaceStoreReserveInput,
     hooks: WorkspaceReserveHooks,
-    host: WorkspaceHost | undefined,
+    catalog: WorkspacesModule,
     operation: WorkspaceMutationRequest,
     now: () => number,
 ): Promise<WorkspaceMutationResult> {
@@ -67,7 +66,7 @@ export async function reserveWorkspace(
         return unchanged(existing);
     }
 
-    const probe = reservationProbe(input.projectRef, hooks, host);
+    const probe = reservationProbe(input.projectRef, hooks, catalog);
     const seed = input.storageKeySeed ?? workspaceStorageKey(input.name);
 
     for (let attempt = 1; ; attempt += 1) {
@@ -219,17 +218,17 @@ export function assertReservationStillMeans(
 }
 
 /**
- * The host's three answers, or a clear refusal. A reservation cannot choose a branch or a folder
- * without them, so a missing probe stops the reservation rather than letting it guess.
+ * Where a workspace would live, and whether its branch or folder name is already taken.
  *
- * Each answer is called on the object that supplied it, because a host is free to write these as
- * methods that read its own state, and each availability answer has to be a real yes or no: a
- * truthy stand-in would quietly decide that a branch is taken.
+ * The catalog answers all three from its live view of Git and the filesystem. A caller may narrow
+ * any of them further for one reservation — a name it knows is spoken for is unavailable whatever
+ * Git says — and each answer it gives has to be a real yes or no, because a truthy stand-in would
+ * quietly decide that a branch is taken.
  */
 function reservationProbe(
     projectRef: string,
     hooks: WorkspaceReserveHooks,
-    host: WorkspaceHost | undefined,
+    catalog: WorkspacesModule,
 ): {
     isBranchUnavailable: (branch: string) => Promise<boolean>;
     isStorageKeyUnavailable: (storageKey: string) => Promise<boolean>;
@@ -238,38 +237,17 @@ function reservationProbe(
     const branch = hooks.isBranchUnavailable?.bind(hooks);
     const storageKey = hooks.isStorageKeyUnavailable?.bind(hooks);
     const path = hooks.pathForStorageKey?.bind(hooks);
-    const hostBranch = host?.isBranchUnavailable?.bind(host);
-    const hostStorageKey = host?.isStorageKeyUnavailable?.bind(host);
-    const hostPath = host?.pathForStorageKey?.bind(host);
-    if (
-        (branch === undefined && hostBranch === undefined) ||
-        (storageKey === undefined && hostStorageKey === undefined) ||
-        (path === undefined && hostPath === undefined)
-    ) {
-        throw new Error(
-            "Reserving a workspace needs the host's view of Git and the filesystem: which " +
-                "branches and folders are already taken, and where this workspace would live.",
-        );
-    }
     return {
         isBranchUnavailable: async (candidate) =>
             (branch === undefined ? false : await availability(branch(candidate), "branch")) ||
-            (hostBranch === undefined
-                ? false
-                : await availability(hostBranch(projectRef, candidate), "branch")),
+            catalog.isBranchUnavailable(projectRef, candidate),
         isStorageKeyUnavailable: async (candidate) =>
             (storageKey === undefined
                 ? false
                 : await availability(storageKey(candidate), "folder")) ||
-            (hostStorageKey === undefined
-                ? false
-                : await availability(hostStorageKey(projectRef, candidate), "folder")),
+            catalog.isStorageKeyUnavailable(projectRef, candidate),
         pathForStorageKey: (candidate) =>
-            path === undefined
-                ? hostPath === undefined
-                    ? unreachablePath()
-                    : hostPath(projectRef, candidate)
-                : path(candidate),
+            path === undefined ? catalog.pathForStorageKey(projectRef, candidate) : path(candidate),
     };
 }
 
@@ -282,10 +260,6 @@ async function availability(answer: boolean | Promise<boolean>, subject: string)
         );
     }
     return settled;
-}
-
-function unreachablePath(): never {
-    throw new Error("Reserving a workspace needs the host's answer for where it would live.");
 }
 
 /**

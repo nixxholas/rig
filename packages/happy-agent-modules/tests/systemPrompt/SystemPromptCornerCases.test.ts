@@ -14,15 +14,17 @@ import {
 import { FakeCompute } from "../compute/support/FakeCompute.js";
 import { InMemoryPersistence } from "../support/InMemoryPersistence.js";
 import { resolveModuleHooks } from "../support/moduleHooks.js";
+import { systemPromptWorld } from "./support/systemPromptWorld.js";
 
 const ctx: Context = createRootContext().named("system-prompt-corner-cases");
 const turnStart = { loopId: "loop", turnId: "turn", contextTokens: undefined };
 
-async function hooksFor(
-    ctxForHook: Context,
-    module: SystemPromptModule,
-): Promise<AgentModuleHooks> {
-    return await resolveModuleHooks(ctxForHook, module);
+/** A module reading the machine a test built, and its resolved hooks. */
+async function moduleFor(
+    compute: FakeCompute | undefined,
+): Promise<{ readonly module: SystemPromptModule; readonly hooks: AgentModuleHooks }> {
+    const world = await systemPromptWorld({ compute: async () => compute });
+    return { module: world.module, hooks: await resolveModuleHooks(ctx, world.module) };
 }
 
 function agentScope(
@@ -37,9 +39,7 @@ describe("SystemPromptModule corner cases", () => {
         const compute = new FakeCompute("/workspace");
         compute.directories.add("/workspace/.git");
         compute.links.set("/workspace/AGENTS.md", "/outside/AGENTS.md");
-        const module = new SystemPromptModule({
-            compute: { resolve: async () => compute },
-        });
+        const { module } = await moduleFor(compute);
 
         await expect(module.readAgentsMd(ctx, "agent-a")).rejects.toThrow(
             "AGENTS.md document must not be a symbolic link",
@@ -50,9 +50,7 @@ describe("SystemPromptModule corner cases", () => {
         const compute = new FakeCompute("/workspace/packages/app");
         compute.directories.add("/workspace/.git");
         compute.links.set("/workspace/AGENTS_SECURITY.md", "/outside/AGENTS_SECURITY.md");
-        const module = new SystemPromptModule({
-            compute: { resolve: async () => compute },
-        });
+        const { module } = await moduleFor(compute);
 
         await expect(module.readAgentsMd(ctx, "agent-a")).rejects.toThrow(
             "AGENTS.md document must not be a symbolic link",
@@ -66,9 +64,7 @@ describe("SystemPromptModule corner cases", () => {
         compute.directories.add("/workspace/empty/AGENTS.md");
         compute.write("/workspace/AGENTS.md", " \n\t ");
         compute.write("/workspace/empty/AGENTS.md", "\n");
-        const module = new SystemPromptModule({
-            compute: { resolve: async () => compute },
-        });
+        const { module } = await moduleFor(compute);
 
         await expect(module.readAgentsMd(ctx, "agent-a")).resolves.toEqual({
             cwd: "/workspace",
@@ -80,9 +76,7 @@ describe("SystemPromptModule corner cases", () => {
         const compute = new FakeCompute("/workspace");
         compute.directories.add("/workspace/.git");
         compute.write("/workspace/AGENTS.md", "Keep this instruction.");
-        const module = new SystemPromptModule({
-            compute: { resolve: async () => compute },
-        });
+        const { module } = await moduleFor(compute);
 
         const first = await module.readAgentsMd(ctx, "agent-a");
         if (first === undefined) throw new Error("Expected an AGENTS.md snapshot.");
@@ -94,12 +88,12 @@ describe("SystemPromptModule corner cases", () => {
     });
 
     it("validates a malformed compute returned at runtime before using its filesystem", async () => {
-        const module = new SystemPromptModule({
-            compute: { resolve: async () => ({ invalid: true }) as never },
+        const world = await systemPromptWorld({
+            compute: async () => ({ invalid: true }) as never,
         });
 
-        await expect(module.readAgentsMd(ctx, "agent-a")).rejects.toThrow(
-            "Compute resolver returned an invalid compute",
+        await expect(world.module.readAgentsMd(ctx, "agent-a")).rejects.toThrow(
+            "The compute module returned an invalid compute",
         );
     });
 
@@ -115,9 +109,7 @@ describe("SystemPromptModule corner cases", () => {
                 mtimeMs: 1,
             }),
         });
-        const module = new SystemPromptModule({
-            compute: { resolve: async () => compute },
-        });
+        const { module } = await moduleFor(compute);
 
         await expect(module.readAgentsMd(ctx, "agent-a")).rejects.toThrow(
             "Compute returned an invalid file stat",
@@ -130,10 +122,7 @@ describe("SystemPromptModule corner cases", () => {
         compute.write("/workspace/AGENTS.md", "Version A.");
         const persistence = new InMemoryPersistence();
         const kv = new AgentKV(persistence, "agent.");
-        const module = new SystemPromptModule({
-            compute: { resolve: async () => compute },
-        });
-        const hooks = await hooksFor(ctx, module);
+        const { module, hooks } = await moduleFor(compute);
         const scope = { ...agentScope(), kv } as never;
 
         await hooks.instructions!(ctx, scope);
@@ -151,9 +140,7 @@ describe("SystemPromptModule corner cases", () => {
     });
 
     it("does not add the AGENTS specification to the reviewer result when no document exists", async () => {
-        const module = new SystemPromptModule({
-            compute: { resolve: async () => undefined },
-        });
+        const { module } = await moduleFor(undefined);
 
         await expect(module.readAgentsMdInstructions(ctx, "agent-a")).resolves.toBeUndefined();
     });
@@ -168,8 +155,7 @@ describe("SystemPromptModule corner cases", () => {
                 { path: "/workspace/AGENTS.md", text: "Duplicate." },
             ],
         });
-        const module = new SystemPromptModule();
-        const hooks = await hooksFor(ctx, module);
+        const { hooks } = await moduleFor(undefined);
 
         await expect(
             hooks.instructions!(ctx, {
@@ -190,8 +176,7 @@ describe("SystemPromptModule corner cases", () => {
                 text: "x".repeat(MAX_AGENTS_SECURITY_MD_BYTES + 1),
             },
         });
-        const module = new SystemPromptModule();
-        const hooks = await hooksFor(ctx, module);
+        const { hooks } = await moduleFor(undefined);
 
         await expect(
             hooks.instructions!(ctx, {
@@ -213,8 +198,7 @@ describe("SystemPromptModule corner cases", () => {
             cwd: "/workspace",
             documents: [{ path: "/workspace/AGENTS.md", text }],
         });
-        const module = new SystemPromptModule();
-        const hooks = await hooksFor(ctx, module);
+        const { hooks } = await moduleFor(undefined);
 
         await expect(
             hooks.instructions!(ctx, {
@@ -232,8 +216,7 @@ describe("SystemPromptModule corner cases", () => {
     });
 
     it("keeps the AGENTS specification available in the normal prompt with no files", async () => {
-        const module = new SystemPromptModule();
-        const hooks = await hooksFor(ctx, module);
+        const { hooks } = await moduleFor(undefined);
 
         await expect(hooks.instructions!(ctx, agentScope() as never)).resolves.toContain(
             AGENTS_MD_SPEC,

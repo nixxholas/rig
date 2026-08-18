@@ -1,5 +1,5 @@
 import { Value } from "@sinclair/typebox/value";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { PROFILE_MIGRATION_KEY, ProfileModule } from "../../sources/profile/ProfileModule.js";
 import {
@@ -12,24 +12,29 @@ import { moduleDatabase } from "../support/moduleDatabase.js";
 const LOCAL_INSTANCE_ID = "alocalinstance000000001";
 const OTHER_INSTANCE_ID = "anotherinstance00000001";
 
+/**
+ * The module reads the wall clock, so the test moves the wall clock. Nothing about the moment a
+ * profile was written is injectable any more, which is what the production code relies on.
+ */
 async function createFixture(name: string) {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
     const events: ProfileChangedEvent[] = [];
-    const clock = { now: 1_000 };
-    const profiles = new ProfileModule({
-        now: () => clock.now,
-        listener: {
-            onEvent: (_ctx, event) => {
-                events.push(event);
-            },
-        },
+    const profiles = new ProfileModule();
+    const unsubscribe = profiles.onEvent((_ctx, event) => {
+        events.push(event);
     });
     const test = moduleDatabase(profiles.migrations, name);
     await test.ready;
     profiles.open(LOCAL_INSTANCE_ID);
-    return { clock, events, profiles, test };
+    return { events, profiles, test, unsubscribe };
 }
 
 describe("ProfileModule", () => {
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
     it("names the one person behind this installation and refuses a second", async () => {
         const fixture = await createFixture("profile-create");
         const ctx = fixture.test.context;
@@ -76,7 +81,7 @@ describe("ProfileModule", () => {
                 name: "Steve",
             });
 
-            fixture.clock.now = 2_000;
+            vi.setSystemTime(2_000);
             const updated = await fixture.profiles.update(ctx, profile.id, { name: "Steve K" });
             expect(updated).toEqual({
                 ...profile,
@@ -86,7 +91,7 @@ describe("ProfileModule", () => {
             });
             await expect(fixture.profiles.get(ctx)).resolves.toEqual(updated);
 
-            fixture.clock.now = 3_000;
+            vi.setSystemTime(3_000);
             await expect(
                 fixture.profiles.update(ctx, profile.id, { email: "steve@elsewhere.test" }),
             ).resolves.toMatchObject({
@@ -123,7 +128,7 @@ describe("ProfileModule", () => {
                 name: "Steve",
             });
 
-            const elsewhere = new ProfileModule({ now: () => 4_000 });
+            const elsewhere = new ProfileModule();
             elsewhere.open(OTHER_INSTANCE_ID);
             await expect(elsewhere.isLocal(ctx, profile.id)).resolves.toBe(false);
             await expect(elsewhere.update(ctx, profile.id, { name: "Stolen" })).rejects.toThrow(
@@ -144,7 +149,7 @@ describe("ProfileModule", () => {
                 name: "Steve",
             });
 
-            const unopened = new ProfileModule({});
+            const unopened = new ProfileModule();
             await expect(unopened.isLocal(ctx, profile.id)).resolves.toBe(false);
             await expect(unopened.get(ctx)).resolves.toEqual(profile);
             await expect(
@@ -194,7 +199,7 @@ describe("ProfileModule", () => {
                 email: "steve@example.test",
                 name: "Steve",
             });
-            fixture.clock.now = 2_000;
+            vi.setSystemTime(2_000);
             await fixture.profiles.update(ctx, profile.id, { name: "Steve K" });
 
             expect(fixture.events.every((event) => Value.Check(profileChangedEventSchema, event)))
@@ -213,6 +218,69 @@ describe("ProfileModule", () => {
                     type: "profile_changed",
                 },
             ]);
+        } finally {
+            fixture.test.close();
+        }
+    });
+
+    it("stops telling a listener that has walked away, and keeps the others", async () => {
+        const fixture = await createFixture("profile-unsubscribe");
+        const ctx = fixture.test.context;
+        try {
+            const second: string[] = [];
+            const stopSecond = fixture.profiles.onEvent((_ctx, event) => {
+                second.push(event.id);
+            });
+
+            const profile = await fixture.profiles.create(ctx, {
+                email: "steve@example.test",
+                name: "Steve",
+            });
+            expect(fixture.events).toHaveLength(1);
+            expect(second).toEqual([`${profile.id}-1`]);
+
+            fixture.unsubscribe();
+            fixture.unsubscribe();
+            await fixture.profiles.update(ctx, profile.id, { name: "Steve K" });
+
+            expect(fixture.events).toHaveLength(1);
+            expect(second).toEqual([`${profile.id}-1`, `${profile.id}-2`]);
+
+            stopSecond();
+            await fixture.profiles.update(ctx, profile.id, { name: "Steve Korshakov" });
+            expect(second).toHaveLength(2);
+        } finally {
+            fixture.test.close();
+        }
+    });
+
+    it("saves the change even when a listener throws afterwards", async () => {
+        const fixture = await createFixture("profile-listener-failure");
+        const ctx = fixture.test.context;
+        try {
+            fixture.profiles.onEvent(() => {
+                throw new Error("listener exploded");
+            });
+
+            const profile = await fixture.profiles.create(ctx, {
+                email: "steve@example.test",
+                name: "Steve",
+            });
+            await expect(fixture.profiles.get(ctx)).resolves.toEqual(profile);
+            expect(fixture.events).toHaveLength(1);
+        } finally {
+            fixture.test.close();
+        }
+    });
+
+    it("refuses anything but a function as a listener", async () => {
+        const fixture = await createFixture("profile-listener-shape");
+        try {
+            for (const candidate of [undefined, null, 42, "listener", {}]) {
+                expect(() => fixture.profiles.onEvent(candidate as never)).toThrow(
+                    "Profile event listener must be a function.",
+                );
+            }
         } finally {
             fixture.test.close();
         }

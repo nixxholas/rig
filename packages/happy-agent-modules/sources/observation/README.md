@@ -3,8 +3,8 @@
 `ObservationModule` is what the agent records about itself: logs, traces, and a
 readable copy of its history. Three audiences, one module, because all three
 answer the same question — what was this agent actually doing — and all three
-need the same things from the host: somewhere on disk, a lifetime, and to be
-started before any work happens.
+need the same things: somewhere on disk, a lifetime, and to be started before
+any work happens.
 
 ```text
 ~/.happy/agent/observation/
@@ -17,13 +17,18 @@ started before any work happens.
 
 ## Starting it
 
-`ObservationModule.start` opens only what the settings ask for. The root it
-returns from `install` is the root every other lifetime must be derived from:
+`ObservationModule.start` takes the `ConfigModule` — it reads the paths,
+settings, and version it needs from there rather than being handed a
+configuration — and opens only what those settings ask for. The root it returns
+from `install` is the root every other lifetime must be derived from:
 
 ```ts
-const observation = await ObservationModule.start({ configuration });
+const observation = await ObservationModule.start(config);
 const ctx = observation.install(rootContext);
 ```
+
+A second, optional argument labels the traces with the deployment they came
+from; it defaults to `"production"`.
 
 Contexts are immutable, so this ordering is the whole design. `ctx.log` and
 `ctx.span` exist on every context and do nothing at all until a logger and a
@@ -90,7 +95,8 @@ reads it back through a tool. The dump is for the other audience: a person
 tailing a file to see what their agent said and did, without a query, a client,
 or a running daemon.
 
-It listens on `HistoryModule`'s `onAppend`, which runs _after_ the history
+It subscribes to the history module — `history.onAppend(observation.recordHistory)`,
+after both modules exist — and that subscription runs _after_ the history
 transaction commits, so the file describes exactly what the agent durably
 remembers. Agent IDs are validated before they become file names. A message
 that will not serialize is skipped rather than replaced with a placeholder,

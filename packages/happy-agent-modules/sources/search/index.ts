@@ -1,5 +1,9 @@
 export * from "./Search.js";
-export * from "./SearchModule.js";
+export {
+    MAX_SEARCH_FETCH_CHARACTERS,
+    MAX_SEARCH_OUTPUT_CHARACTERS,
+    SearchModule,
+} from "./SearchModule.js";
 export { bedrockWebSearchTool } from "./tools/bedrock_web_search.js";
 export { claudeWebSearchTool } from "./tools/claude_web_search.js";
 export { codexWebSearchTool } from "./tools/codex_web_search.js";

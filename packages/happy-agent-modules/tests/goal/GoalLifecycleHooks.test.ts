@@ -43,10 +43,7 @@ function ownerContext(
 
 describe("Goal lifecycle hooks", () => {
     it("clears stale run state before a loop and records the current lifecycle", async () => {
-        const module = new GoalModule({
-            idFactory: () => "lifecycle-a",
-            clock: () => 100,
-        });
+        const module = new GoalModule();
         const database = moduleDatabase(module.migrations, "goal-before-loop-state-test");
         await database.ready;
         const agents = recordingAgents();
@@ -57,7 +54,7 @@ describe("Goal lifecycle hooks", () => {
             [GOAL_OBSERVED_LIFECYCLE_ID_KEY, "stale-lifecycle"],
         ]);
         try {
-            await module.setGoal(ctx, "agent-a", "ship it");
+            await module.setGoal(ctx, "agent-a", "ship it", "lifecycle-a");
             await hooks.beforeAgentLoopTransact!(
                 ctx,
                 { agent: { id: "agent-a" }, runKV: store.runKV } as never,
@@ -83,10 +80,7 @@ describe("Goal lifecycle hooks", () => {
     });
 
     it("returns a repeatable attributed continuation action and resets prior failures", async () => {
-        const module = new GoalModule({
-            idFactory: () => "lifecycle-a",
-            clock: () => 100,
-        });
+        const module = new GoalModule();
         const database = moduleDatabase(module.migrations, "goal-continuation-action-test");
         await database.ready;
         const agents = recordingAgents();
@@ -98,7 +92,7 @@ describe("Goal lifecycle hooks", () => {
             [GOAL_FAILURE_COUNT_KEY, 2],
         ]);
         try {
-            await module.setGoal(ctx, "agent-a", "ship <it>");
+            await module.setGoal(ctx, "agent-a", "ship <it>", "lifecycle-a");
             const scope = { agent: { id: "agent-a" }, runKV: store.runKV } as never;
             const first = await hooks.afterAgentLoop!(ctx, scope, { loopId: "loop-a" });
             const second = await hooks.afterAgentLoop!(ctx, scope, { loopId: "loop-a" });
@@ -134,26 +128,12 @@ describe("Goal lifecycle hooks", () => {
     });
 
     it("blocks after the configured consecutive failure count and interrupts host work", async () => {
-        const interruptions: string[] = [];
         const events: string[] = [];
-        const module = new GoalModule({
-            host: {
-                interruptGoalWork: (_ctx, _agentId, reason) => {
-                    interruptions.push(reason);
-                },
-            },
-            listener: {
-                onEventTransactional: (_ctx, event) => {
-                    events.push(
-                        `${event.type}:${
-                            event.type === "goal_cleared" ? "cleared" : event.goal.status
-                        }`,
-                    );
-                },
-            },
-            idFactory: () => "lifecycle-a",
-            eventIdFactory: () => "event-a",
-            clock: () => 100,
+        const module = new GoalModule();
+        module.onEventTransactional((_ctx, event) => {
+            events.push(
+                `${event.type}:${event.type === "goal_cleared" ? "cleared" : event.goal.status}`,
+            );
         });
         const database = moduleDatabase(module.migrations, "goal-failure-block-test");
         await database.ready;
@@ -165,7 +145,7 @@ describe("Goal lifecycle hooks", () => {
             [GOAL_LAST_INFERENCE_KEY, { state: "error" }],
         ]);
         try {
-            await module.setGoal(ctx, "agent-a", "ship it");
+            await module.setGoal(ctx, "agent-a", "ship it", "lifecycle-a");
             const scope = { agent: { id: "agent-a" }, runKV: store.runKV } as never;
 
             await expect(
@@ -188,17 +168,15 @@ describe("Goal lifecycle hooks", () => {
                 status: "blocked",
             });
             expect(events).toEqual(["goal_set:active", "goal_status_changed:blocked"]);
-            expect(interruptions).toEqual(["goal_blocked"]);
+            // Blocking happens inside the agent's own finished loop, so nothing needs stopping.
+            expect(agents.aborts).toEqual([]);
         } finally {
             database.close();
         }
     });
 
     it("does not continue after a cancelled inference", async () => {
-        const module = new GoalModule({
-            idFactory: () => "lifecycle-a",
-            clock: () => 100,
-        });
+        const module = new GoalModule();
         const database = moduleDatabase(module.migrations, "goal-cancelled-continuation-test");
         await database.ready;
         const agents = recordingAgents();
@@ -209,7 +187,7 @@ describe("Goal lifecycle hooks", () => {
             [GOAL_LAST_INFERENCE_KEY, { state: "cancelled" }],
         ]);
         try {
-            await module.setGoal(ctx, "agent-a", "ship it");
+            await module.setGoal(ctx, "agent-a", "ship it", "lifecycle-a");
             await expect(
                 hooks.afterAgentLoop!(
                     ctx,
@@ -223,10 +201,7 @@ describe("Goal lifecycle hooks", () => {
     });
 
     it("does not continue for stale lifecycle observations and rejects corrupt run state", async () => {
-        const module = new GoalModule({
-            idFactory: () => "lifecycle-a",
-            clock: () => 100,
-        });
+        const module = new GoalModule();
         const database = moduleDatabase(module.migrations, "goal-stale-observation-test");
         await database.ready;
         const agents = recordingAgents();
@@ -237,7 +212,7 @@ describe("Goal lifecycle hooks", () => {
             [GOAL_LAST_INFERENCE_KEY, { state: "normal" }],
         ]);
         try {
-            await module.setGoal(ctx, "agent-a", "ship it");
+            await module.setGoal(ctx, "agent-a", "ship it", "lifecycle-a");
             const scope = { agent: { id: "agent-a" }, runKV: store.runKV } as never;
             await expect(
                 hooks.afterAgentLoop!(ctx, scope, { loopId: "loop-a" }),
@@ -259,16 +234,7 @@ describe("Goal lifecycle hooks", () => {
     });
 
     it("pauses cancelled, aborted, and missing-inference turns but leaves normal turns active", async () => {
-        const interruptions: string[] = [];
-        const module = new GoalModule({
-            host: {
-                interruptGoalWork: (_ctx, _agentId, reason) => {
-                    interruptions.push(reason);
-                },
-            },
-            idFactory: () => "lifecycle-a",
-            clock: () => 100,
-        });
+        const module = new GoalModule();
         const database = moduleDatabase(module.migrations, "goal-turn-outcomes-test");
         await database.ready;
         const agents = recordingAgents();
@@ -338,18 +304,15 @@ describe("Goal lifecycle hooks", () => {
             await expect(module.goal(database.context, "agent-d")).resolves.toMatchObject({
                 status: "paused",
             });
-            expect(interruptions).toEqual([
-                "session_failed",
-                "session_interrupted",
-                "session_failed",
-            ]);
+            // Each of these runs after the turn already ended, so nothing is aborted.
+            expect(agents.aborts).toEqual([]);
         } finally {
             database.close();
         }
     });
 
     it("rejects malformed inference hook state instead of persisting it", async () => {
-        const module = new GoalModule({});
+        const module = new GoalModule();
         const database = moduleDatabase(module.migrations, "goal-inference-validation-test");
         await database.ready;
         const agents = recordingAgents();

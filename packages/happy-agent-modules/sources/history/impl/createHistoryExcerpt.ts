@@ -1,6 +1,6 @@
-import { formatHistoryMessage, truncate } from "../../history/impl/formatHistoryMessage.js";
-import { summarizeHistory, type HistoryStats } from "../../history/impl/summarizeHistory.js";
-import type { HistoryRecord } from "../../history/HistoryStore.js";
+import type { HistoryRecord } from "../HistoryStore.js";
+import { formatHistoryMessage, truncate } from "./formatHistoryMessage.js";
+import { summarizeHistory, type HistoryStats } from "./summarizeHistory.js";
 
 /** How many of the earliest messages are worth showing: where the work was asked for. */
 const BEGINNING_MESSAGES = 4;
@@ -18,9 +18,8 @@ export interface HistoryExcerpt {
     /** What the whole history amounts to. */
     readonly stats: HistoryStats;
     /**
-     * True when the history module supplied only the bounded two-ended sample and no exact
-     * aggregate.
-     * Callers must label these counts as sampled rather than archive-wide totals.
+     * True when only the bounded two-ended sample could be counted and no exact archive aggregate
+     * was available. Callers must label these counts as sampled rather than archive-wide totals.
      */
     readonly statsAreSampled: boolean;
 }

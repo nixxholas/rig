@@ -1,10 +1,30 @@
 import { sql } from "drizzle-orm";
 import { agentDatabaseRows, agentDatabaseRun } from "@slopus/happy-agent-base";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { EventsModule } from "../../sources/events/EventsModule.js";
+import { EVENTS_CAPACITY, EventsModule } from "../../sources/events/EventsModule.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
 import { resolveModuleHooks } from "../support/moduleHooks.js";
+
+/**
+ * The journal with a deliberately small live window.
+ *
+ * `capacity()` is the one place the module answers how big its window is, so overriding it is how
+ * retention, origin advancement, and replay bounds are exercised without recording ten thousand
+ * events. Nothing is stubbed: the same code runs against a smaller number.
+ */
+class SmallWindowEventsModule extends EventsModule {
+    readonly #capacity: number;
+
+    constructor(capacity: number) {
+        super();
+        this.#capacity = capacity;
+    }
+
+    override capacity(): number {
+        return this.#capacity;
+    }
+}
 
 function eventTypes(events: readonly { readonly type: string }[]): string[] {
     return events.map((event) => event.type);
@@ -24,8 +44,12 @@ function systemScope() {
 }
 
 describe("EventsModule", () => {
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
     it("starts at a stable origin and supports bounded replay from every cursor", async () => {
-        const events = new EventsModule({ now: () => 100 });
+        const events = new EventsModule();
         const database = moduleDatabase(events.migrations ?? [], "events-replay-test");
         await database.ready;
         try {
@@ -78,14 +102,16 @@ describe("EventsModule", () => {
         }
     });
 
-    it("rejects invalid capacities, replay limits, and append envelopes", async () => {
-        for (const capacity of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 100_001]) {
-            expect(() => new EventsModule({ capacity })).toThrow(
-                "The event queue capacity must be between 1 and 100,000.",
-            );
-        }
+    it("keeps one fixed window size no caller can widen", () => {
+        expect(new EventsModule().capacity()).toBe(EVENTS_CAPACITY);
+        expect(new EventsModule().replay(undefined, EVENTS_CAPACITY)).toBeDefined();
+        expect(() => new EventsModule().replay(undefined, EVENTS_CAPACITY + 1)).toThrow(
+            `The event replay limit must be between 1 and ${EVENTS_CAPACITY}.`,
+        );
+    });
 
-        const events = new EventsModule({ capacity: 2, now: () => 100 });
+    it("rejects replay limits past its window and invalid append envelopes", async () => {
+        const events = new SmallWindowEventsModule(2);
         const database = moduleDatabase(events.migrations ?? [], "events-bounds-test");
         await database.ready;
         try {
@@ -136,7 +162,7 @@ describe("EventsModule", () => {
     });
 
     it("owns its journal migrations and reloads durable events", async () => {
-        const first = new EventsModule({ now: () => 100 });
+        const first = new EventsModule();
         const database = moduleDatabase(first.migrations ?? [], "events-restart-test");
         await database.ready;
         try {
@@ -150,7 +176,7 @@ describe("EventsModule", () => {
             expect(first.latestCursor("agent-1")).toBe(recorded.id);
             expect(first.replay(first.originCursor())?.events).toEqual([recorded]);
 
-            const restarted = new EventsModule({ now: () => 50 });
+            const restarted = new EventsModule();
             await restarted.beforeStart?.(database.context);
 
             expect(restarted.cursor()).toBe(recorded.id);
@@ -161,8 +187,8 @@ describe("EventsModule", () => {
         }
     });
 
-    it("retains only the configured live window and persists the advanced origin", async () => {
-        const first = new EventsModule({ capacity: 2, now: () => 100 });
+    it("retains only its live window and persists the advanced origin", async () => {
+        const first = new SmallWindowEventsModule(2);
         const database = moduleDatabase(first.migrations ?? [], "events-retention-test");
         await database.ready;
         try {
@@ -184,7 +210,7 @@ describe("EventsModule", () => {
             expect(first.cursor()).toBe(thirdEvent.id);
             expect(first.replay(first.originCursor())?.events).toEqual([secondEvent, thirdEvent]);
 
-            const restarted = new EventsModule({ capacity: 2, now: () => 50 });
+            const restarted = new SmallWindowEventsModule(2);
             await restarted.beforeStart?.(database.context);
             expect(restarted.originCursor()).toBe(firstEvent.id);
             expect(restarted.replay(restarted.originCursor())?.events).toEqual([
@@ -196,8 +222,8 @@ describe("EventsModule", () => {
         }
     });
 
-    it("advances the origin when a restart lowers the configured capacity", async () => {
-        const first = new EventsModule({ capacity: 5, now: () => 125 });
+    it("advances the origin when a restart runs with a smaller window", async () => {
+        const first = new SmallWindowEventsModule(5);
         const database = moduleDatabase(first.migrations ?? [], "events-capacity-change-test");
         await database.ready;
         try {
@@ -214,7 +240,7 @@ describe("EventsModule", () => {
                     ),
             );
 
-            const restarted = new EventsModule({ capacity: 2, now: () => 125 });
+            const restarted = new SmallWindowEventsModule(2);
             await restarted.beforeStart?.(database.context);
             expect(restarted.originCursor()).toBe(recorded[2]?.id);
             expect(restarted.replay(restarted.originCursor())?.events).toEqual(recorded.slice(3));
@@ -224,7 +250,7 @@ describe("EventsModule", () => {
     });
 
     it("finds accepted-message cursors and trims an exact durable prefix", async () => {
-        const events = new EventsModule({ now: () => 200 });
+        const events = new EventsModule();
         const database = moduleDatabase(events.migrations ?? [], "events-trim-test");
         await database.ready;
         try {
@@ -253,7 +279,7 @@ describe("EventsModule", () => {
     });
 
     it("trims through the head and rejects unknown cursors without changing state", async () => {
-        const events = new EventsModule({ now: () => 200 });
+        const events = new EventsModule();
         const database = moduleDatabase(events.migrations ?? [], "events-trim-head-test");
         await database.ready;
         try {
@@ -293,7 +319,7 @@ describe("EventsModule", () => {
     });
 
     it("does not publish an in-memory trim after its outer transaction rolls back", async () => {
-        const events = new EventsModule({ now: () => 225 });
+        const events = new EventsModule();
         const database = moduleDatabase(events.migrations ?? [], "events-trim-rollback-test");
         await database.ready;
         try {
@@ -328,9 +354,7 @@ describe("EventsModule", () => {
 
     it("does not publish or trim in-memory state when the outer transaction rolls back", async () => {
         const received: string[] = [];
-        const events = new EventsModule({
-            now: () => 200,
-        });
+        const events = new EventsModule();
         events.observe({
             onEvent: (_ctx, event) => {
                 received.push(event.type);
@@ -366,9 +390,7 @@ describe("EventsModule", () => {
         const transactional: unknown[] = [];
         const postCommit: unknown[] = [];
         const ordinary: unknown[] = [];
-        const events = new EventsModule({
-            now: () => 300,
-        });
+        const events = new EventsModule();
         events.observe({
             onEventTransactional: (_ctx, event) => {
                 transactional.push(event);
@@ -408,9 +430,7 @@ describe("EventsModule", () => {
 
     it("isolates ordinary listener failures and contains post-commit failures", async () => {
         const ordinary: string[] = [];
-        const events = new EventsModule({
-            now: () => 300,
-        });
+        const events = new EventsModule();
         events.observe({
             onEvent: () => {
                 throw new Error("post-commit observer failed");
@@ -439,9 +459,7 @@ describe("EventsModule", () => {
     });
 
     it("rolls back durable state when the transactional module listener rejects", async () => {
-        const events = new EventsModule({
-            now: () => 300,
-        });
+        const events = new EventsModule();
         events.observe({
             onEventTransactional: () => {
                 throw new Error("transactional observer failed");
@@ -472,7 +490,7 @@ describe("EventsModule", () => {
     });
 
     it("clones input payloads and rejects unsupported or oversized payloads before writing", async () => {
-        const events = new EventsModule({ now: () => 400 });
+        const events = new EventsModule();
         const database = moduleDatabase(events.migrations ?? [], "events-payload-test");
         await database.ready;
         try {
@@ -497,9 +515,11 @@ describe("EventsModule", () => {
         }
     });
 
-    it("keeps event IDs and timestamps monotonic when the injected clock moves backward", async () => {
-        let now = 500;
-        const events = new EventsModule({ now: () => now });
+    it("keeps event IDs and timestamps monotonic when the wall clock moves backward", async () => {
+        // Only the clock is moved; the database and its promises keep real timers.
+        vi.useFakeTimers({ toFake: ["Date"] });
+        vi.setSystemTime(500);
+        const events = new EventsModule();
         const database = moduleDatabase(events.migrations ?? [], "events-clock-test");
         await database.ready;
         try {
@@ -508,12 +528,12 @@ describe("EventsModule", () => {
                 payload: {},
                 type: "test.first",
             });
-            now = 499;
+            vi.setSystemTime(499);
             const second = await events.record(database.context, {
                 payload: {},
                 type: "test.second",
             });
-            now = 501;
+            vi.setSystemTime(501);
             const third = await events.record(database.context, {
                 payload: {},
                 type: "test.third",
@@ -529,7 +549,7 @@ describe("EventsModule", () => {
     });
 
     it("records all lifecycle and provider events, then clears the active run on settlement", async () => {
-        const events = new EventsModule({ now: () => 500 });
+        const events = new EventsModule();
         const database = moduleDatabase(events.migrations ?? [], "events-hooks-test");
         await database.ready;
         try {
@@ -608,7 +628,7 @@ describe("EventsModule", () => {
     });
 
     it("records restored, archived, permission, and metadata lifecycle hooks", async () => {
-        const events = new EventsModule({ now: () => 525 });
+        const events = new EventsModule();
         const database = moduleDatabase(events.migrations ?? [], "events-lifecycle-hooks-test");
         await database.ready;
         try {
@@ -645,7 +665,7 @@ describe("EventsModule", () => {
     });
 
     it("keeps one run identity for send and steering messages accepted in one transaction", async () => {
-        const events = new EventsModule({ now: () => 535 });
+        const events = new EventsModule();
         const database = moduleDatabase(events.migrations ?? [], "events-steering-identity-test");
         await database.ready;
         try {
@@ -675,7 +695,7 @@ describe("EventsModule", () => {
     });
 
     it("projects reasoning, tool-call, server-result, retry, reset, and done variants", async () => {
-        const events = new EventsModule({ now: () => 550 });
+        const events = new EventsModule();
         const database = moduleDatabase(events.migrations ?? [], "events-provider-projection-test");
         await database.ready;
         try {
@@ -812,7 +832,7 @@ describe("EventsModule", () => {
     });
 
     it("does not carry a failed inference message into a later successful retry", async () => {
-        const events = new EventsModule({ now: () => 575 });
+        const events = new EventsModule();
         const database = moduleDatabase(events.migrations ?? [], "events-retry-state-test");
         await database.ready;
         try {
@@ -855,7 +875,7 @@ describe("EventsModule", () => {
     });
 
     it("rebuilds a crashed provider block on agent restoration", async () => {
-        const first = new EventsModule({ now: () => 600 });
+        const first = new EventsModule();
         const database = moduleDatabase(first.migrations ?? [], "events-recovery-test");
         await database.ready;
         try {
@@ -872,7 +892,7 @@ describe("EventsModule", () => {
                 delta: "partial",
             });
 
-            const restarted = new EventsModule({ now: () => 601 });
+            const restarted = new EventsModule();
             const restartedHooks = await resolveModuleHooks(database.context, restarted);
             await restartedHooks.agentRestoredTransact?.(database.context, systemScope(), {
                 id: "agent-recovery",
@@ -894,7 +914,7 @@ describe("EventsModule", () => {
     });
 
     it("rejects provider deltas without a matching start and leaves no partial event", async () => {
-        const events = new EventsModule({ now: () => 700 });
+        const events = new EventsModule();
         const database = moduleDatabase(events.migrations ?? [], "events-provider-validation-test");
         await database.ready;
         try {
@@ -912,7 +932,7 @@ describe("EventsModule", () => {
     });
 
     it("serializes concurrent appends in ID order", async () => {
-        const events = new EventsModule({ capacity: 100, now: () => 800 });
+        const events = new SmallWindowEventsModule(100);
         const database = moduleDatabase(events.migrations ?? [], "events-concurrent-test");
         await database.ready;
         try {
@@ -1130,7 +1150,7 @@ describe("EventsModule", () => {
     });
 
     it("does not alias mutable persisted payloads across reloads", async () => {
-        const first = new EventsModule({ now: () => 900 });
+        const first = new EventsModule();
         const database = moduleDatabase(first.migrations ?? [], "events-payload-reload-test");
         await database.ready;
         try {
@@ -1141,7 +1161,7 @@ describe("EventsModule", () => {
             });
             expect((recorded.payload as { omitted?: undefined }).omitted).toBeUndefined();
 
-            const restarted = new EventsModule({ now: () => 900 });
+            const restarted = new EventsModule();
             await restarted.beforeStart?.(database.context);
             const reloadedPayload = restarted.replay(restarted.originCursor())?.events[0]?.payload;
             expect(reloadedPayload).toEqual(recorded.payload);
@@ -1158,9 +1178,7 @@ describe("EventsModule", () => {
 
     it("deep-freezes values nested inside structured-clone collection payloads", async () => {
         const observed: { readonly payload: unknown }[] = [];
-        const events = new EventsModule({
-            now: () => 950,
-        });
+        const events = new EventsModule();
         events.observe({
             onEvent: (_ctx, event) => {
                 observed.push(event);

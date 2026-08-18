@@ -17,14 +17,11 @@ function ownerContext(context: Context, agentId: string): Context {
 
 describe("Goal concurrent public mutations", () => {
     it("serializes competing goal creation through the database transaction", async () => {
-        const module = new GoalModule({
-            idFactory: () => "lifecycle-a",
-            clock: () => 100,
-        });
+        const module = new GoalModule();
         const database = moduleDatabase(module.migrations, "goal-concurrent-create-test");
         await database.ready;
         const agents = recordingAgents();
-        await module.beforeStart(database.context, agents.ref);
+        module.beforeStart(database.context, agents.ref);
         const ctx = ownerContext(database.context, "agent-a");
         try {
             const results = await Promise.allSettled([
@@ -52,26 +49,20 @@ describe("Goal concurrent public mutations", () => {
     });
 
     it("allows concurrent identical activation retries to converge on one goal", async () => {
-        let lifecycleCalls = 0;
-        const module = new GoalModule({
-            idFactory: () => {
-                lifecycleCalls += 1;
-                return "lifecycle-a";
-            },
-            clock: () => 100,
-        });
+        const module = new GoalModule();
         const database = moduleDatabase(module.migrations, "goal-concurrent-identical-test");
         await database.ready;
         const agents = recordingAgents();
-        await module.beforeStart(database.context, agents.ref);
-        const ctx = ownerContext(database.context, "agent-a");
+        module.beforeStart(database.context, agents.ref);
         try {
+            // Activated from outside the agent, so each new lifecycle is visible as a wake.
             const results = await Promise.allSettled([
-                module.setGoal(ctx, "agent-a", "same"),
-                module.setGoal(ctx, "agent-a", "same"),
+                module.setGoal(database.context, "agent-a", "same"),
+                module.setGoal(database.context, "agent-a", "same"),
             ]);
             expect(results.every((result) => result.status === "fulfilled")).toBe(true);
-            expect(lifecycleCalls).toBe(1);
+            // One lifecycle, so one wake: the retry observed the first caller's committed goal.
+            expect(agents.wakes).toHaveLength(1);
             await expect(module.goal(database.context, "agent-a")).resolves.toMatchObject({
                 objective: "same",
                 status: "active",

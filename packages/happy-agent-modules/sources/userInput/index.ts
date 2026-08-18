@@ -100,12 +100,16 @@ export {
 } from "./UserInputRequest.js";
 export {
     assertUserInputEvent,
+    assertUserInputEventListener,
+    userInputEventListenerSchema,
     userInputEventSchema,
-    userInputModuleListenerSchema,
     type UserInputEvent,
-    type UserInputModuleListener,
+    type UserInputEventListener,
+    type UserInputUnsubscribe,
 } from "./UserInputEvent.js";
 export {
+    MAX_USER_INPUT_OUTPUT_CHARACTERS,
+    MAX_USER_INPUT_PAGE_SIZE,
     UserInputModule,
     formatDetailPageForModel,
     formatForModel,
@@ -113,23 +117,13 @@ export {
     formatUserInputDetailPageForModel,
     formatUserInputPageForModel,
     formatUserInputForModel,
-    userInputClockSchema,
-    userInputEventIdFactorySchema,
-    userInputModuleOptionsSchema,
-    userInputIdFactorySchema,
-    userInputPostCommitErrorSchema,
-    type UserInputModuleOptions,
 } from "./UserInputModule.js";
 export {
     assertUserInputContext,
     assertUserInputPage,
     assertUserInputVoidResult,
     userInputAuthorizationActionSchema,
-    userInputAuthorizationSchema,
-    userInputPresencePolicySchema,
-    type UserInputAuthorization,
     type UserInputAuthorizationAction,
-    type UserInputPresencePolicy,
 } from "./UserInputStore.js";
 export { requestUserInputTool } from "./tools/request_user_input.js";
 export { cancelAskTool } from "./tools/cancel_ask.js";

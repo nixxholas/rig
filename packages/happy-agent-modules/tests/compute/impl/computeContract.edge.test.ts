@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ComputePermissions } from "../../../sources/compute/Compute.js";
 import { computeToolVendor } from "../../../sources/compute/ComputeToolVendor.js";
-import { FileReadLog } from "../../../sources/compute/impl/FileReadLog.js";
+import { FileReadLog } from "../../../sources/impl/FileReadLog.js";
 import { listComputeDirectory } from "../../../sources/compute/impl/listComputeDirectory.js";
 import { moveComputeFile } from "../../../sources/compute/impl/moveComputeFile.js";
 import { readComputeCommand } from "../../../sources/compute/impl/readComputeCommand.js";

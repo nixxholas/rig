@@ -8,6 +8,7 @@ import {
     createComputeModules,
     type HostComputeProvider,
 } from "../../sources/index.js";
+import { testConfig } from "../support/computeModule.js";
 import { resolveModuleHooks } from "../support/moduleHooks.js";
 import { FakeCompute } from "./support/FakeCompute.js";
 import { computeToolset } from "./support/computeTools.js";
@@ -27,13 +28,8 @@ describe("ComputeModule", () => {
                 return compute;
             },
         };
-        const created = createComputeModules({ provider });
-        const systemPrompt = new SystemPromptModule({
-            compute: {
-                resolve: async (resolveCtx, agentId) =>
-                    await created.computeModule.resolve(resolveCtx, agentId),
-            },
-        });
+        const created = createComputeModules(ComputeModule.withProvider(testConfig, provider));
+        const systemPrompt = new SystemPromptModule(testConfig, created.computeModule);
         const agentACtx = withAgentConfig(ctx, {
             modules: { compute: { cwd: "/workspace/a" } },
         });
@@ -86,7 +82,7 @@ describe("ComputeModule", () => {
     });
 
     it("does nothing for an agent without compute configuration", async () => {
-        const module = new ComputeModule();
+        const module = new ComputeModule(testConfig);
         await expect(module.resolve(ctx, "agent-a")).resolves.toBeUndefined();
         const hooks = await resolveModuleHooks(ctx, module);
         await expect(hooks.tools!(ctx, { agent: { id: "agent-a" } } as never)).resolves.toEqual([]);
@@ -151,7 +147,7 @@ describe("ComputeModule", () => {
             id: "host",
             create: async () => compute,
         };
-        const module = new ComputeModule({ provider });
+        const module = ComputeModule.withProvider(testConfig, provider);
         const agentCtx = withAgentConfig(ctx, {
             modules: { compute: { cwd: "/srv/app" } },
         });
@@ -173,8 +169,9 @@ describe("ComputeModule", () => {
 
     it("rejects invalid computes returned by the global provider", async () => {
         const dockerLike = { ...new FakeCompute(), kind: "docker" };
-        const dockerModule = new ComputeModule({
-            provider: { id: "host", create: async () => dockerLike as never },
+        const dockerModule = ComputeModule.withProvider(testConfig, {
+            id: "host",
+            create: async () => dockerLike as never,
         });
         const agentCtx = withAgentConfig(ctx, {
             modules: { compute: { cwd: "/workspace" } },
@@ -184,8 +181,9 @@ describe("ComputeModule", () => {
         );
         const mismatched = new FakeCompute();
         (mismatched.fs as { cwd: string }).cwd = "/another-workspace";
-        const mismatchedModule = new ComputeModule({
-            provider: { id: "host", create: async () => mismatched },
+        const mismatchedModule = ComputeModule.withProvider(testConfig, {
+            id: "host",
+            create: async () => mismatched,
         });
         await expect(mismatchedModule.resolve(agentCtx, "agent-a")).rejects.toThrow(
             "mismatched working directories",

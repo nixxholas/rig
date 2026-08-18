@@ -1,7 +1,9 @@
 import {
     withAgentConfig,
+    type AgentModel,
     type AgentModuleAgent,
     type AgentModuleScope,
+    type MaybePromise,
 } from "@slopus/happy-agent-base";
 import type { ProviderModelCompatibilityType } from "@slopus/happy-providers";
 import { Value } from "@sinclair/typebox/value";
@@ -14,7 +16,6 @@ import {
     MAX_SYSTEM_PROMPT_OUTPUT_BYTES,
     MAX_SYSTEM_PROMPT_AVAILABLE_MODELS_BYTES,
     MAX_SYSTEM_PROMPT_AVAILABLE_MODELS,
-    systemPromptModuleOptionsSchema,
     systemPromptSelectionSchema,
 } from "../../sources/systemPrompt/SystemPromptModule.js";
 import { systemPromptIdentitySchema } from "../../sources/systemPrompt/SystemPromptIdentity.js";
@@ -26,6 +27,7 @@ import { formatAvailableModels } from "../../sources/systemPrompt/impl/assembleE
 import { systemPromptForModel } from "../../sources/systemPrompt/impl/systemPromptForModel.js";
 import { FakeCompute } from "../compute/support/FakeCompute.js";
 import { resolveModuleHooks } from "../support/moduleHooks.js";
+import { catalogModel, systemPromptWorld } from "./support/systemPromptWorld.js";
 
 const ctx: Context = createRootContext();
 const testEnvironment = {
@@ -34,6 +36,10 @@ const testEnvironment = {
     workingDirectory: "/workspace",
     shell: "/bin/zsh",
 };
+const twoModelCatalog: readonly AgentModel[] = [
+    catalogModel("Claude Opus", "anthropic/opus-5", "anthropic"),
+    catalogModel("Codex", "openai/gpt-5.6-sol", "openai"),
+];
 
 /** A scope naming only what the module reads: which model the agent is running on. */
 function scopeOf(
@@ -57,7 +63,17 @@ function contextWithEnvironment(environment = testEnvironment): Context {
     return withAgentConfig(ctx, { environment });
 }
 
-function catalogWithBytes(targetBytes: number) {
+/** A module whose configuration serves exactly the catalog a test names. */
+async function moduleWithCatalog(models: readonly AgentModel[] = []): Promise<{
+    readonly module: SystemPromptModule;
+    readonly instructions: (promptCtx: Context, scope: AgentModuleScope) => MaybePromise<string>;
+}> {
+    const world = await systemPromptWorld({ models });
+    const hooks = await resolveModuleHooks(ctx, world.module);
+    return { module: world.module, instructions: hooks.instructions! };
+}
+
+function catalogWithBytes(targetBytes: number): AgentModel[] {
     const fieldLength = 158;
     const catalog = Array.from({ length: MAX_SYSTEM_PROMPT_AVAILABLE_MODELS }, () => ({
         name: "x".repeat(fieldLength),
@@ -74,17 +90,16 @@ function catalogWithBytes(targetBytes: number) {
         catalog[index]!.name = "x".repeat(fieldLength + added);
         remaining -= added;
     }
-    return catalog;
+    return catalog.map(({ name, id, providerId }) => catalogModel(name, id, providerId));
 }
 
 describe("SystemPromptModule", () => {
     it("gives each model the prompt it was written for", async () => {
-        const module = new SystemPromptModule();
-        const hooks = await resolveModuleHooks(ctx, module);
+        const { instructions } = await moduleWithCatalog();
 
-        const opus5 = await hooks.instructions!(ctx, scopeOf("anthropic/opus-5", "claude"));
-        const opus48 = await hooks.instructions!(ctx, scopeOf("anthropic/opus-4-8", "claude"));
-        const codex = await hooks.instructions!(ctx, scopeOf("openai/gpt-5.6-sol", "codex"));
+        const opus5 = await instructions(ctx, scopeOf("anthropic/opus-5", "claude"));
+        const opus48 = await instructions(ctx, scopeOf("anthropic/opus-4-8", "claude"));
+        const codex = await instructions(ctx, scopeOf("openai/gpt-5.6-sol", "codex"));
 
         expect(opus5).toContain("mid-conversation system turns");
         expect(opus48).not.toContain("mid-conversation system turns");
@@ -94,97 +109,56 @@ describe("SystemPromptModule", () => {
     });
 
     it("follows the model rather than the provider it is served through", async () => {
-        const module = new SystemPromptModule();
-        const hooks = await resolveModuleHooks(ctx, module);
+        const { instructions } = await moduleWithCatalog();
 
-        expect(await hooks.instructions!(ctx, scopeOf("anthropic/opus-5", "bedrock"))).toBe(
-            await hooks.instructions!(ctx, scopeOf("anthropic/opus-5", "claude")),
+        expect(await instructions(ctx, scopeOf("anthropic/opus-5", "bedrock"))).toBe(
+            await instructions(ctx, scopeOf("anthropic/opus-5", "claude")),
         );
-        expect(await hooks.instructions!(ctx, scopeOf("xai/grok-build", "grok"))).toBe(
-            await hooks.instructions!(ctx, scopeOf("xai/grok-4.5", "grok")),
+        expect(await instructions(ctx, scopeOf("xai/grok-build", "grok"))).toBe(
+            await instructions(ctx, scopeOf("xai/grok-4.5", "grok")),
         );
     });
 
     it("falls back to the provider's family when the model is unknown or absent", async () => {
-        const module = new SystemPromptModule();
-        const hooks = await resolveModuleHooks(ctx, module);
+        const { instructions } = await moduleWithCatalog();
 
-        expect(await hooks.instructions!(ctx, scopeOf("openai/gpt-9-unreleased", "codex"))).toBe(
-            await hooks.instructions!(ctx, scopeOf("openai/gpt-5.6-sol", "codex")),
+        expect(await instructions(ctx, scopeOf("openai/gpt-9-unreleased", "codex"))).toBe(
+            await instructions(ctx, scopeOf("openai/gpt-5.6-sol", "codex")),
         );
-        expect(await hooks.instructions!(ctx, scopeOf(undefined, "grok"))).toBe(
-            await hooks.instructions!(ctx, scopeOf("xai/grok-4.5", "grok")),
+        expect(await instructions(ctx, scopeOf(undefined, "grok"))).toBe(
+            await instructions(ctx, scopeOf("xai/grok-4.5", "grok")),
         );
     });
 
     it("falls back to the simple prompt when nothing was written for the model", async () => {
-        const module = new SystemPromptModule();
-        const hooks = await resolveModuleHooks(ctx, module);
+        const { instructions } = await moduleWithCatalog();
 
-        const unknown = await hooks.instructions!(ctx, scopeOf("mystery/model", "gym"));
+        const unknown = await instructions(ctx, scopeOf("mystery/model", "gym"));
 
         expect(unknown).toContain("You are an expert coding assistant.");
         expect(unknown.startsWith("You are Rig, built by Happy")).toBe(true);
-        expect(await hooks.instructions!(ctx, scopeOf(undefined, undefined))).toBe(unknown);
+        expect(await instructions(ctx, scopeOf(undefined, undefined))).toBe(unknown);
     });
 
-    it("substitutes the identity it was built with", async () => {
-        const named = new SystemPromptModule({
-            identity: { name: "Scout", prompt: "You are Scout, built by Happy" },
-        });
-        const hooks = await resolveModuleHooks(ctx, named);
-
+    it("names Rig in every prompt and leaves no identity marker behind", async () => {
+        const { instructions } = await moduleWithCatalog();
         const [claudePrompt, codexPrompt] = await Promise.all([
-            hooks.instructions!(ctx, scopeOf("anthropic/opus-5", "claude")),
-            hooks.instructions!(ctx, scopeOf("openai/gpt-5.6-sol", "codex")),
+            instructions(ctx, scopeOf("anthropic/opus-5", "claude")),
+            instructions(ctx, scopeOf("openai/gpt-5.6-sol", "codex")),
         ]);
 
         for (const prompt of [claudePrompt, codexPrompt]) {
-            expect(prompt.startsWith("You are Scout, built by Happy")).toBe(true);
+            expect(prompt.startsWith("You are Rig, built by Happy")).toBe(true);
             expect(prompt).not.toContain("{{identity}}");
             expect(prompt).not.toContain("{{name}}");
         }
-        expect(codexPrompt).toContain("As Scout,");
-    });
-
-    it("substitutes replacement-string metacharacters literally", async () => {
-        for (const value of ["$&", "$`", "$'"]) {
-            const module = new SystemPromptModule({
-                identity: { name: value, prompt: value },
-            });
-            const hooks = await resolveModuleHooks(ctx, module);
-            const prompt = await hooks.instructions!(ctx, scopeOf("anthropic/opus-5", "claude"));
-
-            expect(prompt.startsWith(value)).toBe(true);
-            expect(prompt).toContain(value);
-            expect(prompt).not.toContain("{{identity}}");
-            expect(prompt).not.toContain("{{name}}");
-        }
-    });
-
-    it("names Rig when the host names nobody", async () => {
-        const module = new SystemPromptModule();
-        const hooks = await resolveModuleHooks(ctx, module);
-        const [claudePrompt, codexPrompt] = await Promise.all([
-            hooks.instructions!(ctx, scopeOf("anthropic/opus-5", "claude")),
-            hooks.instructions!(ctx, scopeOf("openai/gpt-5.6-sol", "codex")),
-        ]);
-
-        expect(claudePrompt.startsWith("You are Rig, built by Happy")).toBe(true);
-        expect(codexPrompt.startsWith("You are Rig, built by Happy")).toBe(true);
         expect(codexPrompt).toContain("As Rig,");
     });
 
-    it("appends the machine environment and every injected model route", async () => {
-        const module = new SystemPromptModule({
-            availableModels: [
-                { name: "Claude Opus", id: "anthropic/opus-5", providerId: "anthropic" },
-                { name: "Codex", id: "openai/gpt-5.6-sol", providerId: "openai" },
-            ],
-        });
-        const hooks = await resolveModuleHooks(ctx, module);
+    it("appends the machine environment and every configured model route", async () => {
+        const { instructions } = await moduleWithCatalog(twoModelCatalog);
 
-        const prompt = await hooks.instructions!(
+        const prompt = await instructions(
             contextWithEnvironment(),
             scopeOf("anthropic/opus-5", "claude"),
         );
@@ -210,27 +184,18 @@ describe("SystemPromptModule", () => {
     });
 
     it("omits the environment section when the context has no environment", async () => {
-        const module = new SystemPromptModule({
-            availableModels: [
-                { name: "Claude Opus", id: "anthropic/opus-5", providerId: "anthropic" },
-            ],
-        });
-        const hooks = await resolveModuleHooks(ctx, module);
+        const { module, instructions } = await moduleWithCatalog(twoModelCatalog);
         const selection = { model: "anthropic/opus-5", providerKind: "claude" as const };
 
-        const prompt = await hooks.instructions!(
-            ctx,
-            scopeOf(selection.model, selection.providerKind),
-        );
+        const prompt = await instructions(ctx, scopeOf(selection.model, selection.providerKind));
 
         expect(prompt).toBe([module.promptFor(selection), AGENTS_MD_SPEC].join("\n\n"));
         expect(prompt).not.toContain("# Environment");
     });
 
-    it("omits blank shell and empty available-model sections", async () => {
-        const module = new SystemPromptModule();
-        const hooks = await resolveModuleHooks(ctx, module);
-        const prompt = await hooks.instructions!(
+    it("omits blank shell and an empty configured catalog", async () => {
+        const { instructions } = await moduleWithCatalog();
+        const prompt = await instructions(
             contextWithEnvironment({ ...testEnvironment, shell: "" }),
             scopeOf("anthropic/opus-5", "claude"),
         );
@@ -241,12 +206,7 @@ describe("SystemPromptModule", () => {
     });
 
     it("renders the complete legacy environment text in its exact order", async () => {
-        const module = new SystemPromptModule({
-            availableModels: [
-                { name: "Claude Opus", id: "anthropic/opus-5", providerId: "anthropic" },
-                { name: "Codex", id: "openai/gpt-5.6-sol", providerId: "openai" },
-            ],
-        });
+        const { module, instructions } = await moduleWithCatalog(twoModelCatalog);
         const selection = { model: "anthropic/opus-5", providerKind: "claude" as const };
         const expectedEnvironment = [
             "# Environment",
@@ -263,82 +223,67 @@ describe("SystemPromptModule", () => {
             "- Claude Opus — model ID: `anthropic/opus-5`; provider ID: `anthropic`",
             "- Codex — model ID: `openai/gpt-5.6-sol`; provider ID: `openai`",
         ].join("\n");
-        const hooks = await resolveModuleHooks(ctx, module);
 
         expect(
-            await hooks.instructions!(
+            await instructions(
                 contextWithEnvironment(),
                 scopeOf(selection.model, selection.providerKind),
             ),
         ).toBe([module.promptFor(selection), expectedEnvironment, AGENTS_MD_SPEC].join("\n\n"));
     });
 
-    it("substitutes identity before appending an environment", async () => {
-        const module = new SystemPromptModule({
-            identity: { name: "Scout", prompt: "You are Scout, built by Happy" },
-            availableModels: [{ name: "Codex", id: "openai/gpt-5.6-sol", providerId: "openai" }],
-        });
-        const hooks = await resolveModuleHooks(ctx, module);
-
-        const prompt = await hooks.instructions!(
-            contextWithEnvironment(),
-            scopeOf("openai/gpt-5.6-sol", "codex"),
-        );
-
-        expect(prompt.startsWith("You are Scout, built by Happy")).toBe(true);
-        expect(prompt).toContain("As Scout,");
-        expect(prompt).toContain("# Environment");
-        expect(prompt).not.toContain("{{identity}}");
-        expect(prompt).not.toContain("{{name}}");
-    });
-
-    it("accepts the exact catalog byte boundary and rejects the next byte", () => {
+    it("accepts the exact catalog byte boundary and refuses the next byte", async () => {
         const below = catalogWithBytes(MAX_SYSTEM_PROMPT_AVAILABLE_MODELS_BYTES - 1);
         const equal = catalogWithBytes(MAX_SYSTEM_PROMPT_AVAILABLE_MODELS_BYTES);
         const above = catalogWithBytes(MAX_SYSTEM_PROMPT_AVAILABLE_MODELS_BYTES + 1);
+        const scope = scopeOf("anthropic/opus-5", "claude");
 
-        expect(new TextEncoder().encode(formatAvailableModels(below)).byteLength).toBe(
-            MAX_SYSTEM_PROMPT_AVAILABLE_MODELS_BYTES - 1,
-        );
         expect(new TextEncoder().encode(formatAvailableModels(equal)).byteLength).toBe(
             MAX_SYSTEM_PROMPT_AVAILABLE_MODELS_BYTES,
         );
-        expect(new TextEncoder().encode(formatAvailableModels(above)).byteLength).toBe(
-            MAX_SYSTEM_PROMPT_AVAILABLE_MODELS_BYTES + 1,
-        );
-        expect(() => new SystemPromptModule({ availableModels: below })).not.toThrow();
-        expect(() => new SystemPromptModule({ availableModels: equal })).not.toThrow();
-        expect(() => new SystemPromptModule({ availableModels: above })).toThrow(
-            "System prompt available models exceed the configured UTF-8 byte bound",
-        );
+        await expect(
+            (await moduleWithCatalog(below)).instructions(contextWithEnvironment(), scope),
+        ).resolves.toContain("## Available models");
+        await expect(
+            (await moduleWithCatalog(equal)).instructions(contextWithEnvironment(), scope),
+        ).resolves.toContain("## Available models");
+        await expect(
+            (await moduleWithCatalog(above)).instructions(contextWithEnvironment(), scope),
+        ).rejects.toThrow("System prompt available models exceed the configured UTF-8 byte bound");
     });
 
-    it("rejects catalogs that exceed the item or Unicode UTF-8 bounds", () => {
-        const plainModel = { name: "Model", id: "model", providerId: "provider" };
+    it("refuses a configured catalog past the item or Unicode UTF-8 bounds", async () => {
+        const plainModel = catalogModel("Model", "model", "provider");
+        const scope = scopeOf("anthropic/opus-5", "claude");
         const maximumModels = Array.from(
             { length: MAX_SYSTEM_PROMPT_AVAILABLE_MODELS },
             () => plainModel,
         );
-        expect(() => new SystemPromptModule({ availableModels: maximumModels })).not.toThrow();
+        await expect(
+            (await moduleWithCatalog(maximumModels)).instructions(contextWithEnvironment(), scope),
+        ).resolves.toContain("## Available models");
 
         const tooManyModels = Array.from(
             { length: MAX_SYSTEM_PROMPT_AVAILABLE_MODELS + 1 },
             () => plainModel,
         );
-        expect(() => new SystemPromptModule({ availableModels: tooManyModels })).toThrow(
-            "System prompt available models are invalid",
-        );
+        await expect(
+            (await moduleWithCatalog(tooManyModels)).instructions(contextWithEnvironment(), scope),
+        ).rejects.toThrow("System prompt available models are invalid");
 
         const unicodeField = "😀".repeat(128);
-        const unicodeCatalog = Array.from({ length: MAX_SYSTEM_PROMPT_AVAILABLE_MODELS }, () => ({
-            name: unicodeField,
-            id: unicodeField,
-            providerId: unicodeField,
-        }));
-        expect(Value.Check(systemPromptAvailableModelsSchema, unicodeCatalog)).toBe(true);
-        expect(() => new SystemPromptModule({ availableModels: unicodeCatalog })).toThrow(
-            "System prompt available models exceed the configured UTF-8 byte bound",
+        const unicodeCatalog = Array.from({ length: MAX_SYSTEM_PROMPT_AVAILABLE_MODELS }, () =>
+            catalogModel(unicodeField, unicodeField, unicodeField),
         );
+        await expect(
+            (await moduleWithCatalog(unicodeCatalog)).instructions(contextWithEnvironment(), scope),
+        ).rejects.toThrow("System prompt available models exceed the configured UTF-8 byte bound");
+
+        await expect(
+            (
+                await moduleWithCatalog([catalogModel("bad\nname", "id", "provider")])
+            ).instructions(contextWithEnvironment(), scope),
+        ).rejects.toThrow("System prompt available models are invalid");
     });
 
     it("fits a maximal AGENTS.md chain into the remaining UTF-8 prompt budget", async () => {
@@ -349,15 +294,12 @@ describe("SystemPromptModule", () => {
         compute.write("/workspace/AGENTS.md", document);
         compute.write("/workspace/packages/AGENTS.md", document);
         compute.write("/workspace/packages/app/AGENTS.md", document);
-        const module = new SystemPromptModule({
-            availableModels: catalogWithBytes(MAX_SYSTEM_PROMPT_AVAILABLE_MODELS_BYTES - 1),
-            compute: { resolve: async () => compute },
-            globalInstructions: {
-                path: "/home/agent/AGENTS.md",
-                read: async () => "界".repeat(131_072),
-            },
+        const world = await systemPromptWorld({
+            models: catalogWithBytes(MAX_SYSTEM_PROMPT_AVAILABLE_MODELS_BYTES - 1),
+            globalInstructions: "界".repeat(131_072),
+            compute: async () => compute,
         });
-        const hooks = await resolveModuleHooks(ctx, module);
+        const hooks = await resolveModuleHooks(ctx, world.module);
 
         const prompt = await hooks.instructions!(
             contextWithEnvironment(),
@@ -375,29 +317,27 @@ describe("SystemPromptModule", () => {
             ...testEnvironment,
             osVersion: "x".repeat(MAX_SYSTEM_PROMPT_OUTPUT_BYTES),
         });
-        const module = new SystemPromptModule();
-        const hooks = await resolveModuleHooks(ctx, module);
+        const { instructions } = await moduleWithCatalog();
 
         await expect(
-            hooks.instructions!(environmentCtx, scopeOf("anthropic/opus-5", "claude")),
+            instructions(environmentCtx, scopeOf("anthropic/opus-5", "claude")),
         ).rejects.toThrow("The system prompt exceeds the configured output bound");
     });
 
-    it("detaches the injected model catalog and validates its bounded contract", async () => {
-        const availableModels = [
-            { name: "Claude Opus", id: "anthropic/opus-5", providerId: "anthropic" },
-        ];
-        const module = new SystemPromptModule({ availableModels });
-        const hooks = await resolveModuleHooks(ctx, module);
-        availableModels[0]!.name = "Mutated";
-
+    it("keeps the catalog it first published and validates its bounded contract", async () => {
+        const models = [catalogModel("Claude Opus", "anthropic/opus-5", "anthropic")];
+        const { instructions } = await moduleWithCatalog(models);
         const environmentCtx = contextWithEnvironment();
-        const prompt = await hooks.instructions!(
-            environmentCtx,
-            scopeOf("anthropic/opus-5", "claude"),
+        const scope = scopeOf("anthropic/opus-5", "claude");
+
+        expect(await instructions(environmentCtx, scope)).toContain(
+            "- Claude Opus — model ID: `anthropic/opus-5`",
+        );
+        (models[0] as { name: string }).name = "Mutated";
+        expect(await instructions(environmentCtx, scope)).toContain(
+            "- Claude Opus — model ID: `anthropic/opus-5`",
         );
 
-        expect(prompt).toContain("- Claude Opus — model ID: `anthropic/opus-5`");
         expect(
             Value.Check(systemPromptAvailableModelSchema, {
                 name: "Model",
@@ -420,33 +360,13 @@ describe("SystemPromptModule", () => {
                 })),
             ]),
         ).toBe(false);
-        expect(
-            () =>
-                new SystemPromptModule({
-                    availableModels: [{ name: "bad\nname", id: "id", providerId: "provider" }],
-                }),
-        ).toThrow("System prompt available models are invalid");
     });
 
-    it("validates closed options and detaches the configured identity", async () => {
-        const identity = { name: "Scout", prompt: "You are Scout, built by Happy" };
-        const module = new SystemPromptModule({ identity });
-        const hooks = await resolveModuleHooks(ctx, module);
+    it("takes only modules and keeps the identity contract closed", async () => {
+        const world = await systemPromptWorld();
 
-        identity.name = "Mutated";
-        identity.prompt = "A hostile replacement";
-
-        expect(
-            (await hooks.instructions!(ctx, scopeOf("anthropic/opus-5", "claude"))).startsWith(
-                "You are Scout, built by Happy",
-            ),
-        ).toBe(true);
-        expect(
-            Value.Check(systemPromptModuleOptionsSchema, {
-                identity,
-                unexpected: true,
-            }),
-        ).toBe(false);
+        expect(SystemPromptModule.length).toBe(2);
+        expect(world.module.name).toBe("system-prompt");
         expect(
             Value.Check(systemPromptIdentitySchema, {
                 name: "Scout",
@@ -459,25 +379,13 @@ describe("SystemPromptModule", () => {
                 prompt: "You are Scout",
             }),
         ).toBe(false);
-        expect(() => new SystemPromptModule({ unexpected: true } as never)).toThrow(
-            "System prompt module options are invalid",
-        );
         expect(
-            () =>
-                new SystemPromptModule({
-                    compute: {
-                        resolve: async () => undefined,
-                        extra: true,
-                    } as never,
-                }),
-        ).toThrow("System prompt module options are invalid");
-        const inheritedIdentity = Object.create({
-            name: "Inherited",
-            prompt: "You are inherited",
-        }) as { name: string; prompt: string };
-        expect(() => new SystemPromptModule({ identity: inheritedIdentity })).toThrow(
-            "System prompt identity is invalid",
-        );
+            Value.Check(systemPromptIdentitySchema, {
+                name: "Scout",
+                prompt: "You are Scout",
+                unexpected: true,
+            }),
+        ).toBe(false);
     });
 
     it("validates public model selection and keeps the selector provider-neutral", () => {

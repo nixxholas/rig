@@ -2,23 +2,18 @@ import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
 import {
-    secretAgentIdSchema,
     secretAttachmentSchema,
     secretCommandEnvironmentSchema,
-    secretCommandResolverResultSchema,
     secretHostEnvironmentSchema,
     secretIdSchema,
     secretPageSchema,
     secretReferenceSchema,
-    secretScopeRefSchema,
     type SecretAttachment,
     type SecretCommandEnvironment,
-    type SecretCommandResolverResult,
     type SecretHostEnvironment,
     type SecretReference,
     type SecretPage,
 } from "./Secret.js";
-import { secretContextSchema } from "./SecretEvent.js";
 
 export const secretStoreRegisterResultSchema = Type.Object(
     {
@@ -84,65 +79,11 @@ export type SecretStoreAttachResult = Static<typeof secretStoreAttachResultSchem
 export type SecretStoreDetachResult = Static<typeof secretStoreDetachResultSchema>;
 export type SecretStoreMutationResult = Static<typeof secretStoreMutationResultSchema>;
 
-/** Resolver results contain values only on the trusted host path. */
-export const secretResolverSchema = Type.Function(
-    [
-        secretContextSchema,
-        secretAgentIdSchema,
-        secretScopeRefSchema,
-        Type.Optional(Type.Array(secretIdSchema, { maxItems: 256, uniqueItems: true })),
-    ],
-    Type.Promise(secretHostEnvironmentSchema),
-);
-
-export type SecretResolver = Static<typeof secretResolverSchema>;
-
-/**
- * Host/compute composition contract. The host returns one environment per selected ID; the module
- * performs the case-insensitive collision-safe merge before returning the command environment.
- */
-export const secretCommandResolverSchema = Type.Function(
-    [
-        secretContextSchema,
-        secretAgentIdSchema,
-        secretScopeRefSchema,
-        Type.Array(secretIdSchema, { maxItems: 256, uniqueItems: true }),
-    ],
-    Type.Promise(secretCommandResolverResultSchema),
-);
-
-export type SecretCommandResolver = Static<typeof secretCommandResolverSchema>;
-
-export const secretAuthorizationOperationSchema = Type.Union([
-    Type.Literal("list"),
-    Type.Literal("reference"),
-    Type.Literal("register"),
-    Type.Literal("update"),
-    Type.Literal("remove"),
-    Type.Literal("attach"),
-    Type.Literal("detach"),
-    Type.Literal("resolve"),
-]);
-
-/** Optional host policy for opaque scope access. The store remains authoritative for its catalog. */
-export const secretAuthorizationSchema = Type.Function(
-    [
-        secretContextSchema,
-        secretAgentIdSchema,
-        secretAuthorizationOperationSchema,
-        Type.Optional(secretScopeRefSchema),
-    ],
-    Type.Union([Type.Boolean(), Type.Promise(Type.Boolean())]),
-);
-
-export type SecretAuthorization = Static<typeof secretAuthorizationSchema>;
-
 /**
  * Secret metadata and attachments are persisted by the module in its Agent Base database.
  *
- * The historical store names remain package exports for source compatibility, but are not
- * constructor options or host injection points. Secret values are only exposed by the trusted
- * resolver capability below.
+ * There is no resolver, command resolver, or authorization policy to supply: the module resolves
+ * values out of this catalog itself, and nothing outside it can observe or intercept a value.
  */
 export const secretStoreSchema = Type.Unknown();
 
@@ -202,17 +143,6 @@ export function assertSecretCommandEnvironment(
     }
 }
 
-export function assertSecretCommandResolverResult(
-    value: unknown,
-): asserts value is SecretCommandResolverResult {
-    if (!Value.Check(secretCommandResolverResultSchema, value)) {
-        throw new Error("Secret command resolver returned an invalid per-secret result.");
-    }
-    for (const entry of value) {
-        assertUniqueEnvironmentNames(entry.environment);
-    }
-}
-
 export function assertSecretStoreMutationResult(
     value: unknown,
 ): asserts value is SecretStoreMutationResult {
@@ -227,32 +157,7 @@ export function assertSecretStore(value: unknown): asserts value is SecretStore 
     }
 }
 
-export function assertSecretResolver(value: unknown): asserts value is SecretResolver {
-    if (!Value.Check(secretResolverSchema, value)) {
-        throw new Error("Secrets module received an invalid host resolver.");
-    }
-}
-
-export function assertSecretCommandResolver(
-    value: unknown,
-): asserts value is SecretCommandResolver {
-    if (!Value.Check(secretCommandResolverSchema, value)) {
-        throw new Error("Secrets module received an invalid command resolver.");
-    }
-}
-
-export function assertSecretAuthorization(value: unknown): asserts value is SecretAuthorization {
-    if (!Value.Check(secretAuthorizationSchema, value)) {
-        throw new Error("Secrets module received an invalid authorization policy.");
-    }
-}
-
-export type {
-    SecretAttachment,
-    SecretCommandResolverResult,
-    SecretHostEnvironment,
-    SecretReference,
-};
+export type { SecretAttachment, SecretHostEnvironment, SecretReference };
 
 function assertUniqueEnvironmentNames(value: Record<string, string>): void {
     const names = new Set<string>();

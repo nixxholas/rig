@@ -59,16 +59,16 @@ export {
     type SchedulingWaitingRecord,
 } from "./Scheduling.js";
 export {
+    schedulingEventListenerSchema,
     schedulingEventSchema,
-    schedulingModuleListenerSchema,
     type SchedulingEvent,
-    type SchedulingModuleListener,
+    type SchedulingEventListener,
+    type SchedulingUnsubscribe,
 } from "./SchedulingEvent.js";
 export {
     assertSchedulingPage,
     assertSchedulingScheduledMessage,
     assertSchedulingStore,
-    assertSchedulingVoid,
     assertSchedulingWaitRecord,
     assertSchedulingWaitResult,
     MAX_SCHEDULING_RECOVERY_BATCH,
@@ -79,21 +79,11 @@ export {
     type SchedulingStore,
 } from "./SchedulingStore.js";
 export {
-    assertSchedulingTimers,
-    nodeSchedulingTimers,
-    SchedulingAlarm,
-    schedulingTimersSchema,
-    type SchedulingTimers,
-} from "./SchedulingTimers.js";
-export {
-    assertSchedulingModuleOptions,
-    schedulingClockSchema,
-    schedulingEventIdFactorySchema,
-    schedulingIdFactorySchema,
-    schedulingModuleOptionsSchema,
-    schedulingPostCommitErrorSchema,
+    MAX_SCHEDULING_HORIZON,
+    MAX_SCHEDULING_WAIT_DURATION,
+    SCHEDULING_OUTPUT_CHARACTERS,
+    SCHEDULING_PAGE_SIZE,
     SchedulingModule,
-    type SchedulingModuleOptions,
 } from "./SchedulingModule.js";
 export { cancelScheduledMessageTool } from "./tools/cancel_scheduled_message.js";
 export { listScheduledMessagesTool } from "./tools/list_scheduled_messages.js";

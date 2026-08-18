@@ -12,7 +12,6 @@ import {
     MAX_HISTORY_MESSAGE_JSON_BYTES,
     MAX_HISTORY_TEXT_LENGTH,
 } from "../../sources/history/HistoryMessage.js";
-import { historyModuleOptionsSchema, HistoryModule } from "../../sources/history/HistoryModule.js";
 import { historyStoreSchema } from "../../sources/history/HistoryStore.js";
 
 function validMessage() {
@@ -111,22 +110,6 @@ describe("history runtime bounds and contracts", () => {
             type: "text" as const,
         }));
         expect(historyMessageWithinPersistenceBounds({ ...validMessage(), blocks })).toBe(false);
-    });
-
-    it("keeps constructor options closed and validates numeric limits", () => {
-        expect(Value.Check(historyModuleOptionsSchema, {})).toBe(true);
-        expect(
-            Value.Check(historyModuleOptionsSchema, {
-                toolOutputLimit: -1,
-            }),
-        ).toBe(false);
-        expect(
-            Value.Check(historyModuleOptionsSchema, {
-                unknownOption: true,
-            }),
-        ).toBe(false);
-        expect(() => new HistoryModule({ toolOutputLimit: -1 })).toThrow();
-        expect(() => new HistoryModule({ unknownOption: true } as never)).toThrow();
     });
 
     it("requires both store operations and rejects extra store capabilities", () => {

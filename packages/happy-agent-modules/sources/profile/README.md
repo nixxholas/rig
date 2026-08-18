@@ -9,16 +9,16 @@ refused with a clear message rather than silently ignored, and no method takes a
 ```ts
 import { ProfileModule } from "@slopus/happy-agent-modules";
 
-const profile = new ProfileModule({
-    listener: {
-        onEvent: async (ctx, event) => {
-            await events.record(ctx, { type: "profile.changed", payload: event });
-        },
-    },
+const profile = new ProfileModule();
+profile.onEvent(async (ctx, event) => {
+    await events.record(ctx, { type: "profile.changed", payload: event });
 });
 // The agent this installation runs as is the machine the profile records.
 profile.open(rootAgentId);
 ```
+
+The module takes nothing: one person, one profile, one clock. Whoever wants to hear about changes
+subscribes after construction.
 
 `open(agentId)` names the installation. It is separate from the constructor because the agent
 only exists once the module system has started, and a profile records the machine it was made on
@@ -47,6 +47,10 @@ about which text belongs to it.
 
 Every create and update publishes a `profile_changed` event carrying `{ profileId, version }`.
 The host is what puts it on its event stream; the module only says that it happened.
+
+`onEvent(listener)` subscribes and returns the function that stops the subscription. Listeners
+hear about a change that is already saved, so one that throws is reported through `ctx.log.warn`
+and the others still hear about it.
 
 ## Storage
 

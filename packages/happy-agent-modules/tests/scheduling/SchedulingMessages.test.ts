@@ -1,12 +1,29 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { SchedulingEvent } from "../../sources/scheduling/SchedulingEvent.js";
-import { schedulingHarness, settle, TestAgents } from "./support/schedulingHarness.js";
+import { SCHEDULING_OUTPUT_CHARACTERS } from "../../sources/scheduling/SchedulingModule.js";
+import { schedulePageText } from "../../sources/scheduling/schedulingFormat.js";
+import {
+    advance,
+    armedAlarms,
+    schedulingHarness,
+    settle,
+    START_TIME,
+    useSchedulingClock,
+} from "./support/schedulingHarness.js";
 
 const sender = "agenta";
 const recipient = "agentb";
 
 describe("Scheduled messages", () => {
+    beforeEach(() => {
+        useSchedulingClock();
+    });
+
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
     it("delivers a message itself when its time comes and records that it arrived", async () => {
         const harness = await schedulingHarness("message-delivered");
         try {
@@ -16,10 +33,10 @@ describe("Scheduled messages", () => {
                 message: "Check the release",
                 in: { minutes: 5 },
             });
-            expect(scheduled).toMatchObject({ status: "pending", dueAt: 301_000 });
+            expect(scheduled).toMatchObject({ status: "pending", dueAt: START_TIME + 300_000 });
             expect(harness.agents.delivered).toEqual([]);
 
-            await harness.clock.advance(5 * 60_000);
+            await advance(5 * 60_000);
 
             expect(harness.agents.delivered).toEqual([
                 {
@@ -41,7 +58,10 @@ describe("Scheduled messages", () => {
                 sender,
                 "messageone",
             );
-            expect(settled).toMatchObject({ status: "delivered", deliveredAt: 301_000 });
+            expect(settled).toMatchObject({
+                status: "delivered",
+                deliveredAt: START_TIME + 300_000,
+            });
         } finally {
             harness.close();
         }
@@ -55,7 +75,7 @@ describe("Scheduled messages", () => {
                 message: "Remember the deploy",
                 in: { seconds: 30 },
             });
-            await harness.clock.advance(30_000);
+            await advance(30_000);
 
             expect(harness.agents.delivered[0]).toMatchObject({
                 agentId: sender,
@@ -76,7 +96,7 @@ describe("Scheduled messages", () => {
                 message: "Check the release",
                 in: { seconds: 10 },
             });
-            await harness.clock.advance(10_000);
+            await advance(10_000);
 
             expect(
                 await harness.module.getSchedule(harness.database.context, sender, "messagefail"),
@@ -104,9 +124,9 @@ describe("Scheduled messages", () => {
                 { scheduleId: "messagestop" },
             );
             expect(cancelled.status).toBe("cancelled");
-            expect(harness.clock.armed).toBe(0);
+            expect(armedAlarms()).toBe(0);
 
-            await harness.clock.advance(60_000);
+            await advance(60_000);
             expect(harness.agents.delivered).toEqual([]);
             expect(harness.module.formatCancellationForModel(cancelled)).toBe(
                 "Message messagestop is now cancelled before delivery.",
@@ -124,7 +144,7 @@ describe("Scheduled messages", () => {
                 message: "Already gone",
                 in: { seconds: 1 },
             });
-            await harness.clock.advance(1_000);
+            await advance(1_000);
 
             expect(
                 await harness.module.cancelSchedule(harness.database.context, sender, {
@@ -147,16 +167,15 @@ describe("Scheduled messages", () => {
                 in: { minutes: 10 },
             });
             first.module.stop();
-            expect(first.clock.armed).toBe(0);
+            expect(armedAlarms()).toBe(0);
 
             const second = await schedulingHarness("message-recovered", {
                 agents: first.agents,
-                clock: first.clock,
                 database: first.database,
             });
-            expect(second.clock.armed).toBe(1);
+            expect(armedAlarms()).toBe(1);
 
-            await second.clock.advance(10 * 60_000);
+            await advance(10 * 60_000);
             expect(second.agents.delivered).toHaveLength(1);
             expect(
                 await second.module.getSchedule(second.database.context, sender, "messagelives"),
@@ -181,7 +200,7 @@ describe("Scheduled messages", () => {
             });
             await settle();
 
-            await harness.clock.advance(30_000);
+            await advance(30_000);
 
             expect(await waiting).toMatchObject({ outcome: "interrupted", elapsedMs: 30_000 });
         } finally {
@@ -204,8 +223,27 @@ describe("Scheduled messages", () => {
             });
 
             expect(replayed).toEqual(first);
-            await harness.clock.advance(20_000);
+            await advance(20_000);
             expect(harness.agents.delivered).toHaveLength(1);
+        } finally {
+            harness.close();
+        }
+    });
+
+    it("mints its own message identity when a caller does not supply one", async () => {
+        const harness = await schedulingHarness("message-generated-id");
+        try {
+            const first = await harness.module.schedule(harness.database.context, sender, {
+                message: "One",
+                in: { seconds: 20 },
+            });
+            const second = await harness.module.schedule(harness.database.context, sender, {
+                message: "Two",
+                in: { seconds: 20 },
+            });
+
+            expect(first.id).toMatch(/^[a-z][a-z0-9]{1,31}$/);
+            expect(second.id).not.toBe(first.id);
         } finally {
             harness.close();
         }
@@ -246,18 +284,19 @@ describe("Scheduled messages", () => {
         }
     });
 
-    it("gives transactional and post-commit listeners the same frozen events", async () => {
+    it("gives every subscriber the same frozen event, before and after the commit", async () => {
         const transactional: SchedulingEvent[] = [];
         const postCommit: SchedulingEvent[] = [];
-        const harness = await schedulingHarness("message-events", {
-            listener: {
-                onEventTransactional: (_ctx, event) => {
-                    transactional.push(event);
-                },
-                onEvent: (_ctx, event) => {
-                    postCommit.push(event);
-                },
-            },
+        const second: SchedulingEvent[] = [];
+        const harness = await schedulingHarness("message-events");
+        const stopTransactional = harness.module.onEventTransactional((_ctx, event) => {
+            transactional.push(event);
+        });
+        harness.module.onEvent((_ctx, event) => {
+            postCommit.push(event);
+        });
+        const stopSecond = harness.module.onEvent((_ctx, event) => {
+            second.push(event);
         });
         try {
             await harness.module.schedule(harness.database.context, sender, {
@@ -265,21 +304,91 @@ describe("Scheduled messages", () => {
                 message: "Observed",
                 in: { seconds: 5 },
             });
-            await harness.clock.advance(5_000);
+            await advance(5_000);
 
             expect(transactional.map((event) => event.type)).toEqual([
                 "message_scheduled",
                 "scheduled_message_delivery_outcome",
             ]);
             expect(postCommit).toEqual(transactional);
+            expect(second).toEqual(transactional);
             expect(Object.isFrozen(transactional[0])).toBe(true);
+
+            // Unsubscribing stops exactly that subscriber and leaves the others alone.
+            stopTransactional();
+            stopSecond();
+            await harness.module.schedule(harness.database.context, sender, {
+                id: "messageafter",
+                message: "Only the remaining subscriber sees this",
+                in: { seconds: 5 },
+            });
+            expect(transactional).toHaveLength(2);
+            expect(second).toHaveLength(2);
+            expect(postCommit).toHaveLength(3);
+        } finally {
+            harness.close();
+        }
+    });
+
+    it("keeps working when a post-commit subscriber throws", async () => {
+        const seen: string[] = [];
+        const harness = await schedulingHarness("message-subscriber-failure");
+        harness.module.onEvent(() => {
+            throw new Error("subscriber failed");
+        });
+        harness.module.onEvent((_ctx, event) => {
+            seen.push(event.type);
+        });
+        try {
+            await expect(
+                harness.module.schedule(harness.database.context, sender, {
+                    id: "messagesurvives",
+                    message: "Committed anyway",
+                    in: { seconds: 5 },
+                }),
+            ).resolves.toMatchObject({ status: "pending" });
+            await settle();
+
+            expect(seen).toEqual(["message_scheduled"]);
+            expect(
+                await harness.module.getSchedule(
+                    harness.database.context,
+                    sender,
+                    "messagesurvives",
+                ),
+            ).toMatchObject({ status: "pending" });
+        } finally {
+            harness.close();
+        }
+    });
+
+    it("rejects the mutation when a transactional subscriber throws", async () => {
+        const harness = await schedulingHarness("message-transactional-failure");
+        harness.module.onEventTransactional(() => {
+            throw new Error("reject this schedule");
+        });
+        try {
+            await expect(
+                harness.module.schedule(harness.database.context, sender, {
+                    id: "messagerejected",
+                    message: "Never stored",
+                    in: { seconds: 5 },
+                }),
+            ).rejects.toThrow("reject this schedule");
+            expect(
+                await harness.module.getSchedule(
+                    harness.database.context,
+                    sender,
+                    "messagerejected",
+                ),
+            ).toBeUndefined();
         } finally {
             harness.close();
         }
     });
 
     it("trims a page to the output budget without stepping over a message", async () => {
-        const harness = await schedulingHarness("message-page", { maxOutputCharacters: 256 });
+        const harness = await schedulingHarness("message-page");
         try {
             for (let index = 0; index < 6; index += 1) {
                 await harness.module.schedule(harness.database.context, sender, {
@@ -291,12 +400,35 @@ describe("Scheduled messages", () => {
             }
 
             const page = await harness.module.listSchedulePage(harness.database.context, sender);
-            const text = harness.module.formatSchedulePageForModel(page);
-            const shown = text.split("\n").filter((line) => line.startsWith("messagepage"));
+            const trimmed = schedulePageText(page, 256);
+            const shown = trimmed.text.split("\n").filter((line) => line.startsWith("messagepage"));
 
-            expect(text.length).toBeLessThanOrEqual(256);
+            expect(trimmed.text.length).toBeLessThanOrEqual(256);
             expect(shown.length).toBeGreaterThan(0);
-            expect(text).toContain(`More messages start at cursor ${shown.length}.`);
+            expect(shown.length).toBeLessThan(6);
+            expect(trimmed.text).toContain(`More messages start at cursor ${shown.length}.`);
+        } finally {
+            harness.close();
+        }
+    });
+
+    it("keeps a full page of messages inside the module's own output budget", async () => {
+        const harness = await schedulingHarness("message-page-budget");
+        try {
+            for (let index = 0; index < 6; index += 1) {
+                await harness.module.schedule(harness.database.context, sender, {
+                    id: `messagebudget${index}`,
+                    targetAgentId: recipient,
+                    message: `Message ${index}`,
+                    in: { minutes: index + 1 },
+                });
+            }
+
+            const page = await harness.module.listSchedulePage(harness.database.context, sender);
+            const text = harness.module.formatSchedulePageForModel(page);
+
+            expect(text.length).toBeLessThanOrEqual(SCHEDULING_OUTPUT_CHARACTERS);
+            expect(text.split("\n")).toHaveLength(6);
         } finally {
             harness.close();
         }
@@ -317,11 +449,14 @@ describe("Scheduled messages", () => {
         }
     });
 
-    it("has no scheduler, authorization, or delivery-reporting surface left", async () => {
+    it("has no options, scheduler, authorization, or delivery-reporting surface left", async () => {
         const exports = await import("../../sources/scheduling/index.js");
         expect("schedulingSchedulerSchema" in exports).toBe(false);
         expect("schedulingAuthorizationSchema" in exports).toBe(false);
         expect("schedulingDeliveryOutcomeInputSchema" in exports).toBe(false);
-        expect("scheduler" in exports.schedulingModuleOptionsSchema.properties).toBe(false);
+        expect("schedulingModuleOptionsSchema" in exports).toBe(false);
+        expect("schedulingClockSchema" in exports).toBe(false);
+        expect("schedulingTimersSchema" in exports).toBe(false);
+        expect(exports.SchedulingModule.length).toBe(0);
     });
 });

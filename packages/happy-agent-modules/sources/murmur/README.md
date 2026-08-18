@@ -10,16 +10,9 @@ to, so the two can never disagree about who this installation is.
 ```ts
 import { MurmurModule } from "@slopus/happy-agent-modules";
 
-const murmur = new MurmurModule({
-    enabled: configuration.values.sharing.enabled,
-    listener: {
-        onEvent: async (ctx, event) => {
-            await events.record(ctx, { type: "sharing.changed", payload: event });
-        },
-    },
-    profile: profileModule,
-    relay: configuration.values.sharing.relayUrl,
-    rootContext: applicationRoot,
+const murmur = new MurmurModule(config, profileModule);
+murmur.onEvent((ctx, event) => {
+    void events.record(ctx, { type: "sharing.changed", payload: event });
 });
 await murmur.open(ctx, person?.id);
 ```
@@ -27,20 +20,35 @@ await murmur.open(ctx, person?.id);
 Sharing is off unless the configuration turns it on. Nothing reaches a relay, and no identity is
 created, until someone says so.
 
-## Options
+## Dependencies
 
-Options are a TypeBox schema, `murmurModuleOptionsSchema`, checked in the constructor.
+The constructor takes modules and nothing else.
 
+- **`config`** — the [configuration](../config/README.md) module. Whether sharing runs at all
+  (`sharing.enabled`) and which relay it reaches (`sharing.relayUrl`) are settings, not arguments:
+  an identity on a relay is not something an installation should acquire because a caller passed a
+  flag. `enabled` is read live, so it is always what configuration currently says.
 - **`profile`** — the [profile](../profile/README.md) catalog itself. Sharing puts a person on the
   wire so a contact sees a name rather than a key, and whether this installation may act as that
   person is that catalog's decision rather than something restated here.
-- **`listener.onEvent`** — told, after the fact, that sharing changed. Optional: nothing here
-  depends on anyone listening.
-- **`openClient`** — optional; replaces `MurmurClient.open` so a test can drive every path
-  without a relay. It is handed the store the module opened, and the module owns the lifetime of
-  whatever it returns.
-- **`rootContext`** — the lifetime the relay loop and the store run on, with the agent database
-  attached. Both outlive every call that touches them, so neither may borrow a request's context.
+
+The lifetime the relay loop and the store run on is derived by the module itself, the first time
+sharing opens: the caller's context is detached and the agent database carried back onto it. Both
+outlive every call that touches them, so neither may borrow a request's context. Opening sharing
+without an agent database throws `Sharing was opened without an agent database.`
+
+The clock is `Date.now`. Background failures — a relay that will not answer, a subscriber that
+throws — go to `ctx.log` on the lifetime they happened on, because there is no caller left to hand
+them back to.
+
+`openClient` is a `protected` method holding the one call that needs a network. A test subclasses
+the module and overrides it; nothing in the product does. It is handed the store the module
+opened, and the module owns the lifetime of whatever it returns.
+
+## Events
+
+`onEvent(listener)` subscribes and returns the function that ends the subscription. Subscribers are
+told after the change has happened, so one that throws is logged and the rest still hear it.
 
 ## Direct operations
 
@@ -70,7 +78,7 @@ closes, a network changes — so the loop reports it, backs off from one second 
 tries again. Only closing ends it. The snapshot reports `connecting`, `connected`, or
 `disconnected` while it lasts; none of it is durable.
 
-## Events
+## What an event says
 
 Every change publishes a `murmur_changed` event carrying the version that resulted. A burst of
 relay callbacks — synchronizing after a while offline delivers many at once — collapses into one
@@ -86,7 +94,7 @@ this is must be caught here rather than halfway through a contact exchange.
 
 Migration `002-murmur-store` creates `happy_agent_murmur_store`, the key–value table Murmur keeps
 its own state in. `SqliteMurmurStore` is its only reader. Murmur's store API carries no caller
-context, so the store is built on the module's `rootContext` and every statement runs there.
+context, so the store is built on the lifetime the module derived and every statement runs there.
 Values are base64 text rather than blobs, which keeps the same statements working on either
 database this package supports. Scans order and paginate with `COLLATE BINARY`, because Murmur's
 keys carry base64url identities whose case and punctuation a linguistic collation would fold

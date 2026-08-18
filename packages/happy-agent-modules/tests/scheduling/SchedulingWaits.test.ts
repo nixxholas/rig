@@ -1,11 +1,27 @@
 import type { AgentModuleScope } from "@slopus/happy-agent-base";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { schedulingHarness, settle, TestAgents } from "./support/schedulingHarness.js";
+import {
+    advance,
+    armedAlarms,
+    schedulingHarness,
+    settle,
+    START_TIME,
+    TestAgents,
+    useSchedulingClock,
+} from "./support/schedulingHarness.js";
 
 const agentId = "agenta";
 
 describe("Scheduling waits", () => {
+    beforeEach(() => {
+        useSchedulingClock();
+    });
+
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
     it("finishes a wait when its own time comes and reports what really elapsed", async () => {
         const harness = await schedulingHarness("wait-elapses");
         try {
@@ -14,9 +30,9 @@ describe("Scheduling waits", () => {
                 duration: { seconds: 90 },
             });
             await settle();
-            expect(harness.clock.armed).toBe(1);
+            expect(armedAlarms()).toBe(1);
 
-            await harness.clock.advance(90_000);
+            await advance(90_000);
             const result = await pending;
 
             expect(result).toMatchObject({
@@ -42,7 +58,7 @@ describe("Scheduling waits", () => {
                 duration: "1h 30m",
             });
             await settle();
-            await harness.clock.advance(90 * 60_000);
+            await advance(90 * 60_000);
 
             expect((await pending).elapsedMs).toBe(5_400_000);
         } finally {
@@ -69,10 +85,10 @@ describe("Scheduling waits", () => {
         try {
             const pending = harness.module.waitUntil(harness.database.context, agentId, {
                 id: "waituntil",
-                at: new Date(harness.clock.now() + 60_000).toISOString(),
+                at: new Date(Date.now() + 60_000).toISOString(),
             });
             await settle();
-            await harness.clock.advance(60_000);
+            await advance(60_000);
             expect((await pending).outcome).toBe("elapsed");
 
             const past = await harness.module.waitUntil(harness.database.context, agentId, {
@@ -94,7 +110,7 @@ describe("Scheduling waits", () => {
             });
             await settle();
 
-            await harness.clock.advance(42_000);
+            await advance(42_000);
             harness.module.interruptWaits(harness.database.context, agentId);
             const result = await pending;
 
@@ -116,7 +132,7 @@ describe("Scheduling waits", () => {
             });
             await settle();
 
-            await harness.clock.advance(1_000);
+            await advance(1_000);
             await harness.hooks.messageAccepted?.(
                 harness.database.context,
                 { agent: { id: agentId } } as AgentModuleScope,
@@ -142,7 +158,7 @@ describe("Scheduling waits", () => {
             });
             await settle();
 
-            await harness.clock.advance(5_000);
+            await advance(5_000);
             turn.abort();
 
             expect(await pending).toMatchObject({ outcome: "interrupted", elapsedMs: 5_000 });
@@ -154,8 +170,8 @@ describe("Scheduling waits", () => {
     it("re-enters its own durable wait after a restart and finishes it once", async () => {
         const first = await schedulingHarness("wait-restart");
         try {
-            // The process dies here: the row is written and the tool call never settles it. Its
-            // suspension is left hanging on a clock nothing will move again.
+            // The process dies here: the row is written and this tool call never returns to
+            // anyone. The durable row is all that survives, and the restarted module re-enters it.
             const abandoned = first.module.wait(first.database.context, agentId, {
                 id: "waitagain",
                 duration: { hours: 1 },
@@ -171,11 +187,11 @@ describe("Scheduling waits", () => {
                 duration: { hours: 1 },
             });
             await settle();
-            await second.clock.advance(60 * 60_000);
+            await advance(60 * 60_000);
             const result = await resumed;
 
             // Elapsed is measured from the original start, not from the restart.
-            expect(result).toMatchObject({ outcome: "elapsed", startedAt: 1_000 });
+            expect(result).toMatchObject({ outcome: "elapsed", startedAt: START_TIME });
             expect(result.elapsedMs).toBe(60 * 60_000);
         } finally {
             first.close();
@@ -190,7 +206,7 @@ describe("Scheduling waits", () => {
                 duration: { seconds: 5 },
             });
             await settle();
-            await harness.clock.advance(5_000);
+            await advance(5_000);
             const first = await pending;
 
             const replayed = await harness.module.wait(harness.database.context, agentId, {
@@ -199,6 +215,21 @@ describe("Scheduling waits", () => {
             });
 
             expect(replayed).toEqual(first);
+        } finally {
+            harness.close();
+        }
+    });
+
+    it("mints its own wait identity when a caller does not supply one", async () => {
+        const harness = await schedulingHarness("wait-generated-id");
+        try {
+            const pending = harness.module.wait(harness.database.context, agentId, {
+                duration: { seconds: 1 },
+            });
+            await settle();
+            await advance(1_000);
+
+            expect((await pending).waitId).toMatch(/^[a-z][a-z0-9]{1,31}$/);
         } finally {
             harness.close();
         }

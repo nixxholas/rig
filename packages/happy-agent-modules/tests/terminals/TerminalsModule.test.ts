@@ -3,8 +3,10 @@ import { PassThrough } from "node:stream";
 import type { Context } from "@steve.kite/stdlib";
 import { afterEach, describe, expect, it } from "vitest";
 
+import { GitModule } from "../../sources/git/index.js";
 import { projectMigrations, ProjectsModule } from "../../sources/projects/index.js";
 import {
+    MAX_TERMINALS_PER_SCOPE,
     TerminalError,
     TerminalsModule,
     type TerminalProcess,
@@ -12,12 +14,8 @@ import {
     type TerminalProcessOptions,
 } from "../../sources/terminals/index.js";
 import { workspaceMigrations, WorkspacesModule } from "../../sources/workspaces/index.js";
+import { temporaryTestConfig } from "../support/configModule.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
-
-const AGENT = "agent-1";
-
-/** Where workspace folders are created. The catalog decides every workspace path from this. */
-const WORKSPACES_DIRECTORY = "/managed";
 
 const opened: World[] = [];
 
@@ -34,7 +32,6 @@ describe("TerminalsModule", () => {
 
         const terminal = await module.create(
             ctx,
-            AGENT,
             { projectId: project.id },
             { cols: 40, rows: 12 },
         );
@@ -45,28 +42,29 @@ describe("TerminalsModule", () => {
         expect(terminal.colorScheme).toBe("dark");
         expect(terminal.exitCode).toBeNull();
         expect(factory.started[0]?.cwd).toBe(project.repositoryRef);
-        expect(await module.list(ctx, AGENT, { projectId: project.id })).toEqual([terminal]);
+        expect(await module.list(ctx, { projectId: project.id })).toEqual([terminal]);
     });
 
     it("starts a workspace terminal in the worktree rather than inside the project", async () => {
-        const { ctx, factory, module, project, workspace } =
-            await createWorld("terminals-workspace-folder");
+        const { ctx, factory, module, project, workspace, workspacesDirectory } = await createWorld(
+            "terminals-workspace-folder",
+        );
         const scope = { projectId: project.id, workspaceId: workspace.id };
 
-        await module.create(ctx, AGENT, scope, {});
+        await module.create(ctx, scope, {});
 
         expect(factory.started[0]?.cwd).toBe(workspace.path);
-        expect(workspace.path.startsWith(WORKSPACES_DIRECTORY)).toBe(true);
+        expect(workspace.path.startsWith(workspacesDirectory)).toBe(true);
         // The two folders are two collections: a project terminal is not a workspace terminal.
-        expect(await module.list(ctx, AGENT, { projectId: project.id })).toEqual([]);
-        expect(await module.list(ctx, AGENT, scope)).toHaveLength(1);
+        expect(await module.list(ctx, { projectId: project.id })).toEqual([]);
+        expect(await module.list(ctx, scope)).toHaveLength(1);
     });
 
     it("resolves a relative working directory against the folder, and keeps an absolute one", async () => {
         const { ctx, factory, module, project } = await createWorld("terminals-cwd");
 
-        await module.create(ctx, AGENT, { projectId: project.id }, { cwd: "packages/thing" });
-        await module.create(ctx, AGENT, { projectId: project.id }, { cwd: "/somewhere/else" });
+        await module.create(ctx, { projectId: project.id }, { cwd: "packages/thing" });
+        await module.create(ctx, { projectId: project.id }, { cwd: "/somewhere/else" });
 
         expect(factory.started.map((options) => options.cwd)).toEqual([
             `${project.repositoryRef}/packages/thing`,
@@ -77,15 +75,15 @@ describe("TerminalsModule", () => {
     it("refuses a project, a workspace, and a terminal nobody has", async () => {
         const { ctx, module, project } = await createWorld("terminals-unknown");
 
-        await expect(module.list(ctx, AGENT, { projectId: "missing" })).rejects.toMatchObject({
+        await expect(module.list(ctx, { projectId: "missing" })).rejects.toMatchObject({
             code: "not_found",
         });
         await expect(
-            module.create(ctx, AGENT, { projectId: project.id, workspaceId: "missing" }, {}),
+            module.create(ctx, { projectId: project.id, workspaceId: "missing" }, {}),
         ).rejects.toMatchObject({ code: "not_found" });
-        await expect(
-            module.get(ctx, AGENT, { projectId: project.id }, "nope"),
-        ).rejects.toMatchObject({ code: "not_found" });
+        await expect(module.get(ctx, { projectId: project.id }, "nope")).rejects.toMatchObject({
+            code: "not_found",
+        });
     });
 
     it("refuses a workspace that is not ready and an archived project", async () => {
@@ -95,31 +93,31 @@ describe("TerminalsModule", () => {
         await expect(
             module.create(
                 ctx,
-                AGENT,
                 { projectId: project.id, workspaceId: initializingWorkspace.id },
                 {},
             ),
         ).rejects.toMatchObject({ code: "conflict" });
         await expect(
-            module.create(ctx, AGENT, { projectId: archivedProject.id }, {}),
+            module.create(ctx, { projectId: archivedProject.id }, {}),
         ).rejects.toMatchObject({ code: "conflict" });
     });
 
     it("refuses a workspace that belongs to another project", async () => {
-        const { ctx, module, otherProject, workspace } =
-            await createWorld("terminals-foreign-workspace");
+        const { ctx, module, otherProject, workspace } = await createWorld(
+            "terminals-foreign-workspace",
+        );
 
         await expect(
-            module.create(ctx, AGENT, { projectId: otherProject.id, workspaceId: workspace.id }, {}),
+            module.create(ctx, { projectId: otherProject.id, workspaceId: workspace.id }, {}),
         ).rejects.toMatchObject({ code: "not_found" });
     });
 
     it("resizes the process and the record together", async () => {
         const { ctx, factory, module, project } = await createWorld("terminals-resize");
         const scope = { projectId: project.id };
-        const created = await module.create(ctx, AGENT, scope, {});
+        const created = await module.create(ctx, scope, {});
 
-        const resized = await module.resize(ctx, AGENT, scope, created.id, { cols: 100, rows: 30 });
+        const resized = await module.resize(ctx, scope, created.id, { cols: 100, rows: 30 });
 
         expect(resized).toMatchObject({ cols: 100, id: created.id, rows: 30 });
         expect(factory.processes[0]?.sizes.at(-1)).toEqual([100, 30]);
@@ -128,34 +126,34 @@ describe("TerminalsModule", () => {
     it("keeps a stopped terminal, holding what it exited with", async () => {
         const { ctx, factory, module, project } = await createWorld("terminals-exit-code");
         const scope = { projectId: project.id };
-        const created = await module.create(ctx, AGENT, scope, {});
+        const created = await module.create(ctx, scope, {});
         factory.processes[0]?.exitWith(3);
 
-        const stopped = await module.stop(ctx, AGENT, scope, created.id);
+        const stopped = await module.stop(ctx, scope, created.id);
 
         expect(stopped).toMatchObject({ exitCode: 3, id: created.id, status: "exited" });
-        expect(await module.list(ctx, AGENT, scope)).toEqual([stopped]);
+        expect(await module.list(ctx, scope)).toEqual([stopped]);
     });
 
     it("refuses one terminal past the limit, then reuses the place a finished one gave up", async () => {
-        const { ctx, factory, module, project } = await createWorld("terminals-limit", {
-            maxTerminalsPerScope: 2,
-        });
+        const { ctx, factory, module, project } = await createWorld("terminals-limit");
         const scope = { projectId: project.id };
-        const first = await module.create(ctx, AGENT, scope, {});
-        await module.create(ctx, AGENT, scope, {});
+        const first = await module.create(ctx, scope, {});
+        for (let opened = 1; opened < MAX_TERMINALS_PER_SCOPE; opened += 1) {
+            await module.create(ctx, scope, {});
+        }
 
-        await expect(module.create(ctx, AGENT, scope, {})).rejects.toMatchObject({
+        await expect(module.create(ctx, scope, {})).rejects.toMatchObject({
             code: "conflict",
         });
 
         factory.processes[0]?.exitWith(0);
-        await module.stop(ctx, AGENT, scope, first.id);
-        const third = await module.create(ctx, AGENT, scope, {});
+        await module.stop(ctx, scope, first.id);
+        const replacement = await module.create(ctx, scope, {});
 
-        const listed = await module.list(ctx, AGENT, scope);
-        expect(listed).toHaveLength(2);
-        expect(listed.map((terminal) => terminal.id)).toContain(third.id);
+        const listed = await module.list(ctx, scope);
+        expect(listed).toHaveLength(MAX_TERMINALS_PER_SCOPE);
+        expect(listed.map((terminal) => terminal.id)).toContain(replacement.id);
         expect(listed.map((terminal) => terminal.id)).not.toContain(first.id);
     });
 
@@ -163,14 +161,14 @@ describe("TerminalsModule", () => {
         const { ctx, factory, module, project, workspace } =
             await createWorld("terminals-close-folder");
         const workspaceScope = { projectId: project.id, workspaceId: workspace.id };
-        await module.create(ctx, AGENT, { projectId: project.id }, {});
-        await module.create(ctx, AGENT, workspaceScope, {});
+        await module.create(ctx, { projectId: project.id }, {});
+        await module.create(ctx, workspaceScope, {});
 
         await module.closeScope(workspaceScope);
 
         expect(factory.processes[1]?.killed).toBe(true);
         expect(factory.processes[0]?.killed).toBe(false);
-        expect(await module.list(ctx, AGENT, workspaceScope)).toEqual([]);
+        expect(await module.list(ctx, workspaceScope)).toEqual([]);
 
         await module.closeProject(project.id);
         expect(factory.processes[0]?.killed).toBe(true);
@@ -179,10 +177,10 @@ describe("TerminalsModule", () => {
     it("attaches a stream and detaches it again", async () => {
         const { ctx, module, project } = await createWorld("terminals-attach");
         const scope = { projectId: project.id };
-        const created = await module.create(ctx, AGENT, scope, {});
+        const created = await module.create(ctx, scope, {});
         const stream = new PassThrough();
 
-        const detach = await module.attach(ctx, AGENT, scope, created.id, stream);
+        const detach = await module.attach(ctx, scope, created.id, stream);
         detach();
         stream.destroy();
 
@@ -193,30 +191,21 @@ describe("TerminalsModule", () => {
         const { ctx, module, project } = await createWorld("terminals-invalid-settings");
         const scope = { projectId: project.id };
 
-        await expect(module.create(ctx, AGENT, scope, { cols: 0 })).rejects.toBeInstanceOf(
-            TerminalError,
-        );
+        await expect(module.create(ctx, scope, { cols: 0 })).rejects.toBeInstanceOf(TerminalError);
         await expect(
-            module.create(ctx, AGENT, scope, {
+            module.create(ctx, scope, {
                 nonsense: true,
             } as unknown as Record<string, never>),
         ).rejects.toMatchObject({ code: "invalid" });
-    });
-
-    it("insists on being given both catalogs", () => {
-        expect(() => new TerminalsModule({} as never)).toThrow(/invalid/i);
-        expect(() => new TerminalsModule({ projects: new ProjectsModule({}) } as never)).toThrow(
-            /invalid/i,
-        );
     });
 
     it("opens nothing once it has closed", async () => {
         const { ctx, module, project } = await createWorld("terminals-closed");
         await module.close();
 
-        await expect(module.create(ctx, AGENT, { projectId: project.id }, {})).rejects.toMatchObject(
-            { code: "unavailable" },
-        );
+        await expect(module.create(ctx, { projectId: project.id }, {})).rejects.toMatchObject({
+            code: "unavailable",
+        });
     });
 });
 
@@ -233,6 +222,11 @@ interface World {
     readonly module: TerminalsModule;
     readonly project: { readonly id: string; readonly repositoryRef: string };
     readonly workspace: { readonly id: string; readonly path: string };
+    /**
+     * Where this world's workspace folders live, as the catalog itself resolves it: configuration
+     * says where the managed root is, and Git settles what that path really names.
+     */
+    readonly workspacesDirectory: string;
 }
 
 /**
@@ -242,10 +236,7 @@ interface World {
  * real ones over a real agent database rather than restating their answers in a stand-in that could
  * drift from them. Only the pseudo-terminal is replaced, because a shell is not what is under test.
  */
-async function createWorld(
-    name: string,
-    options: { readonly maxTerminalsPerScope?: number } = {},
-): Promise<World> {
+async function createWorld(name: string): Promise<World> {
     const database = moduleDatabase([], name);
     for (const [, migrate] of projectMigrations) {
         await migrate(database.context, database.database);
@@ -255,47 +246,39 @@ async function createWorld(
     }
 
     const ctx = database.context;
-    const projects = new ProjectsModule({});
-    const workspaces = new WorkspacesModule({
-        projects,
-        workspacesDirectory: WORKSPACES_DIRECTORY,
-    });
+    const config = await temporaryTestConfig();
+    const git = new GitModule();
+    const projects = new ProjectsModule(config, git);
+    const workspaces = new WorkspacesModule(config, projects, git);
 
-    const project = await projects.create(ctx, AGENT, {
+    const project = await projects.create(ctx, {
         name: "Main",
         repositoryRef: "/projects/main",
     });
-    const otherProject = await projects.create(ctx, AGENT, {
+    const otherProject = await projects.create(ctx, {
         name: "Other",
         repositoryRef: "/projects/other",
     });
-    const gone = await projects.create(ctx, AGENT, {
+    const gone = await projects.create(ctx, {
         name: "Gone",
         repositoryRef: "/projects/gone",
     });
-    const archivedProject = await projects.archive(ctx, AGENT, gone.id);
+    const archivedProject = await projects.archive(ctx, gone.id);
 
-    const reserved = await workspaces.reserve(ctx, AGENT, {
+    const reserved = await workspaces.reserve(ctx, {
         name: "Ready",
         projectRef: project.id,
     });
-    const workspace = await workspaces.markReady(ctx, AGENT, {
+    const workspace = await workspaces.markReady(ctx, {
         workspaceId: reserved.workspace.id,
     });
-    const initializing = await workspaces.reserve(ctx, AGENT, {
+    const initializing = await workspaces.reserve(ctx, {
         name: "Starting",
         projectRef: project.id,
     });
 
     const factory = new FakeProcessFactory();
-    const module = new TerminalsModule({
-        projects,
-        workspaces,
-        processFactory: factory,
-        ...(options.maxTerminalsPerScope === undefined
-            ? {}
-            : { maxTerminalsPerScope: options.maxTerminalsPerScope }),
-    });
+    const module = TerminalsModule.withProcessFactory(projects, workspaces, factory);
 
     const world: World = {
         archivedProject,
@@ -307,6 +290,7 @@ async function createWorld(
         otherProject,
         project,
         workspace,
+        workspacesDirectory: git.normalizeFuturePath(config.workspacesHome),
     };
     opened.push(world);
     return world;

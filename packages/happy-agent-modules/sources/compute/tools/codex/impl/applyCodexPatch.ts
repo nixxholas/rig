@@ -3,7 +3,7 @@ import type { Context } from "@steve.kite/stdlib";
 import type { Compute, ComputePermissions } from "../../../Compute.js";
 import { computePermissionsForContext } from "../../../impl/computePermissionsForContext.js";
 import { deleteComputeFile } from "../../../impl/deleteComputeFile.js";
-import type { FileReadLog } from "../../../impl/FileReadLog.js";
+import type { FileReadLog } from "../../../../impl/FileReadLog.js";
 import { moveComputeFile } from "../../../impl/moveComputeFile.js";
 import { resolveComputePath } from "../../../impl/resolveComputePath.js";
 import { writeComputeTextFile } from "../../../impl/writeComputeTextFile.js";

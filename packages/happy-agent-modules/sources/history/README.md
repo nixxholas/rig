@@ -29,18 +29,17 @@ const history = new HistoryModule();
 const agent = await Agent.create(ctx, { ...options, modules: [history] });
 ```
 
-Any agent may read any agent's history. `HistoryModuleOptions` accepts `resolveTarget`, a
-callback the host provides to map canonical session-tree paths to Agent IDs (it may raise its
-own ambiguous-path error); a target the host does not recognize is read as a raw Agent ID, and a
-target that exists nowhere simply has an empty archive. `listAgents` supplies the bounded session-tree
-summaries returned with every tool response; without it, self-history still reports the current
-agent with its archive count. `toolDisplay` optionally supplies the one-line summary that the host
-would show for a tool result. When it is absent, lifecycle recording uses a bounded generic
-success/error summary. `toolOutputLimit` controls how many characters of a tool's output are worth
-recording (default `16_000`, separate from `MAX_HISTORY_TOOL_OUTPUT_LENGTH`, the hard persistence
-cap). `failureMode` defaults to `"propagate"`: an archive failure rolls back the Agent Base
-transaction it happened inside. Passing `"best-effort"` is an explicit opt-in for hosts that treat
-history as advisory; a store failure is then swallowed and the record is dropped.
+The module takes no construction arguments and no callbacks. Any agent may read any agent's
+history: a target is a stable Agent ID, reading one's own always resolves, and an agent that has
+recorded nothing simply has an empty archive. Every tool response carries the bounded roster of
+the agents it concerns — the reader, and the agent read when that is someone else — each with its
+own archive count.
+
+A tool result is summarized by the module's own bounded one-line display, and only the first
+16,000 characters of a tool's output are worth recording (separately from
+`MAX_HISTORY_TOOL_OUTPUT_LENGTH`, the hard persistence cap); output past that is truncated with a
+note saying how much was dropped. An archive failure always propagates: it rolls back the Agent
+Base transaction it happened inside, so the record and the thing recorded stay in agreement.
 
 ## Tools
 
@@ -66,13 +65,12 @@ Arguments:
 - `roles` — restrict to up to five of `"user"`, `"agent"`, `"assistant"`, `"error"`, `"system"`.
 - `include_tools` — include simplified tool calls and truncated tool results in the rendering.
   Defaults to `true`; it never changes what `query` searches.
-- `target` — a Stable Agent ID or canonical session-tree path such as `/root/audit`. Omitted means
-  the caller; paths are resolved by the host, and a value the host does not recognize is read as a
-  raw Agent ID.
+- `target` — a stable Agent ID. Omitted means the caller; any well-formed ID may be read, including
+  one that has recorded nothing yet.
 
-The response always includes `agents`, the bounded session-tree roster with `agent_id`,
-`description`, `message_count`, `path`, and `status`, so a model can discover targets before
-reading them. The response is a rendering, not a replay: `history` is chronological text capped at 80,000
+The response always includes `agents`, the bounded roster of the agents it concerns with `agent_id`,
+`description`, `message_count`, `path`, and `status`, so a model can see what it is reading.
+The response is a rendering, not a replay: `history` is chronological text capped at 80,000
 characters (`MAX_HISTORY_CHARACTERS`), one numbered block per message, with long text truncated,
 tool arguments and output truncated separately and more tightly, images represented only by media
 type, and reasoning the provider hid marked `[redacted]` rather than fabricated. Because the cap is
@@ -84,24 +82,34 @@ tool calls, and tool results), let the model size what it did and did not see wi
 
 ## External functions
 
-- `record(ctx, agentId, message: HistoryMessageInput): Promise<void>` — append one message on the
-  host's behalf, for anything the module itself did not observe. The module allocates `recordId`
+- `record(ctx, agentId, message: HistoryMessageInput): Promise<void>` — append one message a
+  caller observed, for anything the module itself did not. The module allocates `recordId`
   and `at` when the input omits them.
 - `read(ctx, agentId, query?: HistoryQuery): Promise<HistoryPage>` — one page, filtered and paged
   exactly the way the tool sees it. This is what `read_agent_history` calls internally.
 - `messages(ctx, agentId, { from?, limit? }): Promise<HistoryRecord[]>` — the raw records for a
-  page, without the tool's text rendering, for a host that wants to build its own view.
+  page, without the tool's text rendering, for a caller that wants to build its own view.
 - `stats(ctx, agentId): Promise<HistoryStats>` — exact totals for the whole archive, read through
   the store's bounded page operation rather than derived from a sampled page, since a caller such
   as model handoff may keep only a two-ended sample while still needing the true totals.
+- `readExcerpt(ctx, agentId, maxCharacters): Promise<HistoryExcerpt | undefined>` — a bounded
+  two-ended quotation of a whole archive: the first and last pages read, merged and deduplicated,
+  rendered into `beginning` and `recent` text within `maxCharacters` (at most
+  `MAX_HISTORY_EXCERPT_CHARACTERS`, 200,000), with `stats` for the whole archive when the exact
+  totals agree with what was sampled and `statsAreSampled` saying which it got. An archive with
+  nothing in it returns `undefined`. This is what a model handoff quotes, so the caller never has
+  to page, merge, or reconcile totals itself.
 - `listAgents(ctx, requesterAgentId, targetAgentId?): Promise<HistoryAgentSummaries>` — the bounded
-  related-agent roster supplied by the host, or a self/target fallback when no roster adapter is
-  configured.
+  roster returned with every tool response: the reader, and the agent read when that is someone
+  else, each described from its own archive count.
 - `resolveTarget(ctx, requesterAgentId, requestedTarget): Promise<string>` — the resolution behind
-  the tool's `target` argument. Requesting one's own ID always resolves; anything else is offered
-  to the constructor's `resolveTarget` (which maps canonical paths and may raise its own
-  ambiguous-path error), and a target it does not map is used as a raw Agent ID as long as it is a
-  well-formed one.
+  the tool's `target` argument. Requesting one's own ID always resolves; anything else is used as
+  a raw Agent ID as long as it is a well-formed one, and is refused when it is not.
+- `onAppend(listener): () => void` — subscribe to committed appends. The listener is called after
+  the appending transaction commits, with a private clone of the messages, and the returned
+  function unsubscribes. Subscribers are independent: one that fails is logged through `ctx.log`
+  and the rest are still told. This is how the observation module's history dump follows the
+  archive.
 
 The module also implements the `AgentModule` lifecycle hooks that do the recording:
 `onEventTransact` (buffers each completed text/thinking/tool-call block), `messageAcceptedTransact`
@@ -109,13 +117,13 @@ The module also implements the `AgentModule` lifecycle hooks that do the recordi
 tool result per call, including its one-line display summary), `afterInferenceTransact` (writes the
 finished response and, if inference failed, a separate `role: "error"` message), and
 `afterAgentSettledTransact` (flushes any response blocks still pending after an interruption).
-These are not meant to be called directly by a host.
+These are not meant to be called directly.
 
 ## Storage
 
 Completed history lives in the module's migrated database table. Agent lifecycle hooks use the
-transaction already supplied by Agent Base; direct host operations use the constructor's
-`transaction` integration. `recordId` identifies a record, and reusing one is a database conflict,
+transaction already supplied by Agent Base; a direct call opens its own through `ctx.inTx`, which
+joins the caller's transaction when there already is one. `recordId` identifies a record, and reusing one is a database conflict,
 not a module-owned replay signal. Agent Base owns durable tool retry and completion. A
 `HistoryRecord.position` is the original, stable position at which a message was written; cursors
 are positions rather than offsets.

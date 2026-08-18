@@ -1,4 +1,5 @@
 import { Type, type Static } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
 import type { Context } from "@steve.kite/stdlib";
 
 import { presenceDefinitionSchema } from "./PresenceState.js";
@@ -77,19 +78,22 @@ export const presenceEventSchema = Type.Union([
 
 export type PresenceEvent = Static<typeof presenceEventSchema>;
 
-const presenceEventListenerCallbackSchema = Type.Function(
+/** What a caller registers with `onEvent` or `onEventTransactional` after construction. */
+export const presenceEventListenerSchema = Type.Function(
     [presenceContextSchema, presenceEventSchema],
     Type.Union([Type.Void(), Type.Promise(Type.Void())]),
 );
 
-/** Transactional and post-commit notifications for host protocol projection. */
-export const presenceModuleListenerSchema = Type.Object(
-    {
-        onEventTransactional: Type.Optional(presenceEventListenerCallbackSchema),
-        onEvent: Type.Optional(presenceEventListenerCallbackSchema),
-    },
-    { additionalProperties: false },
-);
-
 /** The listener contract is inferred directly from the runtime schema. */
-export type PresenceModuleListener = Static<typeof presenceModuleListenerSchema>;
+export type PresenceEventListener = Static<typeof presenceEventListenerSchema>;
+
+/** Undoing a registration; calling it twice is harmless. */
+export type PresenceUnsubscribe = () => void;
+
+export function assertPresenceEventListener(
+    value: unknown,
+): asserts value is PresenceEventListener {
+    if (!Value.Check(presenceEventListenerSchema, value)) {
+        throw new Error("Presence event listener must be a function.");
+    }
+}

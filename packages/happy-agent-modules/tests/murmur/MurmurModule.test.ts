@@ -1,21 +1,76 @@
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { Value } from "@sinclair/typebox/value";
 import { sql } from "drizzle-orm";
 import { agentDatabaseRows } from "@slopus/happy-agent-base";
+import type { MurmurStore } from "@slopus/murmur";
 import type { Context } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
+import { ConfigModule } from "../../sources/config/ConfigModule.js";
 import {
     MURMUR_STORE_TABLE,
     murmurMigrations,
     readMurmurBinding,
 } from "../../sources/murmur/MurmurDatabase.js";
 import { MurmurModule } from "../../sources/murmur/MurmurModule.js";
-import { murmurSnapshotSchema } from "../../sources/murmur/MurmurTypes.js";
+import type { MurmurClientFacade } from "../../sources/murmur/MurmurService.js";
+import {
+    murmurSnapshotSchema,
+    type MurmurChangedEvent,
+} from "../../sources/murmur/MurmurTypes.js";
 import { ProfileModule } from "../../sources/profile/ProfileModule.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
 import { FakeMurmurClient, encodeIdentity, identityBytes } from "./fakeMurmurClient.js";
 
 const LOCAL_INSTANCE_ID = "alocalinstance000000001";
+
+/**
+ * A sharing module with no relay to reach.
+ *
+ * Opening a client is the only thing sharing does that needs the network, so it is the only thing
+ * a test replaces, and it is replaced the way the module documents: by subclassing.
+ */
+class ScriptedMurmurModule extends MurmurModule {
+    readonly clients: FakeMurmurClient[] = [];
+    readonly #open: (store: MurmurStore, clients: FakeMurmurClient[]) => Promise<FakeMurmurClient>;
+
+    constructor(
+        config: ConfigModule,
+        profile: ProfileModule,
+        open: (store: MurmurStore, clients: FakeMurmurClient[]) => Promise<FakeMurmurClient>,
+    ) {
+        super(config, profile);
+        this.#open = open;
+    }
+
+    protected override async openClient(
+        _ctx: Context,
+        store: MurmurStore,
+    ): Promise<MurmurClientFacade> {
+        return await this.#open(store, this.clients);
+    }
+}
+
+/**
+ * A configuration read from a Happy root of its own, with sharing set the way a test wants it.
+ *
+ * Whether sharing runs is a configuration decision, so a test that wants it on writes it where
+ * configuration reads it rather than passing a flag the module no longer accepts.
+ */
+async function sharingConfig(enabled: boolean): Promise<ConfigModule> {
+    const root = await mkdtemp(join(tmpdir(), "happy-murmur-"));
+    const configHome = join(root, "Happy", "Config");
+    await mkdir(configHome, { recursive: true });
+    await writeFile(
+        join(configHome, "happy.toml"),
+        `[sharing]\nenabled = ${String(enabled)}\n`,
+        "utf8",
+    );
+    return await ConfigModule.load(join(root, ".happy"));
+}
 
 /** Every Murmur key currently in the agent database, which is what a reset has to leave empty. */
 async function storedKeys(test: { context: Context }): Promise<readonly string[]> {
@@ -27,7 +82,7 @@ async function storedKeys(test: { context: Context }): Promise<readonly string[]
 }
 
 async function createFixture(name: string, enabled = true) {
-    const profiles = new ProfileModule({ now: () => 1_000 });
+    const profiles = new ProfileModule();
     const test = moduleDatabase([...murmurMigrations, ...profiles.migrations], name);
     await test.ready;
     profiles.open(LOCAL_INSTANCE_ID);
@@ -35,22 +90,16 @@ async function createFixture(name: string, enabled = true) {
         email: "steve@example.test",
         name: "Steve",
     });
-    const clients: FakeMurmurClient[] = [];
-    const module = new MurmurModule({
-        enabled,
-        now: () => 1_000,
-        // Each open is a fresh identity, exactly as a client with no stored keys would be, and it
-        // writes one key so the store it was handed can be seen to be the agent's own database.
-        openClient: async (_ctx, store) => {
-            const client = new FakeMurmurClient({ identity: identityBytes(clients.length + 1) });
-            clients.push(client);
-            await store.set(`murmur/session-states/${clients.length}`, client.identity);
-            return client;
-        },
-        profile: profiles,
-        rootContext: test.rootContext,
+    const config = await sharingConfig(enabled);
+    // Each open is a fresh identity, exactly as a client with no stored keys would be, and it
+    // writes one key so the store it was handed can be seen to be the agent's own database.
+    const module = new ScriptedMurmurModule(config, profiles, async (store, clients) => {
+        const client = new FakeMurmurClient({ identity: identityBytes(clients.length + 1) });
+        clients.push(client);
+        await store.set(`murmur/session-states/${clients.length}`, client.identity);
+        return client;
     });
-    return { clients, module, profile, profiles, test };
+    return { clients: module.clients, config, module, profile, profiles, test };
 }
 
 describe("MurmurModule", () => {
@@ -90,6 +139,24 @@ describe("MurmurModule", () => {
         }
     });
 
+    it("takes whether sharing runs, and where it reaches, from configuration", async () => {
+        const off = await createFixture("murmur-module-config-off", false);
+        const on = await createFixture("murmur-module-config-on");
+        try {
+            expect(off.module.enabled).toBe(false);
+            expect(off.config.configuration.values.sharing.enabled).toBe(false);
+            expect(on.module.enabled).toBe(true);
+            expect(on.config.configuration.values.sharing.relayUrl).toBe(
+                "https://murmur.cluster-fluster.com/",
+            );
+        } finally {
+            await off.module.close(off.test.context);
+            await on.module.close(on.test.context);
+            off.test.close();
+            on.test.close();
+        }
+    });
+
     it("waits for someone to be named before it connects to anything", async () => {
         const fixture = await createFixture("murmur-module-unbound");
         const ctx = fixture.test.context;
@@ -114,6 +181,50 @@ describe("MurmurModule", () => {
         }
     });
 
+    it("tells a subscriber that sharing changed, and stops when it unsubscribes", async () => {
+        const fixture = await createFixture("murmur-module-events");
+        const ctx = fixture.test.context;
+        const heard: MurmurChangedEvent[] = [];
+        try {
+            const unsubscribe = fixture.module.onEvent((_eventCtx, event) => heard.push(event));
+            await fixture.module.bindProfile(ctx, fixture.profile.id);
+            expect(heard.length).toBeGreaterThan(0);
+            expect(new Set(heard.map((event) => event.type))).toEqual(new Set(["murmur_changed"]));
+            const delivered = heard.length;
+
+            unsubscribe();
+            unsubscribe();
+            await fixture.module.reset(ctx);
+            expect(heard).toHaveLength(delivered);
+        } finally {
+            await fixture.module.close(ctx);
+            fixture.test.close();
+        }
+    });
+
+    it("keeps telling the remaining subscribers when one of them fails", async () => {
+        const fixture = await createFixture("murmur-module-events-failure");
+        const ctx = fixture.test.context;
+        const heard: MurmurChangedEvent[] = [];
+        let failures = 0;
+        try {
+            fixture.module.onEvent(() => {
+                failures += 1;
+                throw new Error("A subscriber that cannot cope.");
+            });
+            fixture.module.onEvent((_eventCtx, event) => heard.push(event));
+
+            await expect(
+                fixture.module.bindProfile(ctx, fixture.profile.id),
+            ).resolves.toMatchObject({ profileId: fixture.profile.id });
+            expect(failures).toBeGreaterThan(0);
+            expect(heard).toHaveLength(failures);
+        } finally {
+            await fixture.module.close(ctx);
+            fixture.test.close();
+        }
+    });
+
     it("opens again as the same person after a restart", async () => {
         const fixture = await createFixture("murmur-module-restart");
         const ctx = fixture.test.context;
@@ -123,12 +234,11 @@ describe("MurmurModule", () => {
 
             // The same database, and therefore the same store, so the identity the first module
             // bound is the one this one has to present again.
-            const restarted = new MurmurModule({
-                enabled: true,
-                openClient: async () => new FakeMurmurClient({ identity: identityBytes(1) }),
-                profile: fixture.profiles,
-                rootContext: fixture.test.rootContext,
-            });
+            const restarted = new ScriptedMurmurModule(
+                fixture.config,
+                fixture.profiles,
+                async () => new FakeMurmurClient({ identity: identityBytes(1) }),
+            );
             try {
                 await restarted.open(ctx);
                 expect(restarted.running).toBe(true);
@@ -182,15 +292,14 @@ describe("MurmurModule", () => {
             await fixture.module.close(ctx);
             await expect(storedKeys(fixture.test)).resolves.toEqual(["murmur/session-states/1"]);
 
-            const cold = new MurmurModule({
-                enabled: true,
-                openClient: async (_coldCtx, store) => {
+            const cold = new ScriptedMurmurModule(
+                fixture.config,
+                fixture.profiles,
+                async (store) => {
                     await store.set("murmur/session-states/cold", identityBytes(7));
                     return new FakeMurmurClient({ identity: identityBytes(7) });
                 },
-                profile: fixture.profiles,
-                rootContext: fixture.test.rootContext,
-            });
+            );
             try {
                 await expect(cold.reset(ctx)).resolves.toMatchObject({
                     identity: encodeIdentity(identityBytes(7)),

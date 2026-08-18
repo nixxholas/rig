@@ -45,15 +45,25 @@ The two catalogs that own the folders, given directly:
 Both are required. A terminal never derives a path of its own, so the catalog that decided where a
 folder is is the only thing it will ask.
 
-Everything else the module does itself. `TerminalProcessFactory` defaults to a real pseudo-terminal
-on this machine; a test replaces it to drive lifecycle without a shell.
+Everything else the module does itself. Production always spawns a real pseudo-terminal; the one
+test-only seam is `TerminalsModule.withProcessFactory(projects, workspaces, factory)`, which
+replaces that boundary so a test can drive the lifecycle without a shell. There is no constructor
+option for it, because nothing in the product supplies one.
 
 ```ts
-import { ProjectsModule, TerminalsModule, WorkspacesModule } from "@slopus/happy-agent-modules";
+import {
+    ConfigModule,
+    GitModule,
+    ProjectsModule,
+    TerminalsModule,
+    WorkspacesModule,
+} from "@slopus/happy-agent-modules";
 
-const projects = new ProjectsModule({ rootContext });
-const workspaces = new WorkspacesModule({ projects, rootContext });
-const terminals = new TerminalsModule({ projects, workspaces });
+const config = await ConfigModule.load();
+const git = new GitModule();
+const projects = new ProjectsModule(config, git);
+const workspaces = new WorkspacesModule(config, projects, git);
+const terminals = new TerminalsModule(projects, workspaces);
 ```
 
 ## Bounds
@@ -63,7 +73,7 @@ const terminals = new TerminalsModule({ projects, workspaces });
 | Columns                      | 1–500, 80 by default             |
 | Rows                         | 1–200, 24 by default             |
 | Scrollback rows              | 0–100,000, 10,000 by default     |
-| Terminals per folder         | 32                               |
+| Terminals per folder         | 32 (`MAX_TERMINALS_PER_SCOPE`)   |
 | Command                      | 8,192 characters                 |
 
 Reaching the terminal limit discards a terminal that has already finished. When every terminal is

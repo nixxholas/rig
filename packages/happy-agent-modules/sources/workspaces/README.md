@@ -15,27 +15,40 @@ crashed creation recoverable rather than a half-made worktree nobody recorded.
 
 ```ts
 import { Agent } from "@slopus/happy-agent-base";
-import { ProjectsModule, WorkspacesModule } from "@slopus/happy-agent-modules";
+import {
+    ConfigModule,
+    GitModule,
+    ProjectsModule,
+    WorkspacesModule,
+} from "@slopus/happy-agent-modules";
 
-const projects = new ProjectsModule({ rootContext });
-const workspaces = new WorkspacesModule({ projects, rootContext });
+const config = await ConfigModule.load();
+const git = new GitModule();
+const projects = new ProjectsModule(config, git);
+const workspaces = new WorkspacesModule(config, projects, git);
 const agent = await Agent.create(ctx, { ...options, modules: [projects, workspaces] });
 ```
 
-`projects` is the only other module this one needs, and the dependency is one-way. A workspace is a
-branch of a project's repository, in a folder under that project's key, cut from the trunk that
-project decided on, and every worktree of a project shares one set of refs — so the projects catalog
-owns the folder, the credential and the repository lock, and this catalog takes all three through it.
-Archiving a project archives everything cut from it, which this module arranges by listening to the
-projects catalog's own events inside that transaction rather than by being called back.
+Three modules, and nothing else.
 
-`rootContext` is the lifetime the module's Git and filesystem work runs on: a context derived from
-the application root, carrying the agent database. A checkout, a setup command or a folder removal
-outlives the call that asked for it, so it never runs on the caller's context, and without a root the
-catalog still records everything it is told but cannot start work of its own. `workspacesDirectory`,
-`homeDirectory`, `environment` and `settings` locate and configure that work — where folders are
-created, which setup commands and sync paths apply, whether folders are kept on archive. `git` and
-`probeGit` replace the Git surfaces so a test can drive the whole lifecycle without Git.
+| Module                                      | What it answers                                                        |
+| ------------------------------------------- | ---------------------------------------------------------------------- |
+| [`ConfigModule`](../config/README.md)       | Where managed workspace folders live, whether managed workspaces are on at all, and what a workspace folder does by default — setup commands, sync paths, what is kept on archive. |
+| [`ProjectsModule`](../projects/README.md)   | The project's folder, its credential, its repository lock, and the vocabulary a workspace names things with. |
+| [`GitModule`](../git/README.md)             | Worktrees, branches, clones, transfers, and every path Git is handed.  |
+
+The dependency on projects is one-way. A workspace is a branch of a project's repository, in a
+folder under that project's key, cut from the trunk that project decided on, and every worktree of
+a project shares one set of refs — so the projects catalog owns the folder, the credential and the
+repository lock, and this catalog takes all three through it. Archiving a project archives
+everything cut from it, which this module arranges by subscribing to the projects catalog's own
+events inside that transaction rather than by being called back.
+
+There is no `rootContext`, no path string, no settings object and no injected runner. The lifetime
+the module's Git and filesystem work runs on is derived from the first context it is used with: a
+checkout, a setup command or a folder removal outlives the call that asked for it, so it never runs
+on the caller's context. A detached context deliberately carries no storage, so the catalog puts the
+agent database back on that lifetime itself.
 
 This catalog does not name anything. A workspace created from a client is called something like
 "Workspace 3" until a chat working in it settles on something better, and the module that thinks of
@@ -43,13 +56,13 @@ that name is [titles](../titles/README.md): it asks, and then renames the worksp
 `inheritName`. What a folder and a branch are called is this catalog's to write down and nobody
 else's, but what they should be called is not a question it asks.
 
-`authorization` lets one agent act on another agent's workspaces (self access is always allowed
-without it); `idFactory`, `eventIdFactory`, and `clock` let a caller control identity and time
-instead of `crypto.randomUUID()` and `Date.now()`; `listener` receives every workspace event;
-`maxPageSize` and `maxOutputCharacters` bound paging and model-facing text; `onPostCommitError` is
-told about a listener failure after the durable transaction has already committed; `onHostError` is
-told when the module's own folder removal or branch rename throws, so the durable record can stand
-while the failure is still surfaced.
+Access is same-owner only: a workspace belongs to the agent that made it, and there is no policy to
+install. Identities are `crypto.randomUUID()` and time is `Date.now()`, both the module's own.
+`WORKSPACE_PAGE_SIZE` (50) and `MAX_WORKSPACE_OUTPUT_CHARACTERS` (12,000) bound paging and
+model-facing text. `onEventTransactional(listener)` and `onEvent(listener)` take a subscriber and
+return the call that ends the subscription. When the module's own folder removal or branch rename
+throws, it is logged through the context's own logger, so the durable record stands while the
+failure is still visible.
 
 `open(ctx, agentId)` picks up whatever the last run left unfinished — every workspace still being
 created is carried through to a usable checkout — and `close(ctx)` stops every background lifetime
@@ -93,10 +106,11 @@ has any more.
 
 Archival is two steps on purpose. `beginArchive` is the durable decision and moves the row to
 `archiving` immediately, and that is what `archive` returns. Folder removal does **not** run in the
-caller's lifetime: it is started on a lifetime named off `rootContext`, and `completeArchive` moves
-the row to `archived` when it finishes. A tool call therefore returns as soon as the decision is
-durable, however long a folder takes to delete. If removal throws, the workspace stays `archiving`
-and the failure is reported through `onHostError` — **cleanup failure never rolls archival back**. A
+caller's lifetime: it is started on the catalog's own background lifetime, and `completeArchive`
+moves the row to `archived` when it finishes. A tool call therefore returns as soon as the decision
+is durable — with status `archiving` — however long a folder takes to delete. If removal throws, the
+workspace stays `archiving` and the failure is logged — **cleanup failure never rolls archival
+back**. A
 person who archived a workspace does not get it handed back because a folder would not delete.
 `whenCleanupSettles()` waits for the removals this module started, for shutdown and for tests.
 
@@ -141,9 +155,9 @@ Governing principles across all seven tools:
   fresh authoritative read before it is trusted. The store's `changed` flag must agree with an
   actual before/after comparison, and a changed row must have advanced its `version`; a mismatch
   throws rather than passing bad state to the model.
-- Every page and detail string is re-clipped to `maxOutputCharacters`, never truncated silently.
-- Ownership is enforced on every read and mutation: acting on another agent's workspace is refused
-  unless the `authorization` callback allows the specific action.
+- Every page and detail string is re-clipped to `MAX_WORKSPACE_OUTPUT_CHARACTERS`, never truncated
+  silently.
+- Ownership is enforced on every read and mutation: acting on another agent's workspace is refused.
 
 ### Paging
 
@@ -203,8 +217,8 @@ Lifecycle:
 - `recordInitialization`, `markReady`, `markFailed`, `markInitializationFailed`, `applyGitFacts`,
   `applyProbe` — each returns the authoritative `Workspace`.
 - `beginArchive`, `completeArchive`, and `archive` — the last commits the decision, starts folder
-  removal on a lifetime named off `rootContext`, and returns the `archiving` row without waiting for
-  it. `whenCleanupSettles()` waits for those removals.
+  removal on the catalog's own background lifetime, and returns the `archiving` row without waiting
+  for it. `whenCleanupSettles()` waits for those removals.
 - `reorder(ctx, agentId, input)` — `{ workspaceId, afterId, expectedVersion? }`; `afterId: null`
   moves a workspace to the top.
 
@@ -223,6 +237,12 @@ Reading:
   `formatBranchMetadataDetailPageForModel`, `formatBranchMetadataForModel` — the exact rendering
   each tool's `toLLM` uses, exposed so a caller can show the same text outside a tool call.
 
+What a folder key means is the catalog's to answer, and it answers directly:
+`pathForStorageKey(projectRef, storageKey)`, `isBranchUnavailable(projectRef, branch)`,
+`isStorageKeyUnavailable(projectRef, storageKey)`, and
+`nameWithPreservedPrefix(current, generated)` — the last is what [titles](../titles/README.md) asks
+so a generated name keeps the number a person sorts by. There is no host object holding these.
+
 Naming helpers are exported too: `workspaceNameKey`, `workspaceStorageKey`, and
 `workspaceBranchName` derive the collision key, the kebab folder key, and the `worktree/<key>`
 branch. Collisions are suffixed the way a person would expect — `Name (2)` for names, `key-2` for
@@ -233,11 +253,12 @@ keys and branches.
 Every changed mutation emits a `WorkspaceEvent`: `workspace_created`, `workspace_updated` (carrying
 a `change` naming the transition), `workspace_renamed`, `workspace_reordered` (with
 `previousOrderKey`), `workspace_transferred`, `workspace_archived`, or
-`workspace_transfer_scheduled`. Each carries `eventId`, `at` (from `clock`), `agentId`, and the
-resulting workspace. If `listener.onEventTransactional` is set it runs inside the same store
-transaction as the mutation; `listener.onEvent` runs only after that transaction has durably
-committed, receiving the identical frozen event object. A listener failure is reported to
-`onPostCommitError` and otherwise swallowed — it never fails the mutation that already happened.
+`workspace_transfer_scheduled`. Each carries `eventId`, `at`, `agentId`, and the resulting
+workspace. A subscriber taken by `onEventTransactional(listener)` runs inside the same store
+transaction as the mutation, so a subscriber that throws rolls the mutation back with it. A
+subscriber taken by `onEvent(listener)` runs only after that transaction has durably committed,
+receiving the identical frozen event object; a failure there is logged and reaches nobody else — it
+never fails the mutation that already happened. Both return the call that ends the subscription.
 
 ## Storage
 

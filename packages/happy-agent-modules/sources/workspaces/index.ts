@@ -106,11 +106,12 @@ export { workspaceBranchName, workspaceNameKey, workspaceStorageKey } from "./Wo
 export {
     workspaceContextSchema,
     workspaceEventIdSchema,
+    workspaceEventListenerSchema,
     workspaceEventSchema,
-    workspaceModuleListenerSchema,
     workspaceUpdateChangeSchema,
     type WorkspaceEvent,
-    type WorkspaceModuleListener,
+    type WorkspaceEventListener,
+    type WorkspaceUnsubscribe,
     type WorkspaceUpdateChange,
 } from "./WorkspaceEvent.js";
 export {
@@ -148,29 +149,16 @@ export {
     type WorkspaceTransferWorkspace,
 } from "./WorkspaceTransfer.js";
 export {
-    assertWorkspaceModuleOptions,
-    workspaceClockSchema,
-    workspaceEventIdFactorySchema,
-    workspaceHostErrorSchema,
-    workspaceModuleOptionsSchema,
-    workspaceIdFactorySchema,
-    workspacePostCommitErrorSchema,
+    MAX_WORKSPACE_OUTPUT_CHARACTERS,
+    WORKSPACE_PAGE_SIZE,
     WorkspacesModule,
     type ResolvedProjectOwnership,
-    type WorkspaceModuleOptions,
     type WorkspaceReservation,
 } from "./WorkspacesModule.js";
 export {
-    workspaceEnvironmentSchema,
-    workspaceFolderSettingsOptionSchema,
-    workspaceGitRunnerSchema,
-    workspaceProjectsModuleSchema,
-    workspaceRootContextSchema,
     type CreateWorkspaceRequest,
     type WorkspaceCreatorOptions,
 } from "./WorkspaceProvisioning.js";
-export { withPreservedNumericPrefix } from "./impl/withPreservedNumericPrefix.js";
-export { getManagedWorkspacesDirectory } from "./impl/getManagedWorkspacesDirectory.js";
 export { isPathLexicallyWithin, syncWorkspaceFiles } from "./impl/syncWorkspaceFiles.js";
 export {
     DEFAULT_WORKSPACE_FOLDER_SETTINGS,
@@ -190,7 +178,6 @@ export {
     assertWorkspaceTransferResult,
     createWorkspaceStore,
     orderKeyBetween,
-    workspaceHostSchema,
     workspaceMigrations,
     workspaceMutationRequestSchema,
     workspaceMutationResultSchema,
@@ -199,7 +186,6 @@ export {
     workspaceStoreArchiveInputSchema,
     workspaceStoreFailInputSchema,
     workspaceStoreInheritNameInputSchema,
-    workspaceStoreOptionsSchema,
     workspaceStoreRecordInitializationInputSchema,
     workspaceStoreRenameInputSchema,
     workspaceStoreReorderInputSchema,
@@ -208,7 +194,6 @@ export {
     workspaceStoreSetBranchInputSchema,
     workspaceStoreWorkspaceInputSchema,
     workspaceTransactionChangeSchema,
-    type WorkspaceHost,
     type WorkspaceMutationRequest,
     type WorkspaceMutationResult,
     type WorkspaceStore,
@@ -217,7 +202,6 @@ export {
     type WorkspaceStoreArchiveInput,
     type WorkspaceStoreFailInput,
     type WorkspaceStoreInheritNameInput,
-    type WorkspaceStoreOptions,
     type WorkspaceStoreRecordInitializationInput,
     type WorkspaceStoreRenameInput,
     type WorkspaceStoreReorderInput,

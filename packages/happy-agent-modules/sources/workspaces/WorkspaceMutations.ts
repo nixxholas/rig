@@ -1,14 +1,19 @@
 import { Value } from "@sinclair/typebox/value";
 import { afterCommit, asyncLock, type Context } from "@steve.kite/stdlib";
 
-import { type Workspace, type WorkspaceMutationOperation } from "./Workspace.js";
+import {
+    workspaceTimestampSchema,
+    type Workspace,
+    type WorkspaceMutationOperation,
+} from "./Workspace.js";
 import { assertWorkspaceRecord } from "./WorkspaceRecord.js";
-import { workspaceNow, type WorkspaceClock } from "./WorkspaceClock.js";
 import {
     workspaceEventIdSchema,
+    workspaceEventListenerSchema,
     workspaceEventSchema,
     type WorkspaceEvent,
-    type WorkspaceModuleListener,
+    type WorkspaceEventListener,
+    type WorkspaceUnsubscribe,
 } from "./WorkspaceEvent.js";
 import {
     assertWorkspace,
@@ -22,13 +27,7 @@ import {
     type WorkspaceStore,
     type WorkspaceTransactionChange,
 } from "./WorkspaceStore.js";
-import {
-    deepFreeze,
-    isDeepFrozen,
-    isPromiseLike,
-    requirePromise,
-    safeError,
-} from "./workspaceRuntime.js";
+import { deepFreeze, isDeepFrozen, requirePromise } from "./workspaceRuntime.js";
 
 /** Distributes over the event union, so each event keeps its own fields. */
 export type WorkspaceEventPayload = WorkspaceEvent extends infer TEvent
@@ -36,16 +35,6 @@ export type WorkspaceEventPayload = WorkspaceEvent extends infer TEvent
         ? Omit<TEvent, "eventId" | "at">
         : never
     : never;
-
-export interface WorkspaceMutationsOptions {
-    readonly store: WorkspaceStore;
-    readonly eventIdFactory: (ctx: Context) => string | Promise<string>;
-    readonly clock: WorkspaceClock;
-    readonly listener: WorkspaceModuleListener | undefined;
-    readonly onPostCommitError:
-        | ((ctx: Context, event: WorkspaceEvent, error: unknown) => void | Promise<void>)
-        | undefined;
-}
 
 /**
  * The path every durable workspace change takes.
@@ -57,10 +46,8 @@ export interface WorkspaceMutationsOptions {
  */
 export class WorkspaceMutations {
     readonly #store: WorkspaceStore;
-    readonly #eventIdFactory: WorkspaceMutationsOptions["eventIdFactory"];
-    readonly #clock: WorkspaceMutationsOptions["clock"];
-    readonly #listener: WorkspaceModuleListener | undefined;
-    readonly #onPostCommitError: WorkspaceMutationsOptions["onPostCommitError"];
+    readonly #transactionalListeners = new Set<WorkspaceEventListener>();
+    readonly #postCommitListeners = new Set<WorkspaceEventListener>();
     /**
      * One durable change at a time. Two callers that ask at the same moment would otherwise each open
      * a root transaction, and a mutation already running inside one joins it instead of waiting on
@@ -68,12 +55,31 @@ export class WorkspaceMutations {
      */
     readonly #oneAtATime = asyncLock({ reentry: "allow" });
 
-    constructor(options: WorkspaceMutationsOptions) {
-        this.#store = options.store;
-        this.#eventIdFactory = options.eventIdFactory;
-        this.#clock = options.clock;
-        this.#listener = options.listener;
-        this.#onPostCommitError = options.onPostCommitError;
+    constructor(store: WorkspaceStore) {
+        this.#store = store;
+    }
+
+    /** Takes a subscriber that runs inside the transaction the change commits in. */
+    onEventTransactional(listener: WorkspaceEventListener): WorkspaceUnsubscribe {
+        return this.#subscribe(this.#transactionalListeners, listener);
+    }
+
+    /** Takes a subscriber that runs once the change is durable. */
+    onEvent(listener: WorkspaceEventListener): WorkspaceUnsubscribe {
+        return this.#subscribe(this.#postCommitListeners, listener);
+    }
+
+    #subscribe(
+        listeners: Set<WorkspaceEventListener>,
+        listener: WorkspaceEventListener,
+    ): WorkspaceUnsubscribe {
+        if (!Value.Check(workspaceEventListenerSchema, listener)) {
+            throw new Error("A workspace subscriber must be a function.");
+        }
+        listeners.add(listener);
+        return () => {
+            listeners.delete(listener);
+        };
     }
 
     /** `runResult` for the callers that only care about the row it produced. */
@@ -91,16 +97,8 @@ export class WorkspaceMutations {
             after: Workspace,
         ) => WorkspaceEventPayload | undefined,
     ): Promise<Workspace> {
-        return (
-            await this.runResult(
-                ctx,
-                operation,
-                operationId,
-                workspaceId,
-                perform,
-                describe,
-            )
-        ).workspace;
+        return (await this.runResult(ctx, operation, operationId, workspaceId, perform, describe))
+            .workspace;
     }
 
     async runResult(
@@ -154,7 +152,7 @@ export class WorkspaceMutations {
             if (!changed) return { result };
             const payload = describe(before, after);
             if (payload === undefined) return { result };
-            const event = await this.newEvent(txCtx, payload);
+            const event = this.newEvent(payload);
             await this.observe(txCtx, event);
             return { result, event };
         });
@@ -191,14 +189,8 @@ export class WorkspaceMutations {
         return workspace;
     }
 
-    async getOptional(
-        ctx: Context,
-        workspaceId: string,
-    ): Promise<Workspace | undefined> {
-        const raw = await requirePromise(
-            this.#store.get(ctx, workspaceId),
-            "Workspace store get",
-        );
+    async getOptional(ctx: Context, workspaceId: string): Promise<Workspace | undefined> {
+        const raw = await requirePromise(this.#store.get(ctx, workspaceId), "Workspace store get");
         if (raw === undefined) return undefined;
         assertWorkspace(raw);
         assertWorkspaceRecord(raw);
@@ -208,16 +200,15 @@ export class WorkspaceMutations {
         return structuredClone(raw);
     }
 
-    async newEvent(
-        ctx: Context,
-        payload: WorkspaceEventPayload,
-    ): Promise<WorkspaceEvent> {
-        const rawId = this.#eventIdFactory(ctx);
-        const eventId = isPromiseLike(rawId) ? await rawId : rawId;
+    newEvent(payload: WorkspaceEventPayload): WorkspaceEvent {
+        const eventId = globalThis.crypto.randomUUID();
         if (!Value.Check(workspaceEventIdSchema, eventId)) {
-            throw new Error("Workspace event ID factory returned an invalid ID.");
+            throw new Error("The workspaces catalog minted an identity it cannot represent.");
         }
-        const at = workspaceNow(this.#clock, ctx);
+        const at = Date.now();
+        if (!Value.Check(workspaceTimestampSchema, at)) {
+            throw new Error("The clock is outside the range a workspace timestamp can hold.");
+        }
         const event = { ...payload, eventId, at };
         if (!Value.Check(workspaceEventSchema, event)) {
             throw new Error("Workspace module created an invalid event.");
@@ -229,23 +220,23 @@ export class WorkspaceMutations {
         if (!Value.Check(workspaceEventSchema, event) || !isDeepFrozen(event)) {
             throw new Error("Workspace module created an invalid unfrozen event.");
         }
-        const transactional = this.#listener?.onEventTransactional;
-        if (transactional !== undefined) {
-            await transactional.call(this.#listener, ctx, event);
+        // A snapshot, so subscribing or unsubscribing from inside a subscriber cannot change who
+        // this event goes to.
+        for (const listener of Array.from(this.#transactionalListeners)) {
+            await listener(ctx, event);
         }
         afterCommit(ctx, (postCommitCtx) => this.#notifyPostCommit(postCommitCtx, event));
     }
 
     async #notifyPostCommit(ctx: Context, event: WorkspaceEvent): Promise<void> {
-        const listener = this.#listener?.onEvent;
-        if (listener === undefined) return;
-        try {
-            await listener.call(this.#listener, ctx, event);
-        } catch (error: unknown) {
+        for (const listener of Array.from(this.#postCommitListeners)) {
             try {
-                await this.#onPostCommitError?.(ctx, event, safeError(error));
-            } catch {
-                // Observer reporting is advisory after durable state has settled.
+                await listener(ctx, event);
+            } catch (error: unknown) {
+                ctx.log.error(
+                    { error, eventId: event.eventId, type: event.type },
+                    "A workspace subscriber failed after the change was committed.",
+                );
             }
         }
     }

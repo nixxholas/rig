@@ -3,6 +3,7 @@ import { createRootContext } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
 import { ComputeModule, type HostComputeProvider } from "../../sources/index.js";
+import { testConfig } from "../support/computeModule.js";
 import { resolveModuleHooks } from "../support/moduleHooks.js";
 import { FakeCompute } from "./support/FakeCompute.js";
 
@@ -29,7 +30,7 @@ describe("ComputeModule edge behavior", () => {
                 return new FakeCompute(config.cwd);
             },
         };
-        const module = new ComputeModule({ provider });
+        const module = ComputeModule.withProvider(testConfig, provider);
 
         await expect(
             module.resolve(
@@ -55,7 +56,7 @@ describe("ComputeModule edge behavior", () => {
             id: "host",
             create: async (_createCtx, config) => new FakeCompute(config.cwd),
         };
-        const module = new ComputeModule({ provider });
+        const module = ComputeModule.withProvider(testConfig, provider);
 
         await module.resolve(configured("/workspace/one"), "agent-a");
         await expect(module.resolve(configured("/workspace/two"), "agent-a")).rejects.toThrow(
@@ -69,7 +70,7 @@ describe("ComputeModule edge behavior", () => {
             id: "host",
             create: async () => compute,
         };
-        const module = new ComputeModule({ provider });
+        const module = ComputeModule.withProvider(testConfig, provider);
 
         await module.resolve(configured("/workspace"), "agent-a");
         await Promise.all([module.dispose(ctx), module.dispose(ctx)]);
@@ -80,11 +81,9 @@ describe("ComputeModule edge behavior", () => {
     });
 
     it("returns safe empty and false values for unresolved agent commands", async () => {
-        const module = new ComputeModule({
-            provider: {
-                id: "host",
-                create: async (_createCtx, config) => new FakeCompute(config.cwd),
-            },
+        const module = ComputeModule.withProvider(testConfig, {
+            id: "host",
+            create: async (_createCtx, config) => new FakeCompute(config.cwd),
         });
         expect(module.runningCommands("missing-agent")).toEqual([]);
         await expect(module.readCommand("missing-agent", 1)).resolves.toBeUndefined();
@@ -95,19 +94,20 @@ describe("ComputeModule edge behavior", () => {
         ).resolves.toBeUndefined();
     });
 
-    it("gives the reviewer only read-oriented tools for each vendor", async () => {
-        const module = new ComputeModule({
-            provider: {
-                id: "host",
-                create: async (_createCtx, config) => new FakeCompute(config.cwd),
+    it("gives the reviewer only read-oriented tools for each vendor, over one machine of its own", async () => {
+        const created: string[] = [];
+        const module = ComputeModule.withProvider(testConfig, {
+            id: "host",
+            create: async (_createCtx, config) => {
+                created.push(config.cwd);
+                return new FakeCompute(config.cwd);
             },
         });
-        const compute = new FakeCompute();
         const scope = {
             agent: { id: "reviewer", model: "anthropic/opus-5" },
             kv: undefined,
         } as never;
-        expect(module.reviewerTools(scope, compute).map((tool) => tool.name)).toEqual([
+        expect((await module.reviewerTools(ctx, scope)).map((tool) => tool.name)).toEqual([
             "Bash",
             "Read",
             "Glob",
@@ -115,24 +115,23 @@ describe("ComputeModule edge behavior", () => {
             "BashInput",
         ]);
         expect(
-            module
-                .reviewerTools(
-                    {
-                        agent: { id: "reviewer", model: "openai/gpt-5.6-sol" },
-                        kv: undefined,
-                    } as never,
-                    compute,
-                )
-                .map((tool) => tool.name),
+            (
+                await module.reviewerTools(ctx, {
+                    agent: { id: "reviewer", model: "openai/gpt-5.6-sol" },
+                    kv: undefined,
+                } as never)
+            ).map((tool) => tool.name),
         ).toEqual(["exec_command", "write_stdin"]);
         expect(
-            module
-                .reviewerTools(
-                    { agent: { id: "reviewer", model: "xai/grok-4.5" }, kv: undefined } as never,
-                    compute,
-                )
-                .map((tool) => tool.name),
+            (
+                await module.reviewerTools(ctx, {
+                    agent: { id: "reviewer", model: "xai/grok-4.5" },
+                    kv: undefined,
+                } as never)
+            ).map((tool) => tool.name),
         ).toEqual(["run_terminal_command", "read_file", "list_dir", "grep", "send_command_input"]);
-        void scope;
+        // One machine, in the folder this installation works in, however many reviews ask for it.
+        expect(created).toEqual([testConfig.configuration.paths.publicHome]);
+        await module.dispose(ctx);
     });
 });

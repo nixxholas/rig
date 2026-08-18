@@ -4,11 +4,13 @@ import { agentDatabaseRun } from "@slopus/happy-agent-base";
 import { withAfterCommit, type Context } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
+import { GitModule } from "../../sources/git/index.js";
 import {
     MAX_PROJECT_AVATAR_BYTES,
     MAX_PROJECT_REPOSITORY_REF_LENGTH,
     projectByIdInputSchema,
     projectCreateInputSchema,
+    projectIdSchema,
     projectMigrations,
     projectRemoteSourceSchema,
     projectSchema,
@@ -21,25 +23,21 @@ import {
     PROJECTS_TABLE,
     PROJECT_SETTINGS_TABLE,
 } from "../../sources/projects/ProjectMigrations.js";
+import { temporaryTestConfig } from "../support/configModule.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
 
 describe("ProjectsModule edge cases", () => {
     it("preserves the documented singleton home-project invariant", async () => {
         const database = await migratedProjectDatabase("projects-home-singleton-edge");
         try {
-            const projects = new ProjectsModule({
-                idFactory: (() => {
-                    let next = 0;
-                    return () => `project-home-${++next}`;
-                })(),
-            });
-            await projects.ensure(database.context, "agent-a", {
+            const projects = await projectsModule();
+            await projects.ensure(database.context, {
                 kind: "home",
                 repositoryRef: "/Users/person",
             });
 
             await expect(
-                projects.ensure(database.context, "agent-a", {
+                projects.ensure(database.context, {
                     kind: "home",
                     repositoryRef: "/Users/another-person",
                 }),
@@ -52,12 +50,12 @@ describe("ProjectsModule edge cases", () => {
     it("treats equivalent settings with different object key order as a no-op", async () => {
         const database = await migratedProjectDatabase("projects-settings-order-edge");
         try {
-            const projects = new ProjectsModule({ idFactory: () => "project-settings-order" });
-            const created = await projects.create(database.context, "agent-a", {
+            const projects = await projectsModule();
+            const created = await projects.create(database.context, {
                 name: "Settings order",
                 repositoryRef: "/tmp/projects/settings-order",
             });
-            const first = await projects.updateSettings(database.context, "agent-a", {
+            const first = await projects.updateSettings(database.context, {
                 projectId: created.id,
                 settings: {
                     defaultWorkspaceCompute: {
@@ -67,7 +65,7 @@ describe("ProjectsModule edge cases", () => {
                 },
             });
 
-            const equivalent = await projects.updateSettings(database.context, "agent-a", {
+            const equivalent = await projects.updateSettings(database.context, {
                 projectId: created.id,
                 settings: {
                     defaultWorkspaceCompute: {
@@ -79,7 +77,7 @@ describe("ProjectsModule edge cases", () => {
 
             expect(equivalent.changed).toBe(false);
             expect(equivalent.version).toBe(first.version);
-            expect(await projects.get(database.context, "agent-a", created.id)).toMatchObject({
+            expect(await projects.get(database.context, created.id)).toMatchObject({
                 version: first.version,
             });
         } finally {
@@ -90,8 +88,8 @@ describe("ProjectsModule edge cases", () => {
     it("treats equivalent avatar metadata with different key order as a no-op", async () => {
         const database = await migratedProjectDatabase("projects-avatar-order-edge");
         try {
-            const projects = new ProjectsModule({ idFactory: () => "project-avatar-order" });
-            const created = await projects.create(database.context, "agent-a", {
+            const projects = await projectsModule();
+            const created = await projects.create(database.context, {
                 name: "Avatar order",
                 repositoryRef: "/tmp/projects/avatar-order",
             });
@@ -103,7 +101,7 @@ describe("ProjectsModule edge cases", () => {
                 url: "/assets/avatar",
                 width: 64,
             };
-            const first = await projects.setAvatar(database.context, "agent-a", {
+            const first = await projects.setAvatar(database.context, {
                 projectId: created.id,
                 avatar,
             });
@@ -116,7 +114,7 @@ describe("ProjectsModule edge cases", () => {
                 height: avatar.height,
                 hash: avatar.hash,
             };
-            const second = await projects.setAvatar(database.context, "agent-a", {
+            const second = await projects.setAvatar(database.context, {
                 projectId: created.id,
                 avatar: equivalent,
             });
@@ -131,8 +129,8 @@ describe("ProjectsModule edge cases", () => {
     it("rejects malformed persisted boolean values instead of coercing them", async () => {
         const database = await migratedProjectDatabase("projects-malformed-boolean-edge");
         try {
-            const projects = new ProjectsModule({ idFactory: () => "project-malformed-boolean" });
-            const created = await projects.create(database.context, "agent-a", {
+            const projects = await projectsModule();
+            const created = await projects.create(database.context, {
                 name: "Malformed boolean",
                 repositoryRef: "/tmp/projects/malformed-boolean",
             });
@@ -143,7 +141,7 @@ describe("ProjectsModule edge cases", () => {
                     WHERE id = ${created.id}`,
             );
 
-            await expect(projects.get(database.context, "agent-a", created.id)).rejects.toThrow(
+            await expect(projects.get(database.context, created.id)).rejects.toThrow(
                 /invalid project|storage/i,
             );
         } finally {
@@ -154,17 +152,14 @@ describe("ProjectsModule edge cases", () => {
     it("keeps a legal maximum-length folder actionable at the minimum output budget", async () => {
         const database = await migratedProjectDatabase("projects-min-output-path-edge");
         try {
-            const projects = new ProjectsModule({
-                idFactory: () => "project-long-folder",
-                maxOutputCharacters: 256,
-            });
+            const projects = await projectsModule();
             const repositoryRef = `/${"x".repeat(MAX_PROJECT_REPOSITORY_REF_LENGTH - 1)}`;
-            await projects.create(database.context, "agent-a", {
+            await projects.create(database.context, {
                 name: "Long folder",
                 repositoryRef,
             });
 
-            const page = await projects.list(database.context, "agent-a", { limit: 1 });
+            const page = await projects.list(database.context, { limit: 1 });
             expect(page.projects).toHaveLength(1);
             expect(projects.formatPageForModel(page)).toContain("Project ID:");
         } finally {
@@ -185,19 +180,19 @@ describe("ProjectsModule edge cases", () => {
     it("does not require compute when a resolved remote name cannot apply", async () => {
         const database = await migratedProjectDatabase("projects-remote-name-no-compute-edge");
         try {
-            const projects = new ProjectsModule({ idFactory: () => "project-user-name" });
-            const created = await projects.create(database.context, "agent-a", {
+            const projects = await projectsModule();
+            const created = await projects.create(database.context, {
                 name: "Chosen name",
                 repositoryRef: "/tmp/projects/user-name",
             });
-            const renamed = await projects.rename(database.context, "agent-a", {
+            const renamed = await projects.rename(database.context, {
                 name: "Person chosen",
                 projectId: created.id,
             });
 
-            await expect(
-                projects.resolveRemoteName(database.context, "agent-a", created.id),
-            ).resolves.toEqual(renamed);
+            await expect(projects.resolveRemoteName(database.context, created.id)).resolves.toEqual(
+                renamed,
+            );
         } finally {
             database.close();
         }
@@ -206,25 +201,19 @@ describe("ProjectsModule edge cases", () => {
     it("publishes one frozen event after the outer transaction commits", async () => {
         const transactional: object[] = [];
         const postCommit: object[] = [];
-        const projects = new ProjectsModule({
-            idFactory: () => "project-event-boundary",
-            eventIdFactory: () => "event-event-boundary",
-            clock: () => 123,
-            listener: {
-                onEventTransactional: (_ctx, event) => {
-                    transactional.push(event);
-                    expect(Object.isFrozen(event)).toBe(true);
-                    if ("project" in event) expect(Object.isFrozen(event.project)).toBe(true);
-                },
-                onEvent: (_ctx, event) => {
-                    postCommit.push(event);
-                },
-            },
+        const projects = await projectsModule();
+        projects.onEventTransactional((_ctx, event) => {
+            transactional.push(event);
+            expect(Object.isFrozen(event)).toBe(true);
+            if ("project" in event) expect(Object.isFrozen(event.project)).toBe(true);
+        });
+        projects.onEvent((_ctx, event) => {
+            postCommit.push(event);
         });
         const database = await migratedProjectDatabase("projects-event-boundary-edge");
         try {
             const [outerContext, drain] = withAfterCommit(database.context);
-            await projects.create(outerContext, "agent-a", {
+            await projects.create(outerContext, {
                 name: "Event boundary",
                 repositoryRef: "/tmp/projects/event-boundary",
             });
@@ -239,124 +228,121 @@ describe("ProjectsModule edge cases", () => {
         }
     });
 
-    it("rolls back durable state when a transactional listener rejects", async () => {
-        const projects = new ProjectsModule({
-            idFactory: () => "project-listener-rollback",
-            listener: {
-                onEventTransactional: () => {
-                    throw new Error("reject project mutation");
-                },
-            },
+    it("rolls back durable state when a transactional subscriber rejects", async () => {
+        const projects = await projectsModule();
+        projects.onEventTransactional(() => {
+            throw new Error("reject project mutation");
         });
         const database = await migratedProjectDatabase("projects-listener-rollback-edge");
         try {
             await expect(
-                projects.create(database.context, "agent-a", {
+                projects.create(database.context, {
                     name: "Rolled back",
                     repositoryRef: "/tmp/projects/listener-rollback",
                 }),
             ).rejects.toThrow("reject project mutation");
             await expect(
-                projects.get(database.context, "agent-a", "project-listener-rollback"),
+                projects.getByPath(database.context, "/tmp/projects/listener-rollback"),
             ).resolves.toBeUndefined();
         } finally {
             database.close();
         }
     });
 
-    it("contains hostile post-commit observer failures", async () => {
-        const reports: string[] = [];
+    it("contains a hostile post-commit subscriber failure", async () => {
         const hostile = {
             [Symbol.toPrimitive](): never {
                 throw new Error("cannot stringify observer failure");
             },
         };
-        const projects = new ProjectsModule({
-            idFactory: () => "project-post-commit-hostile",
-            listener: {
-                onEvent: () => {
-                    throw hostile;
-                },
-            },
-            onPostCommitError: (_ctx, _event, message) => {
-                reports.push(typeof message === "string" ? message : "not-string");
-            },
+        const projects = await projectsModule();
+        projects.onEvent(() => {
+            throw hostile;
         });
         const database = await migratedProjectDatabase("projects-post-commit-hostile-edge");
         try {
+            // The change is already durable, so a subscriber that fails — even one whose failure
+            // cannot be turned into text — reaches the log rather than the caller.
             await expect(
-                projects.create(database.context, "agent-a", {
+                projects.create(database.context, {
                     name: "Post commit",
                     repositoryRef: "/tmp/projects/post-commit-hostile",
                 }),
-            ).resolves.toMatchObject({ id: "project-post-commit-hostile" });
-            expect(reports).toEqual(["Unknown project observer error."]);
+            ).resolves.toMatchObject({ name: "Post commit" });
+            await expect(
+                projects.getByPath(database.context, "/tmp/projects/post-commit-hostile"),
+            ).resolves.toMatchObject({ name: "Post commit" });
         } finally {
             database.close();
         }
     });
 
-    it("uses class-backed listeners with their owning receiver", async () => {
-        class Listener {
+    it("keeps a subscriber taken from a class bound to the object that owns it", async () => {
+        class Watcher {
             readonly #seen: string[] = [];
 
-            onEventTransactional(_ctx: Context, event: { readonly type: string }): void {
+            observe = (_ctx: Context, event: { readonly type: string }): void => {
                 this.#seen.push(event.type);
-            }
+            };
 
             get seen(): readonly string[] {
                 return this.#seen;
             }
         }
-        const listener = new Listener();
-        const projects = new ProjectsModule({
-            idFactory: () => "project-class-listener",
-            listener,
-        });
+        const watcher = new Watcher();
+        const projects = await projectsModule();
+        projects.onEventTransactional(watcher.observe);
         const database = await migratedProjectDatabase("projects-class-listener-edge");
         try {
-            await projects.create(database.context, "agent-a", {
+            await projects.create(database.context, {
                 name: "Class listener",
                 repositoryRef: "/tmp/projects/class-listener",
             });
-            expect(listener.seen).toEqual(["project_created"]);
+            expect(watcher.seen).toEqual(["project_created"]);
         } finally {
             database.close();
         }
     });
 
-    it("supports asynchronous identity factories and rejects invalid event identities", async () => {
-        const projects = new ProjectsModule({
-            idFactory: async () => "project-async-factory",
-            eventIdFactory: async () => "event-async-factory",
-            clock: () => 123,
+    it("stops telling a subscriber that has unsubscribed", async () => {
+        const seen: string[] = [];
+        const projects = await projectsModule();
+        const stop = projects.onEventTransactional((_ctx, event) => {
+            seen.push(event.type);
         });
-        const database = await migratedProjectDatabase("projects-async-factory-edge");
+        const database = await migratedProjectDatabase("projects-unsubscribe-edge");
         try {
-            const created = await projects.create(database.context, "agent-a", {
-                name: "Async factory",
-                repositoryRef: "/tmp/projects/async-factory",
+            const created = await projects.create(database.context, {
+                name: "Watched",
+                repositoryRef: "/tmp/projects/watched",
             });
-            expect(created.id).toBe("project-async-factory");
+            stop();
+            await projects.rename(database.context, {
+                name: "Renamed unwatched",
+                projectId: created.id,
+            });
+            expect(seen).toEqual(["project_created"]);
+        } finally {
+            database.close();
+        }
+    });
 
-            const invalid = new ProjectsModule({
-                idFactory: () => "project-invalid-event",
-                eventIdFactory: async () => "",
+    it("mints its own identities rather than taking them from a caller", async () => {
+        const projects = await projectsModule();
+        const database = await migratedProjectDatabase("projects-identity-edge");
+        try {
+            const first = await projects.create(database.context, {
+                name: "First",
+                repositoryRef: "/tmp/projects/identity-first",
             });
-            const invalidDatabase = await migratedProjectDatabase("projects-invalid-event-edge");
-            try {
-                await expect(
-                    invalid.create(invalidDatabase.context, "agent-a", {
-                        name: "Invalid event",
-                        repositoryRef: "/tmp/projects/invalid-event",
-                    }),
-                ).rejects.toThrow(/event ID factory/);
-                await expect(
-                    invalid.get(invalidDatabase.context, "agent-a", "project-invalid-event"),
-                ).resolves.toBeUndefined();
-            } finally {
-                invalidDatabase.close();
-            }
+            const second = await projects.create(database.context, {
+                name: "Second",
+                repositoryRef: "/tmp/projects/identity-second",
+            });
+
+            expect(first.id).not.toBe(second.id);
+            expect(Value.Check(projectIdSchema, first.id)).toBe(true);
+            expect(Value.Check(projectIdSchema, second.id)).toBe(true);
         } finally {
             database.close();
         }
@@ -365,8 +351,8 @@ describe("ProjectsModule edge cases", () => {
     it("returns an empty settings object when its companion row is absent", async () => {
         const database = await migratedProjectDatabase("projects-missing-settings-edge");
         try {
-            const projects = new ProjectsModule({ idFactory: () => "project-missing-settings" });
-            const created = await projects.create(database.context, "agent-a", {
+            const projects = await projectsModule();
+            const created = await projects.create(database.context, {
                 name: "Missing settings",
                 repositoryRef: "/tmp/projects/missing-settings",
             });
@@ -376,9 +362,7 @@ describe("ProjectsModule edge cases", () => {
                     WHERE project_id = ${created.id}`,
             );
 
-            await expect(
-                projects.readSettings(database.context, "agent-a", created.id),
-            ).resolves.toEqual({});
+            await expect(projects.readSettings(database.context, created.id)).resolves.toEqual({});
         } finally {
             database.close();
         }
@@ -387,8 +371,8 @@ describe("ProjectsModule edge cases", () => {
     it("rejects malformed persisted settings JSON", async () => {
         const database = await migratedProjectDatabase("projects-malformed-settings-edge");
         try {
-            const projects = new ProjectsModule({ idFactory: () => "project-malformed-settings" });
-            const created = await projects.create(database.context, "agent-a", {
+            const projects = await projectsModule();
+            const created = await projects.create(database.context, {
                 name: "Malformed settings",
                 repositoryRef: "/tmp/projects/malformed-settings",
             });
@@ -399,9 +383,9 @@ describe("ProjectsModule edge cases", () => {
                     WHERE project_id = ${created.id}`,
             );
 
-            await expect(
-                projects.readSettings(database.context, "agent-a", created.id),
-            ).rejects.toThrow(/settings/i);
+            await expect(projects.readSettings(database.context, created.id)).rejects.toThrow(
+                /settings/i,
+            );
         } finally {
             database.close();
         }
@@ -411,29 +395,27 @@ describe("ProjectsModule edge cases", () => {
         const database = await migratedProjectDatabase("projects-list-status-edge");
         try {
             let next = 0;
-            const projects = new ProjectsModule({
-                idFactory: () => `project-list-${++next}`,
-            });
-            const active = await projects.create(database.context, "agent-a", {
+            const projects = await projectsModule();
+            const active = await projects.create(database.context, {
                 name: "Active",
                 repositoryRef: "/tmp/projects/list-active",
             });
-            const archived = await projects.create(database.context, "agent-a", {
+            const archived = await projects.create(database.context, {
                 name: "Archived",
                 repositoryRef: "/tmp/projects/list-archived",
             });
-            await projects.archive(database.context, "agent-a", archived.id);
+            await projects.archive(database.context, archived.id);
 
-            await expect(projects.list(database.context, "agent-a")).resolves.toMatchObject({
+            await expect(projects.list(database.context)).resolves.toMatchObject({
                 projects: [{ id: active.id }],
             });
             await expect(
-                projects.list(database.context, "agent-a", { status: "archived" }),
+                projects.list(database.context, { status: "archived" }),
             ).resolves.toMatchObject({
                 projects: [{ id: archived.id, status: "archived" }],
             });
             await expect(
-                projects.list(database.context, "agent-a", { includeArchived: true }),
+                projects.list(database.context, { includeArchived: true }),
             ).resolves.toMatchObject({
                 projects: [{ id: active.id }, { id: archived.id }],
             });
@@ -445,18 +427,14 @@ describe("ProjectsModule edge cases", () => {
     it("survives a fresh module instance over the same database", async () => {
         const database = await migratedProjectDatabase("projects-reload-edge");
         try {
-            const first = new ProjectsModule({ idFactory: () => "project-reload" });
-            const created = await first.create(database.context, "agent-a", {
+            const first = await projectsModule();
+            const created = await first.create(database.context, {
                 name: "Reloaded",
                 repositoryRef: "/tmp/projects/reloaded",
             });
-            const second = new ProjectsModule({});
-            await expect(second.get(database.context, "agent-a", created.id)).resolves.toEqual(
-                created,
-            );
-            await expect(
-                second.readSettings(database.context, "agent-a", created.id),
-            ).resolves.toEqual({});
+            const second = await projectsModule();
+            await expect(second.get(database.context, created.id)).resolves.toEqual(created);
+            await expect(second.readSettings(database.context, created.id)).resolves.toEqual({});
         } finally {
             database.close();
         }
@@ -478,7 +456,6 @@ describe("ProjectsModule edge cases", () => {
         expect(
             Value.Check(projectSchema, {
                 id: "project",
-                ownerAgentId: "agent",
                 repositoryRef: "/tmp/project",
                 kind: "regular",
                 storageKey: "project",
@@ -532,6 +509,15 @@ describe("ProjectsModule edge cases", () => {
         expect(Value.Check(projectStateChangeReasonSchema, "probe")).toBe(true);
     });
 });
+
+/**
+ * The catalog as the product builds it: configuration rooted in a folder this test owns, and Git
+ * itself. Identities, event identities and timestamps are the module's own, so nothing here
+ * asserts on them.
+ */
+async function projectsModule(toml?: string): Promise<ProjectsModule> {
+    return new ProjectsModule(await temporaryTestConfig(toml), new GitModule());
+}
 
 async function migratedProjectDatabase(name: string) {
     const database = moduleDatabase([], name);

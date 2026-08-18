@@ -9,18 +9,38 @@ import {
 import {
     hostComputeProvider,
     type Compute,
+    type ComputeHostPolicy,
     type HostComputeConfig,
 } from "@slopus/happy-agent-compute";
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { mapAsyncLock, type Context, type MapAsyncLock } from "@steve.kite/stdlib";
 
-import type { ComputeSessionActivity, ComputeSessionSnapshot } from "./Compute.js";
+import type { ConfigModule } from "../config/index.js";
+import { FileReadLog } from "../impl/FileReadLog.js";
+import type {
+    ComputePermissions,
+    ComputeSessionActivity,
+    ComputeSessionSnapshot,
+} from "./Compute.js";
 import { computeToolVendor, type ComputeToolVendor } from "./ComputeToolVendor.js";
 import { computeInstructionsForVendor } from "./impl/computeInstructionsForVendor.js";
-import { FileReadLog } from "./impl/FileReadLog.js";
+import { computePermissionsForContext } from "./impl/computePermissionsForContext.js";
+import { describeComputePathAction } from "./impl/describeComputePathAction.js";
+import {
+    basenameComputePath,
+    parentComputePath,
+    resolveComputePath,
+} from "./impl/resolveComputePath.js";
+import { shouldReviewComputePath } from "./impl/shouldReviewComputePath.js";
 import { assembleComputeTools } from "./tools/assembleComputeTools.js";
 import { assembleReviewerTools } from "./tools/assembleReviewerTools.js";
+
+/**
+ * The lock key the reviewer's machine is created under. It carries a NUL so it can never be an
+ * agent ID, and therefore never serializes against the creation of an agent's own machine.
+ */
+const REVIEWER_COMPUTE_KEY = "\u0000permission-reviewer";
 
 const exact = { additionalProperties: false } as const;
 const callableSchema = Type.Function([], Type.Any());
@@ -111,14 +131,6 @@ const hostComputeProviderSchema = Type.Object(
 /** The one global host provider used to create every agent's separate compute. */
 export type HostComputeProvider = Pick<typeof hostComputeProvider, "id" | "create">;
 
-export const computeModuleOptionsSchema = Type.Object(
-    { provider: Type.Optional(hostComputeProviderSchema) },
-    exact,
-);
-export type ComputeModuleOptions = Omit<Static<typeof computeModuleOptionsSchema>, "provider"> & {
-    provider?: HostComputeProvider;
-};
-
 interface CachedCompute {
     readonly cwd: string;
     readonly compute: HostCompute;
@@ -130,10 +142,17 @@ interface CachedCompute {
  * One instance serves the whole AgentSystem. It reads each agent's immutable compute config,
  * creates one host compute for that agent through the global provider, and retains that exact
  * instance in memory for every module and tool serving the same agent.
+ *
+ * The module is built from the configuration alone. The boundary a restricted command runs inside
+ * — which directories are the product's own, which project files decide what later commands may do
+ * — is a fact about this installation's layout and settings, so it is derived here from the config
+ * module that owns those paths rather than handed in by whoever assembles the agent.
  */
 export class ComputeModule implements AgentModule {
     readonly name = "compute";
-    readonly #provider: HostComputeProvider;
+    readonly #config: ConfigModule;
+    /** Settled at construction: the ordinary constructor or {@link ComputeModule.withProvider}. */
+    #provider: HostComputeProvider;
     readonly #computes = new Map<string, CachedCompute>();
     readonly #computeLocks: MapAsyncLock<string> = mapAsyncLock<string>();
     readonly #activeOperations = new Set<Promise<unknown>>();
@@ -146,16 +165,32 @@ export class ComputeModule implements AgentModule {
      * being serialized by, a reviewed agent's own reads.
      */
     readonly #reviewerReadLocks: MapAsyncLock<string> = mapAsyncLock<string>();
+    /** The one machine the automatic permission reviewer investigates local state through. */
+    #reviewer: HostCompute | undefined;
     #closed = false;
     #disposePromise: Promise<void> | undefined;
 
-    constructor(options: ComputeModuleOptions = {}) {
-        const provider = options.provider ?? hostComputeProvider;
-        const candidate = { provider: { id: provider.id, create: provider.create } };
-        if (!Value.Check(computeModuleOptionsSchema, candidate)) {
-            throw new Error("Compute module options are invalid.");
+    constructor(config: ConfigModule) {
+        this.#config = config;
+        this.#provider = hostComputeProvider;
+    }
+
+    /**
+     * The same module over a different machine.
+     *
+     * This is the one named alternate construction: a test runs the whole agent on a scripted
+     * machine rather than this computer, and a sandboxed or Docker deployment offers the agent a
+     * machine that is not the host it started on. The boundary policy still comes from the
+     * configuration, so a swapped machine is a different machine and not a different set of rules.
+     */
+    static withProvider(config: ConfigModule, provider: HostComputeProvider): ComputeModule {
+        const candidate = { id: provider.id, create: provider.create };
+        if (!Value.Check(hostComputeProviderSchema, candidate)) {
+            throw new Error("The host compute provider is invalid.");
         }
-        this.#provider = provider;
+        const module = new ComputeModule(config);
+        module.#provider = provider;
+        return module;
     }
 
     /** Resolve the exact compute cached for this agent, or no compute when none was configured. */
@@ -219,6 +254,65 @@ export class ComputeModule implements AgentModule {
             : (await compute.shell.killSession(commandId)) !== undefined;
     }
 
+    /**
+     * The permission boundary every compute operation in the current tool call runs under.
+     *
+     * This is Agent Base's durable per-agent mode translated into the immutable boundary the
+     * compute demands. Any module holding a machine — reading a skill, writing generated media,
+     * reading a project's instructions — asks for it here rather than deriving one of its own, so
+     * every operation on that machine is bounded the same way.
+     */
+    permissionsForContext(ctx: Context): ComputePermissions {
+        return computePermissionsForContext(ctx);
+    }
+
+    /**
+     * The absolute path a machine means by what the model wrote.
+     *
+     * The paths belong to the machine rather than to the process holding these tools, so `~`, the
+     * separator, and what counts as absolute are all read from that machine instead of from
+     * `node:path`.
+     */
+    resolvePath(compute: Compute, path: string): string {
+        return resolveComputePath(path, compute.cwd, compute.fs.home);
+    }
+
+    /** The directory holding a path on a machine, or the path itself once there is nowhere left. */
+    parentPath(path: string): string {
+        return parentComputePath(path);
+    }
+
+    /** The last segment of a path on a machine: the file's or directory's own name. */
+    pathName(path: string): string {
+        return basenameComputePath(path);
+    }
+
+    /**
+     * Whether one file operation is something Auto has to decide on rather than simply allow.
+     *
+     * Work inside the workspace is what the agent is for. What leaves it is not, and neither is a
+     * change to a path this machine protects, so a tool anywhere in the product asks the module
+     * that owns the boundary instead of judging a path itself.
+     */
+    async shouldReviewPath(
+        ctx: Context,
+        compute: Compute,
+        path: string,
+        options: { readonly write: boolean },
+    ): Promise<boolean> {
+        return await shouldReviewComputePath(compute, path, options, ctx);
+    }
+
+    /** The exact action a reviewer is deciding on: what happens, to what, and across which boundary. */
+    describePathAction(
+        compute: Compute,
+        path: string,
+        operation: string,
+        options: { readonly write?: boolean } = {},
+    ): string {
+        return describeComputePathAction(compute, path, operation, options);
+    }
+
     /** Dispose every cached compute when the owning host shuts down. */
     async dispose(ctx: Context): Promise<void> {
         if (this.#disposePromise !== undefined) return await this.#disposePromise;
@@ -227,27 +321,58 @@ export class ComputeModule implements AgentModule {
             await Promise.allSettled([...this.#activeOperations]);
             const cached = [...this.#computes.values()];
             this.#computes.clear();
-            await Promise.all(cached.map(async ({ compute }) => await compute.dispose(ctx)));
+            const reviewer = this.#reviewer;
+            this.#reviewer = undefined;
+            await Promise.all([
+                ...cached.map(async ({ compute }) => await compute.dispose(ctx)),
+                ...(reviewer === undefined ? [] : [reviewer.dispose(ctx)]),
+            ]);
         })();
         return await this.#disposePromise;
     }
 
     /**
-     * Build the fixed, read-only tool array the automatic permission reviewer runs with, over a
-     * compute the host owns for the reviewer.
+     * The fixed, read-only tool array the automatic permission reviewer runs with, over a machine
+     * this module keeps for the reviewer alone.
      *
-     * This is the reviewer counterpart to {@link tools}, but it is a pure builder rather than a
-     * module hook: the reviewer lives in its own private agent system that this `ComputeModule`
-     * never serves, so the host owns the reviewer's compute and hands it in here. The vendor is the
-     * reviewer's own model route — a Claude review gets Claude's read-only tools, a Codex review
-     * Codex's — chosen from `scope.agent.model` exactly as an ordinary agent's tools are chosen from
-     * its model, so the reviewer sees the tool names it was trained on. Read bookkeeping uses the
-     * reviewer's own read-lock map, under the reviewer's own agent ID and store, so a reviewer's file
-     * reads stay consistent among themselves without touching any main agent's read log.
+     * This is the reviewer counterpart to the `tools` hook, but it is a method rather than a hook:
+     * the reviewer lives in its own private agent system that this `ComputeModule` never serves, so
+     * it asks for its tools here instead of being served them. The machine behind them is created
+     * once, on the same provider and under the same boundary policy every agent's machine is, in
+     * the folder this installation works in; it is not one of the per-agent machines and is
+     * disposed with this module. The vendor is the reviewer's own model route — a Claude review
+     * gets Claude's read-only tools, a Codex review Codex's — chosen from `scope.agent.model`
+     * exactly as an ordinary agent's tools are chosen from its model, so the reviewer sees the tool
+     * names it was trained on. Read bookkeeping uses the reviewer's own read-lock map, under the
+     * reviewer's own agent ID and store, so a reviewer's file reads stay consistent among
+     * themselves without touching any main agent's read log.
      */
-    reviewerTools(scope: AgentModuleScope, compute: HostCompute): readonly AnyAgentTool[] {
+    async reviewerTools(ctx: Context, scope: AgentModuleScope): Promise<readonly AnyAgentTool[]> {
+        const compute = await this.#reviewerCompute(ctx);
         const reads = new FileReadLog(scope.kv, this.#reviewerReadLocks, scope.agent.id);
         return assembleReviewerTools(vendorFor(scope), compute, reads);
+    }
+
+    /** The reviewer's own machine, created on first use and kept for as long as this module runs. */
+    async #reviewerCompute(ctx: Context): Promise<HostCompute> {
+        const existing = this.#reviewer;
+        if (existing !== undefined) return existing;
+        return await this.#track(
+            this.#computeLocks.runInLock(ctx, REVIEWER_COMPUTE_KEY, async (lockCtx) => {
+                if (this.#closed) throw new Error("Compute module is closed.");
+                const cached = this.#reviewer;
+                if (cached !== undefined) return cached;
+                const compute = await this.#create(lockCtx, {
+                    cwd: this.#config.configuration.paths.publicHome,
+                });
+                if (this.#closed) {
+                    await compute.dispose(lockCtx);
+                    throw new Error("Compute module is closed.");
+                }
+                this.#reviewer = compute;
+                return compute;
+            }),
+        );
     }
 
     readonly #hooks: AgentModuleHooks = {
@@ -291,8 +416,34 @@ export class ComputeModule implements AgentModule {
         }
     }
 
+    /**
+     * What this installation calls its own, in the compute package's terms.
+     *
+     * The private root holds the agent's credentials and databases, so a restricted command may not
+     * read it for the same reason it may not read a person's `.ssh`. The protected project files are
+     * the ones that decide what later commands may do — the instruction and security documents, and
+     * whatever else the configuration names — so they sit above the boundary rather than inside it.
+     */
+    get hostPolicy(): ComputeHostPolicy {
+        const values = this.#config.configuration.values;
+        return {
+            privateDirectories: [this.#config.configuration.paths.agentHome],
+            protectedProjectFiles: [
+                ...new Set([
+                    "AGENTS.md",
+                    "AGENTS_SECURITY.md",
+                    ...values.permissions.protectedPaths,
+                    ...values.workspace.protectedSync,
+                ]),
+            ],
+        };
+    }
+
     async #create(ctx: Context, config: AgentComputeConfig): Promise<HostCompute> {
-        const providerConfig: HostComputeConfig = { cwd: config.cwd };
+        const providerConfig: HostComputeConfig = {
+            cwd: config.cwd,
+            hostPolicy: this.hostPolicy,
+        };
         const compute = await this.#provider.create(ctx, providerConfig);
         const candidate = runtimeCompute(compute);
         if (!Value.Check(hostComputeSchema, candidate)) {

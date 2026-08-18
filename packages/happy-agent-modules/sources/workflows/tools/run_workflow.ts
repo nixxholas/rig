@@ -2,9 +2,7 @@ import { Type, type Static } from "@sinclair/typebox";
 import { defineAgentTool } from "@slopus/happy-agent-base";
 import type { Context } from "@steve.kite/stdlib";
 
-import type { Compute } from "../../compute/Compute.js";
-import { describeComputePathAction } from "../../compute/impl/describeComputePathAction.js";
-import { shouldReviewComputePath } from "../../compute/impl/shouldReviewComputePath.js";
+import type { Compute, ComputeModule } from "../../compute/index.js";
 import { workflowLaunchInputSchema, workflowRunSchema } from "../Workflow.js";
 import type { WorkflowsModule } from "../WorkflowsModule.js";
 
@@ -56,6 +54,7 @@ Runs are capped at 1,000 agents. The tool returns as soon as the run has started
 export function runWorkflowTool(
     module: WorkflowsModule,
     agentId: string,
+    computeModule: ComputeModule | undefined,
     compute: Compute | undefined,
 ) {
     return defineAgentTool({
@@ -69,13 +68,17 @@ export function runWorkflowTool(
         describeAutoPermissionAction: ({ input }: RunWorkflowToolParameters) =>
             !("scriptPath" in input)
                 ? "starting an inline workflow"
-                : compute === undefined
+                : computeModule === undefined || compute === undefined
                   ? "reading a workflow script"
-                  : describeComputePathAction(compute, input.scriptPath, "reading workflow script"),
+                  : computeModule.describePathAction(
+                        compute,
+                        input.scriptPath,
+                        "reading workflow script",
+                    ),
         shouldReviewInAutoMode: async ({ input }: RunWorkflowToolParameters, ctx) =>
-            await reviewsScriptPath(compute, input, ctx),
+            await reviewsScriptPath(computeModule, compute, input, ctx),
         shouldRunInFullAccessInAutoMode: async ({ input }: RunWorkflowToolParameters, ctx) =>
-            await reviewsScriptPath(compute, input, ctx),
+            await reviewsScriptPath(computeModule, compute, input, ctx),
         execute: async (ctx, { input }: RunWorkflowToolParameters, call) =>
             await module.launch(ctx, agentId, input, call.id),
         toLLM: (run) => [{ type: "text", text: module.formatRunForModel(run) }],
@@ -88,11 +91,12 @@ export function runWorkflowTool(
  * the reviewer decides.
  */
 async function reviewsScriptPath(
+    computeModule: ComputeModule | undefined,
     compute: Compute | undefined,
     input: RunWorkflowToolParameters["input"],
     ctx: Context,
 ): Promise<boolean> {
     if (!("scriptPath" in input)) return false;
-    if (compute === undefined) return true;
-    return await shouldReviewComputePath(compute, input.scriptPath, { write: false }, ctx);
+    if (computeModule === undefined || compute === undefined) return true;
+    return await computeModule.shouldReviewPath(ctx, compute, input.scriptPath, { write: false });
 }

@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import type { HistoryMessage } from "../../history/HistoryMessage.js";
+import type { HistoryMessage } from "../../history/index.js";
 import {
     MAX_OBSERVATION_FILE_BYTES,
     MAX_OBSERVATION_HISTORY_FILES,

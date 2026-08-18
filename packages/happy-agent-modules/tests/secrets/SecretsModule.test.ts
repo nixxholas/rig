@@ -10,11 +10,9 @@ describe("SecretsModule", () => {
         await database.ready;
         try {
             expect(secretsMigrations.map(([key]) => key)).toEqual([SECRETS_MIGRATION_KEY]);
-            const module = new SecretsModule({
-                idFactory: () => "secret-1",
-                eventIdFactory: () => "event-1",
-            });
+            const module = new SecretsModule();
             const reference = await module.register(database.context, "agent-a", {
+                id: "secret-1",
                 description: "A token",
                 environment: { TOKEN: "never returned to the model" },
             });
@@ -41,10 +39,8 @@ describe("SecretsModule", () => {
                 secretId: "secret-1",
             });
 
-            const restarted = new SecretsModule({
-                idFactory: () => "secret-2",
-                eventIdFactory: () => "event-2",
-            });
+            // A fresh module reads the same durable catalog: nothing lives only in memory.
+            const restarted = new SecretsModule();
             expect(await restarted.reference(database.context, "agent-a", "secret-1")).toEqual(
                 reference,
             );
@@ -53,45 +49,83 @@ describe("SecretsModule", () => {
         }
     });
 
-    it("retains only the external host resolver capability and rejects injected stores", async () => {
-        const database = moduleDatabase(secretsMigrations, "secrets-resolver-test");
+    it("mints its own secret identity when a caller does not supply one", async () => {
+        const database = moduleDatabase(secretsMigrations, "secrets-minted-id-test");
         await database.ready;
         try {
-            const module = new SecretsModule({
-                resolveForHost: async () => ({ TOKEN: "host-only" }),
-            });
-            await module.register(database.context, "agent-a", {
-                id: "secret-1",
+            const module = new SecretsModule();
+            const first = await module.register(database.context, "agent-a", {
                 description: "A token",
-                environment: { TOKEN: "database value" },
+                environment: { TOKEN: "value" },
+            });
+            const second = await module.register(database.context, "agent-a", {
+                description: "Another token",
+                environment: { OTHER: "value" },
             });
 
-            expect(await module.resolveForHost(database.context, "agent-a", "scope-1")).toEqual({
-                TOKEN: "host-only",
-            });
-            expect(
-                () =>
-                    new SecretsModule({
-                        store: {},
-                    } as never),
-            ).toThrow("options are invalid");
+            expect(first.id).not.toEqual(second.id);
+            expect(first.id.length).toBeGreaterThan(0);
+            expect(await module.reference(database.context, "agent-a", first.id)).toEqual(first);
         } finally {
             database.close();
         }
     });
 
-    it("lists and validates scoped attachments in one context transaction", async () => {
+    it("takes no construction arguments at all", () => {
+        expect(SecretsModule.length).toBe(0);
+        const module = new SecretsModule();
+        expect(module.name).toBe("secrets");
+        expect(module.migrations).toBe(secretsMigrations);
+    });
+
+    it("resolves host values from its own catalog", async () => {
+        const database = moduleDatabase(secretsMigrations, "secrets-resolver-test");
+        await database.ready;
+        try {
+            const module = new SecretsModule();
+            await module.register(database.context, "agent-a", {
+                id: "secret-1",
+                description: "A token",
+                environment: { TOKEN: "database value" },
+            });
+            await module.attach(database.context, "agent-a", "scope-1", "secret-1");
+
+            expect(await module.resolveForHost(database.context, "agent-a", "scope-1")).toEqual({
+                TOKEN: "database value",
+            });
+        } finally {
+            database.close();
+        }
+    });
+
+    it("scopes the catalog to the acting agent", async () => {
+        const database = moduleDatabase(secretsMigrations, "secrets-agent-scope-test");
+        await database.ready;
+        try {
+            const module = new SecretsModule();
+            await module.register(database.context, "agent-a", {
+                id: "secret-1",
+                description: "A token",
+                environment: { TOKEN: "value" },
+            });
+
+            // Another agent never sees it: the acting agent ID is the whole of the policy.
+            expect(await module.reference(database.context, "agent-b", "secret-1")).toBeUndefined();
+            await expect(
+                module.list(database.context, "agent-b", {}),
+            ).resolves.toMatchObject({ secrets: [] });
+            await expect(module.remove(database.context, "agent-b", "secret-1")).resolves.toBe(
+                false,
+            );
+        } finally {
+            database.close();
+        }
+    });
+
+    it("lists scoped attachments in one context transaction", async () => {
         const database = moduleDatabase(secretsMigrations, "secrets-list-snapshot-test");
         await database.ready;
-        let listAuthorizationWasTransactional = false;
-        const module = new SecretsModule({
-            authorize: async (ctx, _agentId, operation) => {
-                if (operation === "list") {
-                    listAuthorizationWasTransactional = ctx.db !== database.database;
-                }
-                return true;
-            },
-        });
+        const module = new SecretsModule();
         try {
             await module.register(database.context, "agent-a", {
                 id: "secret-1",
@@ -105,7 +139,6 @@ describe("SecretsModule", () => {
             ).resolves.toMatchObject({
                 secrets: [expect.objectContaining({ id: "secret-1" })],
             });
-            expect(listAuthorizationWasTransactional).toBe(true);
         } finally {
             database.close();
         }
@@ -219,77 +252,30 @@ describe("SecretsModule", () => {
         }
     });
 
-    it("validates an injected command resolver and preserves its selected result", async () => {
-        const database = moduleDatabase(
-            secretsMigrations,
-            "secrets-command-resolver-contract-test",
-        );
+    it("hides every attached variable from a command even when only some are selected", async () => {
+        const database = moduleDatabase(secretsMigrations, "secrets-command-hiding-test");
         await database.ready;
         try {
-            const calls: unknown[][] = [];
-            const module = new SecretsModule({
-                resolveForCommand: async (...args) => {
-                    calls.push(args);
-                    return [{ secretId: "selected", environment: { DYNAMIC_TOKEN: "host-only" } }];
-                },
-            });
+            const module = new SecretsModule();
             await module.register(database.context, "agent-a", {
                 id: "selected",
                 description: "Selected",
-                environment: { TOKEN: "database-value" },
+                environment: { SELECTED_TOKEN: "value" },
+            });
+            await module.register(database.context, "agent-a", {
+                id: "unselected",
+                description: "Unselected",
+                environment: { UNSELECTED_TOKEN: "value" },
             });
             await module.attach(database.context, "agent-a", "scope-1", "selected");
+            await module.attach(database.context, "agent-a", "scope-1", "unselected");
+
             await expect(
                 module.resolveForCommand(database.context, "agent-a", "scope-1", ["selected"]),
             ).resolves.toEqual({
-                environment: { DYNAMIC_TOKEN: "host-only" },
-                hiddenEnvironmentVariables: ["DYNAMIC_TOKEN", "TOKEN"],
+                environment: { SELECTED_TOKEN: "value" },
+                hiddenEnvironmentVariables: ["SELECTED_TOKEN", "UNSELECTED_TOKEN"],
             });
-            expect(calls).toHaveLength(1);
-            expect(calls[0]?.[1]).toBe("agent-a");
-            expect(calls[0]?.[2]).toBe("scope-1");
-            expect(calls[0]?.[3]).toEqual(["selected"]);
-
-            expect(
-                () =>
-                    new SecretsModule({
-                        resolveForCommand: {} as never,
-                    }),
-            ).toThrow("options are invalid");
-        } finally {
-            database.close();
-        }
-    });
-
-    it("rejects collisions from an injected resolver regardless of result order", async () => {
-        const database = moduleDatabase(
-            secretsMigrations,
-            "secrets-command-resolver-collision-test",
-        );
-        await database.ready;
-        try {
-            const module = new SecretsModule({
-                resolveForCommand: async () => [
-                    { secretId: "second", environment: { token: "second" } },
-                    { secretId: "first", environment: { TOKEN: "first" } },
-                ],
-            });
-            await module.register(database.context, "agent-a", {
-                id: "first",
-                description: "First",
-                environment: { TOKEN: "database-first" },
-            });
-            await module.register(database.context, "agent-a", {
-                id: "second",
-                description: "Second",
-                environment: { token: "database-second" },
-            });
-            await module.attach(database.context, "agent-a", "scope-1", "second");
-            await module.attach(database.context, "agent-a", "scope-1", "first");
-
-            await expect(
-                module.resolveForCommand(database.context, "agent-a", "scope-1"),
-            ).rejects.toThrow("both define token");
         } finally {
             database.close();
         }

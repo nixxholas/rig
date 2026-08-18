@@ -13,6 +13,7 @@ import {
     type HostCompute,
     type HostComputeProvider,
 } from "../../../sources/index.js";
+import { testConfig } from "../../support/computeModule.js";
 import { resolveModuleHooks } from "../../support/moduleHooks.js";
 
 /** One agent's compute tools, with the module they came from and a way to reach one by name. */
@@ -95,7 +96,7 @@ export async function computeToolset(
         id: "host",
         create: async () => compute,
     };
-    const module = new ComputeModule({ provider });
+    const module = ComputeModule.withProvider(testConfig, provider);
     const agentCtx = withAgentConfig(ctx, {
         modules: { compute: { cwd: compute.cwd, providerId: "host" } },
     });

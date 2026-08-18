@@ -11,27 +11,35 @@ and collecting avatar bytes: all of it is this module's own. There is no host
 object between the catalog and the disk.
 
 ```ts
-import { ProjectsModule } from "@slopus/happy-agent-modules";
+import { ConfigModule, GitModule, ProjectsModule } from "@slopus/happy-agent-modules";
 
-const projects = new ProjectsModule({ rootContext });
+const projects = new ProjectsModule(await ConfigModule.load(), new GitModule());
 await projects.open(ctx, agentId);
 ```
 
-`rootContext` is the lifetime the module's own Git and filesystem work runs on:
-a context derived from the application root, carrying the agent database. A
-clone, a project setup, or an avatar sweep outlives the request that started
-it, so none of them run on the caller's context; without a root the catalog
-still records everything it is told but cannot start work of its own.
-`managedProjectsDirectory`, `homeDirectory`, `environment` and `stateDirectory`
-locate that work — where cloned projects live, and where avatar bytes live so
-they survive a restart. `git` and `probeGit` replace the Git surfaces so a test
-can drive the whole lifecycle without Git; `cloneRemote` and
-`gitCredentialBroker` replace the clone boundary and the credential broker.
-`localProfileId` names the one person this copy of Rig acts for when a caller
-names nobody — which machine that is the catalog learns from the agent it was
-opened for. `resolveGitSecret` and `resolveProfile` answer for that person's
-token and Git identity. `onHostError` is told when the module's own Git or
-filesystem work failed after a durable decision was already recorded.
+Two modules and nothing else.
+
+| Module                                | What it answers                                                          |
+| ------------------------------------- | ------------------------------------------------------------------------ |
+| [`ConfigModule`](../config/README.md) | Where managed projects live, where the agent keeps its own state, whether cross-workspace work is on, and the GitHub token a clone of a private repository needs. |
+| [`GitModule`](../git/README.md)       | Every Git command, probe, clone and worktree, the credentials they carry, and who this copy of Git commits as. |
+
+There is no `rootContext`, no path string, no runner and no callback. The
+lifetime the catalog's own Git and filesystem work runs on is derived from the
+first context it is used with: a clone, a project setup, or an avatar sweep
+outlives the request that started it, so none of them run on the caller's
+context. A detached context deliberately carries no storage, so the catalog puts
+the agent database back on that lifetime itself.
+
+Two answers that used to be the composition root's are now owned deliberately:
+
+- **The GitHub token is configuration's.** `ConfigModule.githubToken` is where a
+  personal access token already lives, beside every other credential a person
+  configures, and it is read at the moment a clone needs one.
+- **The local Git identity is Git's.** `GitModule.localIdentity()` asks Git what
+  this machine commits as, because running Git is what that module is for. The
+  one profile a single-machine installation can resolve is named `local` inside
+  this module; a caller never passes a profile resolver.
 
 `open(ctx, agentId)` picks up whatever the last run left unfinished — projects
 still being set up, failures worth another try, and stale avatar bytes — and
@@ -192,14 +200,16 @@ Every changed mutation is represented by one frozen event: `project_created`,
 `project_reordered`, `project_avatar_updated`, `project_avatar_cleared`,
 `project_settings_updated`, or `project_state_changed` carrying the reason the
 lifecycle moved. Transactional and post-commit listeners receive the same
-event object. Post-commit listener failures are contained and optionally
-reported through `onPostCommitError`. Registration uses stdlib
-`afterCommit(ctx, ...)`.
+event object. `onEventTransactional(listener)` and `onEvent(listener)` take a
+subscriber and return the call that ends the subscription; a post-commit
+subscriber that fails is logged through the context's own logger and reaches
+nobody else, because the change it describes is already durable. Registration
+uses stdlib `afterCommit(ctx, ...)`.
 
-Authorization defaults to same-owner access only; an `authorization` policy may
-grant cross-agent reads or actions.
+Access is same-owner only. There is no installable authorization policy: a
+project belongs to the agent that made it.
 
-Avatar bytes live in `stateDirectory`, addressed by the content hash the row
+Avatar bytes live under the agent's own state folder, addressed by the content hash the row
 records, so they survive a restart and so two projects that chose the same image
 share one file. `collectAvatarGarbage` removes the files no row points at any
 more; it runs when the catalog opens.

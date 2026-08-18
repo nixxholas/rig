@@ -6,33 +6,25 @@ import {
     type AgentModule,
     type AgentModuleMigration,
 } from "@slopus/happy-agent-base";
-import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { sql } from "drizzle-orm";
 import type { Context } from "@steve.kite/stdlib";
 
 import {
     createProfileInputSchema,
-    profileModuleListenerSchema,
+    profileEventListenerSchema,
     profileSchema,
     updateProfileInputSchema,
     type CreateProfileInput,
     type Profile,
+    type ProfileEventListener,
+    type ProfileUnsubscribe,
     type UpdateProfileInput,
 } from "./ProfileTypes.js";
 
 export const PROFILE_MIGRATION_KEY = "001-profile";
 
 const PROFILE_TABLE = "happy_agent_profile";
-
-export const profileModuleOptionsSchema = Type.Object(
-    {
-        listener: Type.Optional(profileModuleListenerSchema),
-        now: Type.Optional(Type.Function([], Type.Integer({ minimum: 0 }))),
-    },
-    { additionalProperties: false },
-);
-export type ProfileModuleOptions = Static<typeof profileModuleOptionsSchema>;
 
 /**
  * The one person this installation belongs to.
@@ -59,17 +51,19 @@ export class ProfileModule<Database extends AgentDatabase = AgentDatabase>
             },
         ],
     ] as readonly AgentModuleMigration<Database>[];
-    readonly #now: () => number;
-    readonly #listener: ProfileModuleOptions["listener"];
+    readonly #listeners = new Set<ProfileEventListener>();
     /** This machine, learned from the agent the profile is opened for. */
     #localInstanceId: string | undefined;
 
-    constructor(options: ProfileModuleOptions = {}) {
-        if (!Value.Check(profileModuleOptionsSchema, options)) {
-            throw new Error("Profile module options are invalid.");
+    /** Watch every saved change; call the returned function to stop watching. */
+    onEvent(listener: ProfileEventListener): ProfileUnsubscribe {
+        if (!Value.Check(profileEventListenerSchema, listener)) {
+            throw new Error("Profile event listener must be a function.");
         }
-        this.#now = options.now ?? Date.now;
-        this.#listener = options.listener;
+        this.#listeners.add(listener);
+        return () => {
+            this.#listeners.delete(listener);
+        };
     }
 
     /**
@@ -122,7 +116,7 @@ export class ProfileModule<Database extends AgentDatabase = AgentDatabase>
             throw new Error("The profile name or email address is not valid.");
         }
         const instanceId = this.#requireInstance();
-        const now = this.#now();
+        const now = Date.now();
         const profile = await ctx.inTx(async (txCtx): Promise<Profile> => {
             if ((await this.get(txCtx)) !== undefined) {
                 throw new Error("This installation already has a profile.");
@@ -162,7 +156,7 @@ export class ProfileModule<Database extends AgentDatabase = AgentDatabase>
                 ...current,
                 ...(input.email === undefined ? {} : { email: input.email }),
                 ...(input.name === undefined ? {} : { name: input.name }),
-                updatedAt: this.#now(),
+                updatedAt: Date.now(),
                 version: current.version + 1,
             };
             await this.#write(txCtx, next);
@@ -191,12 +185,27 @@ export class ProfileModule<Database extends AgentDatabase = AgentDatabase>
         );
     }
 
+    /**
+     * Tell whoever is watching, after the change is already saved. A listener that fails is
+     * reported rather than allowed to undo a person who has already been named.
+     */
     async #publishChanged(ctx: Context, profile: Profile): Promise<void> {
-        await this.#listener?.onEvent?.(ctx, {
-            createdAt: this.#now(),
+        const event = {
+            createdAt: Date.now(),
             data: { profileId: profile.id, version: profile.version },
             id: `${profile.id}-${profile.version}`,
             type: "profile_changed",
-        });
+        } as const;
+        for (const listener of this.#listeners) {
+            try {
+                await listener(ctx, event);
+            } catch (error: unknown) {
+                ctx.log.warn(
+                    "A profile listener failed after the change was saved.",
+                    { profileId: profile.id, version: profile.version },
+                    error,
+                );
+            }
+        }
     }
 }

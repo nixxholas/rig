@@ -1,8 +1,9 @@
 import { existsSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 
 import {
+    withAgentDatabase,
+    type AgentDatabase,
     type AgentModule,
     type AgentModuleHooks,
     type AgentModuleScope,
@@ -10,48 +11,29 @@ import {
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
 import { createId } from "@paralleldrive/cuid2";
-import { Type, type Static } from "@sinclair/typebox";
+import { type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import {
+    detach,
     mapAsyncLock,
     type Context,
     type MapAsyncLock,
     type RootContext,
 } from "@steve.kite/stdlib";
 
-import { createGitWorktree } from "../git/createGitWorktree.js";
-import type { GitCommandRunner } from "../git/GitCommandRunner.js";
-import { isGitWorktreeAt } from "../git/isGitWorktreeAt.js";
-import { normalizeFuturePath } from "../git/normalizeFuturePath.js";
-import { normalizeProjectCwd } from "../git/normalizeProjectCwd.js";
+import { ConfigModule } from "../config/index.js";
 import {
-    prepareWorkspaceTransfer,
+    GitModule,
     WorkspaceTransferTargetRestoreError,
+    type GitCredentialRef,
+    type GitRepositoryFacts,
     type PreparedWorkspaceTransfer,
-} from "../git/prepareWorkspaceTransfer.js";
-import { probeGitRepository } from "../git/probeGitRepository.js";
-import { readGitCommonDir } from "../git/readGitCommonDir.js";
-import { readGitTopLevel } from "../git/readGitTopLevel.js";
-import { renameGitBranch } from "../git/renameGitBranch.js";
-import { resolveWorkspaceBase } from "../git/resolveWorkspaceBase.js";
-import { directGitCommandRunner } from "../git/runGitCommand.js";
-import type { GitRepositoryFacts } from "../git/types.js";
-import { projectGitFactsFrom } from "../projects/projectGitFacts.js";
-import {
-    clientChosenId,
-    requestedBaseRef,
-    validateProjectName,
-} from "../projects/impl/projectNames.js";
-import { projectStorageKey } from "../projects/projectIdentity.js";
-import { ProjectRegistrationError } from "../projects/ProjectRegistrationError.js";
-import type { Project } from "../projects/Project.js";
-import type { ProjectsModule } from "../projects/ProjectsModule.js";
+} from "../git/index.js";
+import { ProjectRegistrationError, ProjectsModule, type Project } from "../projects/index.js";
 
 import { copyProjectFolder } from "./impl/copyProjectFolder.js";
 
-import { getManagedWorkspacesDirectory } from "./impl/getManagedWorkspacesDirectory.js";
 import {
-    DEFAULT_WORKSPACE_FOLDER_SETTINGS,
     loadWorkspaceFolderSettings,
     type WorkspaceFolderSettings,
 } from "./impl/loadWorkspaceFolderSettings.js";
@@ -59,22 +41,17 @@ import { removeWorkspaceDirectory } from "./impl/removeWorkspaceDirectory.js";
 import { runWorkspaceSetupCommands } from "./impl/runWorkspaceSetupCommands.js";
 import { syncWorkspaceFiles } from "./impl/syncWorkspaceFiles.js";
 import { watchWorkspaceSyncPaths } from "./impl/watchWorkspaceSyncPaths.js";
+import { withPreservedNumericPrefix } from "./impl/withPreservedNumericPrefix.js";
 import {
     gitBranchExists,
     workspaceGitRefSnapshot,
     workspaceStorageKeyExists,
 } from "./impl/workspaceGitRefSnapshot.js";
 import {
-    workspaceEnvironmentSchema,
-    workspaceFolderSettingsOptionSchema,
-    workspaceGitRunnerSchema,
-    workspaceProjectsModuleSchema,
-    workspaceRootContextSchema,
     type CreateWorkspaceRequest,
     type WorkspaceCreatorOptions,
 } from "./WorkspaceProvisioning.js";
 import {
-    workspaceAgentIdSchema,
     workspaceApplyGitFactsInputSchema,
     workspaceApplyProbeInputSchema,
     workspaceArchiveOptionsSchema,
@@ -89,7 +66,6 @@ import {
     workspaceReserveHooksSchema,
     workspaceReserveInputSchema,
     workspaceSetBranchInputSchema,
-    workspaceTimestampSchema,
     workspaceSchema,
     type Workspace,
     type WorkspaceApplyGitFactsInput,
@@ -118,13 +94,7 @@ import {
     type WorkspaceBranchMetadataDetailQuery,
     type WorkspaceBranchMetadataPage,
 } from "./WorkspaceBranchMetadataPage.js";
-import {
-    workspaceContextSchema,
-    workspaceEventIdSchema,
-    workspaceEventSchema,
-    workspaceModuleListenerSchema,
-    type WorkspaceModuleListener,
-} from "./WorkspaceEvent.js";
+import { type WorkspaceEventListener, type WorkspaceUnsubscribe } from "./WorkspaceEvent.js";
 import {
     firstBranchMetadataPage,
     firstWorkspaceDetailPage,
@@ -139,7 +109,6 @@ import {
 } from "./WorkspaceFormat.js";
 import { WorkspaceMutations, type WorkspaceEventPayload } from "./WorkspaceMutations.js";
 import {
-    MAX_WORKSPACE_PAGE_SIZE,
     workspacePageQuerySchema,
     type WorkspacePage,
     type WorkspacePageQuery,
@@ -150,7 +119,6 @@ import {
     workspaceDetailQuerySchema,
     type WorkspaceDetailPage,
     type WorkspaceDetailQuery,
-    type WorkspaceDetailResult,
 } from "./WorkspaceDetailPage.js";
 import {
     workspaceTransferInputSchema,
@@ -167,15 +135,13 @@ import {
     assertWorkspaceList,
     assertWorkspacePage,
     createWorkspaceStore,
-    workspaceHostSchema,
     workspaceMigrations,
-    type WorkspaceHost,
     type WorkspaceMutationRequest,
     type WorkspaceMutationResult,
     type WorkspaceStore,
     type WorkspaceTransactionChange,
 } from "./WorkspaceStore.js";
-import { isPromiseLike, requirePromise, safeError } from "./workspaceRuntime.js";
+import { requirePromise } from "./workspaceRuntime.js";
 import { archiveWorkspaceTool } from "./tools/archive_workspace.js";
 import { createWorkspaceTool } from "./tools/create_workspace.js";
 import { getBranchMetadataTool } from "./tools/get_branch_metadata.js";
@@ -184,8 +150,9 @@ import { listWorkspacesTool } from "./tools/list_workspaces.js";
 import { renameWorkspaceTool } from "./tools/rename_workspace.js";
 import { transferWorkspaceTool } from "./tools/transfer_workspace.js";
 
-const DEFAULT_PAGE_SIZE = 50;
-const DEFAULT_OUTPUT_CHARACTERS = 12_000;
+/** How many workspaces one page may carry, and how much text a page may spend on them. */
+export const WORKSPACE_PAGE_SIZE = 50;
+export const MAX_WORKSPACE_OUTPUT_CHARACTERS = 12_000;
 /** A stored failure is something a person reads, not a stack trace to keep whole. */
 const MAX_ERROR_LENGTH = 500;
 /** A burst of file events inside this window becomes a single replication pass. */
@@ -199,88 +166,6 @@ export interface ResolvedProjectOwnership {
     readonly workspace?: Workspace;
 }
 
-export const workspaceIdFactorySchema = Type.Function(
-    [workspaceContextSchema],
-    Type.Union([workspaceIdSchema, Type.Promise(workspaceIdSchema)]),
-);
-export const workspaceEventIdFactorySchema = Type.Function(
-    [workspaceContextSchema],
-    Type.Union([workspaceEventIdSchema, Type.Promise(workspaceEventIdSchema)]),
-);
-export const workspaceClockSchema = Type.Function(
-    [workspaceContextSchema],
-    workspaceTimestampSchema,
-);
-export const workspacePostCommitErrorSchema = Type.Function(
-    [workspaceContextSchema, workspaceEventSchema, Type.Unknown()],
-    Type.Union([Type.Void(), Type.Promise(Type.Void())]),
-);
-/**
- * Told when the host's own Git or filesystem work failed after a durable decision had already been
- * recorded. Archival is never rolled back because cleanup failed, so this is how that failure
- * reaches a log instead of the caller.
- */
-export const workspaceHostErrorSchema = Type.Function(
-    [
-        workspaceContextSchema,
-        workspaceIdSchema,
-        Type.Union([Type.Literal("archive"), Type.Literal("rename")]),
-        Type.String(),
-    ],
-    Type.Union([Type.Void(), Type.Promise(Type.Void())]),
-);
-const workspaceMaxPageSizeSchema = Type.Integer({
-    minimum: 1,
-    maximum: MAX_WORKSPACE_PAGE_SIZE,
-});
-const workspaceMaxOutputSchema = Type.Integer({
-    minimum: 256,
-    maximum: 100_000,
-});
-
-export const workspaceModuleOptionsSchema = Type.Object(
-    {
-        enabled: Type.Optional(Type.Boolean()),
-        idFactory: Type.Optional(workspaceIdFactorySchema),
-        eventIdFactory: Type.Optional(workspaceEventIdFactorySchema),
-        clock: Type.Optional(workspaceClockSchema),
-        listener: Type.Optional(workspaceModuleListenerSchema),
-        maxPageSize: Type.Optional(workspaceMaxPageSizeSchema),
-        maxOutputCharacters: Type.Optional(workspaceMaxOutputSchema),
-        onPostCommitError: Type.Optional(workspacePostCommitErrorSchema),
-        onHostError: Type.Optional(workspaceHostErrorSchema),
-
-        /**
-         * The projects catalog these workspaces are cut from.
-         *
-         * A workspace belongs to a project: it is a branch of that project's repository, in a
-         * folder named after it, cut from the trunk that project decided on. Everything the
-         * workspaces catalog does with Git therefore starts by asking the projects catalog, which
-         * owns the folder, the credential, and the repository lock.
-         */
-        projects: Type.Optional(workspaceProjectsModuleSchema),
-        /**
-         * The lifetime the catalog's own Git and filesystem work runs on: a detached root carrying
-         * the agent database. Cutting a worktree, running setup commands, replicating files, and
-         * removing a folder all outlive the call that asked for them.
-         */
-        rootContext: Type.Optional(workspaceRootContextSchema),
-        /** Replaces both Git surfaces at once, so a test can drive lifecycle without Git. */
-        git: Type.Optional(workspaceGitRunnerSchema),
-        /** The read-only Git surface used to look at a folder without changing it. */
-        probeGit: Type.Optional(workspaceGitRunnerSchema),
-        environment: Type.Optional(workspaceEnvironmentSchema),
-        homeDirectory: Type.Optional(Type.String({ minLength: 1 })),
-        /** Where workspace folders are created. Defaults to the user-facing managed root. */
-        workspacesDirectory: Type.Optional(Type.String({ minLength: 1 })),
-        /** The configured defaults for setup commands, file sync, and keeping folders. */
-        settings: Type.Optional(workspaceFolderSettingsOptionSchema),
-    },
-    { additionalProperties: false },
-);
-
-export type WorkspaceModuleOptions = Static<typeof workspaceModuleOptionsSchema>;
-
 /** What a reservation produced: the workspace, and whether this call is the one that made it. */
 export interface WorkspaceReservation {
     readonly created: boolean;
@@ -293,26 +178,16 @@ export class WorkspacesModule implements AgentModule {
 
     readonly #store: WorkspaceStore;
     readonly #mutations: WorkspaceMutations;
-    readonly #operations: WorkspaceHost;
     readonly #enabled: boolean;
-    readonly #idFactory: NonNullable<WorkspaceModuleOptions["idFactory"]>;
-    readonly #maxPageSize: number;
-    readonly #maxOutputCharacters: number;
-    readonly #onHostError: WorkspaceModuleOptions["onHostError"];
     readonly #cleanupTasks = new Set<Promise<void>>();
     #agents: AgentSystemRef | undefined;
 
     // --- The catalog's own Git and filesystem work -------------------------------------------
 
-    readonly #backgroundAbort = new AbortController();
-    readonly #environment: NodeJS.ProcessEnv;
-    readonly #folderSettingsDefaults: WorkspaceFolderSettings;
-    readonly #git: GitCommandRunner;
-    readonly #homeDirectory: string;
-    readonly #probeGit: GitCommandRunner;
+    readonly #config: ConfigModule;
+    readonly #git: GitModule;
+    readonly #projects: ProjectsModule;
     readonly #projectFolders = new Map<string, { path: string; storageKey: string }>();
-    readonly #projects: ProjectsModule | undefined;
-    readonly #rootContext: RootContext | undefined;
     readonly #setupControllers = new Map<string, AbortController>();
     readonly #syncLocks: MapAsyncLock<string> = mapAsyncLock();
     readonly #syncStops = new Map<string, () => void>();
@@ -322,69 +197,42 @@ export class WorkspacesModule implements AgentModule {
     readonly #workspacesDirectory: string;
 
     #closed = false;
+    #lifetime: RootContext | undefined;
+    #storage: AgentDatabase | undefined;
 
-    constructor(options: WorkspaceModuleOptions) {
-        assertWorkspaceModuleOptions(options);
-        this.#projects = options.projects;
-        this.#rootContext = options.rootContext;
-        this.#environment = options.environment ?? process.env;
-        this.#folderSettingsDefaults = options.settings ?? DEFAULT_WORKSPACE_FOLDER_SETTINGS;
-        this.#git = options.git ?? options.projects?.git ?? directGitCommandRunner;
-        this.#probeGit = options.probeGit ?? options.git ?? options.projects?.probeGit ?? this.#git;
-        this.#homeDirectory = normalizeProjectCwd(options.homeDirectory ?? homedir());
-        this.#workspacesDirectory = normalizeFuturePath(
-            options.workspacesDirectory ??
-                getManagedWorkspacesDirectory(this.#environment, this.#homeDirectory),
-        );
-        // The catalog's own Git and filesystem work, given to the store as the operations it may
-        // ask for while it decides. Nothing here comes from outside the module.
-        this.#operations = {
-            pathForStorageKey: (projectRef, storageKey) =>
-                join(this.#workspaceRoot(projectRef), storageKey),
-            isBranchUnavailable: (projectRef, branch) => {
-                const folder = this.#projectFolders.get(projectRef);
-                if (folder === undefined) return false;
-                return gitBranchExists(workspaceGitRefSnapshot(folder.path), branch);
-            },
-            isStorageKeyUnavailable: (projectRef, storageKey) => {
-                const folder = this.#projectFolders.get(projectRef);
-                if (folder === undefined) return false;
-                return workspaceStorageKeyExists(
-                    workspaceGitRefSnapshot(folder.path),
-                    this.#workspaceRoot(projectRef),
-                    storageKey,
-                );
-            },
-            branchMetadata: async (ctx, workspaceId) =>
-                await this.#readBranchMetadata(ctx, workspaceId),
-        };
-        this.#store = createWorkspaceStore({ host: this.#operations });
-        this.#enabled = options.enabled ?? true;
-        this.#idFactory =
-            options.idFactory ??
-            ((_ctx: Context) => globalThis.crypto.randomUUID());
-        this.#maxPageSize = options.maxPageSize ?? DEFAULT_PAGE_SIZE;
-        this.#maxOutputCharacters = options.maxOutputCharacters ?? DEFAULT_OUTPUT_CHARACTERS;
-        this.#onHostError = options.onHostError;
-        this.#mutations = new WorkspaceMutations({
-            store: this.#store,
-            eventIdFactory:
-                options.eventIdFactory ??
-                ((_ctx: Context) => globalThis.crypto.randomUUID()),
-            clock: options.clock ?? ((_ctx: Context) => Date.now()),
-            listener: options.listener,
-            onPostCommitError: options.onPostCommitError,
-        });
+    /**
+     * @param config Where workspace folders live and what a folder does when it says nothing itself.
+     * @param projects The catalog these workspaces are cut from: a workspace is a branch of a
+     * project's repository, in a folder named after it, so the projects catalog owns the folder,
+     * the credential, and the repository lock every Git call here goes through.
+     * @param git Git itself.
+     */
+    constructor(config: ConfigModule, projects: ProjectsModule, git: GitModule) {
+        this.#config = config;
+        this.#git = git;
+        this.#projects = projects;
+        this.#enabled = config.configuration.values.features.workspaces;
+        this.#workspacesDirectory = git.normalizeFuturePath(config.workspacesHome);
+        this.#store = createWorkspaceStore(this);
+        this.#mutations = new WorkspaceMutations(this.#store);
 
         // Archiving a project archives everything cut from it. The decision belongs to the
         // projects catalog, so this catalog listens for it inside that transaction rather than
         // asking the projects catalog to know about workspaces.
-        options.projects?.addProjectListener({
-            onEventTransactional: async (txCtx, event) => {
-                if (event.type !== "project_archived") return;
-                await this.#archiveProjectWorkspaces(txCtx, event.project.id);
-            },
+        projects.onEventTransactional(async (txCtx, event) => {
+            if (event.type !== "project_archived") return;
+            await this.#archiveProjectWorkspaces(txCtx, event.project.id);
         });
+    }
+
+    /** Takes a subscriber that runs inside the transaction the change commits in. */
+    onEventTransactional(listener: WorkspaceEventListener): WorkspaceUnsubscribe {
+        return this.#mutations.onEventTransactional(listener);
+    }
+
+    /** Takes a subscriber that runs once the change is durable. */
+    onEvent(listener: WorkspaceEventListener): WorkspaceUnsubscribe {
+        return this.#mutations.onEvent(listener);
     }
 
     readonly #hooks: AgentModuleHooks = {
@@ -434,9 +282,7 @@ export class WorkspacesModule implements AgentModule {
         }
         const normalized = structuredClone(input);
         const workspaceId =
-            normalized.id ??
-            normalized.operationId ??
-            (await this.#newIdentity(ctx, workspaceIdSchema));
+            normalized.id ?? normalized.operationId ?? this.#newIdentity(workspaceIdSchema);
         const result = await this.#mutateResult(
             ctx,
             "reserve",
@@ -471,9 +317,7 @@ export class WorkspacesModule implements AgentModule {
                     request,
                 ),
             (before, after) =>
-                before === undefined
-                    ? { type: "workspace_created", workspace: after }
-                    : undefined,
+                before === undefined ? { type: "workspace_created", workspace: after } : undefined,
         );
         return { created: result.changed, workspace: result.workspace };
     }
@@ -512,17 +356,14 @@ export class WorkspacesModule implements AgentModule {
             },
         );
         if (previousBranch === undefined || previousBranch === renamed.branch) return renamed;
-        return await this.#moveHostBranch(ctx, renamed, previousBranch);
+        return await this.#moveGitBranch(ctx, renamed, previousBranch);
     }
 
     /**
      * Gives a workspace the name its first chat arrived at. A workspace someone has already named
      * keeps that name: only a placeholder is replaced.
      */
-    async inheritName(
-        ctx: Context,
-        input: WorkspaceInheritNameInput,
-    ): Promise<Workspace> {
+    async inheritName(ctx: Context, input: WorkspaceInheritNameInput): Promise<Workspace> {
         this.#assertEnabled();
         this.#assertInput(workspaceInheritNameInputSchema, input, "workspace name inheritance");
         const normalized = structuredClone(input);
@@ -549,14 +390,11 @@ export class WorkspacesModule implements AgentModule {
             },
         );
         if (previousBranch === undefined || previousBranch === named.branch) return named;
-        return await this.#moveHostBranch(ctx, named, previousBranch);
+        return await this.#moveGitBranch(ctx, named, previousBranch);
     }
 
     /** Records the branch a host actually created or renamed to. */
-    async setBranch(
-        ctx: Context,
-        input: WorkspaceSetBranchInput,
-    ): Promise<Workspace> {
+    async setBranch(ctx: Context, input: WorkspaceSetBranchInput): Promise<Workspace> {
         this.#assertEnabled();
         this.#assertInput(workspaceSetBranchInputSchema, input, "workspace branch");
         const normalized = structuredClone(input);
@@ -611,10 +449,7 @@ export class WorkspacesModule implements AgentModule {
     }
 
     /** The workspace is checked out, set up, and ready for someone to work in. */
-    async markReady(
-        ctx: Context,
-        input: WorkspaceMarkReadyInput,
-    ): Promise<Workspace> {
+    async markReady(ctx: Context, input: WorkspaceMarkReadyInput): Promise<Workspace> {
         this.#assertEnabled();
         this.#assertInput(workspaceMarkReadyInputSchema, input, "workspace readiness");
         const normalized = structuredClone(input);
@@ -638,10 +473,7 @@ export class WorkspacesModule implements AgentModule {
     }
 
     /** A ready workspace stopped working, with a bounded explanation of why. */
-    async markFailed(
-        ctx: Context,
-        input: WorkspaceMarkFailedInput,
-    ): Promise<Workspace> {
+    async markFailed(ctx: Context, input: WorkspaceMarkFailedInput): Promise<Workspace> {
         this.#assertEnabled();
         this.#assertInput(workspaceMarkFailedInputSchema, input, "workspace failure");
         const normalized = structuredClone(input);
@@ -792,8 +624,7 @@ export class WorkspacesModule implements AgentModule {
      * The archival is committed here and returned at once: the workspace has left the active list
      * before this call answers. Removing a worktree can take minutes and can fail, so it runs on
      * the module's cleanup lifetime instead of the caller's, and its outcome arrives later as the
-     * `workspace_archived` event or as a reported host error. Archival never fails because
-     * cleanup did.
+     * `workspace_archived` event or as a logged failure. Archival never fails because cleanup did.
      */
     async archive(
         ctx: Context,
@@ -802,10 +633,7 @@ export class WorkspacesModule implements AgentModule {
     ): Promise<Workspace> {
         const begun = await this.beginArchive(ctx, workspaceId, options);
         if (begun.status !== "archiving") return begun;
-        if (this.#rootContext === undefined) {
-            return await this.completeArchive(ctx, workspaceId);
-        }
-        this.#runCleanup(this.#rootContext.named("workspace-cleanup"), async (workerCtx) => {
+        this.#runCleanup(ctx, async (workerCtx) => {
             await this.removeArchivedWorkspace(workerCtx, begun.projectRef, workspaceId);
         });
         return begun;
@@ -823,14 +651,51 @@ export class WorkspacesModule implements AgentModule {
     }
 
     /**
+     * The managed path a folder key would take inside a project. Reservation asks this while it is
+     * deciding, so it answers from what the catalog already knows rather than from the database.
+     */
+    pathForStorageKey(projectRef: string, storageKey: string): string {
+        return join(this.#workspaceRoot(projectRef), storageKey);
+    }
+
+    /** Whether Git already holds this branch in the project's shared repository. */
+    isBranchUnavailable(projectRef: string, branch: string): boolean {
+        const folder = this.#projectFolders.get(projectRef);
+        if (folder === undefined) return false;
+        return gitBranchExists(workspaceGitRefSnapshot(folder.path), branch);
+    }
+
+    /** Whether this folder key is already taken, on disk or as a worktree Git knows about. */
+    isStorageKeyUnavailable(projectRef: string, storageKey: string): boolean {
+        const folder = this.#projectFolders.get(projectRef);
+        if (folder === undefined) return false;
+        return workspaceStorageKeyExists(
+            workspaceGitRefSnapshot(folder.path),
+            this.#workspaceRoot(projectRef),
+            storageKey,
+        );
+    }
+
+    /**
+     * A generated name put where the workspace's current one sits, keeping a leading number.
+     *
+     * An automatically created workspace is often numbered, and the number is how a person tells
+     * one from the next in a list. Naming it after the first message should change what the
+     * workspace is about, not where it sits.
+     */
+    nameWithPreservedPrefix(current: string, generated: string): string {
+        return withPreservedNumericPrefix(current, generated);
+    }
+
+    /**
      * Picks up whatever the last run left unfinished: workspaces still being created, and the file
      * replication watch for every workspace that is ready.
      */
     async open(ctx: Context): Promise<void> {
         for (const workspace of await this.#allWorkspaces(ctx)) {
-            if (workspace.status === "ready") this.#scheduleSync(workspace.projectRef);
+            if (workspace.status === "ready") this.#scheduleSync(ctx, workspace.projectRef);
         }
-        this.#runInBackground("workspace-initialization", async (workerCtx) => {
+        this.#runInBackground(ctx, "workspace-initialization", async (workerCtx) => {
             await this.reconcileInitializingWorkspaces(workerCtx);
         });
     }
@@ -838,7 +703,6 @@ export class WorkspacesModule implements AgentModule {
     /** Stops every background lifetime this catalog started and waits for the ones in flight. */
     async close(_ctx: Context): Promise<void> {
         this.#closed = true;
-        this.#backgroundAbort.abort();
         for (const controller of this.#setupControllers.values()) {
             controller.abort(new Error("Workspace setup stopped because Rig is closing."));
         }
@@ -849,7 +713,7 @@ export class WorkspacesModule implements AgentModule {
         this.#syncStops.clear();
         await this.whenCleanupSettles();
         while (this.#tasks.size > 0) {
-            await Promise.allSettled([...this.#tasks]);
+            await Promise.allSettled(this.#tasks);
         }
     }
 
@@ -868,24 +732,21 @@ export class WorkspacesModule implements AgentModule {
         creatorSessionId?: string,
         options: WorkspaceCreatorOptions = {},
     ): Promise<Workspace | undefined> {
-        const projects = this.#requireProjects();
+        const projects = this.#projects;
         const project = await this.#project(ctx, projectId);
         if (project === undefined) return undefined;
         if (request.secret !== undefined && project.remoteSource?.kind !== "github") {
             throw new Error("GitHub credentials can only be used with a GitHub project.");
         }
-        const name = validateProjectName(request.name);
+        const name = projects.validateName(request.name);
         const requestedId =
-            request.id === undefined ? undefined : clientChosenId(request.id, "workspace");
-        const baseRef = requestedBaseRef(request.baseRef);
+            request.id === undefined
+                ? undefined
+                : projects.validateClientChosenId(request.id, "workspace");
+        const baseRef = projects.validateBaseRef(request.baseRef);
         const creator = options.createdBy;
         if (options.githubToken !== undefined && creator !== undefined) {
-            await projects.registerGitCredential(
-                ctx,
-                projectId,
-                creator,
-                options.githubToken,
-            );
+            await projects.registerGitCredential(ctx, projectId, creator, options.githubToken);
         }
         if (
             project.requiredSecretKind === "github" &&
@@ -898,7 +759,7 @@ export class WorkspacesModule implements AgentModule {
         const workspaceRoot = this.#workspaceRoot(projectId);
         const workspaceId = requestedId ?? createId();
         const gitRefs = workspaceGitRefSnapshot(project.repositoryRef);
-        const fallbackStorageKey = `${projectStorageKey(name).slice(0, 20)}-${workspaceId}`;
+        const fallbackStorageKey = `${projects.storageKeyFor(name).slice(0, 20)}-${workspaceId}`;
 
         const reserved = await this.reserve(
             ctx,
@@ -923,7 +784,7 @@ export class WorkspacesModule implements AgentModule {
         );
         if (reserved.created) {
             const workspace = reserved.workspace;
-            this.#runInBackground("workspace-initialization", async (workerCtx) => {
+            this.#runInBackground(ctx, "workspace-initialization", async (workerCtx) => {
                 await this.#initializeWorkspace(workerCtx, workspace);
             });
         }
@@ -942,8 +803,8 @@ export class WorkspacesModule implements AgentModule {
         assertedWorkspaceId?: string,
         requestedProjectId?: string,
     ): Promise<ResolvedProjectOwnership> {
-        const projects = this.#requireProjects();
-        const path = normalizeProjectCwd(cwd);
+        const projects = this.#projects;
+        const path = this.#git.normalizeProjectCwd(cwd);
         const workspace = await this.getByPath(ctx, path);
         if (workspace !== undefined) {
             if (workspace.status !== "ready") {
@@ -996,8 +857,8 @@ export class WorkspacesModule implements AgentModule {
         workspaceId: string,
         assertedProjectId?: string,
     ): Promise<ResolvedProjectOwnership> {
-        const projects = this.#requireProjects();
-        const path = normalizeProjectCwd(cwd);
+        const projects = this.#projects;
+        const path = this.#git.normalizeProjectCwd(cwd);
         const workspace = await this.get(ctx, workspaceId);
         if (workspace === undefined || workspace.path !== path) {
             throw new Error("The workspace ID does not match the session directory.");
@@ -1029,23 +890,16 @@ export class WorkspacesModule implements AgentModule {
         }
         return {
             project:
-                project.status === "archived"
-                    ? await projects.restore(ctx, project.id)
-                    : project,
+                project.status === "archived" ? await projects.restore(ctx, project.id) : project,
             workspace,
         };
     }
 
     /** A project Git cannot cut a worktree from still gets a workspace: a copy of the folder. */
-    async #workspaceKindFor(
-        ctx: Context,
-        project: Project,
-    ): Promise<"git_worktree" | "directory"> {
+    async #workspaceKindFor(ctx: Context, project: Project): Promise<"git_worktree" | "directory"> {
         if (project.worktreeSupport === "supported") return "git_worktree";
         if (project.worktreeSupport === "unsupported") return "directory";
-        const probed = this.#remember(
-            await this.#requireProjects().probe(ctx, project.id),
-        );
+        const probed = this.#remember(await this.#projects.probe(ctx, project.id));
         return probed.worktreeSupport === "supported" ? "git_worktree" : "directory";
     }
 
@@ -1090,7 +944,7 @@ export class WorkspacesModule implements AgentModule {
                 return;
             }
             try {
-                const current = await this.#requireProjects().runInProjectGitLock(
+                const current = await this.#projects.runInProjectGitLock(
                     ctx,
                     workspace.projectRef,
                     async () => await this.#createContentsLocked(ctx, workspace, project),
@@ -1099,7 +953,7 @@ export class WorkspacesModule implements AgentModule {
                 await this.#setupWorkspace(ctx, current);
                 if (this.#closed) return;
                 await this.markReady(ctx, { workspaceId: current.id });
-                this.#scheduleSync(current.projectRef);
+                this.#scheduleSync(ctx, current.projectRef);
             } catch (error) {
                 if (this.#closed) return;
                 await this.#failInitialization(ctx, workspace.id, errorToMessage(error));
@@ -1131,16 +985,17 @@ export class WorkspacesModule implements AgentModule {
         if (existsSync(locked.path)) {
             const adoptable =
                 locked.gitCommonDir !== undefined &&
-                (await isGitWorktreeAt({
+                (await this.#git.isWorktreeAt({
                     commonDir: locked.gitCommonDir,
-                    git: this.#git,
                     path: locked.path,
+                    ...this.#gitOptions(project.id),
                 }));
             if (adoptable) return locked;
             // A half-made worktree is cleaned up before creation is tried again. The keep-on-
             // archive settings do not apply: this folder was never a workspace someone worked in.
             await removeWorkspaceDirectory({
                 git: this.#git,
+                ...this.#gitOptions(project.id),
                 keepCopiesOnArchive: false,
                 keepWorktreesOnArchive: false,
                 project,
@@ -1154,12 +1009,7 @@ export class WorkspacesModule implements AgentModule {
         if (locked.baseCommit === undefined) {
             throw new Error("The workspace has no base commit to start from.");
         }
-        await this.#createCheckoutLocked(
-            ctx,
-            locked,
-            project.repositoryRef,
-            locked.baseCommit,
-        );
+        await this.#createCheckoutLocked(ctx, locked, project.repositoryRef, locked.baseCommit);
         return locked;
     }
 
@@ -1171,19 +1021,20 @@ export class WorkspacesModule implements AgentModule {
         if (workspace.baseCommit !== undefined && workspace.gitCommonDir !== undefined) {
             return workspace;
         }
-        const projects = this.#requireProjects();
-        const git = projects.gitForProject(project.id);
-        if ((await readGitTopLevel(git, project.repositoryRef)) !== project.repositoryRef) {
+        const projects = this.#projects;
+        const gitOptions = this.#gitOptions(project.id);
+        const topLevel = await this.#git.topLevel(project.repositoryRef, gitOptions);
+        if (topLevel !== project.repositoryRef) {
             throw new Error("A workspace worktree needs a Git repository project.");
         }
         const defaultBranch =
             workspace.baseRef === undefined
                 ? (await projects.resolveDefaultBranch(ctx, project.id)).defaultBranch
                 : undefined;
-        const gitCommonDir = await readGitCommonDir(git, project.repositoryRef);
-        const base = await resolveWorkspaceBase({
+        const gitCommonDir = await this.#git.commonDir(project.repositoryRef, gitOptions);
+        const base = await this.#git.resolveWorkspaceBase({
+            ...gitOptions,
             ...(defaultBranch === undefined ? {} : { defaultBranch }),
-            git,
             projectPath: project.repositoryRef,
             ...(workspace.baseRef === undefined ? {} : { requestedRef: workspace.baseRef }),
         });
@@ -1203,15 +1054,15 @@ export class WorkspacesModule implements AgentModule {
         if (this.#closed) return;
         // The branch may already have followed a rename made while the checkout was reserved.
         const branch =
-            (await this.#ownedWorkspace(ctx, workspace.projectRef, workspace.id))
-                ?.branch ?? workspace.branch;
-        await createGitWorktree({
+            (await this.#ownedWorkspace(ctx, workspace.projectRef, workspace.id))?.branch ??
+            workspace.branch;
+        await this.#git.createWorktree({
             branch,
             commit,
             expectedCommonDir: workspace.gitCommonDir ?? "",
-            git: this.#git,
             projectPath,
             workspacePath: workspace.path,
+            ...this.#gitOptions(workspace.projectRef),
         });
         // A rename landing during the checkout is not moved by the branch mover, which leaves
         // workspaces that are not ready alone. The branch Git just created is the real one.
@@ -1219,13 +1070,9 @@ export class WorkspacesModule implements AgentModule {
         const stored = await this.#ownedWorkspace(ctx, workspace.projectRef, workspace.id);
         if (stored === undefined || stored.branch === branch) return;
         await this.setBranch(ctx, { workspaceId: workspace.id, branch });
-        await this.#reportHostError(
-            ctx,
-            workspace.id,
-            "rename",
-            new Error(
-                `The workspace was renamed while it was being created, so its branch stayed "${branch}".`,
-            ),
+        ctx.log.warn(
+            { branch, workspaceId: workspace.id },
+            "The workspace was renamed while it was being created, so its branch kept the reserved name.",
         );
     }
 
@@ -1234,8 +1081,8 @@ export class WorkspacesModule implements AgentModule {
         this.#setupControllers.set(workspace.id, controller);
         try {
             if (
-                (await this.#ownedWorkspace(ctx, workspace.projectRef, workspace.id))
-                    ?.status !== "initializing"
+                (await this.#ownedWorkspace(ctx, workspace.projectRef, workspace.id))?.status !==
+                "initializing"
             ) {
                 return;
             }
@@ -1253,7 +1100,6 @@ export class WorkspacesModule implements AgentModule {
             }
             const settings = await this.#folderSettings(workspace.path);
             await runWorkspaceSetupCommands(ctx, workspace.path, settings.setupCommands, {
-                environment: this.#environment,
                 signal: controller.signal,
             });
         } finally {
@@ -1263,11 +1109,7 @@ export class WorkspacesModule implements AgentModule {
         }
     }
 
-    async #failInitialization(
-        ctx: Context,
-        workspaceId: string,
-        message: string,
-    ): Promise<void> {
+    async #failInitialization(ctx: Context, workspaceId: string, message: string): Promise<void> {
         await this.markInitializationFailed(ctx, {
             workspaceId,
             error: boundedWorkspaceError(message),
@@ -1275,7 +1117,7 @@ export class WorkspacesModule implements AgentModule {
     }
 
     async #folderSettings(folder: string): Promise<WorkspaceFolderSettings> {
-        return await loadWorkspaceFolderSettings(folder, this.#folderSettingsDefaults);
+        return await loadWorkspaceFolderSettings(folder, this.#config.workspaceSettings);
     }
 
     // --- Archival ----------------------------------------------------------------------------
@@ -1298,6 +1140,7 @@ export class WorkspacesModule implements AgentModule {
             try {
                 await removeWorkspaceDirectory({
                     git: this.#git,
+                    ...this.#gitOptions(projectId),
                     keepCopiesOnArchive: settings.keepCopiesOnArchive,
                     keepWorktreesOnArchive: settings.keepWorktreesOnArchive,
                     project,
@@ -1307,11 +1150,16 @@ export class WorkspacesModule implements AgentModule {
                 if (this.#closed) return;
             } catch (error) {
                 if (this.#closed) return;
-                await this.#reportHostError(ctx, workspaceId, "archive", error);
+                // The archival is already durable, so a folder Rig could not remove is something
+                // to tell someone about rather than a failure to hand back.
+                ctx.log.warn(
+                    { error, workspaceId },
+                    "The archived workspace's folder could not be removed.",
+                );
             }
             await this.completeArchive(ctx, workspaceId);
             // The next pass stops the watch when this was the project's last ready workspace.
-            this.#scheduleSync(projectId);
+            this.#scheduleSync(ctx, projectId);
         });
         return await this.#ownedWorkspace(ctx, projectId, workspaceId);
     }
@@ -1321,10 +1169,7 @@ export class WorkspacesModule implements AgentModule {
      * transaction, and removes the folders afterwards. A workspace of an archived project is not a
      * workspace anybody has any more, so it leaves the active list at the same moment.
      */
-    async #archiveProjectWorkspaces(
-        ctx: Context,
-        projectId: string,
-    ): Promise<void> {
+    async #archiveProjectWorkspaces(ctx: Context, projectId: string): Promise<void> {
         if (!this.#enabled) return;
         const workspaces = (await this.#allWorkspaces(ctx, projectId)).filter(
             (workspace) => workspace.status !== "archived" && workspace.status !== "archiving",
@@ -1333,8 +1178,8 @@ export class WorkspacesModule implements AgentModule {
             await this.beginArchive(ctx, workspace.id);
             this.#stopSetup(workspace.id);
         }
-        if (workspaces.length === 0 || this.#rootContext === undefined) return;
-        this.#runCleanup(this.#rootContext.named("workspace-cleanup"), async (workerCtx) => {
+        if (workspaces.length === 0) return;
+        this.#runCleanup(ctx, async (workerCtx) => {
             for (const workspace of workspaces) {
                 await this.removeArchivedWorkspace(workerCtx, projectId, workspace.id);
             }
@@ -1350,12 +1195,12 @@ export class WorkspacesModule implements AgentModule {
     // --- File replication --------------------------------------------------------------------
 
     /** Debounces the project's next sync pass, so a burst of file events becomes one copy. */
-    #scheduleSync(projectId: string): void {
-        if (this.#closed || this.#rootContext === undefined) return;
+    #scheduleSync(ctx: Context, projectId: string): void {
+        if (this.#closed) return;
         clearTimeout(this.#syncTimers.get(projectId));
         const timer = setTimeout(() => {
             this.#syncTimers.delete(projectId);
-            this.#runInBackground("workspace-sync", async (workerCtx) => {
+            this.#runInBackground(ctx, "workspace-sync", async (workerCtx) => {
                 await this.#syncLocks.runInLock(workerCtx, projectId, async (lockedCtx) => {
                     await this.#runSyncPass(lockedCtx, projectId);
                 });
@@ -1389,9 +1234,10 @@ export class WorkspacesModule implements AgentModule {
             projectId,
             watchWorkspaceSyncPaths({
                 onChange: () => {
-                    this.#scheduleSync(projectId);
+                    this.#scheduleSync(ctx, projectId);
                 },
                 projectPath: project.repositoryRef,
+                recursive: this.#git.supportsRecursiveWorktreeWatch(),
                 syncPaths,
             }),
         );
@@ -1399,10 +1245,7 @@ export class WorkspacesModule implements AgentModule {
             if (this.#closed) return;
             // Re-read right before copying: a workspace archived while this pass was running must
             // not have its folder written to, much less recreated.
-            if (
-                (await this.#ownedWorkspace(ctx, projectId, workspace.id))?.status !==
-                "ready"
-            ) {
+            if ((await this.#ownedWorkspace(ctx, projectId, workspace.id))?.status !== "ready") {
                 continue;
             }
             try {
@@ -1424,12 +1267,14 @@ export class WorkspacesModule implements AgentModule {
         for (const workspace of await this.#allWorkspaces(ctx)) {
             if (this.#closed) return;
             if (workspace.status !== "ready") continue;
-            const probe = await probeGitRepository({ git: this.#probeGit, path: workspace.path });
+            const probe = await this.#git.probe(workspace.path);
             if (this.#closed) return;
             await this.applyProbe(ctx, {
                 workspaceId: workspace.id,
                 presence: probe.presence,
-                facts: projectGitFactsFrom(probe.facts ?? { ahead: 0, behind: 0, detached: false }),
+                facts: this.#projects.gitFactsFrom(
+                    probe.facts ?? { ahead: 0, behind: 0, detached: false },
+                ),
             });
         }
     }
@@ -1442,7 +1287,7 @@ export class WorkspacesModule implements AgentModule {
     ): Promise<void> {
         await this.applyGitFacts(ctx, {
             workspaceId,
-            facts: projectGitFactsFrom(facts),
+            facts: this.#projects.gitFactsFrom(facts),
         });
     }
 
@@ -1452,15 +1297,12 @@ export class WorkspacesModule implements AgentModule {
      * The stored facts are a snapshot of the last scan; this question is asked when someone wants
      * the truth, so the folder is read rather than the row.
      */
-    async #readBranchMetadata(
-        ctx: Context,
-        workspaceId: string,
-    ): Promise<WorkspaceBranchMetadata> {
+    async #readBranchMetadata(ctx: Context, workspaceId: string): Promise<WorkspaceBranchMetadata> {
         const workspace = await this.#mutations.getRequired(ctx, workspaceId);
         const facts =
             workspace.presence === "missing"
                 ? undefined
-                : (await probeGitRepository({ git: this.#probeGit, path: workspace.path })).facts;
+                : (await this.#git.probe(workspace.path)).facts;
         return {
             workspaceId,
             ahead: facts?.ahead ?? 0,
@@ -1519,9 +1361,9 @@ export class WorkspacesModule implements AgentModule {
         );
         try {
             return {
-                prepared: await prepareWorkspaceTransfer({
+                prepared: await this.#git.prepareWorkspaceTransfer({
                     ...(beforeApply === undefined ? {} : { beforeApply }),
-                    git: this.#git,
+                    ...this.#gitOptions(projectId),
                     sourcePath: source.path,
                     targetPath: target.path,
                 }),
@@ -1562,10 +1404,7 @@ export class WorkspacesModule implements AgentModule {
     // --- Internals ---------------------------------------------------------------------------
 
     /** Every workspace this agent can see, archived ones included. */
-    async #allWorkspaces(
-        ctx: Context,
-        projectId?: string,
-    ): Promise<readonly Workspace[]> {
+    async #allWorkspaces(ctx: Context, projectId?: string): Promise<readonly Workspace[]> {
         return await this.list(ctx, {
             includeArchived: true,
             ...(projectId === undefined ? {} : { projectRef: projectId }),
@@ -1584,7 +1423,7 @@ export class WorkspacesModule implements AgentModule {
 
     /** The project a workspace belongs to, remembering its folder for later reservations. */
     async #project(ctx: Context, projectId: string): Promise<Project | undefined> {
-        const project = await this.#requireProjects().get(ctx, projectId);
+        const project = await this.#projects.get(ctx, projectId);
         return project === undefined ? undefined : this.#remember(project);
     }
 
@@ -1605,29 +1444,42 @@ export class WorkspacesModule implements AgentModule {
         return project;
     }
 
-    #requireProjects(): ProjectsModule {
-        const projects = this.#projects;
-        if (projects === undefined) {
-            throw new Error(
-                "This workspaces catalog was built without a projects catalog, so it cannot create or set up workspaces.",
-            );
-        }
-        return projects;
+    /**
+     * The credential a Git command against one project must carry. The projects catalog owns who
+     * created a project, so it is what names the credential a workspace cut from it inherits.
+     */
+    #gitOptions(projectId: string): { readonly credential?: GitCredentialRef } {
+        const credential = this.#projects.gitCredential(projectId);
+        return credential === undefined ? {} : { credential };
+    }
+
+    /**
+     * The lifetime the catalog's own Git and filesystem work runs on.
+     *
+     * Cutting a worktree, running setup commands, replicating files, and removing a folder all
+     * outlive the call that asked for them, so none of them runs on that call's context. The
+     * lifetime is detached from the first context the catalog is used with. A detached context
+     * carries no storage — that is what stops work outliving its caller from writing through a
+     * transaction facade that has already committed — so the agent database is put back on it
+     * deliberately, and nothing else about the request comes along.
+     */
+    #backgroundLifetime(ctx: Context, name: string): Context {
+        this.#lifetime ??= detach(ctx);
+        this.#storage ??= ctx.db;
+        return withAgentDatabase(this.#lifetime.named(name), this.#storage);
     }
 
     /**
      * Starts work that outlives whatever asked for it, on its own named lifetime. The caller's
      * context is deliberately not used: a background checkout must not end when a request does.
      */
-    #runInBackground(name: string, work: (ctx: Context) => Promise<void>): void {
+    #runInBackground(
+        ctx: Context,
+        name: string,
+        work: (workerCtx: Context) => Promise<void>,
+    ): void {
         if (this.#closed) return;
-        const root = this.#rootContext;
-        if (root === undefined) {
-            throw new Error(
-                "This workspaces catalog was built without a rootContext, so it cannot start background work.",
-            );
-        }
-        const task = work(root.named(name))
+        const task = work(this.#backgroundLifetime(ctx, name))
             .catch(() => undefined)
             .finally(() => {
                 this.#tasks.delete(task);
@@ -1638,15 +1490,12 @@ export class WorkspacesModule implements AgentModule {
     /** Waits for the folder removals this module started. Closing and tests both need it. */
     async whenCleanupSettles(): Promise<void> {
         while (this.#cleanupTasks.size > 0) {
-            await Promise.allSettled([...this.#cleanupTasks]);
+            await Promise.allSettled(this.#cleanupTasks);
         }
     }
 
     /** Persists the Git state the host observed, writing only when something actually changed. */
-    async applyGitFacts(
-        ctx: Context,
-        input: WorkspaceApplyGitFactsInput,
-    ): Promise<Workspace> {
+    async applyGitFacts(ctx: Context, input: WorkspaceApplyGitFactsInput): Promise<Workspace> {
         this.#assertEnabled();
         this.#assertInput(workspaceApplyGitFactsInputSchema, input, "workspace Git facts");
         const normalized = structuredClone(input);
@@ -1670,10 +1519,7 @@ export class WorkspacesModule implements AgentModule {
     }
 
     /** The same, plus whether the folder was still there when the host looked. */
-    async applyProbe(
-        ctx: Context,
-        input: WorkspaceApplyProbeInput,
-    ): Promise<Workspace> {
+    async applyProbe(ctx: Context, input: WorkspaceApplyProbeInput): Promise<Workspace> {
         this.#assertEnabled();
         this.#assertInput(workspaceApplyProbeInputSchema, input, "workspace probe");
         const normalized = structuredClone(input);
@@ -1705,25 +1551,19 @@ export class WorkspacesModule implements AgentModule {
      * when a caller asks for them by name, so a list nobody qualified never shows a folder that
      * is already gone.
      */
-    async listPage(
-        ctx: Context,
-        query: WorkspacePageQuery = {},
-    ): Promise<WorkspacePage> {
+    async listPage(ctx: Context, query: WorkspacePageQuery = {}): Promise<WorkspacePage> {
         this.#assertEnabled();
         this.#assertInput(workspacePageQuerySchema, query, "workspace page query");
-        const limit = query.limit ?? this.#maxPageSize;
-        if (limit > this.#maxPageSize) {
-            throw new Error(`Workspace page limit cannot exceed ${String(this.#maxPageSize)}.`);
+        const limit = query.limit ?? WORKSPACE_PAGE_SIZE;
+        if (limit > WORKSPACE_PAGE_SIZE) {
+            throw new Error(`Workspace page limit cannot exceed ${String(WORKSPACE_PAGE_SIZE)}.`);
         }
         const normalized = {
             ...structuredClone(query),
             includeArchived: query.includeArchived === true,
             limit,
         };
-        const raw = await requirePromise(
-            this.#store.list(ctx, normalized),
-            "Workspace store list",
-        );
+        const raw = await requirePromise(this.#store.list(ctx, normalized), "Workspace store list");
         assertWorkspacePage(raw);
         this.#assertPage(raw, normalized.cursor ?? 0, limit);
         for (const workspace of raw.workspaces) {
@@ -1741,13 +1581,10 @@ export class WorkspacesModule implements AgentModule {
                 throw new Error("Workspace page returned an archived row without includeArchived.");
             }
         }
-        return structuredClone(fitPageForModel(raw, this.#maxOutputCharacters));
+        return structuredClone(fitPageForModel(raw, MAX_WORKSPACE_OUTPUT_CHARACTERS));
     }
 
-    async list(
-        ctx: Context,
-        query: WorkspacePageQuery = {},
-    ): Promise<Workspace[]> {
+    async list(ctx: Context, query: WorkspacePageQuery = {}): Promise<Workspace[]> {
         this.#assertEnabled();
         return (await this.listPage(ctx, query)).workspaces;
     }
@@ -1755,10 +1592,7 @@ export class WorkspacesModule implements AgentModule {
     async get(ctx: Context, workspaceId: string): Promise<Workspace | undefined> {
         this.#assertEnabled();
         this.#assertId(workspaceId, "workspace");
-        const raw = await requirePromise(
-            this.#store.get(ctx, workspaceId),
-            "Workspace store get",
-        );
+        const raw = await requirePromise(this.#store.get(ctx, workspaceId), "Workspace store get");
         if (raw === undefined) return undefined;
         assertWorkspace(raw);
         assertWorkspaceRecord(raw);
@@ -1814,21 +1648,16 @@ export class WorkspacesModule implements AgentModule {
                 total: detail.length,
                 ...(cursor + limit < detail.length ? { nextCursor: cursor + limit } : {}),
             },
-            this.#maxOutputCharacters,
+            MAX_WORKSPACE_OUTPUT_CHARACTERS,
         );
     }
 
-    async transfer(
-        ctx: Context,
-        input: WorkspaceTransferInput,
-    ): Promise<WorkspaceTransferResult> {
+    async transfer(ctx: Context, input: WorkspaceTransferInput): Promise<WorkspaceTransferResult> {
         this.#assertEnabled();
         this.#assertInput(workspaceTransferInputSchema, input, "workspace transfer");
         const normalized = structuredClone(input);
         const request = stripOperationId(normalized);
-        const operationId =
-            normalized.operationId ??
-            (await this.#newIdentity(ctx, workspaceOperationIdSchema));
+        const operationId = normalized.operationId ?? this.#newIdentity(workspaceOperationIdSchema);
         const mutationRequest: WorkspaceMutationRequest = { operation: "transfer", operationId };
         const subjectId =
             "workspaceId" in request ? request.workspaceId : request.targetWorkspaceId;
@@ -1853,11 +1682,11 @@ export class WorkspacesModule implements AgentModule {
             if (!result.changed) return { result };
             const event =
                 result.state === "scheduled"
-                    ? await this.#mutations.newEvent(txCtx, {
+                    ? this.#mutations.newEvent({
                           type: "workspace_transfer_scheduled",
                           targetWorkspaceId: result.targetWorkspaceId,
                       })
-                    : await this.#mutations.newEvent(txCtx, {
+                    : this.#mutations.newEvent({
                           type: "workspace_transferred",
                           workspace: after,
                           ...("workspaceId" in request
@@ -1870,17 +1699,10 @@ export class WorkspacesModule implements AgentModule {
         return structuredClone(requireTransferFromResult(change.result));
     }
 
-    async branchMetadata(
-        ctx: Context,
-        workspaceId: string,
-    ): Promise<WorkspaceBranchMetadata> {
+    async branchMetadata(ctx: Context, workspaceId: string): Promise<WorkspaceBranchMetadata> {
         this.#assertEnabled();
         this.#assertId(workspaceId, "workspace");
-        const workspace = await this.#mutations.getRequired(ctx, workspaceId);
-        const raw = await requirePromise(
-            this.#store.branchMetadata(ctx, workspaceId),
-            "Workspace store branch metadata",
-        );
+        const raw = await this.#readBranchMetadata(ctx, workspaceId);
         assertWorkspaceBranchMetadata(raw);
         if (raw.workspaceId !== workspaceId) {
             throw new Error("Workspace branch metadata belongs to another workspace.");
@@ -1914,7 +1736,7 @@ export class WorkspacesModule implements AgentModule {
                 total: detail.length,
                 ...(cursor + limit < detail.length ? { nextCursor: cursor + limit } : {}),
             },
-            this.#maxOutputCharacters,
+            MAX_WORKSPACE_OUTPUT_CHARACTERS,
         );
     }
 
@@ -1924,12 +1746,12 @@ export class WorkspacesModule implements AgentModule {
         if (workspaces.length === 0) return "No workspaces.";
         const rows = workspaces.map(workspaceRow);
         const output = rows.join("\n");
-        if (output.length <= this.#maxOutputCharacters) return output;
+        if (output.length <= MAX_WORKSPACE_OUTPUT_CHARACTERS) return output;
         const visible: string[] = [];
         let size = 0;
         for (const row of rows) {
             const next = size + row.length + (visible.length === 0 ? 0 : 1);
-            if (next > this.#maxOutputCharacters) break;
+            if (next > MAX_WORKSPACE_OUTPUT_CHARACTERS) break;
             visible.push(row);
             size = next;
         }
@@ -1944,14 +1766,14 @@ export class WorkspacesModule implements AgentModule {
         const detailPage = Value.Check(workspaceDetailPageSchema, page)
             ? page
             : Value.Check(workspaceSchema, page)
-              ? firstWorkspaceDetailPage(page, this.#maxOutputCharacters)
+              ? firstWorkspaceDetailPage(page, MAX_WORKSPACE_OUTPUT_CHARACTERS)
               : undefined;
         if (detailPage === undefined) {
             throw new Error("Cannot format an invalid workspace detail page.");
         }
         if (detailPage.workspace === null) return "That workspace does not exist.";
-        const output = formatWorkspaceDetailPage(detailPage, this.#maxOutputCharacters);
-        if (output.length > this.#maxOutputCharacters) {
+        const output = formatWorkspaceDetailPage(detailPage, MAX_WORKSPACE_OUTPUT_CHARACTERS);
+        if (output.length > MAX_WORKSPACE_OUTPUT_CHARACTERS) {
             throw new Error("Workspace detail page exceeds its model-output bound.");
         }
         return output;
@@ -1961,15 +1783,15 @@ export class WorkspacesModule implements AgentModule {
     formatWorkspaceOperationForModel(label: string, workspace: Workspace): string {
         assertWorkspace(workspace);
         const prefix = `${label}\n`;
-        if (prefix.length >= this.#maxOutputCharacters) {
+        if (prefix.length >= MAX_WORKSPACE_OUTPUT_CHARACTERS) {
             throw new Error("Workspace operation label exceeds the model-output bound.");
         }
-        const budget = this.#maxOutputCharacters - prefix.length;
+        const budget = MAX_WORKSPACE_OUTPUT_CHARACTERS - prefix.length;
         const output = `${prefix}${formatWorkspaceDetailPage(
             firstWorkspaceDetailPage(workspace, budget),
             budget,
         )}`;
-        if (output.length > this.#maxOutputCharacters) {
+        if (output.length > MAX_WORKSPACE_OUTPUT_CHARACTERS) {
             throw new Error("Workspace operation output exceeds its model-output bound.");
         }
         return output;
@@ -1988,14 +1810,17 @@ export class WorkspacesModule implements AgentModule {
             : Value.Check(workspaceBranchMetadataSchema, page)
               ? fitWorkspaceBranchMetadataPage(
                     firstBranchMetadataPage(page),
-                    this.#maxOutputCharacters,
+                    MAX_WORKSPACE_OUTPUT_CHARACTERS,
                 )
               : undefined;
         if (detailPage === undefined) {
             throw new Error("Cannot format invalid workspace branch metadata detail.");
         }
-        const output = formatWorkspaceBranchMetadataPage(detailPage, this.#maxOutputCharacters);
-        if (output.length > this.#maxOutputCharacters) {
+        const output = formatWorkspaceBranchMetadataPage(
+            detailPage,
+            MAX_WORKSPACE_OUTPUT_CHARACTERS,
+        );
+        if (output.length > MAX_WORKSPACE_OUTPUT_CHARACTERS) {
             throw new Error("Workspace branch metadata detail exceeds its model-output bound.");
         }
         return output;
@@ -2009,7 +1834,7 @@ export class WorkspacesModule implements AgentModule {
 
     formatPageForModel(page: WorkspacePage): string {
         assertWorkspacePage(page);
-        const visiblePage = fitPageForModel(page, this.#maxOutputCharacters);
+        const visiblePage = fitPageForModel(page, MAX_WORKSPACE_OUTPUT_CHARACTERS);
         const rows = visiblePage.workspaces.map(workspaceRow);
         const continuation =
             visiblePage.nextCursor === undefined
@@ -2018,7 +1843,8 @@ export class WorkspacesModule implements AgentModule {
         let output = rows.length === 0 ? "No workspaces." : rows.join("\n");
         if (continuation !== undefined) {
             const withContinuation = `${output}\n${continuation}`;
-            if (withContinuation.length <= this.#maxOutputCharacters) output = withContinuation;
+            if (withContinuation.length <= MAX_WORKSPACE_OUTPUT_CHARACTERS)
+                output = withContinuation;
         }
         return output;
     }
@@ -2064,9 +1890,7 @@ export class WorkspacesModule implements AgentModule {
             after: Workspace,
         ) => WorkspaceEventPayload | undefined,
     ): Promise<WorkspaceMutationResult> {
-        const operationId =
-            requestedOperationId ??
-            (await this.#newIdentity(ctx, workspaceOperationIdSchema));
+        const operationId = requestedOperationId ?? this.#newIdentity(workspaceOperationIdSchema);
         return await this.#mutations.runResult(
             ctx,
             operation,
@@ -2085,32 +1909,31 @@ export class WorkspacesModule implements AgentModule {
      * has. Every worktree of a project shares one set of refs, so this takes the project's Git lock
      * the way cutting a worktree does.
      */
-    async #moveHostBranch(
+    async #moveGitBranch(
         ctx: Context,
         workspace: Workspace,
         previousBranch: string,
     ): Promise<Workspace> {
         if (workspace.branch === previousBranch) return workspace;
         if (workspace.status !== "ready" || workspace.gitCommonDir === undefined) return workspace;
-        const projects = this.#projects;
         try {
-            const move = async (): Promise<void> => {
-                await renameGitBranch({
+            await this.#projects.runInProjectGitLock(ctx, workspace.projectRef, async () => {
+                await this.#git.renameBranch({
                     expectedCommonDir: workspace.gitCommonDir ?? "",
                     from: previousBranch,
-                    git: this.#git,
                     to: workspace.branch,
                     workspacePath: workspace.path,
+                    ...this.#gitOptions(workspace.projectRef),
                 });
-            };
-            if (projects === undefined) {
-                await move();
-            } else {
-                await projects.runInProjectGitLock(ctx, workspace.projectRef, move);
-            }
+            });
             return workspace;
         } catch (error: unknown) {
-            await this.#reportHostError(ctx, workspace.id, "rename", error);
+            // The name the person asked for is already durable. Git keeping the old branch is not
+            // a failure of that rename, so the recorded branch goes back to the one Git has.
+            ctx.log.warn(
+                { branch: workspace.branch, error, workspaceId: workspace.id },
+                "The workspace was renamed, but Git kept its old branch.",
+            );
             return await this.setBranch(ctx, {
                 workspaceId: workspace.id,
                 branch: previousBranch,
@@ -2123,26 +1946,13 @@ export class WorkspacesModule implements AgentModule {
      * used: an archive that has already been committed must not be tied to the request that asked
      * for it, and a failure here cannot reach that caller as an error.
      */
-    #runCleanup(lifetime: Context, work: (ctx: Context) => Promise<void>): void {
-        const task = work(lifetime)
+    #runCleanup(ctx: Context, work: (workerCtx: Context) => Promise<void>): void {
+        const task = work(this.#backgroundLifetime(ctx, "workspace-cleanup"))
             .catch(() => undefined)
             .finally(() => {
                 this.#cleanupTasks.delete(task);
             });
         this.#cleanupTasks.add(task);
-    }
-
-    async #reportHostError(
-        ctx: Context,
-        workspaceId: string,
-        operation: "archive" | "rename",
-        error: unknown,
-    ): Promise<void> {
-        try {
-            await this.#onHostError?.(ctx, workspaceId, operation, safeError(error));
-        } catch {
-            // Reporting is advisory once the durable decision has already been recorded.
-        }
     }
 
     #assertEnabled(): void {
@@ -2151,19 +1961,13 @@ export class WorkspacesModule implements AgentModule {
         }
     }
 
-    async #newIdentity(
-        ctx: Context,
-        schema: typeof workspaceIdSchema | typeof workspaceOperationIdSchema,
-    ): Promise<string> {
-        const raw = this.#idFactory(ctx);
-        const value = isPromiseLike(raw) ? await raw : raw;
+    #newIdentity(schema: typeof workspaceIdSchema | typeof workspaceOperationIdSchema): string {
+        const value = globalThis.crypto.randomUUID();
         if (!Value.Check(schema, value)) {
-            throw new Error("Workspace identity factory returned an invalid identity.");
+            throw new Error("The workspaces catalog minted an identity it cannot represent.");
         }
         return value;
     }
-
-
 
     #assertId(id: string, label: string): void {
         if (!Value.Check(workspaceIdSchema, id)) {
@@ -2202,14 +2006,6 @@ export class WorkspacesModule implements AgentModule {
         if (page.nextCursor !== cursor + page.workspaces.length) {
             throw new Error("Workspace page cursor must advance exactly by visible records.");
         }
-    }
-}
-
-export function assertWorkspaceModuleOptions(
-    value: unknown,
-): asserts value is WorkspaceModuleOptions {
-    if (!Value.Check(workspaceModuleOptionsSchema, value)) {
-        throw new Error("Workspace module options are invalid.");
     }
 }
 

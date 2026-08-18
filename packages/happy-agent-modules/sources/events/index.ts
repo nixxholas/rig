@@ -19,5 +19,5 @@ export {
     type EventType,
 } from "./types.js";
 
-export { EventsModule, type EventsModuleOptions } from "./EventsModule.js";
+export { EventsModule, EVENTS_CAPACITY } from "./EventsModule.js";
 export { createUuidV7Factory } from "./createUuidV7.js";

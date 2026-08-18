@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -7,7 +7,8 @@ import { promisify } from "node:util";
 
 import { withAgentDatabase, type AgentDatabase } from "@slopus/happy-agent-base";
 import {
-    directGitCommandRunner,
+    ConfigModule,
+    GitModule,
     projectMigrations,
     ProjectsModule,
     workspaceMigrations,
@@ -15,7 +16,7 @@ import {
     type GitCommandRunner,
     type WorkspaceFolderSettings,
 } from "@slopus/happy-agent-modules";
-import { createRootContext, type Context, type RootContext } from "@steve.kite/stdlib";
+import { createRootContext, withLogger, type Context, type RootContext } from "@steve.kite/stdlib";
 import { drizzle } from "drizzle-orm/sqlite-proxy";
 
 const execFile = promisify(execFileCallback);
@@ -27,12 +28,10 @@ export const INSTANCE_ID = "installation-test";
 export interface ProjectCatalogOptions {
     /** Replaces Git for both catalogs, so a test can hold one command still. */
     readonly git?: GitCommandRunner;
-    readonly now?: () => number;
-    readonly onWorkspaceHostError?: (
-        workspaceId: string,
-        kind: "archive" | "rename",
-        message: string,
-    ) => void;
+    /**
+     * What `[workspace]` says for this installation. Both catalogs read it from configuration, so
+     * it is written into the harness's own `happy.toml` rather than handed to a module.
+     */
     readonly settings?: WorkspaceFolderSettings;
 }
 
@@ -46,6 +45,7 @@ export type ProjectCatalogOverrides = {
 
 /** One pair of catalogs over one database: what a single run of Rig has. */
 export interface ProjectCatalogs {
+    readonly git: GitModule;
     readonly projects: ProjectsModule;
     readonly workspaces: WorkspacesModule;
     readonly open: (ctx: Context) => Promise<void>;
@@ -54,13 +54,20 @@ export interface ProjectCatalogs {
 
 /** The temporary directories one test gets, plus everything it has to take down afterwards. */
 export interface ProjectTestHarness extends ProjectCatalogs {
+    readonly config: ConfigModule;
     readonly ctx: Context;
+    /**
+     * The folder the catalogs treat as this person's home. Git decides that from the real home
+     * directory now, so a test that wants the home project asks for the same answer.
+     */
     readonly home: string;
     readonly managedProjects: string;
     readonly managedWorkspaces: string;
     readonly root: string;
     readonly rootContext: RootContext;
     readonly stateDirectory: string;
+    /** Every warning the catalogs logged, which is where a failed folder cleanup now reports. */
+    readonly warnings: readonly string[];
     readonly dispose: () => Promise<void>;
     /**
      * Another pair of catalogs over the same database and folders, which is what a restart looks
@@ -72,9 +79,10 @@ export interface ProjectTestHarness extends ProjectCatalogs {
 /**
  * A real database, real modules and real folders.
  *
- * Nothing here is a stand-in: the catalogs run their own migrations against SQLite, and they work
- * on directories under the system temporary folder. Git is the Git on this machine, because the
- * behaviors under test — worktrees, branches, prune — are Git's, not a mock's.
+ * Nothing here is a stand-in: the catalogs run their own migrations against SQLite, they read their
+ * layout from a real `ConfigModule` rooted in the test's own folder, and they work on directories
+ * under the system temporary folder. Git is the Git on this machine, because the behaviors under
+ * test — worktrees, branches, prune — are Git's, not a mock's.
  */
 export async function projectTestHarness(
     name: string,
@@ -83,11 +91,10 @@ export async function projectTestHarness(
     // macOS hands out `/var/...` for a temporary directory but canonicalizes it to `/private/var`,
     // and the catalogs store canonical paths. Resolving here keeps the two the same string.
     const root = await realpath(await mkdtemp(join(tmpdir(), `rig-${name}-`)));
-    const home = join(root, "home");
     const managedProjects = join(root, "managed-projects");
     const managedWorkspaces = join(root, "managed-workspaces");
-    const stateDirectory = join(root, "state");
-    await execFile("mkdir", ["-p", home]);
+    const config = await testConfiguration(root, managedProjects, managedWorkspaces, overrides);
+    const stateDirectory = join(config.configuration.paths.agentHome, "projects");
 
     const sqlite = new DatabaseSync(":memory:");
     const database = drizzle(async (query, params, method) => {
@@ -107,9 +114,23 @@ export async function projectTestHarness(
         return { rows: statement.all(...params) };
     }) as unknown as AgentDatabase;
 
+    // A failed folder cleanup is reported by the catalog on its own lifetime's logger now, so the
+    // harness listens where it actually lands instead of taking a callback.
+    const warnings: string[] = [];
+    const record = (...args: unknown[]): void => {
+        warnings.push(args.map((value) => String(value)).join(" "));
+    };
+    const silent = (): void => undefined;
     // The catalogs start their own background work off this root, so the database has to be on the
     // root itself rather than on the context of whichever call happened to reach them first.
-    const rootContext = withAgentDatabase(createRootContext(), database) as RootContext;
+    const rootContext = withLogger(withAgentDatabase(createRootContext(), database), {
+        trace: silent,
+        debug: silent,
+        info: silent,
+        warn: (_context, ...args) => record(...args),
+        error: (_context, ...args) => record(...args),
+        fatal: (_context, ...args) => record(...args),
+    }) as RootContext;
     const ctx = rootContext.named(name);
     for (const [, migrate] of projectMigrations) await migrate(ctx, database);
     for (const [, migrate] of workspaceMigrations) await migrate(ctx, database);
@@ -117,30 +138,12 @@ export async function projectTestHarness(
     const built: ProjectCatalogs[] = [];
     const create = (extra: ProjectCatalogOverrides = {}): ProjectCatalogs => {
         const settings: ProjectCatalogOverrides = { ...overrides, ...extra };
-        const projects = new ProjectsModule({
-            homeDirectory: home,
-            managedProjectsDirectory: managedProjects,
-            rootContext,
-            stateDirectory,
-            ...(settings.git === undefined ? {} : { git: settings.git }),
-            ...(settings.now === undefined ? {} : { now: settings.now }),
-        });
-        const workspaces = new WorkspacesModule({
-            homeDirectory: home,
-            projects,
-            rootContext,
-            workspacesDirectory: managedWorkspaces,
-            ...(settings.git === undefined ? {} : { git: settings.git }),
-            ...(settings.settings === undefined ? {} : { settings: settings.settings }),
-            ...(settings.onWorkspaceHostError === undefined
-                ? {}
-                : {
-                      onHostError: (_hostCtx, workspaceId, kind, message) => {
-                          settings.onWorkspaceHostError?.(workspaceId, kind, message);
-                      },
-                  }),
-        });
+        const git =
+            settings.git === undefined ? new GitModule() : GitModule.withRunner(settings.git);
+        const projects = new ProjectsModule(config, git);
+        const workspaces = new WorkspacesModule(config, projects, git);
         const pair: ProjectCatalogs = {
+            git,
             projects,
             workspaces,
             open: async (openCtx) => {
@@ -151,6 +154,7 @@ export async function projectTestHarness(
             close: async (closeCtx) => {
                 await workspaces.close(closeCtx);
                 await projects.close(closeCtx);
+                git.dispose();
             },
         };
         built.push(pair);
@@ -165,9 +169,11 @@ export async function projectTestHarness(
     };
 
     return {
+        config,
         ctx,
         dispose,
-        home,
+        git: current.git,
+        home: current.projects.homeDirectory,
         managedProjects,
         managedWorkspaces,
         projects: current.projects,
@@ -178,7 +184,62 @@ export async function projectTestHarness(
         root,
         rootContext,
         stateDirectory,
+        warnings,
     };
+}
+
+/**
+ * Configuration for one harness, rooted in the folder that harness owns.
+ *
+ * Where managed projects and workspaces live is the product's own mechanism —
+ * `RIG_PROJECTS_DIRECTORY` and `RIG_WORKSPACES_DIRECTORY` — read once while those variables are
+ * set, because configuration settles its layout once per installation and remembers it. Workspace
+ * folder settings are written into the same `happy.toml` a person would edit.
+ */
+async function testConfiguration(
+    root: string,
+    managedProjects: string,
+    managedWorkspaces: string,
+    overrides: ProjectCatalogOptions,
+): Promise<ConfigModule> {
+    const previousProjects = process.env.RIG_PROJECTS_DIRECTORY;
+    const previousWorkspaces = process.env.RIG_WORKSPACES_DIRECTORY;
+    process.env.RIG_PROJECTS_DIRECTORY = managedProjects;
+    process.env.RIG_WORKSPACES_DIRECTORY = managedWorkspaces;
+    try {
+        const happyHome = join(root, "happy");
+        if (overrides.settings !== undefined) {
+            const path = (await ConfigModule.load(happyHome)).configuration.paths.globalConfigPath;
+            await mkdir(join(path, ".."), { recursive: true });
+            await writeFile(path, workspaceSettingsToml(overrides.settings), "utf8");
+        }
+        const config = await ConfigModule.load(happyHome);
+        void config.projectsHome;
+        void config.workspacesHome;
+        return config;
+    } finally {
+        restoreEnvironment("RIG_PROJECTS_DIRECTORY", previousProjects);
+        restoreEnvironment("RIG_WORKSPACES_DIRECTORY", previousWorkspaces);
+    }
+}
+
+function workspaceSettingsToml(settings: WorkspaceFolderSettings): string {
+    const list = (values: readonly string[]): string =>
+        `[${values.map((value) => JSON.stringify(value)).join(", ")}]`;
+    return [
+        "[workspace]",
+        `keep_copies_on_archive = ${settings.keepCopiesOnArchive}`,
+        `keep_worktrees_on_archive = ${settings.keepWorktreesOnArchive}`,
+        `protected_sync = ${list(settings.protectedSync)}`,
+        `setup_commands = ${list(settings.setupCommands)}`,
+        `sync = ${list(settings.sync)}`,
+        "",
+    ].join("\n");
+}
+
+function restoreEnvironment(name: string, value: string | undefined): void {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
 }
 
 /**
@@ -201,6 +262,7 @@ export function pausableGit(pauseWhen: (args: readonly string[]) => boolean): {
     const gate = new Promise<void>((resolve) => {
         releaseGate = () => resolve();
     });
+    const real = new GitModule();
     return {
         paused: pausedPromise,
         release: () => releaseGate(),
@@ -211,7 +273,7 @@ export function pausableGit(pauseWhen: (args: readonly string[]) => boolean): {
                     await gate;
                     return { code: 128, stderr: "Git was interrupted.", stdout: "" };
                 }
-                return await directGitCommandRunner.run(cwd, args, options);
+                return await real.run(cwd, args, options);
             },
         },
     };

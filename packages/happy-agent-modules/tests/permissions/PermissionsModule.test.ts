@@ -12,6 +12,7 @@ import { describe, expect, it } from "vitest";
 
 import {
     MAX_PERMISSION_ACTION,
+    PERMISSION_REFUSALS_BEFORE_STOPPING,
     PermissionsModule,
     mergePermissionToolGuidances,
     permissionModeChangeNotice,
@@ -23,7 +24,10 @@ import {
 import { PermissionRefusalCircuitBreaker } from "../../sources/permissions/impl/permissionRefusalCircuitBreaker.js";
 import { permissionModeGuidance } from "../../sources/permissions/impl/permissionModeGuidance.js";
 import { permissionTurnStoppedReason } from "../../sources/permissions/impl/permissionRefusalMessage.js";
+import { AutoModule } from "../../sources/auto/index.js";
 import { agentWorld } from "../support/agentWorld.js";
+import { AUTO_TEST_MODELS, autoWorld } from "../support/autoWorld.js";
+import { ScriptedCommandsComputeModule } from "../support/computeModule.js";
 import { providersOf, sharedKV, textTurn, toolCallTurn, user } from "../support/fixtures.js";
 import { resolveModuleRuntime } from "../support/moduleHooks.js";
 import { ScriptedProvider } from "../support/ScriptedProvider.js";
@@ -126,6 +130,18 @@ function reviewerAnswering(
     };
 }
 
+/**
+ * The automatic reviewer, as the one member `PermissionsModule` reads of it.
+ *
+ * The module reads `reviewer` off the auto module at the moment of each review, so a test about
+ * what a mode does to a tool call supplies that member rather than starting a private review
+ * system. The real `AutoModule` is exercised against this seam in "takes its verdict from the
+ * automatic reviewer the module publishes" below, and on its own in `tests/auto`.
+ */
+function autoWith(reviewer: PermissionReviewer): AutoModule {
+    return { reviewer } as unknown as AutoModule;
+}
+
 /** One agent running the permissions module over its own isolated store. */
 async function permissionAgent(
     agentId: string,
@@ -134,34 +150,22 @@ async function permissionAgent(
         readonly reviewer?: PermissionReviewer;
         readonly events?: PermissionEvent[];
         readonly permissionMode?: AgentPermissionMode;
-        readonly refusalsBeforeStopping?: number;
-        readonly reviewTimeoutMs?: number;
-        readonly toolGuidance?: readonly { readonly autoPermissionInstructions?: string }[];
-        readonly killAllSessions?: (ctx: Context, agentId: string) => Promise<void> | void;
+        readonly compute?: ScriptedCommandsComputeModule;
     } = {},
 ) {
     const world = await agentWorld();
     const provider = new ScriptedProvider(script);
-    const permissions = new PermissionsModule({
-        ...(options.reviewer === undefined ? {} : { reviewer: options.reviewer }),
-        ...(options.refusalsBeforeStopping === undefined
-            ? {}
-            : { refusalsBeforeStopping: options.refusalsBeforeStopping }),
-        ...(options.reviewTimeoutMs === undefined
-            ? {}
-            : { reviewTimeoutMs: options.reviewTimeoutMs }),
-        ...(options.toolGuidance === undefined ? {} : { toolGuidance: options.toolGuidance }),
-        killAllSessions: options.killAllSessions ?? (() => {}),
-        ...(options.events === undefined
-            ? {}
-            : {
-                  listener: {
-                      onEvent: (_eventCtx, event) => {
-                          options.events?.push(event);
-                      },
-                  },
-              }),
-    });
+    const compute = options.compute ?? new ScriptedCommandsComputeModule();
+    const permissions =
+        options.reviewer === undefined
+            ? new PermissionsModule(compute)
+            : new PermissionsModule(compute, autoWith(options.reviewer));
+    if (options.events !== undefined) {
+        const events = options.events;
+        permissions.onEvent((_eventCtx, event) => {
+            events.push(event);
+        });
+    }
     const agent = await Agent.create(ctx, {
         id: agentId,
         providers: providersOf(provider),
@@ -181,7 +185,7 @@ async function permissionAgent(
         },
         ...(options.permissionMode === undefined ? {} : { permissionMode: options.permissionMode }),
     });
-    return { agent, permissions, provider, world };
+    return { agent, compute, permissions, provider, world };
 }
 
 /** Every tool result the agent sent back to the model, as text. */
@@ -455,7 +459,9 @@ describe("PermissionsModule", () => {
         expect(seen).toHaveLength(1);
     });
 
-    it("distinguishes an unavailable reviewer from a timeout", async () => {
+    it("tells the model a failed reviewer proved nothing, without ending the turn", async () => {
+        // The timeout half of this distinction is proven against the module's own 90-second budget
+        // in `PermissionsBoundary.test.ts`, where a fake clock can reach it.
         const unavailable = reviewerAnswering(() => {
             throw new Error("reviewer offline");
         });
@@ -473,35 +479,6 @@ describe("PermissionsModule", () => {
             "Continue with work that does not need this permission",
         );
         await unavailableRun.agent.close();
-
-        let timedOutSignal: AbortSignal | undefined;
-        const timeoutReviewer: PermissionReviewer = {
-            review: (_reviewCtx, request) =>
-                new Promise<PermissionReviewDecision>((resolve) => {
-                    timedOutSignal = request.signal;
-                    request.signal.addEventListener("abort", () =>
-                        resolve({
-                            outcome: "denied",
-                            reason: "The reviewer was cancelled.",
-                        }),
-                    );
-                }),
-        };
-        const timedOut = await permissionAgent(
-            "timeout-reviewer-agent",
-            [
-                toolCallTurn("call-1", "publish", JSON.stringify({ target: "/etc/hosts" })),
-                textTurn("stop"),
-            ],
-            { reviewer: timeoutReviewer, reviewTimeoutMs: 5 },
-        );
-        await timedOut.agent.send(ctx, user("publish it"), { await: true });
-        await timedOut.agent.waitForIdle();
-        expect(toolResults(timedOut.provider).join("\n")).toContain(
-            "You may try once more, or ask the user how to proceed",
-        );
-        expect(timedOutSignal?.aborted).toBe(true);
-        await timedOut.agent.close();
     });
 
     it("keeps a tool that leaves the sandbox out of the restricted modes, without a review", async () => {
@@ -602,39 +579,22 @@ describe("PermissionsModule", () => {
             userAuthorization: "low",
         }));
         const world = await agentWorld();
+        // As many refused actions as the bound, then a routine call the stopped turn must not run.
         const provider = new ScriptedProvider([
             [
-                { type: "toolcall_start", callId: "call-1", name: "publish" },
-                {
-                    type: "toolcall_end",
-                    callId: "call-1",
-                    arguments: JSON.stringify({ target: "a" }),
-                },
-                { type: "toolcall_start", callId: "call-2", name: "publish" },
-                {
-                    type: "toolcall_end",
-                    callId: "call-2",
-                    arguments: JSON.stringify({ target: "b" }),
-                },
-                { type: "toolcall_start", callId: "call-3", name: "look" },
-                {
-                    type: "toolcall_end",
-                    callId: "call-3",
-                    arguments: "{}",
-                },
+                ...threeDeniedPublishTurn().slice(0, -1),
+                { type: "toolcall_start", callId: "call-4", name: "look" },
+                { type: "toolcall_end", callId: "call-4", arguments: "{}" },
                 { type: "done", state: "tool_call", tokens: { input: 1, output: 1 } },
             ],
             textTurn("never asked again"),
         ]);
-        const permissions = new PermissionsModule({
-            reviewer,
-            refusalsBeforeStopping: 2,
-            listener: {
-                onEvent: (_eventCtx, event) => {
-                    events.push(event);
-                },
-            },
-            killAllSessions: () => {},
+        const permissions = new PermissionsModule(
+            new ScriptedCommandsComputeModule(),
+            autoWith(reviewer),
+        );
+        permissions.onEvent((_eventCtx, event) => {
+            events.push(event);
         });
         const system = await AgentSystemLocal.create(ctx, world.storage, {
             providers: providersOf(provider),
@@ -658,22 +618,16 @@ describe("PermissionsModule", () => {
     it("enforces the mode a steered message made effective", async () => {
         ran.length = 0;
         const events: PermissionEvent[] = [];
-        const killedFor: string[] = [];
         const world = await agentWorld();
         const provider = new ScriptedProvider([
             textTurn("noted"),
             toolCallTurn("call-1", "look", "{}"),
             textTurn("looked"),
         ]);
-        const permissions = new PermissionsModule({
-            listener: {
-                onEvent: (_eventCtx, event) => {
-                    events.push(event);
-                },
-            },
-            killAllSessions: (_killCtx, agentId) => {
-                killedFor.push(agentId);
-            },
+        const compute = new ScriptedCommandsComputeModule();
+        const permissions = new PermissionsModule(compute);
+        permissions.onEvent((_eventCtx, event) => {
+            events.push(event);
         });
         const system = await AgentSystemLocal.create(ctx, world.storage, {
             providers: providersOf(provider),
@@ -683,6 +637,9 @@ describe("PermissionsModule", () => {
         });
         const agent = await system.create(ctx, {});
         agent.state.tools = [routineTool, escalatingTool, externalTool, missingDescriptionTool];
+        // A command started under the wider mode. Reducing the mode has to end it, or the agent
+        // keeps exactly what the new mode says it may not have.
+        compute.running(agent.id, [7]);
 
         // The mode is the agent's, so a host changes it the way anything else about a turn
         // changes: by steering a message that carries it.
@@ -702,7 +659,7 @@ describe("PermissionsModule", () => {
             previousMode: "auto",
             mode: "read_only",
         });
-        expect(killedFor).toEqual([agent.id]);
+        expect(compute.stopped).toEqual([{ agentId: agent.id, commandId: 7 }]);
         const asked = (provider.sessions[0]?.requests ?? []).flatMap((request) =>
             request.context.messages.flatMap((message) =>
                 message.role === "user"
@@ -726,11 +683,11 @@ describe("PermissionsModule", () => {
 
     it("reports a failed elevated-session cleanup after a mode reduction", async () => {
         const events: PermissionEvent[] = [];
+        const compute = new ScriptedCommandsComputeModule();
+        compute.listFailure = new Error("shell cleanup unavailable");
         const run = await permissionAgent("cleanup-failure-agent", [textTurn("noted")], {
             events,
-            killAllSessions: () => {
-                throw new Error("shell cleanup unavailable");
-            },
+            compute,
         });
 
         await run.agent.steer(
@@ -870,71 +827,6 @@ describe("PermissionsModule", () => {
         );
     });
 
-    it("trips on the refusal rate with the exact window even when successes reset the streak", async () => {
-        ran.length = 0;
-        const events: PermissionEvent[] = [];
-        const reviewer = reviewerAnswering((request) =>
-            request.action.includes("allowed")
-                ? {
-                      outcome: "allowed",
-                      risk: "low",
-                      userAuthorization: "high",
-                  }
-                : {
-                      outcome: "denied",
-                      reason: "Not authorized.",
-                      risk: "high",
-                      userAuthorization: "low",
-                  },
-        );
-        const turn: SessionEvent[] = [];
-        for (let index = 1; index <= 10; index += 1) {
-            turn.push(
-                { type: "toolcall_start", callId: `p${index}`, name: "publish" },
-                {
-                    type: "toolcall_end",
-                    callId: `p${index}`,
-                    arguments: JSON.stringify({ target: `t${index}` }),
-                },
-            );
-            // A successfully reviewed call between refusals clears the streak but stays in the
-            // rate window. Routine calls do not affect the review-refusal circuit.
-            if (index < 10) {
-                turn.push(
-                    { type: "toolcall_start", callId: `a${index}`, name: "publish" },
-                    {
-                        type: "toolcall_end",
-                        callId: `a${index}`,
-                        arguments: JSON.stringify({ target: `allowed-${index}` }),
-                    },
-                );
-            }
-        }
-        turn.push({ type: "done", state: "tool_call", tokens: { input: 1, output: 1 } });
-
-        const { agent } = await permissionAgent(
-            "rate-window-agent",
-            [turn, textTurn("never asked again")],
-            { reviewer, events, refusalsBeforeStopping: 100 },
-        );
-
-        await agent.send(ctx, user("publish repeatedly"), { await: true });
-        await agent.waitForIdle();
-        await agent.close();
-
-        const stopped = events.filter((event) => event.type === "permission_turn_stopped");
-        expect(stopped).toEqual([
-            {
-                type: "permission_turn_stopped",
-                agentId: "rate-window-agent",
-                consecutiveRefusals: 1,
-                recentRefusals: 10,
-                recentWindowLength: 19,
-                reason: permissionTurnStoppedReason(1, 10, 19),
-            },
-        ]);
-    });
-
     it("records a turn-stop event before the abort it triggers settles the run", async () => {
         ran.length = 0;
         const order: string[] = [];
@@ -946,22 +838,19 @@ describe("PermissionsModule", () => {
         }));
         const world = await agentWorld();
         const provider = new ScriptedProvider([threeDeniedPublishTurn(), textTurn("done")]);
-        const permissions = new PermissionsModule({
-            reviewer,
-            refusalsBeforeStopping: 3,
-            listener: {
-                onEvent: async (_eventCtx, event) => {
-                    if (event.type === "permission_turn_stopped") {
-                        // A real asynchronous gap. If the decision did not await the listener, the
-                        // abort it triggers would settle the run before this line ran, and the
-                        // settlement marker below would land first. A single flushed microtask would
-                        // not expose that; this delay does.
-                        await new Promise<void>((resolve) => setTimeout(resolve, 30));
-                    }
-                    order.push(`event:${event.type}`);
-                },
-            },
-            killAllSessions: () => {},
+        const permissions = new PermissionsModule(
+            new ScriptedCommandsComputeModule(),
+            autoWith(reviewer),
+        );
+        permissions.onEvent(async (_eventCtx, event) => {
+            if (event.type === "permission_turn_stopped") {
+                // A real asynchronous gap. If the decision did not await the listener, the abort it
+                // triggers would settle the run before this line ran, and the settlement marker
+                // below would land first. A single flushed microtask would not expose that; this
+                // delay does.
+                await new Promise<void>((resolve) => setTimeout(resolve, 30));
+            }
+            order.push(`event:${event.type}`);
         });
         // A second module records when the run settles, so the two orderings can be compared: the
         // turn-stop event must be durably observed before the settlement the abort produces.
@@ -992,60 +881,70 @@ describe("PermissionsModule", () => {
         expect(stoppedIndex).toBeLessThan(settledIndex);
     });
 
-    it("does not let a listener that never settles wedge the turn", async () => {
+    it("takes its verdict from the automatic reviewer the module publishes", async () => {
+        // Every other test here supplies the one member `PermissionsModule` reads. This one wires
+        // the real classes together, so the seam between them is proven rather than assumed: a real
+        // `AutoModule`, its private review system running on a scripted account, deciding a real
+        // tool call.
         ran.length = 0;
-        const reviewer = reviewerAnswering(() => ({
-            outcome: "denied",
-            reason: "Not authorized.",
-            risk: "high",
-            userAuthorization: "low",
-        }));
-        const world = await agentWorld();
-        const provider = new ScriptedProvider([threeDeniedPublishTurn(), textTurn("done")]);
-        const recorded: PermissionEvent[] = [];
-        let hungCalls = 0;
-        const permissions = new PermissionsModule({
-            reviewer,
-            refusalsBeforeStopping: 3,
-            // A tiny bound so the test proves the ceiling exists without waiting the real budget on
-            // it. Production uses seconds; the behavior under test is the same.
-            announceTimeoutMs: 20,
-            listener: {
-                onEvent: (_eventCtx, event) => {
-                    recorded.push(event);
-                    if (event.type === "permission_turn_stopped") {
-                        hungCalls += 1;
-                        // Never settles. Without a bound this would leave the refusal path awaiting
-                        // forever, so the abort that ends the runaway turn would never run and the
-                        // agent would never reach idle — this test would hang instead of passing.
-                        return new Promise<void>(() => {});
-                    }
-                    return undefined;
+        const installation = await autoWorld([
+            [
+                { type: "text_start" },
+                {
+                    type: "text_delta",
+                    delta:
+                        "<review>\n<risk_level>low</risk_level>\n" +
+                        "<user_authorization>high</user_authorization>\n" +
+                        "<outcome>allow</outcome>\n" +
+                        "<rationale>The user asked for exactly this.</rationale>\n</review>",
                 },
-            },
-            killAllSessions: () => {},
+                { type: "text_end" },
+                { type: "done", state: "normal", tokens: { input: 1, output: 1 } },
+            ],
+        ]);
+        const lifetime = createRootContext().named("permissions-with-real-auto");
+        const auto = new AutoModule(
+            installation.config,
+            installation.compute,
+            installation.systemPrompt,
+            installation.storage,
+        );
+        const permissions = new PermissionsModule(installation.compute, auto);
+        const events: PermissionEvent[] = [];
+        permissions.onEvent((_eventCtx, event) => {
+            events.push(event);
         });
+        const world = await agentWorld();
+        const provider = new ScriptedProvider([
+            toolCallTurn("call-1", "publish", JSON.stringify({ target: "/tmp/out" })),
+            textTurn("done"),
+        ]);
         const system = await AgentSystemLocal.create(ctx, world.storage, {
             providers: providersOf(provider),
             provider: "scripted",
-            models: [],
-            modules: [permissions],
+            // The reviewed agent runs on a real route, because that is the route the reviewer
+            // resolves its own model from.
+            models: [...AUTO_TEST_MODELS],
+            modules: [auto, permissions],
         });
         const agent = await system.create(ctx, {});
-        agent.state.tools = [routineTool, escalatingTool, externalTool];
-        await agent.send(ctx, user("publish everything"), { await: true });
-        // Reaching idle at all is the proof: a wedged observer no longer holds the decision, so the
-        // abort ran and the run settled.
-        await agent.waitForIdle();
-        await system.close(ctx);
+        agent.state.tools = [routineTool, escalatingTool];
 
-        expect(hungCalls).toBe(1);
-        // The decisions still stand: all three actions were refused and the turn stopped, regardless
-        // of the wedged observer.
-        expect(recorded.filter((event) => event.type === "permission_action_denied")).toHaveLength(
-            3,
-        );
-        expect(recorded.some((event) => event.type === "permission_turn_stopped")).toBe(true);
+        // The reviewer resolves its own model from the route the reviewed turn is running on, so
+        // the turn names one, exactly as a turn on a real installation does.
+        await agent.send(ctx, user("publish it"), {
+            await: true,
+            provider: "scripted",
+            model: "scripted/model",
+            effort: "low",
+        });
+        await agent.waitForIdle();
+
+        expect(events).toMatchObject([{ type: "permission_action_reviewed", elevated: true }]);
+        expect(ran).toEqual([{ tool: "publish", mode: "full_access" }]);
+        await system.close(ctx);
+        await auto.close(lifetime);
+        await installation.compute.dispose(lifetime);
     });
 
     it("contains a listener that throws so the decisions still stand and the run settles", async () => {
@@ -1069,14 +968,12 @@ describe("PermissionsModule", () => {
             ],
             textTurn("understood"),
         ]);
-        const throwingPermissions = new PermissionsModule({
-            reviewer,
-            listener: {
-                onEvent: () => {
-                    throw new Error("listener exploded");
-                },
-            },
-            killAllSessions: () => {},
+        const throwingPermissions = new PermissionsModule(
+            new ScriptedCommandsComputeModule(),
+            autoWith(reviewer),
+        );
+        throwingPermissions.onEvent(() => {
+            throw new Error("listener exploded");
         });
         const throwingSystem = await AgentSystemLocal.create(ctx, throwingWorld.storage, {
             providers: providersOf(throwingProvider),

@@ -32,7 +32,7 @@ import { humanizeMcpName } from "./humanizeMcpName.js";
 import { isMcpErrorResult } from "./isMcpErrorResult.js";
 import type { McpModule } from "./McpModule.js";
 import { boundedMcpJsonStringify, mcpResultToContentBlocks } from "./mcpResultToContentBlocks.js";
-import { quoteVisibleExact } from "./quoteVisibleExact.js";
+import { quoteVisibleExact } from "../impl/quoteVisibleExact.js";
 
 export function createMcpProtocolTools(
     module: McpModule,

@@ -1,10 +1,11 @@
 export * from "./PresenceCatalog.js";
+export * from "./PresenceConfiguration.js";
 export * from "./PresenceDatabase.js";
 export * from "./PresenceEvent.js";
 export * from "./PresenceModule.js";
-export * from "./PresencePolicy.js";
 export * from "./PresenceSchedule.js";
 export * from "./PresenceState.js";
+export * from "./PresenceUserInput.js";
 export {
     assertPresenceContext,
     assertPresenceDefinitionResult,

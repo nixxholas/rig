@@ -9,10 +9,11 @@ import type {
     AgentSystemRef,
     AnyAgentTool,
 } from "@slopus/happy-agent-base";
-import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type { Context } from "@steve.kite/stdlib";
 
+import type { AutoModule } from "../auto/index.js";
+import type { ComputeModule } from "../compute/index.js";
 import { describePermissionAction } from "./impl/describePermissionAction.js";
 import {
     autoPermissionPolicyDenialReason,
@@ -32,58 +33,39 @@ import {
     unprovenRefusal,
     type PermissionUnprovenKind,
 } from "./impl/permissionRefusalMessage.js";
-import {
-    permissionModuleListenerSchema,
-    type PermissionEvent,
-    type PermissionModuleListener,
-} from "./PermissionEvent.js";
+import { type PermissionEvent } from "./PermissionEvent.js";
 import {
     MAX_PERMISSION_ACTION,
     permissionReviewRequestSchema,
     permissionReviewDecisionSchema,
-    permissionReviewerSchema,
     type PermissionReviewDecision,
     type PermissionReviewRequest,
-    type PermissionReviewer,
 } from "./PermissionReviewer.js";
 import {
     mergePermissionToolGuidances,
     permissionToolGuidanceProviderSchema,
-    permissionToolGuidancesSchema,
     type PermissionToolGuidanceProvider,
     type PermissionToolGuidances,
 } from "./PermissionToolGuidance.js";
 import { snapshotPermissionArguments } from "./impl/snapshotPermissionArguments.js";
 
-const permissionContextSchema = Type.Unsafe<Context>(
-    Type.Object({}, { additionalProperties: false }),
-);
-const permissionAgentIdSchema = Type.String({ minLength: 1, maxLength: 128 });
-const killAllSessionsSchema = Type.Function(
-    [permissionContextSchema, permissionAgentIdSchema],
-    Type.Union([Type.Void(), Type.Promise(Type.Void())]),
-);
-
 /**
- * Runtime-checked construction boundary for the module. The cleanup seam is required because a
- * committed reduction must always have a host capability that can terminate elevated sessions.
+ * Told about every mode change and every decision, at the two points there are.
+ *
+ * `onEventTransactional` runs inside the transaction that commits the change it describes, which
+ * only a mode change has: a listener writing a record of its own commits it with the change, and
+ * its failure rolls both back. `onEvent` runs once the change is durable, and every decision about
+ * a single tool call — which commits nothing — is reported only there. It may be asynchronous, and
+ * the module awaits it so that a healthy host has durably recorded what happened before the run
+ * settles; a listener that throws is contained and never changes the permission decision.
  */
-export const permissionsModuleOptionsSchema = Type.Object(
-    {
-        reviewer: Type.Optional(permissionReviewerSchema),
-        listener: Type.Optional(permissionModuleListenerSchema),
-        toolGuidance: Type.Optional(Type.Readonly(permissionToolGuidancesSchema)),
-        toolGuidanceProvider: Type.Optional(permissionToolGuidanceProviderSchema),
-        killAllSessions: killAllSessionsSchema,
-        reviewTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: 600_000 })),
-        refusalsBeforeStopping: Type.Optional(Type.Integer({ minimum: 1 })),
-        announceTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: 600_000 })),
-    },
-    { additionalProperties: false },
-);
+export type PermissionEventListener = (
+    ctx: Context,
+    event: PermissionEvent,
+) => Promise<void> | void;
 
-/** What a permissions module is built with. */
-export type PermissionsModuleOptions = Static<typeof permissionsModuleOptionsSchema>;
+/** Ends a subscription. Calling it more than once does nothing further. */
+export type PermissionUnsubscribe = () => void;
 
 /** A review that ended without a decision, which is not the same as one that refused. */
 type ReviewOutcome =
@@ -98,8 +80,7 @@ type ReviewOutcome =
  * as many read-only tool calls as it wants inside this window; when the window closes the action is
  * treated as unproven rather than judged unsafe.
  */
-const DEFAULT_REVIEW_TIMEOUT_MS = 90_000;
-const MAX_REVIEW_TIMEOUT_MS = 600_000;
+export const PERMISSION_REVIEW_TIMEOUT_MS = 90_000;
 
 /**
  * A review the caller's own lifetime cancelled. Rig v1 propagates this as "Permission review was
@@ -119,7 +100,7 @@ class PermissionReviewCancelledError extends Error {
  * How many refused actions in a row end a turn. Nothing outside the agent breaks a refusal loop
  * once the person is no longer in it, so a turn that keeps being refused has to stop itself.
  */
-const DEFAULT_REFUSALS_BEFORE_STOPPING = 3;
+export const PERMISSION_REFUSALS_BEFORE_STOPPING = 3;
 const REVIEW_TIMEOUT = Symbol("permission-review-timeout");
 
 /**
@@ -132,10 +113,9 @@ const REVIEW_TIMEOUT = Symbol("permission-review-timeout");
  * settles would leave the refusal path stuck, so the abort that ends a runaway turn would never
  * run. Five seconds is orders of magnitude more than any healthy durable write needs, even on a
  * loaded host whose fsync stalls, so a healthy host always records first; yet it is a hard ceiling,
- * so a wedged observer delays the decision by at most this long and can never hold it hostage. A
- * host may override it, and a test uses a tiny value to prove the ceiling without waiting on it.
+ * so a wedged observer delays the decision by at most this long and can never hold it hostage.
  */
-const ANNOUNCE_TIMEOUT_MS = 5_000;
+export const PERMISSION_ANNOUNCE_TIMEOUT_MS = 5_000;
 const ANNOUNCE_TIMEOUT = Symbol("permission-announce-timeout");
 
 /**
@@ -172,21 +152,15 @@ const ANNOUNCE_TIMEOUT = Symbol("permission-announce-timeout");
 export class PermissionsModule implements AgentModule {
     readonly name = "permissions";
 
-    /** Who decides in Auto, when anyone does. */
-    readonly #reviewer: PermissionReviewer | undefined;
-    /** Whoever is told about modes and decisions, if anyone. */
-    readonly #listener: PermissionModuleListener | undefined;
-    /** Static or host-supplied guidance for the active tools. */
-    readonly #toolGuidance: PermissionToolGuidances;
-    readonly #toolGuidanceProvider: PermissionToolGuidanceProvider | undefined;
-    /** Host-owned Compute seam used when a committed mode reduction tightens the boundary. */
-    readonly #killAllSessions: (ctx: Context, agentId: string) => Promise<void> | void;
-    /** How long a review may take before the action counts as unreviewed. */
-    readonly #reviewTimeoutMs: number;
-    /** How long a decision waits for its listener before giving up on it. */
-    readonly #announceTimeoutMs: number;
-    /** How many refusals in a row end the turn. */
-    readonly #refusalsBeforeStopping: number;
+    /** The machine whose running commands a tightened mode has to end. */
+    readonly #compute: ComputeModule;
+    /** Who decides in Auto, when this agent has an automatic reviewer at all. */
+    readonly #auto: AutoModule | undefined;
+    /** Whoever is told about modes and decisions, as subscriptions taken after construction. */
+    readonly #transactionalListeners = new Set<PermissionEventListener>();
+    readonly #listeners = new Set<PermissionEventListener>();
+    /** Where the active tools' own Auto guidance comes from. See {@link provideToolGuidance}. */
+    readonly #toolGuidanceProviders = new Set<PermissionToolGuidanceProvider>();
     /** The collection this module belongs to, kept from the moment it starts. */
     #agents: AgentSystemRef | undefined;
     /** One bounded circuit per agent, cleared when its run settles. */
@@ -196,54 +170,63 @@ export class PermissionsModule implements AgentModule {
     /** Delay clearing a circuit until queued decisions from the settled run have drained. */
     readonly #settledWhileBusy = new Set<string>();
 
-    constructor(options: PermissionsModuleOptions) {
-        if (!Value.Check(permissionsModuleOptionsSchema, options)) {
-            throw new Error("Permissions module options are invalid.");
+    /**
+     * @param compute The machine the agents run on. A committed reduction of the mode has to end
+     *   the commands that are still running under the wider one, so the module asks the module that
+     *   owns those commands rather than being handed a way to end them.
+     * @param auto The automatic reviewer. It is optional because an agent may be composed without
+     *   one: with no reviewer, every action that asks to be reviewed is refused as unproven, which
+     *   is honest — nothing judged it — rather than refused as unsafe.
+     */
+    constructor(compute: ComputeModule, auto?: AutoModule) {
+        this.#compute = compute;
+        this.#auto = auto;
+    }
+
+    /**
+     * Be told about every mode change and decision once it is durable.
+     *
+     * This is where a host makes permission history its own: writing the event into a conversation
+     * record, a journal, or an audit log. The module keeps nothing of the sort itself.
+     */
+    onEvent(listener: PermissionEventListener): PermissionUnsubscribe {
+        this.#listeners.add(listener);
+        return () => {
+            this.#listeners.delete(listener);
+        };
+    }
+
+    /**
+     * Be told about a mode change inside the transaction that commits it, so a listener keeping its
+     * own record of what an agent was allowed to do commits that record with the change itself, and
+     * a listener that fails rolls both back. Only a mode change commits anything; a per-call
+     * decision is reported through {@link onEvent} alone.
+     */
+    onEventTransactional(listener: PermissionEventListener): PermissionUnsubscribe {
+        this.#transactionalListeners.add(listener);
+        return () => {
+            this.#transactionalListeners.delete(listener);
+        };
+    }
+
+    /**
+     * Register where the Auto guidance of the currently active tools comes from.
+     *
+     * The instructions this module writes include what each active tool says about asking for Auto
+     * approval, deduplicated. Which tools are active at the next inference is Agent Base's merged
+     * list, and Agent Base keeps that list private, so no module in this package can answer it.
+     * Until it can, whoever assembles the agent registers the answer here; every registered source
+     * is merged, in registration order, under one shared bound. A fixed list is registered as a
+     * function returning it.
+     */
+    provideToolGuidance(provider: PermissionToolGuidanceProvider): PermissionUnsubscribe {
+        if (!Value.Check(permissionToolGuidanceProviderSchema, provider)) {
+            throw new Error("A permission tool guidance provider must be a function.");
         }
-        if (
-            options.reviewer !== undefined &&
-            !Value.Check(permissionReviewerSchema, options.reviewer)
-        ) {
-            throw new Error("Permissions module reviewer is invalid.");
-        }
-        if (
-            options.listener !== undefined &&
-            !Value.Check(permissionModuleListenerSchema, options.listener)
-        ) {
-            throw new Error("Permissions module listener is invalid.");
-        }
-        if (
-            options.toolGuidanceProvider !== undefined &&
-            !Value.Check(permissionToolGuidanceProviderSchema, options.toolGuidanceProvider)
-        ) {
-            throw new Error("Permissions module tool guidance provider is invalid.");
-        }
-        this.#reviewer = options.reviewer;
-        this.#listener = options.listener;
-        this.#toolGuidance = [...(options.toolGuidance ?? [])];
-        this.#toolGuidanceProvider = options.toolGuidanceProvider;
-        this.#killAllSessions = options.killAllSessions;
-        this.#reviewTimeoutMs = options.reviewTimeoutMs ?? DEFAULT_REVIEW_TIMEOUT_MS;
-        this.#announceTimeoutMs = options.announceTimeoutMs ?? ANNOUNCE_TIMEOUT_MS;
-        this.#refusalsBeforeStopping =
-            options.refusalsBeforeStopping ?? DEFAULT_REFUSALS_BEFORE_STOPPING;
-        if (
-            !Number.isInteger(this.#reviewTimeoutMs) ||
-            this.#reviewTimeoutMs < 1 ||
-            this.#reviewTimeoutMs > MAX_REVIEW_TIMEOUT_MS
-        ) {
-            throw new Error("Permissions module review timeout is invalid.");
-        }
-        if (
-            !Number.isInteger(this.#announceTimeoutMs) ||
-            this.#announceTimeoutMs < 1 ||
-            this.#announceTimeoutMs > MAX_REVIEW_TIMEOUT_MS
-        ) {
-            throw new Error("Permissions module announce timeout is invalid.");
-        }
-        if (!Number.isInteger(this.#refusalsBeforeStopping) || this.#refusalsBeforeStopping < 1) {
-            throw new Error("Permissions module refusal limit is invalid.");
-        }
+        this.#toolGuidanceProviders.add(provider);
+        return () => {
+            this.#toolGuidanceProviders.delete(provider);
+        };
     }
 
     /**
@@ -271,12 +254,14 @@ export class PermissionsModule implements AgentModule {
             scope: AgentModuleScope,
             change: AgentBasePermissionModeChange,
         ): Promise<void> => {
-            await this.#listener?.onEventTransactional?.(ctx, {
-                type: "permission_mode_changed",
-                agentId: scope.agent.id,
-                previousMode: change.previousMode,
-                mode: change.mode,
-            });
+            for (const listener of this.#transactionalListeners) {
+                await listener(ctx, {
+                    type: "permission_mode_changed",
+                    agentId: scope.agent.id,
+                    previousMode: change.previousMode,
+                    mode: change.mode,
+                });
+            }
         },
 
         permissionModeChanged: async (
@@ -286,7 +271,7 @@ export class PermissionsModule implements AgentModule {
         ): Promise<void> => {
             if (isPermissionReduction(change.previousMode, change.mode)) {
                 try {
-                    await this.#killAllSessions(ctx, scope.agent.id);
+                    await this.#stopRunningCommands(scope.agent.id);
                 } catch (error: unknown) {
                     await this.#announce(ctx, {
                         type: "permission_mode_cleanup_failed",
@@ -517,7 +502,7 @@ export class PermissionsModule implements AgentModule {
         const stopped = this.#terminalRefusal(agentId);
         if (stopped !== undefined) return stopped;
         if (circuit === undefined) {
-            circuit = new PermissionRefusalCircuitBreaker(this.#refusalsBeforeStopping);
+            circuit = new PermissionRefusalCircuitBreaker(PERMISSION_REFUSALS_BEFORE_STOPPING);
             this.#refusals.set(agentId, circuit);
         }
         if (!circuit.recordAllowed()) return this.#terminalRefusal(agentId);
@@ -555,7 +540,7 @@ export class PermissionsModule implements AgentModule {
     ): Promise<AgentBaseToolCallDecision> {
         let circuit = this.#refusals.get(agentId);
         if (circuit === undefined) {
-            circuit = new PermissionRefusalCircuitBreaker(this.#refusalsBeforeStopping);
+            circuit = new PermissionRefusalCircuitBreaker(PERMISSION_REFUSALS_BEFORE_STOPPING);
             this.#refusals.set(agentId, circuit);
         }
         const status = circuit.recordRefusal();
@@ -584,12 +569,26 @@ export class PermissionsModule implements AgentModule {
         );
     }
 
+    /**
+     * End what is still running under the wider mode.
+     *
+     * A command started in Auto or Full access keeps running after the mode is reduced, so a
+     * reduction that left it alive would leave the agent holding exactly what the new mode says it
+     * may not have. The commands belong to the machine, so the machine is asked for them and asked
+     * to end them; a failure here is reported as a failed cleanup and never undoes the change.
+     */
+    async #stopRunningCommands(agentId: string): Promise<void> {
+        for (const command of this.#compute.runningCommands(agentId)) {
+            await this.#compute.stopCommand(agentId, command.sessionId);
+        }
+    }
+
     async #resolveToolGuidance(ctx: Context, agentId: string): Promise<PermissionToolGuidances> {
-        const supplied =
-            this.#toolGuidanceProvider === undefined
-                ? []
-                : await this.#toolGuidanceProvider(ctx, agentId);
-        return mergePermissionToolGuidances([this.#toolGuidance, supplied]);
+        const sources: PermissionToolGuidances[] = [];
+        for (const provider of this.#toolGuidanceProviders) {
+            sources.push(await provider(ctx, agentId));
+        }
+        return mergePermissionToolGuidances(sources);
     }
 
     /**
@@ -615,7 +614,9 @@ export class PermissionsModule implements AgentModule {
         // Register cancellation before any evidence is prepared or the reviewer is consulted, and
         // fail out immediately if the turn was already stopped.
         if (hasStopped(owner)) throw new PermissionReviewCancelledError();
-        const reviewer = this.#reviewer;
+        // Read through the module on every review rather than kept from construction: what decides
+        // is the automatic reviewer as it is now, not a function captured before it started.
+        const reviewer = this.#auto?.reviewer;
         if (reviewer === undefined) {
             return {
                 outcome: "unproven",
@@ -644,7 +645,7 @@ export class PermissionsModule implements AgentModule {
                     timedOut = true;
                     abortController.abort();
                     resolve(REVIEW_TIMEOUT);
-                }, this.#reviewTimeoutMs);
+                }, PERMISSION_REVIEW_TIMEOUT_MS);
                 timer.unref?.();
             });
             const reviewPromise = reviewer.review(ctx, reviewRequest);
@@ -660,7 +661,7 @@ export class PermissionsModule implements AgentModule {
                 return {
                     outcome: "unproven",
                     kind: "timed_out",
-                    reason: `The reviewer did not answer within ${Math.max(1, Math.ceil(this.#reviewTimeoutMs / 1000))} seconds.`,
+                    reason: `The reviewer did not answer within ${Math.max(1, Math.ceil(PERMISSION_REVIEW_TIMEOUT_MS / 1000))} seconds.`,
                 };
             }
             if (!Value.Check(permissionReviewDecisionSchema, candidate)) {
@@ -691,26 +692,28 @@ export class PermissionsModule implements AgentModule {
      * a healthy host has durably recorded the event before the run settles — a turn-stop must reach
      * the transcript before the abort it triggers emits its settlement — but the wait is bounded so
      * a listener that hangs cannot hold the decision hostage: a stuck observer stops being awaited
-     * after `ANNOUNCE_TIMEOUT_MS` and the decision continues. A listener that throws is contained
-     * the same way. Either failure is logged, because an event the client never sees is the
-     * difference between a transcript that explains why a turn stopped and one that only shows the
-     * generic interruption row; an operator has to be able to find out that the explanation was
+     * after `PERMISSION_ANNOUNCE_TIMEOUT_MS` and the decision continues. A listener that throws is
+     * contained the same way. Either failure is logged, because an event the client never sees is
+     * the difference between a transcript that explains why a turn stopped and one that only shows
+     * the generic interruption row; an operator has to be able to find out that the explanation was
      * lost. It observes permissions; it never decides them.
+     *
+     * The whole set is bounded once rather than each listener separately, so several observers
+     * cannot add their waits together into a delay longer than the ceiling.
      */
     async #announce(ctx: Context, event: PermissionEvent): Promise<void> {
-        const listener = this.#listener;
-        const onEvent = listener?.onEvent;
-        if (listener === undefined || onEvent === undefined) return;
+        const listeners = [...this.#listeners];
+        if (listeners.length === 0) return;
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
-            // Called on the listener rather than on its own, so an observer written as a class or
-            // an object with methods still sees itself and its own state.
-            const settled = Promise.resolve(onEvent.call(listener, ctx, event));
+            const settled = Promise.all(
+                listeners.map(async (listener) => await listener(ctx, event)),
+            );
             // A listener that settles after the timeout must not become an unhandled rejection once
             // the decision has already moved on without it.
             void settled.catch(() => undefined);
             const timeout = new Promise<typeof ANNOUNCE_TIMEOUT>((resolve) => {
-                timer = setTimeout(() => resolve(ANNOUNCE_TIMEOUT), this.#announceTimeoutMs);
+                timer = setTimeout(() => resolve(ANNOUNCE_TIMEOUT), PERMISSION_ANNOUNCE_TIMEOUT_MS);
                 timer.unref?.();
             });
             const outcome = await Promise.race([settled.then(() => undefined), timeout]);
@@ -720,7 +723,7 @@ export class PermissionsModule implements AgentModule {
                     {
                         agentId: event.agentId,
                         type: event.type,
-                        timeoutMs: this.#announceTimeoutMs,
+                        timeoutMs: PERMISSION_ANNOUNCE_TIMEOUT_MS,
                     },
                 );
             }

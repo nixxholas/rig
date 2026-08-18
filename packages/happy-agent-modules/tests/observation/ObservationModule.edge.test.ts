@@ -3,15 +3,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createRootContext, withLogContext } from "@steve.kite/stdlib";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { loadHappyAgentConfiguration } from "../../sources/config/index.js";
-import type { HistoryMessage } from "../../sources/history/HistoryMessage.js";
+import { ConfigModule } from "../../sources/config/index.js";
+import type { HistoryMessage } from "../../sources/history/index.js";
 import { ObservationModule } from "../../sources/observation/ObservationModule.js";
 
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
+    vi.unstubAllEnvs();
     await Promise.all(
         temporaryDirectories.splice(0).map((path) => rm(path, { force: true, recursive: true })),
     );
@@ -27,8 +28,8 @@ function message(recordId: string, text: string): HistoryMessage {
     return { blocks: [{ type: "text", text }], recordId, role: "assistant" };
 }
 
-async function configurationIn(root: string) {
-    return await loadHappyAgentConfiguration(join(root, ".happy"));
+async function configIn(root: string): Promise<ConfigModule> {
+    return await ConfigModule.load(join(root, ".happy"));
 }
 
 function logRecords(raw: string): Array<Record<string, unknown>> {
@@ -42,8 +43,8 @@ function logRecords(raw: string): Array<Record<string, unknown>> {
 describe("ObservationModule edge cases", () => {
     it("uses the installed root only, leaving contexts derived from the old root silent", async () => {
         const root = await temporaryRoot("happy-observation-install-");
-        const configuration = await configurationIn(root);
-        const observation = await ObservationModule.start({ configuration, environment: {} });
+        const config = await configIn(root);
+        const observation = await ObservationModule.start(config);
         const original = createRootContext();
         const installed = observation.install(original);
 
@@ -51,7 +52,7 @@ describe("ObservationModule edge cases", () => {
         withLogContext(installed, { source: "installed-root" }).log.info("must be written");
         await observation.close();
 
-        const records = logRecords(await readFile(configuration.paths.logPath, "utf8"));
+        const records = logRecords(await readFile(config.configuration.paths.logPath, "utf8"));
         expect(records).toHaveLength(1);
         expect(records[0]).toMatchObject({
             source: "installed-root",
@@ -60,37 +61,32 @@ describe("ObservationModule edge cases", () => {
     });
 
     it("keeps the history dump independent from logging", async () => {
+        vi.stubEnv("HAPPY_OBSERVATION_LOGS", "false");
+        vi.stubEnv("HAPPY_OBSERVATION_HISTORY_DUMP", "true");
         const root = await temporaryRoot("happy-observation-independent-");
-        const configuration = await configurationIn(root);
-        const observation = await ObservationModule.start({
-            configuration,
-            environment: {
-                HAPPY_OBSERVATION_LOGS: "false",
-                HAPPY_OBSERVATION_HISTORY_DUMP: "true",
-            },
-        });
+        const config = await configIn(root);
+        const observation = await ObservationModule.start(config);
 
         await observation.recordHistory(createRootContext(), "agent1", [message("r1", "hello")]);
         await observation.flush();
         await observation.close();
 
         expect(
-            await readFile(join(configuration.paths.historyDumpHome, "agent1.jsonl"), "utf8"),
+            await readFile(
+                join(config.configuration.paths.historyDumpHome, "agent1.jsonl"),
+                "utf8",
+            ),
         ).toContain('"recordId":"r1"');
-        await expect(readFile(configuration.paths.logPath, "utf8")).rejects.toThrow();
+        await expect(readFile(config.configuration.paths.logPath, "utf8")).rejects.toThrow();
     });
 
     it("creates no observation files when every sink is disabled", async () => {
+        vi.stubEnv("HAPPY_OBSERVATION_LOGS", "false");
+        vi.stubEnv("HAPPY_OBSERVATION_HISTORY_DUMP", "false");
+        vi.stubEnv("HAPPY_OBSERVATION_TRACES", "false");
         const root = await temporaryRoot("happy-observation-disabled-");
-        const configuration = await configurationIn(root);
-        const observation = await ObservationModule.start({
-            configuration,
-            environment: {
-                HAPPY_OBSERVATION_LOGS: "false",
-                HAPPY_OBSERVATION_HISTORY_DUMP: "false",
-                HAPPY_OBSERVATION_TRACES: "false",
-            },
-        });
+        const config = await configIn(root);
+        const observation = await ObservationModule.start(config);
 
         const installed = observation.install(createRootContext());
         await installed.span("silent", async (ctx) => {
@@ -99,20 +95,16 @@ describe("ObservationModule edge cases", () => {
         });
         await observation.close();
 
-        await expect(readdir(configuration.paths.observationHome)).rejects.toThrow();
+        await expect(readdir(config.configuration.paths.observationHome)).rejects.toThrow();
     });
 
     it("installs an optional tracer without making tracing part of the caller's work", async () => {
+        vi.stubEnv("HAPPY_OBSERVATION_LOGS", "false");
+        vi.stubEnv("HAPPY_OBSERVATION_TRACES", "true");
+        vi.stubEnv("HAPPY_OBSERVATION_TRACES_ENDPOINT", "http://127.0.0.1:1/v1/traces");
         const root = await temporaryRoot("happy-observation-tracing-");
-        const configuration = await configurationIn(root);
-        const observation = await ObservationModule.start({
-            configuration,
-            environment: {
-                HAPPY_OBSERVATION_LOGS: "false",
-                HAPPY_OBSERVATION_TRACES: "true",
-                HAPPY_OBSERVATION_TRACES_ENDPOINT: "http://127.0.0.1:1/v1/traces",
-            },
-        });
+        const config = await configIn(root);
+        const observation = await ObservationModule.start(config);
 
         const installed = observation.install(createRootContext());
         await expect(
@@ -123,13 +115,24 @@ describe("ObservationModule edge cases", () => {
         await expect(observation.close()).resolves.toBeUndefined();
     });
 
+    it("labels traces with the deployment it was started for", async () => {
+        vi.stubEnv("HAPPY_OBSERVATION_LOGS", "false");
+        vi.stubEnv("HAPPY_OBSERVATION_TRACES", "true");
+        vi.stubEnv("HAPPY_OBSERVATION_TRACES_ENDPOINT", "http://127.0.0.1:1/v1/traces");
+        const root = await temporaryRoot("happy-observation-deployment-");
+        const config = await configIn(root);
+        const observation = await ObservationModule.start(config, "local-development");
+
+        const installed = observation.install(createRootContext());
+        await expect(installed.span("agent.turn", async () => "done")).resolves.toBe("done");
+        await expect(observation.close()).resolves.toBeUndefined();
+    });
+
     it("logs every lifecycle hook with its stable identifiers and outcome", async () => {
+        vi.stubEnv("HAPPY_OBSERVATION_LOG_LEVEL", "trace");
         const root = await temporaryRoot("happy-observation-hooks-");
-        const configuration = await configurationIn(root);
-        const observation = await ObservationModule.start({
-            configuration,
-            environment: { HAPPY_OBSERVATION_LOG_LEVEL: "trace" },
-        });
+        const config = await configIn(root);
+        const observation = await ObservationModule.start(config);
         const ctx = observation.install(createRootContext());
         const hooks = observation.beforeStart();
         const scope = {
@@ -220,7 +223,7 @@ describe("ObservationModule edge cases", () => {
         await observation.flush();
         await observation.close();
 
-        const records = logRecords(await readFile(configuration.paths.logPath, "utf8"));
+        const records = logRecords(await readFile(config.configuration.paths.logPath, "utf8"));
         expect(records).toHaveLength(11);
         expect(records.map((record) => record.msg)).toEqual([
             "The agent started a run.",
@@ -246,19 +249,17 @@ describe("ObservationModule edge cases", () => {
     });
 
     it("does not emit history after the module is closed", async () => {
+        vi.stubEnv("HAPPY_OBSERVATION_HISTORY_DUMP", "true");
         const root = await temporaryRoot("happy-observation-closed-history-");
-        const configuration = await configurationIn(root);
-        const observation = await ObservationModule.start({
-            configuration,
-            environment: { HAPPY_OBSERVATION_HISTORY_DUMP: "true" },
-        });
+        const config = await configIn(root);
+        const observation = await ObservationModule.start(config);
 
         await observation.close();
         await observation.recordHistory(createRootContext(), "agent1", [message("r1", "ignored")]);
         await observation.flush();
 
         await expect(
-            readFile(join(configuration.paths.historyDumpHome, "agent1.jsonl"), "utf8"),
+            readFile(join(config.configuration.paths.historyDumpHome, "agent1.jsonl"), "utf8"),
         ).rejects.toThrow();
     });
 });

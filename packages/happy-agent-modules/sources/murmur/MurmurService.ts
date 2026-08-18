@@ -60,18 +60,16 @@ export interface MurmurClientFacade {
 
 export interface MurmurServiceOptions {
     readonly client: MurmurClientFacade;
-    readonly now?: () => number;
-    readonly onError?: (error: unknown) => void;
-    /** The catalog holding the one person this installation shares as. */
-    readonly profile: ProfileModule;
-    readonly publish: (ctx: Context, event: MurmurChangedEvent) => void;
     /**
      * The lifetime the relay loop runs on, with the agent database attached.
      *
      * The loop outlives every call that touches it, so it must never borrow the context of the
-     * request that happened to start it.
+     * request that happened to start it. The module derives this once and hands it down.
      */
-    readonly rootContext: RootContext;
+    readonly lifetime: RootContext;
+    /** The catalog holding the one person this installation shares as. */
+    readonly profile: ProfileModule;
+    readonly publish: (ctx: Context, event: MurmurChangedEvent) => void;
 }
 
 /**
@@ -87,8 +85,6 @@ export class MurmurService {
     readonly #client: MurmurClientFacade;
     readonly #identity: string;
     readonly #nextVersion: () => string;
-    readonly #now: () => number;
-    readonly #onError: (error: unknown) => void;
     readonly #profile: ProfileModule;
     readonly #publish: (ctx: Context, event: MurmurChangedEvent) => void;
     readonly #root: RootContext;
@@ -103,12 +99,10 @@ export class MurmurService {
     constructor(options: MurmurServiceOptions) {
         this.#client = options.client;
         this.#identity = encodeBytes(options.client.identity);
-        this.#now = options.now ?? Date.now;
-        this.#nextVersion = createOrderedIdFactory(this.#now);
-        this.#onError = options.onError ?? (() => undefined);
+        this.#nextVersion = createOrderedIdFactory();
         this.#profile = options.profile;
         this.#publish = options.publish;
-        this.#root = options.rootContext;
+        this.#root = options.lifetime;
         this.#version = this.#nextVersion();
     }
 
@@ -127,7 +121,7 @@ export class MurmurService {
     async initializeBinding(ctx: Context): Promise<void> {
         const binding = await readMurmurBinding(ctx);
         if (binding === undefined) return;
-        await bindMurmurProfile(ctx, binding.profileId, this.#identity, this.#now());
+        await bindMurmurProfile(ctx, binding.profileId, this.#identity, Date.now());
     }
 
     start(_ctx: Context): void {
@@ -163,13 +157,13 @@ export class MurmurService {
         if (profile === undefined || !(await this.#profile.isLocal(ctx, profileId))) {
             throw new Error("Sharing requires a profile owned by this installation.");
         }
-        const result = await bindMurmurProfile(ctx, profileId, this.#identity, this.#now());
+        const result = await bindMurmurProfile(ctx, profileId, this.#identity, Date.now());
         if (result === "created") this.#changed(ctx);
     }
 
     async createInvitation(ctx: Context, signal?: AbortSignal): Promise<MurmurInvitation> {
         await this.#requireLocalProfile(ctx);
-        const createdAt = this.#now();
+        const createdAt = Date.now();
         return this.#run(ctx, async () => {
             const invitation = await this.#client.createInvitation(this.#operationSignal(signal));
             return {
@@ -279,7 +273,7 @@ export class MurmurService {
             } catch (error: unknown) {
                 if (this.#abort.signal.aborted) return;
                 await this.#setConnectionFromWorker("disconnected");
-                this.#onError(error);
+                this.#root.log.warn("Sharing could not reach the relay.", {}, error);
             }
             await this.#waitForSyncRetry(retryMilliseconds);
             retryMilliseconds = Math.min(SYNC_RETRY_MAXIMUM_MILLISECONDS, retryMilliseconds * 2);
@@ -372,18 +366,25 @@ export class MurmurService {
         const id = this.#nextVersion();
         this.#version = id;
         this.#publish(ctx, {
-            createdAt: this.#now(),
+            createdAt: Date.now(),
             data: { version: id },
             id,
             type: "murmur_changed",
         });
     }
 
+    /**
+     * Background work on the sharing lifetime, which nobody is waiting on.
+     *
+     * There is no caller to hand a failure back to — the relay callback that started it has
+     * already returned — so it is written to the log the lifetime carries and the loop goes on.
+     */
     async #worker(name: string, work: (ctx: Context) => Promise<void>): Promise<void> {
+        const workerCtx = this.#root.named(name);
         try {
-            await work(this.#root.named(name));
+            await work(workerCtx);
         } catch (error: unknown) {
-            this.#onError(error);
+            workerCtx.log.warn("Sharing could not finish background work.", {}, error);
         }
     }
 }
@@ -437,11 +438,11 @@ function decodeBytes(value: string): Uint8Array {
  * A client compares versions to find out whether what it holds is current, so two changes in
  * the same millisecond must still be distinguishable and correctly ordered.
  */
-function createOrderedIdFactory(now: () => number): () => string {
+function createOrderedIdFactory(): () => string {
     let lastMilliseconds = 0;
     let counter = 0;
     return () => {
-        const milliseconds = Math.max(now(), lastMilliseconds);
+        const milliseconds = Math.max(Date.now(), lastMilliseconds);
         counter = milliseconds === lastMilliseconds ? counter + 1 : 0;
         lastMilliseconds = milliseconds;
         return `${milliseconds.toString(36).padStart(9, "0")}-${counter.toString(36).padStart(5, "0")}`;

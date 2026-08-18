@@ -2,13 +2,13 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { AgentModuleScope, AgentProviders } from "@slopus/happy-agent-base";
+import { AgentProviders, type AgentModuleScope } from "@slopus/happy-agent-base";
 import { CodexApiKeyCredential, CodexProvider } from "@slopus/happy-providers";
 import { createRootContext } from "@steve.kite/stdlib";
 import sharp from "sharp";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ConfigModule } from "../../sources/config/ConfigModule.js";
+import { ConfigModule } from "../../sources/config/index.js";
 import { ImageGenerationModule } from "../../sources/imageGeneration/ImageGenerationModule.js";
 import { resolveModuleHooks } from "../support/moduleHooks.js";
 
@@ -47,21 +47,22 @@ async function codexAccount(): Promise<CodexProvider> {
     });
 }
 
-function providers(accounts: Readonly<Record<string, CodexProvider | null>>): AgentProviders {
-    return {
-        ids: Object.keys(accounts),
-        typeOf: () => "codex",
-        resolve: async (id: string) => accounts[id] ?? null,
-    } as unknown as AgentProviders;
-}
-
+/**
+ * The module over a configuration whose accounts are the ones this test registered.
+ *
+ * Configuration is what owns the accounts, so a scripted registry reaches the module the same way
+ * a person's own Codex sign-in would: through `ConfigModule`, not around it.
+ */
 async function moduleWith(
-    accounts: Readonly<Record<string, CodexProvider | null>>,
+    accounts: Readonly<Record<string, CodexProvider>>,
 ): Promise<ImageGenerationModule> {
-    return new ImageGenerationModule({
-        config: await ConfigModule.load(join(happyRoot, ".happy")),
-        providers: providers(accounts),
-    });
+    const providers = new AgentProviders();
+    for (const [id, provider] of Object.entries(accounts)) providers.add(id, provider, "codex");
+    return new ImageGenerationModule(
+        await ConfigModule.load(join(happyRoot, ".happy"), {
+            inference: { models: [], providers },
+        }),
+    );
 }
 
 function scope(model: string): AgentModuleScope {

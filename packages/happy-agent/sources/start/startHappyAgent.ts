@@ -1,30 +1,22 @@
-import { chmod, mkdir, readFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { chmod, mkdir } from "node:fs/promises";
 
 import {
     AgentStorage,
     AgentSystemLocal,
-    currentAgentEnvironment,
     withAgentDatabase,
-    type Agent,
     type AgentModel,
     type AgentModule,
     type AgentProviders,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
+import type { Compute, HostComputeConfig } from "@slopus/happy-agent-compute";
 import {
-    hostComputeProvider,
-    type Compute,
-    type HostComputeConfig,
-} from "@slopus/happy-agent-compute";
-import {
-    AUTO_PERMISSION_REVIEW_BUDGET_MS,
     AutoModule,
     CollaborationModule,
     ComputeModule,
     ConfigModule,
     EventsModule,
+    GitModule,
     GoalModule,
     HistoryModule,
     ImageGenerationModule,
@@ -47,12 +39,9 @@ import {
     UserInputModule,
     WorkflowsModule,
     WorkspacesModule,
-    boundSecurityFileText,
     createComputeModules,
-    isMissingSecurityFileError,
     type HappyAgentConfiguration,
     type HostCompute,
-    type PresenceModuleOptions,
 } from "@slopus/happy-agent-modules";
 import type { LibSQLDatabase } from "drizzle-orm/libsql";
 import { createRootContext, detach, type Context, type RootContext } from "@steve.kite/stdlib";
@@ -60,12 +49,9 @@ import { createRootContext, detach, type Context, type RootContext } from "@stev
 import { checkModuleToolParameters } from "../modules/agent/checkModuleToolParameters.js";
 import { openHappyAgentDatabase } from "../modules/agent/HappyAgentDatabase.js";
 import { acquireHappyAgentStorageLock } from "../modules/agent/HappyAgentStorageLock.js";
-import { readGlobalInstructions } from "../modules/agent/readGlobalInstructions.js";
 import { ConversationModule } from "../modules/conversations/ConversationModule.js";
 import { HappyModule } from "../modules/happy/index.js";
 import { InstallationModule } from "../modules/installation/InstallationModule.js";
-import { GitStateTracker, directGitCommandRunner } from "@slopus/happy-agent-modules";
-import type { ProjectCreatorProfile } from "@slopus/happy-agent-modules";
 
 /** Everything a caller needs to say. Every other answer comes out of the configuration. */
 export interface StartHappyAgentOptions {
@@ -136,8 +122,11 @@ export interface StartedHappyAgent {
     readonly storage: AgentStorage<LibSQLDatabase>;
     readonly system: AgentSystemLocal<LibSQLDatabase>;
     readonly modules: HappyAgentModules;
-    /** The one live Git watcher every reader shares instead of scanning once per request. */
-    readonly gitTracker: GitStateTracker;
+    /**
+     * Git itself: the one instance every reader shares, holding the live watcher and the
+     * credentials the catalogs registered, instead of scanning once per request.
+     */
+    readonly git: GitModule;
     /** What this `.happy` folder is, from the first time anyone started it here. */
     readonly installation: {
         readonly epoch: string;
@@ -170,7 +159,7 @@ export async function startHappyAgent(
     // Observation starts before anything it should be able to watch, and the root it installs its
     // logger and tracer on becomes the root every lifetime below is derived from. Contexts are
     // immutable, so a module started on the bare root would log nowhere for ever.
-    const observation = await ObservationModule.start({ configuration });
+    const observation = await ObservationModule.start(config);
     const ctx = observation.install(createRootContext());
     // Everything opened below is closed in the reverse order it opened, and observation closes
     // last, so the last thing the agent did is still in the file a person reads to find out why it
@@ -226,16 +215,6 @@ export async function startHappyAgent(
         unwind.unshift(() => review.close());
         await chmod(paths.autoDatabasePath, 0o600);
 
-        const protectedProjectFiles = [
-            ...new Set([
-                "AGENTS.md",
-                "AGENTS_SECURITY.md",
-                ...configuration.values.permissions.protectedPaths,
-                ...configuration.values.workspace.protectedSync,
-            ]),
-        ];
-        const hostPolicy = { privateDirectories: [paths.agentHome], protectedProjectFiles };
-
         // Work that outlives whatever asked for it — a clone, a setup command, a worktree removal —
         // runs on a detached root that still carries the logger and the tracer. The database is not
         // on that root, so every such lifetime gets it attached, or a catalog write from background
@@ -254,55 +233,39 @@ export async function startHappyAgent(
             backgroundTasks.add(task);
         };
 
-        const createCompute =
-            options.compute ??
-            (async (computeCtx: Context, computeConfig: HostComputeConfig) =>
-                await hostComputeProvider.create(computeCtx, computeConfig));
-        const compute = createComputeModules({
-            provider: {
-                id: "host",
-                create: async (computeCtx, computeConfig) =>
-                    (await createCompute(computeCtx, {
-                        ...computeConfig,
-                        hostPolicy,
-                    })) as HostCompute,
-            },
-        });
+        // The compute module derives its own host policy from the configuration. A caller that
+        // supplies its own machine — a test, or a deployment that runs the agent in a container —
+        // replaces only how one is created, which is the one thing configuration cannot know.
+        const suppliedCompute = options.compute;
+        const computeModule =
+            suppliedCompute === undefined
+                ? new ComputeModule(config)
+                : ComputeModule.withProvider(config, {
+                      id: "host",
+                      create: async (computeCtx: Context, computeConfig: HostComputeConfig) =>
+                          (await suppliedCompute(computeCtx, computeConfig)) as HostCompute,
+                  });
+        const compute = createComputeModules(computeModule);
         unwind.unshift(async () => await compute.computeModule.dispose(ctx));
 
-        const history = new HistoryModule({ onAppend: observation.recordHistory });
+        const history = new HistoryModule();
+        // The history dump follows the archive by subscription, so it is wired after both modules
+        // exist rather than being built into one of them.
+        history.onAppend(observation.recordHistory);
         const events = new EventsModule();
-        const presence = new PresenceModule(presenceOptions(configuration));
+        const presence = new PresenceModule(config);
 
         // The system prompt reads each agent's own AGENTS.md through that agent's compute, so the
         // reviewer below sees exactly the project instructions the reviewed agent sees.
-        const systemPrompt = new SystemPromptModule({
-            availableModels: models.map(({ id, name, providerId }) => ({ id, name, providerId })),
-            compute: {
-                resolve: async (resolveCtx, agentId) =>
-                    await compute.computeModule.resolve(resolveCtx, agentId),
-            },
-            globalInstructions: { path: paths.instructionsPath, read: readGlobalInstructions },
-        });
+        const systemPrompt = new SystemPromptModule(config, compute.computeModule);
 
-        // The reviewer investigates local state through its own read-only compute, behind the same
-        // sandbox policy as the agent, with the reviewer's database treated as private.
-        const reviewerCompute = (await createCompute(ctx, {
-            cwd: paths.publicHome,
-            hostPolicy,
-        })) as HostCompute;
-        unwind.unshift(async () => await reviewerCompute.dispose(ctx));
-
-        const readSecurity = async (path: string): Promise<string | undefined> => {
-            try {
-                return boundSecurityFileText(await readFile(path));
-            } catch (error: unknown) {
-                if (isMissingSecurityFileError(error)) return undefined;
-                throw error;
-            }
-        };
-        const auto = new AutoModule({
-            storage: new AgentStorage({
+        // The reviewer runs on its own private database, its own accounts and its own read-only
+        // compute. Only the store is handed in: this package is what opens databases.
+        const auto = new AutoModule(
+            config,
+            compute.computeModule,
+            systemPrompt,
+            new AgentStorage({
                 acquireLock: async () => {
                     try {
                         return await acquireHappyAgentStorageLock(paths.autoAgentLockPath);
@@ -316,48 +279,27 @@ export async function startHappyAgent(
                 },
                 database: review.database,
             }),
-            providers,
-            provider,
-            models: [...models],
-            workingDirectory: paths.publicHome,
-            lifetimeContext: ctx,
-            reviewerTools: (scope) => compute.computeModule.reviewerTools(scope, reviewerCompute),
-            readGlobalSecurity: async () => await readSecurity(paths.securityPath),
-            readProjectSecurity: async () =>
-                await readSecurity(join(paths.publicHome, "AGENTS_SECURITY.md")),
-            readAgentsMd: async (reviewCtx, agentId) =>
-                await systemPrompt.readAgentsMdInstructions(reviewCtx, agentId),
-        });
+        );
         unwind.unshift(async () => await auto.close(ctx));
 
-        const permissions = new PermissionsModule({
-            reviewer: auto.reviewer,
-            reviewTimeoutMs: AUTO_PERMISSION_REVIEW_BUDGET_MS,
-            // A decision belongs in the journal a client reads and in the conversation record a
-            // person reads. Neither may break the decision itself.
-            listener: {
-                onEvent: async (listenerCtx, event) => {
-                    await conversations
-                        .recordAgentEvent(listenerCtx, event.agentId, "permission_event", event)
-                        .catch((error: unknown) => {
-                            listenerCtx.log.warn(
-                                "This agent's permission history is now incomplete.",
-                                { agentId: event.agentId, type: event.type },
-                                error,
-                            );
-                        });
-                    await events.record(listenerCtx, {
-                        agentId: event.agentId,
-                        type: "permission.event",
-                        payload: event,
-                    });
-                },
-            },
-            killAllSessions: async (_ctx, agentId) => {
-                for (const session of compute.computeModule.runningCommands(agentId)) {
-                    await compute.computeModule.stopCommand(agentId, session.sessionId);
-                }
-            },
+        const permissions = new PermissionsModule(compute.computeModule, auto);
+        // A decision belongs in the journal a client reads and in the conversation record a person
+        // reads. Neither may break the decision itself.
+        permissions.onEvent(async (listenerCtx, event) => {
+            await conversations
+                .recordAgentEvent(listenerCtx, event.agentId, "permission_event", event)
+                .catch((error: unknown) => {
+                    listenerCtx.log.warn(
+                        "This agent's permission history is now incomplete.",
+                        { agentId: event.agentId, type: event.type },
+                        error,
+                    );
+                });
+            await events.record(listenerCtx, {
+                agentId: event.agentId,
+                type: "permission.event",
+                payload: event,
+            });
         });
 
         // Cutting a worktree, cloning a repository, running setup commands and removing a folder are
@@ -365,53 +307,22 @@ export async function startHappyAgent(
         // the agent's own lifetime rather than on the request that asked and would be gone before
         // they finish. `withDatabase` keeps the root a root; the cast only restates that.
         const catalogRoot = withDatabase(hostRoot) as RootContext;
+        // Git is one module for the whole installation: it runs every command, brokers every
+        // repository credential and holds the one live watcher. Both catalogs and the daemon's
+        // routes take this instance, so a credential registered by one is visible to all of them.
+        const git = new GitModule();
         // The workspaces catalog is cut from the projects catalog: a workspace is a branch of a
         // project's repository, in a folder under the project's own key, and the project owns the
         // repository lock both of them take. That makes the dependency one-way, and the projects
         // catalog is built first so it can be handed over rather than reached for.
-        const projects = new ProjectsModule({
-            crossWorkspace: configuration.values.features.crossWorkspace,
-            rootContext: catalogRoot,
-            // A project's own person: the profile this copy of Git commits as. Which machine that is
-            // the catalog learns when it is opened, so only the profile is named here.
-            localProfileId: LOCAL_PROJECT_PROFILE_ID,
-            resolveGitSecret: (kind) =>
-                kind === "github" ? localGithubToken(process.env) : undefined,
-            resolveProfile: async (profileId, instanceId) =>
-                profileId === LOCAL_PROJECT_PROFILE_ID
-                    ? await localGitProfile(instanceId)
-                    : undefined,
-            // Avatar bytes are content a person chose and expects to survive a restart, so they
-            // live beside the agent's own database rather than in a temporary folder.
-            stateDirectory: join(paths.agentHome, "projects"),
-            onHostError: (hostCtx, projectId, error) => {
-                hostCtx.log.warn(
-                    "Setting a project up failed; the record says so and it will be tried again.",
-                    { projectId },
-                    error,
-                );
-            },
-        });
-        const workspaces = new WorkspacesModule({
-            enabled: configuration.values.features.workspaces,
-            projects,
-            rootContext: catalogRoot,
-            settings: configuration.values.workspace,
-            onHostError: (hostCtx, workspaceId, kind, message) => {
-                hostCtx.log.warn(
-                    kind === "archive"
-                        ? "Removing an archived workspace folder failed; it stays archived and on disk."
-                        : "Renaming a workspace branch failed; the record and Git now disagree.",
-                    { workspaceId, message },
-                );
-            },
-        });
+        const projects = new ProjectsModule(config, git);
+        const workspaces = new WorkspacesModule(config, projects, git);
 
         // What a first message names: the chat, and the workspace and branch it works in. Naming is
         // one bounded question asked of the cheapest model of the chat's own account, so it owns the
         // whole thing — it takes the accounts from the configuration and hands the folder name to
         // the catalog that owns folders and branches.
-        const titles = new TitlesModule({ config, workspaces });
+        const titles = new TitlesModule(config, workspaces);
 
         // The chat catalog is what a title is written into, so it is what looks at one again once a
         // run has settled and the conversation says more than the first message could.
@@ -427,45 +338,29 @@ export async function startHappyAgent(
         // Terminals stand in the folders both catalogs own, so they ask those catalogs where a
         // project or workspace actually is rather than deriving a path of their own. They keep no
         // record: a terminal is a running process and a live screen, and both end with this daemon.
-        const terminals = new TerminalsModule({ projects, workspaces });
+        const terminals = new TerminalsModule(projects, workspaces);
         unwind.unshift(async () => await terminals.close());
 
         // One person behind this installation, and the contacts they have accepted. Sharing is
         // given the profile catalog itself, because whether this installation may act as that
         // person is that catalog's decision rather than something to restate here.
-        const profile = new ProfileModule<LibSQLDatabase>({
-            listener: {
-                onEvent: async (listenerCtx, event) => {
-                    await events.record(listenerCtx, { type: "profile.changed", payload: event });
-                },
-            },
+        const profile = new ProfileModule<LibSQLDatabase>();
+        profile.onEvent(async (listenerCtx, event) => {
+            await events.record(listenerCtx, { type: "profile.changed", payload: event });
         });
-        const sharing = configuration.values.sharing;
-        const murmur = new MurmurModule<LibSQLDatabase>({
-            enabled: sharing.enabled,
-            listener: {
-                onEvent: async (listenerCtx, event) => {
-                    // Murmur names its own event; sharing is what a client calls it, and the
-                    // client's name is what goes on the wire.
-                    await events.record(listenerCtx, {
-                        type: "sharing.changed",
-                        payload: { ...event, type: "sharing_changed" },
-                    });
-                },
-            },
-            profile,
-            relay: sharing.relayUrl,
-            // The relay connection and the store both outlive every request that touches them, so
-            // they run on the same application root the catalogs use, with the database attached.
-            rootContext: catalogRoot,
-            onError: (error: unknown) => {
-                ctx.log.warn("Sharing could not reach the relay.", {}, error);
-            },
+        const murmur = new MurmurModule<LibSQLDatabase>(config, profile);
+        // Murmur names its own event; sharing is what a client calls it, and the client's name is
+        // what goes on the wire.
+        murmur.onEvent((listenerCtx, event) => {
+            void events
+                .record(listenerCtx, {
+                    type: "sharing.changed",
+                    payload: { ...event, type: "sharing_changed" },
+                })
+                .catch((error: unknown) => {
+                    listenerCtx.log.warn("A sharing change was not journaled.", {}, error);
+                });
         });
-
-        // Gemini is not one of the accounts a chat runs on, so its search reads a key from the
-        // environment rather than from a configured provider.
-        const gemini = process.env.GEMINI_API_KEY?.trim() || undefined;
 
         // A workflow starts its agents through collaboration, so it needs that very module rather
         // than one of its own.
@@ -476,44 +371,40 @@ export async function startHappyAgent(
         // its own. This lifetime is the daemon's, not the asking turn's.
         const userInputJournal = withDatabase(hostRoot.named("user-input-journal"));
         const scheduling = new SchedulingModule();
-        const userInput = new UserInputModule({
-            presence: presence.userInputPolicy,
-            // Only a person's own answer becomes authorization evidence: the actor answering
-            // must be the agent that asked. An agent answering for another agent is a
-            // hand-off, not a human decision, and stays untrusted context.
-            listener: {
-                onEventTransactional: async (listenerCtx, event) => {
-                    if (event.type !== "user_input_answered") return;
-                    if (event.actingAgentId !== event.request.askingAgentId) return;
-                    await auto
-                        .recordUserInputEventTransactional(listenerCtx, {
-                            type: "user_input_answered",
-                            agentId: event.request.askingAgentId,
-                            requestId: event.requestId,
-                            answer: JSON.stringify(event.request.answers ?? event.request.answer),
-                        })
-                        // An unrecorded answer under-authorizes, which is the safe direction.
-                        // It must never break saving what the person said.
-                        .catch(() => undefined);
-                },
-                onEvent: async (_listenerCtx, event) => {
-                    await events
-                        .record(userInputJournal, {
-                            agentId: event.request.askingAgentId,
-                            // Hyphens, not underscores: the journal only accepts dotted,
-                            // hyphenated type names, so an underscored one is never stored.
-                            type: "user-input.event",
-                            payload: event,
-                        })
-                        .catch((error: unknown) => {
-                            userInputJournal.log.warn(
-                                "Failed to journal a user input event.",
-                                { agentId: event.request.askingAgentId, type: event.type },
-                                error,
-                            );
-                        });
-                },
-            },
+        const userInput = new UserInputModule(presence);
+        // Only a person's own answer becomes authorization evidence: the actor answering must be
+        // the agent that asked. An agent answering for another agent is a hand-off, not a human
+        // decision, and stays untrusted context.
+        userInput.onEventTransactional(async (listenerCtx, event) => {
+            if (event.type !== "user_input_answered") return;
+            if (event.actingAgentId !== event.request.askingAgentId) return;
+            await auto
+                .recordUserInputEventTransactional(listenerCtx, {
+                    type: "user_input_answered",
+                    agentId: event.request.askingAgentId,
+                    requestId: event.requestId,
+                    answer: JSON.stringify(event.request.answers ?? event.request.answer),
+                })
+                // An unrecorded answer under-authorizes, which is the safe direction. It must
+                // never break saving what the person said.
+                .catch(() => undefined);
+        });
+        userInput.onEvent(async (_listenerCtx, event) => {
+            await events
+                .record(userInputJournal, {
+                    agentId: event.request.askingAgentId,
+                    // Hyphens, not underscores: the journal only accepts dotted, hyphenated type
+                    // names, so an underscored one is never stored.
+                    type: "user-input.event",
+                    payload: event,
+                })
+                .catch((error: unknown) => {
+                    userInputJournal.log.warn(
+                        "Failed to journal a user input event.",
+                        { agentId: event.request.askingAgentId, type: event.type },
+                        error,
+                    );
+                });
         });
         // Happy is built here rather than beside the other modules because it works through them:
         // the configuration that says where the credentials live and what version to report, the
@@ -535,11 +426,11 @@ export async function startHappyAgent(
             config,
             conversations,
             events,
-            goal: new GoalModule({}),
+            goal: new GoalModule(),
             happy,
             history,
-            imageGeneration: new ImageGenerationModule({ config, providers }),
-            modelSwitch: new ModelSwitchModule({ history }),
+            imageGeneration: new ImageGenerationModule(config),
+            modelSwitch: new ModelSwitchModule(history),
             murmur,
             observation,
             permissions,
@@ -547,32 +438,16 @@ export async function startHappyAgent(
             profile,
             projects,
             scheduling,
-            search: new SearchModule({
-                providers,
-                models,
-                currentProviderId: provider,
-                bedrockSearchModels: config.bedrockSearchModels,
-                ...(gemini === undefined ? {} : { geminiApiKey: gemini }),
-            }),
-            secrets: new SecretsModule({}),
+            search: new SearchModule(config),
+            secrets: new SecretsModule(),
             skills: compute.skillsModule,
             systemPrompt,
-            tasks: new TasksModule({}),
+            tasks: new TasksModule(),
             terminals,
             titles,
-            usage: new UsageModule({}),
+            usage: new UsageModule(),
             userInput,
-            workflows: new WorkflowsModule({
-                enabled: configuration.values.features.workflows,
-                collaboration,
-                compute: {
-                    resolve: async (resolveCtx, agentId) =>
-                        await compute.computeModule.resolve(resolveCtx, agentId),
-                },
-                // A run outlives the tool call that started it, so it lives on the application root
-                // rather than on the turn that launched it, with the database attached.
-                runContext: withDatabase(hostRoot.named("workflow-run")),
-            }),
+            workflows: new WorkflowsModule(config, collaboration, compute.computeModule),
             workspaces,
         };
 
@@ -595,6 +470,9 @@ export async function startHappyAgent(
             modules.profile,
             // Sharing puts the profile on the wire, so the person exists before the identity does.
             modules.murmur,
+            // Git declares no tools; its start hook adopts the collection's lifetime so watchers
+            // and background scans do not run on a root of their own.
+            git,
             modules.projects,
             // Titles precedes the catalog it names for: the workspace it renames is the one the
             // catalog owns, and the fact that a workspace has been named lives in this module.
@@ -639,41 +517,27 @@ export async function startHappyAgent(
         // becomes a durable fact for every later one. Failures are logged rather than raised: a scan
         // arriving for a workspace that has just been archived is ordinary, and a watcher is not the
         // place to decide a person sees an error.
-        const gitTracker = new GitStateTracker({
-            onObserverError: (_observerCtx, error, entity) => {
-                ctx.log.debug("A Git watcher could not be armed.", { path: entity.path }, error);
-            },
-            onSnapshot: async (snapshotCtx, entity, snapshot) => {
-                const factsCtx = withDatabase(snapshotCtx);
-                try {
-                    if (entity.workspaceId === undefined) {
-                        await projects.recordGitFacts(
-                            factsCtx,
-                            entity.projectId,
-                            snapshot.facts,
-                        );
-                    } else {
-                        await workspaces.recordGitFacts(
-                            factsCtx,
-                            entity.workspaceId,
-                            snapshot.facts,
-                        );
-                    }
-                } catch (error: unknown) {
-                    factsCtx.log.debug(
-                        "Git facts from a live scan were not stored.",
-                        { path: entity.path },
-                        error,
-                    );
+        git.onSnapshot(async (snapshotCtx, entity, snapshot) => {
+            const factsCtx = withDatabase(snapshotCtx);
+            try {
+                if (entity.workspaceId === undefined) {
+                    await projects.recordGitFacts(factsCtx, entity.projectId, snapshot.facts);
+                } else {
+                    await workspaces.recordGitFacts(factsCtx, entity.workspaceId, snapshot.facts);
                 }
-            },
-            rootContext: hostRoot,
+            } catch (error: unknown) {
+                factsCtx.log.debug(
+                    "Git facts from a live scan were not stored.",
+                    { path: entity.path },
+                    error,
+                );
+            }
         });
         // The watcher and both catalogs stop before the systems that own their database: all three
         // write from background lifetimes, and a write arriving after the database closed is the one
         // failure nobody would see. Workspaces close before the projects they are cut from.
         unwind.unshift(async () => {
-            gitTracker.dispose();
+            git.dispose();
             await workspaces.close(withDatabase(ctx));
             await projects.close(withDatabase(ctx));
         });
@@ -699,7 +563,7 @@ export async function startHappyAgent(
             configuration,
             ctx,
             database: main.database,
-            gitTracker,
+            git,
             installation: {
                 epoch: installation.epoch,
                 schemaVersion: installation.schemaVersion,
@@ -715,123 +579,4 @@ export async function startHappyAgent(
         await close().catch(() => undefined);
         throw error;
     }
-}
-
-/**
- * The only profile a single-machine installation can resolve.
- *
- * Profiles are a multi-instance idea: a project created on one machine records who created it so
- * another machine can refuse to clone with the wrong person's credentials. One local installation
- * has exactly one person behind it, so it names that profile once and answers for it below.
- */
-const LOCAL_PROJECT_PROFILE_ID = "local";
-
-/** A GitHub token from the environment, under either of the two names the tooling uses. */
-function localGithubToken(environment: NodeJS.ProcessEnv): string | undefined {
-    for (const name of ["GITHUB_TOKEN", "GH_TOKEN"] as const) {
-        const value = environment[name]?.trim();
-        if (value !== undefined && value.length > 0) return value;
-    }
-    return undefined;
-}
-
-/**
- * Who this machine commits as, read from Git's own configuration.
- *
- * A clone made on someone's behalf writes commits, and commits need a name and an address. Asking
- * Git is the honest answer: it is the same identity the person's own commits already carry. When
- * Git has nothing configured the clone is refused rather than attributed to an invented person.
- */
-async function localGitProfile(instanceId: string): Promise<ProjectCreatorProfile | undefined> {
-    const read = async (key: string): Promise<string | undefined> => {
-        const result = await directGitCommandRunner.run(homedir(), ["config", "--get", key], {
-            maxOutputBytes: 4096,
-        });
-        if (result.code !== 0) return undefined;
-        const value = result.stdout.trim();
-        return value.length > 0 ? value : undefined;
-    };
-    const [email, name] = await Promise.all([read("user.email"), read("user.name")]);
-    if (email === undefined || name === undefined) return undefined;
-    return { email, name, parentInstanceId: instanceId };
-}
-
-type ConfiguredPresence = NonNullable<PresenceModuleOptions["catalog"]>[number];
-
-/** The states every installation has, before the configuration adds to or retitles any of them. */
-const BUILT_IN_PRESENCE: readonly ConfiguredPresence[] = [
-    {
-        id: "online",
-        status: "online",
-        title: "Online",
-        emoji: "🟢",
-        prompt: "The user is at the keyboard and can answer questions right away.",
-        answerWaitMs: null,
-    },
-    {
-        id: "away",
-        status: "away",
-        title: "Away",
-        emoji: "🌙",
-        prompt: "The user is away and cannot be reached.",
-        answerWaitMs: 0,
-    },
-    {
-        id: "offline",
-        status: "offline",
-        title: "Offline",
-        emoji: "⚫",
-        prompt: "The user is offline and cannot be reached.",
-        answerWaitMs: 0,
-    },
-    {
-        id: "dnd",
-        status: "dnd",
-        title: "Do not disturb",
-        emoji: "🔕",
-        prompt: "The user has asked not to be disturbed.",
-        answerWaitMs: 0,
-    },
-];
-
-function presenceOptions(
-    configuration: HappyAgentConfiguration,
-): ConstructorParameters<typeof PresenceModule>[0] {
-    const presence = configuration.values.presence;
-    const catalog: ConfiguredPresence[] = Object.entries(presence.states).map(([id, state]) => {
-        const builtIn = BUILT_IN_PRESENCE.find((candidate) => candidate.id === id);
-        return {
-            id,
-            status: builtIn?.status ?? "custom",
-            title: state.title ?? builtIn?.title ?? id,
-            emoji: state.emoji ?? builtIn?.emoji ?? "🟣",
-            prompt: state.prompt ?? builtIn?.prompt ?? "",
-            answerWaitMs:
-                state.answerWaitMs === undefined
-                    ? (builtIn?.answerWaitMs ?? 0)
-                    : state.answerWaitMs,
-        };
-    });
-    const current = presence.current;
-    if (current === undefined) {
-        return { catalog } as unknown as ConstructorParameters<typeof PresenceModule>[0];
-    }
-    const known = new Set([
-        ...BUILT_IN_PRESENCE.map((candidate) => candidate.id),
-        ...Object.keys(presence.states),
-    ]);
-    if (!known.has(current)) {
-        throw new Error(`Configured current presence "${current}" is not defined.`);
-    }
-    if (presence.fallback !== undefined && !known.has(presence.fallback)) {
-        throw new Error(`Configured fallback presence "${presence.fallback}" is not defined.`);
-    }
-    return {
-        catalog,
-        initialState: {
-            presenceId: current,
-            ...(presence.fallback === undefined ? {} : { fallbackPresenceId: presence.fallback }),
-            ...(presence.until === undefined ? {} : { expiresAt: presence.until }),
-        },
-    } as unknown as ConstructorParameters<typeof PresenceModule>[0];
 }

@@ -68,18 +68,18 @@ export const schedulingEventSchema = Type.Union([
 export type SchedulingEvent = Static<typeof schedulingEventSchema>;
 
 const opaqueContextSchema = Type.Unsafe<Context>(Type.Object({}, { additionalProperties: true }));
-const listenerReturnSchema = Type.Union([Type.Void(), Type.Promise(Type.Void())]);
 
-export const schedulingModuleListenerSchema = Type.Object(
-    {
-        onEventTransactional: Type.Optional(
-            Type.Function([opaqueContextSchema, schedulingEventSchema], listenerReturnSchema),
-        ),
-        onEvent: Type.Optional(
-            Type.Function([opaqueContextSchema, schedulingEventSchema], listenerReturnSchema),
-        ),
-    },
-    { additionalProperties: false },
+/**
+ * One subscriber to the stream above. Subscriptions are taken after construction through
+ * `SchedulingModule.onEventTransactional` and `SchedulingModule.onEvent`, each of which returns
+ * the function that ends the subscription.
+ */
+export const schedulingEventListenerSchema = Type.Function(
+    [opaqueContextSchema, schedulingEventSchema],
+    Type.Union([Type.Void(), Type.Promise(Type.Void())]),
 );
 
-export type SchedulingModuleListener = Static<typeof schedulingModuleListenerSchema>;
+export type SchedulingEventListener = Static<typeof schedulingEventListenerSchema>;
+
+/** Ends a subscription. Calling it more than once does nothing further. */
+export type SchedulingUnsubscribe = () => void;

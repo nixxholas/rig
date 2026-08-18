@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { SecretsModule } from "../../sources/secrets/SecretsModule.js";
 import { secretsMigrations } from "../../sources/secrets/SecretDatabase.js";
@@ -74,30 +74,19 @@ describe("SecretsModule host and command resolution", () => {
         });
     });
 
-    it("uses the trusted host resolver only on the host API and passes selection identity intact", async () => {
-        await withDatabase("secrets-resolution-injected-host", async (database) => {
-            const calls: Array<readonly unknown[]> = [];
-            const resolver = vi.fn(async (...args: unknown[]) => {
-                calls.push(args);
-                return { RESOLVED: "host-only-value" };
-            });
-            const module = new SecretsModule({ resolveForHost: resolver });
+    it("keeps resolved values out of every model-facing shape", async () => {
+        await withDatabase("secrets-resolution-model-facing", async (database) => {
+            const module = new SecretsModule();
             await registerAndAttach(module, database, "one", { ONE: "database-value" });
 
             await expect(
                 module.resolveForHost(database.context, AGENT, "scope-1"),
-            ).resolves.toEqual({ RESOLVED: "host-only-value" });
-            await expect(
-                module.resolveForHost(database.context, AGENT, "scope-1", []),
-            ).resolves.toEqual({ RESOLVED: "host-only-value" });
-            expect(resolver).toHaveBeenCalledTimes(2);
-            expect(calls[0]?.slice(1)).toEqual([AGENT, "scope-1", undefined]);
-            expect(calls[1]?.slice(1)).toEqual([AGENT, "scope-1", []]);
+            ).resolves.toEqual({ ONE: "database-value" });
 
-            const tools = module.beforeStart();
-            const toolText = JSON.stringify(tools);
-            expect(toolText).not.toContain("host-only-value");
-            expect(toolText).not.toContain("database-value");
+            const page = await module.list(database.context, AGENT, { scopeRef: "scope-1" });
+            expect(JSON.stringify(page)).not.toContain("database-value");
+            expect(module.formatPageForModel(page)).not.toContain("database-value");
+            expect(JSON.stringify(module.beforeStart())).not.toContain("database-value");
         });
     });
 
@@ -123,10 +112,9 @@ describe("SecretsModule host and command resolution", () => {
         });
     });
 
-    it("rejects invalid selections before a resolver can observe them", async () => {
+    it("rejects invalid selections before reading any value", async () => {
         await withDatabase("secrets-resolution-selection", async (database) => {
-            const resolver = vi.fn(async () => ({}));
-            const module = new SecretsModule({ resolveForHost: resolver });
+            const module = new SecretsModule();
             await registerAndAttach(module, database, "one", { TOKEN: "value" });
 
             await expect(
@@ -138,95 +126,53 @@ describe("SecretsModule host and command resolution", () => {
             await expect(
                 module.resolveForHost(database.context, AGENT, "scope-1", ["bad id"]),
             ).rejects.toThrow("selection is invalid");
-            expect(resolver).not.toHaveBeenCalled();
         });
     });
 
-    it("merges command resolver entries deterministically and hides attached names case-insensitively", async () => {
+    it("merges attached secrets deterministically and hides attached names case-insensitively", async () => {
         await withDatabase("secrets-resolution-command", async (database) => {
-            const calls: string[][] = [];
-            const module = new SecretsModule({
-                resolveForCommand: async (_ctx, _agentId, _scopeRef, ids) => {
-                    calls.push([...ids]);
-                    return [
-                        { secretId: "second", environment: { zed: "two" } },
-                        { secretId: "first", environment: { TOKEN: "one" } },
-                    ];
-                },
-            });
-            await registerAndAttach(module, database, "first", { TOKEN: "db-one", Ambient: "a" });
-            await registerAndAttach(module, database, "second", { zed: "db-two" });
+            const module = new SecretsModule();
+            await registerAndAttach(module, database, "first", { TOKEN: "one", Ambient: "a" });
+            await registerAndAttach(module, database, "second", { zed: "two" });
 
             await expect(
                 module.resolveForCommand(database.context, AGENT, "scope-1"),
             ).resolves.toEqual({
-                environment: { TOKEN: "one", zed: "two" },
+                environment: { Ambient: "a", TOKEN: "one", zed: "two" },
                 hiddenEnvironmentVariables: ["Ambient", "TOKEN", "zed"],
             });
-            expect(calls).toEqual([["first", "second"]]);
             await expect(
                 module.resolveForCommand(database.context, AGENT, "scope-1", ["second"]),
-            ).rejects.toThrow("did not return every selected secret");
+            ).resolves.toEqual({
+                environment: { zed: "two" },
+                hiddenEnvironmentVariables: ["Ambient", "TOKEN", "zed"],
+            });
         });
     });
 
-    it("rejects command resolver omissions, extras, duplicates, and case-insensitive collisions", async () => {
-        await withDatabase("secrets-resolution-command-contracts", async (database) => {
-            const setup = new SecretsModule();
-            await registerAndAttach(setup, database, "first", { TOKEN: "one" });
-            await registerAndAttach(setup, database, "second", { OTHER: "two" });
+    it("rejects case-insensitive collisions between two attached secrets", async () => {
+        await withDatabase("secrets-resolution-command-collision", async (database) => {
+            const module = new SecretsModule();
+            await registerAndAttach(module, database, "first", { TOKEN: "one" });
+            await registerAndAttach(module, database, "second", { token: "two" });
 
-            const cases: Array<{
-                name: string;
-                result: unknown;
-                message: string;
-            }> = [
-                {
-                    name: "missing",
-                    result: [{ secretId: "first", environment: { TOKEN: "one" } }],
-                    message: "did not return every selected secret",
-                },
-                {
-                    name: "extra",
-                    result: [
-                        { secretId: "first", environment: { TOKEN: "one" } },
-                        { secretId: "second", environment: { OTHER: "two" } },
-                        { secretId: "third", environment: { THIRD: "three" } },
-                    ],
-                    message: "did not return every selected secret",
-                },
-                {
-                    name: "duplicate",
-                    result: [
-                        { secretId: "first", environment: { TOKEN: "one" } },
-                        { secretId: "first", environment: { OTHER: "two" } },
-                    ],
-                    message: "unexpected secret identity",
-                },
-                {
-                    name: "collision",
-                    result: [
-                        { secretId: "first", environment: { TOKEN: "one" } },
-                        { secretId: "second", environment: { token: "two" } },
-                    ],
-                    message: "both define",
-                },
-            ];
-            for (const testCase of cases) {
-                const module = new SecretsModule({
-                    resolveForCommand: async () => testCase.result as never,
-                });
-                await expect(
-                    module.resolveForCommand(database.context, AGENT, "scope-1"),
-                    testCase.name,
-                ).rejects.toThrow(testCase.message);
-            }
+            await expect(
+                module.resolveForCommand(database.context, AGENT, "scope-1"),
+            ).rejects.toThrow("both define");
+            await expect(
+                module.resolveForHost(database.context, AGENT, "scope-1"),
+            ).rejects.toThrow("both define");
+            // Selecting one side of the collision is unambiguous, so it still resolves.
+            await expect(
+                module.resolveForHost(database.context, AGENT, "scope-1", ["first"]),
+            ).resolves.toEqual({ TOKEN: "one" });
         });
     });
 
-    it("rejects invalid resolver environments and values at the trusted boundary", async () => {
-        await withDatabase("secrets-resolution-invalid-results", async (database) => {
-            const invalidResults: unknown[] = [
+    it("rejects invalid environments at the registration boundary", async () => {
+        await withDatabase("secrets-resolution-invalid-inputs", async (database) => {
+            const module = new SecretsModule();
+            const invalidEnvironments: unknown[] = [
                 { TOKEN: "nul\u0000value" },
                 { "1NOT_VALID": "value" },
                 { TOKEN: "value", token: "collision" },
@@ -235,13 +181,20 @@ describe("SecretsModule host and command resolution", () => {
                     Array.from({ length: 257 }, (_, index) => [`VAR_${index}`, "value"]),
                 ),
             ];
-            for (const result of invalidResults) {
-                const module = new SecretsModule({
-                    resolveForHost: async () => result as never,
-                });
+            let index = 0;
+            for (const environment of invalidEnvironments) {
+                index += 1;
                 await expect(
-                    module.resolveForHost(database.context, AGENT, "scope-1"),
-                ).rejects.toThrow("resolver returned");
+                    module.register(database.context, AGENT, {
+                        id: `invalid-${index}`,
+                        description: "Invalid",
+                        environment: environment as never,
+                    }),
+                    `case ${index}`,
+                ).rejects.toThrow();
+                expect(
+                    await module.reference(database.context, AGENT, `invalid-${index}`),
+                ).toBeUndefined();
             }
         });
     });

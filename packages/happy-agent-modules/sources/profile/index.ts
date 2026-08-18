@@ -1,23 +1,19 @@
-export {
-    PROFILE_MIGRATION_KEY,
-    ProfileModule,
-    profileModuleOptionsSchema,
-    type ProfileModuleOptions,
-} from "./ProfileModule.js";
+export { PROFILE_MIGRATION_KEY, ProfileModule } from "./ProfileModule.js";
 export {
     createProfileInputSchema,
     profileChangedEventSchema,
     profileContextSchema,
     profileEmailSchema,
+    profileEventListenerSchema,
     profileIdSchema,
-    profileModuleListenerSchema,
     profileNameSchema,
     profileSchema,
     updateProfileInputSchema,
     type CreateProfileInput,
     type Profile,
     type ProfileChangedEvent,
+    type ProfileEventListener,
     type ProfileId,
-    type ProfileModuleListener,
+    type ProfileUnsubscribe,
     type UpdateProfileInput,
 } from "./ProfileTypes.js";

@@ -1,18 +1,14 @@
-import { type Context } from "@steve.kite/stdlib";
 import { describe, expect, it, vi } from "vitest";
 
-import {
-    UserInputModule,
-    formatUserInputForModel,
-    userInputMigrations,
-    type UserInputEvent,
-    type UserInputPresenceState,
-    type UserInputTerminalRequest,
-} from "../../sources/userInput/index.js";
+import { formatUserInputForModel, userInputMigrations } from "../../sources/userInput/index.js";
 import { cancelAskTool } from "../../sources/userInput/tools/cancel_ask.js";
 import { requestUserInputTool } from "../../sources/userInput/tools/request_user_input.js";
-import { moduleDatabase } from "../support/moduleDatabase.js";
 import { resolveModuleHooks } from "../support/moduleHooks.js";
+import {
+    createPresenceModule,
+    createUserInputDatabase,
+    createUserInputModule,
+} from "./userInputTestSupport.js";
 
 const agentId = "agent-one";
 const askInput = {
@@ -20,43 +16,12 @@ const askInput = {
     context: "The choice changes the implementation.",
 } as const;
 
-function createModule(
-    options: {
-        readonly listener?: {
-            readonly onEventTransactional?: (ctx: Context, event: UserInputEvent) => Promise<void>;
-            readonly onEvent?: (ctx: Context, event: UserInputEvent) => Promise<void>;
-        };
-        readonly presence?: {
-            readonly isAvailable?: () => boolean | Promise<boolean>;
-            readonly state?: () =>
-                | UserInputPresenceState
-                | undefined
-                | Promise<UserInputPresenceState | undefined>;
-            readonly subscribe?: (
-                ctx: Context,
-                agentId: string,
-                callback: (ctx: Context, state: UserInputPresenceState | undefined) => void,
-            ) => void | (() => void);
-        };
-    } = {},
-): UserInputModule {
-    let requestIndex = 0;
-    let eventIndex = 0;
-    let now = 100;
-    return new UserInputModule({
-        idFactory: () => `request-${String(++requestIndex)}`,
-        eventIdFactory: () => `event-${String(++eventIndex)}`,
-        clock: () => ++now,
-        ...options,
-    });
-}
-
 describe("UserInputModule", () => {
     it("uses ctx.db to create and resume the stable request identity", async () => {
-        const database = moduleDatabase(userInputMigrations, "user-input-resume");
+        const module = createUserInputModule();
+        const database = createUserInputDatabase(module, "user-input-resume");
         await database.ready;
         try {
-            const module = createModule();
             const created = await module.ask(database.context, agentId, askInput, "stable-request");
             const resumed = await module.ask(database.context, agentId, askInput, "stable-request");
 
@@ -75,11 +40,27 @@ describe("UserInputModule", () => {
         }
     });
 
-    it("uses the provider call ID, does not commit manually, and waits outside its transaction", async () => {
-        const database = moduleDatabase(userInputMigrations, "user-input-tool-wait");
+    it("gives every request its own identity when the caller names none", async () => {
+        const module = createUserInputModule();
+        const database = createUserInputDatabase(module, "user-input-generated-identity");
         await database.ready;
         try {
-            const module = createModule();
+            const first = await module.ask(database.context, agentId, askInput);
+            const second = await module.ask(database.context, agentId, askInput);
+
+            expect(first.id).not.toBe(second.id);
+            expect(first.id).toMatch(/^[0-9a-f]{32}$/u);
+            await expect(module.get(database.context, agentId, first.id)).resolves.toEqual(first);
+        } finally {
+            database.close();
+        }
+    });
+
+    it("uses the provider call ID, does not commit manually, and waits outside its transaction", async () => {
+        const module = createUserInputModule();
+        const database = createUserInputDatabase(module, "user-input-tool-wait");
+        await database.ready;
+        try {
             const tool = requestUserInputTool(module, agentId);
             expect(tool.durable).toBe(false);
             expect(tool.transactional).toBeUndefined();
@@ -106,11 +87,13 @@ describe("UserInputModule", () => {
         }
     });
 
-    it("settles unavailable tool requests in a narrow second transaction", async () => {
-        const database = moduleDatabase(userInputMigrations, "user-input-away");
+    it("settles a request nobody is there to answer in a narrow second transaction", async () => {
+        const presence = createPresenceModule();
+        const module = createUserInputModule(presence);
+        const database = createUserInputDatabase(module, "user-input-away");
         await database.ready;
         try {
-            const module = createModule({ presence: { isAvailable: () => false } });
+            await presence.setPresence(database.context, { status: "away" });
             const tool = requestUserInputTool(module, agentId);
 
             await expect(
@@ -125,19 +108,16 @@ describe("UserInputModule", () => {
     });
 
     it("publishes transactional and post-commit events around the mutation", async () => {
-        const database = moduleDatabase(userInputMigrations, "user-input-events");
+        const module = createUserInputModule();
+        const database = createUserInputDatabase(module, "user-input-events");
         await database.ready;
         try {
             const order: string[] = [];
-            const module = createModule({
-                listener: {
-                    onEventTransactional: async (ctx) => {
-                        order.push(ctx.db === database.database ? "wrong" : "transactional");
-                    },
-                    onEvent: async () => {
-                        order.push("post-commit");
-                    },
-                },
+            module.onEventTransactional((ctx) => {
+                order.push(ctx.db === database.database ? "wrong" : "transactional");
+            });
+            module.onEvent(() => {
+                order.push("post-commit");
             });
 
             await module.ask(database.context, agentId, askInput, "event-request");
@@ -147,11 +127,46 @@ describe("UserInputModule", () => {
         }
     });
 
-    it("keeps cross-agent access denied unless explicitly authorized", async () => {
-        const database = moduleDatabase(userInputMigrations, "user-input-auth");
+    it("stops telling a watcher that has unsubscribed", async () => {
+        const module = createUserInputModule();
+        const database = createUserInputDatabase(module, "user-input-unsubscribe");
         await database.ready;
         try {
-            const module = createModule();
+            const seen: string[] = [];
+            const stop = module.onEvent((_ctx, event) => {
+                seen.push(event.type);
+            });
+            await module.ask(database.context, agentId, askInput, "watched");
+            await vi.waitFor(() => expect(seen).toEqual(["user_input_requested"]));
+
+            stop();
+            await module.answer(database.context, agentId, {
+                requestId: "watched",
+                answer: "Done.",
+            });
+            expect(seen).toEqual(["user_input_requested"]);
+        } finally {
+            database.close();
+        }
+    });
+
+    it("refuses a watcher that is not a function", () => {
+        const module = createUserInputModule();
+        for (const candidate of [undefined, null, 42, "listener", {}]) {
+            expect(() => module.onEvent(candidate as never)).toThrow(
+                "User input event listener must be a function.",
+            );
+            expect(() => module.onEventTransactional(candidate as never)).toThrow(
+                "User input event listener must be a function.",
+            );
+        }
+    });
+
+    it("keeps cross-agent access denied when nothing says the agents are related", async () => {
+        const module = createUserInputModule();
+        const database = createUserInputDatabase(module, "user-input-auth");
+        await database.ready;
+        try {
             const request = await module.ask(
                 database.context,
                 agentId,
@@ -174,10 +189,10 @@ describe("UserInputModule", () => {
     });
 
     it("exposes cancel_ask and withdraws a pending request", async () => {
-        const database = moduleDatabase(userInputMigrations, "user-input-cancel-tool");
+        const module = createUserInputModule();
+        const database = createUserInputDatabase(module, "user-input-cancel-tool");
         await database.ready;
         try {
-            const module = createModule();
             const hooks = await resolveModuleHooks(database.context, module);
             const tools = await hooks.tools!(database.context, {
                 agent: { id: agentId },
@@ -196,10 +211,10 @@ describe("UserInputModule", () => {
     });
 
     it("stores and settles a related batch of questions as one Inbox request", async () => {
-        const database = moduleDatabase(userInputMigrations, "user-input-batch");
+        const module = createUserInputModule();
+        const database = createUserInputDatabase(module, "user-input-batch");
         await database.ready;
         try {
-            const module = createModule();
             const waiting = requestUserInputTool(module, agentId).execute(
                 database.context,
                 {
@@ -260,10 +275,10 @@ describe("UserInputModule", () => {
     });
 
     it("records the auto-resolution window on the request it waits on", async () => {
-        const database = moduleDatabase(userInputMigrations, "user-input-auto-resolution");
+        const module = createUserInputModule();
+        const database = createUserInputDatabase(module, "user-input-auto-resolution");
         await database.ready;
         try {
-            const module = createModule();
             const waiting = requestUserInputTool(module, agentId).execute(
                 database.context,
                 {
@@ -292,43 +307,22 @@ describe("UserInputModule", () => {
     });
 
     it("re-evaluates a live presence change while a wait is in flight", async () => {
-        const database = moduleDatabase(userInputMigrations, "user-input-presence-change");
+        const presence = createPresenceModule();
+        const module = createUserInputModule(presence);
+        const database = createUserInputDatabase(module, "user-input-presence-change");
         await database.ready;
         try {
-            let current: UserInputPresenceState = {
-                answerWaitMs: null,
-                title: "Online",
-                emoji: "🟢",
-                prompt: "You can reach the user now.",
-            };
-            const listeners = new Set<
-                (ctx: Context, state: UserInputPresenceState | undefined) => void
-            >();
-            const module = createModule({
-                presence: {
-                    state: () => current,
-                    subscribe: (_ctx, _agentId, callback) => {
-                        listeners.add(callback);
-                        return () => listeners.delete(callback);
-                    },
-                },
-            });
+            await presence.setPresence(database.context, { status: "online" });
             const request = await module.ask(database.context, agentId, askInput, "presence-call");
             const waiting = module.wait(database.context, agentId, request.id);
-            await vi.waitFor(() => expect(listeners.size).toBe(1));
-            current = {
-                answerWaitMs: 0,
-                title: "Away",
-                emoji: "🌙",
-                prompt: "Do not wait for an answer; keep working.",
-                changesAt: 200,
-            };
-            for (const listener of listeners) listener(database.context, current);
+
+            // The person steps away: presence tells everyone watching, and the wait it was
+            // holding open ends with the guidance that state carries.
+            await presence.setPresence(database.context, { status: "away" });
             const result = await waiting;
             expect(result.status).toBe("away");
             const text = formatUserInputForModel(result);
             expect(text).toContain("Away 🌙");
-            expect(text).toContain("Do not wait for an answer");
             expect(text).toContain("cancel_ask");
             expect(text).toContain("best judgement");
         } finally {

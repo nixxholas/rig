@@ -2,11 +2,14 @@ import {
     type AgentModule,
     type AgentModuleHooks,
     type AgentModuleScope,
+    type AgentSystemRef,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { afterCommit, type Context } from "@steve.kite/stdlib";
+
+import { PresenceModule } from "../presence/index.js";
 
 import {
     assertUserInputAnswer,
@@ -35,7 +38,6 @@ import {
     userInputListQuerySchema,
     userInputPageSchema,
     userInputRequestIdSchema,
-    userInputTimestampSchema,
     userInputPresenceStateSchema,
     userInputToolInputSchema,
     type UserInputAnswer,
@@ -56,102 +58,29 @@ import {
     type UserInputWaitInput,
 } from "./UserInputRequest.js";
 import {
-    userInputContextSchema,
+    assertUserInputEventListener,
     userInputEventSchema,
-    userInputModuleListenerSchema,
     type UserInputEvent,
-    type UserInputModuleListener,
+    type UserInputEventListener,
+    type UserInputUnsubscribe,
 } from "./UserInputEvent.js";
 import {
     assertUserInputPage,
     assertUserInputVoidResult,
-    userInputAuthorizationSchema,
-    userInputPresencePolicySchema,
-    type UserInputAuthorization,
     type UserInputAuthorizationAction,
-    type UserInputPresencePolicy,
     type UserInputStore,
 } from "./UserInputStore.js";
 import { createSqliteUserInputStorage, userInputMigrations } from "./SqliteUserInputStorage.js";
 import { cancelAskTool } from "./tools/cancel_ask.js";
 import { requestUserInputTool } from "./tools/request_user_input.js";
 
-const DEFAULT_PAGE_SIZE = 50;
-const DEFAULT_OUTPUT_CHARACTERS = 8_000;
-const DEFAULT_MAX_QUESTION_CHARACTERS = MAX_USER_INPUT_QUESTION_CHARACTERS;
-const DEFAULT_MAX_CONTEXT_CHARACTERS = MAX_USER_INPUT_CONTEXT_CHARACTERS;
-const DEFAULT_MAX_ANSWER_CHARACTERS = MAX_USER_INPUT_ANSWER_CHARACTERS;
-const DEFAULT_MAX_OPTION_COUNT = MAX_USER_INPUT_OPTION_COUNT;
-const DEFAULT_MAX_OPTION_LABEL_CHARACTERS = MAX_USER_INPUT_OPTION_LABEL_CHARACTERS;
-const DEFAULT_MAX_OPTION_DESCRIPTION_CHARACTERS = MAX_USER_INPUT_OPTION_DESCRIPTION_CHARACTERS;
-const DEFAULT_MAX_CANCEL_REASON_CHARACTERS = MAX_USER_INPUT_CANCEL_REASON_CHARACTERS;
-const DEFAULT_MAX_DETAIL_PAGE_CHARACTERS = MAX_USER_INPUT_DETAIL_PAGE_CHARACTERS;
+/** The most requests one list page may return. */
+export const MAX_USER_INPUT_PAGE_SIZE = 50;
+/** The most characters any model-facing rendering may occupy. */
+export const MAX_USER_INPUT_OUTPUT_CHARACTERS = 8_000;
+/** How far up the family tree an agent is looked for before the answer is no. */
+const MAX_USER_INPUT_ANCESTRY_DEPTH = 64;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
-
-const voidOrPromiseVoidSchema = Type.Union([Type.Void(), Type.Promise(Type.Void())]);
-export const userInputIdFactorySchema = Type.Function(
-    [userInputContextSchema, userInputAgentIdSchema],
-    Type.Union([userInputRequestIdSchema, Type.Promise(userInputRequestIdSchema)]),
-);
-export const userInputEventIdFactorySchema = Type.Function(
-    [userInputContextSchema, userInputAgentIdSchema],
-    Type.Union([userInputEventIdSchema, Type.Promise(userInputEventIdSchema)]),
-);
-export const userInputClockSchema = Type.Function(
-    [userInputContextSchema, userInputAgentIdSchema],
-    userInputTimestampSchema,
-);
-
-export const userInputModuleOptionsSchema = Type.Object(
-    {
-        presence: Type.Optional(userInputPresencePolicySchema),
-        authorization: Type.Optional(userInputAuthorizationSchema),
-        idFactory: Type.Optional(userInputIdFactorySchema),
-        eventIdFactory: Type.Optional(userInputEventIdFactorySchema),
-        clock: Type.Optional(userInputClockSchema),
-        listener: Type.Optional(userInputModuleListenerSchema),
-        maxPageSize: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
-        maxOutputCharacters: Type.Optional(Type.Integer({ minimum: 256, maximum: 100_000 })),
-        onPostCommitError: Type.Optional(
-            Type.Function(
-                [userInputContextSchema, userInputEventSchema, Type.Unknown()],
-                voidOrPromiseVoidSchema,
-            ),
-        ),
-        maxQuestionCharacters: Type.Optional(
-            Type.Integer({ minimum: 1, maximum: MAX_USER_INPUT_QUESTION_CHARACTERS }),
-        ),
-        maxContextCharacters: Type.Optional(
-            Type.Integer({ minimum: 1, maximum: MAX_USER_INPUT_CONTEXT_CHARACTERS }),
-        ),
-        maxAnswerCharacters: Type.Optional(
-            Type.Integer({ minimum: 1, maximum: MAX_USER_INPUT_ANSWER_CHARACTERS }),
-        ),
-        maxOptionCount: Type.Optional(
-            Type.Integer({ minimum: 1, maximum: MAX_USER_INPUT_OPTION_COUNT }),
-        ),
-        maxOptionLabelCharacters: Type.Optional(
-            Type.Integer({ minimum: 1, maximum: MAX_USER_INPUT_OPTION_LABEL_CHARACTERS }),
-        ),
-        maxOptionDescriptionCharacters: Type.Optional(
-            Type.Integer({ minimum: 1, maximum: MAX_USER_INPUT_OPTION_DESCRIPTION_CHARACTERS }),
-        ),
-        maxCancelReasonCharacters: Type.Optional(
-            Type.Integer({ minimum: 1, maximum: MAX_USER_INPUT_CANCEL_REASON_CHARACTERS }),
-        ),
-        maxDetailPageCharacters: Type.Optional(
-            Type.Integer({ minimum: 1, maximum: MAX_USER_INPUT_DETAIL_PAGE_CHARACTERS }),
-        ),
-    },
-    { additionalProperties: false },
-);
-
-export const userInputPostCommitErrorSchema = Type.Function(
-    [userInputContextSchema, userInputEventSchema, Type.Unknown()],
-    voidOrPromiseVoidSchema,
-);
-
-export type UserInputModuleOptions = Static<typeof userInputModuleOptionsSchema>;
 
 type UserInputWaitOutcome =
     | {
@@ -179,54 +108,15 @@ export class UserInputModule implements AgentModule {
     readonly #store: UserInputStore;
     /** In-flight waits, woken by the settling transaction once it commits. */
     readonly #waiters = new Map<string, Set<(request: UserInputRequest) => void>>();
-    readonly #presence: UserInputPresencePolicy | undefined;
-    readonly #authorization: UserInputAuthorization | undefined;
-    readonly #idFactory: NonNullable<UserInputModuleOptions["idFactory"]>;
-    readonly #eventIdFactory: NonNullable<UserInputModuleOptions["eventIdFactory"]>;
-    readonly #clock: NonNullable<UserInputModuleOptions["clock"]>;
-    readonly #listener: UserInputModuleListener | undefined;
-    readonly #onPostCommitError: UserInputModuleOptions["onPostCommitError"];
-    readonly #maxPageSize: number;
-    readonly #maxOutputCharacters: number;
-    readonly #maxQuestionCharacters: number;
-    readonly #maxContextCharacters: number;
-    readonly #maxAnswerCharacters: number;
-    readonly #maxOptionCount: number;
-    readonly #maxOptionLabelCharacters: number;
-    readonly #maxOptionDescriptionCharacters: number;
-    readonly #maxCancelReasonCharacters: number;
-    readonly #maxDetailPageCharacters: number;
+    readonly #presence: PresenceModule;
+    readonly #transactionalListeners = new Set<UserInputEventListener>();
+    readonly #listeners = new Set<UserInputEventListener>();
+    /** The collection this module runs in, which is where one agent's family tree is known. */
+    #agents: AgentSystemRef | undefined;
 
-    constructor(options: UserInputModuleOptions) {
-        const validated = validateOptions(options);
+    constructor(presence: PresenceModule) {
         this.#store = createSqliteUserInputStorage();
-        this.#presence = validated.presence;
-        this.#authorization = validated.authorization;
-        this.#idFactory =
-            validated.idFactory ??
-            ((_ctx, _agentId) => globalThis.crypto.randomUUID().replaceAll("-", ""));
-        this.#eventIdFactory =
-            validated.eventIdFactory ??
-            ((_ctx, _agentId) => globalThis.crypto.randomUUID().replaceAll("-", ""));
-        this.#clock = validated.clock ?? ((_ctx, _agentId) => Date.now());
-        this.#listener = validated.listener;
-        this.#onPostCommitError = validated.onPostCommitError;
-        this.#maxPageSize = validated.maxPageSize ?? DEFAULT_PAGE_SIZE;
-        this.#maxOutputCharacters = validated.maxOutputCharacters ?? DEFAULT_OUTPUT_CHARACTERS;
-        this.#maxQuestionCharacters =
-            validated.maxQuestionCharacters ?? DEFAULT_MAX_QUESTION_CHARACTERS;
-        this.#maxContextCharacters =
-            validated.maxContextCharacters ?? DEFAULT_MAX_CONTEXT_CHARACTERS;
-        this.#maxAnswerCharacters = validated.maxAnswerCharacters ?? DEFAULT_MAX_ANSWER_CHARACTERS;
-        this.#maxOptionCount = validated.maxOptionCount ?? DEFAULT_MAX_OPTION_COUNT;
-        this.#maxOptionLabelCharacters =
-            validated.maxOptionLabelCharacters ?? DEFAULT_MAX_OPTION_LABEL_CHARACTERS;
-        this.#maxOptionDescriptionCharacters =
-            validated.maxOptionDescriptionCharacters ?? DEFAULT_MAX_OPTION_DESCRIPTION_CHARACTERS;
-        this.#maxCancelReasonCharacters =
-            validated.maxCancelReasonCharacters ?? DEFAULT_MAX_CANCEL_REASON_CHARACTERS;
-        this.#maxDetailPageCharacters =
-            validated.maxDetailPageCharacters ?? DEFAULT_MAX_DETAIL_PAGE_CHARACTERS;
+        this.#presence = presence;
     }
 
     readonly #hooks: AgentModuleHooks = {
@@ -239,7 +129,31 @@ export class UserInputModule implements AgentModule {
         },
     };
 
-    readonly beforeStart = (): AgentModuleHooks => this.#hooks;
+    readonly beforeStart = (_ctx: Context, agents: AgentSystemRef): AgentModuleHooks => {
+        this.#agents = agents;
+        return this.#hooks;
+    };
+
+    /** Watch every committed question and settlement; call the returned function to stop. */
+    onEvent(listener: UserInputEventListener): UserInputUnsubscribe {
+        assertUserInputEventListener(listener);
+        this.#listeners.add(listener);
+        return () => {
+            this.#listeners.delete(listener);
+        };
+    }
+
+    /**
+     * Watch from inside the transaction that makes the change, so a caller can write its own
+     * record in the same commit. A listener that throws rolls the change back.
+     */
+    onEventTransactional(listener: UserInputEventListener): UserInputUnsubscribe {
+        assertUserInputEventListener(listener);
+        this.#transactionalListeners.add(listener);
+        return () => {
+            this.#transactionalListeners.delete(listener);
+        };
+    }
 
     async ask(
         ctx: Context,
@@ -250,7 +164,7 @@ export class UserInputModule implements AgentModule {
         this.#assertAgentId(agentId);
         this.#assertInput(userInputToolInputSchema, input, "user input request");
         this.#assertAskBounds(input);
-        const id = requestId ?? (await this.#newIdentity(ctx, agentId));
+        const id = requestId ?? newIdentity();
         this.#assertValue(userInputRequestIdSchema, id, "request identity");
         const request = await ctx.inTx((txCtx) =>
             this.#createOrResume(txCtx, agentId, id, structuredClone(input)),
@@ -299,7 +213,7 @@ export class UserInputModule implements AgentModule {
     ): Promise<UserInputRequest> {
         this.#assertAgentId(agentId);
         this.#assertInput(userInputAnswerInputUnionSchema, input, "user input answer");
-        if (answerCharactersForInput(input) > this.#maxAnswerCharacters) {
+        if (answerCharactersForInput(input) > MAX_USER_INPUT_ANSWER_CHARACTERS) {
             throw new Error("User input answer exceeds its configured bound.");
         }
         const request = await ctx.inTx(async (txCtx) => {
@@ -308,7 +222,7 @@ export class UserInputModule implements AgentModule {
             if (isUserInputTerminal(current)) {
                 return current;
             }
-            const at = this.#now(ctx, agentId);
+            const at = now();
             const answeredFields =
                 "answer" in input
                     ? this.#singleAnswerFields(current, input.answer)
@@ -332,7 +246,7 @@ export class UserInputModule implements AgentModule {
     ): Promise<UserInputRequest> {
         this.#assertAgentId(agentId);
         this.#assertInput(userInputCancelInputSchema, input, "user input cancellation");
-        if (input.reason.length > this.#maxCancelReasonCharacters) {
+        if (input.reason.length > MAX_USER_INPUT_CANCEL_REASON_CHARACTERS) {
             throw new Error("User input cancellation reason exceeds its configured bound.");
         }
         const request = await ctx.inTx(async (txCtx) => {
@@ -344,7 +258,7 @@ export class UserInputModule implements AgentModule {
             const cancelled = this.#terminalRequest(
                 current,
                 { outcome: "cancelled", reason: input.reason },
-                this.#now(ctx, agentId),
+                now(),
             );
             return await this.#persistTransition(txCtx, agentId, "user_input_cancelled", cancelled);
         });
@@ -363,11 +277,11 @@ export class UserInputModule implements AgentModule {
             await this.#authorize(txCtx, agentId, current.askingAgentId, "complete");
             if (isUserInputTerminal(current)) {
                 if (input.outcome === "timed_out") {
-                    this.#assertTimeout(current, input.deadlineAt, this.#now(ctx, agentId));
+                    this.#assertTimeout(current, input.deadlineAt, now());
                 }
                 return current;
             }
-            const terminal = this.#terminalRequest(current, input, this.#now(ctx, agentId));
+            const terminal = this.#terminalRequest(current, input, now());
             return await this.#persistTransition(
                 txCtx,
                 agentId,
@@ -387,9 +301,9 @@ export class UserInputModule implements AgentModule {
         this.#assertInput(userInputListQuerySchema, query, "user input list query");
         const targetAgentId = query.askingAgentId ?? agentId;
         await this.#authorize(ctx, agentId, targetAgentId, "list");
-        const limit = query.limit ?? this.#maxPageSize;
-        if (limit > this.#maxPageSize) {
-            throw new Error(`User input page limit cannot exceed ${String(this.#maxPageSize)}.`);
+        const limit = query.limit ?? MAX_USER_INPUT_PAGE_SIZE;
+        if (limit > MAX_USER_INPUT_PAGE_SIZE) {
+            throw new Error(`User input page limit cannot exceed ${String(MAX_USER_INPUT_PAGE_SIZE)}.`);
         }
         const requestedCursor = query.cursor ?? "0";
         assertSourceCursor(requestedCursor, "requests");
@@ -427,7 +341,7 @@ export class UserInputModule implements AgentModule {
                 );
             }
         }
-        return structuredClone(fitUserInputPage(page, this.#maxOutputCharacters));
+        return structuredClone(fitUserInputPage(page, MAX_USER_INPUT_OUTPUT_CHARACTERS));
     }
 
     async list(
@@ -468,13 +382,13 @@ export class UserInputModule implements AgentModule {
         if (query.limit !== undefined && query.detailLimit !== undefined) {
             throw new Error("User input detail query cannot specify both limit and detailLimit.");
         }
-        const requestedLimit = query.limit ?? query.detailLimit ?? this.#maxDetailPageCharacters;
-        if (requestedLimit > this.#maxDetailPageCharacters) {
+        const requestedLimit = query.limit ?? query.detailLimit ?? MAX_USER_INPUT_DETAIL_PAGE_CHARACTERS;
+        if (requestedLimit > MAX_USER_INPUT_DETAIL_PAGE_CHARACTERS) {
             throw new Error("User input detail page exceeds its configured bound.");
         }
         const limit = Math.min(
             requestedLimit,
-            detailModelCharacterLimit(request, this.#maxOutputCharacters),
+            detailModelCharacterLimit(request, MAX_USER_INPUT_OUTPUT_CHARACTERS),
         );
         const part = detail.slice(start, start + limit);
         const page: UserInputDetailPage = {
@@ -491,15 +405,15 @@ export class UserInputModule implements AgentModule {
     }
 
     formatForModel(request: UserInputRequest): string {
-        return formatUserInputForModel(request, this.#maxOutputCharacters);
+        return formatUserInputForModel(request, MAX_USER_INPUT_OUTPUT_CHARACTERS);
     }
 
     formatPageForModel(page: UserInputPage): string {
-        return formatUserInputPageForModel(page, this.#maxOutputCharacters);
+        return formatUserInputPageForModel(page, MAX_USER_INPUT_OUTPUT_CHARACTERS);
     }
 
     formatDetailPageForModel(page: UserInputDetailPage): string {
-        return formatUserInputDetailPageForModel(page, this.#maxOutputCharacters);
+        return formatUserInputDetailPageForModel(page, MAX_USER_INPUT_OUTPUT_CHARACTERS);
     }
 
     async #createOrResume(
@@ -513,7 +427,7 @@ export class UserInputModule implements AgentModule {
             this.#assertSameRequest(current, input, requestId, agentId);
             return current;
         }
-        const at = this.#now(ctx, agentId);
+        const at = now();
         const questions = normalizeQuestions(input);
         const first = questions[0]!;
         const isBatch = "questions" in input;
@@ -535,7 +449,7 @@ export class UserInputModule implements AgentModule {
         };
         this.#assertRequest(request);
         await this.#writeRequest(ctx, request);
-        const event = await this.#newEvent(ctx, agentId, "user_input_requested", request);
+        const event = this.#newEvent(agentId, "user_input_requested", request);
         await this.#announce(ctx, event);
         return request;
     }
@@ -551,7 +465,7 @@ export class UserInputModule implements AgentModule {
         if (isUserInputTerminal(current)) {
             return current;
         }
-        const terminal = this.#terminalRequest(current, outcome, this.#now(ctx, agentId));
+        const terminal = this.#terminalRequest(current, outcome, now());
         return await this.#persistTransition(ctx, agentId, "user_input_completed", terminal);
     }
 
@@ -563,22 +477,21 @@ export class UserInputModule implements AgentModule {
     ): Promise<UserInputRequest> {
         this.#assertRequest(request);
         await this.#writeRequest(ctx, request);
-        const event = await this.#newEvent(ctx, agentId, eventType, request);
+        const event = this.#newEvent(agentId, eventType, request);
         await this.#announce(ctx, event);
         return request;
     }
 
-    async #newEvent(
-        ctx: Context,
+    #newEvent(
         actingAgentId: string,
         type: UserInputEvent["type"],
         request: UserInputRequest,
-    ): Promise<UserInputEvent> {
-        const eventId = await this.#eventIdFactory(ctx, actingAgentId);
+    ): UserInputEvent {
+        const eventId = newIdentity();
         this.#assertValue(userInputEventIdSchema, eventId, "event identity");
         const event = {
             eventId,
-            at: this.#now(ctx, actingAgentId),
+            at: now(),
             actingAgentId,
             requestId: request.id,
             type,
@@ -590,10 +503,9 @@ export class UserInputModule implements AgentModule {
 
     async #announce(ctx: Context, event: UserInputEvent): Promise<void> {
         const frozen = cloneAndFreeze(event);
-        await invokeVoid(
-            this.#listener?.onEventTransactional?.(ctx, frozen),
-            "User input transactional listener",
-        );
+        for (const listener of this.#transactionalListeners) {
+            await invokeVoid(listener(ctx, frozen), "User input transactional listener");
+        }
         afterCommit(ctx, (postCommitCtx) => {
             this.#wakeWaiters(frozen.request);
             return this.#notifyPostCommit(postCommitCtx, frozen);
@@ -635,19 +547,21 @@ export class UserInputModule implements AgentModule {
     }
 
     async #notifyPostCommit(ctx: Context, event: UserInputEvent): Promise<void> {
-        try {
-            await invokeVoid(
-                this.#listener?.onEvent?.(ctx, event),
-                "User input post-commit listener",
-            );
-        } catch (error: unknown) {
+        for (const listener of this.#listeners) {
             try {
-                await invokeVoid(
-                    this.#onPostCommitError?.(ctx, event, error),
-                    "User input post-commit error handler",
-                );
-            } catch {
-                // Post-commit observation cannot undo durable state.
+                await invokeVoid(listener(ctx, event), "User input post-commit listener");
+            } catch (error: unknown) {
+                try {
+                    // The request is already durable, so a failed watcher is something to
+                    // report rather than a reason to undo what the person was told.
+                    ctx.log.warn(
+                        "A user input listener failed after the change was saved.",
+                        { eventId: event.eventId, type: event.type },
+                        error,
+                    );
+                } catch {
+                    // Post-commit observation cannot undo durable state.
+                }
             }
         }
     }
@@ -683,7 +597,7 @@ export class UserInputModule implements AgentModule {
         requestId: string,
         request: Extract<UserInputRequest, { status: "pending" }>,
     ): Promise<UserInputRequest> {
-        let presence = await this.#readPresenceState(ctx, agentId);
+        let presence = await this.#readPresenceState(ctx);
         let timer: ReturnType<typeof setTimeout> | undefined;
         let unsubscribe: (() => void) | undefined;
         let resolveOutcome: ((outcome: UserInputWaitOutcome) => void) | undefined;
@@ -696,7 +610,7 @@ export class UserInputModule implements AgentModule {
         const elapsed = (): number =>
             Math.min(
                 MAX_USER_INPUT_TIMESTAMP,
-                Math.max(0, this.#now(ctx, agentId) - request.createdAt),
+                Math.max(0, now() - request.createdAt),
             );
         const clearTimer = (): void => {
             if (timer === undefined) return;
@@ -712,7 +626,7 @@ export class UserInputModule implements AgentModule {
         const armTimer = (dueAt: number | undefined, state: UserInputPresenceState | undefined) => {
             clearTimer();
             if (dueAt === undefined) return;
-            const delay = Math.max(0, dueAt - this.#now(ctx, agentId));
+            const delay = Math.max(0, dueAt - now());
             timer = setTimeout(
                 () => {
                     timer = undefined;
@@ -746,7 +660,7 @@ export class UserInputModule implements AgentModule {
             const presenceDeadline =
                 state?.answerWaitMs === null || state === undefined
                     ? undefined
-                    : this.#safeAdd(this.#now(ctx, agentId), state.answerWaitMs);
+                    : this.#safeAdd(now(), state.answerWaitMs);
             const deadlineAt =
                 requestDeadline === undefined
                     ? presenceDeadline
@@ -765,37 +679,22 @@ export class UserInputModule implements AgentModule {
         const watch = this.#watchSettlement(requestId);
         try {
             rearm(presence);
-            if (this.#presence !== undefined) {
-                const subscribe = this.#presence.subscribe ?? this.#presence.onChange;
-                if (subscribe !== undefined) {
-                    const callback = async (
-                        _changeCtx: Context,
-                        state: UserInputPresenceState | undefined,
-                    ) => {
-                        try {
-                            if (state !== undefined) {
-                                this.#assertValue(
-                                    userInputPresenceStateSchema,
-                                    state,
-                                    "user input presence state",
-                                );
-                            }
-                            rearm(state === undefined ? undefined : structuredClone(state));
-                        } catch (error: unknown) {
-                            settled = true;
-                            clearTimer();
-                            rejectOutcome?.(error);
-                        }
-                    };
-                    const returned = await subscribe.call(this.#presence, ctx, agentId, callback);
-                    if (returned !== undefined && typeof returned !== "function") {
-                        throw new Error(
-                            "User input presence subscription returned an invalid cleanup.",
+            unsubscribe = await this.#presence.subscribeUserInput(ctx, (_changeCtx, state) => {
+                try {
+                    if (state !== undefined) {
+                        this.#assertValue(
+                            userInputPresenceStateSchema,
+                            state,
+                            "user input presence state",
                         );
                     }
-                    if (typeof returned === "function") unsubscribe = returned;
+                    rearm(state === undefined ? undefined : structuredClone(state));
+                } catch (error: unknown) {
+                    settled = true;
+                    clearTimer();
+                    rejectOutcome?.(error);
                 }
-            }
+            });
             // A settlement committed before this wait registered is only visible in storage.
             const alreadySettled = await this.#readRequest(ctx, requestId);
             if (alreadySettled !== undefined && isUserInputTerminal(alreadySettled)) {
@@ -826,15 +725,15 @@ export class UserInputModule implements AgentModule {
         agentId: string,
         request: Extract<UserInputRequest, { status: "pending" }>,
     ): Promise<UserInputWaitOutcome | undefined> {
-        const now = this.#now(ctx, agentId);
-        const presence = await this.#readPresenceState(ctx, agentId);
+        const at = now();
+        const presence = await this.#readPresenceState(ctx);
         const deadlineAt = this.#requestDeadline(request);
-        if (deadlineAt !== undefined && deadlineAt <= now) {
+        if (deadlineAt !== undefined && deadlineAt <= at) {
             return {
                 outcome: "timed_out",
                 deadlineAt,
                 ...(presence === undefined ? {} : { presence }),
-                waitedMs: Math.min(MAX_USER_INPUT_TIMESTAMP, Math.max(0, now - request.createdAt)),
+                waitedMs: Math.min(MAX_USER_INPUT_TIMESTAMP, Math.max(0, at - request.createdAt)),
             };
         }
         if (presence !== undefined) {
@@ -844,7 +743,7 @@ export class UserInputModule implements AgentModule {
                     presence,
                     waitedMs: Math.min(
                         MAX_USER_INPUT_TIMESTAMP,
-                        Math.max(0, now - request.createdAt),
+                        Math.max(0, at - request.createdAt),
                     ),
                 };
             }
@@ -958,31 +857,32 @@ export class UserInputModule implements AgentModule {
         }
     }
 
+    /**
+     * A question belongs to the agent that asked it. Its own answer is always its business, and
+     * an agent that started that agent — its parent, or a parent's parent — may act for it,
+     * because the work it delegated is the work the question came out of. Everyone else is
+     * refused, including an agent that was never created by this collection.
+     */
     async #authorize(
         ctx: Context,
         actingAgentId: string,
         askingAgentId: string,
-        action: UserInputAuthorizationAction,
+        _action: UserInputAuthorizationAction,
     ): Promise<void> {
         if (actingAgentId === askingAgentId) return;
-        const allowed =
-            this.#authorization === undefined
-                ? false
-                : await this.#authorization.authorize(ctx, actingAgentId, askingAgentId, action);
-        if (typeof allowed !== "boolean") {
-            throw new Error("User input authorization returned a non-boolean result.");
+        const agents = this.#agents;
+        if (agents === undefined) throw new Error("User input access is not authorized.");
+        let descendantId: string | null = askingAgentId;
+        for (let depth = 0; depth < MAX_USER_INPUT_ANCESTRY_DEPTH; depth += 1) {
+            descendantId = await agents.parentOf(ctx, descendantId);
+            if (descendantId === null) break;
+            if (descendantId === actingAgentId) return;
         }
-        if (!allowed) throw new Error("User input access is not authorized.");
-    }
-
-    async #newIdentity(ctx: Context, agentId: string): Promise<string> {
-        const value = await this.#idFactory(ctx, agentId);
-        this.#assertValue(userInputRequestIdSchema, value, "request identity");
-        return value;
+        throw new Error("User input access is not authorized.");
     }
 
     #assertAskBounds(input: UserInputAskInput): void {
-        if (input.context.length > this.#maxContextCharacters) {
+        if (input.context.length > MAX_USER_INPUT_CONTEXT_CHARACTERS) {
             throw new Error("User input context exceeds its configured bound.");
         }
         const questions = normalizeQuestions(input);
@@ -991,7 +891,7 @@ export class UserInputModule implements AgentModule {
         }
         const ids = new Set<string>();
         for (const question of questions) {
-            if (question.question.length > this.#maxQuestionCharacters) {
+            if (question.question.length > MAX_USER_INPUT_QUESTION_CHARACTERS) {
                 throw new Error("User input question exceeds its configured bound.");
             }
             if (
@@ -1006,44 +906,25 @@ export class UserInputModule implements AgentModule {
             ids.add(question.id);
             assertUserInputOptions(question.options);
             if (question.options === undefined) continue;
-            if (question.options.choices.length > this.#maxOptionCount) {
+            if (question.options.choices.length > MAX_USER_INPUT_OPTION_COUNT) {
                 throw new Error("User input options exceed their configured count.");
             }
             for (const choice of question.options.choices) {
-                if (choice.label.length > this.#maxOptionLabelCharacters) {
+                if (choice.label.length > MAX_USER_INPUT_OPTION_LABEL_CHARACTERS) {
                     throw new Error("User input option label exceeds its configured bound.");
                 }
-                if (choice.description.length > this.#maxOptionDescriptionCharacters) {
+                if (choice.description.length > MAX_USER_INPUT_OPTION_DESCRIPTION_CHARACTERS) {
                     throw new Error("User input option description exceeds its configured bound.");
                 }
             }
         }
     }
 
-    async #readPresenceState(
-        ctx: Context,
-        agentId: string,
-    ): Promise<UserInputPresenceState | undefined> {
-        if (this.#presence === undefined) return undefined;
-        if (this.#presence.state !== undefined) {
-            const value = await this.#presence.state.call(this.#presence, ctx, agentId);
-            if (value !== undefined) {
-                this.#assertValue(userInputPresenceStateSchema, value, "user input presence state");
-                return structuredClone(value);
-            }
-        }
-        if (this.#presence.isAvailable === undefined) return undefined;
-        const available = await this.#presence.isAvailable.call(this.#presence, ctx, agentId);
-        if (typeof available !== "boolean") {
-            throw new Error("User input presence policy returned a non-boolean result.");
-        }
-        if (available) return undefined;
-        return {
-            answerWaitMs: 0,
-            title: "unavailable",
-            emoji: "⚠️",
-            prompt: "",
-        };
+    async #readPresenceState(ctx: Context): Promise<UserInputPresenceState | undefined> {
+        const value = await this.#presence.userInputState(ctx);
+        if (value === undefined) return undefined;
+        this.#assertValue(userInputPresenceStateSchema, value, "user input presence state");
+        return structuredClone(value);
     }
 
     #requestDeadline(request: {
@@ -1124,16 +1005,11 @@ export class UserInputModule implements AgentModule {
         if (!Value.Check(schema, value)) throw new Error(`Invalid ${label}.`);
     }
 
-    #now(ctx: Context, agentId: string): number {
-        const value = this.#clock(ctx, agentId);
-        this.#assertValue(userInputTimestampSchema, value, "clock value");
-        return value;
-    }
 }
 
 export function formatUserInputForModel(
     request: UserInputRequest,
-    maxOutputCharacters = DEFAULT_OUTPUT_CHARACTERS,
+    maxOutputCharacters = MAX_USER_INPUT_OUTPUT_CHARACTERS,
 ): string {
     assertUserInputRequest(request);
     const output = [
@@ -1149,7 +1025,7 @@ export function formatUserInputForModel(
 
 export function formatUserInputPageForModel(
     page: UserInputPage,
-    maxOutputCharacters = DEFAULT_OUTPUT_CHARACTERS,
+    maxOutputCharacters = MAX_USER_INPUT_OUTPUT_CHARACTERS,
 ): string {
     if (!Value.Check(userInputPageSchema, page)) throw new Error("User input page is invalid.");
     if (page.requests.length === 0) return "No user input requests.";
@@ -1168,7 +1044,7 @@ export function formatUserInputPageForModel(
 
 export function formatUserInputDetailPageForModel(
     page: UserInputDetailPage,
-    maxOutputCharacters = DEFAULT_OUTPUT_CHARACTERS,
+    maxOutputCharacters = MAX_USER_INPUT_OUTPUT_CHARACTERS,
 ): string {
     if (!Value.Check(userInputDetailPageSchema, page)) {
         throw new Error("User input detail page is invalid.");
@@ -1455,56 +1331,12 @@ async function invokeVoid(value: void | Promise<void> | undefined, label: string
     if (result !== undefined) throw new Error(`${label} must resolve to undefined.`);
 }
 
-function validateOptions(options: unknown): UserInputModuleOptions {
-    if (options === null || typeof options !== "object") {
-        throw new Error("User input module options are invalid.");
-    }
-    const source = options as Record<string, unknown>;
-    const view: Record<string, unknown> = { ...source };
-    if (source.presence !== undefined) {
-        view.presence = methodView(source.presence, [
-            "isAvailable",
-            "state",
-            "subscribe",
-            "onChange",
-        ]);
-        if (view.presence === null || typeof view.presence !== "object") {
-            throw new Error("User input presence policy is invalid.");
-        }
-        const presence = view.presence as Record<string, unknown>;
-        if (
-            presence.isAvailable === undefined &&
-            presence.state === undefined &&
-            presence.subscribe === undefined &&
-            presence.onChange === undefined
-        ) {
-            throw new Error(
-                "User input presence policy must expose a state or availability method.",
-            );
-        }
-    }
-    if (source.authorization !== undefined) {
-        view.authorization = methodView(source.authorization, ["authorize"]);
-    }
-    if (source.listener !== undefined) {
-        view.listener = methodView(source.listener, ["onEventTransactional", "onEvent"]);
-    }
-    if (!Value.Check(userInputModuleOptionsSchema, view)) {
-        throw new Error("User input module options are invalid.");
-    }
-    return options as UserInputModuleOptions;
+/** The wall clock the module reads; deliberately not injectable. */
+function now(): number {
+    return Date.now();
 }
 
-function methodView(value: unknown, names: readonly string[]): unknown {
-    if (value === null || (typeof value !== "object" && typeof value !== "function")) return value;
-    const source = value as Record<string, (...args: never[]) => unknown>;
-    const isPlain =
-        Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null;
-    const view: Record<string, unknown> = isPlain ? { ...source } : {};
-    for (const name of names) {
-        if (typeof source[name] === "function") {
-            view[name] = (...args: never[]) => source[name]!.apply(value, args);
-        }
-    }
-    return view;
+/** Fresh opaque identity for a request or an event. */
+function newIdentity(): string {
+    return globalThis.crypto.randomUUID().replaceAll("-", "");
 }

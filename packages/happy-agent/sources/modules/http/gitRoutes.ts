@@ -4,14 +4,13 @@ import { AgentHttpError, sendJson } from "./errors.js";
 import { createRouteGroup, type AgentHttpRouteGroup } from "./router.js";
 import { ProjectFileError, type ProjectFilesModule } from "../files/ProjectFilesModule.js";
 import { GitModule, gitWatchSchema } from "@slopus/happy-agent-modules";
-import type { GitStateTracker, GitTrackedEntity } from "@slopus/happy-agent-modules";
+import type { GitTrackedEntity } from "@slopus/happy-agent-modules";
 
 export interface GitRouteOptions {
     readonly agent: StartedHappyAgent;
     readonly files: ProjectFilesModule;
+    /** Git itself, holding the daemon's one live watcher. Watching registers with it. */
     readonly git: GitModule;
-    /** The daemon's one live watcher. Watching registers with it instead of scanning here. */
-    readonly tracker?: GitStateTracker;
 }
 
 export function createGitRoutes(options: GitRouteOptions): AgentHttpRouteGroup {
@@ -44,31 +43,17 @@ export function createGitRoutes(options: GitRouteOptions): AgentHttpRouteGroup {
                         throw error;
                     }
                 }
-                const tracker = options.tracker;
-                if (tracker === undefined) {
-                    // Only a caller that constructed these routes without the daemon's watcher
-                    // gets here; it still deserves an answer rather than a failure.
-                    sendJson(response, 200, {
-                        snapshots: await options.git.watch(
-                            body.entities.map((entity, index) => ({
-                                ...entity,
-                                root: tracked[index]?.path ?? "",
-                            })),
-                        ),
-                    });
-                    return;
-                }
                 // Watching is a subscription, not a scan. Each entity is registered with the one
                 // live watcher, which keeps its own bounded set of repositories, debounces file
                 // events and persists what it learns; the reply is whatever it already knows.
                 // A repository it has not scanned yet simply has no snapshot to report, and the
                 // next poll finds one, instead of this request walking 256 repositories in turn.
-                for (const { entity } of tracked) tracker.watch(ctx, entity);
+                for (const { entity } of tracked) options.git.track(entity);
                 const wanted = new Set(
                     tracked.map(({ entity }) => `${entity.projectId}:${entity.workspaceId ?? ""}`),
                 );
                 sendJson(response, 200, {
-                    snapshots: tracker
+                    snapshots: options.git
                         .liveSnapshots()
                         .filter((snapshot) =>
                             wanted.has(`${snapshot.projectId}:${snapshot.workspaceId ?? ""}`),

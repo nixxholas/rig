@@ -1,8 +1,8 @@
 import { existsSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { withPreservedNumericPrefix, type Workspace } from "@slopus/happy-agent-modules";
+import { type Workspace } from "@slopus/happy-agent-modules";
 import sharp from "sharp";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -123,9 +123,7 @@ describe("projects", () => {
         const test = await harness("project-default-branch");
         const project = await readyProject(test);
 
-        expect((await test.projects.get(test.ctx, project.id))?.defaultBranch).toBe(
-            "main",
-        );
+        expect((await test.projects.get(test.ctx, project.id))?.defaultBranch).toBe("main");
     });
 
     it("re-derives Git facts for a project whose branch moved underneath it", async () => {
@@ -164,12 +162,7 @@ describe("project pictures", () => {
             .png()
             .toBuffer();
 
-        const withAvatar = await test.projects.storeAvatarImage(
-            test.ctx,
-            project.id,
-            "user",
-            png,
-        );
+        const withAvatar = await test.projects.storeAvatarImage(test.ctx, project.id, "user", png);
 
         expect(withAvatar!.avatar?.mediaType).toBe("image/webp");
         expect(withAvatar!.avatar?.width).toBe(256);
@@ -202,20 +195,14 @@ describe("project pictures", () => {
     });
 
     it("clears a picture and eventually forgets the bytes nothing points at", async () => {
-        let clock = Date.now();
-        const test = await harness("project-avatar-gc", { now: () => clock });
+        const test = await harness("project-avatar-gc");
         const project = await readyProject(test);
         const png = await sharp({
             create: { background: "#3366ff", channels: 3, height: 64, width: 64 },
         })
             .png()
             .toBuffer();
-        const withAvatar = await test.projects.storeAvatarImage(
-            test.ctx,
-            project.id,
-            "user",
-            png,
-        );
+        const withAvatar = await test.projects.storeAvatarImage(test.ctx, project.id, "user", png);
         const hash = withAvatar!.avatar!.hash;
         const storedFile = join(
             test.stateDirectory,
@@ -233,22 +220,24 @@ describe("project pictures", () => {
         await test.projects.collectAvatarGarbage(test.ctx);
         expect(existsSync(storedFile)).toBe(true);
 
-        clock += 25 * 60 * 60 * 1000;
+        // The delay is measured against the file's own age off the real clock, so the way to make
+        // a picture old enough to forget is to make the file old.
+        const aged = new Date(Date.now() - 25 * 60 * 60 * 1000);
+        await utimes(storedFile, aged, aged);
         await test.projects.collectAvatarGarbage(test.ctx);
         expect(existsSync(storedFile)).toBe(false);
     });
 });
 
-describe("withPreservedNumericPrefix", () => {
-    it("keeps the number a person tells workspaces apart by", () => {
-        expect(withPreservedNumericPrefix("12 Untitled", "Login redirect")).toBe(
-            "12 Login redirect",
-        );
-        expect(withPreservedNumericPrefix("workspace-7", "Login redirect")).toBe("Login redirect");
-        expect(withPreservedNumericPrefix("07_untitled", "Login redirect")).toBe(
-            "07_Login redirect",
-        );
-        expect(withPreservedNumericPrefix("Untitled", "Login redirect")).toBe("Login redirect");
+describe("nameWithPreservedPrefix", () => {
+    it("keeps the number a person tells workspaces apart by", async () => {
+        const test = await harness("workspace-name-prefix");
+        const renamed = (current: string, generated: string): string =>
+            test.workspaces.nameWithPreservedPrefix(current, generated);
+        expect(renamed("12 Untitled", "Login redirect")).toBe("12 Login redirect");
+        expect(renamed("workspace-7", "Login redirect")).toBe("Login redirect");
+        expect(renamed("07_untitled", "Login redirect")).toBe("07_Login redirect");
+        expect(renamed("Untitled", "Login redirect")).toBe("Login redirect");
     });
 });
 
@@ -265,9 +254,9 @@ describe("starting up again", () => {
         expect((await ownedWorkspace(test, restarted, project.id, workspace.id))?.status).toBe(
             "ready",
         );
-        expect(
-            (await restarted.projects.get(test.ctx, project.id))?.initializationStatus,
-        ).toBe("ready");
+        expect((await restarted.projects.get(test.ctx, project.id))?.initializationStatus).toBe(
+            "ready",
+        );
     });
 
     it("replicates the sync files into a workspace made before they existed", async () => {

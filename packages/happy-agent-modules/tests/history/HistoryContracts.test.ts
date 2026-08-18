@@ -6,7 +6,6 @@ import {
     historyAgentSummariesSchema,
     historyAgentTargetSchema,
 } from "../../sources/history/HistoryAgent.js";
-import { assertHistoryReader, historyReaderSchema } from "../../sources/history/HistoryReader.js";
 import { historyPageSchema, historyQuerySchema } from "../../sources/history/HistoryPage.js";
 import {
     summarizeHistory,
@@ -83,27 +82,6 @@ describe("history public contracts", () => {
             }),
         ).toBe(false);
         expect(Value.Check(historyAgentTargetSchema, "x".repeat(1_025))).toBe(false);
-    });
-
-    it("requires both reader methods while keeping the structural contract extensible", () => {
-        const reader = {
-            messages: async () => [],
-            stats: async () => ({
-                assistantMessages: 0,
-                messages: 0,
-                textCharacters: 0,
-                thinkingBlocks: 0,
-                toolCalls: 0,
-                toolResults: 0,
-                userMessages: 0,
-            }),
-            metadata: "host-owned",
-        };
-        expect(Value.Check(historyReaderSchema, reader)).toBe(true);
-        expect(() => assertHistoryReader(reader)).not.toThrow();
-        expect(() => assertHistoryReader({ messages: reader.messages })).toThrow(
-            "history reader is invalid",
-        );
     });
 
     it("validates query shapes and empty pages at the runtime boundary", () => {

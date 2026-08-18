@@ -5,7 +5,7 @@ import {
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
 import { createId } from "@paralleldrive/cuid2";
-import { Type, type Static } from "@sinclair/typebox";
+import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type { Context } from "@steve.kite/stdlib";
 
@@ -18,10 +18,8 @@ import {
     type TitleNames,
     type TitleRefineRequest,
 } from "./Title.js";
-import { ConfigModule } from "../config/ConfigModule.js";
-import type { Workspace } from "../workspaces/Workspace.js";
-import { WorkspacesModule } from "../workspaces/WorkspacesModule.js";
-import { withPreservedNumericPrefix } from "../workspaces/impl/withPreservedNumericPrefix.js";
+import { ConfigModule } from "../config/index.js";
+import { WorkspacesModule, type Workspace } from "../workspaces/index.js";
 import {
     createNamingRequest,
     createRefinementRequest,
@@ -39,21 +37,7 @@ import { selectNamingRoute } from "./impl/selectNamingRoute.js";
  * words from the cheapest model at no reasoning effort is seconds of work; ten of them is already
  * an account that is not going to answer.
  */
-const DEFAULT_NAMING_TIMEOUT_MS = 10_000;
-
-export const titlesModuleOptionsSchema = Type.Object(
-    {
-        /** The accounts a name may be written on, and the catalog it picks a cheap model from. */
-        config: Type.Unsafe<ConfigModule>(Type.Object({}, { additionalProperties: true })),
-        /** The catalog a named workspace is renamed through. */
-        workspaces: Type.Unsafe<WorkspacesModule>(Type.Object({}, { additionalProperties: true })),
-        timeoutMs: Type.Optional(Type.Integer({ minimum: 1_000, maximum: 120_000 })),
-        clock: Type.Optional(Type.Function([], Type.Number())),
-    },
-    { additionalProperties: false },
-);
-
-export type TitlesModuleOptions = Static<typeof titlesModuleOptionsSchema>;
+const NAMING_TIMEOUT_MS = 10_000;
 
 /**
  * The names a first message settles: the chat's title, and the workspace and branch it works in.
@@ -78,18 +62,16 @@ export class TitlesModule implements AgentModule<AnyAgentTool> {
 
     readonly #config: ConfigModule;
     readonly #workspaces: WorkspacesModule;
-    readonly #timeoutMs: number;
-    readonly #clock: () => number;
     #store: AgentKV | undefined;
 
-    constructor(options: TitlesModuleOptions) {
-        if (!Value.Check(titlesModuleOptionsSchema, options)) {
-            throw new Error("Titles module options are invalid.");
-        }
-        this.#config = options.config;
-        this.#workspaces = options.workspaces;
-        this.#timeoutMs = options.timeoutMs ?? DEFAULT_NAMING_TIMEOUT_MS;
-        this.#clock = options.clock ?? Date.now;
+    /**
+     * @param config The accounts a name may be written on, and the catalog it picks a cheap model
+     * from.
+     * @param workspaces The catalog a named workspace is renamed through.
+     */
+    constructor(config: ConfigModule, workspaces: WorkspacesModule) {
+        this.#config = config;
+        this.#workspaces = workspaces;
     }
 
     /**
@@ -191,7 +173,7 @@ export class TitlesModule implements AgentModule<AnyAgentTool> {
             prompt: text.prompt,
             providers: this.#config.providers,
             route,
-            timeoutMs: this.#timeoutMs,
+            timeoutMs: NAMING_TIMEOUT_MS,
             ...(options.signal === undefined ? {} : { signal: options.signal }),
         });
         return parseSuggestedNames(answer, request.wanted);
@@ -222,7 +204,7 @@ export class TitlesModule implements AgentModule<AnyAgentTool> {
             prompt: text.prompt,
             providers: this.#config.providers,
             route,
-            timeoutMs: this.#timeoutMs,
+            timeoutMs: NAMING_TIMEOUT_MS,
             ...(options.signal === undefined ? {} : { signal: options.signal }),
         });
         return parseSuggestedNames(answer, { title: true }).title;
@@ -243,7 +225,7 @@ export class TitlesModule implements AgentModule<AnyAgentTool> {
         // would let both of them believe they won.
         const attempt = createId();
         const stored = await this.#refined().getOrCreate(ctx, sessionId, () => ({
-            at: Math.trunc(this.#clock()),
+            at: Date.now(),
             attempt,
         }));
         return Value.Check(refinementClaimSchema, stored) && stored.attempt === attempt;
@@ -276,7 +258,7 @@ export class TitlesModule implements AgentModule<AnyAgentTool> {
      */
     async markWorkspaceNamed(ctx: Context, workspaceId: string): Promise<void> {
         assertWorkspaceId(workspaceId);
-        await this.#named().write(ctx, workspaceId, { at: Math.trunc(this.#clock()) });
+        await this.#named().write(ctx, workspaceId, { at: Date.now() });
     }
 
     /**
@@ -322,7 +304,7 @@ export class TitlesModule implements AgentModule<AnyAgentTool> {
     ): Promise<Workspace> {
         return await this.#workspaces.inheritName(ctx, {
             workspaceId: current.id,
-            name: withPreservedNumericPrefix(current.name, slug),
+            name: this.#workspaces.nameWithPreservedPrefix(current.name, slug),
         });
     }
 

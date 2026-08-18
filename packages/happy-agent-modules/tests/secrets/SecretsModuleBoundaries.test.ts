@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { SecretsModule } from "../../sources/secrets/SecretsModule.js";
 import { SECRETS_MIGRATION_KEY, secretsMigrations } from "../../sources/secrets/SecretDatabase.js";
@@ -26,17 +26,10 @@ async function withDatabase<T>(
 describe("SecretsModule boundary contracts", () => {
     it("trims descriptions, allocates fresh IDs, sorts safe names, and keeps values out of metadata", async () => {
         await withDatabase("secrets-boundary-registration", async (database) => {
-            let nextId = 0;
             const events: unknown[] = [];
-            const module = new SecretsModule({
-                idFactory: () => `generated-${++nextId}`,
-                eventIdFactory: () => `event-${nextId}`,
-                clock: () => 123,
-                listener: {
-                    onEventTransactional: (_ctx, event) => {
-                        events.push(event);
-                    },
-                },
+            const module = new SecretsModule();
+            module.onEventTransactional((_ctx, event) => {
+                events.push(event);
             });
 
             const first = await module.register(database.context, AGENT, {
@@ -53,20 +46,21 @@ describe("SecretsModule boundary contracts", () => {
             });
 
             expect(first).toEqual({
-                id: "generated-1",
+                id: first.id,
                 description: "API token",
                 environmentVariables: ["ALPHA", "API_TOKEN", "ZED"],
                 revision: "1",
             });
-            expect(second.id).toBe("generated-2");
+            expect(second.id).not.toBe(first.id);
             expect(JSON.stringify(first)).not.toContain("top-secret");
             expect(JSON.stringify(second)).not.toContain("top-secret");
             expect(events).toHaveLength(2);
             expect(JSON.stringify(events)).not.toContain("top-secret");
             expect(await module.reference(database.context, AGENT, first.id)).toEqual(first);
-            expect(await module.list(database.context, AGENT)).toMatchObject({
-                secrets: [first, second],
-            });
+            const listed = await module.list(database.context, AGENT);
+            expect([...listed.secrets].sort((a, b) => a.id.localeCompare(b.id))).toEqual(
+                [first, second].sort((a, b) => a.id.localeCompare(b.id)),
+            );
             expect(secretsMigrations.map(([key]) => key)).toEqual([SECRETS_MIGRATION_KEY]);
         });
     });
@@ -110,16 +104,9 @@ describe("SecretsModule boundary contracts", () => {
     it("increments revisions only when environment values change and emits no-op update events", async () => {
         await withDatabase("secrets-boundary-update", async (database) => {
             const events: Array<{ type: string; secret?: { revision: string } }> = [];
-            const module = new SecretsModule({
-                eventIdFactory: (() => {
-                    let value = 0;
-                    return () => `event-${++value}`;
-                })(),
-                listener: {
-                    onEventTransactional: (_ctx, event) => {
-                        events.push(event as (typeof events)[number]);
-                    },
-                },
+            const module = new SecretsModule();
+            module.onEventTransactional((_ctx, event) => {
+                events.push(event as (typeof events)[number]);
             });
 
             const original = await module.register(database.context, AGENT, {
@@ -188,12 +175,9 @@ describe("SecretsModule boundary contracts", () => {
     it("treats explicit re-registration with reordered identical variables as a no-op", async () => {
         await withDatabase("secrets-boundary-registration-order", async (database) => {
             const events: string[] = [];
-            const module = new SecretsModule({
-                listener: {
-                    onEventTransactional: (_ctx, event) => {
-                        events.push(event.type);
-                    },
-                },
+            const module = new SecretsModule();
+            module.onEventTransactional((_ctx, event) => {
+                events.push(event.type);
             });
             const first = await module.register(database.context, AGENT, {
                 id: "same-values",
@@ -276,87 +260,69 @@ describe("SecretsModule boundary contracts", () => {
         });
     });
 
-    it("authorizes every operation before it can expose or mutate catalog state", async () => {
+    it("scopes every operation to the acting agent and applies no further policy", async () => {
         await withDatabase("secrets-boundary-authorization", async (database) => {
-            const authorize = vi.fn(async (_ctx, _agent, operation, scope?: string) => {
-                if (operation === "list" && scope === "allowed") return true;
-                return operation === "register";
-            });
-            const module = new SecretsModule({ authorize });
+            const module = new SecretsModule();
 
             await module.register(database.context, AGENT, {
-                id: "protected",
-                description: "Protected",
+                id: "owned",
+                description: "Owned",
                 environment: { TOKEN: "value" },
             });
-            await expect(module.reference(database.context, AGENT, "protected")).rejects.toThrow(
-                "not authorized",
+            await module.attach(database.context, AGENT, "scope-a", "owned");
+
+            // The owning agent may do everything, with no policy hook in between.
+            await expect(module.reference(database.context, AGENT, "owned")).resolves.toMatchObject(
+                { id: "owned" },
             );
-            await expect(module.list(database.context, AGENT)).rejects.toThrow("not authorized");
+            await expect(module.list(database.context, AGENT)).resolves.toMatchObject({
+                secrets: [expect.objectContaining({ id: "owned" })],
+            });
             await expect(
-                module.list(database.context, AGENT, { scopeRef: "forbidden" }),
-            ).rejects.toThrow("not authorized");
+                module.resolveForHost(database.context, AGENT, "scope-a"),
+            ).resolves.toEqual({ TOKEN: "value" });
+
+            // Another agent sees an empty catalog rather than an authorization error: the acting
+            // agent ID is the whole of the policy.
             await expect(
-                module.attach(database.context, AGENT, "forbidden", "protected"),
-            ).rejects.toThrow("not authorized");
+                module.reference(database.context, "agent-other", "owned"),
+            ).resolves.toBeUndefined();
+            await expect(module.list(database.context, "agent-other")).resolves.toMatchObject({
+                secrets: [],
+            });
             await expect(
-                module.resolveForHost(database.context, AGENT, "forbidden"),
-            ).rejects.toThrow("not authorized");
-            expect(authorize.mock.calls.map(([, , operation]) => operation)).toEqual([
-                "register",
-                "reference",
-                "list",
-                "list",
-                "attach",
-                "resolve",
-            ]);
+                module.attach(database.context, "agent-other", "scope-a", "owned"),
+            ).rejects.toThrow("reference does not exist");
+            await expect(
+                module.resolveForHost(database.context, "agent-other", "scope-a"),
+            ).resolves.toEqual({});
         });
     });
 
-    it("does not accept unknown constructor options or malformed factory outputs", async () => {
-        expect(
-            () =>
-                new SecretsModule({
-                    unexpected: true,
-                } as never),
-        ).toThrow("options are invalid");
-        expect(
-            () =>
-                new SecretsModule({
-                    idFactory: () => "not an id\n",
-                }),
-        ).not.toThrow();
+    it("takes no constructor options and mints valid identities on its own", async () => {
+        expect(SecretsModule.length).toBe(0);
 
         await withDatabase("secrets-boundary-factories", async (database) => {
-            const invalidId = new SecretsModule({
-                idFactory: () => "invalid id",
+            const module = new SecretsModule();
+            const events: Array<{ eventId: string; at: number }> = [];
+            module.onEventTransactional((_ctx, event) => {
+                events.push(event);
             });
-            await expect(
-                invalidId.register(database.context, AGENT, {
-                    description: "A secret",
-                    environment: { TOKEN: "value" },
-                }),
-            ).rejects.toThrow("factory returned an invalid identity");
-
-            const invalidEvent = new SecretsModule({
-                eventIdFactory: () => "event\ninvalid",
+            const before = Date.now();
+            const reference = await module.register(database.context, AGENT, {
+                description: "A secret",
+                environment: { TOKEN: "value" },
             });
-            await expect(
-                invalidEvent.register(database.context, AGENT, {
-                    id: "event-secret",
-                    description: "A secret",
-                    environment: { TOKEN: "value" },
-                }),
-            ).rejects.toThrow("event ID factory returned an invalid ID");
 
-            const invalidClock = new SecretsModule({ clock: () => -1 });
+            // Minted IDs are usable identities: they round-trip through the public API.
+            expect(reference.id).toMatch(/^[A-Za-z0-9_-]+$/);
             await expect(
-                invalidClock.register(database.context, AGENT, {
-                    id: "clock-secret",
-                    description: "A secret",
-                    environment: { TOKEN: "value" },
-                }),
-            ).rejects.toThrow("clock must return");
+                module.reference(database.context, AGENT, reference.id),
+            ).resolves.toEqual(reference);
+            expect(events).toHaveLength(1);
+            expect(events[0]!.eventId).toMatch(/^[A-Za-z0-9_-]+$/);
+            expect(events[0]!.at).toBeGreaterThanOrEqual(before);
+            expect(events[0]!.at).toBeLessThanOrEqual(Date.now());
         });
     });
 });

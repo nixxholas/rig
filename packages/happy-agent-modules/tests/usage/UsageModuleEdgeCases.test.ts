@@ -1,22 +1,30 @@
 import {
     agentDatabaseRun,
     type AgentModuleScope,
+    type AgentSystemRef,
     withAgentContext,
 } from "@slopus/happy-agent-base";
-import { withAfterCommit, type Context } from "@steve.kite/stdlib";
+import { withAfterCommit, withLogger, type Context } from "@steve.kite/stdlib";
 import { sql } from "drizzle-orm";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
     MAX_USAGE_GROUPS,
     MAX_USAGE_OUTPUT_CHARACTERS,
     MAX_USAGE_RECORDS,
+    MAX_USAGE_TREE_PATH_LENGTH,
+    MAX_USAGE_TREE_SESSIONS,
     type UsageAgentTree,
     type UsageInferenceRecord,
     type UsageSummary,
     type UsageTurnRecord,
 } from "../../sources/usage/Usage.js";
-import { UsageModule } from "../../sources/usage/UsageModule.js";
+import {
+    USAGE_GROUP_PAGE_SIZE,
+    USAGE_OUTPUT_CHARACTERS,
+    USAGE_PAGE_SIZE,
+    UsageModule,
+} from "../../sources/usage/UsageModule.js";
 import { UsageDatabase } from "../../sources/usage/impl/usageDatabase.js";
 import type { UsageEvent } from "../../sources/usage/UsageEvent.js";
 import { getAgentTreeUsageTool } from "../../sources/usage/tools/get_agent_tree_usage.js";
@@ -49,7 +57,7 @@ async function withUsageDatabase<T>(
     callback: (database: UsageDatabaseHandle) => Promise<T>,
 ): Promise<T> {
     const database = moduleDatabase([], name) as UsageDatabaseHandle;
-    const module = new UsageModule({});
+    const module = new UsageModule();
     try {
         for (const [, migration] of module.migrations) {
             await migration(database.context, database.database);
@@ -164,38 +172,74 @@ function agentContext(ctx: Context, id = "agent-1"): Context {
     });
 }
 
-function tree(rootId = "agent-1"): UsageAgentTree {
+/**
+ * A collection of agents shaped the way the usage module uses `AgentSystemRef`: who an agent's
+ * parent is, what it started, and how it was configured.
+ */
+function fakeAgents(
+    roster: Readonly<Record<string, { readonly parent?: string; readonly createdBy?: string }>>,
+): AgentSystemRef {
     return {
-        sessions: [
-            {
-                agentId: rootId,
-                modelId: "model-main",
-                path: "/root",
-                providerId: "provider-main",
-                relation: "root",
-                status: "running",
-                totalTokens: 10,
-            },
-            {
-                agentId: "agent-2",
-                modelId: "model-sub",
-                parentAgentId: rootId,
-                path: "/root/sub",
-                providerId: "provider-main",
-                relation: "subagent",
-                status: "completed",
-                totalTokens: 7,
-            },
-        ],
-        totalTokens: 17,
-    };
+        parentOf: (_ctx: Context, agentId: string): Promise<string | null> =>
+            Promise.resolve(roster[agentId]?.parent ?? null),
+        childOf: (_ctx: Context, agentId: string): Promise<readonly string[]> =>
+            Promise.resolve(Object.keys(roster).filter((id) => roster[id]?.parent === agentId)),
+        config: (_ctx: Context, agentId: string): Promise<unknown> => {
+            const agent = roster[agentId];
+            if (agent === undefined) return Promise.resolve(undefined);
+            return Promise.resolve(
+                agent.createdBy === undefined
+                    ? {}
+                    : { provenance: { createdAt: 0, createdBy: agent.createdBy } },
+            );
+        },
+    } as unknown as AgentSystemRef;
+}
+
+/** A module already started against a collection, the way the system starts one. */
+async function startedModule(ctx: Context, agents: AgentSystemRef): Promise<UsageModule> {
+    const module = new UsageModule();
+    await resolveModuleHooks(ctx, module, agents);
+    return module;
+}
+
+/**
+ * The same context with a log a test can read.
+ *
+ * Usage reports every advisory failure through `ctx.log.warn`, so the log is where a test sees
+ * one. Nothing else about the context changes.
+ */
+function capturingContext(ctx: Context): [Context, readonly unknown[][]] {
+    const warnings: unknown[][] = [];
+    const context = withLogger(ctx, {
+        trace: () => {},
+        debug: () => {},
+        info: () => {},
+        warn: (_logContext, ...args) => {
+            warnings.push(args);
+        },
+        error: () => {},
+        fatal: () => {},
+    });
+    return [context, warnings];
+}
+
+/** The phases an advisory usage failure was reported for. */
+function warnedPhases(warnings: readonly unknown[][]): readonly string[] {
+    return warnings.map((warning) => (warning[1] as { readonly phase: string }).phase);
 }
 
 describe("UsageModule edge cases", () => {
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
     it("preserves provider attribution, error state, and aborted turn fields", async () => {
         await withUsageDatabase("usage-attribution-fields", async (database) => {
-            let now = 100;
-            const module = new UsageModule({ clock: () => now });
+            // Only the clock is moved; the database and its promises keep real timers.
+            vi.useFakeTimers({ toFake: ["Date"] });
+            vi.setSystemTime(100);
+            const module = new UsageModule();
             const hooks = await resolveModuleHooks(database.context, module);
             const runKV = new FakeKV();
             const scope = makeScope(database.database, runKV);
@@ -206,7 +250,7 @@ describe("UsageModule edge cases", () => {
                 inferenceId: "inference",
                 contextTokens: undefined,
             });
-            now = 140;
+            vi.setSystemTime(140);
             await runWithAfterCommit(database.context, async (txCtx) => {
                 await hooks.afterInferenceTransact!(txCtx, scope, {
                     loopId: "loop",
@@ -224,7 +268,7 @@ describe("UsageModule edge cases", () => {
                 turnId: "turn",
                 contextTokens: undefined,
             });
-            now = 150;
+            vi.setSystemTime(150);
             await runWithAfterCommit(database.context, async (txCtx) => {
                 await hooks.afterTurnTransact!(txCtx, scope, {
                     loopId: "loop",
@@ -261,24 +305,19 @@ describe("UsageModule edge cases", () => {
 
     it("treats missing provider tokens as an advisory observation failure and clears pending state", async () => {
         await withUsageDatabase("usage-missing-tokens", async (database) => {
-            const report = vi.fn(async () => undefined);
-            let now = 100;
-            const module = new UsageModule({
-                clock: () => now,
-                onObserverError: report,
-            });
-            const hooks = await resolveModuleHooks(database.context, module);
+            const [ctx, warnings] = capturingContext(database.context);
+            const module = new UsageModule();
+            const hooks = await resolveModuleHooks(ctx, module);
             const runKV = new FakeKV();
             const scope = makeScope(database.database, runKV);
 
-            await hooks.beforeInferenceTransact!(database.context, scope, {
+            await hooks.beforeInferenceTransact!(ctx, scope, {
                 loopId: "loop",
                 turnId: "turn",
                 inferenceId: "missing",
                 contextTokens: undefined,
             });
-            now = 110;
-            await runWithAfterCommit(database.context, async (txCtx) => {
+            await runWithAfterCommit(ctx, async (txCtx) => {
                 await hooks.afterInferenceTransact!(txCtx, scope, {
                     loopId: "loop",
                     turnId: "turn",
@@ -291,29 +330,29 @@ describe("UsageModule edge cases", () => {
 
             expect(runKV.values).toEqual(new Map());
             expect((await module.readPage(database.context, "agent-1")).records).toEqual([]);
-            expect(report).toHaveBeenCalledWith(
-                expect.anything(),
-                "after_inference",
-                expect.stringContaining("token"),
-            );
+            expect(warnedPhases(warnings)).toEqual(["after_inference"]);
+            expect(warnings[0]?.[2]).toMatchObject({
+                message: expect.stringContaining("token"),
+            });
         });
     });
 
     it("rejects clocks that move backward or exceed duration bounds without failing the turn", async () => {
         await withUsageDatabase("usage-clock-errors", async (database) => {
-            const report = vi.fn(async () => undefined);
-            let now = 200;
-            const module = new UsageModule({ clock: () => now, onObserverError: report });
-            const hooks = await resolveModuleHooks(database.context, module);
+            const [ctx, warnings] = capturingContext(database.context);
+            vi.useFakeTimers({ toFake: ["Date"] });
+            vi.setSystemTime(200);
+            const module = new UsageModule();
+            const hooks = await resolveModuleHooks(ctx, module);
             const scope = makeScope(database.database);
 
-            await hooks.beforeTurnTransact!(database.context, scope, {
+            await hooks.beforeTurnTransact!(ctx, scope, {
                 loopId: "loop",
                 turnId: "turn",
                 contextTokens: undefined,
             });
-            now = 100;
-            await runWithAfterCommit(database.context, async (txCtx) => {
+            vi.setSystemTime(100);
+            await runWithAfterCommit(ctx, async (txCtx) => {
                 await hooks.afterTurnTransact!(txCtx, scope, {
                     loopId: "loop",
                     turnId: "turn",
@@ -323,18 +362,17 @@ describe("UsageModule edge cases", () => {
             });
 
             expect((await module.readPage(database.context, "agent-1")).records).toEqual([]);
-            expect(report).toHaveBeenCalledWith(
-                expect.anything(),
-                "after_turn",
-                expect.stringContaining("backwards"),
-            );
+            expect(warnedPhases(warnings)).toEqual(["after_turn"]);
+            expect(warnings[0]?.[2]).toMatchObject({
+                message: expect.stringContaining("backwards"),
+            });
         });
     });
 
     it("survives a fresh module instance and rejects malformed JSON at the persistence boundary", async () => {
         await withUsageDatabase("usage-reload-and-malformed-json", async (database) => {
             await insertRawRecord(database, inferenceRecord("reload", "agent-1", 10));
-            const fresh = new UsageModule({});
+            const fresh = new UsageModule();
             await expect(fresh.readPage(database.context, "agent-1")).resolves.toMatchObject({
                 totalRecords: 1,
                 records: [{ id: "reload" }],
@@ -359,7 +397,7 @@ describe("UsageModule edge cases", () => {
                 durationMs: 999,
             });
             await insertRawRecord(database, invalid);
-            await expect(new UsageModule({}).readPage(database.context, "agent-1")).rejects.toThrow(
+            await expect(new UsageModule().readPage(database.context, "agent-1")).rejects.toThrow(
                 "duration",
             );
         });
@@ -377,7 +415,7 @@ describe("UsageModule edge cases", () => {
              * a trusted total.
              */
             await expect(
-                new UsageModule({}).aggregate(database.context, { agentId: "agent-1" }),
+                new UsageModule().aggregate(database.context, { agentId: "agent-1" }),
             ).rejects.toThrow("duration");
         });
     });
@@ -391,7 +429,7 @@ describe("UsageModule edge cases", () => {
                     inferenceRecord(`record-${index}`, "agent-1", index + 10),
                 );
             }
-            const module = new UsageModule({ maxPageSize: 7 });
+            const module = new UsageModule();
             const first = await module.readPage(database.context, "agent-1", { limit: 7 });
             expect(first.records).toHaveLength(7);
             expect(first.records[0]?.id).toBe("record-1");
@@ -424,7 +462,7 @@ describe("UsageModule edge cases", () => {
                     }),
                 );
             }
-            const module = new UsageModule({ maxGroups: 1 });
+            const module = new UsageModule();
             const pages: UsageSummary[] = [];
             let cursor = 0;
             while (true) {
@@ -451,16 +489,22 @@ describe("UsageModule edge cases", () => {
 
     it("rejects invalid page and aggregate bounds before touching storage", async () => {
         await withUsageDatabase("usage-query-bounds", async (database) => {
-            const module = new UsageModule({ maxPageSize: 2, maxGroups: 2 });
+            const module = new UsageModule();
             await expect(
-                module.readPage(database.context, "agent-1", { limit: 3 }),
-            ).rejects.toThrow("cannot exceed");
+                module.readPage(database.context, "agent-1", { limit: USAGE_PAGE_SIZE }),
+            ).resolves.toMatchObject({ agentId: "agent-1", cursor: 0 });
+            await expect(
+                module.readPage(database.context, "agent-1", { limit: USAGE_PAGE_SIZE + 1 }),
+            ).rejects.toThrow(`cannot exceed ${USAGE_PAGE_SIZE}`);
             await expect(
                 module.readPage(database.context, "agent-1", { cursor: -1 }),
             ).rejects.toThrow("invalid");
             await expect(
-                module.aggregate(database.context, { agentId: "agent-1", maxGroups: 3 }),
-            ).rejects.toThrow("cannot exceed");
+                module.aggregate(database.context, {
+                    agentId: "agent-1",
+                    maxGroups: USAGE_GROUP_PAGE_SIZE + 1,
+                }),
+            ).rejects.toThrow(`cannot exceed ${USAGE_GROUP_PAGE_SIZE}`);
             await expect(
                 module.aggregate(database.context, { agentId: "agent-1", cursor: -1 }),
             ).rejects.toThrow("invalid");
@@ -471,7 +515,7 @@ describe("UsageModule edge cases", () => {
         await withUsageDatabase("usage-agent-boundary", async (database) => {
             await insertRawRecord(database, inferenceRecord("owned", "agent-1", 10));
             await insertRawRecord(database, inferenceRecord("other", "agent-2", 11));
-            const module = new UsageModule({});
+            const module = new UsageModule();
             const current = agentContext(database.context, "agent-1");
 
             await expect(module.read(current, "agent-2")).rejects.toThrow("current agent");
@@ -492,7 +536,7 @@ describe("UsageModule edge cases", () => {
         await withUsageDatabase("usage-tool-scope", async (database) => {
             await insertRawRecord(database, inferenceRecord("a", "agent-1", 11));
             await insertRawRecord(database, inferenceRecord("b", "agent-2", 12));
-            const module = new UsageModule({});
+            const module = new UsageModule();
             const hostTool = getUsageTool(module);
             await expect(
                 hostTool.execute(database.context, { target: "agent-2" }, undefined as never),
@@ -521,142 +565,95 @@ describe("UsageModule edge cases", () => {
         });
     });
 
-    it("validates complete agent trees, including duplicate IDs, cycles, roots, totals, and limits", async () => {
+    it("keeps one finite tree out of a collection that reports a cycle", async () => {
         await withUsageDatabase("usage-tree-validation", async (database) => {
-            const invalidTrees: UsageAgentTree[] = [
-                {
-                    sessions: [
-                        {
-                            agentId: "agent-1",
-                            modelId: "model",
-                            path: "/root",
-                            providerId: "provider",
-                            relation: "root",
-                            status: "running",
-                            totalTokens: 1,
-                        },
-                        {
-                            agentId: "agent-1",
-                            modelId: "model",
-                            path: "/root/duplicate",
-                            providerId: "provider",
-                            relation: "subagent",
-                            parentAgentId: "agent-1",
-                            status: "running",
-                            totalTokens: 1,
-                        },
-                    ],
-                    totalTokens: 2,
-                },
-                {
-                    sessions: [
-                        {
-                            agentId: "agent-1",
-                            modelId: "model",
-                            path: "/root",
-                            providerId: "provider",
-                            relation: "root",
-                            status: "running",
-                            totalTokens: 1,
-                        },
-                        {
-                            agentId: "agent-2",
-                            modelId: "model",
-                            path: "/orphan",
-                            providerId: "provider",
-                            relation: "delegated",
-                            parentAgentId: "missing",
-                            status: "running",
-                            totalTokens: 1,
-                        },
-                    ],
-                    totalTokens: 2,
-                },
-                {
-                    sessions: [
-                        {
-                            agentId: "agent-1",
-                            modelId: "model",
-                            path: "/root",
-                            providerId: "provider",
-                            relation: "root",
-                            status: "running",
-                            totalTokens: 1,
-                        },
-                        {
-                            agentId: "agent-2",
-                            modelId: "model",
-                            path: "/root/a",
-                            providerId: "provider",
-                            relation: "subagent",
-                            parentAgentId: "agent-3",
-                            status: "running",
-                            totalTokens: 1,
-                        },
-                        {
-                            agentId: "agent-3",
-                            modelId: "model",
-                            path: "/root/b",
-                            providerId: "provider",
-                            relation: "delegated",
-                            parentAgentId: "agent-2",
-                            status: "running",
-                            totalTokens: 1,
-                        },
-                    ],
-                    totalTokens: 3,
-                },
-            ];
-            for (const [index, invalid] of invalidTrees.entries()) {
-                const module = new UsageModule({
-                    agentTreeReader: () => invalid,
-                });
-                await expect(
-                    module.readAgentTreeUsage(database.context, "agent-1"),
-                ).rejects.toThrow();
-                expect(index).toBeLessThan(invalidTrees.length);
+            // A collection that answers with a loop is a broken collection, not a deeper tree.
+            const module = await startedModule(
+                database.context,
+                fakeAgents({
+                    "agent-1": { parent: "agent-2" },
+                    "agent-2": { createdBy: "agent-1", parent: "agent-1" },
+                }),
+            );
+            const tree = await module.readAgentTreeUsage(database.context, "agent-1");
+            expect(tree.sessions.map((session) => session.agentId)).toEqual([
+                "agent-1",
+                "agent-2",
+            ]);
+            expect(tree.sessions[0]).toMatchObject({ relation: "root", path: "/agent-1" });
+            expect(tree.sessions[1]).toMatchObject({
+                parentAgentId: "agent-1",
+                path: "/agent-1/agent-2",
+            });
+        });
+    });
+
+    it("refuses a subtree larger or deeper than one snapshot can describe", async () => {
+        await withUsageDatabase("usage-tree-limits", async (database) => {
+            const wide: Record<string, { parent?: string; createdBy?: string }> = {
+                "agent-root": {},
+            };
+            for (let index = 0; index < MAX_USAGE_TREE_SESSIONS; index += 1) {
+                wide[`agent-${index}`] = { createdBy: "agent-root", parent: "agent-root" };
             }
-
-            const wrongTotal = tree();
-            wrongTotal.totalTokens = 999;
+            const wideModule = await startedModule(database.context, fakeAgents(wide));
             await expect(
-                new UsageModule({ agentTreeReader: () => wrongTotal }).readAgentTreeUsage(
-                    database.context,
-                    "agent-1",
-                ),
-            ).rejects.toThrow("inconsistent");
+                wideModule.readAgentTreeUsage(database.context, "agent-root"),
+            ).rejects.toThrow("larger than one snapshot can hold");
+
+            const deep: Record<string, { parent?: string; createdBy?: string }> = {
+                "agent-0": {},
+            };
+            const nameLength = "agent-0".length + 1;
+            for (let index = 1; index <= MAX_USAGE_TREE_PATH_LENGTH / nameLength + 1; index += 1) {
+                deep[`agent-${index}`] = {
+                    createdBy: `agent-${index - 1}`,
+                    parent: `agent-${index - 1}`,
+                };
+            }
+            const deepModule = await startedModule(database.context, fakeAgents(deep));
+            await expect(
+                deepModule.readAgentTreeUsage(database.context, "agent-0"),
+            ).rejects.toThrow("deeper than one snapshot can name");
         });
     });
 
-    it("requires agent-tree authorization only for agent-scoped reads and validates async seams", async () => {
+
+    it("answers a subtree read only from inside that subtree, and never before it has started", async () => {
         await withUsageDatabase("usage-tree-authorization", async (database) => {
-            const reader = async () => structuredClone(tree());
-            const denied = new UsageModule({
-                agentTreeReader: reader,
-                agentTreeAuthorization: async () => false,
-            });
             await expect(
-                denied.readAgentTreeUsage(agentContext(database.context), "agent-1"),
-            ).rejects.toThrow("not authorized");
+                new UsageModule().readAgentTreeUsage(database.context, "agent-1"),
+            ).rejects.toThrow("before it started");
 
-            const hostModule = new UsageModule({ agentTreeReader: reader });
+            const module = await startedModule(
+                database.context,
+                fakeAgents({
+                    "agent-1": {},
+                    "agent-2": { createdBy: "agent-1", parent: "agent-1" },
+                    "agent-3": { createdBy: "agent-2", parent: "agent-2" },
+                    "elsewhere": {},
+                }),
+            );
+            // Host code names no agent, so no agent-facing policy applies to it.
             await expect(
-                hostModule.readAgentTreeUsage(database.context, "agent-1"),
-            ).resolves.toEqual(tree());
-
-            const malformedReader = new UsageModule({
-                agentTreeReader: async () => ({ sessions: [], totalTokens: 0 }),
-                agentTreeAuthorization: () => true,
-            });
+                module.readAgentTreeUsage(database.context, "agent-1"),
+            ).resolves.toMatchObject({ sessions: [{ agentId: "agent-1" }, {}, {}] });
             await expect(
-                malformedReader.readAgentTreeUsage(agentContext(database.context), "agent-1"),
-            ).rejects.toThrow();
+                module.readAgentTreeUsage(agentContext(database.context), "agent-3"),
+            ).resolves.toMatchObject({ sessions: [{ agentId: "agent-3", relation: "root" }] });
+            await expect(
+                module.readAgentTreeUsage(agentContext(database.context, "elsewhere"), "agent-2"),
+            ).rejects.toThrow("agents it started");
+            await expect(
+                module.readAgentTreeUsage(agentContext(database.context, "agent-3"), "agent-1"),
+            ).rejects.toThrow("agents it started");
         });
     });
+
 
     it("renders bounded model output without emitting a partial group row", async () => {
         await withUsageDatabase("usage-output-bounds", async (database) => {
-            const module = new UsageModule({ maxOutputCharacters: 256 });
+            const module = new UsageModule();
             const summary: UsageSummary = {
                 agentId: "agent-1",
                 cursor: 0,
@@ -691,42 +688,45 @@ describe("UsageModule edge cases", () => {
             expect(output.length).toBeLessThanOrEqual(256);
             expect(output).toContain("cursor=1");
             expect(output).not.toContain("p".repeat(256));
+            // A caller may ask for a tighter budget than the module's own, never a wider one.
+            expect(module.formatForModel(summary).length).toBeLessThanOrEqual(
+                USAGE_OUTPUT_CHARACTERS,
+            );
+            expect(() => module.formatForModel(summary, USAGE_OUTPUT_CHARACTERS + 1)).toThrow(
+                "bound",
+            );
             expect(() => module.formatForModel(summary, MAX_USAGE_OUTPUT_CHARACTERS + 1)).toThrow(
                 "bound",
             );
         });
     });
 
-    it("publishes one stable deeply frozen event and keeps listener receivers intact", async () => {
+
+    it("publishes one stable deeply frozen event to both kinds of subscriber", async () => {
         await withUsageDatabase("usage-events-stable", async (database) => {
-            let now = 100;
+            vi.useFakeTimers({ toFake: ["Date"] });
+            vi.setSystemTime(100);
             let transactional: UsageEvent | undefined;
             let postCommit: UsageEvent | undefined;
-            let transactionalReceiver: unknown;
-            let postCommitReceiver: unknown;
-            const listener = {
-                onEventTransactional(this: unknown, _ctx: Context, event: UsageEvent) {
-                    transactionalReceiver = this;
-                    transactional = event;
-                    expect(Object.isFrozen(event)).toBe(true);
-                    if (event.type !== "usage_recorded") {
-                        throw new Error("Expected a recorded usage event");
-                    }
-                    const record = event.record;
-                    if (record.kind !== "inference") {
-                        throw new Error("Expected an inference usage event");
-                    }
-                    expect(Object.isFrozen(record)).toBe(true);
-                    expect(() => {
-                        record.tokens.input = 99;
-                    }).toThrow();
-                },
-                onEvent(this: unknown, _ctx: Context, event: UsageEvent) {
-                    postCommitReceiver = this;
-                    postCommit = event;
-                },
-            };
-            const module = new UsageModule({ clock: () => now, listener });
+            const module = new UsageModule();
+            module.onEventTransactional((_ctx: Context, event: UsageEvent) => {
+                transactional = event;
+                expect(Object.isFrozen(event)).toBe(true);
+                if (event.type !== "usage_recorded") {
+                    throw new Error("Expected a recorded usage event");
+                }
+                const record = event.record;
+                if (record.kind !== "inference") {
+                    throw new Error("Expected an inference usage event");
+                }
+                expect(Object.isFrozen(record)).toBe(true);
+                expect(() => {
+                    record.tokens.input = 99;
+                }).toThrow();
+            });
+            module.onEvent((_ctx: Context, event: UsageEvent) => {
+                postCommit = event;
+            });
             const hooks = await resolveModuleHooks(database.context, module);
             const scope = makeScope(database.database);
             await hooks.beforeInferenceTransact!(database.context, scope, {
@@ -735,7 +735,7 @@ describe("UsageModule edge cases", () => {
                 inferenceId: "event-id",
                 contextTokens: undefined,
             });
-            now = 110;
+            vi.setSystemTime(110);
             await runWithAfterCommit(database.context, async (txCtx) => {
                 await hooks.afterInferenceTransact!(txCtx, scope, {
                     loopId: "loop",
@@ -746,8 +746,6 @@ describe("UsageModule edge cases", () => {
                     tokens: { input: 3, output: 2 },
                 });
             });
-            expect(transactionalReceiver).toBe(listener);
-            expect(postCommitReceiver).toBe(listener);
             expect(postCommit).toBe(transactional);
             expect(postCommit).toEqual({
                 type: "usage_recorded",
@@ -758,9 +756,10 @@ describe("UsageModule edge cases", () => {
         });
     });
 
-    it("contains post-commit listener errors and hostile observer failures", async () => {
+
+    it("contains a hostile post-commit subscriber failure after the record is durable", async () => {
         await withUsageDatabase("usage-post-commit-errors", async (database) => {
-            const report = vi.fn(async () => undefined);
+            const [ctx, warnings] = capturingContext(database.context);
             const hostile = {
                 get message(): never {
                     throw new Error("message trap");
@@ -769,27 +768,24 @@ describe("UsageModule edge cases", () => {
                     throw new Error("primitive trap");
                 },
             };
-            let now = 100;
-            const module = new UsageModule({
-                clock: () => now,
-                listener: {
-                    onEvent: async () => {
-                        throw hostile;
-                    },
-                },
-                onObserverError: report,
+            const announced: string[] = [];
+            const module = new UsageModule();
+            module.onEvent(async () => {
+                throw hostile;
             });
-            const hooks = await resolveModuleHooks(database.context, module);
+            module.onEvent((_eventCtx: Context, event: UsageEvent) => {
+                announced.push(event.type);
+            });
+            const hooks = await resolveModuleHooks(ctx, module);
             const scope = makeScope(database.database);
-            await hooks.beforeInferenceTransact!(database.context, scope, {
+            await hooks.beforeInferenceTransact!(ctx, scope, {
                 loopId: "loop",
                 turnId: "turn",
                 inferenceId: "post-error",
                 contextTokens: undefined,
             });
-            now = 110;
             await expect(
-                runWithAfterCommit(database.context, async (txCtx) => {
+                runWithAfterCommit(ctx, async (txCtx) => {
                     await hooks.afterInferenceTransact!(txCtx, scope, {
                         loopId: "loop",
                         turnId: "turn",
@@ -800,26 +796,23 @@ describe("UsageModule edge cases", () => {
                     });
                 }),
             ).resolves.toBeUndefined();
-            expect(report).toHaveBeenCalledWith(
-                expect.anything(),
-                "post_commit_listener",
-                expect.any(String),
-            );
+            expect(warnedPhases(warnings)).toEqual(["post_commit_subscriber"]);
+            // One failing subscriber cannot starve the subscribers queued behind it.
+            expect(announced).toEqual(["usage_recorded"]);
+            await expect(module.readPage(database.context, "agent-1")).resolves.toMatchObject({
+                records: [{ id: "post-error" }],
+            });
         });
     });
+
 
     it("does not publish reset events or delete rows when an outer transaction rolls back", async () => {
         await withUsageDatabase("usage-reset-rollback", async (database) => {
             await insertRawRecord(database, inferenceRecord("rollback", "agent-1", 10));
             const events: UsageEvent[] = [];
-            const module = new UsageModule({
-                idFactory: () => "reset-event",
-                clock: () => 20,
-                listener: {
-                    onEvent: (_ctx, event) => {
-                        events.push(event);
-                    },
-                },
+            const module = new UsageModule();
+            module.onEvent((_ctx: Context, event: UsageEvent) => {
+                events.push(event);
             });
             await expect(
                 database.context.inTx(async (outer) => {
@@ -835,30 +828,24 @@ describe("UsageModule edge cases", () => {
         });
     });
 
-    it("does not let a transactional listener failure escape advisory accounting", async () => {
+
+    it("does not let a transactional subscriber failure escape advisory accounting", async () => {
         await withUsageDatabase("usage-transactional-listener-failure", async (database) => {
-            let now = 100;
-            const report = vi.fn(async () => undefined);
-            const module = new UsageModule({
-                clock: () => now,
-                listener: {
-                    onEventTransactional: () => {
-                        throw new Error("transactional projection failed");
-                    },
-                },
-                onObserverError: report,
+            const [ctx, warnings] = capturingContext(database.context);
+            const module = new UsageModule();
+            module.onEventTransactional(() => {
+                throw new Error("transactional projection failed");
             });
-            const hooks = await resolveModuleHooks(database.context, module);
+            const hooks = await resolveModuleHooks(ctx, module);
             const scope = makeScope(database.database);
-            await hooks.beforeInferenceTransact!(database.context, scope, {
+            await hooks.beforeInferenceTransact!(ctx, scope, {
                 loopId: "loop",
                 turnId: "turn",
                 inferenceId: "transactional-failure",
                 contextTokens: undefined,
             });
-            now = 110;
             await expect(
-                database.context.inTx(async (txCtx) => {
+                ctx.inTx(async (txCtx) => {
                     await hooks.afterInferenceTransact!(txCtx, scope, {
                         loopId: "loop",
                         turnId: "turn",
@@ -869,11 +856,10 @@ describe("UsageModule edge cases", () => {
                     });
                 }),
             ).resolves.toBeUndefined();
-            expect(report).toHaveBeenCalledWith(
-                expect.anything(),
-                "after_inference",
-                expect.stringContaining("projection"),
-            );
+            expect(warnedPhases(warnings)).toEqual(["after_inference"]);
+            expect(warnings[0]?.[2]).toMatchObject({
+                message: expect.stringContaining("projection"),
+            });
             /*
              * Accounting is advisory: the record remains durable even when
              * an optional transactional observer fails.
@@ -884,64 +870,53 @@ describe("UsageModule edge cases", () => {
         });
     });
 
-    it("rejects invalid ID factories without changing reset state", async () => {
-        await withUsageDatabase("usage-id-factory", async (database) => {
-            await insertRawRecord(database, inferenceRecord("reset-target", "agent-1", 10));
-            const module = new UsageModule({
-                idFactory: () => "x".repeat(129),
-            });
-            await expect(module.reset(database.context, "agent-1")).rejects.toThrow(
-                "invalid result",
-            );
-            await expect(module.readPage(database.context, "agent-1")).resolves.toMatchObject({
-                totalRecords: 1,
-            });
+
+
+    it("takes nothing, and keeps one set of bounds no caller can widen", async () => {
+        expect(new UsageModule()).toBeInstanceOf(UsageModule);
+        await withUsageDatabase("usage-fixed-bounds", async (database) => {
+            const module = new UsageModule();
+            await expect(
+                module.readPage(database.context, "agent-1", { limit: USAGE_PAGE_SIZE }),
+            ).resolves.toMatchObject({ agentId: "agent-1", cursor: 0 });
+            await expect(
+                module.readPage(database.context, "agent-1", { limit: USAGE_PAGE_SIZE + 1 }),
+            ).rejects.toThrow(`cannot exceed ${USAGE_PAGE_SIZE}`);
+            await expect(
+                module.aggregate(database.context, { maxGroups: USAGE_GROUP_PAGE_SIZE }),
+            ).resolves.toMatchObject({ cursor: 0 });
+            await expect(
+                module.aggregate(database.context, { maxGroups: USAGE_GROUP_PAGE_SIZE + 1 }),
+            ).rejects.toThrow(`cannot exceed ${USAGE_GROUP_PAGE_SIZE}`);
         });
     });
 
-    it("rejects unknown options, invalid bounds, and invalid clock values", async () => {
-        expect(() => new UsageModule({ unknown: true } as never)).toThrow("unknown");
-        expect(() => new UsageModule({ maxPageSize: 0 })).toThrow("unknown");
-        expect(() => new UsageModule({ maxGroups: MAX_USAGE_GROUPS + 1 })).toThrow("unknown");
-        expect(() => new UsageModule({ maxOutputCharacters: 255 })).toThrow("unknown");
 
-        await withUsageDatabase("usage-invalid-clock", async (database) => {
-            const report = vi.fn(async () => undefined);
-            const module = new UsageModule({ clock: () => -1, onObserverError: report });
-            const hooks = await resolveModuleHooks(database.context, module);
-            const scope = makeScope(database.database);
-            await hooks.beforeTurnTransact!(database.context, scope, {
-                loopId: "loop",
-                turnId: "turn",
-                contextTokens: undefined,
-            });
-            expect(report).toHaveBeenCalledWith(
-                expect.anything(),
-                "begin",
-                expect.stringContaining("clock"),
-            );
-            expect((await module.readPage(database.context, "agent-1")).records).toEqual([]);
-        });
-    });
-
-    it("rejects invalid tree paths and root identity mismatches", async () => {
+    it("names every agent in the tree by its full path from the root of the snapshot", async () => {
         await withUsageDatabase("usage-tree-paths", async (database) => {
-            const invalidPath = tree();
-            invalidPath.sessions[0]!.path = "relative";
-            await expect(
-                new UsageModule({ agentTreeReader: () => invalidPath }).readAgentTreeUsage(
-                    database.context,
-                    "agent-1",
-                ),
-            ).rejects.toThrow("canonical path");
-
-            await expect(
-                new UsageModule({
-                    agentTreeReader: () => tree("different-root"),
-                }).readAgentTreeUsage(database.context, "agent-1"),
-            ).rejects.toThrow("rooted at the wrong");
+            const module = await startedModule(
+                database.context,
+                fakeAgents({
+                    "agent-1": {},
+                    "agent-2": { createdBy: "agent-1", parent: "agent-1" },
+                    "agent-3": { createdBy: "agent-2", parent: "agent-2" },
+                }),
+            );
+            const fromRoot = await module.readAgentTreeUsage(database.context, "agent-1");
+            expect(fromRoot.sessions.map((session) => session.path)).toEqual([
+                "/agent-1",
+                "/agent-1/agent-2",
+                "/agent-1/agent-2/agent-3",
+            ]);
+            // A snapshot rooted lower names paths from its own root, not from the collection's.
+            const fromMiddle = await module.readAgentTreeUsage(database.context, "agent-2");
+            expect(fromMiddle.sessions.map((session) => session.path)).toEqual([
+                "/agent-2",
+                "/agent-2/agent-3",
+            ]);
         });
     });
+
 
     it("keeps reset events bounded and reports the removed count", async () => {
         await withUsageDatabase("usage-reset-event-count", async (database) => {
@@ -951,21 +926,18 @@ describe("UsageModule edge cases", () => {
                     inferenceRecord(`reset-${index}`, "agent-1", index + 10),
                 );
             }
+            vi.useFakeTimers({ toFake: ["Date"] });
+            vi.setSystemTime(100);
             const events: UsageEvent[] = [];
-            const module = new UsageModule({
-                idFactory: () => "reset-event",
-                clock: () => 100,
-                listener: {
-                    onEventTransactional: (_ctx, event) => {
-                        events.push(event);
-                    },
-                },
+            const module = new UsageModule();
+            module.onEventTransactional((_ctx: Context, event: UsageEvent) => {
+                events.push(event);
             });
             await expect(module.reset(database.context, "agent-1")).resolves.toBe(3);
             expect(events).toEqual([
                 {
                     type: "usage_reset",
-                    eventId: "reset-event",
+                    eventId: expect.any(String),
                     at: 100,
                     agentId: "agent-1",
                     removed: 3,
@@ -975,6 +947,7 @@ describe("UsageModule edge cases", () => {
             expect(events).toHaveLength(1);
         });
     });
+
 
     it("returns exact collection aggregates and latest context measurements", async () => {
         await withUsageDatabase("usage-collection-aggregate", async (database) => {
@@ -991,7 +964,7 @@ describe("UsageModule edge cases", () => {
                     tokens: { input: 4, output: 6 },
                 }),
             );
-            const summary = await new UsageModule({}).aggregate(database.context, {});
+            const summary = await new UsageModule().aggregate(database.context, {});
             expect(summary).toMatchObject({
                 totalTokens: 15,
                 inferenceCount: 2,
@@ -1011,34 +984,38 @@ describe("UsageModule edge cases", () => {
 
     it("keeps model-facing tree output bounded at the minimum budget", async () => {
         await withUsageDatabase("usage-tree-output", async (database) => {
-            const module = new UsageModule({ maxOutputCharacters: 256 });
-            const large = tree();
-            large.sessions.push(
-                ...Array.from({ length: 20 }, (_, index) => ({
-                    agentId: `agent-${index + 3}`,
-                    modelId: "model",
-                    parentAgentId: "agent-1",
-                    path: `/root/${index}`,
-                    providerId: "provider",
-                    relation: "delegated" as const,
-                    status: "completed",
-                    totalTokens: index,
-                })),
-            );
-            large.totalTokens = large.sessions.reduce(
-                (total, session) => total + session.totalTokens,
-                0,
-            );
-            const output = module.formatAgentTreeUsageForModel(large, 256);
+            const module = new UsageModule();
+            const large: UsageAgentTree = {
+                sessions: [
+                    { agentId: "agent-1", path: "/agent-1", relation: "root", totalTokens: 10 },
+                    ...Array.from({ length: 20 }, (_, index) => ({
+                        agentId: `agent-${index + 2}`,
+                        parentAgentId: "agent-1",
+                        path: `/agent-1/agent-${index + 2}`,
+                        relation: "delegated" as const,
+                        totalTokens: index,
+                    })),
+                ],
+                totalTokens: 0,
+            };
+            const bounded: UsageAgentTree = {
+                sessions: large.sessions,
+                totalTokens: large.sessions.reduce(
+                    (total, session) => total + session.totalTokens,
+                    0,
+                ),
+            };
+            const output = module.formatAgentTreeUsageForModel(bounded, 256);
             expect(output.length).toBeLessThanOrEqual(256);
             expect(output).toContain("Agent tree usage");
         });
     });
 
+
     it("validates aggregate shape and rejects forged totals/cursors from persisted storage", async () => {
         await withUsageDatabase("usage-summary-invariants", async (database) => {
             await insertRawRecord(database, inferenceRecord("summary", "agent-1", 10));
-            const module = new UsageModule({});
+            const module = new UsageModule();
             const summary = await module.aggregate(database.context, {
                 agentId: "agent-1",
             });
@@ -1057,10 +1034,13 @@ describe("UsageModule edge cases", () => {
 
     it("keeps agent-tree tool output and contract bounded", async () => {
         await withUsageDatabase("usage-tree-tool-contract", async (database) => {
-            const module = new UsageModule({
-                agentTreeReader: () => tree(),
-                agentTreeAuthorization: () => true,
-            });
+            const module = await startedModule(
+                database.context,
+                fakeAgents({
+                    "agent-1": {},
+                    "agent-2": { createdBy: "agent-1", parent: "agent-1" },
+                }),
+            );
             const tool = getAgentTreeUsageTool(module, "agent-1");
             expect(tool.name).toBe("get_agent_tree_usage");
             expect(tool.durable).toBe(true);
@@ -1070,7 +1050,9 @@ describe("UsageModule edge cases", () => {
                 {},
                 undefined as never,
             );
-            expect(result).toEqual(tree());
+            expect(result).toEqual(
+                await module.readAgentTreeUsage(agentContext(database.context), "agent-1"),
+            );
             const rendered = tool
                 .toLLM(result)
                 .map((block) => (block.type === "text" ? block.text : ""))

@@ -41,20 +41,12 @@ import {
     type SecretUpdateInput,
 } from "./Secret.js";
 import {
-    secretAuthorizationSchema,
-    secretAuthorizationOperationSchema,
     assertSecretCommandEnvironment,
-    assertSecretCommandResolverResult,
-    secretResolverSchema,
-    secretCommandResolverSchema,
     assertSecretAttachment,
     assertSecretHostEnvironment,
     assertSecretPage,
     assertSecretReference,
     assertSecretStoreMutationResult,
-    type SecretAuthorization,
-    type SecretCommandResolver,
-    type SecretCommandResolverResult,
     type SecretStoreAttachResult,
     type SecretStoreDetachResult,
     type SecretStoreRegisterResult,
@@ -65,68 +57,24 @@ import { createSecretDatabase, secretsMigrations, type SecretDatabase } from "./
 import {
     secretContextSchema,
     secretEventIdSchema,
+    secretEventListenerSchema,
     secretEventSchema,
     secretEventTimestampSchema,
-    secretModuleListenerSchema,
     type SecretEvent,
-    type SecretModuleListener,
+    type SecretEventListener,
+    type SecretUnsubscribe,
 } from "./SecretEvent.js";
 import { attachSecretTool } from "./tools/attach_secret.js";
 import { detachSecretTool } from "./tools/detach_secret.js";
 import { listSecretsTool } from "./tools/list_secrets.js";
 import { referenceSecretTool } from "./tools/reference_secret.js";
 
-const DEFAULT_MAX_PAGE_SIZE = 50;
-const MAX_PAGE_SIZE = 100;
-const DEFAULT_MAX_OUTPUT_CHARACTERS = 12_000;
-const MAX_OUTPUT_CHARACTERS = 100_000;
+/** How many references one page returns when the caller does not ask for fewer. */
+export const SECRETS_PAGE_SIZE = 50;
+/** The character budget every model-facing secrets result is trimmed to fit. */
+export const SECRETS_OUTPUT_CHARACTERS = 12_000;
+/** The most secrets one resolver selection may name. */
 const MAX_SECRET_LIST_ITEMS = 256;
-
-const idFactorySchema = Type.Function(
-    [secretContextSchema, secretAgentIdSchema],
-    Type.Union([secretIdSchema, Type.Promise(secretIdSchema)]),
-);
-
-const eventFactorySchema = Type.Function(
-    [secretContextSchema, secretAgentIdSchema],
-    Type.Union([secretEventIdSchema, Type.Promise(secretEventIdSchema)]),
-);
-
-const clockSchema = Type.Function([], secretEventTimestampSchema);
-const postCommitErrorSchema = Type.Function(
-    [secretContextSchema, secretEventSchema, Type.Unknown()],
-    Type.Union([Type.Void(), Type.Promise(Type.Unknown())]),
-);
-
-const secretModuleOptionsSchema = Type.Object(
-    {
-        resolveForHost: Type.Optional(secretResolverSchema),
-        resolveForCommand: Type.Optional(secretCommandResolverSchema),
-        idFactory: Type.Optional(idFactorySchema),
-        eventIdFactory: Type.Optional(eventFactorySchema),
-        clock: Type.Optional(clockSchema),
-        listener: Type.Optional(secretModuleListenerSchema),
-        authorize: Type.Optional(secretAuthorizationSchema),
-        onPostCommitError: Type.Optional(postCommitErrorSchema),
-        maxPageSize: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_PAGE_SIZE })),
-        maxOutputCharacters: Type.Optional(
-            Type.Integer({
-                minimum: 256,
-                maximum: MAX_OUTPUT_CHARACTERS,
-            }),
-        ),
-    },
-    { additionalProperties: false },
-);
-
-/** Public constructor validation schema. */
-export { secretModuleOptionsSchema };
-export type SecretsModuleOptions = Static<typeof secretModuleOptionsSchema>;
-
-type SecretIdFactory = Static<typeof idFactorySchema>;
-type SecretEventFactory = Static<typeof eventFactorySchema>;
-type SecretClock = Static<typeof clockSchema>;
-type SecretPostCommitError = Static<typeof postCommitErrorSchema>;
 
 type SecretChange<Result> = {
     readonly result: Result;
@@ -136,8 +84,14 @@ type SecretChange<Result> = {
 /**
  * Module-owned secret metadata and attachment management.
  *
- * Secret values are never returned to the model. `resolveForHost` and `resolveForCommand` remain
- * optional trusted-host capabilities and are intentionally not exposed as model tools.
+ * Secret values are never returned to the model. The module resolves them itself, out of its own
+ * SQLite catalog, through `resolveForHost` and `resolveForCommand`; both are deliberately not
+ * exposed as tools, and nothing outside the module supplies or intercepts a value.
+ *
+ * The catalog is keyed by the acting agent's ID, which is what keeps one agent's secrets away from
+ * another's. Beyond that there is no authorization policy: any caller already holding the acting
+ * agent's identity may list, read, register, update, remove, attach, detach, and resolve that
+ * agent's secrets.
  *
  * Every mutation simply overwrites: calling `register`, `update`, `attach`, or `detach` again with
  * the same or a different value applies again and succeeds. There is no retry ledger.
@@ -146,42 +100,30 @@ export class SecretsModule implements AgentModule {
     readonly name = "secrets";
     readonly migrations = secretsMigrations;
 
-    readonly #store: SecretDatabase;
-    readonly #resolver: SecretsModuleOptions["resolveForHost"];
-    readonly #commandResolver: SecretCommandResolver | undefined;
-    readonly #idFactory: SecretIdFactory;
-    readonly #eventIdFactory: SecretEventFactory;
-    readonly #clock: SecretClock;
-    readonly #listener: SecretModuleListener | undefined;
-    readonly #authorize: SecretAuthorization | undefined;
-    readonly #onPostCommitError: SecretPostCommitError | undefined;
-    readonly #maxPageSize: number;
-    readonly #maxOutputCharacters: number;
+    readonly #store: SecretDatabase = createSecretDatabase();
 
-    constructor(options: SecretsModuleOptions = {}) {
-        assertSecretsModuleOptions(options);
-        this.#store = createSecretDatabase();
-        this.#resolver = options.resolveForHost;
-        this.#commandResolver = options.resolveForCommand;
-        this.#idFactory = options.idFactory ?? (() => globalThis.crypto.randomUUID());
-        this.#eventIdFactory = options.eventIdFactory ?? (() => globalThis.crypto.randomUUID());
-        this.#clock = options.clock ?? (() => Date.now());
-        this.#listener = options.listener;
-        this.#authorize = options.authorize;
-        this.#onPostCommitError = options.onPostCommitError;
-        this.#maxPageSize = options.maxPageSize ?? DEFAULT_MAX_PAGE_SIZE;
-        this.#maxOutputCharacters = options.maxOutputCharacters ?? DEFAULT_MAX_OUTPUT_CHARACTERS;
-        if (!Value.Check(Type.Integer({ minimum: 1, maximum: MAX_PAGE_SIZE }), this.#maxPageSize)) {
-            throw new Error("Secrets max page size is invalid.");
-        }
-        if (
-            !Value.Check(
-                Type.Integer({ minimum: 256, maximum: MAX_OUTPUT_CHARACTERS }),
-                this.#maxOutputCharacters,
-            )
-        ) {
-            throw new Error("Secrets max model output size is invalid.");
-        }
+    /** Subscribers taken after construction, inside and after the committing transaction. */
+    readonly #transactionalListeners = new Set<SecretEventListener>();
+    readonly #postCommitListeners = new Set<SecretEventListener>();
+
+    /**
+     * Watch the catalog inside the transaction that commits the change.
+     *
+     * A transactional subscriber runs before the commit, so throwing from one rejects the mutation
+     * that produced the event. Returns the function that ends the subscription.
+     */
+    onEventTransactional(listener: SecretEventListener): SecretUnsubscribe {
+        return this.#subscribe(this.#transactionalListeners, listener);
+    }
+
+    /**
+     * Watch the catalog after the outermost transaction has committed.
+     *
+     * A post-commit subscriber cannot undo anything, so a failure in one is logged and the
+     * remaining subscribers still see the event. Returns the function that ends the subscription.
+     */
+    onEvent(listener: SecretEventListener): SecretUnsubscribe {
+        return this.#subscribe(this.#postCommitListeners, listener);
     }
 
     /** Return a bounded page of safe secret metadata, optionally filtered by an opaque scope. */
@@ -195,7 +137,6 @@ export class SecretsModule implements AgentModule {
         this.#assertInput(secretListInputSchema, query, "list query");
         const normalized = this.#listQuery(query);
         return await ctx.inTx(async (txCtx) => {
-            await this.#authorizeOperation(txCtx, actingAgentId, "list", query.scopeRef);
             const page = await this.#readPage(txCtx, actingAgentId, normalized);
             for (let count = page.secrets.length; count >= 1; count -= 1) {
                 const candidate: SecretPage = {
@@ -207,7 +148,7 @@ export class SecretsModule implements AgentModule {
                           ? {}
                           : { nextCursor: page.nextCursor }),
                 };
-                if (this.#formatPage(candidate, true).length <= this.#maxOutputCharacters) {
+                if (this.#formatPage(candidate, true).length <= SECRETS_OUTPUT_CHARACTERS) {
                     return candidate;
                 }
             }
@@ -225,7 +166,6 @@ export class SecretsModule implements AgentModule {
         this.#assertContext(ctx);
         this.#assertAgentId(actingAgentId);
         this.#assertSecretId(secretId);
-        await this.#authorizeOperation(ctx, actingAgentId, "reference");
         const value = await this.#reference(ctx, actingAgentId, secretId);
         if (value === undefined) return undefined;
         const reference = this.#normalizeReference(value);
@@ -244,13 +184,12 @@ export class SecretsModule implements AgentModule {
         this.#assertContext(ctx);
         this.#assertAgentId(actingAgentId);
         this.#assertInput(secretRegistrationInputSchema, input, "registration");
-        await this.#authorizeOperation(ctx, actingAgentId, "register");
         const normalizedInput = normalizeRegistrationInput(input);
 
         return await this.#runTransaction(ctx, "register", async (txCtx) => {
-            const id = normalizedInput.id ?? (await this.#newSecretId(txCtx, actingAgentId));
+            const id = normalizedInput.id ?? (this.#newSecretId());
             const registration = this.#normalizeRegistration({ ...normalizedInput, id });
-            const eventId = await this.#newEventId(txCtx, actingAgentId);
+            const eventId = this.#newEventId();
             const at = this.#now();
             const before = await this.#reference(txCtx, actingAgentId, registration.id);
             const raw = await this.#store.register(
@@ -294,11 +233,10 @@ export class SecretsModule implements AgentModule {
         this.#assertAgentId(actingAgentId);
         this.#assertSecretId(secretId);
         this.#assertInput(secretUpdateInputSchema, input, "update");
-        await this.#authorizeOperation(ctx, actingAgentId, "update");
         const normalizedInput = normalizeUpdateInput(input);
 
         return await this.#runTransaction(ctx, "update", async (txCtx) => {
-            const eventId = await this.#newEventId(txCtx, actingAgentId);
+            const eventId = this.#newEventId();
             const at = this.#now();
             const before = await this.#reference(txCtx, actingAgentId, secretId);
             if (before === undefined) {
@@ -358,10 +296,9 @@ export class SecretsModule implements AgentModule {
         this.#assertContext(ctx);
         this.#assertAgentId(actingAgentId);
         this.#assertSecretId(secretId);
-        await this.#authorizeOperation(ctx, actingAgentId, "remove");
 
         return await this.#runTransaction(ctx, "remove", async (txCtx) => {
-            const eventId = await this.#newEventId(txCtx, actingAgentId);
+            const eventId = this.#newEventId();
             const at = this.#now();
             const before = await this.#reference(txCtx, actingAgentId, secretId);
             const raw = await this.#store.remove(txCtx, actingAgentId, secretId);
@@ -438,10 +375,9 @@ export class SecretsModule implements AgentModule {
         this.#assertContext(ctx);
         this.#assertAgentId(actingAgentId);
         const input = this.#attachArguments(scopeOrInput, secretId);
-        await this.#authorizeOperation(ctx, actingAgentId, "attach", input.scopeRef);
 
         return await this.#runTransaction(ctx, "attach", async (txCtx) => {
-            const eventId = await this.#newEventId(txCtx, actingAgentId);
+            const eventId = this.#newEventId();
             const at = this.#now();
             const reference = await this.#reference(txCtx, actingAgentId, input.secretId);
             if (reference === undefined) {
@@ -503,10 +439,9 @@ export class SecretsModule implements AgentModule {
         this.#assertContext(ctx);
         this.#assertAgentId(actingAgentId);
         const input = this.#attachArguments(scopeOrInput, secretId);
-        await this.#authorizeOperation(ctx, actingAgentId, "detach", input.scopeRef);
 
         return await this.#runTransaction(ctx, "detach", async (txCtx) => {
-            const eventId = await this.#newEventId(txCtx, actingAgentId);
+            const eventId = this.#newEventId();
             const at = this.#now();
             const before = await this.#attachment(txCtx, actingAgentId, input);
             const raw = await this.#store.detach(txCtx, actingAgentId, structuredClone(input));
@@ -540,7 +475,7 @@ export class SecretsModule implements AgentModule {
     }
 
     /**
-     * Resolve attached values for a trusted host operation.
+     * Resolve attached values for a trusted host operation, out of the module's own catalog.
      *
      * This is deliberately not a tool and its result is never converted into model-facing text.
      */
@@ -554,26 +489,23 @@ export class SecretsModule implements AgentModule {
         this.#assertAgentId(actingAgentId);
         this.#assertScopeRef(scopeRef);
         const normalizedSecretIds = this.#normalizeSecretSelection(secretIds);
-        await this.#authorizeOperation(ctx, actingAgentId, "resolve", scopeRef);
         if (normalizedSecretIds !== undefined) {
             await this.#assertSelectionAttached(ctx, actingAgentId, scopeRef, normalizedSecretIds);
         }
-        const environment =
-            this.#resolver === undefined
-                ? await this.#store.resolveForHost(
-                      ctx,
-                      actingAgentId,
-                      scopeRef,
-                      normalizedSecretIds,
-                  )
-                : await this.#resolver(ctx, actingAgentId, scopeRef, normalizedSecretIds);
+        const environment = await this.#store.resolveForHost(
+            ctx,
+            actingAgentId,
+            scopeRef,
+            normalizedSecretIds,
+        );
         assertSecretHostEnvironment(environment);
         return structuredClone(environment);
     }
 
     /**
-     * Resolve selected attachments for a command host. The returned names must be removed from
-     * the command's ambient environment case-insensitively before `environment` is added.
+     * Resolve selected attachments for a command host, out of the module's own catalog. The
+     * returned names must be removed from the command's ambient environment case-insensitively
+     * before `environment` is added.
      */
     async resolveForCommand(
         ctx: Context,
@@ -587,7 +519,6 @@ export class SecretsModule implements AgentModule {
         const normalizedSecretIds = this.#normalizeSecretSelection(secretIds);
 
         return await ctx.inTx(async (txCtx) => {
-            await this.#authorizeOperation(txCtx, actingAgentId, "resolve", scopeRef);
             const selectedSecretIds = await this.#resolveCommandSecretIds(
                 txCtx,
                 actingAgentId,
@@ -600,29 +531,12 @@ export class SecretsModule implements AgentModule {
                 scopeRef,
             );
 
-            let environment: SecretHostEnvironment;
-            if (this.#commandResolver === undefined) {
-                environment =
-                    this.#resolver === undefined
-                        ? await this.#store.resolveForHost(
-                              txCtx,
-                              actingAgentId,
-                              scopeRef,
-                              selectedSecretIds,
-                          )
-                        : await this.#resolver(txCtx, actingAgentId, scopeRef, selectedSecretIds);
-                assertSecretHostEnvironment(environment);
-            } else {
-                const raw = await this.#commandResolver(
-                    txCtx,
-                    actingAgentId,
-                    scopeRef,
-                    selectedSecretIds,
-                );
-                assertSecretCommandResolverResult(raw);
-                environment = mergeCommandResolverEnvironments(raw, selectedSecretIds);
-            }
-
+            const environment: SecretHostEnvironment = await this.#store.resolveForHost(
+                txCtx,
+                actingAgentId,
+                scopeRef,
+                selectedSecretIds,
+            );
             assertSecretHostEnvironment(environment);
             const result = {
                 environment,
@@ -667,7 +581,7 @@ export class SecretsModule implements AgentModule {
     formatForModel(page: SecretPage): string {
         const normalized = this.#normalizePage(page);
         const output = this.#formatPage(normalized, false);
-        if (output.length > this.#maxOutputCharacters) {
+        if (output.length > SECRETS_OUTPUT_CHARACTERS) {
             throw new Error("Secret model output cannot fit complete metadata identities.");
         }
         return output;
@@ -677,7 +591,7 @@ export class SecretsModule implements AgentModule {
     formatPageForModel(page: SecretPage): string {
         const normalized = this.#normalizePage(page);
         const output = this.#formatPage(normalized, true);
-        if (output.length > this.#maxOutputCharacters) {
+        if (output.length > SECRETS_OUTPUT_CHARACTERS) {
             throw new Error("Secret page output cannot fit complete metadata and cursor.");
         }
         return output;
@@ -695,10 +609,10 @@ export class SecretsModule implements AgentModule {
             false,
         )}`;
         const output =
-            detailed.length <= this.#maxOutputCharacters
+            detailed.length <= SECRETS_OUTPUT_CHARACTERS
                 ? detailed
                 : `attach\nscope=${scopeRef}\nsecret=${normalized.id}`;
-        if (output.length > this.#maxOutputCharacters) {
+        if (output.length > SECRETS_OUTPUT_CHARACTERS) {
             throw new Error("Secret attachment output cannot fit complete metadata.");
         }
         return output;
@@ -712,12 +626,12 @@ export class SecretsModule implements AgentModule {
             ? `Detached ${JSON.stringify(secretId)} from scope ${JSON.stringify(scopeRef)}.`
             : `Secret ${JSON.stringify(secretId)} was not attached to scope ${JSON.stringify(scopeRef)}.`;
         const output =
-            detailed.length <= this.#maxOutputCharacters
+            detailed.length <= SECRETS_OUTPUT_CHARACTERS
                 ? detailed
                 : detached
                   ? `detached\nscope=${scopeRef}\nsecret=${secretId}`
                   : `not attached\nscope=${scopeRef}\nsecret=${secretId}`;
-        if (output.length > this.#maxOutputCharacters) {
+        if (output.length > SECRETS_OUTPUT_CHARACTERS) {
             throw new Error("Secret detach output cannot fit complete identities.");
         }
         return output;
@@ -772,7 +686,7 @@ export class SecretsModule implements AgentModule {
                 ? "No secret references."
                 : page.secrets.map((secret) => this.#formatReference(secret)).join("\n");
         const detailed = withCursor(detailedRows);
-        if (detailed.length <= this.#maxOutputCharacters) return detailed;
+        if (detailed.length <= SECRETS_OUTPUT_CHARACTERS) return detailed;
         const compactRows =
             page.secrets.length === 0
                 ? "No secret references."
@@ -794,28 +708,40 @@ export class SecretsModule implements AgentModule {
         });
     }
 
+    #subscribe(
+        listeners: Set<SecretEventListener>,
+        listener: SecretEventListener,
+    ): SecretUnsubscribe {
+        if (!Value.Check(secretEventListenerSchema, listener)) {
+            throw new Error("A secrets subscriber must be a function.");
+        }
+        listeners.add(listener);
+        return () => {
+            listeners.delete(listener);
+        };
+    }
+
     async #observe(ctx: Context, event: SecretEvent): Promise<void> {
         if (!Value.Check(secretEventSchema, event) || !isDeepFrozen(event)) {
             throw new Error("Secrets module created an invalid unfrozen event.");
         }
-        const transactional = this.#listener?.onEventTransactional;
-        if (transactional !== undefined) {
-            await transactional.call(this.#listener, ctx, event);
-        }
+        // A snapshot, so subscribing or unsubscribing from inside a subscriber cannot change who
+        // this event goes to.
+        for (const listener of [...this.#transactionalListeners]) await listener(ctx, event);
         afterCommit(ctx, (postCommitCtx) => this.#notifyPostCommit(postCommitCtx, event));
     }
 
     async #notifyPostCommit(ctx: Context, event: SecretEvent): Promise<void> {
-        try {
-            const listener = this.#listener?.onEvent;
-            if (listener !== undefined) {
-                await listener.call(this.#listener, ctx, event);
-            }
-        } catch (error: unknown) {
+        for (const listener of [...this.#postCommitListeners]) {
             try {
-                await this.#onPostCommitError?.(ctx, event, error);
-            } catch {
-                // Reporting is advisory after durable state has settled.
+                await listener(ctx, event);
+            } catch (error: unknown) {
+                // Nothing here can undo a catalog change the database has already committed, and
+                // one failing subscriber must not hide the event from the rest.
+                ctx.log.error(
+                    { error, eventId: event.eventId, type: event.type },
+                    "A secrets subscriber failed after the change was committed.",
+                );
             }
         }
     }
@@ -1019,32 +945,18 @@ export class SecretsModule implements AgentModule {
         return value;
     }
 
-    async #authorizeOperation(
-        ctx: Context,
-        actingAgentId: SecretAgentId,
-        operation: Static<typeof secretAuthorizationOperationSchema>,
-        scopeRef?: SecretScopeRef,
-    ): Promise<void> {
-        if (this.#authorize === undefined) return;
-        const allowed = await this.#authorize(ctx, actingAgentId, operation, scopeRef);
-        if (typeof allowed !== "boolean") {
-            throw new Error("Secret authorization returned an invalid result.");
-        }
-        if (!allowed) throw new Error("The acting agent is not authorized for this secret scope.");
-    }
-
-    async #newSecretId(ctx: Context, actingAgentId: SecretAgentId): Promise<SecretId> {
-        const value = await this.#idFactory(ctx, actingAgentId);
+    #newSecretId(): SecretId {
+        const value = globalThis.crypto.randomUUID();
         if (!Value.Check(secretIdSchema, value)) {
-            throw new Error("Secret id factory returned an invalid identity.");
+            throw new Error("Secrets minted an invalid secret identity.");
         }
         return value;
     }
 
-    async #newEventId(ctx: Context, actingAgentId: SecretAgentId): Promise<string> {
-        const value = await this.#eventIdFactory(ctx, actingAgentId);
+    #newEventId(): string {
+        const value = globalThis.crypto.randomUUID();
         if (!Value.Check(secretEventIdSchema, value)) {
-            throw new Error("Secret event ID factory returned an invalid ID.");
+            throw new Error("Secrets minted an invalid event identity.");
         }
         return value;
     }
@@ -1101,7 +1013,7 @@ export class SecretsModule implements AgentModule {
 
     #normalizePage(value: SecretPage): SecretPage {
         assertSecretPage(value);
-        if (value.limit > this.#maxPageSize || value.secrets.length > value.limit) {
+        if (value.limit > SECRETS_PAGE_SIZE || value.secrets.length > value.limit) {
             throw new Error("Secret page exceeds the configured metadata bound.");
         }
         const ids = new Set<string>();
@@ -1158,13 +1070,13 @@ export class SecretsModule implements AgentModule {
         const normalized = {
             ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
             ...(query.scopeRef === undefined ? {} : { scopeRef: query.scopeRef }),
-            limit: query.limit ?? this.#maxPageSize,
+            limit: query.limit ?? SECRETS_PAGE_SIZE,
         };
         if (!Value.Check(secretListQuerySchema, normalized)) {
             throw new Error("Secret list query is invalid.");
         }
-        if (normalized.limit > this.#maxPageSize) {
-            throw new Error(`Secret page limit cannot exceed ${this.#maxPageSize}.`);
+        if (normalized.limit > SECRETS_PAGE_SIZE) {
+            throw new Error(`Secret page limit cannot exceed ${SECRETS_PAGE_SIZE}.`);
         }
         return normalized;
     }
@@ -1274,20 +1186,11 @@ export class SecretsModule implements AgentModule {
     }
 
     #now(): number {
-        const at = this.#clock();
+        const at = Date.now();
         if (!Value.Check(secretEventTimestampSchema, at)) {
-            throw new Error("Secret clock must return a non-negative integer timestamp.");
+            throw new Error("The clock returned a time secrets cannot represent.");
         }
         return at;
-    }
-}
-
-/** Validate every configured callable and reject unknown option keys. */
-export function assertSecretsModuleOptions(value: unknown): asserts value is SecretsModuleOptions {
-    if (!Value.Check(secretModuleOptionsSchema, value)) {
-        throw new Error(
-            "Secrets module options are invalid; check the resolver, listener, and callbacks.",
-        );
     }
 }
 
@@ -1439,42 +1342,6 @@ function mergeEnvironmentVariableNames(...nameLists: readonly (readonly string[]
         }
     }
     return sortEnvironmentNames([...names.values()]);
-}
-
-function mergeCommandResolverEnvironments(
-    entries: SecretCommandResolverResult,
-    selectedSecretIds: readonly SecretId[],
-): SecretHostEnvironment {
-    const selected = new Set(selectedSecretIds);
-    if (entries.length !== selectedSecretIds.length) {
-        throw new Error("Secret command resolver did not return every selected secret.");
-    }
-    const seen = new Set<string>();
-    const environment = Object.create(null) as Record<string, string>;
-    const owners = new Map<string, string>();
-    for (const entry of [...entries].sort((left, right) =>
-        left.secretId.localeCompare(right.secretId),
-    )) {
-        if (!selected.has(entry.secretId) || seen.has(entry.secretId)) {
-            throw new Error("Secret command resolver returned an unexpected secret identity.");
-        }
-        seen.add(entry.secretId);
-        for (const [name, value] of Object.entries(entry.environment) as [string, string][]) {
-            const normalizedName = name.toUpperCase();
-            const owner = owners.get(normalizedName);
-            if (owner !== undefined) {
-                throw new Error(
-                    `Secrets '${owner}' and '${entry.secretId}' both define ${name}. Select only one of them for this command.`,
-                );
-            }
-            owners.set(normalizedName, entry.secretId);
-            environment[name] = value;
-        }
-    }
-    if (seen.size !== selected.size) {
-        throw new Error("Secret command resolver did not return every selected secret.");
-    }
-    return environment;
 }
 
 function sameJson(left: unknown, right: unknown): boolean {

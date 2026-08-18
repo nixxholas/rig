@@ -120,18 +120,15 @@ export const projectEventSchema = Type.Union([
 
 const projectListenerResultSchema = Type.Union([Type.Void(), Type.Promise(Type.Void())]);
 
-export const projectModuleListenerSchema = Type.Object(
-    {
-        onEventTransactional: Type.Optional(
-            Type.Function([projectContextSchema, projectEventSchema], projectListenerResultSchema),
-        ),
-        onEvent: Type.Optional(
-            Type.Function([projectContextSchema, projectEventSchema], projectListenerResultSchema),
-        ),
-    },
-    { additionalProperties: false },
+/** One subscriber taken after construction. */
+export const projectEventListenerSchema = Type.Function(
+    [projectContextSchema, projectEventSchema],
+    projectListenerResultSchema,
 );
 
 export type ProjectStateChangeReason = Static<typeof projectStateChangeReasonSchema>;
 export type ProjectEvent = Static<typeof projectEventSchema>;
-export type ProjectModuleListener = Static<typeof projectModuleListenerSchema>;
+export type ProjectEventListener = Static<typeof projectEventListenerSchema>;
+
+/** Ends a subscription. Calling it more than once does nothing further. */
+export type ProjectUnsubscribe = () => void;

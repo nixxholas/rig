@@ -1,11 +1,7 @@
 import { createRootContext } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
-import {
-    MAX_DURABLE_SKILL_COUNT_PER_ROOT,
-    SkillsModule,
-    skillNameSchema,
-} from "../../sources/skills/index.js";
+import { SkillsModule, skillNameSchema } from "../../sources/skills/index.js";
 import {
     MAX_SKILL_COUNT,
     MAX_SKILL_DOCUMENT_BYTES,
@@ -14,6 +10,7 @@ import {
 import { parseSkillFrontmatter } from "../../sources/skills/impl/parseSkillFrontmatter.js";
 import { FakeCompute } from "../compute/support/FakeCompute.js";
 import { resolveModuleHooks } from "../support/moduleHooks.js";
+import { scriptedComputeModule } from "../support/computeModule.js";
 
 const ctx = createRootContext().named("skills-module-edge-test");
 const agentId = "agent-edge";
@@ -24,7 +21,7 @@ function skill(name: string, description: string, body = "Instructions."): strin
 }
 
 function moduleFor(compute: FakeCompute): SkillsModule {
-    return new SkillsModule({ compute: { resolve: async () => compute } });
+    return new SkillsModule(scriptedComputeModule(async () => compute));
 }
 
 describe("SkillsModule edge cases", () => {
@@ -58,101 +55,6 @@ describe("SkillsModule edge cases", () => {
             moduleFor(compute).read(ctx, agentId, { name: "review" }),
         ).resolves.toMatchObject({
             content: expect.stringContaining("App instructions."),
-        });
-    });
-
-    it("applies durable, project, plugin, and builtin precedence independently of root order", async () => {
-        const compute = new FakeCompute("/workspace");
-        compute.directories.add("/workspace/.git");
-        compute.write(
-            "/workspace/.agents/skills/shared/SKILL.md",
-            skill("shared", "Project version.", "Project body."),
-        );
-        compute.write(
-            "/plugin/skills/shared/SKILL.md",
-            skill("shared", "Plugin version.", "Plugin body."),
-        );
-        compute.write(
-            "/builtin/skills/shared/SKILL.md",
-            skill("shared", "Builtin version.", "Builtin body."),
-        );
-        const module = new SkillsModule({
-            compute: { resolve: async () => compute },
-            skillRoots: [
-                {
-                    kind: "durable",
-                    skills: [{ name: "shared", description: "Durable version." }],
-                    read: async () => "Durable body.",
-                },
-                { kind: "builtin", path: "/builtin/skills" },
-                { kind: "plugin", path: "/plugin/skills" },
-            ],
-        });
-
-        await expect(module.list(ctx, agentId)).resolves.toEqual({
-            skills: [
-                {
-                    description: "Durable version.",
-                    location: "durable",
-                    name: "shared",
-                    source: "durable",
-                },
-            ],
-        });
-        await expect(module.read(ctx, agentId, { name: "shared" })).resolves.toMatchObject({
-            content: "Durable body.",
-        });
-    });
-
-    it("rejects unknown nested compute resolver options", () => {
-        const compute = new FakeCompute();
-        expect(
-            () =>
-                new SkillsModule({
-                    compute: {
-                        resolve: async () => compute,
-                        unexpected: true,
-                    },
-                } as never),
-        ).toThrow("Skills module options are invalid");
-    });
-
-    it("rejects a resolver that returns a malformed host compute", async () => {
-        const module = new SkillsModule({
-            compute: {
-                resolve: async () =>
-                    ({
-                        id: "host",
-                        kind: "host",
-                        cwd: "/workspace",
-                    }) as never,
-            },
-        });
-
-        await expect(module.list(ctx, agentId)).rejects.toThrow(
-            "Skills resolver returned an invalid compute",
-        );
-    });
-
-    it("takes a live snapshot of durable roots at construction", async () => {
-        const compute = new FakeCompute();
-        const skills = [{ name: "external", description: "Original description." }];
-        const roots = [
-            {
-                kind: "durable" as const,
-                skills,
-                read: async () => "Original body.",
-            },
-        ];
-        const module = new SkillsModule({
-            compute: { resolve: async () => compute },
-            skillRoots: roots,
-        });
-        skills[0] = { name: "mutated", description: "Mutated description." };
-        roots[0]!.skills = skills;
-
-        await expect(module.list(ctx, agentId)).resolves.toMatchObject({
-            skills: [{ name: "external", description: "Original description." }],
         });
     });
 
@@ -269,31 +171,23 @@ describe("SkillsModule edge cases", () => {
         });
     });
 
-    it("does not follow a plugin root through a symlink but does follow builtin roots", async () => {
+    it("treats a skills root reached through a symlink as the skill itself", async () => {
         const compute = new FakeCompute("/workspace");
         compute.directories.add("/workspace/.git");
-        compute.directories.add("/external/builtin");
+        compute.directories.add("/external/linked");
         compute.write(
-            "/external/builtin/SKILL.md",
-            skill("builtin", "Builtin skill.", "Builtin body."),
+            "/external/linked/SKILL.md",
+            skill("linked", "Linked skill.", "Linked body."),
         );
-        compute.links.set("/builtin/skills", "/external/builtin");
-        compute.links.set("/plugin/skills", "/external/builtin");
+        compute.links.set("/workspace/.agents/skills", "/external/linked");
 
-        const module = new SkillsModule({
-            compute: { resolve: async () => compute },
-            skillRoots: [
-                { kind: "plugin", path: "/plugin/skills" },
-                { kind: "builtin", path: "/builtin/skills" },
-            ],
-        });
-        await expect(module.list(ctx, agentId)).resolves.toEqual({
+        await expect(moduleFor(compute).list(ctx, agentId)).resolves.toEqual({
             skills: [
                 {
-                    description: "Builtin skill.",
-                    location: "/external/builtin/SKILL.md",
-                    name: "builtin",
-                    source: "builtin",
+                    description: "Linked skill.",
+                    location: "/external/linked/SKILL.md",
+                    name: "linked",
+                    source: "project",
                 },
             ],
         });
@@ -380,7 +274,6 @@ describe("SkillsModule edge cases", () => {
             ).toBe(true);
             const previousNames = new Set(names);
             expect(page.skills.every((entry) => !previousNames.has(entry.name))).toBe(true);
-            expect(page.skills.map((entry) => entry.name).join("\n").length).toBeGreaterThan(0);
             names.push(...page.skills.map((entry) => entry.name));
             cursor = page.nextCursor;
         } while (cursor !== undefined);
@@ -389,7 +282,6 @@ describe("SkillsModule edge cases", () => {
 
         const first = await module.list(ctx, agentId);
         expect(first.skills.length).toBeGreaterThan(0);
-        expect(first.skills.map((entry) => entry.name).join("\n").length).toBeGreaterThan(0);
         expect(first.skills.length).toBeLessThanOrEqual(MAX_SKILL_COUNT);
         const hooks = await resolveModuleHooks(ctx, module);
         const listTool = (await hooks.tools!(ctx, scope)).find(
@@ -447,14 +339,12 @@ describe("SkillsModule edge cases", () => {
 
     it("validates list and read inputs before resolving compute", async () => {
         let resolveCalls = 0;
-        const module = new SkillsModule({
-            compute: {
-                resolve: async () => {
-                    resolveCalls += 1;
-                    return new FakeCompute();
-                },
-            },
-        });
+        const module = new SkillsModule(
+            scriptedComputeModule(async () => {
+                resolveCalls += 1;
+                return new FakeCompute();
+            }),
+        );
         await expect(module.list(ctx, agentId, { limit: 0 } as never)).rejects.toThrow(
             "Skill list input is invalid",
         );
@@ -465,25 +355,6 @@ describe("SkillsModule edge cases", () => {
             "Skill read input is invalid",
         );
         expect(resolveCalls).toBe(0);
-    });
-
-    it("keeps durable skills available without compute and exposes bounded instructions", async () => {
-        const module = new SkillsModule({
-            compute: { resolve: async () => undefined },
-            skillRoots: [
-                {
-                    kind: "durable",
-                    skills: [
-                        { name: "one", description: "One durable skill." },
-                        { name: "two", description: "Two durable skill." },
-                    ],
-                    read: async () => "Durable body.",
-                },
-            ],
-        });
-        const hooks = await resolveModuleHooks(ctx, module);
-        await expect(hooks.instructions!(ctx, scope)).resolves.toContain("<name>one</name>");
-        await expect(hooks.tools!(ctx, scope)).resolves.toHaveLength(2);
     });
 
     it("routes list and read tools through the same public operations", async () => {
@@ -521,13 +392,6 @@ describe("SkillsModule edge cases", () => {
         ).toContain("Complete one body.");
     });
 
-    it("does not expose tools when neither compute nor durable skills exist", async () => {
-        const module = new SkillsModule({ compute: { resolve: async () => undefined } });
-        const hooks = await resolveModuleHooks(ctx, module);
-        await expect(hooks.tools!(ctx, scope)).resolves.toEqual([]);
-        await expect(hooks.instructions!(ctx, scope)).resolves.toBe("");
-    });
-
     it("does not retain mutable list results between live reads", async () => {
         const compute = new FakeCompute("/workspace");
         compute.directories.add("/workspace/.git");
@@ -554,56 +418,16 @@ describe("SkillsModule edge cases", () => {
     });
 
     it("escapes skill metadata in system instructions", async () => {
-        const module = new SkillsModule({
-            compute: { resolve: async () => undefined },
-            skillRoots: [
-                {
-                    kind: "durable",
-                    skills: [{ name: "safe", description: "<tag>& value" }],
-                    read: async () => "Body.",
-                },
-            ],
-        });
-        const hooks = await resolveModuleHooks(ctx, module);
+        const compute = new FakeCompute("/workspace");
+        compute.directories.add("/workspace/.git");
+        compute.write(
+            "/workspace/.agents/skills/safe/SKILL.md",
+            skill("safe", "<tag>& value", "Body."),
+        );
+        const hooks = await resolveModuleHooks(ctx, moduleFor(compute));
         const instructions = await hooks.instructions!(ctx, scope);
         expect(instructions).toContain("<description>&lt;tag&gt;&amp; value</description>");
         expect(instructions).not.toContain("<description><tag>& value</description>");
-    });
-
-    it("rejects oversized root configuration and malformed durable entries", () => {
-        const compute = new FakeCompute();
-        expect(
-            () =>
-                new SkillsModule({
-                    compute: { resolve: async () => compute },
-                    skillRoots: Array.from({ length: 65 }, () => ({
-                        kind: "builtin" as const,
-                        path: "/builtin",
-                    })),
-                }),
-        ).toThrow("Skills module options are invalid");
-        expect(
-            () =>
-                new SkillsModule({
-                    compute: { resolve: async () => compute },
-                    skillRoots: [
-                        {
-                            kind: "durable",
-                            skills: [
-                                { name: "ok", description: "valid" },
-                                ...Array.from(
-                                    { length: MAX_DURABLE_SKILL_COUNT_PER_ROOT },
-                                    (_, index) => ({
-                                        name: `extra-${index}`,
-                                        description: "too many",
-                                    }),
-                                ),
-                            ],
-                            read: async () => "body",
-                        },
-                    ],
-                }),
-        ).toThrow("Skills module options are invalid");
     });
 
     it("skips malformed flow-map and oversized frontmatter files while keeping siblings", async () => {
@@ -625,81 +449,6 @@ describe("SkillsModule edge cases", () => {
         await expect(moduleFor(compute).list(ctx, agentId)).resolves.toMatchObject({
             skills: [{ name: "good" }],
         });
-    });
-
-    it("contains durable reader failures and enforces document byte bounds", async () => {
-        const module = new SkillsModule({
-            compute: { resolve: async () => undefined },
-            skillRoots: [
-                {
-                    kind: "durable",
-                    skills: [{ name: "external", description: "External." }],
-                    read: async () => "😀".repeat(Math.floor(MAX_SKILL_DOCUMENT_BYTES / 4) + 1),
-                },
-            ],
-        });
-        await expect(module.read(ctx, agentId, { name: "external" })).rejects.toThrow(
-            "exceeds the configured size limit",
-        );
-
-        const failing = new SkillsModule({
-            compute: { resolve: async () => undefined },
-            skillRoots: [
-                {
-                    kind: "durable",
-                    skills: [{ name: "external", description: "External." }],
-                    read: async () => {
-                        throw new Error("durable backend unavailable");
-                    },
-                },
-            ],
-        });
-        await expect(failing.read(ctx, agentId, { name: "external" })).rejects.toThrow(
-            "durable backend unavailable",
-        );
-    });
-
-    it("caps durable root entries and deduplicates their names", async () => {
-        const firstRootSkills = Array.from(
-            { length: MAX_DURABLE_SKILL_COUNT_PER_ROOT - 1 },
-            (_, index) => ({
-                name: `skill-${index}`,
-                description: `Description ${index}.`,
-            }),
-        );
-        firstRootSkills.push({
-            name: "skill-1",
-            description: "Duplicate should not replace.",
-        });
-        const skills = Array.from({ length: MAX_DURABLE_SKILL_COUNT_PER_ROOT }, (_, index) => ({
-            name: `skill-${index}`,
-            description: `Description ${index}.`,
-        }));
-        const module = new SkillsModule({
-            compute: { resolve: async () => undefined },
-            skillRoots: [
-                {
-                    kind: "durable",
-                    skills: firstRootSkills,
-                    read: async () => "Durable body.",
-                },
-                {
-                    kind: "durable",
-                    skills: [
-                        { name: "skill-1", description: "Second root." },
-                        { name: "second-root", description: "Second root skill." },
-                    ],
-                    read: async () => "Second body.",
-                },
-            ],
-        });
-        const result = await module.list(ctx, agentId);
-        expect(result.skills).toHaveLength(MAX_SKILL_COUNT);
-        expect(result.skills.find((entry) => entry.name === "skill-1")?.description).toBe(
-            "Description 1.",
-        );
-        expect(result.skills.some((entry) => entry.name === "second-root")).toBe(true);
-        expect(skills).toHaveLength(MAX_DURABLE_SKILL_COUNT_PER_ROOT);
     });
 
     it("parses YAML duplicate keys, quoted values, and unknown metadata", () => {

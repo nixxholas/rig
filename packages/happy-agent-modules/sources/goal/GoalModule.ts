@@ -15,21 +15,19 @@ import {
     type AgentSystemRef,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
-import { Type, type Static } from "@sinclair/typebox";
+import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { afterCommit, type Context } from "@steve.kite/stdlib";
 
 import {
+    goalEventListenerSchema,
     goalEventSchema,
-    goalModuleListenerSchema,
-    goalContextSchema,
-    goalVoidOrPromiseVoidSchema,
     type GoalEvent,
-    type GoalModuleListener,
+    type GoalEventListener,
+    type GoalUnsubscribe,
 } from "./GoalEvent.js";
-import { AGENT_MESSAGE_ORIGIN_METADATA, senderAgentIdMetadata } from "../auto/messageOrigin.js";
+import { AGENT_MESSAGE_ORIGIN_METADATA, senderAgentIdMetadata } from "../impl/messageOrigin.js";
 import { createGoalContinuationPrompt } from "./impl/createGoalContinuationPrompt.js";
-import { createGoalTitle } from "./impl/createGoalTitle.js";
 import {
     clearGoal as clearStoredGoal,
     GOAL_CONTINUATION_ID_KEY,
@@ -44,7 +42,6 @@ import {
 } from "./impl/goalState.js";
 import { goalKV } from "./impl/goalKV.js";
 import { normalizeGoalObjective } from "./impl/normalizeGoalObjective.js";
-import { goalHostSchema, type GoalHost } from "./GoalHost.js";
 import {
     FAILED_TURNS_BEFORE_BLOCKED,
     goalAgentIdSchema,
@@ -52,8 +49,6 @@ import {
     goalOperationIdSchema,
     goalStatusSchema,
     goalTimestampSchema,
-    MAX_GOAL_OUTPUT_CHARACTERS,
-    type GoalInterruptionReason,
     type GoalStatus,
     type SessionGoal,
 } from "./SessionGoal.js";
@@ -78,48 +73,8 @@ const goalInferenceSchema = Type.Object(
     },
     { additionalProperties: false },
 );
-const goalOutputCharactersSchema = Type.Integer({
-    minimum: 256,
-    maximum: MAX_GOAL_OUTPUT_CHARACTERS,
-});
-const goalIdFactorySchema = Type.Function(
-    [goalContextSchema, goalAgentIdSchema],
-    Type.Union([goalOperationIdSchema, Type.Promise(goalOperationIdSchema)]),
-);
-const goalEventIdFactorySchema = Type.Function(
-    [goalContextSchema, goalAgentIdSchema],
-    Type.Union([goalOperationIdSchema, Type.Promise(goalOperationIdSchema)]),
-);
-const goalClockSchema = Type.Function(
-    [],
-    Type.Union([goalTimestampSchema, Type.Promise(goalTimestampSchema)]),
-);
-const goalBooleanPromiseSchema = Type.Promise(Type.Boolean());
-const goalFactoryPromiseSchema = Type.Promise(
-    Type.Union([goalOperationIdSchema, goalTimestampSchema]),
-);
-const goalVoidPromiseSchema = Type.Promise(Type.Void());
-const goalObserverErrorSchema = Type.String({ minLength: 1, maxLength: 500 });
-
-export const goalModuleOptionsSchema = Type.Object(
-    {
-        host: Type.Optional(goalHostSchema),
-        listener: Type.Optional(goalModuleListenerSchema),
-        idFactory: Type.Optional(goalIdFactorySchema),
-        eventIdFactory: Type.Optional(goalEventIdFactorySchema),
-        clock: Type.Optional(goalClockSchema),
-        maxOutputCharacters: Type.Optional(goalOutputCharactersSchema),
-        onPostCommitError: Type.Optional(
-            Type.Function(
-                [goalContextSchema, goalEventSchema, goalObserverErrorSchema],
-                goalVoidOrPromiseVoidSchema,
-            ),
-        ),
-    },
-    { additionalProperties: false },
-);
-
-export type GoalModuleOptions = Static<typeof goalModuleOptionsSchema>;
+/** The character budget every model-facing goal result is trimmed to fit. */
+export const GOAL_OUTPUT_CHARACTERS = 12_000;
 
 interface GoalActivation {
     readonly goal: SessionGoal;
@@ -151,26 +106,21 @@ export class GoalModule implements AgentModule {
         ],
     ] as const;
 
-    readonly #host: GoalHost | undefined;
-    readonly #listener: GoalModuleListener | undefined;
-    readonly #idFactory: NonNullable<GoalModuleOptions["idFactory"]>;
-    readonly #eventIdFactory: NonNullable<GoalModuleOptions["eventIdFactory"]>;
-    readonly #clock: NonNullable<GoalModuleOptions["clock"]>;
-    readonly #maxOutputCharacters: number;
-    readonly #onPostCommitError: NonNullable<GoalModuleOptions["onPostCommitError"]> | undefined;
+    /** Subscribers taken after construction, inside and after the committing transaction. */
+    readonly #transactionalListeners = new Set<GoalEventListener>();
+    readonly #postCommitListeners = new Set<GoalEventListener>();
+
     readonly #mutations = new Map<string, Promise<void>>();
     #agents: AgentSystemRef | undefined;
 
-    constructor(options: GoalModuleOptions) {
-        const normalized = normalizeGoalModuleOptions(options);
-        assertGoalModuleOptions(normalized);
-        this.#host = normalized.host;
-        this.#listener = normalized.listener;
-        this.#idFactory = normalized.idFactory ?? (() => globalThis.crypto.randomUUID());
-        this.#eventIdFactory = normalized.eventIdFactory ?? (() => globalThis.crypto.randomUUID());
-        this.#clock = normalized.clock ?? (() => Date.now());
-        this.#maxOutputCharacters = normalized.maxOutputCharacters ?? 12_000;
-        this.#onPostCommitError = normalized.onPostCommitError;
+    /** Subscribe inside the committing transaction; throwing there rolls the mutation back. */
+    onEventTransactional(listener: GoalEventListener): GoalUnsubscribe {
+        return this.#subscribe(this.#transactionalListeners, listener);
+    }
+
+    /** Subscribe after the outer transaction commits; a failure there cannot undo the change. */
+    onEvent(listener: GoalEventListener): GoalUnsubscribe {
+        return this.#subscribe(this.#postCommitListeners, listener);
     }
 
     readonly #hooks: AgentModuleHooks = {
@@ -179,21 +129,21 @@ export class GoalModule implements AgentModule {
             _scope: AgentModuleSystemScope,
             agent: AgentModuleAgentLifecycle,
         ): Promise<void> => {
-            await this.#pauseActiveGoal(ctx, agent.id, "session_archived");
+            await this.#pauseActiveGoal(ctx, agent.id);
         },
 
         tools: (_ctx: Context, scope: AgentModuleScope): readonly AnyAgentTool[] => [
             createGoalTool(
                 this,
                 scope.agent.id,
-                this.#maxOutputCharacters,
+                GOAL_OUTPUT_CHARACTERS,
                 async (toolCtx, goal, lifecycleId) => {
                     if (agentRunningInside(toolCtx) !== scope.agent.id) return;
                     await scope.runKV.write(toolCtx, GOAL_OBSERVED_LIFECYCLE_ID_KEY, lifecycleId);
                 },
             ),
-            getGoalTool(this, scope.agent.id, this.#maxOutputCharacters),
-            updateGoalTool(this, scope.agent.id, this.#maxOutputCharacters),
+            getGoalTool(this, scope.agent.id, GOAL_OUTPUT_CHARACTERS),
+            updateGoalTool(this, scope.agent.id, GOAL_OUTPUT_CHARACTERS),
             clearGoalTool(this, scope.agent.id),
         ],
 
@@ -225,11 +175,7 @@ export class GoalModule implements AgentModule {
                 inference.state === "cancelled" ||
                 inference.state === "error";
             if (!failed) return;
-            await this.#pauseActiveGoal(
-                ctx,
-                scope.agent.id,
-                turn.aborted ? "session_interrupted" : "session_failed",
-            );
+            await this.#pauseActiveGoal(ctx, scope.agent.id);
         },
 
         beforeAgentLoopTransact: async (ctx: Context, scope: AgentModuleScope): Promise<void> => {
@@ -367,19 +313,18 @@ export class GoalModule implements AgentModule {
                 const blocked: SessionGoal = {
                     ...current,
                     status: "blocked",
-                    updatedAt: await this.#timestamp(txCtx),
+                    updatedAt: this.#now(),
                 };
                 await writeGoal(txCtx, kv, blocked);
                 await this.#deactivate(txCtx, kv);
                 await this.#publishEvent(
                     txCtx,
-                    await this.#event(txCtx, {
+                    this.#event({
                         type: "goal_status_changed",
                         agentId: scope.agent.id,
                         goal: blocked,
                     }),
                 );
-                this.#scheduleHostInterruption(txCtx, scope.agent.id, "goal_blocked");
                 return undefined;
             }
             await kv.delete(txCtx, GOAL_FAILURE_COUNT_KEY);
@@ -420,7 +365,6 @@ export class GoalModule implements AgentModule {
         requestedLifecycleId: string | undefined,
     ): Promise<GoalActivation> {
         this.#assertAgentId(agentId);
-        await this.#assertPrimaryAgent(ctx, agentId);
         const normalized = normalizeGoalObjective(objective);
         if (
             requestedLifecycleId !== undefined &&
@@ -448,14 +392,8 @@ export class GoalModule implements AgentModule {
         }
         const external = agentRunningInside(ctx) !== agentId;
         this.#assertCanActivateExternally(external);
-        const lifecycleId =
-            requestedLifecycleId ??
-            (await this.#factoryValue<string>(
-                this.#idFactory(ctx, agentId),
-                goalOperationIdSchema,
-                "Goal lifecycle ID",
-            ));
-        const at = await this.#timestamp(ctx);
+        const lifecycleId = requestedLifecycleId ?? this.#newId();
+        const at = this.#now();
         const goal: SessionGoal = {
             createdAt: at,
             objective: normalized,
@@ -464,12 +402,8 @@ export class GoalModule implements AgentModule {
         };
         await writeGoal(ctx, kv, goal);
         await this.#activate(ctx, kv, lifecycleId, goal, external);
-        await this.#publishEvent(ctx, await this.#event(ctx, { type: "goal_set", agentId, goal }));
+        await this.#publishEvent(ctx, this.#event({ type: "goal_set", agentId, goal }));
         await this.#wakeExternalActivation(ctx, agentId, lifecycleId, goal, external);
-        // The host title is the one externally visible side effect of a new goal, so it runs last:
-        // anything that can still reject the mutation has already run, and a rejected goal never
-        // leaves a renamed session behind.
-        await this.#setSessionTitle(ctx, agentId, normalized);
         return { goal: structuredClone(goal), lifecycleId };
     }
 
@@ -479,7 +413,6 @@ export class GoalModule implements AgentModule {
         status: GoalStatus,
     ): Promise<SessionGoal> {
         this.#assertAgentId(agentId);
-        await this.#assertPrimaryAgent(ctx, agentId);
         this.#assertStatus(status);
         const kv = goalKV(agentId);
         const state = await readGoalAuthoritativeState(ctx, kv, agentId);
@@ -496,23 +429,19 @@ export class GoalModule implements AgentModule {
         const goal: SessionGoal = {
             ...existing,
             status,
-            updatedAt: await this.#timestamp(ctx),
+            updatedAt: this.#now(),
         };
         await writeGoal(ctx, kv, goal);
         let lifecycleId: string | undefined;
         if (status === "active") {
-            lifecycleId = await this.#factoryValue<string>(
-                this.#idFactory(ctx, agentId),
-                goalOperationIdSchema,
-                "Goal lifecycle ID",
-            );
+            lifecycleId = this.#newId();
             await this.#activate(ctx, kv, lifecycleId, goal, external);
         } else {
             await this.#deactivate(ctx, kv);
         }
         await this.#publishEvent(
             ctx,
-            await this.#event(ctx, {
+            this.#event({
                 type: "goal_status_changed",
                 agentId,
                 goal,
@@ -520,42 +449,32 @@ export class GoalModule implements AgentModule {
         );
         if (lifecycleId !== undefined) {
             await this.#wakeExternalActivation(ctx, agentId, lifecycleId, goal, external);
-        } else if (status === "paused" || status === "blocked") {
-            this.#scheduleHostInterruption(
-                ctx,
-                agentId,
-                status === "paused" ? "goal_paused" : "goal_blocked",
-            );
+        } else if (external && (status === "paused" || status === "blocked")) {
+            this.#abortAgentWork(ctx, agentId);
         }
         return structuredClone(goal);
     }
 
     async #clearGoal(ctx: Context, agentId: string): Promise<boolean> {
         this.#assertAgentId(agentId);
-        await this.#assertPrimaryAgent(ctx, agentId);
         const kv = goalKV(agentId);
         const state = await readGoalAuthoritativeState(ctx, kv, agentId);
         const cleared = state.goal !== undefined;
         if (cleared) {
             await clearStoredGoal(ctx, kv);
             await this.#deactivate(ctx, kv);
-            await this.#publishEvent(
-                ctx,
-                await this.#event(ctx, { type: "goal_cleared", agentId }),
-            );
-            this.#scheduleHostInterruption(ctx, agentId, "goal_cleared");
+            await this.#publishEvent(ctx, this.#event({ type: "goal_cleared", agentId }));
+            if (agentRunningInside(ctx) !== agentId) this.#abortAgentWork(ctx, agentId);
         }
         return cleared;
     }
 
-    async #pauseActiveGoal(
-        ctx: Context,
-        agentId: string,
-        reason: Extract<
-            GoalInterruptionReason,
-            "session_failed" | "session_interrupted" | "session_archived"
-        >,
-    ): Promise<boolean> {
+    /**
+     * Park an active goal when the work behind it ended. Every caller runs after that work already
+     * stopped — an archived agent, a failed turn, an interrupted turn — so there is nothing left to
+     * abort here.
+     */
+    async #pauseActiveGoal(ctx: Context, agentId: string): Promise<boolean> {
         this.#assertAgentId(agentId);
         const kv = goalKV(agentId);
         const state = await readGoalAuthoritativeState(ctx, kv, agentId);
@@ -564,55 +483,39 @@ export class GoalModule implements AgentModule {
         const paused: SessionGoal = {
             ...current,
             status: "paused",
-            updatedAt: await this.#timestamp(ctx),
+            updatedAt: this.#now(),
         };
         await writeGoal(ctx, kv, paused);
         await this.#deactivate(ctx, kv);
         await this.#publishEvent(
             ctx,
-            await this.#event(ctx, {
+            this.#event({
                 type: "goal_status_changed",
                 agentId,
                 goal: paused,
             }),
         );
-        this.#scheduleHostInterruption(ctx, agentId, reason);
         return true;
     }
 
-    async #assertPrimaryAgent(ctx: Context, agentId: string): Promise<void> {
-        const check = this.#host?.isPrimaryAgent;
-        if (check === undefined) return;
-        const result = check.call(this.#host, ctx, agentId);
-        const primary = Value.Check(goalBooleanPromiseSchema, result) ? await result : result;
-        if (!Value.Check(Type.Boolean(), primary)) {
-            throw new Error("Goal primary-agent policy returned an invalid value.");
-        }
-        if (!primary) {
-            throw new Error("Goals can only be managed from the primary session.");
-        }
-    }
-
-    async #setSessionTitle(ctx: Context, agentId: string, objective: string): Promise<void> {
-        const setTitle = this.#host?.setSessionTitle;
-        if (setTitle === undefined) return;
-        await this.#awaitVoidResult(
-            setTitle.call(this.#host, ctx, agentId, createGoalTitle(objective)),
-            "Goal session title callback",
-        );
-    }
-
-    #scheduleHostInterruption(ctx: Context, agentId: string, reason: GoalInterruptionReason): void {
-        const interrupt = this.#host?.interruptGoalWork;
-        if (interrupt === undefined) return;
+    /**
+     * Stop the turn the owning agent is running, after the transition commits.
+     *
+     * Only a mutation from outside that agent does this. When the agent itself pauses, blocks, or
+     * clears its own goal it is doing so from inside its own tool call, and aborting there would
+     * cancel the very turn that asked.
+     */
+    #abortAgentWork(ctx: Context, agentId: string): void {
+        const agents = this.#agents;
+        if (agents === undefined) return;
         afterCommit(ctx, async (postCommitCtx) => {
             try {
-                await this.#awaitVoidResult(
-                    interrupt.call(this.#host, postCommitCtx, agentId, reason),
-                    "Goal host interruption callback",
+                await agents.abort(postCommitCtx, agentId);
+            } catch (error: unknown) {
+                postCommitCtx.log.error(
+                    { error, agentId },
+                    "Goal could not stop the agent after its goal changed.",
                 );
-            } catch {
-                // Host cleanup is advisory after the durable Goal transition has committed.
             }
         });
     }
@@ -678,19 +581,24 @@ export class GoalModule implements AgentModule {
         );
     }
 
-    async #publishEvent(ctx: Context, event: GoalEvent): Promise<void> {
-        const transactional = this.#listener?.onEventTransactional;
-        if (transactional !== undefined) {
-            await this.#awaitVoidResult(
-                transactional.call(this.#listener, ctx, event),
-                "Goal transactional listener",
-            );
+    #subscribe(listeners: Set<GoalEventListener>, listener: GoalEventListener): GoalUnsubscribe {
+        if (!Value.Check(goalEventListenerSchema, listener)) {
+            throw new Error("A goal subscriber must be a function.");
         }
+        listeners.add(listener);
+        return () => {
+            listeners.delete(listener);
+        };
+    }
+
+    async #publishEvent(ctx: Context, event: GoalEvent): Promise<void> {
+        // A snapshot, so subscribing or unsubscribing from inside a subscriber cannot change who
+        // this event goes to.
+        for (const listener of [...this.#transactionalListeners]) await listener(ctx, event);
         afterCommit(ctx, (postCommitCtx) => this.#notifyPostCommit(postCommitCtx, event));
     }
 
-    async #event(
-        ctx: Context,
+    #event(
         payload:
             | { readonly type: "goal_set"; readonly agentId: string; readonly goal: SessionGoal }
             | {
@@ -699,30 +607,39 @@ export class GoalModule implements AgentModule {
                   readonly goal: SessionGoal;
               }
             | { readonly type: "goal_cleared"; readonly agentId: string },
-    ): Promise<GoalEvent> {
-        const eventId = await this.#factoryValue<string>(
-            this.#eventIdFactory(ctx, payload.agentId),
-            goalOperationIdSchema,
-            "Goal event ID",
-        );
-        const at = await this.#timestamp(ctx);
-        const event = { ...payload, eventId, at } as unknown;
+    ): GoalEvent {
+        const event = { ...payload, eventId: this.#newId(), at: this.#now() } as unknown;
         if (!Value.Check(goalEventSchema, event)) throw new Error("Goal event is invalid.");
         return deepFreeze(structuredClone(event) as GoalEvent);
     }
 
-    async #timestamp(_ctx: Context): Promise<number> {
-        return await this.#factoryValue<number>(this.#clock(), goalTimestampSchema, "Goal clock");
+    #newId(): string {
+        const id = globalThis.crypto.randomUUID();
+        if (!Value.Check(goalOperationIdSchema, id)) {
+            throw new Error("Goal minted an identity it cannot represent.");
+        }
+        return id;
     }
 
-    async #factoryValue<T>(
-        value: unknown,
-        schema: Parameters<typeof Value.Check>[0],
-        label: string,
-    ): Promise<T> {
-        const resolved = Value.Check(goalFactoryPromiseSchema, value) ? await value : value;
-        if (!Value.Check(schema, resolved)) throw new Error(`${label} returned an invalid value.`);
-        return resolved as T;
+    #now(): number {
+        const now = Date.now();
+        if (!Value.Check(goalTimestampSchema, now)) {
+            throw new Error("The clock returned a time Goal cannot represent.");
+        }
+        return now;
+    }
+
+    async #notifyPostCommit(ctx: Context, event: GoalEvent): Promise<void> {
+        for (const listener of [...this.#postCommitListeners]) {
+            try {
+                await listener(ctx, event);
+            } catch (error: unknown) {
+                ctx.log.error(
+                    { error, eventId: event.eventId, type: event.type },
+                    "A goal subscriber failed after the change was committed.",
+                );
+            }
+        }
     }
 
     async #continuationActionId(ctx: Context, scope: AgentModuleScope): Promise<string> {
@@ -733,45 +650,9 @@ export class GoalModule implements AgentModule {
             }
             return existing as string;
         }
-        const source = await this.#factoryValue<string>(
-            this.#idFactory(ctx, scope.agent.id),
-            goalOperationIdSchema,
-            "Goal continuation ID",
-        );
-        const id = hashMessageId(["goal-continuation", scope.agent.id, source]);
+        const id = hashMessageId(["goal-continuation", scope.agent.id, this.#newId()]);
         await scope.runKV.write(ctx, GOAL_CONTINUATION_ID_KEY, id);
         return id;
-    }
-
-    async #awaitVoidResult(value: unknown, label: string): Promise<void> {
-        const resolved = Value.Check(goalVoidPromiseSchema, value) ? await value : value;
-        if (!Value.Check(Type.Void(), resolved)) {
-            throw new Error(`${label} must return void or a Promise<void>.`);
-        }
-    }
-
-    async #notifyPostCommit(ctx: Context, event: GoalEvent): Promise<void> {
-        try {
-            const callback = this.#listener?.onEvent;
-            if (callback !== undefined) {
-                await this.#awaitVoidResult(
-                    callback.call(this.#listener, ctx, event),
-                    "Goal post-commit listener",
-                );
-            }
-        } catch (error: unknown) {
-            try {
-                const reporter = this.#onPostCommitError;
-                if (reporter !== undefined) {
-                    await this.#awaitVoidResult(
-                        reporter(ctx, event, normalizeObserverError(error)),
-                        "Goal post-commit error reporter",
-                    );
-                }
-            } catch {
-                // Reporting is advisory after durable state has committed.
-            }
-        }
     }
 
     #assertAgentId(agentId: string): void {
@@ -781,44 +662,6 @@ export class GoalModule implements AgentModule {
     #assertStatus(status: string): asserts status is GoalStatus {
         if (!Value.Check(goalStatusSchema, status)) throw new Error("Goal status is invalid.");
     }
-}
-
-export function assertGoalModuleOptions(value: unknown): asserts value is GoalModuleOptions {
-    const candidate = normalizeGoalModuleOptions(value);
-    if (!Value.Check(goalModuleOptionsSchema, candidate)) {
-        throw new Error("Goal module options are invalid.");
-    }
-}
-
-function normalizeGoalModuleOptions(value: unknown): unknown {
-    try {
-        if (!isObjectRecord(value)) return value;
-        const option = { ...value };
-        option.listener = normalizeClassBackedCallbacks(option.listener, [
-            "onEventTransactional",
-            "onEvent",
-        ]);
-        option.host = normalizeClassBackedCallbacks(option.host, [
-            "isPrimaryAgent",
-            "setSessionTitle",
-            "interruptGoalWork",
-        ]);
-        return option;
-    } catch {
-        return undefined;
-    }
-}
-
-function normalizeClassBackedCallbacks(value: unknown, names: readonly string[]): unknown {
-    if (!isClassBacked(value)) return value;
-    const normalized: Record<string, unknown> = { ...value };
-    for (const name of names) {
-        const callback = Reflect.get(value, name);
-        if (callback !== undefined) {
-            normalized[name] = typeof callback === "function" ? callback.bind(value) : callback;
-        }
-    }
-    return normalized;
 }
 
 function continuationMessageId(agentId: string, lifecycleId: string, goal: SessionGoal): string {
@@ -842,35 +685,8 @@ function hashMessageId(parts: readonly (string | number)[]): string {
     return id;
 }
 
-function isObjectRecord(value: unknown): value is Record<string, unknown> {
-    return typeof value === "object" && value !== null;
-}
-
-function isClassBacked(value: unknown): value is object {
-    if (!isObjectRecord(value)) return false;
-    const prototype = Object.getPrototypeOf(value);
-    return prototype !== Object.prototype && prototype !== null;
-}
-
 function deepFreeze<T>(value: T): T {
     if (value === null || typeof value !== "object" || Object.isFrozen(value)) return value;
     for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
     return Object.freeze(value);
-}
-
-function normalizeObserverError(error: unknown): string {
-    try {
-        if (
-            error instanceof Error &&
-            typeof error.message === "string" &&
-            error.message.length > 0
-        ) {
-            return error.message.slice(0, 500);
-        }
-        const converted = String(error);
-        if (converted.length > 0) return converted.slice(0, 500);
-    } catch {
-        // Use the bounded fallback below.
-    }
-    return "Unknown Goal observer error.";
 }

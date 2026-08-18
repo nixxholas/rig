@@ -24,10 +24,7 @@ const activeGoal: SessionGoal = {
 };
 
 function newDatabase(name: string) {
-    const module = new GoalModule({
-        idFactory: () => "lifecycle",
-        clock: () => 10,
-    });
+    const module = new GoalModule();
     const database = moduleDatabase(module.migrations, name);
     return { module, database };
 }
@@ -37,18 +34,22 @@ describe("Goal durable state", () => {
         const first = newDatabase("goal-state-reload-test");
         await first.database.ready;
         const agents = recordingAgents();
-        await first.module.beforeStart(first.database.context, agents.ref);
+        first.module.beforeStart(first.database.context, agents.ref);
         try {
-            await first.module.setGoal(first.database.context, "agent-a", "ship it");
+            const created = await first.module.setGoal(
+                first.database.context,
+                "agent-a",
+                "ship it",
+            );
 
-            const reloaded = new GoalModule({});
+            const reloaded = new GoalModule();
             const loaded = await reloaded.goal(first.database.context, "agent-a");
-            expect(loaded).toMatchObject(activeGoal);
+            expect(loaded).toEqual(created);
             if (loaded === undefined) throw new Error("Expected persisted goal.");
             loaded.objective = "mutated in caller";
 
-            await expect(reloaded.goal(first.database.context, "agent-a")).resolves.toMatchObject(
-                activeGoal,
+            await expect(reloaded.goal(first.database.context, "agent-a")).resolves.toEqual(
+                created,
             );
         } finally {
             first.database.close();
@@ -59,7 +60,7 @@ describe("Goal durable state", () => {
         const test = newDatabase("goal-agent-isolation-test");
         await test.database.ready;
         const agents = recordingAgents();
-        await test.module.beforeStart(test.database.context, agents.ref);
+        test.module.beforeStart(test.database.context, agents.ref);
         try {
             await test.module.setGoal(test.database.context, "agent-a", "one");
             await test.module.setGoal(test.database.context, "agent-b", "two");

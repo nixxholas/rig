@@ -170,7 +170,6 @@ export {
 export { humanizeMcpName } from "./humanizeMcpName.js";
 export { isMcpErrorResult } from "./isMcpErrorResult.js";
 export { normalizeMcpName } from "./normalizeMcpName.js";
-export { quoteVisibleExact } from "./quoteVisibleExact.js";
 export { mergeMcpTools, type McpToolContribution } from "./mergeMcpTools.js";
 export { boundedMcpJsonStringify, mcpResultToContentBlocks } from "./mcpResultToContentBlocks.js";
 export { MCP_RESULT_MAXIMUM_TEXT_BYTES } from "./mcpResultMaximumTextBytes.js";

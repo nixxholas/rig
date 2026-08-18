@@ -11,6 +11,7 @@ capabilities are exactly that list.
 ```ts
 import { AgentSystemLocal } from "@slopus/happy-agent-base";
 import {
+    ComputeModule,
     ConfigModule,
     GoalModule,
     HistoryModule,
@@ -20,7 +21,7 @@ import {
 } from "@slopus/happy-agent-modules";
 
 const config = await ConfigModule.load();
-const compute = createComputeModules();
+const compute = createComputeModules(new ComputeModule(config));
 const history = new HistoryModule();
 
 const system = await AgentSystemLocal.create(ctx, storage, {
@@ -29,10 +30,10 @@ const system = await AgentSystemLocal.create(ctx, storage, {
     providers,
     modules: [
         config,
-        new SystemPromptModule({ compute: compute.computeModule }),
+        new SystemPromptModule(config, compute.computeModule),
         history,
-        new ModelSwitchModule({ history }),
-        new GoalModule({}),
+        new ModelSwitchModule(history),
+        new GoalModule(),
         ...compute.modules,
     ],
 });

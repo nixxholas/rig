@@ -6,7 +6,7 @@ import {
     autoEvidenceStateSchema,
     autoReviewerCursorSchema,
 } from "../../sources/auto/AutoReviewTranscript.js";
-import { autoModuleOptionsSchema, userInputAnsweredSchema } from "../../sources/auto/AutoModule.js";
+import { userInputAnsweredSchema } from "../../sources/auto/AutoModule.js";
 import { autoTranscriptMessageSchema } from "../../sources/auto/impl/createAutoPermissionTranscript.js";
 import { autoReviewerRouteSchema } from "../../sources/auto/impl/reviewerModelForAgent.js";
 
@@ -157,36 +157,5 @@ describe("Auto durable and runtime schemas", () => {
                 provenance: "user",
             }),
         ).toBe(false);
-    });
-
-    it("requires the complete Auto module construction contract", () => {
-        const valid = {
-            storage: {},
-            providers: {},
-            provider: "codex",
-            models: [
-                {
-                    providerId: "codex",
-                    id: "openai/gpt-5.6-sol",
-                    name: "Codex",
-                    effortLevels: ["low"],
-                    defaultEffort: "low",
-                },
-            ],
-            workingDirectory: "/workspace",
-            lifetimeContext: {},
-            reviewerTools: () => [],
-            readGlobalSecurity: async () => undefined,
-            readProjectSecurity: async () => undefined,
-        };
-        expect(Value.Check(autoModuleOptionsSchema, valid)).toBe(true);
-        expect(Value.Check(autoModuleOptionsSchema, { ...valid, provider: "" })).toBe(false);
-        expect(
-            Value.Check(autoModuleOptionsSchema, {
-                ...valid,
-                readProjectSecurity: undefined,
-            }),
-        ).toBe(false);
-        expect(Value.Check(autoModuleOptionsSchema, { ...valid, extra: true })).toBe(false);
     });
 });

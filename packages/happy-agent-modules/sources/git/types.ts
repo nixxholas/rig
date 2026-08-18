@@ -109,4 +109,21 @@ export const gitTrackedEntitySchema = Type.Object(
 );
 export type GitTrackedEntity = Static<typeof gitTrackedEntitySchema>;
 
+/** One repository's change snapshot, addressed the way a live subscriber reads it. */
+export const gitLiveSnapshotSchema = Type.Object(
+    {
+        createdAt: Type.Number(),
+        data: Type.Object({ git: gitChangeSnapshotSchema }),
+        id: Type.String({ minLength: 1 }),
+        projectId: Type.String({ minLength: 1 }),
+        type: Type.Union([
+            Type.Literal("project_git_changed"),
+            Type.Literal("workspace_git_changed"),
+        ]),
+        workspaceId: Type.Optional(Type.String({ minLength: 1 })),
+    },
+    { additionalProperties: false },
+);
+export type GitLiveSnapshot = Static<typeof gitLiveSnapshotSchema>;
+
 export type { GitCommandResult, GitCommandRunner } from "./GitCommandRunner.js";

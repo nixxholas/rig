@@ -12,25 +12,14 @@ import { afterEach, describe, expect, it } from "vitest";
 import { AutoModule } from "../../sources/auto/AutoModule.js";
 import { AutoReviewEvidenceStore } from "../../sources/auto/impl/AutoReviewEvidenceStore.js";
 import type { AutoTranscriptMessage } from "../../sources/auto/impl/createAutoPermissionTranscript.js";
-import { agentWorld } from "../support/agentWorld.js";
+import { autoWorld, type AutoWorld } from "../support/autoWorld.js";
 import { moduleDatabase, type ModuleDatabase } from "../support/moduleDatabase.js";
-import { providersOf } from "../support/fixtures.js";
-import { ScriptedProvider } from "../support/ScriptedProvider.js";
-
-const MODELS = [
-    {
-        providerId: "scripted",
-        id: "scripted/model",
-        name: "Scripted",
-        effortLevels: ["low"],
-        defaultEffort: "low",
-    },
-] as const;
 
 const AGENT_ID = "auto-hooks-agent";
 
 interface HookWorld {
     readonly auto: AutoModule;
+    readonly installation: AutoWorld;
     readonly context: Context;
     readonly database: ModuleDatabase & {
         readonly database: Parameters<AutoReviewEvidenceStore["readState"]>[0];
@@ -42,18 +31,13 @@ interface HookWorld {
 
 async function hookWorld(): Promise<HookWorld> {
     const context = createRootContext().named("auto-hooks-test");
-    const privateStore = await agentWorld();
-    const auto = new AutoModule({
-        storage: privateStore.storage,
-        providers: providersOf(new ScriptedProvider([])),
-        provider: "scripted",
-        models: [...MODELS],
-        workingDirectory: "/tmp/auto-hooks-test",
-        lifetimeContext: context,
-        reviewerTools: () => [],
-        readGlobalSecurity: async () => undefined,
-        readProjectSecurity: async () => undefined,
-    });
+    const installation = await autoWorld();
+    const auto = new AutoModule(
+        installation.config,
+        installation.compute,
+        installation.systemPrompt,
+        installation.storage,
+    );
     const database = moduleDatabase(auto.migrations, "auto-hooks-main");
     await database.ready;
     const hooks = await auto.beforeStart(context, {} as unknown as AgentSystemRef);
@@ -74,12 +58,14 @@ async function hookWorld(): Promise<HookWorld> {
 
     return {
         auto,
+        installation,
         context,
         database: database as HookWorld["database"],
         hooks,
         scope,
         close: async () => {
             await auto.close(context);
+            await installation.compute.dispose(context);
             database.close();
         },
     };

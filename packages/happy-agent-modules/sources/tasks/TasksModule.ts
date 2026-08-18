@@ -14,12 +14,12 @@ import { sql } from "drizzle-orm";
 
 import {
     taskEventIdSchema,
+    taskEventListenerSchema,
     taskEventPayloadSchema,
     taskEventSchema,
-    taskModuleListenerSchema,
     type TaskEvent,
+    type TaskEventListener,
     type TaskEventPayload,
-    type TaskModuleListener,
 } from "./TaskEvent.js";
 import {
     taskCreateInputSchema,
@@ -66,51 +66,23 @@ import { listTasksTool } from "./tools/list_tasks.js";
 import { removeTaskTool } from "./tools/remove_task.js";
 import { updateTaskTool } from "./tools/update_task.js";
 
-/** The largest list a module will accept, regardless of host configuration. */
+/** The largest list the stored shape will hold, whatever any other bound says. */
 export const MAX_TASKS = 500;
-/** The default cap for one agent's task list. */
-export const DEFAULT_MAX_TASKS = 100;
-/** The default priority for newly created tasks. */
+/** How many tasks one agent may keep at once. */
+export const MAX_TASKS_PER_AGENT = 100;
+/** The priority a task gets when its creator does not choose one. */
 export const DEFAULT_TASK_PRIORITY: TaskPriority = "normal";
+/** The largest page `list_tasks` will return, and its size when the caller asks for none. */
+export const MAX_TASK_PAGE_SIZE = 50;
+/** The character budget every rendering of a task, page, or lookup is cut to fit. */
+export const MAX_TASK_OUTPUT_CHARACTERS = 12_000;
+
 const taskListSchema = Type.Array(taskSchema, { maxItems: MAX_TASKS });
 const taskReorderIdsSchema = Type.Array(taskIdSchema, {
     maxItems: MAX_TASKS,
     uniqueItems: true,
 });
 const agentIdSchema = Type.String({ minLength: 1, maxLength: 256 });
-const maxTasksSchema = Type.Integer({ minimum: 1, maximum: MAX_TASKS });
-const outputCharactersSchema = Type.Integer({ minimum: 256, maximum: 100_000 });
-const maxPageSizeSchema = Type.Integer({ minimum: 1, maximum: 100 });
-const DEFAULT_PAGE_SIZE = 50;
-const opaqueContextSchema = Type.Any();
-const opaqueResultSchema = Type.Any();
-const tasksModuleOptionsSchema = Type.Object(
-    {
-        maxTasks: Type.Optional(maxTasksSchema),
-        defaultPriority: Type.Optional(taskPrioritySchema),
-        listener: Type.Optional(taskModuleListenerSchema),
-        idFactory: Type.Optional(
-            Type.Function([opaqueContextSchema, agentIdSchema], opaqueResultSchema),
-        ),
-        clock: Type.Optional(Type.Function([], taskTimestampSchema)),
-        maxOutputCharacters: Type.Optional(outputCharactersSchema),
-        maxPageSize: Type.Optional(maxPageSizeSchema),
-        onPostCommitError: Type.Optional(
-            Type.Function(
-                [opaqueContextSchema, taskEventSchema, opaqueResultSchema],
-                opaqueResultSchema,
-            ),
-        ),
-        eventIdFactory: Type.Optional(
-            Type.Function([opaqueContextSchema, agentIdSchema], opaqueResultSchema),
-        ),
-    },
-    { additionalProperties: false },
-);
-
-/** How a task module is configured by the host. */
-export { tasksModuleOptionsSchema };
-export type TasksModuleOptions = Static<typeof tasksModuleOptionsSchema>;
 
 interface TaskChange<Result> {
     readonly result: Result;
@@ -141,50 +113,36 @@ export class TasksModule implements AgentModule {
         ],
     ] as const;
 
-    readonly #maxTasks: number;
-    readonly #defaultPriority: TaskPriority;
-    readonly #listener: TaskModuleListener | undefined;
-    readonly #idFactory: (ctx: Context, agentId: string) => string | Promise<string>;
-    readonly #clock: () => number;
-    readonly #maxOutputCharacters: number;
-    readonly #maxPageSize: number;
-    readonly #onPostCommitError:
-        | ((ctx: Context, event: TaskEvent, error: unknown) => void | Promise<void>)
-        | undefined;
-    readonly #eventIdFactory: (ctx: Context, agentId: string) => string | Promise<string>;
-
-    /** Whether the injected event-ID factory has already been asked for one usable ID. */
-    #eventIdFactoryChecked = false;
-
     /**
      * In-flight mutation queues, one per agent. This is ordering, not state: nothing about a task
      * lives here, and an idle agent leaves no entry behind.
      */
     readonly #mutations = new Map<string, Promise<void>>();
+    readonly #transactionalListeners = new Set<TaskEventListener>();
+    readonly #listeners = new Set<TaskEventListener>();
 
-    constructor(options: TasksModuleOptions = {}) {
-        assertTasksModuleOptions(options);
-        this.#maxTasks = options.maxTasks ?? DEFAULT_MAX_TASKS;
-        if (!Value.Check(maxTasksSchema, this.#maxTasks)) {
-            throw new Error(`Tasks maxTasks must be an integer from 1 to ${MAX_TASKS}.`);
-        }
-        this.#defaultPriority = options.defaultPriority ?? DEFAULT_TASK_PRIORITY;
-        if (!Value.Check(taskPrioritySchema, this.#defaultPriority)) {
-            throw new Error("Tasks default priority is invalid.");
-        }
-        this.#listener = options.listener;
-        this.#idFactory = options.idFactory ?? (() => globalThis.crypto.randomUUID());
-        this.#clock = options.clock ?? (() => Date.now());
-        this.#maxOutputCharacters = options.maxOutputCharacters ?? 12_000;
-        if (!Value.Check(outputCharactersSchema, this.#maxOutputCharacters)) {
-            throw new Error("Tasks maxOutputCharacters must be between 256 and 100000.");
-        }
-        this.#maxPageSize = options.maxPageSize ?? DEFAULT_PAGE_SIZE;
-        if (!Value.Check(maxPageSizeSchema, this.#maxPageSize)) {
-            throw new Error("Tasks maxPageSize must be between 1 and 100.");
-        }
-        this.#onPostCommitError = options.onPostCommitError;
-        this.#eventIdFactory = options.eventIdFactory ?? (() => globalThis.crypto.randomUUID());
+    /**
+     * Watch changes from inside the transaction that commits them, so a subscriber's own writes
+     * land with the task list or not at all — and a subscriber that throws rolls the mutation back.
+     *
+     * Returns the function that stops the subscription.
+     */
+    onEventTransactional(listener: TaskEventListener): () => void {
+        assertTaskEventListener(listener);
+        this.#transactionalListeners.add(listener);
+        return () => this.#transactionalListeners.delete(listener);
+    }
+
+    /**
+     * Watch changes once they are durable. The task list has already committed by the time this
+     * runs, so a failure here is reported and never turned into a failed mutation.
+     *
+     * Returns the function that stops the subscription.
+     */
+    onEvent(listener: TaskEventListener): () => void {
+        assertTaskEventListener(listener);
+        this.#listeners.add(listener);
+        return () => this.#listeners.delete(listener);
     }
 
     /** Return this agent's tasks in deterministic display order. */
@@ -199,9 +157,9 @@ export class TasksModule implements AgentModule {
         if (!Value.Check(taskPageQuerySchema, query)) {
             throw new Error("Invalid task page query.");
         }
-        const limit = query.limit ?? this.#maxPageSize;
-        if (limit > this.#maxPageSize) {
-            throw new Error(`Task page limit cannot exceed ${this.#maxPageSize}.`);
+        const limit = query.limit ?? MAX_TASK_PAGE_SIZE;
+        if (limit > MAX_TASK_PAGE_SIZE) {
+            throw new Error(`Task page limit cannot exceed ${MAX_TASK_PAGE_SIZE}.`);
         }
         const offset = query.offset ?? 0;
         const tasks = await this.#read(ctx, agentId);
@@ -277,19 +235,19 @@ export class TasksModule implements AgentModule {
     async create(ctx: Context, agentId: string, input: TaskCreateInput): Promise<Task> {
         this.#assertAgentId(agentId);
         this.#assertInput(taskCreateInputSchema, input, "create");
-        const id = input.id ?? (await this.#newTaskId(ctx, agentId));
+        const id = input.id ?? this.#newTaskId();
         const change = await this.#change(ctx, agentId, async (txCtx, tasks, eventId, at) => {
             const title = normalizeTitle(input.title);
             const detail = normalizeDetail(input.detail);
-            const priority = input.priority ?? this.#defaultPriority;
+            const priority = input.priority ?? DEFAULT_TASK_PRIORITY;
             this.#assertTaskId(id);
             const existing = tasks.find((task) => task.id === id);
             if (existing !== undefined) {
                 throw new TaskValidationError(`Task "${id}" already exists.`);
             }
-            if (tasks.length >= this.#maxTasks) {
+            if (tasks.length >= MAX_TASKS_PER_AGENT) {
                 throw new TaskValidationError(
-                    `This agent already has the maximum of ${this.#maxTasks} tasks.`,
+                    `This agent already has the maximum of ${MAX_TASKS_PER_AGENT} tasks.`,
                 );
             }
             const dependsOn = [...(input.dependsOn ?? [])];
@@ -539,15 +497,15 @@ export class TasksModule implements AgentModule {
                           ].join("\n");
                       })
                       .join("\n");
-        if (full.length <= this.#maxOutputCharacters) return full;
-        return `${full.slice(0, this.#maxOutputCharacters - 32)}\n[task list truncated]`;
+        if (full.length <= MAX_TASK_OUTPUT_CHARACTERS) return full;
+        return `${full.slice(0, MAX_TASK_OUTPUT_CHARACTERS - 32)}\n[task list truncated]`;
     }
 
     /**
      * Render a list page without hiding any returned task identity.
      *
-     * `listPage` already reduces the returned page until these compact rows fit the configured
-     * output bound. Full detail remains available through `get_task`.
+     * `listPage` already reduces the returned page until these compact rows fit
+     * `MAX_TASK_OUTPUT_CHARACTERS`. Full detail remains available through `get_task`.
      */
     formatPageForModel(page: TaskPage): string {
         if (!Value.Check(taskPageSchema, page)) {
@@ -557,7 +515,7 @@ export class TasksModule implements AgentModule {
         const suffix =
             page.nextOffset === undefined ? "" : `\nMore tasks start at offset ${page.nextOffset}.`;
         const output = `${rows.length === 0 ? "No tasks." : rows.join("\n")}${suffix}`;
-        if (output.length > this.#maxOutputCharacters) {
+        if (output.length > MAX_TASK_OUTPUT_CHARACTERS) {
             throw new Error("Task page exceeds its model-output bound.");
         }
         return output;
@@ -566,13 +524,13 @@ export class TasksModule implements AgentModule {
     /**
      * Bound one rendered mutation result to the same model-output limit as every other rendering.
      *
-     * A mutation answer echoes fields the caller supplied, and a title alone may be longer than a
-     * small configured bound, so the sentence a tool hands back is cut to fit and says that it was.
+     * A mutation answer echoes fields the caller supplied, and a title alone may be longer than
+     * the bound, so the sentence a tool hands back is cut to fit and says that it was.
      */
     formatMutationForModel(text: string): string {
-        if (text.length <= this.#maxOutputCharacters) return text;
+        if (text.length <= MAX_TASK_OUTPUT_CHARACTERS) return text;
         const suffix = "\n[truncated]";
-        return `${text.slice(0, this.#maxOutputCharacters - suffix.length)}${suffix}`;
+        return `${text.slice(0, MAX_TASK_OUTPUT_CHARACTERS - suffix.length)}${suffix}`;
     }
 
     /** Render one bounded task lookup page and preserve every returned cursor. */
@@ -581,8 +539,8 @@ export class TasksModule implements AgentModule {
             throw new Error("Cannot format an invalid task detail page.");
         }
         if (page.task === null) return "That task does not exist.";
-        const output = formatTaskDetailPage(page, this.#maxOutputCharacters);
-        if (output.length > this.#maxOutputCharacters) {
+        const output = formatTaskDetailPage(page, MAX_TASK_OUTPUT_CHARACTERS);
+        if (output.length > MAX_TASK_OUTPUT_CHARACTERS) {
             throw new Error("Task detail page exceeds its model-output bound.");
         }
         return output;
@@ -598,16 +556,7 @@ export class TasksModule implements AgentModule {
             at: number,
         ) => Promise<TaskChange<Result> & { readonly tasks?: readonly Task[] }>,
     ): Promise<TaskChange<Result>> {
-        // The injected factory names events for whoever is listening, so it is only asked when
-        // somebody is. With no listener the event is built, used to decide the write, and then
-        // discarded, and a host callback that may be asynchronous or durable has no reason to run.
-        // The very first mutation asks regardless, so a factory that cannot produce a usable ID is
-        // reported the moment the module is used rather than whenever a listener happens to attach.
-        const eventId =
-            this.#listener === undefined && this.#eventIdFactoryChecked
-                ? globalThis.crypto.randomUUID()
-                : await this.#eventIdFactory(ctx, agentId);
-        this.#eventIdFactoryChecked = true;
+        const eventId = globalThis.crypto.randomUUID();
         this.#assertEventId(eventId);
         const at = this.#timestamp();
         return await this.#serialize(agentId, async () =>
@@ -638,7 +587,9 @@ export class TasksModule implements AgentModule {
                     );
                 }
                 if (event !== undefined) {
-                    await this.#listener?.onEventTransactional?.(txCtx, event);
+                    for (const listener of this.#transactionalListeners) {
+                        await listener(txCtx, event);
+                    }
                     // The post-commit observer is told about a change that has already landed, so
                     // it is handed the caller's context rather than the transaction's: by the time
                     // it runs, the transaction context has ended and cannot read anything back.
@@ -811,8 +762,8 @@ export class TasksModule implements AgentModule {
         };
     }
 
-    async #newTaskId(ctx: Context, agentId: string): Promise<string> {
-        const id = await this.#idFactory(ctx, agentId);
+    #newTaskId(): string {
+        const id = globalThis.crypto.randomUUID();
         this.#assertTaskId(id);
         return id;
     }
@@ -829,21 +780,25 @@ export class TasksModule implements AgentModule {
     }
 
     async #notifyPostCommit(ctx: Context, event: TaskEvent): Promise<void> {
-        try {
-            await this.#listener?.onEvent?.(ctx, event);
-        } catch (error: unknown) {
+        for (const listener of this.#listeners) {
             try {
-                await this.#onPostCommitError?.(ctx, event, error);
-            } catch {
-                // Reporting is advisory and must not turn a committed mutation into a failure.
+                await listener(ctx, event);
+            } catch (error: unknown) {
+                // The change is already durable; one subscriber cannot make it look failed, and it
+                // cannot starve the subscribers queued behind it either.
+                ctx.log.warn(
+                    "A task subscriber failed after the change was already committed.",
+                    { agentId: event.agentId, eventId: event.eventId, type: event.type },
+                    error,
+                );
             }
         }
     }
 
     #validateTasks(tasks: readonly Task[]): void {
-        if (tasks.length > this.#maxTasks || !Value.Check(taskListSchema, tasks)) {
+        if (tasks.length > MAX_TASKS_PER_AGENT || !Value.Check(taskListSchema, tasks)) {
             throw new TaskValidationError(
-                "The task list exceeds its configured bounds or has an invalid shape.",
+                "The task list exceeds its bounds or has an invalid shape.",
             );
         }
         if (new Set(tasks.map((task) => task.id)).size !== tasks.length) {
@@ -924,9 +879,9 @@ export class TasksModule implements AgentModule {
     }
 
     #timestamp(): number {
-        const value = this.#clock();
+        const value = Date.now();
         if (!Value.Check(taskTimestampSchema, value)) {
-            throw new Error("Tasks clock must return a non-negative integer timestamp.");
+            throw new Error("The system clock is outside the range a task timestamp can hold.");
         }
         return value;
     }
@@ -947,11 +902,11 @@ export class TasksModule implements AgentModule {
             const nextOffset = offset + candidate.length;
             const suffix = nextOffset < total ? `\nMore tasks start at offset ${nextOffset}.` : "";
             const output = `${candidate.map(compactTaskRow).join("\n")}${suffix}`;
-            if (output.length > this.#maxOutputCharacters) break;
+            if (output.length > MAX_TASK_OUTPUT_CHARACTERS) break;
             visible.push(task);
         }
         if (visible.length === 0) {
-            throw new Error("Tasks maxOutputCharacters is too small to expose one task identity.");
+            throw new Error("The task output bound is too small to show one task identity.");
         }
         return visible;
     }
@@ -979,16 +934,16 @@ export class TasksModule implements AgentModule {
                     : {}),
             };
             if (
-                formatTaskDetailPage(candidate, this.#maxOutputCharacters).length <=
-                this.#maxOutputCharacters
+                formatTaskDetailPage(candidate, MAX_TASK_OUTPUT_CHARACTERS).length <=
+                MAX_TASK_OUTPUT_CHARACTERS
             ) {
                 return candidate;
             }
             if (detail.length > 1) {
                 const excess = Math.max(
                     1,
-                    formatTaskDetailPage(candidate, this.#maxOutputCharacters).length -
-                        this.#maxOutputCharacters,
+                    formatTaskDetailPage(candidate, MAX_TASK_OUTPUT_CHARACTERS).length -
+                        MAX_TASK_OUTPUT_CHARACTERS,
                 );
                 detail = detail.slice(0, Math.max(1, detail.length - excess));
                 continue;
@@ -997,7 +952,7 @@ export class TasksModule implements AgentModule {
                 dependencies = dependencies.slice(0, -1);
                 continue;
             }
-            throw new Error("Tasks maxOutputCharacters is too small to expose task identity.");
+            throw new Error("The task output bound is too small to show one task identity.");
         }
     }
 }
@@ -1253,11 +1208,8 @@ function hasCycle(tasks: readonly Task[]): boolean {
     return tasks.some((task) => visit(task.id));
 }
 
-/** Validate an injected module configuration at the runtime boundary. */
-export function assertTasksModuleOptions(value: unknown): asserts value is TasksModuleOptions {
-    if (!Value.Check(tasksModuleOptionsSchema, value)) {
-        throw new Error(
-            "Tasks module options are invalid; check the listener and configuration contracts.",
-        );
+function assertTaskEventListener(value: unknown): asserts value is TaskEventListener {
+    if (!Value.Check(taskEventListenerSchema, value)) {
+        throw new Error("A task subscriber must be a function taking a context and an event.");
     }
 }

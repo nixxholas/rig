@@ -11,7 +11,7 @@ import {
     AGENT_MESSAGE_ORIGIN_METADATA,
     USER_MESSAGE_ORIGIN_METADATA,
     senderAgentIdMetadata,
-} from "../../sources/auto/messageOrigin.js";
+} from "../../sources/impl/messageOrigin.js";
 import { HistoryModule } from "../../sources/history/HistoryModule.js";
 import {
     MAX_HISTORY_PENDING_BLOCKS,
@@ -340,89 +340,56 @@ describe("HistoryModule edge cases", () => {
         }
     });
 
-    it("fails closed for an unresolved tree path and rejects an invalid resolver result", async () => {
-        const unresolved = new HistoryModule({
-            resolveTarget: async () => undefined,
-        });
-        const unresolvedDatabase = moduleDatabase(
-            unresolved.migrations,
-            "history-unresolved-target",
-        );
-        await unresolvedDatabase.ready;
+    it("fails closed for a target that is not a well-formed Agent ID", async () => {
+        const history = new HistoryModule();
+        const database = moduleDatabase(history.migrations, "history-unresolved-target");
+        await database.ready;
         try {
+            // A target longer than an Agent ID may be is refused; one that is merely unfamiliar is
+            // read as the raw Agent ID it looks like, and simply has an empty archive.
             await expect(
-                unresolved.resolveTarget(unresolvedDatabase.context, "agent-a", "x".repeat(300)),
+                history.resolveTarget(database.context, "agent-a", "x".repeat(300)),
             ).rejects.toThrow("not an Agent ID");
-        } finally {
-            unresolvedDatabase.close();
-        }
-
-        const invalid = new HistoryModule({
-            resolveTarget: async () => "invalid\nagent",
-        });
-        const invalidDatabase = moduleDatabase(invalid.migrations, "history-invalid-target");
-        await invalidDatabase.ready;
-        try {
             await expect(
-                invalid.resolveTarget(invalidDatabase.context, "agent-a", "/root/bad"),
-            ).rejects.toThrow("invalid agent ID");
+                history.resolveTarget(database.context, "agent-a", "never-recorded"),
+            ).resolves.toBe("never-recorded");
+            await expect(
+                history.resolveTarget(database.context, "bad\nagent", "agent-b"),
+            ).rejects.toThrow("target identity is invalid");
         } finally {
-            invalidDatabase.close();
+            database.close();
         }
     });
 
-    it("rejects malformed or incomplete host rosters", async () => {
-        const cases: Array<{
-            name: string;
-            listAgents: NonNullable<
-                NonNullable<ConstructorParameters<typeof HistoryModule>[0]>["listAgents"]
-            >;
-            message: string;
-        }> = [
-            {
-                name: "duplicate",
-                listAgents: () => [
-                    { agentId: "agent-a", messageCount: 0, path: "/root", status: "working" },
-                    { agentId: "agent-a", messageCount: 0, path: "/root/again", status: "working" },
-                ],
-                message: "duplicate agent IDs",
-            },
-            {
-                name: "missing-requester",
-                listAgents: () => [
-                    { agentId: "agent-b", messageCount: 0, path: "/root/other", status: "working" },
-                ],
-                message: "omitted the requesting agent",
-            },
-            {
-                name: "malformed",
-                listAgents: () => [
-                    { agentId: "agent-a", messageCount: -1, path: "/root", status: "working" },
-                ],
-                message: "invalid summaries",
-            },
-        ];
+    it("describes an agent that has recorded nothing rather than leaving it out", async () => {
+        const history = new HistoryModule();
+        const database = moduleDatabase(history.migrations, "history-roster-empty");
+        await database.ready;
+        try {
+            await history.record(database.context, "agent-a", {
+                blocks: [{ text: "one", type: "text" }],
+                recordId: "record-roster",
+                role: "user",
+            });
 
-        for (const testCase of cases) {
-            const history = new HistoryModule({ listAgents: testCase.listAgents });
-            const database = moduleDatabase(history.migrations, `history-roster-${testCase.name}`);
-            await database.ready;
-            try {
-                await expect(history.listAgents(database.context, "agent-a")).rejects.toThrow(
-                    testCase.message,
-                );
-            } finally {
-                database.close();
-            }
+            await expect(
+                history.listAgents(database.context, "agent-a", "agent-b"),
+            ).resolves.toEqual([
+                { agentId: "agent-a", messageCount: 1, path: "agent-a", status: "unknown" },
+                { agentId: "agent-b", messageCount: 0, path: "agent-b", status: "unknown" },
+            ]);
+            // Reading one's own history describes exactly one agent, not a duplicate pair.
+            await expect(history.listAgents(database.context, "agent-a")).resolves.toHaveLength(1);
+        } finally {
+            database.close();
         }
     });
 
     it("does not publish an append notification when an outer transaction rolls back", async () => {
         const notifications: string[] = [];
-        const history = new HistoryModule({
-            onAppend: (_ctx, _agentId, messages) => {
-                notifications.push(messages[0]?.blocks[0]?.type ?? "none");
-            },
+        const history = new HistoryModule();
+        history.onAppend((_ctx, _agentId, messages) => {
+            notifications.push(messages[0]?.blocks[0]?.type ?? "none");
         });
         const database = moduleDatabase(history.migrations, "history-outer-rollback");
         await database.ready;
@@ -448,16 +415,14 @@ describe("HistoryModule edge cases", () => {
         }
     });
 
-    it("contains post-commit observer failures and reports them without undoing the archive", async () => {
-        const reported: unknown[] = [];
-        const history = new HistoryModule({
-            onAppend: async () => {
-                throw new Error("observer failed");
-            },
-            onPostCommitError: async (_ctx, error) => {
-                reported.push(error);
-                throw new Error("reporter failed");
-            },
+    it("contains a failing subscriber and still tells the rest without undoing the archive", async () => {
+        const told: string[] = [];
+        const history = new HistoryModule();
+        history.onAppend(async () => {
+            throw new Error("subscriber failed");
+        });
+        history.onAppend((_ctx, agentId) => {
+            told.push(agentId);
         });
         const database = moduleDatabase(history.migrations, "history-post-commit-error");
         await database.ready;
@@ -470,7 +435,7 @@ describe("HistoryModule edge cases", () => {
                     role: "assistant",
                 }),
             ).resolves.toBeUndefined();
-            await vi.waitFor(() => expect(reported).toHaveLength(1));
+            await vi.waitFor(() => expect(told).toEqual(["agent-a"]));
             await expect(history.stats(database.context, "agent-a")).resolves.toMatchObject({
                 messages: 1,
             });
@@ -479,14 +444,50 @@ describe("HistoryModule edge cases", () => {
         }
     });
 
-    it("deeply detaches notification snapshots from the stored archive", async () => {
+    it("stops telling a subscriber that has unsubscribed", async () => {
+        const told: string[] = [];
+        const history = new HistoryModule();
+        const unsubscribe = history.onAppend((_ctx, _agentId, messages) => {
+            told.push(messages[0]?.recordId ?? "none");
+        });
+        const database = moduleDatabase(history.migrations, "history-unsubscribe");
+        await database.ready;
+
+        try {
+            await history.record(database.context, "agent-a", {
+                blocks: [{ text: "first", type: "text" }],
+                recordId: "record-first",
+                role: "user",
+            });
+            await vi.waitFor(() => expect(told).toEqual(["record-first"]));
+
+            unsubscribe();
+            await history.record(database.context, "agent-a", {
+                blocks: [{ text: "second", type: "text" }],
+                recordId: "record-second",
+                role: "user",
+            });
+            await expect(history.stats(database.context, "agent-a")).resolves.toMatchObject({
+                messages: 2,
+            });
+            expect(told).toEqual(["record-first"]);
+        } finally {
+            database.close();
+        }
+    });
+
+    it("gives each subscriber its own copy, detached from the archive and from each other", async () => {
         let delivered: HistoryMessage[] | undefined;
-        const history = new HistoryModule({
-            onAppend: (_ctx, _agentId, messages) => {
-                delivered = messages as HistoryMessage[];
-                const first = messages[0];
-                if (first?.blocks[0]?.type === "text") first.blocks[0].text = "mutated";
-            },
+        let observedByNext: string | undefined;
+        const history = new HistoryModule();
+        history.onAppend((_ctx, _agentId, messages) => {
+            delivered = messages as HistoryMessage[];
+            const first = messages[0];
+            if (first?.blocks[0]?.type === "text") first.blocks[0].text = "mutated";
+        });
+        history.onAppend((_ctx, _agentId, messages) => {
+            const block = messages[0]?.blocks[0];
+            observedByNext = block?.type === "text" ? block.text : "none";
         });
         const database = moduleDatabase(history.migrations, "history-notification-snapshot");
         await database.ready;
@@ -497,57 +498,36 @@ describe("HistoryModule edge cases", () => {
                 recordId: "record-snapshot",
                 role: "user",
             });
-            await vi.waitFor(() => expect(delivered).toBeDefined());
+            await vi.waitFor(() => expect(observedByNext).toBeDefined());
             const page = await history.read(database.context, "agent-a");
             expect(page.messages[0]?.message.blocks[0]).toEqual({
                 text: "original",
                 type: "text",
             });
             expect(delivered?.[0]?.blocks[0]).toMatchObject({ text: "mutated" });
+            expect(observedByNext).toBe("original");
         } finally {
             database.close();
         }
     });
 
-    it("supports strict and explicit best-effort handling of duplicate archive writes", async () => {
-        const strict = new HistoryModule();
-        const strictDatabase = moduleDatabase(strict.migrations, "history-strict-duplicate");
-        await strictDatabase.ready;
+    it("propagates a duplicate archive write instead of dropping the record", async () => {
+        const history = new HistoryModule();
+        const database = moduleDatabase(history.migrations, "history-duplicate-write");
+        await database.ready;
         try {
             const message = {
                 blocks: [{ text: "once", type: "text" as const }],
                 recordId: "record-duplicate",
                 role: "user" as const,
             };
-            await strict.record(strictDatabase.context, "agent-a", message);
-            await expect(
-                strict.record(strictDatabase.context, "agent-a", message),
-            ).rejects.toThrow();
+            await history.record(database.context, "agent-a", message);
+            await expect(history.record(database.context, "agent-a", message)).rejects.toThrow();
+            await expect(history.stats(database.context, "agent-a")).resolves.toMatchObject({
+                messages: 1,
+            });
         } finally {
-            strictDatabase.close();
-        }
-
-        const bestEffort = new HistoryModule({ failureMode: "best-effort" });
-        const bestEffortDatabase = moduleDatabase(
-            bestEffort.migrations,
-            "history-best-effort-duplicate",
-        );
-        await bestEffortDatabase.ready;
-        try {
-            const message = {
-                blocks: [{ text: "once", type: "text" as const }],
-                recordId: "record-duplicate",
-                role: "user" as const,
-            };
-            await bestEffort.record(bestEffortDatabase.context, "agent-a", message);
-            await expect(
-                bestEffort.record(bestEffortDatabase.context, "agent-a", message),
-            ).resolves.toBeUndefined();
-            await expect(
-                bestEffort.stats(bestEffortDatabase.context, "agent-a"),
-            ).resolves.toMatchObject({ messages: 1 });
-        } finally {
-            bestEffortDatabase.close();
+            database.close();
         }
     });
 
@@ -630,11 +610,9 @@ describe("HistoryModule edge cases", () => {
         }
     });
 
-    it("rejects a malformed tool display result at the hook boundary", async () => {
-        const history = new HistoryModule({
-            toolDisplay: () => 123 as never,
-        });
-        const database = moduleDatabase(history.migrations, "history-tool-display-invalid");
+    it("truncates over-long tool output and says how much it dropped", async () => {
+        const history = new HistoryModule();
+        const database = moduleDatabase(history.migrations, "history-tool-output-limit");
         await database.ready;
         const hooks = await resolveModuleHooks(database.context, history);
         const values = new Map<string, unknown>();
@@ -647,13 +625,18 @@ describe("HistoryModule edge cases", () => {
                 name: "read",
                 type: "tool_call",
             });
-            await expect(
-                hooks.afterToolCallTransact!(database.context, scope, {
-                    callId: "call-1",
-                    content: [{ text: "output", type: "text" }],
-                    role: "tool",
-                }),
-            ).rejects.toThrow("invalid tool-result display");
+            await hooks.afterToolCallTransact!(database.context, scope, {
+                callId: "call-1",
+                content: [{ text: "x".repeat(20_000), type: "text" }],
+                role: "tool",
+            });
+
+            const page = await history.read(database.context, "agent-a");
+            const block = page.messages[0]?.message.blocks[0];
+            if (block?.type !== "tool_result") throw new Error("Expected a recorded tool result.");
+            expect(block.output).toContain("...[truncated 4000 chars]");
+            expect(block.output.length).toBeLessThan(20_000);
+            expect(block.display).toBe(`Tool read returned ${block.output.length} characters.`);
         } finally {
             database.close();
         }

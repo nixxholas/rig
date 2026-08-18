@@ -58,6 +58,30 @@ export class UsageDatabase {
         return structuredClone(page);
     }
 
+    /**
+     * Lifetime tokens per agent, in one pass over the bounded record table.
+     *
+     * A subtree snapshot needs a number for every agent in it, and asking per agent would read
+     * the same five hundred rows once per agent. An agent with no records is simply absent.
+     */
+    async totalTokensByAgent(ctx: Context): Promise<ReadonlyMap<string, number>> {
+        const rows = await agentDatabaseRows<{ record_json: string }>(
+            ctx.db,
+            sql`SELECT record_json
+                FROM ${sql.raw(RECORDS_TABLE)}
+                ORDER BY finished_at, record_id
+                LIMIT ${MAX_USAGE_RECORDS}`,
+        );
+        const totals = new Map<string, number>();
+        for (const row of rows) {
+            const record = this.#parseRecord(row.record_json);
+            if (record.kind !== "inference") continue;
+            const previous = totals.get(record.agentId) ?? 0;
+            totals.set(record.agentId, previous + record.tokens.input + record.tokens.output);
+        }
+        return totals;
+    }
+
     async aggregate(
         ctx: Context,
         query: UsageAggregateQuery,

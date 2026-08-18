@@ -6,72 +6,11 @@ import {
     userInputAgentIdSchema,
     userInputListQuerySchema,
     userInputPageSchema,
-    userInputPresenceStateSchema,
     userInputRequestIdSchema,
     userInputRequestSchema,
-    userInputTimestampSchema,
-    userInputTerminalRequestSchema,
     type UserInputPage,
 } from "./UserInputRequest.js";
 import { userInputContextSchema } from "./UserInputEvent.js";
-
-const voidOrPromiseVoidSchema = Type.Union([Type.Void(), Type.Promise(Type.Void())]);
-const userInputPresenceChangeCallbackSchema = Type.Function(
-    [userInputContextSchema, Type.Union([userInputPresenceStateSchema, Type.Undefined()])],
-    voidOrPromiseVoidSchema,
-);
-const userInputPresenceUnsubscribeSchema = Type.Function([], Type.Void());
-
-/** Presence policy is structural; UserInputModule never imports or understands PresenceModule. */
-export const userInputPresencePolicySchema = Type.Object(
-    {
-        isAvailable: Type.Optional(
-            Type.Function(
-                [userInputContextSchema, userInputAgentIdSchema],
-                Type.Union([Type.Boolean(), Type.Promise(Type.Boolean())]),
-            ),
-        ),
-        state: Type.Optional(
-            Type.Function(
-                [userInputContextSchema, userInputAgentIdSchema],
-                Type.Union([
-                    userInputPresenceStateSchema,
-                    Type.Undefined(),
-                    Type.Promise(Type.Union([userInputPresenceStateSchema, Type.Undefined()])),
-                ]),
-            ),
-        ),
-        subscribe: Type.Optional(
-            Type.Function(
-                [
-                    userInputContextSchema,
-                    userInputAgentIdSchema,
-                    userInputPresenceChangeCallbackSchema,
-                ],
-                Type.Union([
-                    Type.Void(),
-                    userInputPresenceUnsubscribeSchema,
-                    Type.Promise(Type.Union([Type.Void(), userInputPresenceUnsubscribeSchema])),
-                ]),
-            ),
-        ),
-        onChange: Type.Optional(
-            Type.Function(
-                [
-                    userInputContextSchema,
-                    userInputAgentIdSchema,
-                    userInputPresenceChangeCallbackSchema,
-                ],
-                Type.Union([
-                    Type.Void(),
-                    userInputPresenceUnsubscribeSchema,
-                    Type.Promise(Type.Union([Type.Void(), userInputPresenceUnsubscribeSchema])),
-                ]),
-            ),
-        ),
-    },
-    { additionalProperties: false },
-);
 
 export const userInputAuthorizationActionSchema = Type.Union([
     Type.Literal("list"),
@@ -81,21 +20,6 @@ export const userInputAuthorizationActionSchema = Type.Union([
     Type.Literal("cancel"),
     Type.Literal("complete"),
 ]);
-
-export const userInputAuthorizationSchema = Type.Object(
-    {
-        authorize: Type.Function(
-            [
-                userInputContextSchema,
-                userInputAgentIdSchema,
-                userInputAgentIdSchema,
-                userInputAuthorizationActionSchema,
-            ],
-            Type.Union([Type.Boolean(), Type.Promise(Type.Boolean())]),
-        ),
-    },
-    { additionalProperties: false },
-);
 
 /** Internal SQL adapter contract used by UserInputModule's module-owned tables. */
 export const userInputStoreSchema = Type.Object(
@@ -116,9 +40,7 @@ export const userInputStoreSchema = Type.Object(
     { additionalProperties: false },
 );
 
-export type UserInputPresencePolicy = Static<typeof userInputPresencePolicySchema>;
 export type UserInputAuthorizationAction = Static<typeof userInputAuthorizationActionSchema>;
-export type UserInputAuthorization = Static<typeof userInputAuthorizationSchema>;
 export type UserInputStore = Static<typeof userInputStoreSchema>;
 
 export function assertUserInputPage(value: unknown): asserts value is UserInputPage {

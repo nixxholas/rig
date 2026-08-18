@@ -16,15 +16,11 @@ function ownerContext(context: Context, agentId: string): Context {
 
 describe("Goal external activation", () => {
     it("wakes an external agent with durable identity and untrusted provenance metadata", async () => {
-        let nextLifecycle = 0;
-        const module = new GoalModule({
-            idFactory: () => `lifecycle-${++nextLifecycle}`,
-            clock: () => 100,
-        });
+        const module = new GoalModule();
         const database = moduleDatabase(module.migrations, "goal-external-wake-test");
         await database.ready;
         const agents = recordingAgents();
-        await module.beforeStart(database.context, agents.ref);
+        module.beforeStart(database.context, agents.ref);
         try {
             await module.setGoal(database.context, "agent-a", "ship it");
 
@@ -47,14 +43,11 @@ describe("Goal external activation", () => {
     });
 
     it("does not wake an owning agent for an in-agent activation", async () => {
-        const module = new GoalModule({
-            idFactory: () => "lifecycle-a",
-            clock: () => 100,
-        });
+        const module = new GoalModule();
         const database = moduleDatabase(module.migrations, "goal-internal-activation-test");
         await database.ready;
         const agents = recordingAgents();
-        await module.beforeStart(database.context, agents.ref);
+        module.beforeStart(database.context, agents.ref);
         try {
             await module.setGoal(ownerContext(database.context, "agent-a"), "agent-a", "ship it");
             expect(agents.wakes).toEqual([]);
@@ -64,16 +57,13 @@ describe("Goal external activation", () => {
     });
 
     it("rolls back external activation when the host send rejects", async () => {
-        const module = new GoalModule({
-            idFactory: () => "lifecycle-a",
-            clock: () => 100,
-        });
+        const module = new GoalModule();
         const database = moduleDatabase(module.migrations, "goal-external-wake-failure-test");
         await database.ready;
         const agents = recordingAgents(async () => {
             throw new Error("send failed");
         });
-        await module.beforeStart(database.context, agents.ref);
+        module.beforeStart(database.context, agents.ref);
         try {
             await expect(module.setGoal(database.context, "agent-a", "ship it")).rejects.toThrow(
                 "send failed",
@@ -86,10 +76,7 @@ describe("Goal external activation", () => {
     });
 
     it("requires the system reference for external activation", async () => {
-        const module = new GoalModule({
-            idFactory: () => "lifecycle-a",
-            clock: () => 100,
-        });
+        const module = new GoalModule();
         const database = moduleDatabase(module.migrations, "goal-external-without-system-test");
         await database.ready;
         try {
@@ -103,15 +90,11 @@ describe("Goal external activation", () => {
     });
 
     it("uses a new lifecycle and wake when resuming a paused external goal", async () => {
-        let nextLifecycle = 0;
-        const module = new GoalModule({
-            idFactory: () => `lifecycle-${++nextLifecycle}`,
-            clock: () => 100,
-        });
+        const module = new GoalModule();
         const database = moduleDatabase(module.migrations, "goal-external-resume-test");
         await database.ready;
         const agents = recordingAgents();
-        await module.beforeStart(database.context, agents.ref);
+        module.beforeStart(database.context, agents.ref);
         try {
             await module.setGoal(database.context, "agent-a", "ship it");
             await module.changeGoalStatus(database.context, "agent-a", "paused");

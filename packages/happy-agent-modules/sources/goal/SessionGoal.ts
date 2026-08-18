@@ -33,15 +33,6 @@ export const goalTitleSchema = Type.String({
     maxLength: MAX_GOAL_TITLE_CHARS,
 });
 
-export const goalInterruptionReasonSchema = Type.Union([
-    Type.Literal("goal_blocked"),
-    Type.Literal("goal_paused"),
-    Type.Literal("goal_cleared"),
-    Type.Literal("session_failed"),
-    Type.Literal("session_interrupted"),
-    Type.Literal("session_archived"),
-]);
-
 export const goalStatusSchema = Type.Union([
     Type.Literal("active"),
     Type.Literal("paused"),
@@ -63,5 +54,4 @@ export type GoalAgentId = Static<typeof goalAgentIdSchema>;
 export type GoalOperationId = Static<typeof goalOperationIdSchema>;
 export type GoalMessageId = Static<typeof goalMessageIdSchema>;
 export type GoalStatus = Static<typeof goalStatusSchema>;
-export type GoalInterruptionReason = Static<typeof goalInterruptionReasonSchema>;
 export type SessionGoal = Static<typeof sessionGoalSchema>;

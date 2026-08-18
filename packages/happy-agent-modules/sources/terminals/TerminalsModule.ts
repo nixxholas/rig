@@ -4,8 +4,8 @@ import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { mapAsyncLock, type Context, type MapAsyncLock } from "@steve.kite/stdlib";
 
-import type { ProjectsModule } from "../projects/ProjectsModule.js";
-import type { WorkspacesModule } from "../workspaces/WorkspacesModule.js";
+import { ProjectsModule } from "../projects/index.js";
+import { WorkspacesModule } from "../workspaces/index.js";
 
 import {
     createTerminalInputSchema,
@@ -21,42 +21,6 @@ import type { TerminalProcessFactory } from "./TerminalProcess.js";
 import { createHostTerminalProcessFactory } from "./impl/createHostTerminalProcessFactory.js";
 import { TerminalCollection } from "./impl/TerminalCollection.js";
 import type { TerminalSession } from "./impl/TerminalSession.js";
-
-export const terminalsProjectsModuleSchema = Type.Unsafe<ProjectsModule>(
-    Type.Object({}, { additionalProperties: true }),
-);
-export const terminalsWorkspacesModuleSchema = Type.Unsafe<WorkspacesModule>(
-    Type.Object({}, { additionalProperties: true }),
-);
-export const terminalsProcessFactorySchema = Type.Unsafe<TerminalProcessFactory>(
-    Type.Object({}, { additionalProperties: true }),
-);
-
-export const terminalsModuleOptionsSchema = Type.Object(
-    {
-        /**
-         * The projects catalog, which owns where a project's checkout is.
-         *
-         * A terminal stands in a folder someone else decided on, so it asks the catalog that
-         * decided rather than deriving a path of its own.
-         */
-        projects: terminalsProjectsModuleSchema,
-        /**
-         * The workspaces catalog, which owns where a managed worktree is and whether it is usable.
-         *
-         * A workspace folder is not inside its project's, and it only exists once the catalog says
-         * the workspace is ready, so both answers have to come from here.
-         */
-        workspaces: terminalsWorkspacesModuleSchema,
-        /** Replaces the real pseudo-terminal, so a test can drive lifecycle without a shell. */
-        processFactory: Type.Optional(terminalsProcessFactorySchema),
-        /** How many terminals one project or workspace may hold at once. */
-        maxTerminalsPerScope: Type.Optional(Type.Integer({ minimum: 1 })),
-    },
-    { additionalProperties: false },
-);
-
-export type TerminalsModuleOptions = Static<typeof terminalsModuleOptionsSchema>;
 
 /**
  * Interactive terminals on a project or one of its workspaces.
@@ -74,21 +38,40 @@ export class TerminalsModule {
     readonly name = "terminals";
 
     readonly #locks: MapAsyncLock<string> = mapAsyncLock<string>();
-    readonly #maximum: number | undefined;
-    readonly #processFactory: TerminalProcessFactory;
     readonly #projects: ProjectsModule;
     readonly #scopes = new Map<string, TerminalCollection>();
     readonly #workspaces: WorkspacesModule;
     #closed = false;
+    #processFactory: TerminalProcessFactory;
 
-    constructor(options: TerminalsModuleOptions) {
-        if (!Value.Check(terminalsModuleOptionsSchema, options)) {
-            throw new Error("Terminals module options are invalid.");
-        }
-        this.#projects = options.projects;
-        this.#workspaces = options.workspaces;
-        this.#processFactory = options.processFactory ?? createHostTerminalProcessFactory();
-        this.#maximum = options.maxTerminalsPerScope;
+    /**
+     * @param projects The catalog that owns where a project's checkout is. A terminal stands in a
+     * folder someone else decided on, so it asks the catalog that decided rather than deriving a
+     * path of its own.
+     * @param workspaces The catalog that owns where a managed worktree is and whether it is usable.
+     * A workspace folder is not inside its project's, and it only exists once the catalog says the
+     * workspace is ready, so both answers have to come from here.
+     */
+    constructor(projects: ProjectsModule, workspaces: WorkspacesModule) {
+        this.#projects = projects;
+        this.#workspaces = workspaces;
+        this.#processFactory = createHostTerminalProcessFactory();
+    }
+
+    /**
+     * Test-only construction over one supplied pseudo-terminal boundary.
+     *
+     * Production always spawns a real pseudo-terminal. A test that needs to drive the lifecycle
+     * without a shell replaces the boundary here instead of reaching into the module.
+     */
+    static withProcessFactory(
+        projects: ProjectsModule,
+        workspaces: WorkspacesModule,
+        processFactory: TerminalProcessFactory,
+    ): TerminalsModule {
+        const module = new TerminalsModule(projects, workspaces);
+        module.#processFactory = processFactory;
+        return module;
     }
 
     /** Open one terminal in a project or workspace folder. */
@@ -232,7 +215,6 @@ export class TerminalsModule {
                 projectId: scope.projectId,
                 processFactory: this.#processFactory,
                 root,
-                ...(this.#maximum === undefined ? {} : { maximum: this.#maximum }),
             });
             this.#scopes.set(key, created);
             return created;

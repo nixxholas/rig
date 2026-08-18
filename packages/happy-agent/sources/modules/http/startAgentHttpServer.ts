@@ -10,7 +10,6 @@ import type { StartedHappyAgent } from "../../start/startHappyAgent.js";
 import type { HappyAgentConfiguration } from "@slopus/happy-agent-modules";
 import { HAPPY_AGENT_RIG_PROTOCOL_VERSION } from "./rigProtocol.js";
 import { ProjectFilesModule } from "../files/ProjectFilesModule.js";
-import { GitModule } from "@slopus/happy-agent-modules";
 import { readOrCreateAgentToken, isAuthorizedAgentRequest } from "./auth.js";
 import { AgentHttpError, sendError, sendJson } from "./errors.js";
 import { createCompatibilityRoutes } from "./compatibilityRoutes.js";
@@ -155,15 +154,18 @@ function routeGroups(
             ...agent.configuration.values.workspace.protectedSync,
         ]),
     ];
+    // The daemon reads Git through the very instance the catalogs were built with. A second one
+    // would keep its own watchers, credentials and lifetime, and would not see what they
+    // registered.
+    const git = options.configuration?.git ?? agent.git;
     const projectFiles =
         options.configuration?.projectFiles ??
         new ProjectFilesModule({
-            git: projects.git,
+            git,
             protectedPaths,
             projects,
             workspaces: agent.modules.workspaces,
         });
-    const git = options.configuration?.git ?? new GitModule({ runner: projects.git });
     return [
         ...(options.routeGroups ?? []),
         createCoreDaemonRoutes(),
@@ -195,7 +197,6 @@ function routeGroups(
             agent,
             files: projectFiles,
             git,
-            tracker: agent.gitTracker,
         }),
     ];
 }

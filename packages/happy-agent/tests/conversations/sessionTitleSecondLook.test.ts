@@ -15,7 +15,9 @@ import {
 import {
     ConfigModule,
     EventsModule,
+    GitModule,
     HistoryModule,
+    ProjectsModule,
     TitlesModule,
     WorkspacesModule,
 } from "@slopus/happy-agent-modules";
@@ -208,11 +210,13 @@ async function harness(answers: readonly string[]) {
     });
 
     const events = new EventsModule();
-    const history = new HistoryModule({});
-    const titles = new TitlesModule({
-        config,
-        workspaces: new WorkspacesModule({ enabled: false }),
-    });
+    const history = new HistoryModule();
+    // The chats under test sit in no workspace, so the catalog is here to be the collaborator
+    // titles was built with rather than to be asked anything.
+    const git = new GitModule();
+    closers.push(() => git.dispose());
+    const workspaces = new WorkspacesModule(config, new ProjectsModule(config, git), git);
+    const titles = new TitlesModule(config, workspaces);
     const conversations = new ConversationModule({
         defaultCwd: "/tmp",
         events,

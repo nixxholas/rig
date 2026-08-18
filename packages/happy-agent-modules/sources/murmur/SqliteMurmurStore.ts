@@ -29,8 +29,8 @@ export class SqliteMurmurStore implements MurmurStore {
     readonly #ctx: Context;
     #closed = false;
 
-    constructor(root: RootContext) {
-        this.#ctx = root.named("murmur-store");
+    constructor(lifetime: RootContext) {
+        this.#ctx = lifetime.named("murmur-store");
     }
 
     async get(key: string): Promise<Uint8Array | undefined> {

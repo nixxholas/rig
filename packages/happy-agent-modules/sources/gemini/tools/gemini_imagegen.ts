@@ -1,10 +1,9 @@
 import { defineAgentTool } from "@slopus/happy-agent-base";
 import { Type } from "@sinclair/typebox";
 
-import type { Compute } from "../../compute/Compute.js";
-import type { FileReadLog } from "../../compute/impl/FileReadLog.js";
-import { shouldReviewComputePath } from "../../compute/impl/shouldReviewComputePath.js";
-import { quoteVisibleExact } from "../../mcp/quoteVisibleExact.js";
+import type { Compute, ComputeModule } from "../../compute/index.js";
+import type { FileReadLog } from "../../impl/FileReadLog.js";
+import { quoteVisibleExact } from "../../impl/quoteVisibleExact.js";
 import type { GeminiConnection } from "../Gemini.js";
 import { computePathExtension } from "../impl/computePathExtension.js";
 import { generateGeminiImage } from "../impl/generateGeminiImage.js";
@@ -21,6 +20,7 @@ const generatedImageSchema = Type.Object({
 /** Gemini's image generation, written straight to a file on the agent's machine. */
 export function geminiGenerateImageTool(
     connection: GeminiConnection,
+    computeModule: ComputeModule,
     compute: Compute,
     reads: FileReadLog,
 ) {
@@ -72,12 +72,13 @@ export function geminiGenerateImageTool(
             `sending ${quoteVisibleExact(prompt)} to Gemini image generation and writing ${quoteVisibleExact(output_path)}. Access: external Gemini API and local filesystem write`,
         shouldReviewInAutoMode: () => true,
         shouldRunInFullAccessInAutoMode: ({ output_path }, ctx) =>
-            shouldReviewComputePath(compute, output_path, { write: true }, ctx),
+            computeModule.shouldReviewPath(ctx, compute, output_path, { write: true }),
         execute: async (ctx, { prompt, output_path, aspect_ratio, image_size }) => {
-            if (computePathExtension(output_path) !== ".png") {
+            if (computePathExtension(computeModule, output_path) !== ".png") {
                 throw new Error("Gemini image output_path must end in .png.");
             }
             const resolvedOutputPath = await prepareGeneratedMediaOutputPath(
+                computeModule,
                 compute,
                 reads,
                 ctx,
@@ -95,6 +96,7 @@ export function geminiGenerateImageTool(
                 throw new Error(`Gemini returned unsupported image type '${generated.mimeType}'.`);
             }
             const path = await writeGeneratedMediaFile(
+                computeModule,
                 compute,
                 reads,
                 ctx,

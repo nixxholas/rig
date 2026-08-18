@@ -1,17 +1,20 @@
-import type { Context } from "@steve.kite/stdlib";
 import { describe, expect, it, vi } from "vitest";
 
 import {
-    UserInputModule,
+    MAX_USER_INPUT_ANSWER_CHARACTERS,
+    MAX_USER_INPUT_CANCEL_REASON_CHARACTERS,
+    MAX_USER_INPUT_OPTION_COUNT,
+    MAX_USER_INPUT_QUESTION_CHARACTERS,
     cancelAskTool,
     formatDetailPageForModel,
     formatForModel,
     formatPageForModel,
     requestUserInputTool,
     type UserInputEvent,
-    type UserInputTerminalRequest,
 } from "../../sources/userInput/index.js";
+import { resolveModuleHooks } from "../support/moduleHooks.js";
 import {
+    agentsWithParent,
     createUserInputDatabase,
     createUserInputModule,
     singularAsk,
@@ -23,22 +26,19 @@ describe("UserInput events, tools, and output bounds", () => {
     it("delivers one stable deeply frozen event through outer afterCommit", async () => {
         let transactional: UserInputEvent | undefined;
         let postCommit: UserInputEvent | undefined;
-        const module = createUserInputModule({
-            listener: {
-                onEventTransactional: (_ctx, event) => {
-                    transactional = event;
-                    expect(Object.isFrozen(event)).toBe(true);
-                    expect(Object.isFrozen(event.request)).toBe(true);
-                    if (event.request.options !== undefined) {
-                        expect(Object.isFrozen(event.request.options)).toBe(true);
-                        expect(Object.isFrozen(event.request.options.choices)).toBe(true);
-                        expect(Object.isFrozen(event.request.options.choices[0])).toBe(true);
-                    }
-                },
-                onEvent: (_ctx, event) => {
-                    postCommit = event;
-                },
-            },
+        const module = createUserInputModule();
+        module.onEventTransactional((_ctx, event) => {
+            transactional = event;
+            expect(Object.isFrozen(event)).toBe(true);
+            expect(Object.isFrozen(event.request)).toBe(true);
+            if (event.request.options !== undefined) {
+                expect(Object.isFrozen(event.request.options)).toBe(true);
+                expect(Object.isFrozen(event.request.options.choices)).toBe(true);
+                expect(Object.isFrozen(event.request.options.choices[0])).toBe(true);
+            }
+        });
+        module.onEvent((_ctx, event) => {
+            postCommit = event;
         });
         const database = createUserInputDatabase(module, "user-input-event-freeze");
         await database.ready;
@@ -61,9 +61,9 @@ describe("UserInput events, tools, and output bounds", () => {
             expect(postCommit).toBe(transactional);
             expect(postCommit).toMatchObject({
                 type: "user_input_requested",
-                eventId: "event-1",
                 requestId: "event-request",
             });
+            expect(postCommit?.eventId).toMatch(/^[0-9a-f]{32}$/u);
             expect(() => {
                 if (transactional?.type === "user_input_requested") {
                     transactional.request.context = "mutated";
@@ -77,15 +77,12 @@ describe("UserInput events, tools, and output bounds", () => {
     it("publishes no post-commit event or durable row after outer rollback", async () => {
         const transactional: string[] = [];
         const postCommit: string[] = [];
-        const module = createUserInputModule({
-            listener: {
-                onEventTransactional: (_ctx, event) => {
-                    transactional.push(event.type);
-                },
-                onEvent: (_ctx, event) => {
-                    postCommit.push(event.type);
-                },
-            },
+        const module = createUserInputModule();
+        module.onEventTransactional((_ctx, event) => {
+            transactional.push(event.type);
+        });
+        module.onEvent((_ctx, event) => {
+            postCommit.push(event.type);
         });
         const database = createUserInputDatabase(module, "user-input-event-rollback");
         await database.ready;
@@ -106,13 +103,10 @@ describe("UserInput events, tools, and output bounds", () => {
         }
     });
 
-    it("rolls back durable state when a transactional listener fails", async () => {
-        const module = createUserInputModule({
-            listener: {
-                onEventTransactional: () => {
-                    throw new Error("transactional listener failed");
-                },
-            },
+    it("rolls back durable state when a transactional watcher fails", async () => {
+        const module = createUserInputModule();
+        module.onEventTransactional(() => {
+            throw new Error("transactional listener failed");
         });
         const database = createUserInputDatabase(module, "user-input-event-listener-rollback");
         await database.ready;
@@ -128,8 +122,7 @@ describe("UserInput events, tools, and output bounds", () => {
         }
     });
 
-    it("contains post-commit listener failures and tolerates a failing error reporter", async () => {
-        const reports: unknown[] = [];
+    it("contains a post-commit watcher failure, however hostile the failure is", async () => {
         const hostile = {
             get message(): never {
                 throw new Error("message getter failed");
@@ -138,16 +131,13 @@ describe("UserInput events, tools, and output bounds", () => {
                 throw new Error("primitive conversion failed");
             },
         };
-        const module = createUserInputModule({
-            listener: {
-                onEvent: () => {
-                    throw hostile;
-                },
-            },
-            onPostCommitError: (_ctx, event, error) => {
-                reports.push({ eventId: event.eventId, error });
-                throw new Error("reporter failed");
-            },
+        const later: string[] = [];
+        const module = createUserInputModule();
+        module.onEvent(() => {
+            throw hostile;
+        });
+        module.onEvent((_ctx, event) => {
+            later.push(event.type);
         });
         const database = createUserInputDatabase(module, "user-input-post-commit-error");
         await database.ready;
@@ -155,13 +145,9 @@ describe("UserInput events, tools, and output bounds", () => {
             await expect(
                 module.ask(database.context, agentId, singularAsk(), "post-commit-error"),
             ).resolves.toMatchObject({ id: "post-commit-error" });
-            await vi.waitFor(() => expect(reports).toHaveLength(1));
-            expect(
-                (reports[0] as { readonly eventId: string; readonly error: unknown }).eventId,
-            ).toBe("event-1");
-            expect(
-                (reports[0] as { readonly eventId: string; readonly error: unknown }).error,
-            ).toBe(hostile);
+            // The request is already durable, so the failure is reported and the watchers behind
+            // the failing one still hear about it.
+            await vi.waitFor(() => expect(later).toEqual(["user_input_requested"]));
             await expect(
                 module.get(database.context, agentId, "post-commit-error"),
             ).resolves.toMatchObject({ status: "pending" });
@@ -170,71 +156,68 @@ describe("UserInput events, tools, and output bounds", () => {
         }
     });
 
-    it("preserves owning this for class-backed listener and authorization adapters", async () => {
-        class Listener {
-            readonly events: string[] = [];
-
-            onEventTransactional(_ctx: Context, event: UserInputEvent): void {
-                this.events.push(`tx:${event.type}`);
-            }
-
-            onEvent(_ctx: Context, event: UserInputEvent): void {
-                this.events.push(`post:${event.type}`);
-            }
-        }
-        class Authorization {
-            readonly calls: string[] = [];
-
-            authorize(
-                _ctx: Context,
-                actingAgentId: string,
-                askingAgentId: string,
-                action: string,
-            ): boolean {
-                this.calls.push(`${actingAgentId}:${askingAgentId}:${action}`);
-                return true;
-            }
-        }
-        const listener = new Listener();
-        const authorization = new Authorization();
-        const module = new UserInputModule({
-            listener,
-            authorization,
-            idFactory: () => "class-request",
-            eventIdFactory: () => "class-event",
-            clock: () => 100,
-        });
-        const database = createUserInputDatabase(module, "user-input-class-adapters");
+    it("lets a parent agent reach its child's request and denies an unrelated agent", async () => {
+        const module = createUserInputModule();
+        const database = createUserInputDatabase(module, "user-input-ancestry");
         await database.ready;
         try {
-            const request = await module.ask(
+            await resolveModuleHooks(
                 database.context,
-                agentId,
-                singularAsk(),
-                "class-request",
+                module,
+                agentsWithParent(agentId, "parent-agent"),
             );
+            const request = await module.ask(database.context, agentId, singularAsk(), "family");
+
+            await expect(
+                module.get(database.context, "parent-agent", request.id),
+            ).resolves.toEqual(request);
+            await expect(
+                module.answer(database.context, "parent-agent", {
+                    requestId: request.id,
+                    answer: "Answered by the parent.",
+                }),
+            ).resolves.toMatchObject({ status: "answered" });
+            await expect(
+                module.get(database.context, "unrelated-agent", request.id),
+            ).rejects.toThrow("not authorized");
+        } finally {
+            database.close();
+        }
+    });
+
+    it("keeps a watcher's own receiver when it is a bound method", async () => {
+        class Watcher {
+            readonly events: string[] = [];
+
+            record(_ctx: unknown, event: UserInputEvent): void {
+                this.events.push(event.type);
+            }
+        }
+        const watcher = new Watcher();
+        const module = createUserInputModule();
+        module.onEvent(watcher.record.bind(watcher));
+        const database = createUserInputDatabase(module, "user-input-bound-watcher");
+        await database.ready;
+        try {
+            const request = await module.ask(database.context, agentId, singularAsk(), "bound");
             const waiting = module.wait(database.context, agentId, request.id);
             await module.answer(database.context, agentId, {
                 requestId: request.id,
                 answer: "Use it.",
             });
             await expect(waiting).resolves.toMatchObject({ status: "answered" });
-            expect(listener.events).toEqual([
-                "tx:user_input_requested",
-                "post:user_input_requested",
-                "tx:user_input_answered",
-                "post:user_input_answered",
-            ]);
-            expect(authorization.calls).toEqual([]);
+            await vi.waitFor(() =>
+                expect(watcher.events).toEqual([
+                    "user_input_requested",
+                    "user_input_answered",
+                ]),
+            );
         } finally {
             database.close();
         }
     });
 
     it.fails("keeps model-facing output bounded while retaining request identity and continuation", () => {
-        const module = createUserInputModule({
-            maxOutputCharacters: 256,
-        });
         const request = {
             id: "r".repeat(128),
             askingAgentId: agentId,
@@ -348,96 +331,60 @@ describe("UserInput events, tools, and output bounds", () => {
         }
     });
 
-    it("rejects invalid injected IDs, clocks, and answer/output bounds before writing", async () => {
-        const badId = new UserInputModule({
-            idFactory: () => "",
-            eventIdFactory: () => "event",
-            clock: () => 100,
-        });
-        const badIdDatabase = createUserInputDatabase(badId, "user-input-bad-id");
-        await badIdDatabase.ready;
+    it("refuses questions, options, answers, and reasons past the module's own bounds", async () => {
+        const module = createUserInputModule();
+        const database = createUserInputDatabase(module, "user-input-bounds");
+        await database.ready;
         try {
-            await expect(badId.ask(badIdDatabase.context, agentId, singularAsk())).rejects.toThrow(
-                "identity",
-            );
             await expect(
-                badId.get(badIdDatabase.context, agentId, "request-1"),
-            ).resolves.toBeUndefined();
-        } finally {
-            badIdDatabase.close();
-        }
+                module.ask(
+                    database.context,
+                    agentId,
+                    singularAsk({ question: "Q".repeat(MAX_USER_INPUT_QUESTION_CHARACTERS + 1) }),
+                ),
+            ).rejects.toThrow(/invalid/iu);
+            await expect(
+                module.ask(
+                    database.context,
+                    agentId,
+                    singularAsk({
+                        options: {
+                            choices: Array.from(
+                                { length: MAX_USER_INPUT_OPTION_COUNT + 1 },
+                                (_, index) => ({
+                                    label: `Choice ${String(index)}`,
+                                    description: "One of too many.",
+                                }),
+                            ),
+                            multiSelect: false,
+                        },
+                    }),
+                ),
+            ).rejects.toThrow(/invalid/iu);
 
-        const badClock = new UserInputModule({
-            idFactory: () => "bad-clock",
-            eventIdFactory: () => "event",
-            clock: () => -1,
-        } as never);
-        const badClockDatabase = createUserInputDatabase(badClock, "user-input-bad-clock");
-        await badClockDatabase.ready;
-        try {
-            await expect(
-                badClock.ask(badClockDatabase.context, agentId, singularAsk()),
-            ).rejects.toThrow("clock");
-        } finally {
-            badClockDatabase.close();
-        }
-
-        const bounded = createUserInputModule({
-            maxAnswerCharacters: 4,
-            maxCancelReasonCharacters: 4,
-            maxContextCharacters: 4,
-            maxQuestionCharacters: 4,
-            maxOptionCount: 1,
-            maxOptionLabelCharacters: 2,
-            maxOptionDescriptionCharacters: 3,
-        });
-        const boundedDatabase = createUserInputDatabase(bounded, "user-input-bounds");
-        await boundedDatabase.ready;
-        try {
-            await expect(
-                bounded.ask(boundedDatabase.context, agentId, singularAsk()),
-            ).rejects.toThrow("bound");
-            const request = await bounded.ask(
-                boundedDatabase.context,
+            const request = await module.ask(
+                database.context,
                 agentId,
-                {
-                    question: "Q",
-                    context: "C",
-                    options: {
-                        choices: [{ label: "A", description: "One" }],
-                        multiSelect: false,
-                    },
-                },
+                singularAsk(),
                 "bounded-request",
             );
             await expect(
-                bounded.answer(boundedDatabase.context, agentId, {
+                module.answer(database.context, agentId, {
                     requestId: request.id,
-                    answer: "Too long",
+                    answer: "A".repeat(MAX_USER_INPUT_ANSWER_CHARACTERS + 1),
                 }),
-            ).rejects.toThrow("bound");
+            ).rejects.toThrow(/invalid/iu);
             await expect(
-                bounded.cancel(boundedDatabase.context, agentId, {
+                module.cancel(database.context, agentId, {
                     requestId: request.id,
-                    reason: "Too long",
+                    reason: "R".repeat(MAX_USER_INPUT_CANCEL_REASON_CHARACTERS + 1),
                 }),
-            ).rejects.toThrow("bound");
+            ).rejects.toThrow(/invalid/iu);
+            await expect(
+                module.get(database.context, agentId, request.id),
+            ).resolves.toMatchObject({ status: "pending" });
         } finally {
-            boundedDatabase.close();
+            database.close();
         }
     });
 });
-
-function terminalAnswer(requestId: string): UserInputTerminalRequest {
-    return {
-        id: requestId,
-        askingAgentId: agentId,
-        question: "Which option should I use?",
-        context: "The choice changes the implementation.",
-        status: "answered",
-        answer: "Use it.",
-        answeredAt: 100,
-        createdAt: 100,
-        updatedAt: 100,
-    };
-}

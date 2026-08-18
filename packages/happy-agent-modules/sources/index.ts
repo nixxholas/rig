@@ -1,5 +1,21 @@
 /** Public surface of `@slopus/happy-agent-modules`, re-exported by module. */
 
+// Shared, module-neutral utilities: things more than one module needs and none of them owns.
+export {
+    AGENT_MESSAGE_ORIGIN_METADATA,
+    MESSAGE_ORIGIN_METADATA_KEY,
+    SENDER_AGENT_ID_METADATA_KEY,
+    USER_MESSAGE_ORIGIN_METADATA,
+    isUserOriginMetadata,
+    senderAgentIdMetadata,
+    senderAgentIdOf,
+} from "./impl/messageOrigin.js";
+export { getManagedProjectsDirectory } from "./impl/managedProjectsDirectory.js";
+export { getManagedWorkspacesDirectory } from "./impl/managedWorkspacesDirectory.js";
+export { FileReadLog } from "./impl/FileReadLog.js";
+export { createTimedSignal, type TimedSignal } from "./impl/createTimedSignal.js";
+export { quoteVisibleExact } from "./impl/quoteVisibleExact.js";
+
 // Config: the resolved filesystem layout and layered Happy Agent settings.
 export {
     ConfigModule,
@@ -33,6 +49,7 @@ export {
     eventTypeSchema,
     eventsModuleListenerSchema,
     EVENT_TYPE,
+    EVENTS_CAPACITY,
     EventsModule,
     MAX_EVENT_AGENT_ID_LENGTH,
     MAX_EVENT_TYPE_LENGTH,
@@ -41,7 +58,6 @@ export {
     type EventListener,
     type EventReplay,
     type EventsModuleListener,
-    type EventsModuleOptions,
     type EventType,
 } from "./events/index.js";
 export { createUuidV7Factory } from "./events/index.js";
@@ -49,17 +65,16 @@ export { createUuidV7Factory } from "./events/index.js";
 // Goal: long-running work the agent keeps pursuing until it is complete or blocked.
 export {
     GoalModule,
-    assertGoalModuleOptions,
-    goalModuleOptionsSchema,
     FAILED_TURNS_BEFORE_BLOCKED,
-    type GoalModuleOptions,
+    GOAL_OUTPUT_CHARACTERS,
 } from "./goal/GoalModule.js";
 export {
     goalEventSchema,
     goalContextSchema,
-    goalModuleListenerSchema,
+    goalEventListenerSchema,
     type GoalEvent,
-    type GoalModuleListener,
+    type GoalEventListener,
+    type GoalUnsubscribe,
 } from "./goal/GoalEvent.js";
 export { createGoalTool } from "./goal/tools/create_goal.js";
 export { clearGoalTool } from "./goal/tools/clear_goal.js";
@@ -91,7 +106,6 @@ export { formatGoalForModel } from "./goal/impl/formatGoalForModel.js";
 
 // System prompt: the instructions each model is written for, chosen by the model in force.
 export {
-    agentsMdGlobalInstructionsReaderSchema,
     SystemPromptModule,
     MAX_SYSTEM_PROMPT_AVAILABLE_MODEL_FIELD_LENGTH,
     MAX_SYSTEM_PROMPT_AVAILABLE_MODELS_BYTES,
@@ -99,13 +113,10 @@ export {
     MAX_SYSTEM_PROMPT_OUTPUT_BYTES,
     systemPromptAvailableModelSchema,
     systemPromptAvailableModelsSchema,
-    systemPromptModuleOptionsSchema,
     systemPromptIdentitySchema,
     systemPromptSelectionSchema,
-    type AgentsMdGlobalInstructionsReader,
     type SystemPromptAvailableModel,
     type SystemPromptAvailableModels,
-    type SystemPromptModuleOptions,
     type SystemPromptSelection,
 } from "./systemPrompt/SystemPromptModule.js";
 export {
@@ -144,8 +155,8 @@ export { systemPromptForModel } from "./systemPrompt/impl/systemPromptForModel.j
 // History: the agent's own durable record of what happened, which it can read back.
 export {
     HistoryModule,
-    historyModuleOptionsSchema,
-    type HistoryModuleOptions,
+    MAX_HISTORY_EXCERPT_CHARACTERS,
+    type HistoryAppendListener,
 } from "./history/HistoryModule.js";
 export {
     historyAgentIdSchema,
@@ -220,6 +231,7 @@ export {
     type FormattedHistoryPage,
 } from "./history/impl/formatHistoryPage.js";
 export { formatHistoryMessage } from "./history/impl/formatHistoryMessage.js";
+export { createHistoryExcerpt, type HistoryExcerpt } from "./history/impl/createHistoryExcerpt.js";
 export {
     historyStatsSchema,
     summarizeHistory,
@@ -233,52 +245,10 @@ export {
 export { selectHistoryPage } from "./history/impl/selectHistoryPage.js";
 
 // Compute: the machine an agent works on, as file and command tools over one compute.
-export {
-    ComputeModule,
-    agentComputeConfigSchema,
-    computeModuleOptionsSchema,
-    hostComputeSchema,
-    type AgentComputeConfig,
-    type ComputeModuleOptions,
-    type HostCompute,
-    type HostComputeProvider,
-} from "./compute/ComputeModule.js";
-export {
-    createComputeModules,
-    type CreatedComputeModules,
-} from "./compute/createComputeModules.js";
-export { type ComputeResolver } from "./compute/ComputeResolver.js";
-export {
-    type Compute,
-    type ComputeFileStat,
-    type ComputeFileSystem,
-    type ComputePermissions,
-    type ComputeRunOptions,
-    type ComputeSessionActivity,
-    type ComputeSessionReadOptions,
-    type ComputeSessionSnapshot,
-    type ComputeSessionStatus,
-    type ComputeShell,
-} from "./compute/Compute.js";
-export {
-    computeToolVendor,
-    computeToolSelectionSchema,
-    computeToolVendorSchema,
-    type ComputeToolSelection,
-    type ComputeToolVendor,
-} from "./compute/ComputeToolVendor.js";
-export { assembleComputeTools } from "./compute/tools/assembleComputeTools.js";
-export { assembleClaudeComputeTools } from "./compute/tools/claude/assembleClaudeComputeTools.js";
-export { assembleCodexComputeTools } from "./compute/tools/codex/assembleCodexComputeTools.js";
-export { assembleGrokComputeTools } from "./compute/tools/grok/assembleGrokComputeTools.js";
-export { FileReadLog } from "./compute/impl/FileReadLog.js";
+export * from "./compute/index.js";
 
 // Model switch: the notice a model gets when it inherits a conversation it cannot see.
-export {
-    ModelSwitchModule,
-    modelSwitchModuleOptionsSchema,
-    type ModelSwitchModuleOptions,
-} from "./modelSwitch/ModelSwitchModule.js";
+export { ModelSwitchModule } from "./modelSwitch/ModelSwitchModule.js";
 export {
     createModelSwitchNotice,
     type ModelSwitchNotice,
@@ -289,13 +259,16 @@ export * from "./auto/index.js";
 
 // Permissions: the mode an agent runs in, enforced call by call.
 export {
+    PERMISSION_ANNOUNCE_TIMEOUT_MS,
+    PERMISSION_REFUSALS_BEFORE_STOPPING,
+    PERMISSION_REVIEW_TIMEOUT_MS,
     PermissionsModule,
-    type PermissionsModuleOptions,
+    type PermissionEventListener,
+    type PermissionUnsubscribe,
 } from "./permissions/PermissionsModule.js";
 export {
     permissionEventSchema,
     type PermissionEvent,
-    type PermissionModuleListener,
 } from "./permissions/PermissionEvent.js";
 export {
     type PermissionReviewDecision,
@@ -317,17 +290,29 @@ export {
     DND_PRESENCE,
 } from "./presence/PresenceCatalog.js";
 export {
+    MAX_PRESENCE_SCHEDULES,
     PresenceModule,
-    presenceModuleOptionsSchema,
-    type PresenceModuleOptions,
+    formatPresenceInstruction,
 } from "./presence/PresenceModule.js";
 export {
-    presenceEventSchema,
-    presenceModuleListenerSchema,
+    MAX_PRESENCE_DEFINITIONS,
+    readConfiguredPresence,
+    type ConfiguredPresence,
+} from "./presence/PresenceConfiguration.js";
+export {
+    assertPresenceEventListener,
     presenceContextSchema,
+    presenceEventListenerSchema,
+    presenceEventSchema,
     type PresenceEvent,
-    type PresenceModuleListener,
+    type PresenceEventListener,
+    type PresenceUnsubscribe,
 } from "./presence/PresenceEvent.js";
+export {
+    assertPresenceUserInputResult,
+    presenceUserInputChangeCallbackSchema,
+    type PresenceUserInputChangeCallback,
+} from "./presence/PresenceUserInput.js";
 export {
     presenceScheduleInputSchema,
     presenceScheduleSchema,
@@ -345,6 +330,7 @@ export {
     presenceStateSchema,
     presenceStatusSchema,
     presenceToolInputSchema,
+    presenceUserInputStateSchema,
     temporaryPresenceInputSchema,
     type PresenceFallback,
     type PresenceDefinition,
@@ -352,6 +338,7 @@ export {
     type PresenceState,
     type PresenceStatus,
     type PresenceToolInput,
+    type PresenceUserInputState,
     type TemporaryPresenceInput,
 } from "./presence/PresenceState.js";
 export {
@@ -371,12 +358,11 @@ export { setPresenceTool } from "./presence/tools/set_presence.js";
 // Tasks: a bounded persistent todo list owned by the module.
 export {
     TasksModule,
-    DEFAULT_MAX_TASKS,
     DEFAULT_TASK_PRIORITY,
     MAX_TASKS,
-    assertTasksModuleOptions,
-    tasksModuleOptionsSchema,
-    type TasksModuleOptions,
+    MAX_TASKS_PER_AGENT,
+    MAX_TASK_OUTPUT_CHARACTERS,
+    MAX_TASK_PAGE_SIZE,
 } from "./tasks/TasksModule.js";
 export {
     taskCreateInputSchema,
@@ -398,10 +384,10 @@ export {
 export {
     taskEventIdSchema,
     taskEventPayloadSchema,
+    taskEventListenerSchema,
     taskEventSchema,
-    taskModuleListenerSchema,
     type TaskEvent,
-    type TaskModuleListener,
+    type TaskEventListener,
     type TaskEventPayload,
 } from "./tasks/TaskEvent.js";
 export {
@@ -433,7 +419,7 @@ export * from "./workflows/index.js";
 // Usage: advisory provider, model, token, and timing accounting.
 export * from "./usage/index.js";
 
-// Image generation: a host-supplied generator returns bytes, which the module writes to disk.
+// Image generation: one prompt becomes one PNG on a configured Codex account, written to disk.
 export * from "./imageGeneration/index.js";
 
 // Secrets: safe metadata/reference operations backed by a host-owned registry.
@@ -485,22 +471,18 @@ export {
     secretEventSchema,
     secretEventTimestampSchema,
     secretContextSchema,
-    secretModuleListenerSchema,
+    secretEventListenerSchema,
     type SecretEvent,
-    type SecretModuleListener,
+    type SecretEventListener,
+    type SecretUnsubscribe,
 } from "./secrets/SecretEvent.js";
 export {
     assertSecretAttachment,
-    assertSecretAuthorization,
     assertSecretHostEnvironment,
     assertSecretPage,
     assertSecretReference,
-    assertSecretResolver,
     assertSecretStore,
     assertSecretStoreMutationResult,
-    secretAuthorizationOperationSchema,
-    secretAuthorizationSchema,
-    secretResolverSchema,
     secretStoreAttachResultSchema,
     secretStoreDetachResultSchema,
     secretStoreMutationResultSchema,
@@ -508,8 +490,6 @@ export {
     secretStoreRemoveResultSchema,
     secretStoreSchema,
     secretStoreUpdateResultSchema,
-    type SecretAuthorization,
-    type SecretResolver,
     type SecretStore,
     type SecretStoreAttachResult,
     type SecretStoreDetachResult,
@@ -520,16 +500,15 @@ export {
 } from "./secrets/SecretStore.js";
 export {
     SecretsModule,
-    secretModuleOptionsSchema,
-    assertSecretsModuleOptions,
-    type SecretsModuleOptions,
+    SECRETS_OUTPUT_CHARACTERS,
+    SECRETS_PAGE_SIZE,
 } from "./secrets/SecretsModule.js";
 export { attachSecretTool } from "./secrets/tools/attach_secret.js";
 export { detachSecretTool } from "./secrets/tools/detach_secret.js";
 export { listSecretsTool } from "./secrets/tools/list_secrets.js";
 export { referenceSecretTool } from "./secrets/tools/reference_secret.js";
 
-// Search: provider-neutral web search and fetch over a host-supplied backend.
+// Search: per-vendor web search and a bounded page fetch, run by the module itself.
 export {
     MAX_FETCH_CONTENT_CHARACTERS,
     MAX_FETCH_CONTENT_TYPE_LENGTH,
@@ -557,9 +536,9 @@ export {
     type SearchSource,
 } from "./search/Search.js";
 export {
+    MAX_SEARCH_FETCH_CHARACTERS,
+    MAX_SEARCH_OUTPUT_CHARACTERS,
     SearchModule,
-    searchModuleOptionsSchema,
-    type SearchModuleOptions,
 } from "./search/SearchModule.js";
 export { bedrockWebSearchTool } from "./search/tools/bedrock_web_search.js";
 export { claudeWebSearchTool } from "./search/tools/claude_web_search.js";
@@ -572,12 +551,10 @@ export { webFetchTool } from "./search/tools/web_fetch.js";
 // Gemini: image generation, music generation, and questions about local media files.
 export {
     GeminiModule,
-    geminiModuleOptionsSchema,
     type GeminiConnection,
     type GeminiGeneratedMedia,
     type GeminiMediaInput,
     type GeminiMediaInputType,
-    type GeminiModuleOptions,
 } from "./gemini/index.js";
 export { geminiAnalyzeMediaTool } from "./gemini/tools/gemini_analyze_media.js";
 export { geminiGenerateImageTool } from "./gemini/tools/gemini_imagegen.js";
@@ -615,9 +592,3 @@ export * from "./profile/index.js";
 
 // Murmur: contacts over one shared identity, and the requests either side is waiting on.
 export * from "./murmur/index.js";
-
-export {
-    assertHistoryReader,
-    historyReaderSchema,
-    type HistoryReader,
-} from "./history/HistoryReader.js";

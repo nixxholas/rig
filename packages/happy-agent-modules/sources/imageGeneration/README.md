@@ -8,8 +8,12 @@ the accounts already configured and the configuration that names the generated-f
 import { ConfigModule, ImageGenerationModule } from "@slopus/happy-agent-modules";
 
 const config = await ConfigModule.load();
-const imageGeneration = new ImageGenerationModule({ config, providers });
+const imageGeneration = new ImageGenerationModule(config);
 ```
+
+The configuration module is the only thing it takes: it owns the Codex accounts an image may be
+generated on and the generated-files folder a finished image is published into, so the module asks
+it for both rather than being handed a registry and a path.
 
 ## The tool
 

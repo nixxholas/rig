@@ -1,24 +1,30 @@
 import { agentDatabaseRun } from "@slopus/happy-agent-base";
 import { Value } from "@sinclair/typebox/value";
 import { sql } from "drizzle-orm";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
-    UserInputModule,
+    MAX_USER_INPUT_DETAIL_PAGE_CHARACTERS,
+    MAX_USER_INPUT_PAGE_SIZE,
     userInputDetailPageSchema,
     userInputRequestSchema,
     type UserInputAskInput,
-    type UserInputRequest,
 } from "../../sources/userInput/index.js";
 import {
+    agentsWithParent,
     createUserInputDatabase,
     createUserInputModule,
     singularAsk,
 } from "./userInputTestSupport.js";
+import { resolveModuleHooks } from "../support/moduleHooks.js";
 
 const agentId = "agent-one";
 
 describe("UserInput durable lifecycle and persistence", () => {
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
     it("survives a fresh module instance and protects stored input from caller mutation", async () => {
         const first = createUserInputModule();
         const database = createUserInputDatabase(first, "user-input-reload");
@@ -190,12 +196,9 @@ describe("UserInput durable lifecycle and persistence", () => {
     });
 
     it("settles cancellation, explicit away, and explicit timeout exactly once", async () => {
-        let now = 100;
-        const module = new UserInputModule({
-            idFactory: () => "unused",
-            eventIdFactory: () => "event",
-            clock: () => now,
-        });
+        vi.useFakeTimers();
+        vi.setSystemTime(100);
+        const module = createUserInputModule();
         const database = createUserInputDatabase(module, "user-input-settlement");
         await database.ready;
         try {
@@ -235,14 +238,14 @@ describe("UserInput durable lifecycle and persistence", () => {
             });
             expect(awayResult).toMatchObject({ status: "away", completedAt: 100 });
 
-            now = 100;
+            vi.setSystemTime(100);
             const timed = await module.ask(
                 database.context,
                 agentId,
                 singularAsk({ deadlineAt: 150 }),
                 "timed-out",
             );
-            now = 200;
+            vi.setSystemTime(200);
             await expect(
                 module.complete(database.context, agentId, {
                     requestId: timed.id,
@@ -267,9 +270,7 @@ describe("UserInput durable lifecycle and persistence", () => {
     });
 
     it("lists pending and terminal requests with bounded forward and backward cursors", async () => {
-        const module = createUserInputModule({
-            maxPageSize: 2,
-        });
+        const module = createUserInputModule();
         const database = createUserInputDatabase(module, "user-input-list-pages");
         await database.ready;
         try {
@@ -304,9 +305,11 @@ describe("UserInput durable lifecycle and persistence", () => {
                 status: "terminal",
             });
             expect(terminal.requests.map((request) => request.id)).toEqual(["third"]);
-            await expect(module.listPage(database.context, agentId, { limit: 3 })).rejects.toThrow(
-                "cannot exceed",
-            );
+            await expect(
+                module.listPage(database.context, agentId, {
+                    limit: MAX_USER_INPUT_PAGE_SIZE + 1,
+                }),
+            ).rejects.toThrow("cannot exceed");
             await expect(
                 module.listPage(database.context, agentId, { cursor: "01" }),
             ).rejects.toThrow("cursor");
@@ -321,10 +324,7 @@ describe("UserInput durable lifecycle and persistence", () => {
     });
 
     it("returns cursor-addressable bounded detail and validates aliases", async () => {
-        const module = createUserInputModule({
-            maxDetailPageCharacters: 20,
-            maxOutputCharacters: 512,
-        });
+        const module = createUserInputModule();
         const database = createUserInputDatabase(module, "user-input-detail");
         await database.ready;
         try {
@@ -360,9 +360,9 @@ describe("UserInput durable lifecycle and persistence", () => {
             ).rejects.toThrow("past");
             await expect(
                 module.getPage(database.context, agentId, request.id, {
-                    limit: 21,
+                    limit: MAX_USER_INPUT_DETAIL_PAGE_CHARACTERS + 1,
                 }),
-            ).rejects.toThrow("configured bound");
+            ).rejects.toThrow(/invalid|bound/iu);
             await expect(
                 module.getPage(database.context, agentId, "missing", { limit: 20 }),
             ).resolves.toMatchObject({
@@ -454,18 +454,16 @@ describe("UserInput durable lifecycle and persistence", () => {
             database.close();
         }
 
-        const actions: string[] = [];
-        const allowed = createUserInputModule({
-            authorization: {
-                authorize: async (_ctx, acting, asking, action) => {
-                    actions.push(`${acting}:${asking}:${action}`);
-                    return acting === "reader" && asking === agentId;
-                },
-            },
-        });
+        const allowed = createUserInputModule();
         const allowedDatabase = createUserInputDatabase(allowed, "user-input-allowed");
         await allowedDatabase.ready;
         try {
+            // The reader is this agent's parent, which is the only reason it may look.
+            await resolveModuleHooks(
+                allowedDatabase.context,
+                allowed,
+                agentsWithParent(agentId, "reader"),
+            );
             const request = await allowed.ask(
                 allowedDatabase.context,
                 agentId,
@@ -486,14 +484,11 @@ describe("UserInput durable lifecycle and persistence", () => {
                     answer: "Allowed",
                 }),
             ).resolves.toMatchObject({ status: "answered" });
-            expect(actions).toEqual([
-                "reader:agent-one:get",
-                "reader:agent-one:list",
-                "reader:agent-one:answer",
-            ]);
             const self = await allowed.get(allowedDatabase.context, agentId, request.id);
             expect(self?.id).toBe(request.id);
-            expect(actions).toHaveLength(3);
+            await expect(
+                allowed.get(allowedDatabase.context, "stranger", request.id),
+            ).rejects.toThrow("not authorized");
         } finally {
             allowedDatabase.close();
         }

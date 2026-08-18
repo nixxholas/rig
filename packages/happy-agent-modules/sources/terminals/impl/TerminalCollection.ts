@@ -24,21 +24,18 @@ export class TerminalCollection {
     /** Which project this folder belongs to, so a project closing takes its workspaces with it. */
     readonly projectId: string;
 
-    readonly #maximum: number;
     readonly #onChange: () => void;
     readonly #processFactory: TerminalProcessFactory;
     readonly #root: string;
     readonly #sessions = new Map<string, TerminalSession>();
 
     constructor(options: {
-        readonly maximum?: number;
         readonly onChange?: () => void;
         readonly processFactory: TerminalProcessFactory;
         readonly projectId: string;
         readonly root: string;
     }) {
         this.projectId = options.projectId;
-        this.#maximum = options.maximum ?? MAX_TERMINALS_PER_SCOPE;
         this.#onChange = options.onChange ?? (() => undefined);
         this.#processFactory = options.processFactory;
         this.#root = options.root;
@@ -104,7 +101,7 @@ export class TerminalCollection {
      * and the request is refused rather than quietly killing someone's work.
      */
     async #makeRoom(): Promise<void> {
-        if (this.#sessions.size < this.#maximum) return;
+        if (this.#sessions.size < MAX_TERMINALS_PER_SCOPE) return;
         const exited = [...this.#sessions.values()].find(
             (session) => session.terminal().status === "exited",
         );

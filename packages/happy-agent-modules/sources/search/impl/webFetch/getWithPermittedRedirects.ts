@@ -1,4 +1,4 @@
-import { createTimedSignal } from "./createTimedSignal.js";
+import { createTimedSignal } from "../../../impl/createTimedSignal.js";
 import { describeWebFetchFailure } from "./describeWebFetchFailure.js";
 import { isPermittedWebFetchRedirect } from "./isPermittedWebFetchRedirect.js";
 import { readWebFetchResponse } from "./readWebFetchResponse.js";

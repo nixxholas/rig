@@ -14,6 +14,7 @@ import {
 import { FakeCompute } from "../compute/support/FakeCompute.js";
 import { InMemoryPersistence } from "../support/InMemoryPersistence.js";
 import { resolveModuleHooks } from "../support/moduleHooks.js";
+import { systemPromptWorld, type SystemPromptWorld } from "./support/systemPromptWorld.js";
 
 const ctx = createRootContext().named("agents-md-module-test");
 const scope = { agent: { id: "agent-a" } } as never;
@@ -22,39 +23,31 @@ const turnStart = { loopId: "loop", turnId: "turn", contextTokens: undefined };
 async function moduleFor(
     compute: FakeCompute,
 ): Promise<{ readonly module: SystemPromptModule; readonly hooks: AgentModuleHooks }> {
-    const module = new SystemPromptModule({
-        compute: { resolve: async () => compute },
-    });
-    const hooks = await resolveModuleHooks(ctx, module);
-    return { module, hooks };
+    const world = await systemPromptWorld({ compute: async () => compute });
+    const hooks = await resolveModuleHooks(ctx, world.module);
+    return { module: world.module, hooks };
+}
+
+async function hooksOf(world: SystemPromptWorld): Promise<AgentModuleHooks> {
+    return await resolveModuleHooks(ctx, world.module);
 }
 
 describe("SystemPromptModule AGENTS.md instructions", () => {
-    it("rejects malformed public agent IDs before reading host instructions", async () => {
-        let globalReads = 0;
+    it("rejects malformed public agent IDs before looking a machine up", async () => {
         let resolutions = 0;
-        const module = new SystemPromptModule({
-            compute: {
-                resolve: async () => {
-                    resolutions += 1;
-                    return undefined;
-                },
-            },
-            globalInstructions: {
-                path: "/home/agent/AGENTS.md",
-                read: async () => {
-                    globalReads += 1;
-                    return "Instructions.";
-                },
+        const world = await systemPromptWorld({
+            globalInstructions: "Instructions.",
+            compute: async () => {
+                resolutions += 1;
+                return undefined;
             },
         });
 
         for (const agentId of ["", "x".repeat(MAX_AGENTS_MD_AGENT_ID_LENGTH + 1), "bad\nid", 42]) {
-            await expect(module.readAgentsMd(ctx, agentId as never)).rejects.toThrow(
+            await expect(world.module.readAgentsMd(ctx, agentId as never)).rejects.toThrow(
                 "AGENTS.md agent ID is invalid",
             );
         }
-        expect(globalReads).toBe(0);
         expect(resolutions).toBe(0);
     });
 
@@ -87,24 +80,21 @@ describe("SystemPromptModule AGENTS.md instructions", () => {
         expect(instructions).not.toContain("Not applicable.");
     });
 
-    it("includes the global instructions, project security rules, and AGENTS.md specification", async () => {
+    it("includes the configured global instructions, project security rules, and the specification", async () => {
         const compute = new FakeCompute("/workspace/packages/app");
         compute.directories.add("/workspace/.git");
         compute.write("/workspace/AGENTS_SECURITY.md", "Never expose credentials.");
         compute.write("/workspace/AGENTS.md", "Use the project conventions.");
-        const module = new SystemPromptModule({
-            compute: { resolve: async () => compute },
-            globalInstructions: {
-                path: "/home/agent/AGENTS.md",
-                read: async () => "Use concise answers.",
-            },
+        const world = await systemPromptWorld({
+            globalInstructions: "Use concise answers.",
+            compute: async () => compute,
         });
-        const hooks = await resolveModuleHooks(ctx, module);
+        const hooks = await hooksOf(world);
 
-        const snapshot = await module.readAgentsMd(ctx, "agent-a");
+        const snapshot = await world.module.readAgentsMd(ctx, "agent-a");
         expect(snapshot).toMatchObject({
             global: {
-                path: "/home/agent/AGENTS.md",
+                path: world.config.configuration.paths.instructionsPath,
                 text: "Use concise answers.",
             },
             security: {
@@ -124,29 +114,31 @@ describe("SystemPromptModule AGENTS.md instructions", () => {
         expect(instructions).toContain("Never expose credentials.");
     });
 
-    it("reads global instructions fresh and works without a configured compute", async () => {
-        let content = "First global instruction.";
-        let reads = 0;
-        const module = new SystemPromptModule({
-            compute: { resolve: async () => undefined },
-            globalInstructions: {
-                path: "/home/agent/AGENTS.md",
-                read: async () => {
-                    reads += 1;
-                    return content;
-                },
-            },
-        });
-        const hooks = await resolveModuleHooks(ctx, module);
+    it("reads global instructions fresh and works without a machine", async () => {
+        const world = await systemPromptWorld({ globalInstructions: "First global instruction." });
+        const hooks = await hooksOf(world);
 
         await expect(hooks.instructions!(ctx, scope)).resolves.toContain(
             "First global instruction.",
         );
-        content = "Updated global instruction.";
+        await world.writeGlobalInstructions("Updated global instruction.");
         await expect(hooks.instructions!(ctx, scope)).resolves.toContain(
             "Updated global instruction.",
         );
-        expect(reads).toBe(2);
+    });
+
+    it("treats a missing or blank global instructions file as no instructions at all", async () => {
+        const world = await systemPromptWorld();
+
+        await expect(world.module.readAgentsMd(ctx, "agent-a")).resolves.toBeUndefined();
+        await world.writeGlobalInstructions(" \n\t ");
+        await expect(world.module.readAgentsMd(ctx, "agent-a")).resolves.toBeUndefined();
+        await world.writeGlobalInstructions("Now there are instructions.");
+        await expect(world.module.readAgentsMd(ctx, "agent-a")).resolves.toMatchObject({
+            global: { text: "Now there are instructions." },
+        });
+        await world.removeGlobalInstructions();
+        await expect(world.module.readAgentsMd(ctx, "agent-a")).resolves.toBeUndefined();
     });
 
     it("marks oversized documents and keeps the instruction hook bounded", async () => {
@@ -228,16 +220,12 @@ describe("SystemPromptModule AGENTS.md instructions", () => {
     });
 
     it("truncates an oversized global document instead of failing the turn", async () => {
-        const module = new SystemPromptModule({
-            compute: { resolve: async () => undefined },
-            globalInstructions: {
-                path: "/home/agent/AGENTS.md",
-                read: async () => "g".repeat(MAX_AGENTS_MD_GLOBAL_BYTES + 1),
-            },
+        const world = await systemPromptWorld({
+            globalInstructions: "g".repeat(MAX_AGENTS_MD_GLOBAL_BYTES + 1),
         });
-        const hooks = await resolveModuleHooks(ctx, module);
+        const hooks = await hooksOf(world);
 
-        const snapshot = await module.readAgentsMd(ctx, "agent-a");
+        const snapshot = await world.module.readAgentsMd(ctx, "agent-a");
         expect(snapshot?.truncated).toBe(true);
         expect(snapshot?.global?.truncated).toBe(true);
         await expect(hooks.instructions!(ctx, scope)).resolves.toContain("truncated");
@@ -245,33 +233,15 @@ describe("SystemPromptModule AGENTS.md instructions", () => {
 
     it("drops a partial Unicode code point at the global byte boundary", async () => {
         const prefix = "a".repeat(MAX_AGENTS_MD_GLOBAL_BYTES - 2);
-        const module = new SystemPromptModule({
-            globalInstructions: {
-                path: "/home/agent/AGENTS.md",
-                read: async () => `${prefix}😀`,
-            },
-        });
+        const world = await systemPromptWorld({ globalInstructions: `${prefix}😀` });
 
-        const snapshot = await module.readAgentsMd(ctx, "agent-a");
+        const snapshot = await world.module.readAgentsMd(ctx, "agent-a");
         expect(snapshot?.global).toMatchObject({
             text: prefix,
             truncated: true,
         });
         expect(new TextEncoder().encode(snapshot?.global?.text).byteLength).toBeLessThanOrEqual(
             MAX_AGENTS_MD_GLOBAL_BYTES,
-        );
-    });
-
-    it("rejects an unbounded global-reader result before formatting it", async () => {
-        const module = new SystemPromptModule({
-            globalInstructions: {
-                path: "/home/agent/AGENTS.md",
-                read: async () => "g".repeat(MAX_AGENTS_MD_GLOBAL_BYTES * 8),
-            },
-        });
-
-        await expect(module.readAgentsMd(ctx, "agent-a")).rejects.toThrow(
-            "Global AGENTS.md reader returned an invalid result",
         );
     });
 
@@ -522,12 +492,8 @@ describe("SystemPromptModule AGENTS.md instructions", () => {
         });
     });
 
-    it("exposes no tools and rejects malformed compute boundaries", async () => {
-        const compute = new FakeCompute();
-        const { module } = await moduleFor(compute);
+    it("exposes no tools", async () => {
+        const { module } = await moduleFor(new FakeCompute());
         expect("tools" in module).toBe(false);
-        expect(() => new SystemPromptModule({ compute: {} as never })).toThrow(
-            "System prompt module options are invalid",
-        );
     });
 });

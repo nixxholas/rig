@@ -29,13 +29,14 @@ import {
     userInputDetailQuerySchema,
     userInputEventSchema,
     userInputListQuerySchema,
-    userInputModuleOptionsSchema,
+    MAX_USER_INPUT_OUTPUT_CHARACTERS,
+    MAX_USER_INPUT_PAGE_SIZE,
     userInputPageSchema,
     userInputRequestSchema,
     userInputTerminalRequestSchema,
     type UserInputRequest,
 } from "../../sources/userInput/index.js";
-import { createUserInputModule } from "./userInputTestSupport.js";
+import { createPresenceModule, createUserInputModule } from "./userInputTestSupport.js";
 
 const agentId = "agent-one";
 
@@ -323,28 +324,14 @@ describe("UserInput runtime schemas and contracts", () => {
         expect(Value.Check(userInputTerminalRequestSchema, answered)).toBe(true);
     });
 
-    it("needs no host collaborator and rejects malformed module options at construction", () => {
-        expect(Value.Check(userInputModuleOptionsSchema, {})).toBe(true);
-        expect(Value.Check(userInputModuleOptionsSchema, { unknown: true })).toBe(false);
-        expect(() => new UserInputModule(undefined as never)).toThrow("options");
-        expect(
-            () =>
-                new UserInputModule({
-                    maxPageSize: 0,
-                } as never),
-        ).toThrow("options");
-        expect(
-            () =>
-                new UserInputModule({
-                    maxOutputCharacters: 255,
-                } as never),
-        ).toThrow("options");
-        expect(
-            () =>
-                new UserInputModule({
-                    maxQuestionCharacters: MAX_USER_INPUT_QUESTION_CHARACTERS + 1,
-                } as never),
-        ).toThrow("options");
+    it("takes the presence module and nothing else", () => {
+        const presence = createPresenceModule();
+        const module = new UserInputModule(presence);
+
+        expect(module.name).toBe("userInput");
+        expect(UserInputModule.length).toBe(1);
+        expect(MAX_USER_INPUT_PAGE_SIZE).toBe(50);
+        expect(MAX_USER_INPUT_OUTPUT_CHARACTERS).toBe(8_000);
     });
 
     it("keeps auto-resolution values within the documented minute-to-four-minute window", () => {

@@ -1,14 +1,6 @@
+export { SkillsModule } from "./SkillsModule.js";
 export {
-    SkillsModule,
-    skillsModuleOptionsSchema,
-    type SkillsModuleOptions,
-} from "./SkillsModule.js";
-export {
-    MAX_DURABLE_SKILL_COUNT_PER_ROOT,
-    MAX_SKILL_ROOT_COUNT,
     skillDescriptionSchema,
-    durableSkillReaderSchema,
-    durableSkillSchema,
     skillDocumentSchema,
     skillEntrySchema,
     skillListInputSchema,
@@ -16,15 +8,10 @@ export {
     skillLocationSchema,
     skillNameSchema,
     skillReadInputSchema,
-    skillRootSchema,
-    skillRootsSchema,
     skillSourceSchema,
-    type DurableSkill,
-    type DurableSkillReader,
     type SkillDocument,
     type SkillEntry,
     type SkillListInput,
     type SkillListResult,
     type SkillReadInput,
-    type SkillRoot,
 } from "./Skills.js";

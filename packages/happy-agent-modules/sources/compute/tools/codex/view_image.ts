@@ -4,7 +4,7 @@ import { defineAgentTool } from "@slopus/happy-agent-base";
 import type { Compute } from "../../Compute.js";
 import { computePermissionsForContext } from "../../impl/computePermissionsForContext.js";
 import { describeComputePathAction } from "../../impl/describeComputePathAction.js";
-import type { FileReadLog } from "../../impl/FileReadLog.js";
+import type { FileReadLog } from "../../../impl/FileReadLog.js";
 import { computeImageSchema, readImageForModel } from "../../impl/readImage.js";
 import { resolveComputePath } from "../../impl/resolveComputePath.js";
 import { shouldReviewComputePath } from "../../impl/shouldReviewComputePath.js";

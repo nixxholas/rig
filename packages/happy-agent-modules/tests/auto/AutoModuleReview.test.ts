@@ -1,20 +1,26 @@
-import type {
-    AgentBaseInferenceStart,
-    AgentModel,
-    AgentModuleScope,
-    AgentSystemRef,
+import { mkdir, symlink } from "node:fs/promises";
+import { dirname, join } from "node:path";
+
+import {
+    AgentProviders,
+    withAgentConfig,
+    type AgentBaseInferenceStart,
+    type AgentModuleScope,
+    type AgentSystemRef,
 } from "@slopus/happy-agent-base";
 import type { SessionEvent } from "@slopus/happy-providers";
-import { createRootContext } from "@steve.kite/stdlib";
+import { createRootContext, type Context } from "@steve.kite/stdlib";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { AutoModule, type AutoModuleOptions } from "../../sources/auto/index.js";
+import { AutoModule } from "../../sources/auto/index.js";
+import type { ComputeModule } from "../../sources/compute/index.js";
+import { ConfigModule } from "../../sources/config/index.js";
+import { SystemPromptModule } from "../../sources/systemPrompt/index.js";
 import type { PermissionReviewRequest } from "../../sources/permissions/PermissionReviewer.js";
-import { agentWorld } from "../support/agentWorld.js";
+import { autoWorld } from "../support/autoWorld.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
-import { providersOf } from "../support/fixtures.js";
 import { resolveModuleHooks } from "../support/moduleHooks.js";
-import { ScriptedProvider } from "../support/ScriptedProvider.js";
+import type { ScriptedProvider } from "../support/ScriptedProvider.js";
 
 /**
  * End-to-end proof that a reviewable Auto action reaches the real `AutoModule` reviewer and that a
@@ -25,18 +31,10 @@ import { ScriptedProvider } from "../support/ScriptedProvider.js";
  * guardian's tagged verdict, parses that verdict, and re-derives the allow policy. Only model
  * inference is scripted; the archive, private system, reviewer lifecycle, prompt, and verdict
  * parsing are the production code paths a daemon uses in Auto mode.
+ *
+ * The module now takes the modules it works through rather than a bag of closures, so a test that
+ * wants a security policy or project instructions writes the files those modules read.
  */
-
-/** The one main-agent route the reviewer resolves its model from; a `gym`-typed scripted provider. */
-const MODELS: AgentModel[] = [
-    {
-        providerId: "scripted",
-        id: "scripted/model",
-        name: "Scripted",
-        effortLevels: ["low"],
-        defaultEffort: "low",
-    },
-];
 
 const MAIN_AGENT_ID = "mainagentunderreview";
 
@@ -74,6 +72,30 @@ interface ReviewWorld {
 }
 
 /**
+ * A system-prompt module whose project-instruction read can be held open.
+ *
+ * `AutoModule` builds its reviewer instructions through this module, so holding the read is how a
+ * test parks one review inside the FIFO queue and lets the next one arrive behind it. Everything
+ * else is the real module's behavior.
+ */
+class GatedSystemPromptModule extends SystemPromptModule {
+    #gate: (() => Promise<void>) | undefined;
+
+    constructor(config: ConfigModule, compute: ComputeModule, gate?: () => Promise<void>) {
+        super(config, compute);
+        this.#gate = gate;
+    }
+
+    override async readAgentsMdInstructions(
+        ctx: Context,
+        agentId: string,
+    ): Promise<string | undefined> {
+        await this.#gate?.();
+        return await super.readAgentsMdInstructions(ctx, agentId);
+    }
+}
+
+/**
  * Stand up a real `AutoModule` over a separate main-evidence database and a separate private review
  * store, start its private review system on a scripted provider, and teach it the reviewed agent's
  * live model route the way the base inference hook would.
@@ -83,12 +105,16 @@ async function reviewWorld(
     options: {
         readonly rememberRoute?: boolean;
         readonly recreateIdentity?: boolean;
-        readonly readGlobalSecurity?: () => Promise<string | undefined>;
-        readonly readProjectSecurity?: () => Promise<string | undefined>;
-        readonly readAgentsMd?: (
-            ctx: ReturnType<typeof createRootContext>,
-            agentId: string,
-        ) => Promise<string | undefined>;
+        /** Written to the path configuration says the person's own policy lives at. */
+        readonly globalSecurity?: string;
+        /** Written to `AGENTS_SECURITY.md` in the folder the agents work in. */
+        readonly projectSecurity?: string;
+        /** Make the global policy unreadable in a way that is not "absent". */
+        readonly unreadableGlobalSecurity?: boolean;
+        /** Written as the working folder's `AGENTS.md` on the machine. */
+        readonly agentsMd?: string;
+        /** Held open inside the instruction build of every review that reaches it. */
+        readonly gate?: () => Promise<void>;
         readonly signal?: AbortSignal;
         readonly signals?: readonly AbortSignal[];
     } = {},
@@ -97,26 +123,41 @@ async function reviewWorld(
     review(): Promise<Awaited<ReturnType<AutoModule["reviewer"]["review"]>>>;
 }> {
     const lifetime = createRootContext().named("auto-review-system-test");
-    const privateStore = await agentWorld();
-    const provider = new ScriptedProvider(script);
+    const installation = await autoWorld(script);
 
-    const auto = new AutoModule({
-        storage: privateStore.storage,
-        providers: providersOf(provider),
-        provider: "scripted",
-        models: MODELS,
-        workingDirectory: "/tmp/auto-review-test",
-        lifetimeContext: lifetime,
-        reviewerTools: () => [],
-        readGlobalSecurity: options.readGlobalSecurity ?? (async () => undefined),
-        readProjectSecurity: options.readProjectSecurity ?? (async () => undefined),
-        ...(options.readAgentsMd === undefined ? {} : { readAgentsMd: options.readAgentsMd }),
-    } as unknown as AutoModuleOptions);
+    if (options.globalSecurity !== undefined) {
+        await installation.writeGlobalSecurity(options.globalSecurity);
+    }
+    if (options.unreadableGlobalSecurity === true) {
+        // A link to itself: reading it fails with ELOOP, which is neither an absent file nor half a
+        // policy, so the review must fail rather than judge against what it could read.
+        const path = installation.config.configuration.paths.securityPath;
+        await mkdir(dirname(path), { recursive: true });
+        await symlink(path, path);
+    }
+    if (options.projectSecurity !== undefined) {
+        await installation.writeProjectSecurity(options.projectSecurity);
+    }
+    if (options.agentsMd !== undefined) {
+        installation.machine.write(join(installation.publicHome, "AGENTS.md"), options.agentsMd);
+    }
+
+    const auto = new AutoModule(
+        installation.config,
+        installation.compute,
+        new GatedSystemPromptModule(installation.config, installation.compute, options.gate),
+        installation.storage,
+    );
 
     // The evidence archive lives in the main database; the review reads it through the review
-    // context, so that context must carry the main database exactly as a permission hook's does.
+    // context, so that context must carry the main database exactly as a permission hook's does —
+    // and the agent's compute configuration, so a review can read the project's own instructions
+    // off the machine the reviewed agent works on.
     const mainDatabase = moduleDatabase(auto.migrations, "auto-main-evidence");
     await mainDatabase.ready;
+    const reviewContext = withAgentConfig(mainDatabase.context, {
+        modules: { compute: { cwd: installation.publicHome } },
+    });
 
     const hooks = await resolveModuleHooks(lifetime, auto, {} as unknown as AgentSystemRef);
 
@@ -124,7 +165,7 @@ async function reviewWorld(
     // been observed by the base inference hook. Reproduce that one observation here.
     if (options.rememberRoute !== false) {
         hooks.beforeInference!(
-            mainDatabase.context,
+            reviewContext,
             {
                 agent: {
                     id: MAIN_AGENT_ID,
@@ -136,7 +177,7 @@ async function reviewWorld(
             {} as unknown as AgentBaseInferenceStart,
         );
         if (options.recreateIdentity === true) {
-            await hooks.agentCreatedTransact?.(mainDatabase.context, {} as never, {
+            await hooks.agentCreatedTransact?.(reviewContext, {} as never, {
                 id: MAIN_AGENT_ID,
                 metadata: undefined,
             });
@@ -160,9 +201,10 @@ async function reviewWorld(
     return {
         world: {
             auto,
-            provider,
+            provider: installation.provider,
             close: async () => {
                 await auto.close(lifetime);
+                await installation.compute.dispose(lifetime);
                 mainDatabase.close();
             },
         },
@@ -171,7 +213,7 @@ async function reviewWorld(
                 options.signals?.[reviewCount] ??
                 (reviewCount === 0 ? request.signal : new AbortController().signal);
             reviewCount += 1;
-            return auto.reviewer.review(mainDatabase.context, { ...request, signal });
+            return auto.reviewer.review(reviewContext, { ...request, signal });
         },
     };
 }
@@ -187,18 +229,13 @@ afterEach(async () => {
 describe("AutoModule reviewer", () => {
     it("rejects a review requested before the private system starts", async () => {
         const context = createRootContext().named("auto-review-not-started");
-        const privateStore = await agentWorld();
-        const auto = new AutoModule({
-            storage: privateStore.storage,
-            providers: providersOf(new ScriptedProvider([])),
-            provider: "scripted",
-            models: MODELS,
-            workingDirectory: "/tmp/auto-review-not-started",
-            lifetimeContext: context,
-            reviewerTools: () => [],
-            readGlobalSecurity: async () => undefined,
-            readProjectSecurity: async () => undefined,
-        });
+        const installation = await autoWorld();
+        const auto = new AutoModule(
+            installation.config,
+            installation.compute,
+            installation.systemPrompt,
+            installation.storage,
+        );
 
         await expect(
             auto.reviewer.review(context, {
@@ -213,6 +250,30 @@ describe("AutoModule reviewer", () => {
             }),
         ).rejects.toThrow("The automatic permission review system is not running.");
         await auto.close(context);
+        await installation.compute.dispose(context);
+    });
+
+    it("refuses to start when the configuration enables no model to review with", async () => {
+        const context = createRootContext().named("auto-review-no-models");
+        const emptyCatalog = await autoWorld();
+        const config = await ConfigModule.load(
+            emptyCatalog.config.configuration.paths.happyHome,
+            { inference: { models: [], providers: new AgentProviders() } },
+        );
+        const auto = new AutoModule(
+            config,
+            emptyCatalog.compute,
+            emptyCatalog.systemPrompt,
+            emptyCatalog.storage,
+        );
+
+        await expect(
+            resolveModuleHooks(context, auto, {} as unknown as AgentSystemRef),
+        ).rejects.toThrow(
+            "Automatic permission review cannot start because no model is enabled by the configuration.",
+        );
+        await auto.close(context);
+        await emptyCatalog.compute.dispose(context);
     });
 
     it("allows an action when the reviewer's verdict allows it", async () => {
@@ -385,19 +446,18 @@ describe("AutoModule reviewer", () => {
     it("does not start a review whose signal aborts while waiting in the FIFO queue", async () => {
         let release!: () => void;
         let resolveFirstReview!: () => void;
-        let reads = 0;
+        let entries = 0;
         const firstReviewEntered = new Promise<void>((resolve) => {
             resolveFirstReview = resolve;
         });
-        const securityReader = async (): Promise<string | undefined> => {
-            reads += 1;
-            if (reads === 1) {
+        const gate = async (): Promise<void> => {
+            entries += 1;
+            if (entries === 1) {
                 resolveFirstReview();
                 await new Promise<void>((resume) => {
                     release = resume;
                 });
             }
-            return undefined;
         };
 
         const firstSignal = new AbortController();
@@ -408,7 +468,7 @@ describe("AutoModule reviewer", () => {
             user_authorization: "high",
         });
         const { world, review } = await reviewWorld([verdictTurn(verdict), verdictTurn(verdict)], {
-            readGlobalSecurity: securityReader,
+            gate,
             signals: [firstSignal.signal, secondController.signal],
         });
         worlds.push(world);
@@ -451,9 +511,9 @@ describe("AutoModule reviewer", () => {
             rationale: "Routine.",
         });
         const { world, review } = await reviewWorld([verdictTurn(verdict)], {
-            readGlobalSecurity: async () => "GLOBAL_SECURITY_RULE",
-            readProjectSecurity: async () => "PROJECT_SECURITY_RULE",
-            readAgentsMd: async () => "FORMATTED_PROJECT_AGENT_RULES",
+            globalSecurity: "GLOBAL_SECURITY_RULE",
+            projectSecurity: "PROJECT_SECURITY_RULE",
+            agentsMd: "FORMATTED_PROJECT_AGENT_RULES",
         });
         worlds.push(world);
 
@@ -465,15 +525,11 @@ describe("AutoModule reviewer", () => {
         expect(request?.context.instructions).toContain("FORMATTED_PROJECT_AGENT_RULES");
     });
 
-    it("propagates security-policy reader failures instead of reviewing partial policy", async () => {
-        const { world, review } = await reviewWorld([], {
-            readGlobalSecurity: async () => {
-                throw new Error("security policy unreadable");
-            },
-        });
+    it("propagates security-policy read failures instead of reviewing partial policy", async () => {
+        const { world, review } = await reviewWorld([], { unreadableGlobalSecurity: true });
         worlds.push(world);
 
-        await expect(review()).rejects.toThrow("security policy unreadable");
+        await expect(review()).rejects.toThrow();
         expect(world.provider.sessions.every((session) => session.requests.length === 0)).toBe(
             true,
         );

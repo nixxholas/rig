@@ -2,7 +2,7 @@ import type { AgentMessageMetadata, AgentBaseToolOutcome } from "@slopus/happy-a
 import type { SessionOutputBlock, SessionUserMessage } from "@slopus/happy-providers";
 
 import type { AutoEvidenceEntry } from "../AutoReviewTranscript.js";
-import { isUserOriginMetadata } from "../messageOrigin.js";
+import { isUserOriginMetadata } from "../../impl/messageOrigin.js";
 import type { AutoTranscriptMessage } from "./createAutoPermissionTranscript.js";
 
 /**

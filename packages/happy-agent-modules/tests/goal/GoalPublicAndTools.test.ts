@@ -3,7 +3,7 @@ import { Value } from "@sinclair/typebox/value";
 import { describe, expect, it } from "vitest";
 import type { Context } from "@steve.kite/stdlib";
 
-import { GoalModule } from "../../sources/goal/GoalModule.js";
+import { GOAL_OUTPUT_CHARACTERS, GoalModule } from "../../sources/goal/GoalModule.js";
 import { MAX_GOAL_OBJECTIVE_CHARS } from "../../sources/goal/SessionGoal.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
 import { resolveModuleHooks } from "../support/moduleHooks.js";
@@ -43,30 +43,19 @@ function toolCall(id: string) {
 describe("Goal public API and tools", () => {
     it("keeps normalized identical mutations idempotent and emits no duplicate events", async () => {
         const events: string[] = [];
-        let lifecycleCalls = 0;
-        const module = new GoalModule({
-            idFactory: () => {
-                lifecycleCalls += 1;
-                return "lifecycle-a";
-            },
-            eventIdFactory: () => `event-${events.length + 1}`,
-            clock: () => 100,
-            listener: {
-                onEventTransactional: (_ctx, event) => {
-                    events.push(event.type);
-                },
-            },
+        const module = new GoalModule();
+        module.onEventTransactional((_ctx, event) => {
+            events.push(event.type);
         });
         const database = moduleDatabase(module.migrations, "goal-public-idempotency-test");
         await database.ready;
         const agents = recordingAgents();
-        await module.beforeStart(database.context, agents.ref);
+        module.beforeStart(database.context, agents.ref);
         const ctx = ownerContext(database.context, "agent-a");
         try {
             const first = await module.setGoal(ctx, "agent-a", "  ship it  ");
             const second = await module.setGoal(ctx, "agent-a", "ship it");
             expect(second).toEqual(first);
-            expect(lifecycleCalls).toBe(1);
             expect(events).toEqual(["goal_set"]);
 
             await expect(module.changeGoalStatus(ctx, "agent-a", "active")).resolves.toEqual(first);
@@ -81,14 +70,11 @@ describe("Goal public API and tools", () => {
     });
 
     it("rejects replacing an unfinished goal but permits a new goal after completion", async () => {
-        const module = new GoalModule({
-            idFactory: () => "lifecycle-a",
-            clock: () => 100,
-        });
+        const module = new GoalModule();
         const database = moduleDatabase(module.migrations, "goal-public-transitions-test");
         await database.ready;
         const agents = recordingAgents();
-        await module.beforeStart(database.context, agents.ref);
+        module.beforeStart(database.context, agents.ref);
         const ctx = ownerContext(database.context, "agent-a");
         try {
             await module.setGoal(ctx, "agent-a", "first");
@@ -106,11 +92,7 @@ describe("Goal public API and tools", () => {
     });
 
     it("uses the same public operations from all four model tools", async () => {
-        const module = new GoalModule({
-            idFactory: () => "factory-lifecycle",
-            clock: () => 100,
-            maxOutputCharacters: 256,
-        });
+        const module = new GoalModule();
         const database = moduleDatabase(module.migrations, "goal-tool-parity-test");
         await database.ready;
         const agents = recordingAgents();
@@ -138,7 +120,9 @@ describe("Goal public API and tools", () => {
                 status: "active",
             });
             expect(run.values.get("observedLifecycleId")).toBe("call-create");
-            expect(create.toLLM(created)[0]?.text.length).toBeLessThanOrEqual(256);
+            expect(create.toLLM(created)[0]?.text.length).toBeLessThanOrEqual(
+                GOAL_OUTPUT_CHARACTERS,
+            );
 
             const read = await get.execute(ctx, {}, toolCall("call-get"));
             expect(read.goal).toEqual(created.goal);
@@ -164,10 +148,7 @@ describe("Goal public API and tools", () => {
     });
 
     it("keeps tool schemas closed and rejects blank or oversized objectives", async () => {
-        const module = new GoalModule({
-            idFactory: () => "lifecycle-a",
-            clock: () => 100,
-        });
+        const module = new GoalModule();
         const database = moduleDatabase(module.migrations, "goal-tool-schema-test");
         await database.ready;
         const agents = recordingAgents();

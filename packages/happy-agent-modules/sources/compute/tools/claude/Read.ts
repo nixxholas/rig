@@ -5,7 +5,7 @@ import type { Compute } from "../../Compute.js";
 import { boundOutputText } from "../../impl/boundOutputText.js";
 import { computePermissionsForContext } from "../../impl/computePermissionsForContext.js";
 import { describeComputePathAction } from "../../impl/describeComputePathAction.js";
-import type { FileReadLog } from "../../impl/FileReadLog.js";
+import type { FileReadLog } from "../../../impl/FileReadLog.js";
 import { readComputeTextFile } from "../../impl/readComputeTextFile.js";
 import {
     computeImageSchema,

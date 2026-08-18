@@ -1,11 +1,8 @@
 import { defineAgentTool } from "@slopus/happy-agent-base";
 import { Type } from "@sinclair/typebox";
 
-import type { Compute } from "../../compute/Compute.js";
-import { computePermissionsForContext } from "../../compute/impl/computePermissionsForContext.js";
-import { resolveComputePath } from "../../compute/impl/resolveComputePath.js";
-import { shouldReviewComputePath } from "../../compute/impl/shouldReviewComputePath.js";
-import { quoteVisibleExact } from "../../mcp/quoteVisibleExact.js";
+import type { Compute, ComputeModule } from "../../compute/index.js";
+import { quoteVisibleExact } from "../../impl/quoteVisibleExact.js";
 import type { GeminiConnection } from "../Gemini.js";
 import { analyzeGeminiMedia } from "../impl/analyzeGeminiMedia.js";
 import { resolveGeminiMediaInput } from "../impl/resolveGeminiMediaInput.js";
@@ -20,7 +17,11 @@ const analyzedMediaSchema = Type.Object({
 });
 
 /** Ask Gemini about a file already on the agent's machine. */
-export function geminiAnalyzeMediaTool(connection: GeminiConnection, compute: Compute) {
+export function geminiAnalyzeMediaTool(
+    connection: GeminiConnection,
+    computeModule: ComputeModule,
+    compute: Compute,
+) {
     return defineAgentTool({
         name: "gemini_analyze_media",
         description:
@@ -40,16 +41,16 @@ export function geminiAnalyzeMediaTool(connection: GeminiConnection, compute: Co
             `uploading ${quoteVisibleExact(path)} to Gemini for ${quoteVisibleExact(prompt)}. Access: local filesystem read and external Gemini API`,
         shouldReviewInAutoMode: () => true,
         shouldRunInFullAccessInAutoMode: ({ path }, ctx) =>
-            shouldReviewComputePath(compute, path, { write: false }, ctx),
+            computeModule.shouldReviewPath(ctx, compute, path, { write: false }),
         execute: async (ctx, { path, prompt }) => {
-            const permissions = computePermissionsForContext(ctx);
-            const resolvedPath = resolveComputePath(path, compute.cwd, compute.fs.home);
+            const permissions = computeModule.permissionsForContext(ctx);
+            const resolvedPath = computeModule.resolvePath(compute, path);
             const stat = await compute.fs.stat(permissions, resolvedPath);
             if (!stat.isFile) throw new Error(`Gemini media path '${path}' is not a file.`);
             if (stat.size > MAX_INLINE_MEDIA_BYTES) {
                 throw new Error("Gemini media analysis supports files up to 15 MiB.");
             }
-            const media = resolveGeminiMediaInput(resolvedPath);
+            const media = resolveGeminiMediaInput(computeModule, resolvedPath);
             const bytes = await compute.fs.readFileBuffer(permissions, resolvedPath, {
                 maxBytes: MAX_INLINE_MEDIA_BYTES,
             });

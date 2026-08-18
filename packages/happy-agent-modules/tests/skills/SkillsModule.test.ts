@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { SkillsModule } from "../../sources/skills/index.js";
 import { FakeCompute } from "../compute/support/FakeCompute.js";
 import { resolveModuleHooks } from "../support/moduleHooks.js";
+import { scriptedComputeModule } from "../support/computeModule.js";
 
 const ctx = createRootContext().named("skills-module-test");
 const agentId = "agent-a";
@@ -14,9 +15,7 @@ function skill(name: string, description: string, body: string): string {
 }
 
 function moduleFor(compute: FakeCompute): SkillsModule {
-    return new SkillsModule({
-        compute: { resolve: async () => compute },
-    });
+    return new SkillsModule(scriptedComputeModule(async () => compute));
 }
 
 describe("SkillsModule", () => {
@@ -123,128 +122,41 @@ describe("SkillsModule", () => {
             "Use the smallest set of matching skills, briefly announce which ones you are using, and continue with the best fallback if a skill cannot be read.",
         );
         expect(instructions).toContain(
-            "When a filesystem skill references relative paths, resolve them against the directory containing that skill file.",
+            "When a skill references relative paths, resolve them against the directory containing that skill file.",
         );
     });
 
-    it("exposes skill tools and rejects malformed compute boundaries", async () => {
+    it("exposes both skill tools, neither of which Auto reviews", async () => {
         const compute = new FakeCompute();
         const module = moduleFor(compute);
         const hooks = await resolveModuleHooks(ctx, module);
-        expect((await hooks.tools!(ctx, scope)).map((tool) => tool.name)).toEqual([
-            "list_skills",
-            "read_skill",
-        ]);
-        expect(() => new SkillsModule({ compute: {} as never })).toThrow(
-            "Skills module options are invalid",
-        );
-        expect(
-            () =>
-                new SkillsModule({
-                    compute: { resolve: async () => compute },
-                    skillRoots: [
-                        {
-                            kind: "plugin",
-                            path: "/plugins",
-                            unexpected: true,
-                        },
-                    ],
-                } as never),
-        ).toThrow("Skills module options are invalid");
+        const tools = await hooks.tools!(ctx, scope);
+        expect(tools.map((tool) => tool.name)).toEqual(["list_skills", "read_skill"]);
+        for (const tool of tools) {
+            expect(tool.shouldReviewInAutoMode({ name: "anything" } as never, ctx)).toBe(false);
+            expect(tool.requiresAutoOrFullAccess).toBeUndefined();
+            expect(tool.shouldRunInFullAccessInAutoMode).toBeUndefined();
+        }
     });
 
-    it("loads optional builtin, plugin, and durable roots with explicit precedence", async () => {
-        const compute = new FakeCompute("/workspace");
-        compute.directories.add("/workspace/.git");
-        compute.write(
-            "/workspace/.agents/skills/shared/SKILL.md",
-            skill("shared", "Project shared.", "Project instructions."),
+    it("refuses a compute module that returns a machine discovery cannot use", async () => {
+        const module = new SkillsModule(
+            scriptedComputeModule(async () => ({ id: "host", kind: "host" }) as never),
         );
-        compute.write(
-            "/builtin/skills/shared/SKILL.md",
-            skill("shared", "Builtin shared.", "Builtin instructions."),
+        await expect(module.list(ctx, agentId)).rejects.toThrow(
+            "The compute module returned an invalid compute",
         );
-        compute.write(
-            "/plugin/skills/plugin-only/SKILL.md",
-            skill("plugin-only", "Plugin instructions.", "Plugin instructions."),
-        );
-        const reads: string[] = [];
-        const module = new SkillsModule({
-            compute: { resolve: async () => compute },
-            skillRoots: [
-                { kind: "builtin", path: "/builtin/skills" },
-                { kind: "plugin", path: "/plugin/skills" },
-                {
-                    kind: "durable",
-                    skills: [{ name: "external", description: "External instructions." }],
-                    read: async (_ctx, id, name) => {
-                        reads.push(`${id}:${name}`);
-                        return "# External instructions";
-                    },
-                },
-            ],
-        });
-
-        await expect(module.list(ctx, agentId)).resolves.toEqual({
-            skills: [
-                {
-                    description: "External instructions.",
-                    location: "durable",
-                    name: "external",
-                    source: "durable",
-                },
-                {
-                    description: "Plugin instructions.",
-                    location: "/plugin/skills/plugin-only/SKILL.md",
-                    name: "plugin-only",
-                    source: "plugin",
-                },
-                {
-                    description: "Project shared.",
-                    location: "/workspace/.agents/skills/shared/SKILL.md",
-                    name: "shared",
-                    source: "project",
-                },
-            ],
-        });
-        await expect(module.read(ctx, agentId, { name: "external" })).resolves.toEqual({
-            content: "# External instructions",
-            location: "durable",
-            name: "external",
-        });
-        expect(reads).toEqual(["agent-a:external"]);
-
-        const hooks = await resolveModuleHooks(ctx, module);
-        const readTool = (await hooks.tools!(ctx, scope)).find(
-            (tool) => tool.name === "read_skill",
-        );
-        if (readTool === undefined) throw new Error("Expected read_skill.");
-        expect(readTool.requiresAutoOrFullAccess).toBe(true);
-        expect(readTool.shouldReviewInAutoMode({ name: "external" }, ctx)).toBe(true);
-        expect(readTool.shouldReviewInAutoMode({ name: "shared" }, ctx)).toBe(false);
-        expect(readTool.shouldRunInFullAccessInAutoMode?.({ name: "external" }, ctx)).toBe(true);
     });
 
-    it("keeps durable skills available when an agent has no compute", async () => {
-        const module = new SkillsModule({
-            compute: { resolve: async () => undefined },
-            skillRoots: [
-                {
-                    kind: "durable",
-                    skills: [{ name: "external", description: "External instructions." }],
-                    read: async () => "External body.",
-                },
-            ],
-        });
-
-        await expect(module.list(ctx, agentId)).resolves.toMatchObject({
-            skills: [{ name: "external", source: "durable" }],
-        });
-        await expect(module.read(ctx, agentId, { name: "external" })).resolves.toMatchObject({
-            content: "External body.",
-        });
+    it("has no skills and no tools when the agent has no machine", async () => {
+        const module = new SkillsModule(scriptedComputeModule(async () => undefined));
+        await expect(module.list(ctx, agentId)).resolves.toEqual({ skills: [] });
+        await expect(module.read(ctx, agentId, { name: "anything" })).rejects.toThrow(
+            "This agent has no compute",
+        );
         const hooks = await resolveModuleHooks(ctx, module);
-        await expect(hooks.tools!(ctx, scope)).resolves.toHaveLength(2);
+        await expect(hooks.tools!(ctx, scope)).resolves.toEqual([]);
+        await expect(hooks.instructions!(ctx, scope)).resolves.toBe("");
     });
 
     it("does not recurse into dot-directories or node_modules", async () => {
@@ -316,24 +228,5 @@ describe("SkillsModule", () => {
                 },
             ],
         });
-    });
-
-    it("refuses symbolic links inside plugin roots", async () => {
-        const compute = new FakeCompute("/workspace");
-        compute.directories.add("/workspace/.git");
-        compute.directories.add("/plugin/skills");
-        compute.directories.add("/external/plugin-skill");
-        compute.write(
-            "/external/plugin-skill/SKILL.md",
-            skill("linked", "Linked skill.", "Should not load."),
-        );
-        compute.links.set("/plugin/skills/linked", "/external/plugin-skill");
-
-        await expect(
-            new SkillsModule({
-                compute: { resolve: async () => compute },
-                skillRoots: [{ kind: "plugin", path: "/plugin/skills" }],
-            }).list(ctx, agentId),
-        ).resolves.toEqual({ skills: [] });
     });
 });

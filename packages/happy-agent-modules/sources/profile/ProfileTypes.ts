@@ -88,14 +88,12 @@ export const profileChangedEventSchema = Type.Object(
 );
 export type ProfileChangedEvent = Static<typeof profileChangedEventSchema>;
 
-const profileEventListenerCallbackSchema = Type.Function(
+/** What `onEvent` registers: told after a change is saved, never inside its transaction. */
+export const profileEventListenerSchema = Type.Function(
     [profileContextSchema, profileChangedEventSchema],
     Type.Union([Type.Void(), Type.Promise(Type.Void())]),
 );
+export type ProfileEventListener = Static<typeof profileEventListenerSchema>;
 
-/** Post-commit notification for host protocol projection. */
-export const profileModuleListenerSchema = Type.Object(
-    { onEvent: Type.Optional(profileEventListenerCallbackSchema) },
-    exact,
-);
-export type ProfileModuleListener = Static<typeof profileModuleListenerSchema>;
+/** Undoing a registration; calling it twice is harmless. */
+export type ProfileUnsubscribe = () => void;

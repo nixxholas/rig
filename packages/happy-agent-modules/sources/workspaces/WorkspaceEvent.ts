@@ -112,26 +112,18 @@ export type WorkspaceEvent = Static<typeof workspaceEventSchema>;
 const workspaceListenerResultSchema = Type.Union([Type.Void(), Type.Promise(Type.Void())]);
 
 /**
- * Both observers receive the exact same detached, deeply frozen event object.
- * The host calls the post-commit callback only once its outermost transaction
- * has committed.
+ * One subscriber taken after construction.
+ *
+ * Both kinds of subscriber receive the exact same detached, deeply frozen event object. A
+ * transactional subscriber sees it inside the transaction the change commits in; a post-commit
+ * subscriber only once that transaction has committed.
  */
-export const workspaceModuleListenerSchema = Type.Object(
-    {
-        onEventTransactional: Type.Optional(
-            Type.Function(
-                [workspaceContextSchema, workspaceEventSchema],
-                workspaceListenerResultSchema,
-            ),
-        ),
-        onEvent: Type.Optional(
-            Type.Function(
-                [workspaceContextSchema, workspaceEventSchema],
-                workspaceListenerResultSchema,
-            ),
-        ),
-    },
-    { additionalProperties: false },
+export const workspaceEventListenerSchema = Type.Function(
+    [workspaceContextSchema, workspaceEventSchema],
+    workspaceListenerResultSchema,
 );
 
-export type WorkspaceModuleListener = Static<typeof workspaceModuleListenerSchema>;
+export type WorkspaceEventListener = Static<typeof workspaceEventListenerSchema>;
+
+/** Ends a subscription. Calling it more than once does nothing further. */
+export type WorkspaceUnsubscribe = () => void;

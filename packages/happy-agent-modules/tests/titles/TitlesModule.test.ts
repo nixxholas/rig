@@ -1,15 +1,14 @@
-import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-
 import type { AgentModel } from "@slopus/happy-agent-base";
 import type { SessionEvent } from "@slopus/happy-providers";
 import { createRootContext } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
 import { ConfigModule } from "../../sources/config/ConfigModule.js";
+import { GitModule } from "../../sources/git/index.js";
+import { ProjectsModule } from "../../sources/projects/index.js";
 import { TitlesModule } from "../../sources/titles/TitlesModule.js";
 import { WorkspacesModule } from "../../sources/workspaces/WorkspacesModule.js";
+import { temporaryTestConfig } from "../support/configModule.js";
 import { providersOf, sharedKV, textTurn } from "../support/fixtures.js";
 import { primaryAgents, resolveModuleHooks } from "../support/moduleHooks.js";
 import { ScriptedProvider } from "../support/ScriptedProvider.js";
@@ -39,20 +38,20 @@ async function scriptedConfig(
     provider: ScriptedProvider,
     catalog: AgentModel[],
 ): Promise<ConfigModule> {
-    const home = await mkdtemp(join(tmpdir(), "happy-titles-"));
-    return await ConfigModule.load(home, {
+    return await temporaryTestConfig(undefined, {
         inference: { models: catalog, providers: providersOf(provider) },
     });
 }
 
 async function titles(script: SessionEvent[][], catalog: AgentModel[] = models()) {
     const provider = new ScriptedProvider(script);
-    const module = new TitlesModule({
-        config: await scriptedConfig(provider, catalog),
-        // A chat outside a workspace never reaches the catalog, and one inside it is exercised
-        // where a real project and a real worktree exist.
-        workspaces: new WorkspacesModule({ enabled: false }),
-    });
+    const config = await scriptedConfig(provider, catalog);
+    const git = new GitModule();
+    // A chat outside a workspace never reaches the catalog, and one inside it is exercised where a
+    // real project and a real worktree exist, so the catalog here is simply the empty one this
+    // configuration's own roots describe.
+    const workspaces = new WorkspacesModule(config, new ProjectsModule(config, git), git);
+    const module = new TitlesModule(config, workspaces);
     return { module, provider };
 }
 
@@ -252,7 +251,7 @@ describe("TitlesModule naming from a first message", () => {
         const test = await titles([textTurn("<title>Retry policy rewrite</title>")]);
 
         await expect(
-            test.module.nameFromFirstMessage(ctx, "agent-1", {
+            test.module.nameFromFirstMessage(ctx, {
                 firstMessage: "Rewrite how the outer loop retries provider requests.",
             }),
         ).resolves.toEqual({ title: "Retry policy rewrite" });
@@ -264,7 +263,7 @@ describe("TitlesModule naming from a first message", () => {
         const test = await titles([textTurn("<title>Something a model invented</title>")]);
 
         await expect(
-            test.module.nameFromFirstMessage(ctx, "agent-1", {
+            test.module.nameFromFirstMessage(ctx, {
                 firstMessage: "The login page redirects in a loop.",
                 sessionNamed: true,
             }),
@@ -276,7 +275,7 @@ describe("TitlesModule naming from a first message", () => {
         const test = await titles([textTurn("<title>Something</title>")]);
 
         await expect(
-            test.module.nameFromFirstMessage(ctx, "agent-1", { firstMessage: "   " }),
+            test.module.nameFromFirstMessage(ctx, { firstMessage: "   " }),
         ).resolves.toEqual({});
         expect(test.provider.sessions).toHaveLength(0);
     });
@@ -287,7 +286,7 @@ describe("TitlesModule naming from a first message", () => {
         ]);
 
         await expect(
-            test.module.nameFromFirstMessage(ctx, "agent-1", { firstMessage: "rewrite retries" }),
+            test.module.nameFromFirstMessage(ctx, { firstMessage: "rewrite retries" }),
         ).resolves.toEqual({});
     });
 });

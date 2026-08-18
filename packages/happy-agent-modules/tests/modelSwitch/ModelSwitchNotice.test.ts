@@ -1,11 +1,10 @@
-import type { ModelSwitchNotice } from "../../sources/modelSwitch/impl/createModelSwitchNotice.js";
-import { createHistoryExcerpt } from "../../sources/modelSwitch/impl/createHistoryExcerpt.js";
-import { createModelSwitchNotice } from "../../sources/modelSwitch/impl/createModelSwitchNotice.js";
-import type { HistoryExcerpt } from "../../sources/modelSwitch/impl/createHistoryExcerpt.js";
-import type { HistoryBlock } from "../../sources/history/HistoryMessage.js";
 import { describe, expect, it } from "vitest";
 
-import { historyMessage, historyRecord } from "./modelSwitchTestSupport.js";
+import type { HistoryExcerpt } from "../../sources/history/index.js";
+import {
+    createModelSwitchNotice,
+    type ModelSwitchNotice,
+} from "../../sources/modelSwitch/impl/createModelSwitchNotice.js";
 
 function notice(overrides: Partial<ModelSwitchNotice> = {}): ModelSwitchNotice {
     return {
@@ -110,95 +109,5 @@ describe("createModelSwitchNotice", () => {
 
         expect(text).toContain("A model with spaces on provider-A");
         expect(text).toContain("Another model on provider-B");
-    });
-});
-
-describe("createHistoryExcerpt", () => {
-    it("keeps the earliest four and latest eight records in source order", () => {
-        const records = Array.from({ length: 15 }, (_, position) => historyRecord(position));
-        const result = createHistoryExcerpt(records, 32_000);
-
-        expect(result.beginning).toContain("1. USER");
-        expect(result.beginning).toContain("4. USER");
-        expect(result.beginning).not.toContain("5. USER");
-        expect(result.recent).toContain("8. USER");
-        expect(result.recent).toContain("15. USER");
-        expect(result.recent).not.toContain("7. USER");
-        expect(result.statsAreSampled).toBe(true);
-        expect(result.stats.messages).toBe(15);
-    });
-
-    it("uses an archive-wide aggregate when one is supplied", () => {
-        const records = [historyRecord(0), historyRecord(1, "assistant")];
-        const exactStats = {
-            assistantMessages: 10,
-            messages: 20,
-            textCharacters: 300,
-            thinkingBlocks: 4,
-            toolCalls: 3,
-            toolResults: 2,
-            userMessages: 10,
-        };
-
-        const result = createHistoryExcerpt(records, 32_000, exactStats);
-
-        expect(result.stats).toEqual(exactStats);
-        expect(result.statsAreSampled).toBe(false);
-    });
-
-    it("bounds the combined excerpt output", () => {
-        const records = Array.from({ length: 20 }, (_, position) =>
-            historyRecord(position, "user", [{ type: "text", text: "x".repeat(5_000) }]),
-        );
-
-        const result = createHistoryExcerpt(records, 500);
-
-        expect(result.beginning.length + result.recent.length).toBeLessThanOrEqual(500);
-        expect(result.beginning.length).toBeGreaterThan(0);
-        expect(result.recent.length).toBeGreaterThan(0);
-    });
-
-    it("caps each rendered message before the excerpt budget is applied", () => {
-        const result = createHistoryExcerpt(
-            [historyRecord(0, "user", [{ type: "text", text: "x".repeat(5_000) }])],
-            32_000,
-        );
-
-        expect(result.beginning.length).toBeLessThan(1_600);
-        expect(result.beginning).toContain("[truncated");
-    });
-
-    it("formats all supported history block kinds for the handoff", () => {
-        const blocks: HistoryBlock[] = [
-            { type: "text", text: "visible" },
-            { type: "thinking", thinking: "reasoned", redacted: true },
-            { type: "image", mediaType: "image/png" },
-            { type: "tool_call", callId: "call-1", name: "lookup", arguments: { q: "x" } },
-            {
-                type: "tool_result",
-                callId: "call-1",
-                toolName: "lookup",
-                display: "looked up",
-                output: "result",
-                isError: true,
-            },
-        ];
-
-        const result = createHistoryExcerpt(
-            [
-                {
-                    position: 0,
-                    message: historyMessage(0, "assistant", blocks),
-                },
-            ],
-            32_000,
-        );
-
-        expect(result.beginning).toContain("Text: visible");
-        expect(result.beginning).toContain("Thinking: [redacted]");
-        expect(result.beginning).toContain("[Image: image/png]");
-        expect(result.beginning).toContain('Tool call: lookup {"q":"x"}');
-        expect(result.beginning).toContain("Tool result: lookup (error)");
-        expect(result.beginning).toContain("Output: result");
     });
 });

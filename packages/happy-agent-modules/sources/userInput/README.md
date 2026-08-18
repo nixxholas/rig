@@ -7,12 +7,21 @@ on this module, and the settling transaction wakes every wait parked on that req
 commits.
 
 ```ts
-import { UserInputModule } from "@slopus/happy-agent-modules";
+import { PresenceModule, UserInputModule } from "@slopus/happy-agent-modules";
 
-const userInput = new UserInputModule({
-    presence, // optional { state(ctx, agentId), subscribe(ctx, agentId, callback) }
+const userInput = new UserInputModule(presence);
+userInput.onEventTransactional(async (ctx, event) => {
+    await auto.recordUserInputEventTransactional(ctx, event);
+});
+userInput.onEvent(async (ctx, event) => {
+    await events.record(ctx, { type: "user-input.event", payload: event });
 });
 ```
+
+The module takes the [presence](../presence/README.md) module and nothing else. It asks presence
+for the person's answer-wait policy and subscribes to changes while a wait is in flight; nothing
+sits between the two modules. Every character and count bound is a `MAX_USER_INPUT_*` constant,
+and request and event identities are the module's own.
 
 Each create and settlement transition uses `ctx.inTx`; storage reads and writes the database facade
 on `ctx.db`. stdlib `afterCommit(ctx, callback)` registers post-commit event delivery against the
@@ -42,9 +51,17 @@ Host callers can use `ask`, `wait`, `listPage`/`list`, `get`/`getPage`, `answer`
 List pages carry the absolute source `cursor` of their first returned row; `nextCursor` is always
 computed from that position and the rows actually shown.
 
-Cross-agent reads and settlement are denied by default. An injected authorization policy may grant
-specific actions; self-access is always allowed. A presence policy may provide a per-state
-`answerWaitMs`, presence guidance, and a subscription for changes while a wait is in flight.
-Immediate-away and timeout results include that guidance so the model is told to continue with its
-best judgement and can withdraw the Inbox request with `cancel_ask`. With no policy, the host wait
-is used directly.
+Cross-agent reads and settlement are denied unless the agents are related. Self-access is always
+allowed, and an agent may reach a request made by one of its descendants: the answer comes from
+the agent collection `beforeStart` hands the module, walked up from the asking agent through
+`parentOf`. Anything else is refused, including every access before the module has started.
+
+Presence supplies the per-state `answerWaitMs`, the guidance shown to the model, and the changes
+that re-evaluate a wait already in flight. Immediate-away and timeout results carry that guidance
+so the model is told to continue with its best judgement and can withdraw the Inbox request with
+`cancel_ask`. When presence has no state, a wait simply waits.
+
+`onEventTransactional(listener)` and `onEvent(listener)` subscribe to request events inside the
+settling transaction and after it commits; both return the function that stops the subscription.
+A transactional listener that throws rolls the change back. A post-commit listener that throws is
+reported through `ctx.log.warn` and never undoes a committed settlement.

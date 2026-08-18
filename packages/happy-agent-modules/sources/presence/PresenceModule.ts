@@ -4,28 +4,26 @@ import {
     type AgentModuleScope,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
-import { Type, type Static } from "@sinclair/typebox";
+import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { afterCommit, type Context } from "@steve.kite/stdlib";
+
+import type { ConfigModule } from "../config/index.js";
 
 import {
     BUILT_IN_PRESENCES,
     ONLINE_PRESENCE_ID,
-    assertPresenceCatalog,
     isBuiltInPresenceId,
 } from "./PresenceCatalog.js";
+import { MAX_PRESENCE_DEFINITIONS, readConfiguredPresence } from "./PresenceConfiguration.js";
 import { createPresenceDatabase, presenceMigrations } from "./PresenceDatabase.js";
 import {
-    presenceContextSchema,
+    assertPresenceEventListener,
     presenceEventSchema,
-    presenceModuleListenerSchema,
     type PresenceEvent,
+    type PresenceEventListener,
+    type PresenceUnsubscribe,
 } from "./PresenceEvent.js";
-import {
-    presenceUserInputChangeCallbackSchema,
-    type PresenceUserInputChangeCallback,
-    type PresenceUserInputPolicy,
-} from "./PresencePolicy.js";
 import {
     assertPresenceSchedule,
     assertPresenceScheduleInput,
@@ -41,9 +39,7 @@ import {
     assertPresenceToolInput,
     assertPresenceUserInputState,
     assertTemporaryPresenceInput,
-    presenceCatalogInputSchema,
     presenceReferenceSchema,
-    presenceStoredStateSchema,
     presenceToolInputSchema,
     type PresenceDefinition,
     type PresenceMutationInput,
@@ -53,6 +49,10 @@ import {
     type PresenceUserInputState,
     type TemporaryPresenceInput,
 } from "./PresenceState.js";
+import {
+    presenceUserInputChangeCallbackSchema,
+    type PresenceUserInputChangeCallback,
+} from "./PresenceUserInput.js";
 import {
     assertPresenceDefinitionResult,
     assertPresenceScheduleResult,
@@ -65,34 +65,10 @@ import { getPresenceTool } from "./tools/get_presence.js";
 import { listPresenceTool } from "./tools/list_presence.js";
 import { setPresenceTool } from "./tools/set_presence.js";
 
+/** The most recurring windows one installation may keep. */
+export const MAX_PRESENCE_SCHEDULES = 64;
+
 const scheduleIdSchema = Type.String({ minLength: 1, maxLength: 128 });
-const nonNegativeIntegerSchema = Type.Integer({
-    minimum: 0,
-    maximum: 8_640_000_000_000_000,
-});
-const maxCatalogEntriesSchema = Type.Integer({ minimum: 1, maximum: 256 });
-const voidOrPromiseVoidSchema = Type.Union([Type.Void(), Type.Promise(Type.Void())]);
-
-export const presenceModuleOptionsSchema = Type.Object(
-    {
-        clock: Type.Optional(Type.Function([], nonNegativeIntegerSchema)),
-        listener: Type.Optional(presenceModuleListenerSchema),
-        allowModelMutation: Type.Optional(Type.Boolean()),
-        catalog: Type.Optional(presenceCatalogInputSchema),
-        initialState: Type.Optional(presenceStoredStateSchema),
-        maxSchedules: Type.Optional(Type.Integer({ minimum: 1, maximum: 10_000 })),
-        maxPresences: Type.Optional(maxCatalogEntriesSchema),
-        onPostCommitError: Type.Optional(
-            Type.Function(
-                [presenceContextSchema, presenceEventSchema, Type.Unknown()],
-                voidOrPromiseVoidSchema,
-            ),
-        ),
-    },
-    { additionalProperties: false },
-);
-
-export type PresenceModuleOptions = Static<typeof presenceModuleOptionsSchema>;
 
 type PresenceChange<Result> = {
     readonly result: Result;
@@ -100,43 +76,31 @@ type PresenceChange<Result> = {
 };
 
 /**
- * One shared, host-configured presence capability for every agent.
+ * One shared presence capability for every agent.
  *
- * Agent Base owns durable tool settlement. Presence owns only its domain state, validation,
- * transactions, and event semantics; it keeps no operation identities or replay ledger.
+ * The catalog of states, and the state this installation starts in, come from the person's own
+ * settings, so this module takes the configuration and reads them itself. Agent Base owns durable
+ * tool settlement; presence owns only its domain state, validation, transactions, and event
+ * semantics, and keeps no operation identities or replay ledger.
  */
 export class PresenceModule implements AgentModule, PresenceReader {
     readonly name = "presence";
     readonly migrations = presenceMigrations;
     readonly #store: PresenceStore;
-    readonly #clock: NonNullable<PresenceModuleOptions["clock"]>;
-    readonly #listener: PresenceModuleOptions["listener"];
-    readonly #allowModelMutation: boolean;
-    readonly #maxSchedules: number;
-    readonly #maxPresences: number;
     readonly #configuredCatalog: readonly PresenceDefinition[];
-    readonly #initialState: PresenceModuleOptions["initialState"];
-    readonly #onPostCommitError: PresenceModuleOptions["onPostCommitError"];
+    readonly #initialState: PresenceStoredState | undefined;
+    readonly #transactionalListeners = new Set<PresenceEventListener>();
+    readonly #listeners = new Set<PresenceEventListener>();
     readonly #userInputSubscribers = new Set<PresenceUserInputChangeCallback>();
-    readonly userInputPolicy: PresenceUserInputPolicy;
 
-    constructor(options: PresenceModuleOptions = {}) {
-        const validated = validateOptions(options);
+    constructor(config: ConfigModule) {
+        const configured = readConfiguredPresence(config.configuration.values.presence);
         this.#store = createPresenceDatabase();
-        this.#clock = validated.clock ?? Date.now;
-        this.#listener = validated.listener;
-        this.#allowModelMutation = validated.allowModelMutation ?? false;
-        this.#maxSchedules = validated.maxSchedules ?? 64;
-        this.#maxPresences = validated.maxPresences ?? 64;
-        this.#configuredCatalog = cloneCatalog(validated.catalog ?? []);
+        this.#configuredCatalog = cloneCatalog(configured.catalog);
         this.#initialState =
-            validated.initialState === undefined ? undefined : cloneValue(validated.initialState);
-        this.#onPostCommitError = validated.onPostCommitError;
-        this.userInputPolicy = {
-            state: async (ctx, _agentId) => await this.userInputState(ctx),
-            subscribe: async (ctx, _agentId, callback) =>
-                await this.subscribeUserInput(ctx, callback),
-        };
+            configured.initialState === undefined
+                ? undefined
+                : cloneValue(configured.initialState);
     }
 
     readonly beforeStart = async (ctx: Context): Promise<AgentModuleHooks> => {
@@ -161,9 +125,30 @@ export class PresenceModule implements AgentModule, PresenceReader {
         return this.#hooks;
     };
 
-    /** Read the host-resolved effective presence at the injected clock instant. */
+    /** Watch every committed presence change; call the returned function to stop watching. */
+    onEvent(listener: PresenceEventListener): PresenceUnsubscribe {
+        assertPresenceEventListener(listener);
+        this.#listeners.add(listener);
+        return () => {
+            this.#listeners.delete(listener);
+        };
+    }
+
+    /**
+     * Watch presence changes from inside the transaction that makes them, so a caller can write
+     * its own record in the same commit. A listener that throws rolls the change back.
+     */
+    onEventTransactional(listener: PresenceEventListener): PresenceUnsubscribe {
+        assertPresenceEventListener(listener);
+        this.#transactionalListeners.add(listener);
+        return () => {
+            this.#transactionalListeners.delete(listener);
+        };
+    }
+
+    /** Read the effective presence at this moment. */
     async read(ctx: Context): Promise<PresenceState | undefined> {
-        const value = await this.#store.read(ctx, this.#now());
+        const value = await this.#store.read(ctx, now());
         if (value === undefined) return undefined;
         assertPresenceStoredState(value);
         const catalog = await this.#readCatalog(ctx);
@@ -172,14 +157,14 @@ export class PresenceModule implements AgentModule, PresenceReader {
         return cloneValue(state);
     }
 
-    /** Alias that reads the same effective state, useful to non-agent host callers. */
+    /** Alias that reads the same effective state, useful to callers outside an agent. */
     async state(ctx: Context): Promise<PresenceState | undefined> {
         return await this.read(ctx);
     }
 
     /**
-     * Return the narrow, display-ready presence projection consumed by UserInput through
-     * `userInputPolicy`. The projection intentionally excludes the catalog and user message.
+     * The narrow, display-ready projection user input waits on. It intentionally excludes the
+     * catalog and the person's own status message.
      */
     async userInputState(ctx: Context): Promise<PresenceUserInputState | undefined> {
         const current = await this.read(ctx);
@@ -188,13 +173,15 @@ export class PresenceModule implements AgentModule, PresenceReader {
     }
 
     /**
-     * Subscribe to effective-state changes for a bounded external wait. This set is only
-     * ephemeral observation state; durable presence remains in the module database.
+     * Watch the effective state for as long as something is waiting on an answer. The callback is
+     * given the current state immediately, and again after every committed change; the returned
+     * function stops the subscription. This set is only ephemeral observation state — durable
+     * presence stays in the module database.
      */
     async subscribeUserInput(
         ctx: Context,
         callback: PresenceUserInputChangeCallback,
-    ): Promise<() => void> {
+    ): Promise<PresenceUnsubscribe> {
         if (!Value.Check(presenceUserInputChangeCallbackSchema, callback)) {
             throw new Error("Presence user-input callback is invalid.");
         }
@@ -217,7 +204,7 @@ export class PresenceModule implements AgentModule, PresenceReader {
         ctx: Context,
         input: PresenceMutationInput | PresenceToolInput,
     ): Promise<PresenceState> {
-        const requested = normalizeMutationInput(input, this.#now());
+        const requested = normalizeMutationInput(input, now());
         const result = await this.#mutate(ctx, async (txCtx, eventId, at) => {
             const catalog = await this.#readCatalog(txCtx);
             assertCatalogSelection(requested, catalog);
@@ -271,7 +258,7 @@ export class PresenceModule implements AgentModule, PresenceReader {
         assertTemporaryPresenceInput(input);
         return await this.setPresence(ctx, {
             ...input,
-            effectiveFrom: input.effectiveFrom ?? this.#now(),
+            effectiveFrom: input.effectiveFrom ?? now(),
         });
     }
 
@@ -295,7 +282,7 @@ export class PresenceModule implements AgentModule, PresenceReader {
             if (existing !== undefined && sameDefinition(existing, definition)) {
                 return { result: cloneValue(existing) };
             }
-            if (existing === undefined && catalog.length >= this.#maxPresences) {
+            if (existing === undefined && catalog.length >= MAX_PRESENCE_DEFINITIONS) {
                 throw new Error("Presence catalog limit reached.");
             }
             const stored = await this.#store.catalog.set(txCtx, cloneValue(definition));
@@ -338,11 +325,7 @@ export class PresenceModule implements AgentModule, PresenceReader {
                     "This presence is the fallback of the current presence and cannot be cleared.",
                 );
             }
-            const schedules = await this.#readSchedules(
-                txCtx,
-                this.#scheduleStore(),
-                this.#maxSchedules,
-            );
+            const schedules = await this.#readSchedules(txCtx, this.#scheduleStore());
             if (schedules.some((candidate) => referenceId(candidate.presence) === presenceId)) {
                 throw new Error("This presence is used by a schedule and cannot be cleared.");
             }
@@ -364,8 +347,7 @@ export class PresenceModule implements AgentModule, PresenceReader {
     }
 
     async listSchedules(ctx: Context): Promise<readonly PresenceSchedule[]> {
-        const scheduleStore = this.#scheduleStore();
-        return await this.#readSchedules(ctx, scheduleStore, this.#maxSchedules);
+        return await this.#readSchedules(ctx, this.#scheduleStore());
     }
 
     async setSchedule(ctx: Context, input: PresenceScheduleInput): Promise<PresenceSchedule> {
@@ -376,12 +358,12 @@ export class PresenceModule implements AgentModule, PresenceReader {
         const result = await this.#mutate(ctx, async (txCtx, eventId, at) => {
             const catalog = await this.#readCatalog(txCtx);
             assertCatalogReference(requested.presence, catalog);
-            const existing = await this.#readSchedules(txCtx, scheduleStore, this.#maxSchedules);
+            const existing = await this.#readSchedules(txCtx, scheduleStore);
             const duplicate = existing.find((candidate) => sameSchedule(candidate, requested));
             if (duplicate !== undefined) {
                 return { result: cloneValue(duplicate) };
             }
-            if (existing.length >= this.#maxSchedules) {
+            if (existing.length >= MAX_PRESENCE_SCHEDULES) {
                 throw new Error("Presence schedule limit reached.");
             }
 
@@ -441,11 +423,11 @@ export class PresenceModule implements AgentModule, PresenceReader {
             return current === undefined ? "" : formatPresenceInstruction(current);
         },
 
-        tools: (_ctx: Context, _scope: AgentModuleScope): readonly AnyAgentTool[] => {
-            const tools: AnyAgentTool[] = [getPresenceTool(this), listPresenceTool(this)];
-            if (this.#allowModelMutation) tools.push(setPresenceTool(this));
-            return tools;
-        },
+        tools: (_ctx: Context, _scope: AgentModuleScope): readonly AnyAgentTool[] => [
+            getPresenceTool(this),
+            listPresenceTool(this),
+            setPresenceTool(this),
+        ],
     };
 
     async #mutate<Result>(
@@ -453,17 +435,19 @@ export class PresenceModule implements AgentModule, PresenceReader {
         decide: (txCtx: Context, eventId: string, at: number) => Promise<PresenceChange<Result>>,
     ): Promise<Result> {
         const eventId = globalThis.crypto.randomUUID();
-        const at = this.#now();
+        const at = now();
         return await ctx.inTx(async (txCtx) => {
             const decided = await decide(txCtx, eventId, at);
             const event =
                 decided.event === undefined ? undefined : cloneAndFreezeEvent(decided.event);
             if (event !== undefined) {
                 const userInputState = await this.#readUserInputState(txCtx, at);
-                await invokeVoid(
-                    this.#listener?.onEventTransactional?.(txCtx, event),
-                    "Presence transactional listener",
-                );
+                for (const listener of this.#transactionalListeners) {
+                    await invokeVoid(
+                        listener(txCtx, event),
+                        "Presence transactional listener",
+                    );
+                }
                 afterCommit(txCtx, (postCommitCtx) =>
                     this.#notifyPostCommit(postCommitCtx, event, userInputState),
                 );
@@ -480,9 +464,9 @@ export class PresenceModule implements AgentModule, PresenceReader {
 
     async #readCatalog(ctx: Context): Promise<readonly PresenceDefinition[]> {
         const stored = await this.#store.catalog.list(ctx, {
-            limit: this.#maxPresences + 1,
+            limit: MAX_PRESENCE_DEFINITIONS + 1,
         });
-        if (stored.length > this.#maxPresences) {
+        if (stored.length > MAX_PRESENCE_DEFINITIONS) {
             throw new Error("Presence database returned more definitions than requested.");
         }
         const byId = new Map<string, PresenceDefinition>();
@@ -492,8 +476,8 @@ export class PresenceModule implements AgentModule, PresenceReader {
             assertPresenceDefinitionResult(definition);
             byId.set(definition.id, definition);
         }
-        if (byId.size > this.#maxPresences) {
-            throw new Error("Presence catalog exceeds its configured bound.");
+        if (byId.size > MAX_PRESENCE_DEFINITIONS) {
+            throw new Error("Presence catalog exceeds its bound.");
         }
         return [...byId.values()].map((definition) => cloneValue(definition));
     }
@@ -505,13 +489,12 @@ export class PresenceModule implements AgentModule, PresenceReader {
     async #readSchedules(
         ctx: Context,
         scheduleStore: PresenceScheduleStore,
-        limit: number,
     ): Promise<readonly PresenceSchedule[]> {
-        const schedules = await scheduleStore.list(ctx, { limit });
+        const schedules = await scheduleStore.list(ctx, { limit: MAX_PRESENCE_SCHEDULES });
         if (!Value.Check(Type.Array(presenceScheduleSchema, { maxItems: 10_000 }), schedules)) {
             throw new Error("Presence database returned an invalid schedule list.");
         }
-        if (schedules.length > limit) {
+        if (schedules.length > MAX_PRESENCE_SCHEDULES) {
             throw new Error("Presence database returned more schedules than requested.");
         }
 
@@ -527,14 +510,6 @@ export class PresenceModule implements AgentModule, PresenceReader {
             cloned.push(cloneValue(schedule));
         }
         return cloned;
-    }
-
-    #now(): number {
-        const now = this.#clock();
-        if (!Value.Check(nonNegativeIntegerSchema, now)) {
-            throw new Error("Presence clock must return a non-negative integer.");
-        }
-        return now;
     }
 
     async #readUserInputState(
@@ -553,13 +528,12 @@ export class PresenceModule implements AgentModule, PresenceReader {
         event: PresenceEvent,
         current: PresenceUserInputState | undefined,
     ): Promise<void> {
-        try {
-            await invokeVoid(
-                this.#listener?.onEvent?.(ctx, event),
-                "Presence post-commit listener",
-            );
-        } catch (error: unknown) {
-            await this.#reportPostCommitError(ctx, event, error);
+        for (const listener of this.#listeners) {
+            try {
+                await invokeVoid(listener(ctx, event), "Presence post-commit listener");
+            } catch (error: unknown) {
+                reportPostCommitFailure(ctx, event, error);
+            }
         }
 
         for (const callback of this.#userInputSubscribers) {
@@ -569,47 +543,29 @@ export class PresenceModule implements AgentModule, PresenceReader {
                     "Presence user-input callback",
                 );
             } catch (error: unknown) {
-                await this.#reportPostCommitError(ctx, event, error);
+                reportPostCommitFailure(ctx, event, error);
             }
-        }
-    }
-
-    async #reportPostCommitError(
-        ctx: Context,
-        event: PresenceEvent,
-        error: unknown,
-    ): Promise<void> {
-        try {
-            await invokeVoid(
-                this.#onPostCommitError?.(ctx, event, error),
-                "Presence post-commit error handler",
-            );
-        } catch {
-            // Reporting is advisory and must not turn a committed mutation into a failure.
         }
     }
 }
 
-function validateOptions(options: unknown): PresenceModuleOptions {
-    if (!Value.Check(presenceModuleOptionsSchema, options)) {
-        throw new Error("Presence module options contain unknown or invalid keys.");
+/**
+ * A presence change is durable before anyone is told about it, so a listener that fails is
+ * something to report rather than a reason to fail the change that already happened.
+ */
+function reportPostCommitFailure(ctx: Context, event: PresenceEvent, error: unknown): void {
+    try {
+        ctx.log.warn("A presence listener failed after the change was saved.", {
+            eventId: event.eventId,
+            type: event.type,
+        }, error);
+    } catch {
+        // Reporting is advisory and must not turn a committed mutation into a failure.
     }
-    const catalog = options.catalog ?? [];
-    if (options.catalog !== undefined) {
-        assertPresenceCatalog(options.catalog);
-        for (const definition of options.catalog) {
-            if (isBuiltInPresenceId(definition.id)) {
-                throw new Error("Built-in presence definitions cannot be replaced.");
-            }
-        }
-    }
-    const maxPresences = options.maxPresences ?? 64;
-    if (maxPresences < BUILT_IN_PRESENCES.length + catalog.length) {
-        throw new Error(
-            "The presence catalog limit is too small to hold the built-in and configured presences.",
-        );
-    }
-    return options as PresenceModuleOptions;
+}
+
+function now(): number {
+    return Date.now();
 }
 
 /**
@@ -626,7 +582,7 @@ function assertKnownTimeZone(timeZone: string): void {
 
 function normalizeMutationInput(
     input: PresenceMutationInput | PresenceToolInput,
-    now: number,
+    at: number,
 ): PresenceStoredState {
     let presenceId: string;
     let message: string | undefined;
@@ -662,7 +618,7 @@ function normalizeMutationInput(
         fallbackPresenceId = referenceId;
     }
     if (expiresAt !== undefined) {
-        effectiveFrom ??= now;
+        effectiveFrom ??= at;
         fallbackPresenceId ??= ONLINE_PRESENCE_ID;
     }
     const result = {
@@ -673,7 +629,7 @@ function normalizeMutationInput(
         ...(fallbackPresenceId === undefined ? {} : { fallbackPresenceId }),
     };
     assertPresenceStoredState(result);
-    if (expiresAt !== undefined && expiresAt <= now) {
+    if (expiresAt !== undefined && expiresAt <= at) {
         throw new Error("A presence must expire in the future.");
     }
     return result;
