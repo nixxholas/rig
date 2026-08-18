@@ -61,8 +61,10 @@ jobs:
             - name: Install dependencies
               run: pnpm install --frozen-lockfile
 
-            - name: Build the API modules
-              run: pnpm --filter @slopus/happy-agent-modules build
+            - name: Build the API libraries
+              run: |
+                  pnpm --filter @slopus/happy-agent-client build
+                  pnpm --filter @slopus/happy-agent-modules build
 
             - name: Check the API libraries
               run: |
