@@ -46,10 +46,18 @@ export async function queryProjectAvatar(
         )
     )[0];
     if (row === undefined) return undefined;
-    if (!Value.Check(storedProjectAvatarRowSchema, row)) {
+    const record = row as Record<string, unknown>;
+    const normalized = {
+        ...record,
+        image_bytes:
+            record["image_bytes"] instanceof ArrayBuffer
+                ? new Uint8Array(record["image_bytes"])
+                : record["image_bytes"],
+    };
+    if (!Value.Check(storedProjectAvatarRowSchema, normalized)) {
         throw new Error("Project avatar storage contains an invalid asset.");
     }
-    const stored = row as StoredProjectAvatarRow;
+    const stored = normalized as StoredProjectAvatarRow;
     const bytes = new Uint8Array(stored.image_bytes);
     const actualHash = createHash("sha256").update(bytes).digest("hex");
     if (actualHash !== stored.content_hash) {

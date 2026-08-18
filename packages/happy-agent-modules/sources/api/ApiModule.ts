@@ -2,7 +2,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import * as inspector from "node:inspector";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { AsyncLocalStorage } from "node:async_hooks";
+import { AsyncLocalStorage, AsyncResource } from "node:async_hooks";
 import type { Socket } from "node:net";
 import { dirname, join } from "node:path";
 
@@ -44,6 +44,7 @@ import {
 } from "../profile/index.js";
 import {
     ProjectRegistrationError,
+    ProjectAvatarInputError,
     ProjectsModule,
     type Project,
     type ProjectEvent,
@@ -57,7 +58,12 @@ import {
 import { createNodeBinaryWebSocket, WebSocketDuplex } from "../transport/index.js";
 import { UsageModule, type UsageInferenceRecord } from "../usage/index.js";
 import { UserInputModule, type UserInputEvent } from "../userInput/index.js";
-import { WorkspacesModule, type Workspace, type WorkspaceEvent } from "../workspaces/index.js";
+import {
+    WorkspaceInputError,
+    WorkspacesModule,
+    type Workspace,
+    type WorkspaceEvent,
+} from "../workspaces/index.js";
 import { ApiError, invalidRequest, notFound, type ApiErrorCode } from "./ApiError.js";
 import { ApiEventJournal, type ApiEvent } from "./ApiEventJournal.js";
 import {
@@ -111,6 +117,7 @@ interface AcceptedMessageBatch {
         readonly occurredAt: number;
         readonly previousVersion: string;
         readonly version: string;
+        readonly mutationId?: string;
     }[];
 }
 
@@ -136,6 +143,7 @@ export class ApiModule implements AgentModule {
     readonly #profile: ProfileModule;
     readonly #compute: ComputeModule;
     readonly #mutationIds = new AsyncLocalStorage<string>();
+    readonly #backgroundScope = new AsyncResource("happy-agent-api");
     readonly #journal = new MutationAwareApiEventJournal(this.#mutationIds);
     readonly #webSockets = new WebSocketServer({
         maxPayload: MAX_TERMINAL_WIRE_MESSAGE_BYTES,
@@ -155,8 +163,13 @@ export class ApiModule implements AgentModule {
     readonly #apiPendingMessageIds = new Set<string>();
     readonly #announcedAgentCreations = new Set<string>();
     readonly #acceptedMessageBatches = new Map<string, AcceptedMessageBatch>();
+    readonly #pendingMessageAnnouncements = new Map<
+        string,
+        { readonly promise: Promise<void>; readonly resolve: () => void }
+    >();
     readonly #processOwners = new Map<string, string>();
     readonly #agentEventChains = new Map<string, Promise<void>>();
+    readonly #backgroundMetadataUpdates = new Set<Promise<void>>();
 
     #agents: AgentSystemRef | undefined;
     #ready = false;
@@ -249,9 +262,14 @@ export class ApiModule implements AgentModule {
         this.#apiPendingMessageIds.clear();
         this.#announcedAgentCreations.clear();
         this.#acceptedMessageBatches.clear();
+        for (const pending of this.#pendingMessageAnnouncements.values()) pending.resolve();
+        this.#pendingMessageAnnouncements.clear();
         this.#processOwners.clear();
         await Promise.allSettled(this.#agentEventChains.values());
         this.#agentEventChains.clear();
+        await Promise.allSettled(this.#backgroundMetadataUpdates);
+        this.#backgroundMetadataUpdates.clear();
+        this.#backgroundScope.emitDestroy();
         for (const client of this.#webSockets.clients) client.terminate();
         this.#webSockets.close();
         this.#workspaceProxy.close();
@@ -552,10 +570,10 @@ export class ApiModule implements AgentModule {
         if (this.#unsubscribe.length > 0) return;
         this.#unsubscribe.push(
             this.#events.subscribe((event) => this.#enqueueAgentEvent(ctx, event)),
-            this.#projects.onEvent(async (ctx, event) => {
+            this.#projects.onEvent(async (_eventCtx, event) => {
                 await this.#convertProjectEvent(ctx, event);
             }),
-            this.#workspaces.onEvent(async (ctx, event) => {
+            this.#workspaces.onEvent(async (_eventCtx, event) => {
                 await this.#convertWorkspaceEvent(ctx, event);
             }),
             this.#terminals.onEvent(async (event) => {
@@ -584,14 +602,14 @@ export class ApiModule implements AgentModule {
                     });
                 }
             }),
-            this.#userInput.onEvent(async (eventCtx, event) => {
-                await this.#convertUserInputEvent(eventCtx, event);
+            this.#userInput.onEvent(async (_eventCtx, event) => {
+                await this.#convertUserInputEvent(ctx, event);
             }),
-            this.#usage.onEvent(async (eventCtx, event) => {
+            this.#usage.onEvent(async (_eventCtx, event) => {
                 if (event.type !== "usage_recorded") return;
-                await this.#updateAgentMetadata(eventCtx, event.record.agentId, {});
+                await this.#updateAgentMetadata(ctx, event.record.agentId, {});
             }),
-            this.#profile.onEvent(async (ctx: Context, event: ProfileChangedEvent) => {
+            this.#profile.onEvent(async (_eventCtx: Context, event: ProfileChangedEvent) => {
                 const profile = profileResource(await this.#profile.ensure(ctx));
                 this.#journal.append("profile.updated", {
                     previousVersion: event.data.previousVersion,
@@ -822,11 +840,20 @@ export class ApiModule implements AgentModule {
 
     #enqueueAgentEvent(ctx: Context, event: AgentEvent): void {
         const key = event.agentId ?? "\u0000daemon";
+        const mutationId = this.#mutationIds.getStore();
         const previous = this.#agentEventChains.get(key) ?? Promise.resolve();
         const next = previous
-            .then(async () => {
-                await this.#convertAgentEvent(ctx, event);
-            })
+            .then(
+                async () =>
+                    await this.#backgroundScope.runInAsyncScope(async () => {
+                        const convert = async () => await this.#convertAgentEvent(ctx, event);
+                        if (mutationId === undefined) {
+                            await convert();
+                        } else {
+                            await this.#mutationIds.run(mutationId, convert);
+                        }
+                    }),
+            )
             .catch((error: unknown) => {
                 ctx.log.error(
                     "The API could not convert an agent event.",
@@ -847,6 +874,7 @@ export class ApiModule implements AgentModule {
         if (agentId === undefined) return;
         const payload = recordValue(event.payload);
         if (event.type !== "message.accepted" && this.#acceptedMessageBatches.has(agentId)) {
+            await this.#waitForPendingMessageAnnouncements(agentId);
             this.#flushAcceptedMessages(agentId);
         }
         if (event.type === "agent.created") {
@@ -900,12 +928,7 @@ export class ApiModule implements AgentModule {
                 status: "idle",
                 updatedAt: event.occurredAt,
             });
-            await this.#updateAgentMetadata(ctx, agentId, {
-                unread: {
-                    reason: "turn_finished",
-                    since: event.occurredAt,
-                },
-            });
+            this.#scheduleUnreadUpdate(ctx, agentId, event.occurredAt);
             await this.#refreshParentSubagents(ctx, agentId);
             return;
         }
@@ -1115,6 +1138,7 @@ export class ApiModule implements AgentModule {
             occurredAt: event.occurredAt,
             previousVersion,
             version: event.id,
+            ...(message.mutationId === undefined ? {} : { mutationId: message.mutationId }),
         });
         this.#acceptedMessageBatches.set(agentId, batch);
         setImmediate(() => {
@@ -1135,6 +1159,21 @@ export class ApiModule implements AgentModule {
         const occurredAt = batch.messages.at(-1)?.occurredAt ?? first.occurredAt;
         const current = this.#activeRuns.get(agentId);
         const start = this.#loopStarts.get(agentId);
+        const mutationIds = new Set(
+            batch.messages.flatMap((message) =>
+                message.mutationId === undefined ? [] : [message.mutationId],
+            ),
+        );
+        const mutationId = mutationIds.size === 1 ? [...mutationIds][0] : undefined;
+        const append = (type: string, payload: unknown, at: number): void => {
+            if (mutationId === undefined) {
+                this.#journal.append(type, payload, at);
+            } else {
+                this.#mutationIds.run(mutationId, () => {
+                    this.#journal.append(type, payload, at);
+                });
+            }
+        };
         const startedRun: Record<string, unknown> = {
             id: batch.runId,
             status: "running",
@@ -1152,7 +1191,7 @@ export class ApiModule implements AgentModule {
                 reason: "steering",
                 endedAt: occurredAt,
             };
-            this.#journal.append(
+            append(
                 "run.boundary",
                 {
                     agentId,
@@ -1164,7 +1203,7 @@ export class ApiModule implements AgentModule {
             );
         } else {
             if (current !== undefined) {
-                this.#journal.append(
+                append(
                     "run.finished",
                     {
                         agentId,
@@ -1178,15 +1217,11 @@ export class ApiModule implements AgentModule {
                     occurredAt,
                 );
             }
-            this.#journal.append(
-                "run.started",
-                { agentId, run: startedRun, acceptedMessageIds },
-                occurredAt,
-            );
+            append("run.started", { agentId, run: startedRun, acceptedMessageIds }, occurredAt);
         }
         this.#activeRuns.set(agentId, startedRun);
         this.#loopStarts.delete(agentId);
-        this.#journal.append(
+        append(
             "agent.updated",
             {
                 agentId,
@@ -1196,6 +1231,31 @@ export class ApiModule implements AgentModule {
             },
             occurredAt,
         );
+    }
+
+    async #waitForPendingMessageAnnouncements(agentId: string): Promise<void> {
+        const batch = this.#acceptedMessageBatches.get(agentId);
+        if (batch === undefined) return;
+        const pending = batch.messages.flatMap((message) => {
+            const announcement = this.#pendingMessageAnnouncements.get(message.id);
+            return announcement === undefined ? [] : [announcement.promise];
+        });
+        if (pending.length > 0) await Promise.all(pending);
+    }
+
+    #beginPendingMessageAnnouncement(messageId: string): void {
+        let resolve!: () => void;
+        const promise = new Promise<void>((done) => {
+            resolve = done;
+        });
+        this.#pendingMessageAnnouncements.set(messageId, { promise, resolve });
+    }
+
+    #finishPendingMessageAnnouncement(messageId: string): void {
+        const pending = this.#pendingMessageAnnouncements.get(messageId);
+        if (pending === undefined) return;
+        this.#pendingMessageAnnouncements.delete(messageId);
+        pending.resolve();
     }
 
     async #announceCreatedAgent(ctx: Context, agentId: string): Promise<void> {
@@ -1370,6 +1430,7 @@ export class ApiModule implements AgentModule {
                 return true;
             }
             if (operation === "read" && request.method === "POST") {
+                await this.#assertTopLevelAgent(ctx, agentId);
                 const body = await bodyAs(request, emptyMutationBodySchema, "read marker");
                 await this.#withMutationId(
                     body.mutationId,
@@ -1389,6 +1450,7 @@ export class ApiModule implements AgentModule {
                 await this.#withMutationId(body.mutationId, async () => {
                     if (operation === "archive") {
                         await this.#agentSystem().abort(ctx, agentId);
+                        await this.#compute.archiveAgent(ctx, agentId);
                     }
                     await this.#updateAgentMetadata(ctx, agentId, {
                         archivedAt: operation === "archive" ? Date.now() : null,
@@ -1613,6 +1675,7 @@ export class ApiModule implements AgentModule {
             runId: null,
         };
         this.#announcedPendingMessages.add(id);
+        this.#beginPendingMessageAnnouncement(id);
         boundedAdd(this.#apiPendingMessageIds, id, MAX_ANNOUNCED_PENDING_MESSAGES);
         if (this.#announcedPendingMessages.size > MAX_ANNOUNCED_PENDING_MESSAGES) {
             const oldest = this.#announcedPendingMessages.values().next().value as
@@ -1632,6 +1695,7 @@ export class ApiModule implements AgentModule {
         } catch (error) {
             this.#announcedPendingMessages.delete(id);
             this.#apiPendingMessageIds.delete(id);
+            this.#finishPendingMessageAnnouncement(id);
             throw error;
         }
         const accepted = await this.#history.message(ctx, agentId, id);
@@ -1652,6 +1716,7 @@ export class ApiModule implements AgentModule {
             ...(body.mutationId === undefined ? {} : { mutationId: body.mutationId }),
         });
         this.#announcedPendingMessages.delete(id);
+        this.#finishPendingMessageAnnouncement(id);
         this.#flushAcceptedMessages(agentId);
         await this.#withMutationId(
             body.mutationId,
@@ -1806,6 +1871,32 @@ export class ApiModule implements AgentModule {
         });
     }
 
+    #scheduleUnreadUpdate(ctx: Context, agentId: string, since: number): void {
+        const task = (async () => {
+            for (let attempt = 0; attempt < 8; attempt += 1) {
+                await new Promise<void>((resolve) => setImmediate(resolve));
+                if (this.#closed) return;
+                try {
+                    await this.#updateAgentMetadata(ctx, agentId, {
+                        unread: { reason: "turn_finished", since },
+                    });
+                    return;
+                } catch (error: unknown) {
+                    if (attempt === 7) {
+                        ctx.log.error(
+                            "The API could not mark a completed agent turn unread.",
+                            { agentId },
+                            error,
+                        );
+                        return;
+                    }
+                }
+            }
+        })();
+        this.#backgroundMetadataUpdates.add(task);
+        void task.finally(() => this.#backgroundMetadataUpdates.delete(task));
+    }
+
     #handleEventPull(url: URL, response: ServerResponse): void {
         const after = optionalCursor(url.searchParams.get("after"));
         const until = optionalCursor(url.searchParams.get("until"));
@@ -1829,6 +1920,7 @@ export class ApiModule implements AgentModule {
         let overflowed = false;
         const pending: ApiEvent[] = [];
         const unsubscribe = this.#journal.subscribe((event) => {
+            if (response.destroyed || response.writableEnded) return;
             if (replaying) {
                 pending.push(event);
                 if (pending.length > 10_000) overflowed = true;
@@ -1885,6 +1977,7 @@ export class ApiModule implements AgentModule {
         }
         pending.splice(0);
         const heartbeat = setInterval(() => {
+            if (response.destroyed || response.writableEnded) return;
             if (!response.write(`: heartbeat ${Date.now()}\n\n`)) response.end();
         }, HEARTBEAT_MS);
         heartbeat.unref();
@@ -1994,7 +2087,7 @@ export class ApiModule implements AgentModule {
             const projectId = action[1] as string;
             const operation = action[2] as "refresh" | "reorder" | "archive";
             if (operation === "refresh") {
-                const project = await this.#projects.refresh(ctx, projectId);
+                const project = await this.#projects.setUpAgain(ctx, projectId);
                 sendJson(response, 202, {
                     project: await this.#projectWithAgents(ctx, project),
                 });
@@ -2798,7 +2891,7 @@ export class ApiModule implements AgentModule {
             while (cursor !== undefined) {
                 const page = await this.#usage.readPage(ctx, agentId, {
                     cursor,
-                    limit: 100,
+                    limit: 50,
                 });
                 for (const record of page.records) {
                     if (record.kind === "inference") records.push(record);
@@ -2833,7 +2926,7 @@ export class ApiModule implements AgentModule {
             while (cursor !== undefined) {
                 const page = await this.#usage.readPage(ctx, agentId, {
                     cursor,
-                    limit: 100,
+                    limit: 50,
                 });
                 for (const record of page.records) {
                     if (record.kind === "inference") records.push(record);
@@ -2955,11 +3048,7 @@ export class ApiModule implements AgentModule {
             return;
         }
         if (error instanceof ApiError) {
-            if (error.status === 401) {
-                sendJson(response, 401, { error: "Unauthorized" });
-            } else {
-                sendJson(response, error.status, error.body());
-            }
+            sendJson(response, error.status, error.body());
             return;
         }
         if (error instanceof ProjectFileError) {
@@ -3001,6 +3090,20 @@ export class ApiModule implements AgentModule {
             return;
         }
         if (error instanceof ProjectRegistrationError) {
+            sendJson(response, 400, {
+                error: error.message,
+                code: "invalid_request",
+            });
+            return;
+        }
+        if (error instanceof ProjectAvatarInputError) {
+            sendJson(response, 400, {
+                error: error.message,
+                code: "invalid_request",
+            });
+            return;
+        }
+        if (error instanceof WorkspaceInputError) {
             sendJson(response, 400, {
                 error: error.message,
                 code: "invalid_request",
@@ -3192,6 +3295,8 @@ function usageRecordsSince(
         });
         tokens.input += record.tokens.input;
         tokens.output += record.tokens.output;
+        tokens.cacheRead += record.tokens.cacheRead ?? 0;
+        tokens.cacheWrite += record.tokens.cacheWrite ?? 0;
     }
     return output;
 }
@@ -3244,9 +3349,7 @@ function writeSocketError(
     message: string,
     code: ApiErrorCode = socketErrorCode(status),
 ): void {
-    const body = JSON.stringify(
-        status === 401 ? { error: "Unauthorized" } : { error: message, code },
-    );
+    const body = JSON.stringify({ error: message, code });
     socket.end(
         `HTTP/1.1 ${status} ${httpStatusText(status)}\r\n` +
             "Content-Type: application/json; charset=utf-8\r\n" +

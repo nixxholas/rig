@@ -13,6 +13,8 @@ export interface GymSseFrame {
 }
 
 export interface GymEventStreamOptions {
+    /** Replays from this durable cursor, sent as the `after` query parameter. */
+    readonly after?: string;
     /** Replays from this durable cursor, the way a reconnecting client does. */
     readonly lastEventId?: string;
     /** How long a wait may take before it is reported as a failure. */

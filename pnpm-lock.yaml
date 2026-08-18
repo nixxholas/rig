@@ -94,6 +94,9 @@ importers:
       '@earendil-works/pi-tui':
         specifier: ^0.80.3
         version: 0.80.3
+      '@slopus/happy-agent-gym':
+        specifier: workspace:*
+        version: link:../happy-agent-gym
       '@slopus/happy-agent-modules':
         specifier: workspace:*
         version: link:../happy-agent-modules
@@ -249,6 +252,9 @@ importers:
       '@slopus/happy-agent-base':
         specifier: npm:@slopus/happy-agent-base@0.0.20
         version: 0.0.20(@aws-sdk/credential-provider-node@3.972.71)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)
+      '@slopus/happy-agent-client':
+        specifier: workspace:*
+        version: link:../happy-agent-client
       '@slopus/happy-agent-compute':
         specifier: npm:@slopus/happy-agent-compute@0.1.6
         version: 0.1.6
@@ -261,10 +267,16 @@ importers:
       '@steve.kite/stdlib':
         specifier: 0.0.12
         version: 0.0.12
+      ws:
+        specifier: ^8.21.1
+        version: 8.21.1
     devDependencies:
       '@types/node':
         specifier: ^24.0.10
         version: 24.13.3
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.1
       typescript:
         specifier: ^7.0.2
         version: 7.0.2

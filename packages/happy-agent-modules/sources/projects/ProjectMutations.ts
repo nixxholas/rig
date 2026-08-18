@@ -120,7 +120,7 @@ export class ProjectMutations {
                 }
             }
             if (raw.changed) {
-                await this.observe(txCtx, this.newEvent(spec.event(after, before)), ctx);
+                await this.observeMutation(ctx, txCtx, this.newEvent(spec.event(after, before)));
             }
             return structuredClone(raw);
         });
@@ -189,14 +189,44 @@ export class ProjectMutations {
      * callback there is what makes an enclosing transaction the boundary: an event belonging to
      * somebody else's larger write is delivered when that write commits, not when this one does.
      */
-    async observe(ctx: Context, event: ProjectEvent, publishCtx: Context = ctx): Promise<void> {
+    async observe(
+        ctx: Context,
+        event: ProjectEvent,
+        publishCtx: Context = ctx,
+        followingPublishCtx?: Context,
+    ): Promise<void> {
         if (!Value.Check(projectEventSchema, event) || !isDeepFrozen(event)) {
             throw new Error("The project module created an invalid unfrozen event.");
         }
         // A snapshot, so subscribing or unsubscribing from inside a subscriber cannot change who
         // this event goes to.
         for (const listener of [...this.#transactionalListeners]) await listener(ctx, event);
-        afterCommit(publishCtx, (postCommitCtx) => this.#notifyPostCommit(postCommitCtx, event));
+        afterCommit(publishCtx, (postCommitCtx) => {
+            if (followingPublishCtx === undefined) {
+                return this.#notifyPostCommit(postCommitCtx, event);
+            }
+            return afterCommit(followingPublishCtx, (followingCtx) =>
+                this.#notifyPostCommit(followingCtx, event),
+            );
+        });
+    }
+
+    /**
+     * Publishes a mutation event after both transaction boundaries that may own it.
+     *
+     * The module transaction must commit before a listener reads the changed row. When the caller
+     * supplied its own post-commit boundary, delivery then waits for that boundary as well.
+     */
+    async observeMutation(
+        callerCtx: Context,
+        txCtx: Context,
+        event: ProjectEvent,
+    ): Promise<void> {
+        if (callerCtx === txCtx) {
+            await this.observe(txCtx, event);
+            return;
+        }
+        await this.observe(txCtx, event, txCtx, callerCtx);
     }
 
     async #notifyPostCommit(ctx: Context, event: ProjectEvent): Promise<void> {

@@ -1,8 +1,16 @@
 import { readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { relative } from "node:path";
+import { join, relative } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import type { AgentModel, AgentPermissionMode } from "@slopus/happy-agent-base";
+import {
+    HappyAgentClient,
+    type Agent,
+    type HappyAgentEvent,
+    type MessageHistoryResponse,
+    type SendMessageRequest,
+    type SendMessageResponse,
+} from "@slopus/happy-agent-client";
 import { startHappyAgentDaemon, type HappyAgentDaemon } from "@slopus/happy-agent";
 
 import { createGymCompute } from "./createGymCompute.js";
@@ -12,7 +20,9 @@ import {
     type GymHome,
     type GymHomeOptions,
 } from "./createGymHome.js";
-import { GymEventStream, type GymEventStreamOptions } from "./GymEventStream.js";
+import { createUnixSocketFetch } from "./createUnixSocketFetch.js";
+import { HappyAgentEventStream } from "./HappyAgentEventStream.js";
+import type { GymEventStreamOptions } from "./GymEventStream.js";
 import { GymHttpClient } from "./GymHttpClient.js";
 import {
     createScriptedInference,
@@ -45,25 +55,13 @@ export interface GymSelection {
 }
 
 /** An agent as the daemon reports it. */
-export interface GymSessionRecord {
-    readonly id: string;
-    readonly [key: string]: unknown;
-}
+export type GymSessionRecord = Agent;
 
 /** The API's grouped transcript shape. */
-export interface GymAgentHistory {
-    readonly hasMore: boolean;
-    readonly pending: readonly Record<string, unknown>[];
-    readonly runs: readonly Record<string, unknown>[];
-}
+export type GymAgentHistory = MessageHistoryResponse;
 
 /** One public API event envelope. */
-export interface GymAgentEvent {
-    readonly cursor: string;
-    readonly occurredAt: number;
-    readonly payload: unknown;
-    readonly type: string;
-}
+export type GymAgentEvent = HappyAgentEvent;
 
 /** The accepted message and its run. */
 export interface GymAcceptance {
@@ -118,7 +116,17 @@ export interface AgentGym {
     readonly workspacePath: string;
     readonly socketPath: string;
     readonly token: string;
-    /** The daemon's `/v0` API over its real Unix socket. Prefer this in scenarios. */
+    /** The typed public API client over the daemon's real Unix socket. */
+    readonly client: HappyAgentClient;
+    /**
+     * Raw Unix-socket access reserved for auth/header/unknown-route probes.
+     *
+     * Ordinary JSON and SSE scenarios must use {@link client}; this exists so
+     * the black-box suite can prove transport failures without a second API
+     * implementation.
+     */
+    readonly raw: GymHttpClient;
+    /** @deprecated Use {@link raw}; retained for existing local gym scenarios only. */
     readonly http: GymHttpClient;
     /** What the scripted model was asked, and what it could not answer. */
     readonly inference: GymInferenceLog;
@@ -175,7 +183,7 @@ export interface AgentGym {
         timeoutMs?: number,
     ): Promise<Result>;
     /** Open one Server-Sent Events subscription, such as `/v0/events/stream`. */
-    stream(path?: string, options?: GymEventStreamOptions): GymEventStream;
+    stream(path?: string, options?: GymEventStreamOptions): HappyAgentEventStream;
 
     /** Read a file from the workspace as text. */
     readFile(path: string): Promise<string>;
@@ -212,6 +220,7 @@ class AgentGymInstance implements AgentGym {
     readonly #errors: unknown[] = [];
     readonly #timeoutMs: number;
     #daemon: HappyAgentDaemon | undefined;
+    #client: HappyAgentClient | undefined;
     #http: GymHttpClient | undefined;
     #token = "";
     #defaultSessionId: string | undefined;
@@ -232,6 +241,10 @@ class AgentGymInstance implements AgentGym {
     async start(): Promise<void> {
         const daemon = await startHappyAgentDaemon({
             compute: createGymCompute(),
+            environment: {
+                RIG_PROJECTS_DIRECTORY: join(this.#home.root, "projects"),
+                RIG_WORKSPACES_DIRECTORY: join(this.#home.root, "workspaces"),
+            },
             happyHome: this.#home.happyHome,
             inference: {
                 models: this.#scripted.models,
@@ -244,6 +257,11 @@ class AgentGymInstance implements AgentGym {
         this.#http = new GymHttpClient({
             socketPath: daemon.socketPath,
             timeoutMs: Math.max(this.#timeoutMs, 20_000),
+            token: this.#token,
+        });
+        this.#client = new HappyAgentClient({
+            endpoint: "http://happy-agent.gym",
+            fetch: createUnixSocketFetch(daemon.socketPath),
             token: this.#token,
         });
         // A project is its root workspace. Register the gym directory once, then put the default
@@ -272,8 +290,17 @@ class AgentGymInstance implements AgentGym {
     }
 
     get http(): GymHttpClient {
+        return this.raw;
+    }
+
+    get raw(): GymHttpClient {
         if (this.#http === undefined) throw new Error("This gym is not running.");
         return this.#http;
+    }
+
+    get client(): HappyAgentClient {
+        if (this.#client === undefined) throw new Error("This gym is not running.");
+        return this.#client;
     }
 
     get inference(): GymInferenceLog {
@@ -304,9 +331,8 @@ class AgentGymInstance implements AgentGym {
 
     async send(text: string, options: GymSendOptions = {}): Promise<GymAcceptance> {
         const agentId = this.#sessionId(options.sessionId);
-        const response = await this.http.ok<ApiSendResponse>(
-            "POST",
-            `/v0/agents/${agentId}/send`,
+        const response = await this.client.sendMessage(
+            agentId,
             this.#messageBody(text, options, "queue"),
         );
         const acceptance = await this.#acceptance(agentId, response);
@@ -316,9 +342,8 @@ class AgentGymInstance implements AgentGym {
 
     async steer(text: string, options: GymSendOptions = {}): Promise<GymAcceptance> {
         const agentId = this.#sessionId(options.sessionId);
-        const response = await this.http.ok<ApiSendResponse>(
-            "POST",
-            `/v0/agents/${agentId}/send`,
+        const response = await this.client.sendMessage(
+            agentId,
             this.#messageBody(text, options, "steer"),
         );
         const acceptance = await this.#acceptance(agentId, response);
@@ -337,34 +362,26 @@ class AgentGymInstance implements AgentGym {
     }
 
     async abort(sessionId?: string): Promise<unknown> {
-        return await this.http.ok("POST", `/v0/agents/${this.#sessionId(sessionId)}/abort`, {});
+        return await this.client.abortAgent(this.#sessionId(sessionId));
     }
 
     async compact(sessionId?: string): Promise<unknown> {
-        return await this.http.ok("POST", `/v0/agents/${this.#sessionId(sessionId)}/compact`, {});
+        return await this.client.compactAgent(this.#sessionId(sessionId));
     }
 
     async createSession(options: GymCreateSessionOptions = {}): Promise<GymSessionRecord> {
         const workspaceId = await this.#workspaceForPath(options.cwd ?? this.workspacePath);
-        const body = await this.http.ok<{ readonly agent: GymSessionRecord }>(
-            "POST",
-            "/v0/agents",
-            {
+        return (
+            await this.client.createAgent({
                 workspaceId,
                 ...(options.id === undefined ? {} : { id: options.id }),
                 ...(options.title === undefined ? {} : { title: options.title }),
-            },
-        );
-        return body.agent;
+            })
+        ).agent;
     }
 
     async listSessions(): Promise<readonly GymSessionRecord[]> {
-        const body = await this.http.ok<{
-            readonly projects: readonly {
-                readonly agents?: readonly GymSessionRecord[];
-                readonly id: string;
-            }[];
-        }>("GET", "/v0/projects");
+        const body = await this.client.listProjects();
         const project = body.projects.find(
             (candidate) => candidate.id === this.#rootWorkspaceIdOrThrow(),
         );
@@ -372,18 +389,11 @@ class AgentGymInstance implements AgentGym {
     }
 
     async getSession(sessionId?: string): Promise<GymSessionRecord> {
-        const body = await this.http.ok<{ readonly agent: GymSessionRecord }>(
-            "GET",
-            `/v0/agents/${this.#sessionId(sessionId)}`,
-        );
-        return body.agent;
+        return (await this.client.getAgent(this.#sessionId(sessionId))).agent;
     }
 
     async history(sessionId?: string): Promise<GymAgentHistory> {
-        return await this.http.ok<GymAgentHistory>(
-            "GET",
-            `/v0/agents/${this.#sessionId(sessionId)}/messages`,
-        );
+        return await this.client.getMessages(this.#sessionId(sessionId));
     }
 
     async sessionEvents(sessionId?: string): Promise<readonly Record<string, unknown>[]> {
@@ -394,11 +404,7 @@ class AgentGymInstance implements AgentGym {
     }
 
     async events(): Promise<readonly GymAgentEvent[]> {
-        const body = await this.http.ok<{ readonly events: readonly GymAgentEvent[] }>(
-            "GET",
-            "/v0/events?limit=10000",
-        );
-        return body.events;
+        return (await this.client.getEvents({ limit: 10_000 })).events;
     }
 
     async waitForEvent(
@@ -434,8 +440,14 @@ class AgentGymInstance implements AgentGym {
         }
     }
 
-    stream(path = "/v0/events/stream", options: GymEventStreamOptions = {}): GymEventStream {
-        return this.http.stream(path, { timeoutMs: this.#timeoutMs, ...options });
+    stream(path = "/v0/events/stream", options: GymEventStreamOptions = {}): HappyAgentEventStream {
+        if (path !== "/v0/events/stream") {
+            throw new Error("The typed event stream only supports /v0/events/stream.");
+        }
+        return new HappyAgentEventStream(this.client, {
+            timeoutMs: this.#timeoutMs,
+            ...options,
+        });
     }
 
     async readFile(path: string): Promise<string> {
@@ -470,6 +482,7 @@ class AgentGymInstance implements AgentGym {
     async restart(): Promise<void> {
         await this.#running.close();
         this.#daemon = undefined;
+        this.#client = undefined;
         this.#http = undefined;
         await this.start();
     }
@@ -477,6 +490,7 @@ class AgentGymInstance implements AgentGym {
     async dispose(): Promise<void> {
         await this.#daemon?.close().catch(() => undefined);
         this.#daemon = undefined;
+        this.#client = undefined;
         this.#http = undefined;
         await this.#home.remove().catch(() => undefined);
     }
@@ -494,7 +508,7 @@ class AgentGymInstance implements AgentGym {
         text: string,
         options: GymSendOptions,
         delivery: "queue" | "steer",
-    ): Record<string, unknown> {
+    ): SendMessageRequest {
         const selection = this.selection;
         return {
             delivery,
@@ -510,7 +524,7 @@ class AgentGymInstance implements AgentGym {
         };
     }
 
-    async #acceptance(agentId: string, response: ApiSendResponse): Promise<GymAcceptance> {
+    async #acceptance(agentId: string, response: SendMessageResponse): Promise<GymAcceptance> {
         return {
             agentId,
             cursor: response.cursor,
@@ -520,7 +534,10 @@ class AgentGymInstance implements AgentGym {
         };
     }
 
-    async #acceptedRunId(agentId: string, message: ApiMessage): Promise<string> {
+    async #acceptedRunId(
+        agentId: string,
+        message: SendMessageResponse["message"],
+    ): Promise<string> {
         if (message.runId !== null && message.runId !== undefined) return message.runId;
         const event = await this.waitForEvent(
             (candidate) =>
@@ -544,11 +561,7 @@ class AgentGymInstance implements AgentGym {
     }
 
     async #registerProject(path: string): Promise<string> {
-        const body = await this.http.ok<{ readonly project: { readonly id: string } }>(
-            "POST",
-            "/v0/projects",
-            { path },
-        );
+        const body = await this.client.registerProject({ path });
         this.#workspaceIdsByPath.set(path, body.project.id);
         return body.project.id;
     }
@@ -576,16 +589,6 @@ export function agentIdOfEvent(event: GymAgentEvent): string | undefined {
     if (payload === null || typeof payload !== "object") return undefined;
     const agentId = (payload as { readonly agentId?: unknown }).agentId;
     return typeof agentId === "string" ? agentId : undefined;
-}
-
-interface ApiMessage {
-    readonly id: string;
-    readonly runId?: string | null;
-}
-
-interface ApiSendResponse {
-    readonly cursor: string;
-    readonly message: ApiMessage;
 }
 
 function acceptedMessageIdsOf(event: GymAgentEvent): readonly string[] {

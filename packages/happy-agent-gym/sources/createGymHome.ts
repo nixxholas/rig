@@ -43,12 +43,14 @@ const MAX_SOCKET_PATH = 100;
 export async function createGymHome(options: GymHomeOptions = {}): Promise<GymHome> {
     const scratch = resolve(import.meta.dirname, "../../../.local/g");
     await mkdir(scratch, { recursive: true });
-    const root = await mkdtemp(join(scratch, "g-"));
+    const runRoot = await mkdtemp(join(scratch, "r-"));
+    const root = await mkdtemp(join(runRoot, "i-"));
     const happyHome = join(root, ".happy");
     const workspacePath = join(root, "Happy");
     const socketPath = join(happyHome, "agent", "server.sock");
     if (Buffer.byteLength(socketPath) > MAX_SOCKET_PATH) {
         await rm(root, { force: true, recursive: true });
+        await rm(runRoot, { force: true, recursive: true });
         throw new Error(
             `A gym cannot start here: its socket path would be ${String(
                 Buffer.byteLength(socketPath),
@@ -77,7 +79,10 @@ export async function createGymHome(options: GymHomeOptions = {}): Promise<GymHo
 
     return {
         happyHome,
-        remove: async () => await rm(root, { force: true, recursive: true }),
+        remove: async () => {
+            await rm(root, { force: true, recursive: true });
+            await rm(runRoot, { force: true, recursive: true });
+        },
         root,
         workspacePath,
     };

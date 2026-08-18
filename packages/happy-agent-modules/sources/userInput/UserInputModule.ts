@@ -81,6 +81,7 @@ export const MAX_USER_INPUT_OUTPUT_CHARACTERS = 8_000;
 /** How far up the family tree an agent is looked for before the answer is no. */
 const MAX_USER_INPUT_ANCESTRY_DEPTH = 64;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
+const ABORTED_TURN_CANCEL_REASON = "The agent run was aborted.";
 
 type UserInputWaitOutcome =
     | {
@@ -126,6 +127,11 @@ export class UserInputModule implements AgentModule {
                 requestUserInputTool(this, scope.agent.id),
                 cancelAskTool(this, scope.agent.id),
             ];
+        },
+
+        afterTurnTransact: async (ctx: Context, scope: AgentModuleScope, turn): Promise<void> => {
+            if (!turn.aborted) return;
+            await this.#cancelPendingForAbortedTurn(ctx, scope.agent.id);
         },
     };
 
@@ -303,7 +309,9 @@ export class UserInputModule implements AgentModule {
         await this.#authorize(ctx, agentId, targetAgentId, "list");
         const limit = query.limit ?? MAX_USER_INPUT_PAGE_SIZE;
         if (limit > MAX_USER_INPUT_PAGE_SIZE) {
-            throw new Error(`User input page limit cannot exceed ${String(MAX_USER_INPUT_PAGE_SIZE)}.`);
+            throw new Error(
+                `User input page limit cannot exceed ${String(MAX_USER_INPUT_PAGE_SIZE)}.`,
+            );
         }
         const requestedCursor = query.cursor ?? "0";
         assertSourceCursor(requestedCursor, "requests");
@@ -382,7 +390,8 @@ export class UserInputModule implements AgentModule {
         if (query.limit !== undefined && query.detailLimit !== undefined) {
             throw new Error("User input detail query cannot specify both limit and detailLimit.");
         }
-        const requestedLimit = query.limit ?? query.detailLimit ?? MAX_USER_INPUT_DETAIL_PAGE_CHARACTERS;
+        const requestedLimit =
+            query.limit ?? query.detailLimit ?? MAX_USER_INPUT_DETAIL_PAGE_CHARACTERS;
         if (requestedLimit > MAX_USER_INPUT_DETAIL_PAGE_CHARACTERS) {
             throw new Error("User input detail page exceeds its configured bound.");
         }
@@ -467,6 +476,38 @@ export class UserInputModule implements AgentModule {
         }
         const terminal = this.#terminalRequest(current, outcome, now());
         return await this.#persistTransition(ctx, agentId, "user_input_completed", terminal);
+    }
+
+    /**
+     * An aborted turn cannot still be waiting for a person. Always read the first pending page:
+     * changing a row removes it from this query, so advancing a numeric offset would skip rows.
+     */
+    async #cancelPendingForAbortedTurn(ctx: Context, agentId: string): Promise<void> {
+        this.#assertAgentId(agentId);
+        while (true) {
+            const page = await this.#store.listRequests(ctx, agentId, {
+                askingAgentId: agentId,
+                cursor: "0",
+                limit: MAX_USER_INPUT_PAGE_SIZE,
+                status: "pending",
+            });
+            assertUserInputPage(page);
+            if (page.requests.length === 0) return;
+            for (const request of page.requests) {
+                this.#assertRequest(request);
+                if (request.askingAgentId !== agentId || request.status !== "pending") {
+                    throw new Error(
+                        "User input store returned a pending request outside the aborted agent.",
+                    );
+                }
+                const cancelled = this.#terminalRequest(
+                    request,
+                    { outcome: "cancelled", reason: ABORTED_TURN_CANCEL_REASON },
+                    now(),
+                );
+                await this.#persistTransition(ctx, agentId, "user_input_cancelled", cancelled);
+            }
+        }
     }
 
     async #persistTransition(
@@ -608,10 +649,7 @@ export class UserInputModule implements AgentModule {
             rejectOutcome = reject;
         });
         const elapsed = (): number =>
-            Math.min(
-                MAX_USER_INPUT_TIMESTAMP,
-                Math.max(0, now() - request.createdAt),
-            );
+            Math.min(MAX_USER_INPUT_TIMESTAMP, Math.max(0, now() - request.createdAt));
         const clearTimer = (): void => {
             if (timer === undefined) return;
             clearTimeout(timer);
@@ -1004,7 +1042,6 @@ export class UserInputModule implements AgentModule {
     #assertValue(schema: TSchema, value: unknown, label: string): void {
         if (!Value.Check(schema, value)) throw new Error(`Invalid ${label}.`);
     }
-
 }
 
 export function formatUserInputForModel(

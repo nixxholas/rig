@@ -11,7 +11,7 @@ import {
 import { projectAgentIdSchema, projectIdSchema, type Project } from "../Project.js";
 import { PROJECT_ROOT_AGENTS_TABLE } from "../ProjectMigrations.js";
 import { databaseFor, readProject } from "./projectRecords.js";
-import { projectAgentOrderKeyBetween } from "./projectRootAgentOrdering.js";
+import { projectOrderKeyBetween } from "./projectRootAgentOrdering.js";
 
 type ProjectAgentAssociationRow = {
     readonly agent_id: string;
@@ -38,7 +38,7 @@ export async function attachProjectRootAgent(
     const ordered = await listProjectRootAgents(ctx, association.projectId);
     const orderedAssociation: ProjectAgentAssociation = {
         ...association,
-        orderKey: projectAgentOrderKeyBetween(ordered.at(-1)?.orderKey ?? null, null),
+        orderKey: projectOrderKeyBetween(ordered.at(-1)?.orderKey ?? null, null),
     };
     await agentDatabaseRun(
         database,
@@ -98,7 +98,7 @@ export async function reorderProjectRootAgent(
     if (afterAgentId !== null && afterIndex < 0) {
         throw new Error("The agent to place after does not belong to that project.");
     }
-    const orderKey = projectAgentOrderKeyBetween(
+    const orderKey = projectOrderKeyBetween(
         afterIndex === -1 ? null : (remaining[afterIndex]?.orderKey ?? null),
         remaining[afterIndex + 1]?.orderKey ?? null,
     );

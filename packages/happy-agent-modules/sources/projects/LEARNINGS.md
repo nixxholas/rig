@@ -59,19 +59,13 @@ value this catalog never wrote is refused instead.
 
 ## Order keys should be fractional, not dense positions
 
-Today an order key is the row's position, zero-padded (`orderKeyForPosition`), so one drag renumbers
-every row it jumped and `writeGuardedProjectOrder` moves those keys without bumping their versions.
-A client that keeps its catalog from the event feed hears only about the row someone dragged: the
-rows it jumped still hold their old keys, two projects claim one position, the tie breaks on id, and
-the dragged row is drawn straight back where it started. The daemon is right and the drag is lost
-anyway. The reorder route now announces every project the transaction moved, which makes the feed
-truthful, but the neighbours are still unversioned writes.
+Dense positional keys made one drag rewrite every row it crossed without versioning or announcing
+those neighbour changes. Event-driven clients then retained duplicate positions and could draw the
+moved row back where it started.
 
-Rig before the module rewrite had no such problem: `projectReorder` wrote exactly one row with a key
-from `orderKeyAfter` / `generateKeyBetween` — vendored fractional indexing, still sitting unused at
-`packages/rig/sources/utils/fractionalIndexing.ts`. A move touched one row, bumped one version, and
-produced one event that told the whole truth. Reordering should go back to that: a fractional key
-between the two neighbours the row lands amongst, one guarded write, no whole-list rewrite.
+Project and root-agent ordering now use decimal fractional keys. A reorder computes one key between
+the destination neighbours, guards and versions only the moved resource, and emits one event that
+tells the whole truth. Neighbour rows remain byte-for-byte unchanged.
 
 ## A remote port is digits
 

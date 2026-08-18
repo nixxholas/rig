@@ -30,6 +30,7 @@ import {
     type WorkspaceReserveHooks,
 } from "./Workspace.js";
 import type { WorkspacesModule } from "./WorkspacesModule.js";
+import { WorkspaceInputError } from "./WorkspaceInputError.js";
 import { workspaceBranchName, workspaceNameKey } from "./WorkspaceIdentity.js";
 import {
     workspaceBranchMetadataSchema,
@@ -470,7 +471,7 @@ export function createWorkspaceStore(catalog: WorkspacesModule): WorkspaceStore 
         reorder: async (ctx, input, operation) => {
             const database = ctx.db;
             if (input.afterId === input.workspaceId) {
-                throw new Error("A workspace cannot be placed after itself.");
+                throw new WorkspaceInputError("A workspace cannot be placed after itself.");
             }
             const target = await readWorkspace(database, input.workspaceId);
             if (target === undefined) {
@@ -484,7 +485,9 @@ export function createWorkspaceStore(catalog: WorkspacesModule): WorkspaceStore 
             const afterIndex =
                 input.afterId === null ? -1 : ordered.findIndex((row) => row.id === input.afterId);
             if (input.afterId !== null && afterIndex === -1) {
-                throw new Error("The workspace to place after was not found in the project.");
+                throw new WorkspaceInputError(
+                    "The workspace to place after is not a sibling of this workspace.",
+                );
             }
             const orderKey = orderKeyBetween(
                 afterIndex === -1 ? null : (ordered[afterIndex]?.orderKey ?? null),
@@ -526,7 +529,11 @@ export function createWorkspaceStore(catalog: WorkspacesModule): WorkspaceStore 
                     "The workspace changed before it could be archived.",
                 );
                 if (isSettled(current)) return undefined;
-                const next: Workspace = { ...current, status: "archiving" };
+                const next: Workspace = {
+                    ...current,
+                    status: "archiving",
+                    archivedAt: Math.max(now(), current.updatedAt + 1),
+                };
                 delete next.initializationError;
                 return next;
             });
@@ -538,7 +545,6 @@ export function createWorkspaceStore(catalog: WorkspacesModule): WorkspaceStore 
                 const next: Workspace = {
                     ...before,
                     status: "archived",
-                    archivedAt: Math.max(now(), before.updatedAt + 1),
                 };
                 delete next.initializationError;
                 return next;

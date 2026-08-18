@@ -14,12 +14,11 @@ import { sameJson } from "../ProjectTransition.js";
 import {
     assertExpectedProjectVersion,
     databaseFor,
-    orderKeyForPosition,
     requireProject,
     writeGuardedProject,
-    writeGuardedProjectOrder,
 } from "./projectRecords.js";
 import { deleteProjectAvatar, queryProjectAvatar, writeProjectAvatar } from "./projectAvatars.js";
+import { projectOrderKeyBetween } from "./projectRootAgentOrdering.js";
 
 /** The edits a person makes to a catalog row: its name, place, avatar and settings. */
 export function createProjectCatalogEdits(): Pick<
@@ -96,9 +95,7 @@ export function createProjectCatalogEdits(): Pick<
                       })();
             const reordered = [...withoutTarget];
             reordered.splice(insertionIndex, 0, before);
-            const changed =
-                reordered.some((project, index) => project.id !== ordered[index]?.id) ||
-                before.orderKey !== orderKeyForPosition(currentIndex + 1);
+            const changed = reordered.some((project, index) => project.id !== ordered[index]?.id);
             if (!changed) {
                 return {
                     operation: "reorder",
@@ -107,38 +104,24 @@ export function createProjectCatalogEdits(): Pick<
                     project: before,
                 };
             }
-            // One rearrangement of one list. Every row is guarded by the version it was read at, so
-            // a catalog that moved while this order was being computed refuses the whole thing
-            // rather than leaving half a list in the new order and half in the old one. Only the
-            // project someone actually moved counts as changed; its neighbours just sit elsewhere.
+            const remainingBefore = withoutTarget[insertionIndex - 1];
+            const remainingAfter = withoutTarget[insertionIndex];
+            const orderKey = projectOrderKeyBetween(
+                remainingBefore?.orderKey ?? null,
+                remainingAfter?.orderKey ?? null,
+            );
             const updatedAt = Date.now();
-            const conflict = "The project catalog changed before it could be reordered.";
-            let moved: Project | undefined;
-            for (const [index, project] of reordered.entries()) {
-                const orderKey = orderKeyForPosition(index + 1);
-                if (project.id === input.projectId) {
-                    moved = await writeGuardedProject(
-                        database,
-                        project.id,
-                        before.version,
-                        sql`UPDATE ${sql.raw(PROJECTS_TABLE)}
-                            SET order_key = ${orderKey}, updated_at = ${updatedAt},
-                                version = version + 1
-                            WHERE id = ${project.id} AND version = ${before.version}
-                            RETURNING id`,
-                        "The project changed before it could be reordered.",
-                    );
-                } else if (project.orderKey !== orderKey) {
-                    await writeGuardedProjectOrder(
-                        database,
-                        project.id,
-                        project.version,
-                        orderKey,
-                        conflict,
-                    );
-                }
-            }
-            if (moved === undefined) throw new Error(conflict);
+            const moved = await writeGuardedProject(
+                database,
+                input.projectId,
+                before.version,
+                sql`UPDATE ${sql.raw(PROJECTS_TABLE)}
+                    SET order_key = ${orderKey}, updated_at = ${updatedAt},
+                        version = version + 1
+                    WHERE id = ${input.projectId} AND version = ${before.version}
+                    RETURNING id`,
+                "The project changed before it could be reordered.",
+            );
             return {
                 operation: "reorder",
                 changed: true,

@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
+import type { UserInputEvent } from "../../sources/userInput/index.js";
+import { resolveModuleHooks } from "../support/moduleHooks.js";
 import {
     createPresenceModule,
     createUserInputDatabase,
@@ -23,6 +25,98 @@ function enqueue<T>(operation: () => Promise<T>): Promise<T> {
 }
 
 describe("UserInput waits, presence, and concurrency", () => {
+    it("cancels every pending question when an aborted turn commits, emits events, and wakes waiters", async () => {
+        const events: UserInputEvent[] = [];
+        const module = createUserInputModule();
+        module.onEvent((_ctx, event) => {
+            events.push(event);
+        });
+        const database = createUserInputDatabase(module, "user-input-aborted-turn");
+        await database.ready;
+        try {
+            const hooks = await resolveModuleHooks(database.context, module);
+            const requestIds: string[] = [];
+            for (let index = 0; index <= 50; index += 1) {
+                const request = await module.ask(
+                    database.context,
+                    agentId,
+                    singularAsk(),
+                    `aborted-${String(index)}`,
+                );
+                requestIds.push(request.id);
+            }
+            await module.ask(database.context, "other-agent", singularAsk(), "other-pending");
+            events.length = 0;
+
+            const waiting = module.wait(database.context, agentId, requestIds[0]!);
+            await database.context.inTx(async (txCtx) => {
+                await hooks.afterTurnTransact!(txCtx, { agent: { id: agentId } } as never, {
+                    loopId: "loop-aborted",
+                    turnId: "turn-aborted",
+                    contextTokens: undefined,
+                    aborted: true,
+                });
+            });
+
+            await expect(waiting).resolves.toMatchObject({
+                id: requestIds[0],
+                status: "cancelled",
+                reason: "The agent run was aborted.",
+            });
+            await vi.waitFor(() =>
+                expect(
+                    events.filter((event) => event.type === "user_input_cancelled"),
+                ).toHaveLength(requestIds.length),
+            );
+            await expect(
+                module.list(database.context, agentId, { status: "pending" }),
+            ).resolves.toEqual([]);
+            await expect(
+                module.get(database.context, "other-agent", "other-pending"),
+            ).resolves.toMatchObject({
+                status: "pending",
+            });
+        } finally {
+            database.close();
+        }
+    });
+
+    it("leaves pending questions alone after a non-aborted turn", async () => {
+        const events: UserInputEvent[] = [];
+        const module = createUserInputModule();
+        module.onEvent((_ctx, event) => {
+            events.push(event);
+        });
+        const database = createUserInputDatabase(module, "user-input-completed-turn");
+        await database.ready;
+        try {
+            const hooks = await resolveModuleHooks(database.context, module);
+            const request = await module.ask(
+                database.context,
+                agentId,
+                singularAsk(),
+                "completed-turn-request",
+            );
+            events.length = 0;
+
+            await database.context.inTx((txCtx) =>
+                hooks.afterTurnTransact!(txCtx, { agent: { id: agentId } } as never, {
+                    loopId: "loop-completed",
+                    turnId: "turn-completed",
+                    contextTokens: undefined,
+                    aborted: false,
+                }),
+            );
+
+            await expect(module.get(database.context, agentId, request.id)).resolves.toMatchObject({
+                status: "pending",
+            });
+            expect(events).toEqual([]);
+        } finally {
+            database.close();
+        }
+    });
+
     it("wakes a parked wait with the outcome a direct answer committed", async () => {
         const module = createUserInputModule();
         const database = createUserInputDatabase(module, "user-input-wait-context");

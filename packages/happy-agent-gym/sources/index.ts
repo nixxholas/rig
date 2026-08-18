@@ -14,7 +14,14 @@ export {
     type GymSendOptions,
     type GymSessionRecord,
 } from "./createAgentGym.js";
+export { createUnixSocketFetch } from "./createUnixSocketFetch.js";
+export {
+    connectTerminalWebSocket,
+    connectWorkspaceProxy,
+    type HappyAgentSocketTransport,
+} from "./HappyAgentDuplex.js";
 export { createGymCompute } from "./createGymCompute.js";
+export * from "./chaos/index.js";
 export {
     createGymHome,
     resolveFixturePath,
@@ -28,6 +35,7 @@ export {
     type GymEventStreamOptions,
     type GymSseFrame,
 } from "./GymEventStream.js";
+export { HappyAgentEventStream, frameEvent as clientFrameEvent } from "./HappyAgentEventStream.js";
 export { GymHttpClient, type GymHttpClientOptions, type GymHttpResponse } from "./GymHttpClient.js";
 export {
     createScriptedInference,

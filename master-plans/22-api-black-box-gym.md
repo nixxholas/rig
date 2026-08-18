@@ -93,6 +93,79 @@ gap hello, slow consumers stay bounded, and resync converges. Restart tests
 prove the ledger's expectation for every durable and runtime resource instead
 of assuming that all state has the same lifetime.
 
+## Scale and continuous consistency
+
+Completion requires at least 596 independently named, runnable, passing API
+scenarios. A scenario counts only when Vitest collects and passes it in the
+authoritative unprivileged Linux job. Skips, TODOs, quarantines, retries,
+expected failures, and platform exclusions count as zero. The Linux job owns
+real Git, smart-HTTP clone, watcher, terminal, and loopback proxy coverage that
+cannot run inside a nested macOS Seatbelt sandbox.
+
+The matrix uses constrained pairwise partitions rather than cosmetic value
+changes or a Cartesian product. Every case adds a distinct state, boundary,
+concurrency outcome, failure phase, or recovery obligation. Each parameterized
+row has a stable scenario ID and appears independently in Vitest output.
+
+Exactly 120 of the scenarios are deterministic model-based chaos traces,
+executing 9,640 public actions in total:
+
+| Chaos file                         | Stable seeds | Actions per seed | Tests   | Public actions |
+| ---------------------------------- | ------------ | ---------------- | ------- | -------------- |
+| `happy_api_chaos_catalog.test.ts`  | `C000-C023`  | 80               | 24      | 1,920          |
+| `happy_api_chaos_files.test.ts`    | `F000-F015`  | 80               | 16      | 1,280          |
+| `happy_api_chaos_runs.test.ts`     | `R000-R019`  | 60               | 20      | 1,200          |
+| `happy_api_chaos_runtime.test.ts`  | `T000-T011`  | 40               | 12      | 480            |
+| `happy_api_chaos_sync.test.ts`     | `S000-S027`  | 120              | 28      | 3,360          |
+| `happy_api_chaos_recovery.test.ts` | `X000-X019`  | 70               | 20      | 1,400          |
+| **Total**                          |              |                  | **120** | **9,640**      |
+
+One black-box reference model tracks daemon generations and cursors, streams,
+config, profile, onboarding, projects, the workspace tree, owner-local agent
+catalogs, transcripts, usage, files, active runs, questions, processes,
+terminals, version chains, observable effects, pending asynchronous
+obligations, and an event-reconstructed replica. Domain-specific model pieces
+stay in their exclusive chaos lane; only deterministic scheduling, trace,
+replay, barrier, reduction, and reporting primitives are shared.
+
+Every chaos schedule is generated before execution from a committed seed. A
+step records pre-state, performs one public command, consumes events to a
+deterministic observable barrier, and checks the full model before the next
+action. A true race may accept any valid observed linearization, but the model
+must commit to that linearization and prove it everywhere. Failures print the
+suite, seed, step, sanitized command, model digest, cursor, and complete replay
+prefix. `API_CHAOS_SEED` selects one trace. Deterministic reduction truncates
+to the failing prefix, then simplifies race batches, operands, and resource
+dependencies without retrying the original test.
+
+After every action, including every rejection, the gym proves:
+
+- IDs are unique; project ID equals root-workspace ID.
+- The workspace graph is rooted, acyclic, and project-local; workspace
+  hierarchy and agent ancestry never cross.
+- Every active top-level agent occurs in exactly one owner-local ordered
+  series; subagents occur in none.
+- Successful mutations agree across response, ordered events, mutation echo,
+  resource versions, fresh reads, and real effects.
+- Rejections change no version, event replica, bytes, catalog, process, or
+  other effect, and the client remains usable.
+- Versions and cursors advance legally; pull, SSE, bootstrap, event reduction,
+  and fresh reads converge without visible duplicates.
+- Messages, runs, pending work, questions, processes, and terminal reasons
+  remain in a legal state machine; only user steering emits `run.boundary`.
+- File bytes and hashes agree, failed CAS or confinement attempts preserve the
+  prior bytes, and Git/watch state matches the real repository.
+- Restart preserves durable state and removes runtime state exactly as the
+  contract requires; disposal leaves no owned process, socket, stream,
+  terminal, tunnel, or fixture path.
+
+Failure injection remains public and unprivileged: stale guards, malformed or
+oversized bodies, symlink escapes, moved folders, inference failure, owned
+child-process exit and signals, unreachable targets, half-closes, malformed
+terminal frames, dropped streams, wrong tokens, public shutdown, and
+harness-owned daemon kill or restart. Tests never patch databases or modules,
+pause internal commit points, request elevation, or use random sleeps.
+
 ## Ordered work
 
 **A. Establish the shared boundary sequentially.** After two GPT-5.6 Sol agents
@@ -144,6 +217,20 @@ ledger. A dedicated `pnpm test:gym:api` command runs the entire API suite. Add
 no internal import, test-only endpoint, elevation, sleep, shared fixture, or
 legacy behavior to make a gap disappear.
 
+**D. Expand the named behavior matrix and chaos model.** The original eleven
+files remain fast smoke coverage. Exclusive Luna-max lanes add the matrix files
+and minimum counts recorded in the coverage ledger. The deterministic chaos
+foundation lands and freezes before the six chaos lanes begin. It owns only
+the fixed PRNG, schedule and trace types, public-state barriers, replay and
+reduction helpers, sanitized failure reporting, and the suite result gate.
+Each chaos lane owns its test file and domain reference model.
+
+The authoritative suite runner asks Vitest for its collected tests and final
+JSON result. It fails unless at least 596 API tests are runnable, exactly 120
+named chaos seeds are collected and pass, every collected test passes, and
+there are zero skips, TODOs, retries, expected failures, unhandled errors, or
+leaked resources. Source-text counting is not evidence.
+
 ## Criteria for the whole plan
 
 - The new client can drive the entire public API against a real local daemon.
@@ -163,6 +250,11 @@ legacy behavior to make a gap disappear.
 - Every implementation lane has exclusive file ownership and an independently
   runnable targeted command; the whole suite remains easy to run from the
   repository root.
+- Vitest collects and passes at least 596 independently named API scenarios,
+  including exactly 120 passing deterministic chaos seeds and all 9,640
+  modeled public actions, with invariant checks after every action.
+- No skipped, TODO, quarantined, retried, expected-failing, or
+  platform-excluded scenario contributes to completion.
 - The completed coverage ledger has exactly one passing owner for every public
   method and path, response, stable error, event, version transition, mutation
   echo, effect, restart expectation, and removed legacy route, with no

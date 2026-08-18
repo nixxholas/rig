@@ -248,22 +248,30 @@ export class ProfileModule<Database extends AgentDatabase = AgentDatabase> imple
             )
         )[0];
         if (row === undefined) return undefined;
-        if (!Value.Check(storedPhotoRowSchema, row)) {
+        const record = row as Record<string, unknown>;
+        const stored = {
+            ...record,
+            photo_bytes:
+                record["photo_bytes"] instanceof ArrayBuffer
+                    ? new Uint8Array(record["photo_bytes"])
+                    : record["photo_bytes"],
+        };
+        if (!Value.Check(storedPhotoRowSchema, stored)) {
             throw new Error("The stored profile photo is invalid.");
         }
-        const bytes = new Uint8Array(row.photo_bytes);
+        const bytes = new Uint8Array(stored.photo_bytes);
         const actualHash = createHash("sha256").update(bytes).digest("hex");
-        if (actualHash !== row.content_hash) {
+        if (actualHash !== stored.content_hash) {
             throw new Error("The stored profile photo does not match its content hash.");
         }
         const asset: ProfilePhotoAsset = {
             bytes,
-            contentHash: row.content_hash,
-            contentType: row.content_type,
-            etag: `"${row.content_hash}"`,
-            height: row.height,
-            thumbhash: row.thumbhash,
-            width: row.width,
+            contentHash: stored.content_hash,
+            contentType: stored.content_type,
+            etag: `"${stored.content_hash}"`,
+            height: stored.height,
+            thumbhash: stored.thumbhash,
+            width: stored.width,
         };
         if (!Value.Check(profilePhotoAssetSchema, asset)) {
             throw new Error("The stored profile photo metadata is invalid.");

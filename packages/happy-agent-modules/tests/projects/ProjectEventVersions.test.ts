@@ -115,6 +115,52 @@ describe("project lifecycle event versions", () => {
             database.close();
         }
     });
+
+    it("reorders one project without silently changing its neighbours", async () => {
+        const database = moduleDatabase(projectMigrations, "project-reorder-event-version-chain");
+        await database.ready;
+        try {
+            const projects = new ProjectsModule(await temporaryTestConfig(), new GitModule());
+            const events: ProjectEvent[] = [];
+            projects.onEventTransactional((_ctx, event) => {
+                events.push(event);
+            });
+
+            const first = await projects.create(database.context, {
+                repositoryRef: "/tmp/projects/reorder-version-chain-first",
+                name: "First",
+            });
+            const second = await projects.create(database.context, {
+                repositoryRef: "/tmp/projects/reorder-version-chain-second",
+                name: "Second",
+            });
+            const third = await projects.create(database.context, {
+                repositoryRef: "/tmp/projects/reorder-version-chain-third",
+                name: "Third",
+            });
+            events.length = 0;
+
+            const reordered = await projects.reorder(database.context, {
+                afterId: third.id,
+                expectedVersion: first.version,
+                projectId: first.id,
+            });
+
+            expect(await projects.get(database.context, second.id)).toEqual(second);
+            expect(await projects.get(database.context, third.id)).toEqual(third);
+            expect(events).toHaveLength(1);
+            expect(events[0]).toMatchObject({
+                type: "project_reordered",
+                previousProject: first,
+                project: reordered,
+            });
+            expect(first.orderKey < second.orderKey).toBe(true);
+            expect(second.orderKey < third.orderKey).toBe(true);
+            expect(third.orderKey < reordered.orderKey).toBe(true);
+        } finally {
+            database.close();
+        }
+    });
 });
 
 async function requiredProject(

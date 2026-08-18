@@ -62,6 +62,8 @@ export interface StartHappyAgentRuntimeOptions {
     };
     /** Test-only machine replacement. */
     readonly compute?: (ctx: Context, config: HostComputeConfig) => Promise<Compute>;
+    /** Test-owned environment overrides consumed only by the config module. */
+    readonly environment?: Readonly<NodeJS.ProcessEnv>;
     /**
      * Called after the API exists but before agents restore.
      *
@@ -138,6 +140,7 @@ export async function startHappyAgentRuntime(
     options: StartHappyAgentRuntimeOptions = {},
 ): Promise<HappyAgentRuntime> {
     const config = await ConfigModule.load(options.happyHome, {
+        ...(options.environment === undefined ? {} : { environment: options.environment }),
         ...(options.inference === undefined ? {} : { inference: options.inference }),
         ...(options.version === undefined ? {} : { version: options.version }),
     });

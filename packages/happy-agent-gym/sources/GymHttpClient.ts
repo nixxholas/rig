@@ -20,12 +20,12 @@ export interface GymHttpClientOptions {
 }
 
 /**
- * The Unix-socket client a gym hands to a test.
+ * A deliberately raw Unix-socket probe.
  *
- * It speaks the daemon's real `/v0` API over its real socket with its real token, and it never
- * throws on an unsuccessful status: a test asserting that a route answers `400` should read the
- * status rather than catch an exception. Use {@link GymHttpClient.ok} when only success is
- * interesting.
+ * Ordinary JSON and SSE scenarios use `HappyAgentClient`; this escape hatch is
+ * reserved for exact authentication/header/unknown-route assertions where a
+ * typed client intentionally has no method. It never throws on unsuccessful
+ * statuses so those probes can inspect the daemon's complete answer.
  */
 export class GymHttpClient {
     readonly socketPath: string;

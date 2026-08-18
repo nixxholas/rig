@@ -672,12 +672,43 @@ export class WorkspacesModule implements AgentModule {
         workspaceId: string,
         options: WorkspaceArchiveOptions = {},
     ): Promise<Workspace> {
-        const begun = await this.beginArchive(ctx, workspaceId, options);
-        if (begun.status !== "archiving") return begun;
-        this.#runCleanup(ctx, async (workerCtx) => {
-            await this.removeArchivedWorkspace(workerCtx, begun.projectRef, workspaceId);
+        const archived = await ctx.inTx(async (txCtx) => {
+            const root = await this.get(txCtx, workspaceId);
+            if (root === undefined) {
+                throw new Error(`Workspace "${workspaceId}" was not found.`);
+            }
+            const descendants: Workspace[] = [];
+            const visit = async (parent: Workspace): Promise<void> => {
+                const children = await readWorkspaceChildren(
+                    txCtx.db,
+                    parent.projectRef,
+                    parent.id,
+                    false,
+                );
+                for (const child of children) {
+                    await visit(child);
+                    descendants.push(child);
+                }
+            };
+            await visit(root);
+
+            const rows: Workspace[] = [];
+            for (const descendant of descendants) {
+                rows.push(await this.beginArchive(txCtx, descendant.id));
+            }
+            const begun = await this.beginArchive(txCtx, workspaceId, options);
+            rows.push(begun);
+            return { begun, rows };
         });
-        return begun;
+        for (const workspace of archived.rows) this.#stopSetup(workspace.id);
+        const cleanup = archived.rows.filter((workspace) => workspace.status === "archiving");
+        if (cleanup.length === 0) return archived.begun;
+        this.#runCleanup(ctx, async (workerCtx) => {
+            for (const workspace of cleanup) {
+                await this.removeArchivedWorkspace(workerCtx, workspace.projectRef, workspace.id);
+            }
+        });
+        return archived.begun;
     }
 
     // --- Folders, Git, and setup -------------------------------------------------------------

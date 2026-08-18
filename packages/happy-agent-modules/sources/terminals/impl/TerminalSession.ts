@@ -10,6 +10,7 @@ import {
     type RemoteTerminalProtocolServer,
     type RemoteTerminalScrollbackPage,
 } from "@slopus/ghostty-web";
+import { createId } from "@paralleldrive/cuid2";
 
 import {
     MAX_TERMINAL_COLS,
@@ -30,7 +31,7 @@ import { GhosttyTerminalState } from "./GhosttyTerminalState.js";
  * same emulator on the other side is what turns them back into a picture.
  */
 export class TerminalSession {
-    readonly id = randomUUID();
+    readonly id = createId();
     readonly colorScheme: TerminalColorScheme;
 
     readonly #driver: GhosttyRemoteTerminalServerDriver;

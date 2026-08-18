@@ -322,7 +322,8 @@ export class ProjectsModule implements AgentModule {
                                 "The project changed while its agent was being attached.",
                             );
                             assertProjectTransition(before, after, []);
-                            await this.#mutations.observe(
+                            await this.#mutations.observeMutation(
+                                ctx,
                                 txCtx,
                                 this.#mutations.newEvent({
                                     type: "project_agent_attached",
@@ -330,7 +331,6 @@ export class ProjectsModule implements AgentModule {
                                     project: after,
                                     previousProject: before,
                                 }),
-                                ctx,
                             );
                         }),
                 ),
@@ -405,7 +405,8 @@ export class ProjectsModule implements AgentModule {
                                 "The project changed while its agent was being reordered.",
                             );
                             assertProjectTransition(before, after, []);
-                            await this.#mutations.observe(
+                            await this.#mutations.observeMutation(
+                                ctx,
                                 txCtx,
                                 this.#mutations.newEvent({
                                     type: "project_agent_reordered",
@@ -414,7 +415,6 @@ export class ProjectsModule implements AgentModule {
                                     project: after,
                                     previousProject: before,
                                 }),
-                                ctx,
                             );
                         }),
                 ),
@@ -758,7 +758,8 @@ export class ProjectsModule implements AgentModule {
                 throw new Error("The settings result reports the wrong change.");
             }
             if (changed) {
-                await this.#mutations.observe(
+                await this.#mutations.observeMutation(
+                    ctx,
                     txCtx,
                     this.#mutations.newEvent({
                         type: "project_settings_updated",
@@ -1175,6 +1176,10 @@ export class ProjectsModule implements AgentModule {
                 } finally {
                     this.#activeInitializations -= 1;
                     this.#initializing.delete(pending);
+                    const current = this.#closed ? undefined : await this.get(workerCtx, pending);
+                    if (current?.initializationStatus === "initializing") {
+                        await this.scheduleInitialization(workerCtx, pending);
+                    }
                     if (!this.#closed) this.#drainInitializations(lifetime);
                 }
             });

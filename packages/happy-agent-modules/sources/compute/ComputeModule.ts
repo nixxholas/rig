@@ -296,6 +296,22 @@ export class ComputeModule implements AgentModule {
         return await this.#processes.stop(agentId, processId);
     }
 
+    /** Ends one archived agent's machine and every background process it still owns. */
+    async archiveAgent(ctx: Context, agentId: string): Promise<void> {
+        await this.#track(
+            this.#computeLocks.runInLock(ctx, agentId, async (lockCtx) => {
+                if (this.#closed) return;
+                const cached = this.#computes.get(agentId);
+                if (cached === undefined) return;
+                this.#computes.delete(agentId);
+                this.#processes.detach(cached.compute);
+                await this.#processes.drain();
+                await cached.compute.dispose(lockCtx);
+                this.#processes.exitAll(agentId, cached.compute);
+            }),
+        );
+    }
+
     /**
      * The permission boundary every compute operation in the current tool call runs under.
      *
@@ -438,18 +454,7 @@ export class ComputeModule implements AgentModule {
             _scope: AgentModuleSystemScope,
             agent: { readonly id: string },
         ): Promise<void> => {
-            await this.#track(
-                this.#computeLocks.runInLock(ctx, agent.id, async (lockCtx) => {
-                    if (this.#closed) return;
-                    const cached = this.#computes.get(agent.id);
-                    if (cached === undefined) return;
-                    this.#computes.delete(agent.id);
-                    this.#processes.detach(cached.compute);
-                    await this.#processes.drain();
-                    await cached.compute.dispose(lockCtx);
-                    this.#processes.exitAll(agent.id, cached.compute);
-                }),
-            );
+            await this.archiveAgent(ctx, agent.id);
         },
     };
 

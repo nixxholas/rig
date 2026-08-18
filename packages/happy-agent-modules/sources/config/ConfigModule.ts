@@ -945,6 +945,8 @@ export interface ConfigModuleLoadOptions {
      * account reaches every module that names one, not only the agent system.
      */
     readonly inference?: ConfigInferenceOverride;
+    /** Test-owned environment overrides for paths and credentials. */
+    readonly environment?: Readonly<NodeJS.ProcessEnv>;
 }
 
 /**
@@ -956,6 +958,7 @@ export class ConfigModule implements AgentModule {
     readonly configuration: HappyAgentConfiguration;
 
     readonly #scripted: ConfigInferenceOverride | undefined;
+    readonly #environment: Readonly<NodeJS.ProcessEnv>;
     #models: readonly AgentModel[] | undefined;
     #projectsHome: string | undefined;
     #providers: AgentProviders | undefined;
@@ -964,9 +967,11 @@ export class ConfigModule implements AgentModule {
     private constructor(
         configuration: HappyAgentConfiguration,
         scripted: ConfigInferenceOverride | undefined,
+        environment: Readonly<NodeJS.ProcessEnv>,
     ) {
         this.configuration = configuration;
         this.#scripted = scripted;
+        this.#environment = environment;
     }
 
     readonly #hooks: AgentModuleHooks = {
@@ -1011,7 +1016,7 @@ export class ConfigModule implements AgentModule {
      * longer than any other configured string, and there is no Gemini key at all.
      */
     get geminiApiKey(): string | undefined {
-        const value = process.env["GEMINI_API_KEY"]?.trim();
+        const value = this.#environmentValue("GEMINI_API_KEY")?.trim();
         if (value === undefined || value.length === 0) return undefined;
         return value.length > MAX_CONFIG_STRING_LENGTH ? undefined : value;
     }
@@ -1027,7 +1032,7 @@ export class ConfigModule implements AgentModule {
      */
     get githubToken(): string | undefined {
         for (const name of ["GITHUB_TOKEN", "GH_TOKEN"] as const) {
-            const value = process.env[name]?.trim();
+            const value = this.#environmentValue(name)?.trim();
             if (value === undefined || value.length === 0) continue;
             return value.length > MAX_CONFIG_STRING_LENGTH ? undefined : value;
         }
@@ -1051,7 +1056,10 @@ export class ConfigModule implements AgentModule {
      * lands. Like the rest of the layout it is settled once per installation.
      */
     get projectsHome(): string {
-        this.#projectsHome ??= getManagedProjectsDirectory();
+        this.#projectsHome ??= getManagedProjectsDirectory({
+            ...process.env,
+            ...this.#environment,
+        });
         return this.#projectsHome;
     }
 
@@ -1062,8 +1070,17 @@ export class ConfigModule implements AgentModule {
      * one lands. It is settled once per installation, the way the rest of the layout is.
      */
     get workspacesHome(): string {
-        this.#workspacesHome ??= getManagedWorkspacesDirectory();
+        this.#workspacesHome ??= getManagedWorkspacesDirectory({
+            ...process.env,
+            ...this.#environment,
+        });
         return this.#workspacesHome;
+    }
+
+    #environmentValue(name: string): string | undefined {
+        return Object.hasOwn(this.#environment, name)
+            ? this.#environment[name]
+            : process.env[name];
     }
 
     /**
@@ -1144,7 +1161,11 @@ export class ConfigModule implements AgentModule {
         if (!Value.Check(happyAgentConfigurationSchema, configuration)) {
             throw new Error("The Happy Agent configuration is invalid.");
         }
-        return new ConfigModule(deepFreeze(configuration), options.inference);
+        return new ConfigModule(
+            deepFreeze(configuration),
+            options.inference,
+            Object.freeze({ ...options.environment }),
+        );
     }
 }
 

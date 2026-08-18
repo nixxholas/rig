@@ -16,14 +16,17 @@
         "@paralleldrive/cuid2": "^3.3.0",
         "@sinclair/typebox": "^0.34.49",
         "@slopus/happy-agent": "workspace:*",
+        "@slopus/happy-agent-client": "workspace:*",
         "@slopus/happy-agent-base": "npm:@slopus/happy-agent-base@0.0.20",
         "@slopus/happy-agent-compute": "npm:@slopus/happy-agent-compute@0.1.6",
         "@slopus/happy-agent-modules": "workspace:*",
         "@slopus/happy-providers": "0.0.10",
-        "@steve.kite/stdlib": "0.0.12"
+        "@steve.kite/stdlib": "0.0.12",
+        "ws": "^8.21.1"
     },
     "devDependencies": {
         "@types/node": "^24.0.10",
+        "@types/ws": "^8.18.1",
         "typescript": "^7.0.2",
         "vitest": "^3.2.4"
     },

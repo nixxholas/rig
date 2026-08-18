@@ -108,6 +108,48 @@ describe("ComputeModule process lifecycle", () => {
         expect(events.filter((event) => event.type === "process_exited")).toHaveLength(1);
     });
 
+    it("projects background processes without a backend detach hook", async () => {
+        const compute = new FakeCompute();
+        delete compute.shell.detachSession;
+        compute.script("quick", { chunks: ["done\n"] });
+        compute.script("watch", { keepRunning: true });
+        const { module, tool, call } = await computeToolset(ctx, compute, {
+            model: "anthropic/opus-5",
+        });
+        const events: ComputeProcessEvent[] = [];
+        module.onProcessEvent((event) => {
+            events.push(event);
+        });
+
+        await tool("Bash").execute(ctx, { command: "quick" }, call);
+        await expect(module.listProcesses(ctx, AGENT_ID)).resolves.toEqual([]);
+
+        await tool("Bash").execute(ctx, { command: "watch", run_in_background: true }, call);
+
+        const [running] = await module.listProcesses(ctx, AGENT_ID);
+        expect(running).toMatchObject({
+            agentId: AGENT_ID,
+            command: "watch",
+            status: "running",
+        });
+        expect(events).toEqual([{ process: running, type: "process_started" }]);
+
+        const stopped = await module.stopProcess(ctx, AGENT_ID, running!.id);
+        expect(stopped).toMatchObject({
+            id: running?.id,
+            status: "exited",
+        });
+        expect(events.at(-1)).toMatchObject({
+            previousVersion: running?.version,
+            processId: running?.id,
+            type: "process_exited",
+            version: stopped?.version,
+        });
+
+        await module.dispose(ctx);
+        expect(compute.shell.detachSession).toBeUndefined();
+    });
+
     it("retains bounded exited history and finalizes running rows when an agent is archived", async () => {
         const compute = new FakeCompute();
         compute.script("done", { keepRunning: true });

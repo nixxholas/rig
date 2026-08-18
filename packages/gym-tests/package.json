@@ -7,6 +7,7 @@
         "prepare:image": "pnpm --filter @slopus/rig-gym run build:image",
         "test:gym": "pnpm run test:gym:fast",
         "test:gym:just-bash": "node runGymLane.ts local",
+        "test:gym:api": "node --experimental-strip-types scripts/runHappyApiSuite.ts",
         "test:gym:fast": "node runGymLane.ts fast",
         "test:gym:heavy": "pnpm run prepare:image && RIG_GYM_SKIP_BUILD=1 node runGymLane.ts heavy",
         "test:gym:slow": "node runGymLane.ts slow",
@@ -18,6 +19,7 @@
     },
     "devDependencies": {
         "@earendil-works/pi-tui": "^0.80.3",
+        "@slopus/happy-agent-gym": "workspace:*",
         "@slopus/happy-agent-modules": "workspace:*",
         "@slopus/happy-providers": "0.0.10",
         "@slopus/rig-gym": "workspace:*",

@@ -56,22 +56,16 @@ export class ComputeProcessRegistry {
     attach(agentId: string, compute: HostCompute): void {
         const shell = compute.shell;
         const originalDetach = shell.detachSession;
-        let restoreDetach: (() => void) | undefined;
-        if (originalDetach !== undefined) {
-            const trackedDetach = (sessionId: number): void => {
-                originalDetach.call(shell, sessionId);
-                const session = shell
-                    .activeSessions?.()
-                    .find((candidate) => candidate.sessionId === sessionId);
-                if (session !== undefined) {
-                    this.#start(agentId, compute, sessionId, session.command);
-                }
-            };
-            shell.detachSession = trackedDetach;
-            restoreDetach = () => {
-                if (shell.detachSession === trackedDetach) shell.detachSession = originalDetach;
-            };
-        }
+        const trackedDetach = (sessionId: number): void => {
+            originalDetach?.call(shell, sessionId);
+            const session = shell
+                .activeSessions?.()
+                .find((candidate) => candidate.sessionId === sessionId);
+            if (session !== undefined) {
+                this.#start(agentId, compute, sessionId, session.command);
+            }
+        };
+        shell.detachSession = trackedDetach;
         shell.setSessionExitListener?.((exit) => {
             this.#exitFromNotice(agentId, compute, exit);
         });
@@ -82,7 +76,13 @@ export class ComputeProcessRegistry {
         this.#trackingCleanups.set(compute, () => {
             shell.setActiveSessionCountListener?.(undefined);
             shell.setSessionExitListener?.(undefined);
-            restoreDetach?.();
+            if (shell.detachSession === trackedDetach) {
+                if (originalDetach === undefined) {
+                    delete shell.detachSession;
+                } else {
+                    shell.detachSession = originalDetach;
+                }
+            }
         });
     }
 

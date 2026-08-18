@@ -6,7 +6,7 @@ const ORDER_DIGITS = "0123456789";
  * Creates the shortest decimal-fraction key strictly between two neighbouring
  * project-agent keys. Lexicographic order is the visible order.
  */
-export function projectAgentOrderKeyBetween(before: string | null, after: string | null): string {
+export function projectOrderKeyBetween(before: string | null, after: string | null): string {
     const lower = before ?? "";
     if (after !== null && lower >= after) {
         throw new Error("Project agent order keys are out of order.");

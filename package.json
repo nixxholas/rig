@@ -34,6 +34,7 @@
         "test": "pnpm --filter @slopus/happy-agent-modules build && pnpm --filter @slopus/happy-agent-compute build && pnpm run test:scripts && pnpm --recursive --filter './packages/**' run test",
         "test:release": "pnpm --filter @slopus/happy-agent-modules build && pnpm --filter @slopus/happy-agent-compute build && pnpm run test:scripts && pnpm --recursive --workspace-concurrency=1 --filter './packages/**' --filter '!happy-plugins' --filter '!@slopus/happy-providers' run test",
         "test:gym": "pnpm --filter @slopus/rig-gym-tests test:gym",
+        "test:gym:api": "pnpm --filter @slopus/rig-gym-tests test:gym:api",
         "test:gym:fast": "pnpm --filter @slopus/rig-gym-tests test:gym:fast",
         "test:gym:full": "pnpm --filter @slopus/rig-gym-tests test:gym:full",
         "test:gym:heavy": "pnpm --filter @slopus/rig-gym-tests test:gym:heavy",
