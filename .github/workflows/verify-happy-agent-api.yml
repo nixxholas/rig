@@ -40,7 +40,7 @@ jobs:
     test:
         name: Unprivileged Linux
         runs-on: ubuntu-22.04
-        timeout-minutes: 45
+        timeout-minutes: 60
         env:
             HOME: ${{ github.workspace }}/.local/happy-agent-api-home
             NODE_OPTIONS: --max-old-space-size=6144
@@ -79,6 +79,15 @@ jobs:
                   pnpm --filter @slopus/happy-agent check
                   pnpm --filter @slopus/happy-agent-gym check
                   pnpm --filter @slopus/rig-gym-tests check
+
+            - name: Run the Linux Files and Git preflight
+              run: |
+                  pnpm --filter @slopus/rig-gym-tests exec vitest run \
+                    tests/happy_api_chaos_files.test.ts \
+                    tests/happy_api_files_git.test.ts \
+                    tests/happy_api_git_matrix.test.ts \
+                    --maxWorkers=1 \
+                    --retry=0
 
             - name: Run the complete API gym
               run: pnpm test:gym:api

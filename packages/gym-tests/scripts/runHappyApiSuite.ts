@@ -174,7 +174,7 @@ console.error(summary.join(" "));
 
 if (failures.length > 0) {
     for (const failure of failures) console.error(`FAIL: ${failure}`);
-    for (const assertion of failedAssertions.slice(0, 10)) {
+    for (const assertion of failedAssertions) {
         console.error(
             `FAILED ${assertion.fullName ?? assertion.title ?? "unnamed"}\n` +
                 `${(assertion.failureMessages ?? []).join("\n")}`,

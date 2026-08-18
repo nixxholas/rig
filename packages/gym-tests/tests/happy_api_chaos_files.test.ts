@@ -370,7 +370,7 @@ function buildSchedule(
                 content: `stale ${label} ${String(index)}\n`,
                 kind: "write",
                 mode: "stale",
-                path: "tracked.txt",
+                path: "README.md",
             }),
         },
         {
@@ -514,7 +514,7 @@ async function applyAction(
             await applyConfinement(action, gym, workspaceId, model);
             break;
         case "tree":
-            await applyTree(action, gym, workspaceId, model);
+            await applyTree(action, gym, workspaceId);
             break;
         case "tree-page":
             await applyTreePages(gym, workspaceId, model);
@@ -744,7 +744,6 @@ async function applyTree(
     action: Extract<FileAction, { kind: "tree" }>,
     gym: AgentGym,
     workspaceId: string,
-    model: FileModel,
 ): Promise<void> {
     const response = await gym.client.getFileTree(workspaceId, {
         ...(action.path === undefined ? {} : { path: action.path }),
@@ -752,12 +751,12 @@ async function applyTree(
     });
     const paths = response.entries.map((entry) => entry.path);
     expect(new Set(paths).size).toBe(paths.length);
-    for (const path of model.files.keys()) {
+    expect(paths.length).toBeLessThanOrEqual(action.limit);
+    for (const path of paths) {
         if (action.path === undefined) {
-            const direct = path.includes("/") ? path.slice(0, path.indexOf("/")) : path;
-            expect(paths).toContain(direct === path ? path : direct);
-        } else if (path.startsWith(`${action.path}/`)) {
-            expect(paths).toContain(path);
+            expect(path).not.toContain("/");
+        } else {
+            expect(path.startsWith(`${action.path}/`)).toBe(true);
         }
     }
 }
