@@ -19,7 +19,7 @@ export function createProjectQueries(): Pick<
     "list" | "get" | "findByPath" | "findByAvatarHash" | "readSettings"
 > {
     return {
-        list: async (ctx, _agentId, query) => {
+        list: async (ctx, query) => {
             const database = databaseFor(ctx);
             const offset = query.cursor === undefined ? 0 : Number(query.cursor);
             const limit = query.limit ?? DEFAULT_PAGE_LIMIT;
@@ -45,10 +45,10 @@ export function createProjectQueries(): Pick<
                 ...(rows.length > limit ? { nextCursor: String(offset + projects.length) } : {}),
             };
         },
-        get: async (ctx, _agentId, projectId) => await readProject(databaseFor(ctx), projectId),
-        findByPath: async (ctx, _agentId, repositoryRef) =>
+        get: async (ctx, projectId) => await readProject(databaseFor(ctx), projectId),
+        findByPath: async (ctx, repositoryRef) =>
             await readProjectByPath(databaseFor(ctx), repositoryRef),
-        findByAvatarHash: async (ctx, _agentId, hash) => {
+        findByAvatarHash: async (ctx, hash) => {
             const rows = await agentDatabaseRows<ProjectRow>(
                 databaseFor(ctx),
                 sql`SELECT * FROM ${sql.raw(PROJECTS_TABLE)}
@@ -58,7 +58,7 @@ export function createProjectQueries(): Pick<
             const row = rows[0];
             return row === undefined ? undefined : projectFromRow(row);
         },
-        readSettings: async (ctx, _agentId, projectId) => {
+        readSettings: async (ctx, projectId) => {
             const database = databaseFor(ctx);
             const rows = await agentDatabaseRows<ProjectSettingsRow>(
                 database,

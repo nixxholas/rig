@@ -27,7 +27,7 @@ export function getBranchMetadataTool(workspaces: WorkspacesModule, agentId: str
         execute: async (
             ctx,
             { workspaceId, ...query }: { workspaceId: string } & WorkspaceBranchMetadataDetailQuery,
-        ) => await workspaces.branchMetadataPage(ctx, agentId, workspaceId, query),
+        ) => await workspaces.branchMetadataPage(ctx, workspaceId, query),
         toLLM: (metadata) => [
             {
                 type: "text",

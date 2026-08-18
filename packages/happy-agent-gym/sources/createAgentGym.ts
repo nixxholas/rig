@@ -69,7 +69,7 @@ export interface GymAcceptance {
 }
 
 export interface GymSendOptions {
-    /** The session to send to. Defaults to the installation's root chat. */
+    /** The session to send to. Defaults to the chat the gym opened as it started. */
     readonly sessionId?: string;
     /** Whether the daemon answers only once the message is durably recorded. Defaults to true. */
     readonly await?: boolean;
@@ -117,8 +117,13 @@ export interface AgentGym {
     readonly daemon: HappyAgentDaemon;
     readonly agent: StartedHappyAgent;
     readonly modules: HappyAgentModules;
-    /** The chat this installation opens with, which is also the root agent's id. */
-    readonly rootSessionId: string;
+    /**
+     * The chat every scenario works in unless it names another.
+     *
+     * The daemon has no conversation of its own, so the gym opens one as it starts, exactly as a
+     * person would. Scenarios that need a second chat call `createSession`.
+     */
+    readonly defaultSessionId: string;
     /** The provider, model, effort and tier every gym request names by default. */
     readonly selection: GymSelection;
     /** Errors the HTTP server reported outside a response. A healthy scenario leaves this empty. */
@@ -201,6 +206,7 @@ class AgentGymInstance implements AgentGym {
     #daemon: HappyAgentDaemon | undefined;
     #http: GymHttpClient | undefined;
     #token = "";
+    #defaultSessionId: string | undefined;
 
     constructor(home: GymHome, options: AgentGymOptions) {
         this.#home = home;
@@ -236,6 +242,10 @@ class AgentGymInstance implements AgentGym {
             timeoutMs: Math.max(this.#timeoutMs, 20_000),
             token: this.#token,
         });
+        // Nothing in the daemon opens a chat by itself, so the gym opens the one every scenario
+        // works in before any of them runs. A restart keeps it: the conversation is durable, and a
+        // scenario that restarts the daemon is asking whether its own chat survived.
+        this.#defaultSessionId ??= (await this.createSession()).id;
     }
 
     get happyHome(): string {
@@ -275,8 +285,9 @@ class AgentGymInstance implements AgentGym {
         return this.#running.agent.modules;
     }
 
-    get rootSessionId(): string {
-        return this.#running.agent.rootAgentId;
+    get defaultSessionId(): string {
+        if (this.#defaultSessionId === undefined) throw new Error("This gym is not running.");
+        return this.#defaultSessionId;
     }
 
     get selection(): GymSelection {
@@ -477,7 +488,7 @@ class AgentGymInstance implements AgentGym {
     }
 
     #sessionId(sessionId: string | undefined): string {
-        return sessionId ?? this.rootSessionId;
+        return sessionId ?? this.defaultSessionId;
     }
 
     #messageBody(text: string, options: GymSendOptions): Record<string, unknown> {

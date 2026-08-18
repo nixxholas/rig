@@ -78,7 +78,6 @@ export function createConfigRoutes(): AgentHttpRouteGroup {
                     instructions: await readDocument(path, 256 * 1024),
                 });
                 await dependencies.agent.modules.events.record(ctx, {
-                    agentId: dependencies.agent.agent.id,
                     payload: { bytes: Buffer.byteLength(body.instructions, "utf8") },
                     type: "config.instructions_changed",
                 });
@@ -107,7 +106,6 @@ export function createConfigRoutes(): AgentHttpRouteGroup {
                     policy: await readDocument(path, 32 * 1024),
                 });
                 await dependencies.agent.modules.events.record(ctx, {
-                    agentId: dependencies.agent.agent.id,
                     payload: { bytes: Buffer.byteLength(body.policy, "utf8") },
                     type: "config.security_changed",
                 });

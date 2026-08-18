@@ -94,7 +94,6 @@ export class TerminalsModule {
     /** Open one terminal in a project or workspace folder. */
     async create(
         ctx: Context,
-        agentId: string,
         scope: TerminalScope,
         input: CreateTerminalInput,
     ): Promise<Terminal> {
@@ -102,28 +101,27 @@ export class TerminalsModule {
         if (!Value.Check(createTerminalInputSchema, input)) {
             throw new TerminalError("invalid", "The terminal settings are invalid.");
         }
-        const collection = await this.#collection(ctx, agentId, scope);
+        const collection = await this.#collection(ctx, scope);
         const session = await collection.create(input);
         return session.terminal();
     }
 
     /** Every terminal open on this folder right now. */
-    async list(ctx: Context, agentId: string, scope: TerminalScope): Promise<readonly Terminal[]> {
+    async list(ctx: Context, scope: TerminalScope): Promise<readonly Terminal[]> {
         assertScope(scope);
         // Resolving first is what makes an unknown project or workspace a refusal rather than an
         // empty list that looks like a folder with nothing open in it.
-        await this.#root(ctx, agentId, scope);
+        await this.#root(ctx, scope);
         return this.#scopes.get(scopeKey(scope))?.list() ?? [];
     }
 
     /** One terminal's current record. */
     async get(
         ctx: Context,
-        agentId: string,
         scope: TerminalScope,
         terminalId: string,
     ): Promise<Terminal> {
-        return (await this.session(ctx, agentId, scope, terminalId)).terminal();
+        return (await this.session(ctx, scope, terminalId)).terminal();
     }
 
     /**
@@ -134,12 +132,11 @@ export class TerminalsModule {
      */
     async session(
         ctx: Context,
-        agentId: string,
         scope: TerminalScope,
         terminalId: string,
     ): Promise<TerminalSession> {
         assertScope(scope);
-        await this.#root(ctx, agentId, scope);
+        await this.#root(ctx, scope);
         const session = this.#scopes.get(scopeKey(scope))?.get(terminalId);
         if (session === undefined) {
             throw new TerminalError("not_found", "The terminal was not found.");
@@ -150,18 +147,16 @@ export class TerminalsModule {
     /** Attach one stream, returning the call that detaches it again. */
     async attach(
         ctx: Context,
-        agentId: string,
         scope: TerminalScope,
         terminalId: string,
         stream: Duplex,
     ): Promise<() => void> {
-        const session = await this.session(ctx, agentId, scope, terminalId);
+        const session = await this.session(ctx, scope, terminalId);
         return session.attach(stream);
     }
 
     async resize(
         ctx: Context,
-        agentId: string,
         scope: TerminalScope,
         terminalId: string,
         input: ResizeTerminalInput,
@@ -169,18 +164,17 @@ export class TerminalsModule {
         if (!Value.Check(resizeTerminalInputSchema, input)) {
             throw new TerminalError("invalid", "The terminal size is invalid.");
         }
-        const session = await this.session(ctx, agentId, scope, terminalId);
+        const session = await this.session(ctx, scope, terminalId);
         return await session.resize(input.cols, input.rows);
     }
 
     /** Stop the process. The record stays, holding the exit code, until the terminal is evicted. */
     async stop(
         ctx: Context,
-        agentId: string,
         scope: TerminalScope,
         terminalId: string,
     ): Promise<Terminal> {
-        const session = await this.session(ctx, agentId, scope, terminalId);
+        const session = await this.session(ctx, scope, terminalId);
         return await session.stop();
     }
 
@@ -224,11 +218,10 @@ export class TerminalsModule {
      */
     async #collection(
         ctx: Context,
-        agentId: string,
         scope: TerminalScope,
     ): Promise<TerminalCollection> {
         const key = scopeKey(scope);
-        const root = await this.#root(ctx, agentId, scope);
+        const root = await this.#root(ctx, scope);
         return await this.#locks.runInLock(ctx, key, async () => {
             if (this.#closed) {
                 throw new TerminalError("unavailable", "The Happy agent is shutting down.");
@@ -247,8 +240,8 @@ export class TerminalsModule {
     }
 
     /** Where this folder actually is, according to the catalog that owns it. */
-    async #root(ctx: Context, agentId: string, scope: TerminalScope): Promise<string> {
-        const project = await this.#projects.get(ctx, agentId, scope.projectId);
+    async #root(ctx: Context, scope: TerminalScope): Promise<string> {
+        const project = await this.#projects.get(ctx, scope.projectId);
         if (project === undefined) {
             throw new TerminalError("not_found", "The project was not found.");
         }
@@ -261,7 +254,7 @@ export class TerminalsModule {
             }
             return project.repositoryRef;
         }
-        const workspace = await this.#workspaces.get(ctx, agentId, scope.workspaceId);
+        const workspace = await this.#workspaces.get(ctx, scope.workspaceId);
         if (workspace === undefined || workspace.projectRef !== scope.projectId) {
             throw new TerminalError("not_found", "The workspace was not found.");
         }

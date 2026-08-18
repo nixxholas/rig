@@ -2,7 +2,7 @@ import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type { Context } from "@steve.kite/stdlib";
 
-import { workspaceAgentIdSchema, workspaceTimestampSchema } from "./Workspace.js";
+import { workspaceTimestampSchema } from "./Workspace.js";
 import { workspaceContextSchema } from "./WorkspaceEvent.js";
 
 /**
@@ -11,15 +11,15 @@ import { workspaceContextSchema } from "./WorkspaceEvent.js";
  * test or replayed against a fake clock tells one consistent story.
  */
 export const workspaceClockSchema = Type.Function(
-    [workspaceContextSchema, workspaceAgentIdSchema],
+    [workspaceContextSchema],
     workspaceTimestampSchema,
 );
 
 export type WorkspaceClock = Static<typeof workspaceClockSchema>;
 
 /** Reads the clock, refusing an answer that could not be a moment in time. */
-export function workspaceNow(clock: WorkspaceClock, ctx: Context, agentId: string): number {
-    const at = clock(ctx, agentId);
+export function workspaceNow(clock: WorkspaceClock, ctx: Context): number {
+    const at = clock(ctx);
     if (!Value.Check(workspaceTimestampSchema, at)) {
         throw new Error("Workspace clock must return a non-negative integer.");
     }

@@ -135,12 +135,9 @@ export interface StartedHappyAgent {
     readonly database: LibSQLDatabase;
     readonly storage: AgentStorage<LibSQLDatabase>;
     readonly system: AgentSystemLocal<LibSQLDatabase>;
-    readonly agent: Agent<AnyAgentTool, LibSQLDatabase>;
     readonly modules: HappyAgentModules;
     /** The one live Git watcher every reader shares instead of scanning once per request. */
     readonly gitTracker: GitStateTracker;
-    /** The agent this installation acts as, and the identity both catalogs were opened for. */
-    readonly rootAgentId: string;
     /** What this `.happy` folder is, from the first time anyone started it here. */
     readonly installation: {
         readonly epoch: string;
@@ -528,7 +525,6 @@ export async function startHappyAgent(
             config,
             conversations,
             events,
-            installation,
             scheduling,
             userInput,
             workspaces,
@@ -632,19 +628,6 @@ export async function startHappyAgent(
             providers,
         });
         unwind.unshift(async () => await system.close(ctx));
-        const rootAgentId = installation.rootAgentId;
-
-        // The root agent is the conversation a person opens when they start Rig. It works in the
-        // public home and nowhere else.
-        const rootConfig = {
-            environment: { ...currentAgentEnvironment(), workingDirectory: paths.publicHome },
-            modules: { compute: { cwd: paths.publicHome, providerId: "host" } },
-        };
-        const existing = await system.config(ctx, rootAgentId);
-        const agent =
-            existing === undefined
-                ? await system.create(ctx, rootConfig, { id: rootAgentId })
-                : await system.resolve(ctx, rootAgentId);
 
         // Happy connected itself as the collection started. It writes through the agent database,
         // so it stops before that database closes.
@@ -666,14 +649,12 @@ export async function startHappyAgent(
                     if (entity.workspaceId === undefined) {
                         await projects.recordGitFacts(
                             factsCtx,
-                            rootAgentId,
                             entity.projectId,
                             snapshot.facts,
                         );
                     } else {
                         await workspaces.recordGitFacts(
                             factsCtx,
-                            rootAgentId,
                             entity.workspaceId,
                             snapshot.facts,
                         );
@@ -697,14 +678,14 @@ export async function startHappyAgent(
             await projects.close(withDatabase(ctx));
         });
         // The catalogs pick up whatever the last run left unfinished, and learn which machine they
-        // are from the agent they are opened for.
-        await projects.open(withDatabase(ctx), rootAgentId);
-        await workspaces.open(withDatabase(ctx), rootAgentId);
+        // are from the installation they are opened for.
+        await projects.open(withDatabase(ctx), installation.epoch);
+        await workspaces.open(withDatabase(ctx));
 
         // Sharing is the same machine as everything else here, and it reconnects to the relay only
         // when the configuration enabled it and a person has already been named. Its client holds a
         // socket, so it stops before the database it reads the binding from.
-        profile.open(rootAgentId);
+        profile.open(installation.epoch);
         unwind.unshift(async () => await murmur.close(withDatabase(ctx)));
         const person = await profile.get(withDatabase(ctx));
         await murmur.open(
@@ -713,7 +694,6 @@ export async function startHappyAgent(
         );
 
         return {
-            agent,
             background,
             close,
             configuration,
@@ -726,7 +706,6 @@ export async function startHappyAgent(
             },
             models,
             modules,
-            rootAgentId,
             provider,
             providers,
             storage,

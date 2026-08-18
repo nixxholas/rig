@@ -5,6 +5,7 @@ import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import {
     agentPermissionModeSchema,
+    currentAgentEnvironment,
     type AgentBaseMessageOptions,
     type AgentConfig,
     type AgentModel,
@@ -273,15 +274,9 @@ export function createSessionRoutes(): AgentHttpRouteGroup {
                     });
                     return;
                 }
-                const rootConfig =
-                    (await dependencies.agent.system.config(ctx, dependencies.agent.agent.id)) ??
-                    {};
                 const owner = await resolveSessionOwner(
                     ctx,
-                    {
-                        rootAgentId: dependencies.agent.rootAgentId,
-                        workspaces: dependencies.agent.modules.workspaces,
-                    },
+                    { workspaces: dependencies.agent.modules.workspaces },
                     body,
                 );
                 // Creating an agent writes the conversation that belongs to it, from defaults that
@@ -304,7 +299,10 @@ export function createSessionRoutes(): AgentHttpRouteGroup {
                 });
                 const agent = await dependencies.agent.system.create(
                     ctx,
-                    sessionAgentConfig(rootConfig, owner.cwd),
+                    sessionAgentConfig(
+                        daemonAgentConfig(dependencies.agent.configuration.paths.publicHome),
+                        owner.cwd,
+                    ),
                     { id: agentId },
                 );
                 const summary = await sessionSummary(ctx, dependencies, session);
@@ -887,7 +885,6 @@ function createMutationRoutes(): AgentHttpRouteGroup["routes"] {
                     async () =>
                         await workspaces.prepareSessionTransfer(
                             ctx,
-                            dependencies.agent.rootAgentId,
                             projectId,
                             session.scope.kind === "workspace" ? session.scope.workspaceId : "",
                             body.workspaceId,
@@ -1437,7 +1434,7 @@ async function nameFromFirstMessage(
     const config = await dependencies.agent.system.config(ctx, session.agentId);
     const sessionNamed = config?.metadata?.title !== undefined;
     const scope = session.scope;
-    const named = await modules.titles.nameFromFirstMessage(ctx, dependencies.agent.rootAgentId, {
+    const named = await modules.titles.nameFromFirstMessage(ctx, {
         firstMessage,
         sessionNamed,
         ...(session.providerId === undefined ? {} : { providerId: session.providerId }),
@@ -1609,21 +1606,19 @@ function parseLimit(value: string | null, fallback: number, maximum: number): nu
  */
 export async function resolveSessionOwner(
     ctx: import("@steve.kite/stdlib").Context,
-    deps: { readonly workspaces: WorkspacesModule; readonly rootAgentId: string },
+    deps: { readonly workspaces: WorkspacesModule },
     body: { readonly cwd: string; readonly projectId?: string; readonly workspaceId?: string },
 ): Promise<{ readonly cwd: string; readonly scope: ConversationScope }> {
     // The workspaces catalog answers for both: a folder that is a workspace resolves to it and its
     // project, and anything else it hands straight to the projects catalog.
     const workspaces = deps.workspaces;
-    const agentId = deps.rootAgentId;
     let owner: ResolvedProjectOwnership;
     try {
         owner =
             body.workspaceId === undefined
-                ? await workspaces.resolvePath(ctx, agentId, body.cwd, undefined, body.projectId)
+                ? await workspaces.resolvePath(ctx, body.cwd, undefined, body.projectId)
                 : await workspaces.resolveSessionOwnership(
                       ctx,
-                      agentId,
                       body.cwd,
                       body.workspaceId,
                       body.projectId,
@@ -1651,7 +1646,21 @@ export async function resolveSessionOwner(
 }
 
 /**
- * The root agent's configuration, moved to the folder this session works in.
+ * What every session starts from before it is moved to its own folder.
+ *
+ * A session inherits the environment this daemon runs in and a host shell, and nothing else. The
+ * daemon has no conversation of its own to copy a configuration from, so the defaults are stated
+ * here rather than read back out of one.
+ */
+export function daemonAgentConfig(publicHome: string): AgentConfig {
+    return {
+        environment: { ...currentAgentEnvironment(), workingDirectory: publicHome },
+        modules: { compute: { cwd: publicHome, providerId: "host" } },
+    };
+}
+
+/**
+ * The daemon's default configuration, moved to the folder this session works in.
  *
  * Everything else is inherited: the models, the modules, the environment the daemon reported. Only
  * the working directory differs, because a session belongs to a project or a workspace and its

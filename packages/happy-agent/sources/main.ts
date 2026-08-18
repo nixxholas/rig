@@ -86,7 +86,6 @@ async function closeHappyAgentDaemon(
     const ctx = agent.ctx.named("happy-agent-shutdown");
     await agent.modules.events
         .record(withAgentDatabase(ctx, agent.database), {
-            agentId: agent.agent.id,
             payload: {},
             type: "daemon.stopping",
         })

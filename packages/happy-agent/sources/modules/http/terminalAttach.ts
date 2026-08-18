@@ -62,7 +62,6 @@ export function attachTerminalWebSocketServer(options: TerminalAttachOptions): (
             const ctx = withAgentDatabase(attachCtx, agent.database);
             const session = await agent.modules.terminals.session(
                 ctx,
-                agent.rootAgentId,
                 route.scope,
                 route.terminalId,
             );

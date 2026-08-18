@@ -37,7 +37,7 @@ describe("a client that says which run it means", () => {
         const acceptance = await gym.send("Take your time.", { wait: false });
         await reached.held;
 
-        const response = await gym.http.post(`/v0/sessions/${gym.rootSessionId}/abort`, {
+        const response = await gym.http.post(`/v0/sessions/${gym.defaultSessionId}/abort`, {
             expectedRunId: acceptance.runId,
         });
         expect(response.status).toBe(200);
@@ -63,7 +63,7 @@ describe("a client that says which run it means", () => {
         await reached.held;
 
         // The run this client remembers finished long ago; the chat has moved on to another one.
-        const response = await gym.http.post(`/v0/sessions/${gym.rootSessionId}/abort`, {
+        const response = await gym.http.post(`/v0/sessions/${gym.defaultSessionId}/abort`, {
             expectedRunId: "a-run-that-finished",
         });
         expect(response.status).toBe(409);
@@ -85,7 +85,7 @@ describe("a client that says which run it means", () => {
         running.add(gym);
 
         await gym.send("Anything.");
-        const response = await gym.http.post(`/v0/sessions/${gym.rootSessionId}/abort`, {});
+        const response = await gym.http.post(`/v0/sessions/${gym.defaultSessionId}/abort`, {});
         expect(response.status).toBe(200);
     });
 });

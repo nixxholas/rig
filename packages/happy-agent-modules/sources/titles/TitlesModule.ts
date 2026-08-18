@@ -126,7 +126,6 @@ export class TitlesModule implements AgentModule<AnyAgentTool> {
      */
     async nameFromFirstMessage(
         ctx: Context,
-        agentId: string,
         request: {
             readonly firstMessage: string;
             readonly providerId?: string;
@@ -138,7 +137,7 @@ export class TitlesModule implements AgentModule<AnyAgentTool> {
         const place = request.workspace;
         const wantTitle = request.sessionNamed !== true;
         try {
-            const current = await this.#unnamedWorkspace(ctx, agentId, place);
+            const current = await this.#unnamedWorkspace(ctx, place);
             const wantSlug = current !== undefined;
             if (!wantSlug && !wantTitle) return {};
             const names = await this.suggestNames(ctx, {
@@ -149,7 +148,7 @@ export class TitlesModule implements AgentModule<AnyAgentTool> {
             const renamed =
                 current === undefined || names.slug === undefined
                     ? undefined
-                    : await this.#renameWorkspace(ctx, agentId, current, names.slug);
+                    : await this.#renameWorkspace(ctx, current, names.slug);
             if (renamed !== undefined && place !== undefined) {
                 await this.markWorkspaceNamed(ctx, place.workspaceId);
             }
@@ -301,12 +300,11 @@ export class TitlesModule implements AgentModule<AnyAgentTool> {
      */
     async #unnamedWorkspace(
         ctx: Context,
-        agentId: string,
         place: { readonly projectId: string; readonly workspaceId: string } | undefined,
     ): Promise<Workspace | undefined> {
         if (place === undefined) return undefined;
         if (await this.workspaceWasNamed(ctx, place.workspaceId)) return undefined;
-        const current = await this.#workspaces.get(ctx, agentId, place.workspaceId);
+        const current = await this.#workspaces.get(ctx, place.workspaceId);
         if (current === undefined || current.projectRef !== place.projectId) return undefined;
         return current.nameConfigured ? undefined : current;
     }
@@ -319,11 +317,10 @@ export class TitlesModule implements AgentModule<AnyAgentTool> {
      */
     async #renameWorkspace(
         ctx: Context,
-        agentId: string,
         current: Workspace,
         slug: string,
     ): Promise<Workspace> {
-        return await this.#workspaces.inheritName(ctx, agentId, {
+        return await this.#workspaces.inheritName(ctx, {
             workspaceId: current.id,
             name: withPreservedNumericPrefix(current.name, slug),
         });

@@ -46,7 +46,7 @@ describe("a question the agent asked and the answer it got", () => {
 
         await gym.http.ok(
             "POST",
-            `/v0/sessions/${gym.rootSessionId}/user-input/${pending.requestId}`,
+            `/v0/sessions/${gym.defaultSessionId}/user-input/${pending.requestId}`,
             { answers: { [pending.requestId]: ["In the repository."] } },
         );
         await gym.waitForRun(acceptance.runId);

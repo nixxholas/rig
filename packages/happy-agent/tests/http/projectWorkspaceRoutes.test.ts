@@ -303,6 +303,11 @@ describe("project and workspace routes over the daemon socket", () => {
         const asset = await fixture.call("GET", `/v0/project-assets/${avatar.hash}`);
         expect(asset.status).toBe(200);
 
+        // A client paints the picture by following the address it was given, so that address has
+        // to be the asset route itself, under the protocol prefix the client already speaks.
+        expect(avatar.url).toBe(`/project-assets/${avatar.hash}`);
+        expect((await fixture.call("GET", `/v0${avatar.url}`)).status).toBe(200);
+
         const cleared = await fixture.call("DELETE", `/v0/projects/${firstId}/avatar`, {
             headers: { "if-match": String(readProject(withAvatar.body).version) },
         });
@@ -320,6 +325,64 @@ describe("project and workspace routes over the daemon socket", () => {
             { body: { afterId: null }, headers: { "if-match": String(ready.version) } },
         );
         expect(movedWorkspace.status).toBe(200);
+    }, 60_000);
+
+    it("announces every project a reorder moved, not only the one that was dragged", async () => {
+        const fixture = await startTestDaemon();
+        const ids: string[] = [];
+        for (const name of ["kappa", "lambda", "mu"]) {
+            ids.push(
+                await importProject(
+                    fixture,
+                    await createGitRepository(join(fixture.directory, "work", name)),
+                ),
+            );
+        }
+
+        // What a client following the feed believes, and the cursor it is caught up to.
+        const believed = new Map(
+            readProjects((await fixture.call("GET", "/v0/projects")).body).map((project) => [
+                String(project.id),
+                String(project.orderKey),
+            ]),
+        );
+        const caughtUp = String(
+            (await fixture.call("GET", "/v0/events")).body["cursor" as never] ?? "",
+        );
+
+        const first = ids[0]!;
+        const last = ids[2]!;
+        const current = await fixture.call("GET", `/v0/projects/${first}`);
+        const moved = await fixture.call("POST", `/v0/projects/${first}/reorder`, {
+            body: { afterId: last },
+            headers: { "if-match": String(readProject(current.body).version) },
+        });
+        expect(moved.status).toBe(200);
+
+        for (const event of readEvents(
+            (await fixture.call("GET", `/v0/events?after=${caughtUp}`)).body,
+        )) {
+            const project = (event.payload as { project?: Record<string, unknown> } | undefined)
+                ?.project;
+            if (project === undefined) continue;
+            believed.set(String(project.id), String(project.orderKey));
+        }
+
+        // The list a client draws from the feed alone is the list the daemon holds. A reorder
+        // that renumbers a neighbour without saying so leaves two rows claiming one position,
+        // and the row someone dragged slides back where it started.
+        const believedOrder = [...believed]
+            .sort(([leftId, left], [rightId, right]) =>
+                left === right ? leftId.localeCompare(rightId) : left.localeCompare(right),
+            )
+            .map(([id]) => id);
+        expect(new Set(believed.values()).size).toBe(believed.size);
+        expect(believedOrder).toEqual(
+            readProjects((await fixture.call("GET", "/v0/projects")).body).map((project) =>
+                String(project.id),
+            ),
+        );
+        expect(believedOrder.at(-1)).toBe(first);
     }, 60_000);
 
     it("refuses a mutation whose If-Match no longer matches the row", async () => {
@@ -452,6 +515,10 @@ function readProject(body: Record<string, never>): Record<string, unknown> {
 
 function readProjects(body: Record<string, never>): readonly Record<string, unknown>[] {
     return (body as { projects?: Record<string, unknown>[] }).projects ?? [];
+}
+
+function readEvents(body: Record<string, never>): readonly Record<string, unknown>[] {
+    return (body as { events?: Record<string, unknown>[] }).events ?? [];
 }
 
 function readWorkspace(body: Record<string, never>): Record<string, unknown> {

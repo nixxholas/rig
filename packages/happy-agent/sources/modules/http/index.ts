@@ -4,7 +4,6 @@ export {
     type StartAgentHttpServerOptions,
 } from "./startAgentHttpServer.js";
 export { readOrCreateAgentToken, isAuthorizedAgentRequest } from "./auth.js";
-export { createAgentRoutes } from "./agentRoutes.js";
 export {
     createCompatibilityRoutes,
     createCompatibilitySnapshots,

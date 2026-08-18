@@ -175,14 +175,14 @@ const session = await gym.createSession({ cwd: gym.workspacePath });
 await gym.send("In the new chat.", { sessionId: session.id });
 ```
 
-`gym.rootSessionId` is the chat an installation opens with. Every request names the provider,
+`gym.defaultSessionId` is the chat an installation opens with. Every request names the provider,
 model, effort and tier from `gym.selection` unless the scenario overrides them.
 
 Anything the helpers do not cover goes through the client directly, which never throws on an
 unsuccessful status:
 
 ```ts
-const response = await gym.http.post(`/v0/sessions/${gym.rootSessionId}/messages`, body);
+const response = await gym.http.post(`/v0/sessions/${gym.defaultSessionId}/messages`, body);
 expect(response.status).toBe(400);
 expect(response.text).toContain("not served by provider");
 ```

@@ -13,8 +13,10 @@ import {
     HAPPY_AGENT_RIG_PROTOCOL_VERSION,
     readRigProviderCapabilities,
 } from "./rigProtocol.js";
+import { projectWire } from "./projectWire.js";
 import { sessionSummary } from "./sessionRoutes.js";
 import { createSseWriter } from "./sseWriter.js";
+import { workspaceWire } from "./workspaceWire.js";
 
 const timelineSchema = Type.Object(
     {
@@ -65,6 +67,17 @@ export function createEventRoutes(): AgentHttpRouteGroup {
                     archived: false,
                     limit: 50,
                 });
+                // A client opens with this snapshot and shows what is in it. Reading the catalogs
+                // here is what makes the first screen show the same folders as `/v0/projects`,
+                // rather than an empty sidebar until something else happens to refresh it.
+                const projects = (
+                    await dependencies.agent.modules.projects.list(ctx, {
+                        includeArchived: true,
+                    })
+                ).projects;
+                const workspaces = await dependencies.agent.modules.workspaces.list(ctx, {
+                    includeArchived: true,
+                });
                 sendJson(response, 200, {
                     catalog: createRigModelCatalog(
                         dependencies.agent.system.models,
@@ -78,7 +91,16 @@ export function createEventRoutes(): AgentHttpRouteGroup {
                     folders: [],
                     identity: { version: dependencies.version ?? "0.0.0" },
                     presence: (await readLiveRigPresence(ctx, dependencies.agent)).presence,
-                    projects: [],
+                    projects: await Promise.all(
+                        projects.map(
+                            async (project) =>
+                                await projectWire(
+                                    ctx,
+                                    dependencies.agent.modules.projects,
+                                    project,
+                                ),
+                        ),
+                    ),
                     protocolVersion: HAPPY_AGENT_RIG_PROTOCOL_VERSION,
                     sessions: await Promise.all(
                         sessions.map(
@@ -87,7 +109,7 @@ export function createEventRoutes(): AgentHttpRouteGroup {
                     ),
                     sessionsComplete: true,
                     terminalGroups: [],
-                    workspaces: [],
+                    workspaces: workspaces.map((workspace) => workspaceWire(workspace)),
                 });
             },
         },
@@ -141,7 +163,6 @@ export function createEventRoutes(): AgentHttpRouteGroup {
                     dependencies.agent.modules.events,
                     cursorFromRequest(request, url),
                     "live",
-                    dependencies.agent.agent.id,
                 );
             },
         },
@@ -155,7 +176,6 @@ export function createEventRoutes(): AgentHttpRouteGroup {
                     dependencies.agent.modules.events,
                     cursorFromRequest(request, url),
                     "durable",
-                    dependencies.agent.agent.id,
                 );
             },
         },
@@ -206,7 +226,6 @@ async function streamEvents(
     },
     after: string | undefined,
     mode: "durable" | "live",
-    agentId: string,
 ): Promise<void> {
     const writer = createSseWriter(request, response);
     let replaying = true;
@@ -268,7 +287,6 @@ async function streamEvents(
     writer.write(": connected\n\n");
     writer.write(
         `event: hello\ndata: ${serializeJson({
-            agentId,
             connectedAt: Date.now(),
             cursor: replay.latestCursor,
             gap,

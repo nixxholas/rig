@@ -2,7 +2,6 @@ import { Value } from "@sinclair/typebox/value";
 import { afterCommit, type Context } from "@steve.kite/stdlib";
 
 import { projectEventIdSchema, projectTimestampSchema, type Project } from "./Project.js";
-import { authorizeProjectAccess } from "./ProjectAccess.js";
 import {
     projectEventSchema,
     type ProjectEvent,
@@ -12,8 +11,6 @@ import { assertProject } from "./ProjectRow.js";
 import { type ProjectSettings } from "./ProjectSettings.js";
 import {
     assertProjectStoreMutationResult,
-    type ProjectAuthorization,
-    type ProjectAuthorizationAction,
     type ProjectStore,
     type ProjectStoreMutationResult,
 } from "./ProjectStore.js";
@@ -39,7 +36,6 @@ export type ProjectEventPayload = ProjectEvent extends infer TEvent
     : never;
 
 export type ProjectMutationSpec<Result extends ProjectStoreMutationResult> = {
-    readonly action: ProjectAuthorizationAction;
     /** Reads the project this operation may already have, by folder rather than by ID. */
     readonly beforeByPath?: string;
     readonly changeable: readonly (keyof Project)[];
@@ -50,9 +46,8 @@ export type ProjectMutationSpec<Result extends ProjectStoreMutationResult> = {
 
 export interface ProjectMutationsOptions {
     readonly store: ProjectStore;
-    readonly authorization: ProjectAuthorization | undefined;
-    readonly eventIdFactory: (ctx: Context, agentId: string) => string | Promise<string>;
-    readonly clock: (ctx: Context, agentId: string) => number;
+    readonly eventIdFactory: (ctx: Context) => string | Promise<string>;
+    readonly clock: (ctx: Context) => number;
     readonly listener: ProjectModuleListener | undefined;
     readonly onPostCommitError:
         | ((ctx: Context, event: ProjectEvent, error: unknown) => void | Promise<void>)
@@ -62,15 +57,14 @@ export interface ProjectMutationsOptions {
 /**
  * The path every durable project change takes, and the reads it is decided from.
  *
- * A mutation runs in one transaction: the row is read, the acting agent is authorized against the
- * row that owns it, the store decides, and the answer is checked against what is actually stored
- * before anything is told about it. One event describes one change, the transactional observer sees
+ * A mutation runs in one transaction: the row is read, the store decides, and the answer is checked
+ * against what is actually stored before anything is told about it. One event describes one change,
+ * the transactional observer sees
  * it inside that transaction, and the post-commit observer only after the change is durable. An
  * observer that fails cannot undo a committed change.
  */
 export class ProjectMutations {
     readonly #store: ProjectStore;
-    readonly #authorization: ProjectAuthorization | undefined;
     readonly #eventIdFactory: ProjectMutationsOptions["eventIdFactory"];
     readonly #clock: ProjectMutationsOptions["clock"];
     readonly #listeners: ProjectModuleListener[] = [];
@@ -78,7 +72,6 @@ export class ProjectMutations {
 
     constructor(options: ProjectMutationsOptions) {
         this.#store = options.store;
-        this.#authorization = options.authorization;
         this.#eventIdFactory = options.eventIdFactory;
         this.#clock = options.clock;
         if (options.listener !== undefined) this.#listeners.push(options.listener);
@@ -96,33 +89,26 @@ export class ProjectMutations {
 
     /**
      * Runs one durable catalog write: it reads the project the operation names,
-     * authorizes the acting agent, checks the store's answer against the row
-     * that is actually stored, and emits one event when something changed.
+     * checks the store's answer against the row that is actually stored, and
+     * emits one event when something changed.
      */
     async run<Result extends ProjectStoreMutationResult>(
         ctx: Context,
-        agentId: string,
         spec: ProjectMutationSpec<Result>,
     ): Promise<Result> {
         return await ctx.inTx(async (txCtx) => {
             const before =
                 spec.projectId !== undefined
-                    ? await this.getRequired(txCtx, agentId, spec.projectId)
+                    ? await this.getRequired(txCtx, spec.projectId)
                     : spec.beforeByPath === undefined
                       ? undefined
-                      : await this.findByPath(txCtx, agentId, spec.beforeByPath);
-            if (before !== undefined) {
-                await this.authorize(txCtx, agentId, before.ownerAgentId, spec.action);
-            }
+                      : await this.findByPath(txCtx, spec.beforeByPath);
             const raw = await spec.run(txCtx, before);
             assertProjectStoreMutationResult(raw);
-            if (raw.agentId !== agentId) {
-                throw new Error("A project mutation result names a different agent.");
-            }
             if (!("project" in raw)) {
                 throw new Error("A project mutation did not return a project.");
             }
-            const after = await this.getRequired(txCtx, agentId, raw.project.id);
+            const after = await this.getRequired(txCtx, raw.project.id);
             if (!sameJson(after, raw.project)) {
                 throw new Error("A project mutation result does not match what was stored.");
             }
@@ -143,7 +129,7 @@ export class ProjectMutations {
             if (raw.changed) {
                 await this.observe(
                     txCtx,
-                    await this.newEvent(txCtx, agentId, spec.event(after, before)),
+                    await this.newEvent(txCtx, spec.event(after, before)),
                     ctx,
                 );
             }
@@ -151,22 +137,12 @@ export class ProjectMutations {
         });
     }
 
-    async authorize(
-        ctx: Context,
-        actingAgentId: string,
-        ownerAgentId: string,
-        action: ProjectAuthorizationAction,
-    ): Promise<void> {
-        await authorizeProjectAccess(ctx, this.#authorization, actingAgentId, ownerAgentId, action);
-    }
-
     async getOptional(
         ctx: Context,
-        agentId: string,
         projectId: string,
     ): Promise<Project | undefined> {
         const raw = await requirePromise(
-            this.#store.get(ctx, agentId, projectId),
+            this.#store.get(ctx, projectId),
             "Project store get",
         );
         if (raw === undefined) return undefined;
@@ -178,19 +154,18 @@ export class ProjectMutations {
         return structuredClone(raw);
     }
 
-    async getRequired(ctx: Context, agentId: string, projectId: string): Promise<Project> {
-        const project = await this.getOptional(ctx, agentId, projectId);
+    async getRequired(ctx: Context, projectId: string): Promise<Project> {
+        const project = await this.getOptional(ctx, projectId);
         if (project === undefined) throw new Error(`Project "${projectId}" was not found.`);
         return project;
     }
 
     async findByPath(
         ctx: Context,
-        agentId: string,
         repositoryRef: string,
     ): Promise<Project | undefined> {
         const raw = await requirePromise(
-            this.#store.findByPath(ctx, agentId, repositoryRef),
+            this.#store.findByPath(ctx, repositoryRef),
             "Project store find by folder",
         );
         if (raw === undefined) return undefined;
@@ -202,9 +177,9 @@ export class ProjectMutations {
         return structuredClone(raw);
     }
 
-    async readSettings(ctx: Context, agentId: string, projectId: string): Promise<ProjectSettings> {
+    async readSettings(ctx: Context, projectId: string): Promise<ProjectSettings> {
         const raw = await requirePromise(
-            this.#store.readSettings(ctx, agentId, projectId),
+            this.#store.readSettings(ctx, projectId),
             "Project store read settings",
         );
         assertProjectSettings(raw);
@@ -213,15 +188,14 @@ export class ProjectMutations {
 
     async newEvent(
         ctx: Context,
-        agentId: string,
         payload: ProjectEventPayload,
     ): Promise<ProjectEvent> {
-        const rawId = this.#eventIdFactory(ctx, agentId);
+        const rawId = this.#eventIdFactory(ctx);
         const eventId = isPromiseLike(rawId) ? await rawId : rawId;
         if (!Value.Check(projectEventIdSchema, eventId)) {
             throw new Error("The project event ID factory returned an invalid ID.");
         }
-        const at = this.#clock(ctx, agentId);
+        const at = this.#clock(ctx);
         if (!Value.Check(projectTimestampSchema, at)) {
             throw new Error("The project clock must return a non-negative integer.");
         }

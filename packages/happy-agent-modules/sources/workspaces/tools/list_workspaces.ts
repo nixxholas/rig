@@ -18,7 +18,7 @@ export function listWorkspacesTool(workspaces: WorkspacesModule, agentId: string
         durable: false,
         shouldReviewInAutoMode: () => false,
         execute: async (ctx, query: WorkspacePageQuery) =>
-            await workspaces.listPage(ctx, agentId, query),
+            await workspaces.listPage(ctx, query),
         toLLM: (page) => [
             {
                 type: "text",

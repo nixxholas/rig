@@ -13,13 +13,12 @@ import {
 /** Archival, restoration, and the host-reported state a project accumulates. */
 export function createProjectLifecycle(): Pick<ProjectStore, "archive" | "restore" | "applyState"> {
     return {
-        archive: async (ctx, actingAgentId, input) => {
+        archive: async (ctx, input) => {
             const database = databaseFor(ctx);
             const before = await requireProject(database, input.projectId);
             if (before.status === "archived") {
                 return {
                     operation: "archive",
-                    agentId: actingAgentId,
                     changed: false,
                     project: before,
                 };
@@ -32,7 +31,6 @@ export function createProjectLifecycle(): Pick<ProjectStore, "archive" | "restor
             const updatedAt = Date.now();
             return {
                 operation: "archive",
-                agentId: actingAgentId,
                 changed: true,
                 project: await writeGuardedProject(
                     database,
@@ -47,13 +45,12 @@ export function createProjectLifecycle(): Pick<ProjectStore, "archive" | "restor
                 ),
             };
         },
-        restore: async (ctx, actingAgentId, input) => {
+        restore: async (ctx, input) => {
             const database = databaseFor(ctx);
             const before = await requireProject(database, input.projectId);
             if (before.status === "active") {
                 return {
                     operation: "restore",
-                    agentId: actingAgentId,
                     changed: false,
                     project: before,
                 };
@@ -61,7 +58,6 @@ export function createProjectLifecycle(): Pick<ProjectStore, "archive" | "restor
             const updatedAt = Date.now();
             return {
                 operation: "restore",
-                agentId: actingAgentId,
                 changed: true,
                 project: await writeGuardedProject(
                     database,
@@ -76,14 +72,13 @@ export function createProjectLifecycle(): Pick<ProjectStore, "archive" | "restor
                 ),
             };
         },
-        applyState: async (ctx, actingAgentId, input) => {
+        applyState: async (ctx, input) => {
             const database = databaseFor(ctx);
             const before = await requireProject(database, input.projectId);
             const after = withStateChanges(before, input.changes);
             if (JSON.stringify(after) === JSON.stringify(before)) {
                 return {
                     operation: "state_change",
-                    agentId: actingAgentId,
                     changed: false,
                     project: before,
                 };
@@ -117,7 +112,6 @@ export function createProjectLifecycle(): Pick<ProjectStore, "archive" | "restor
             );
             return {
                 operation: "state_change",
-                agentId: actingAgentId,
                 changed: true,
                 project: stored,
             };

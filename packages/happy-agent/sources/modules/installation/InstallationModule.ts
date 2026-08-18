@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 
-import { createId } from "@paralleldrive/cuid2";
 import {
     agentDatabaseRows,
     agentDatabaseRun,
@@ -15,19 +14,19 @@ import type { LibSQLDatabase } from "drizzle-orm/libsql";
 /** What this `.happy` folder has been since the first time anyone started here. */
 interface Installation {
     readonly epoch: string;
-    readonly rootAgentId: string;
     readonly schemaVersion: number;
 }
 
 /**
- * Who this installation is: which conversation is its root, and which installation it has been.
+ * Which installation this `.happy` folder has been.
  *
- * The root agent's identity is the one thing about a machine that nothing else can invent. It is
- * read out of the folder's own state as the modules start, and every module that needs to know
- * which agent this installation acts as asks this one rather than being handed the answer.
+ * The epoch is the one thing about a machine that nothing else can invent: it distinguishes this
+ * folder from a copy of it restored somewhere else, which is what lets a project refuse to be
+ * cloned with another machine's credentials. It is read out of the folder's own state as the
+ * modules start, and everything that needs it asks this one rather than being handed the answer.
  *
  * It is a module so that its table is created by the same migration pass as everything else, and
- * so that the identity is settled before any module that depends on it is asked for anything.
+ * so that the epoch is settled before any module that depends on it is asked for anything.
  */
 export class InstallationModule implements AgentModule<AnyAgentTool, LibSQLDatabase> {
     readonly name = "happy-agent-installation";
@@ -44,6 +43,18 @@ export class InstallationModule implements AgentModule<AnyAgentTool, LibSQLDatab
                 );
             },
         ],
+        [
+            // The daemon no longer has an agent of its own, so the identity it used to keep here
+            // names nothing. It is deleted rather than left behind, because a stored identity that
+            // nothing reads is the kind of thing a later reader mistakes for the truth.
+            "002-drop-root-agent",
+            async (_ctx: Context, database: AgentDatabase) => {
+                await agentDatabaseRun(
+                    database,
+                    sql`DELETE FROM happy_agent_loader_state WHERE key = 'root_agent_id'`,
+                );
+            },
+        ],
     ] as const satisfies AgentModule<AnyAgentTool, LibSQLDatabase>["migrations"];
 
     #installation: Installation | undefined;
@@ -55,11 +66,6 @@ export class InstallationModule implements AgentModule<AnyAgentTool, LibSQLDatab
     /** When this folder was first started here, which distinguishes it from a restored copy. */
     get epoch(): string {
         return this.#read().epoch;
-    }
-
-    /** The agent this installation acts as. */
-    get rootAgentId(): string {
-        return this.#read().rootAgentId;
     }
 
     /** The generation of the stored schema this folder is on. */
@@ -79,13 +85,9 @@ async function readInstallation(database: AgentDatabase): Promise<Installation> 
     const rows = await agentDatabaseRows<{ key: string; value: string }>(
         database,
         sql`SELECT key, value FROM happy_agent_loader_state
-            WHERE key IN ('root_agent_id', 'installation_epoch', 'schema_version')`,
+            WHERE key IN ('installation_epoch', 'schema_version')`,
     );
     const values = new Map(rows.map((row) => [row.key, row.value]));
-    const rootAgentId = values.get("root_agent_id") ?? createId();
-    if (!/^[a-z][a-z0-9]+$/.test(rootAgentId)) {
-        throw new Error("The stored root agent identity is invalid.");
-    }
     const epoch = values.get("installation_epoch") ?? randomUUID();
     const storedVersion = values.get("schema_version");
     const schemaVersion = storedVersion === undefined ? 1 : Number.parseInt(storedVersion, 10);
@@ -93,7 +95,6 @@ async function readInstallation(database: AgentDatabase): Promise<Installation> 
         throw new Error("The stored Happy agent schema version is invalid.");
     }
     for (const [key, value] of [
-        ["root_agent_id", rootAgentId],
         ["installation_epoch", epoch],
         ["schema_version", String(schemaVersion)],
     ] as const) {
@@ -103,5 +104,5 @@ async function readInstallation(database: AgentDatabase): Promise<Installation> 
             sql`INSERT INTO happy_agent_loader_state (key, value) VALUES (${key}, ${value})`,
         );
     }
-    return { epoch, rootAgentId, schemaVersion };
+    return { epoch, schemaVersion };
 }

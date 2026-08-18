@@ -34,7 +34,7 @@ describe("a second session keeps its own conversation", () => {
 
         await gym.send("Let's talk about widgets.");
         const second = await gym.createSession({ cwd: gym.workspacePath });
-        expect(second.id).not.toBe(gym.rootSessionId);
+        expect(second.id).not.toBe(gym.defaultSessionId);
 
         await gym.send("Let's talk about gadgets.", { sessionId: second.id });
 
@@ -74,7 +74,7 @@ describe("a second session keeps its own conversation", () => {
         const sessions = await gym.listSessions();
 
         expect(sessions.map((session) => session.id)).toEqual(
-            expect.arrayContaining([gym.rootSessionId, second.id]),
+            expect.arrayContaining([gym.defaultSessionId, second.id]),
         );
     });
 

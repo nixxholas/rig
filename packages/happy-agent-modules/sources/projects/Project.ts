@@ -295,7 +295,6 @@ export const projectMutationOperationSchema = Type.Union([
 export const projectSchema = Type.Object(
     {
         id: projectIdSchema,
-        ownerAgentId: projectAgentIdSchema,
         repositoryRef: projectRepositoryRefSchema,
         kind: projectKindSchema,
         storageKey: projectStorageKeySchema,

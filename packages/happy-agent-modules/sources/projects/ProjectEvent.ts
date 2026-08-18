@@ -20,7 +20,6 @@ export const projectContextSchema = Type.Unsafe<Context>(
 const projectEventEnvelope = {
     eventId: projectEventIdSchema,
     at: projectTimestampSchema,
-    agentId: projectAgentIdSchema,
 } as const;
 
 /**

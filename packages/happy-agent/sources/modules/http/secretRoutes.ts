@@ -106,7 +106,7 @@ export function createSecretRoutes(): AgentHttpRouteGroup {
                 const secretId = validatedSecretId(params.secretId);
                 const removed = await dependencies.agent.modules.secrets.remove(
                     ctx,
-                    secretOwner(dependencies.agent),
+                    DAEMON_SECRET_OWNER,
                     secretId,
                 );
                 sendJson(response, 200, { removed });
@@ -124,7 +124,7 @@ async function listRigSecrets(
     for (;;) {
         const page = await agent.modules.secrets.list(
             ctx,
-            secretOwner(agent),
+            DAEMON_SECRET_OWNER,
             cursor === undefined ? {} : { cursor },
         );
         secrets.push(...page.secrets.map(projectRigSecret));
@@ -142,7 +142,7 @@ async function registerSecret(
     body: RegisterSecretRequest,
 ): Promise<SecretReference> {
     try {
-        return await agent.modules.secrets.register(ctx, secretOwner(agent), body);
+        return await agent.modules.secrets.register(ctx, DAEMON_SECRET_OWNER, body);
     } catch (error) {
         throw secretMutationError(error, "The secret could not be saved.");
     }
@@ -155,7 +155,7 @@ async function updateSecret(
     body: UpdateSecretRequest,
 ): Promise<SecretReference | undefined> {
     try {
-        return await agent.modules.secrets.update(ctx, secretOwner(agent), secretId, body);
+        return await agent.modules.secrets.update(ctx, DAEMON_SECRET_OWNER, secretId, body);
     } catch (error) {
         throw secretMutationError(error, "The secret could not be changed.");
     }
@@ -163,11 +163,10 @@ async function updateSecret(
 
 /**
  * Rig's catalog is daemon-global, while SecretsModule deliberately scopes storage by an opaque
- * acting-agent identity. The durable root agent is the daemon's stable owner for this adapter.
+ * owner. The daemon owns the secrets a person registers through Rig, under a fixed name rather
+ * than a conversation's, because no conversation registered them.
  */
-function secretOwner(agent: StartedHappyAgent): string {
-    return agent.agent.id;
-}
+const DAEMON_SECRET_OWNER = "daemon";
 
 function projectRigSecret(secret: SecretReference): RigSecretSummary {
     const summary = {

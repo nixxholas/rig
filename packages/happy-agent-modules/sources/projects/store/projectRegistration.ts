@@ -22,13 +22,13 @@ import {
 /** Registering a folder, once. Ensure converges on the row the folder already has. */
 export function createProjectRegistration(): Pick<ProjectStore, "create" | "ensure"> {
     return {
-        create: async (ctx, actingAgentId, input) => {
+        create: async (ctx, input) => {
             const database = databaseFor(ctx);
             const project = await newProjectRow(ctx, input);
             await insertProjectRow(database, project);
-            return { operation: "create", agentId: actingAgentId, changed: true, project };
+            return { operation: "create", changed: true, project };
         },
-        ensure: async (ctx, actingAgentId, input) => {
+        ensure: async (ctx, input) => {
             const database = databaseFor(ctx);
             const existing = await readProjectByPath(database, input.repositoryRef);
             if (existing === undefined) {
@@ -36,7 +36,6 @@ export function createProjectRegistration(): Pick<ProjectStore, "create" | "ensu
                 await insertProjectRow(database, project);
                 return {
                     operation: "ensure",
-                    agentId: actingAgentId,
                     changed: true,
                     created: true,
                     project,
@@ -45,7 +44,6 @@ export function createProjectRegistration(): Pick<ProjectStore, "create" | "ensu
             if (existing.status !== "archived") {
                 return {
                     operation: "ensure",
-                    agentId: actingAgentId,
                     changed: false,
                     created: false,
                     project: existing,
@@ -65,7 +63,6 @@ export function createProjectRegistration(): Pick<ProjectStore, "create" | "ensu
             }
             return {
                 operation: "ensure",
-                agentId: actingAgentId,
                 changed: true,
                 created: false,
                 project: restored,
@@ -97,7 +94,6 @@ async function newProjectRow(
     const at = Date.now();
     return {
         id: input.id,
-        ownerAgentId: input.ownerAgentId,
         repositoryRef: input.repositoryRef,
         kind: input.kind,
         storageKey,

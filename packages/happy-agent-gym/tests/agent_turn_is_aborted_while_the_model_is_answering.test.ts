@@ -115,19 +115,13 @@ describe("an abort arrives with nothing to interrupt", () => {
         const aborted = await gym.http.post<{
             readonly eventId: string;
             readonly session: { readonly status: string };
-        }>(`/v0/sessions/${gym.rootSessionId}/abort`, { await: true });
+        }>(`/v0/sessions/${gym.defaultSessionId}/abort`, { await: true });
         expect(aborted.status).toBe(200);
         expect(aborted.body.session.status).toBe("aborted");
         expect(aborted.body.eventId.length).toBeGreaterThan(0);
 
-        // The installation-wide route answers the same idle agent, and answers that it took the
-        // request rather than that there was nothing to take.
-        const root = await gym.http.post("/v0/abort", {});
-        expect(root.status).toBe(202);
-        expect(root.body).toEqual({ accepted: true });
-
-        // Neither abort ran anything: the model was never asked, and the journal is exactly what
-        // it was before, so no run was opened, cancelled or settled on the way through.
+        // The abort ran nothing: the model was never asked, and the journal is exactly what it was
+        // before, so no run was opened, cancelled or settled on the way through.
         expect(gym.inference.requests).toEqual([]);
         expect((await gym.events()).map((event) => event.type)).toEqual(before);
 

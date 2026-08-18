@@ -6,6 +6,7 @@ import type { Context } from "@steve.kite/stdlib";
 
 import type { StartedHappyAgent } from "../../start/startHappyAgent.js";
 import { readValidatedBody } from "./body.js";
+import { workspaceWire } from "./workspaceWire.js";
 import { AgentHttpError, sendJson } from "./errors.js";
 import { createRouteGroup, type AgentHttpRouteGroup } from "./router.js";
 import type { GitModule } from "@slopus/happy-agent-modules";
@@ -14,6 +15,7 @@ const createWorkspaceSchema = Type.Object(
     {
         baseRef: Type.Optional(Type.String({ minLength: 1, maxLength: 1_024 })),
         id: Type.Optional(Type.String({ minLength: 1, maxLength: 96 })),
+        /** The person this workspace is made for. One installation has exactly one. */
         identity: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
         name: Type.String({ minLength: 1, maxLength: 500 }),
         nameConfigured: Type.Optional(Type.Boolean()),
@@ -50,7 +52,6 @@ export function createWorkspaceRoutes(options: WorkspaceRouteOptions): AgentHttp
     // projects catalog answers whether the project in the path exists at all.
     const catalog = options.agent.modules.workspaces;
     const projects = options.agent.modules.projects;
-    const agentId = options.agent.rootAgentId;
     const assertEnabled = (): void => {
         if (!options.agent.configuration.values.features.workspaces) {
             throw new AgentHttpError(503, "Workspaces are disabled by configuration.");
@@ -73,7 +74,7 @@ export function createWorkspaceRoutes(options: WorkspaceRouteOptions): AgentHttp
                 // already gone as far as the project is concerned.
                 const includeArchived = url.searchParams.get("includeArchived") === "true";
                 const rows = (
-                    await catalog.list(ctx, agentId, {
+                    await catalog.list(ctx, {
                         includeArchived: true,
                         projectRef: projectId,
                     })
@@ -82,7 +83,7 @@ export function createWorkspaceRoutes(options: WorkspaceRouteOptions): AgentHttp
                         includeArchived ||
                         (row.status !== "archived" && row.status !== "archiving"),
                 );
-                sendJson(response, 200, { workspaces: rows.map((row) => toWorkspace(row)) });
+                sendJson(response, 200, { workspaces: rows.map((row) => workspaceWire(row)) });
             },
         },
         {
@@ -97,18 +98,11 @@ export function createWorkspaceRoutes(options: WorkspaceRouteOptions): AgentHttp
                 );
                 await requireProject(ctx, projectId);
                 const body = await readValidatedBody(request, createWorkspaceSchema);
-                if (body.identity !== undefined && body.identity !== options.agent.agent.id) {
-                    throw new AgentHttpError(
-                        403,
-                        "The workspace identity does not match this agent.",
-                    );
-                }
                 // Reservation is durable and immediate; the checkout runs behind it. The row that
                 // comes back already carries the branch, folder and storage key Git will use, so
                 // 202 means "this workspace exists and is being built", not "maybe".
                 const workspace = await catalog.createWorkspace(
                     ctx,
-                    agentId,
                     projectId,
                     {
                         ...(body.baseRef === undefined ? {} : { baseRef: body.baseRef }),
@@ -125,7 +119,7 @@ export function createWorkspaceRoutes(options: WorkspaceRouteOptions): AgentHttp
                     throw new AgentHttpError(404, "The project was not found.");
                 }
                 await recordWorkspaceEvent(ctx, projectId, workspace, "workspace.created");
-                sendJson(response, 202, { workspace: toWorkspace(workspace) });
+                sendJson(response, 202, { workspace: workspaceWire(workspace) });
             },
         },
         {
@@ -136,7 +130,7 @@ export function createWorkspaceRoutes(options: WorkspaceRouteOptions): AgentHttp
                 const [projectId, workspaceId] = workspaceParams(url.pathname, "");
                 await requireProject(ctx, projectId);
                 sendJson(response, 200, {
-                    workspace: toWorkspace(await requireWorkspace(ctx, projectId, workspaceId)),
+                    workspace: workspaceWire(await requireWorkspace(ctx, projectId, workspaceId)),
                 });
             },
         },
@@ -153,7 +147,7 @@ export function createWorkspaceRoutes(options: WorkspaceRouteOptions): AgentHttp
                 // the recorded branch, and the host moves the Git ref afterwards without holding
                 // the request while Git works.
                 const workspace = await mutate(ctx, projectId, workspaceId, expectedVersion, () =>
-                    catalog.rename(ctx, agentId, {
+                    catalog.rename(ctx, {
                         workspaceId,
                         name: body.name,
                         expectedVersion,
@@ -162,7 +156,7 @@ export function createWorkspaceRoutes(options: WorkspaceRouteOptions): AgentHttp
                 await recordWorkspaceEvent(ctx, projectId, workspace, "workspace.updated", {
                     ...(body.mutationId === undefined ? {} : { mutationId: body.mutationId }),
                 });
-                sendJson(response, 200, { workspace: toWorkspace(workspace) });
+                sendJson(response, 200, { workspace: workspaceWire(workspace) });
             },
         },
         {
@@ -178,13 +172,13 @@ export function createWorkspaceRoutes(options: WorkspaceRouteOptions): AgentHttp
                 // catalog's own background work: it can fail, be retried, or find the folder
                 // already gone, and none of that gives the workspace back.
                 const workspace = await mutate(ctx, projectId, workspaceId, expectedVersion, () =>
-                    catalog.archive(ctx, agentId, workspaceId, { expectedVersion }),
+                    catalog.archive(ctx, workspaceId, { expectedVersion }),
                 );
                 // The folder is about to be removed, so the shells standing in it end here rather
                 // than surviving into a directory that no longer exists.
                 await options.agent.modules.terminals.closeScope({ projectId, workspaceId });
                 await recordWorkspaceEvent(ctx, projectId, workspace, "workspace.updated");
-                sendJson(response, 202, { workspace: toWorkspace(workspace) });
+                sendJson(response, 202, { workspace: workspaceWire(workspace) });
             },
         },
         {
@@ -197,7 +191,7 @@ export function createWorkspaceRoutes(options: WorkspaceRouteOptions): AgentHttp
                 const expectedVersion = await expectVersion(ctx, request, projectId, workspaceId);
                 const body = await readValidatedBody(request, reorderSchema);
                 const workspace = await mutate(ctx, projectId, workspaceId, expectedVersion, () =>
-                    catalog.reorder(ctx, agentId, {
+                    catalog.reorder(ctx, {
                         workspaceId,
                         afterId: body.afterId,
                         expectedVersion,
@@ -206,13 +200,13 @@ export function createWorkspaceRoutes(options: WorkspaceRouteOptions): AgentHttp
                 await recordWorkspaceEvent(ctx, projectId, workspace, "workspace.updated", {
                     ...(body.mutationId === undefined ? {} : { mutationId: body.mutationId }),
                 });
-                sendJson(response, 200, { workspace: toWorkspace(workspace) });
+                sendJson(response, 200, { workspace: workspaceWire(workspace) });
             },
         },
     ]);
 
     async function requireProject(ctx: Context, projectId: string): Promise<void> {
-        if ((await projects.get(ctx, agentId, projectId)) === undefined) {
+        if ((await projects.get(ctx, projectId)) === undefined) {
             throw new AgentHttpError(404, "The project was not found.");
         }
     }
@@ -223,7 +217,7 @@ export function createWorkspaceRoutes(options: WorkspaceRouteOptions): AgentHttp
         projectId: string,
         workspaceId: string,
     ): Promise<Workspace | undefined> {
-        const workspace = await catalog.get(ctx, agentId, workspaceId);
+        const workspace = await catalog.get(ctx, workspaceId);
         return workspace?.projectRef === projectId ? workspace : undefined;
     }
 
@@ -258,7 +252,7 @@ export function createWorkspaceRoutes(options: WorkspaceRouteOptions): AgentHttp
         if (parsed !== current.version) {
             throw new AgentHttpError(409, "The workspace has changed.", {
                 currentVersion: current.version,
-                workspace: toWorkspace(current),
+                workspace: workspaceWire(current),
             });
         }
         return parsed;
@@ -285,7 +279,7 @@ export function createWorkspaceRoutes(options: WorkspaceRouteOptions): AgentHttp
             if (now !== undefined && now.version !== expectedVersion) {
                 throw new AgentHttpError(409, "The workspace has changed.", {
                     currentVersion: now.version,
-                    workspace: toWorkspace(now),
+                    workspace: workspaceWire(now),
                 });
             }
             throw error;
@@ -307,11 +301,10 @@ export function createWorkspaceRoutes(options: WorkspaceRouteOptions): AgentHttp
     ): Promise<void> {
         try {
             await options.agent.modules.events.record(ctx, {
-                agentId: options.agent.agent.id,
                 payload: {
                     projectId,
                     workspaceId: workspace.id,
-                    workspace: toWorkspace(workspace),
+                    workspace: workspaceWire(workspace),
                     ...extra,
                 },
                 type,
@@ -324,41 +317,6 @@ export function createWorkspaceRoutes(options: WorkspaceRouteOptions): AgentHttp
             );
         }
     }
-}
-
-/** The wire form of one workspace. The path and the branch are the recorded ones. */
-function toWorkspace(workspace: Workspace): Record<string, unknown> {
-    return {
-        archivedAt: workspace.archivedAt,
-        baseCommit: workspace.baseCommit,
-        baseRef: workspace.baseRef,
-        branch: workspace.branch,
-        createdAt: workspace.createdAt,
-        creatorSessionId: workspace.creatorSessionId,
-        git: {
-            ahead: workspace.gitAhead,
-            behind: workspace.gitBehind,
-            branch: workspace.branch,
-            detached: workspace.gitDetached,
-            head: workspace.gitHead,
-            upstream: workspace.gitUpstream,
-        },
-        gitCommonDir: workspace.gitCommonDir,
-        id: workspace.id,
-        initializationAttempt: workspace.initializationAttempt,
-        initializationError: workspace.initializationError,
-        kind: workspace.kind,
-        name: workspace.name,
-        nameConfigured: workspace.nameConfigured,
-        orderKey: workspace.orderKey,
-        path: workspace.path,
-        presence: workspace.presence,
-        projectId: workspace.projectRef,
-        status: workspace.status,
-        storageKey: workspace.storageKey,
-        updatedAt: workspace.updatedAt,
-        version: workspace.version,
-    };
 }
 
 function workspaceParams(pathname: string, suffix: string): [string, string] {

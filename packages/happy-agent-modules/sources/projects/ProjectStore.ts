@@ -45,7 +45,6 @@ export const projectStoreCreateInputSchema = Type.Object(
         kind: projectKindSchema,
         name: projectNameSchema,
         nameSource: projectNameSourceSchema,
-        ownerAgentId: projectAgentIdSchema,
         remoteSource: Type.Optional(projectRemoteSourceSchema),
         repositoryRef: projectRepositoryRefSchema,
         requiredSecretKind: Type.Optional(projectRequiredSecretKindSchema),
@@ -150,7 +149,6 @@ export const projectStoreStateChangeInputSchema = Type.Object(
 );
 
 const projectMutationEnvelope = {
-    agentId: projectAgentIdSchema,
     changed: Type.Boolean(),
 } as const;
 
@@ -261,34 +259,6 @@ export const projectStoreMutationResultSchema = Type.Union([
     projectStateChangeResultSchema,
 ]);
 
-export const projectAuthorizationActionSchema = Type.Union([
-    Type.Literal("list"),
-    Type.Literal("get"),
-    Type.Literal("ensure"),
-    Type.Literal("create"),
-    Type.Literal("rename"),
-    Type.Literal("archive"),
-    Type.Literal("restore"),
-    Type.Literal("reorder"),
-    Type.Literal("set_avatar"),
-    Type.Literal("clear_avatar"),
-    Type.Literal("avatar_update"),
-    Type.Literal("avatar_read"),
-    Type.Literal("settings_read"),
-    Type.Literal("settings_update"),
-    Type.Literal("update_state"),
-]);
-
-export const projectAuthorizationSchema = Type.Function(
-    [
-        projectContextSchema,
-        projectAgentIdSchema,
-        projectAgentIdSchema,
-        projectAuthorizationActionSchema,
-    ],
-    Type.Union([Type.Boolean(), Type.Promise(Type.Boolean())]),
-);
-
 /**
  * This is the private persistence contract used by the module-owned SQLite
  * adapter below. It remains exported for the protocol package's structural
@@ -297,63 +267,63 @@ export const projectAuthorizationSchema = Type.Function(
 export const projectStoreSchema = Type.Object(
     {
         create: Type.Function(
-            [projectContextSchema, projectAgentIdSchema, projectStoreCreateInputSchema],
+            [projectContextSchema, projectStoreCreateInputSchema],
             Type.Promise(projectCreateResultSchema),
         ),
         ensure: Type.Function(
-            [projectContextSchema, projectAgentIdSchema, projectStoreEnsureInputSchema],
+            [projectContextSchema, projectStoreEnsureInputSchema],
             Type.Promise(projectEnsureResultSchema),
         ),
         list: Type.Function(
-            [projectContextSchema, projectAgentIdSchema, projectPageQuerySchema],
+            [projectContextSchema, projectPageQuerySchema],
             Type.Promise(projectPageSchema),
         ),
         get: Type.Function(
-            [projectContextSchema, projectAgentIdSchema, projectIdSchema],
+            [projectContextSchema, projectIdSchema],
             Type.Promise(Type.Union([projectSchema, Type.Undefined()])),
         ),
         findByPath: Type.Function(
-            [projectContextSchema, projectAgentIdSchema, projectRepositoryRefSchema],
+            [projectContextSchema, projectRepositoryRefSchema],
             Type.Promise(Type.Union([projectSchema, Type.Undefined()])),
         ),
         findByAvatarHash: Type.Function(
-            [projectContextSchema, projectAgentIdSchema, projectAvatarHashSchema],
+            [projectContextSchema, projectAvatarHashSchema],
             Type.Promise(Type.Union([projectSchema, Type.Undefined()])),
         ),
         rename: Type.Function(
-            [projectContextSchema, projectAgentIdSchema, projectStoreRenameInputSchema],
+            [projectContextSchema, projectStoreRenameInputSchema],
             Type.Promise(projectRenameResultSchema),
         ),
         archive: Type.Function(
-            [projectContextSchema, projectAgentIdSchema, projectStoreArchiveInputSchema],
+            [projectContextSchema, projectStoreArchiveInputSchema],
             Type.Promise(projectArchiveResultSchema),
         ),
         restore: Type.Function(
-            [projectContextSchema, projectAgentIdSchema, projectStoreRestoreInputSchema],
+            [projectContextSchema, projectStoreRestoreInputSchema],
             Type.Promise(projectRestoreResultSchema),
         ),
         reorder: Type.Function(
-            [projectContextSchema, projectAgentIdSchema, projectStoreReorderInputSchema],
+            [projectContextSchema, projectStoreReorderInputSchema],
             Type.Promise(projectReorderResultSchema),
         ),
         setAvatar: Type.Function(
-            [projectContextSchema, projectAgentIdSchema, projectStoreSetAvatarInputSchema],
+            [projectContextSchema, projectStoreSetAvatarInputSchema],
             Type.Promise(projectSetAvatarResultSchema),
         ),
         clearAvatar: Type.Function(
-            [projectContextSchema, projectAgentIdSchema, projectStoreClearAvatarInputSchema],
+            [projectContextSchema, projectStoreClearAvatarInputSchema],
             Type.Promise(projectClearAvatarResultSchema),
         ),
         readSettings: Type.Function(
-            [projectContextSchema, projectAgentIdSchema, projectIdSchema],
+            [projectContextSchema, projectIdSchema],
             Type.Promise(projectSettingsSchema),
         ),
         updateSettings: Type.Function(
-            [projectContextSchema, projectAgentIdSchema, projectStoreSettingsUpdateInputSchema],
+            [projectContextSchema, projectStoreSettingsUpdateInputSchema],
             Type.Promise(projectSettingsUpdateResultSchema),
         ),
         applyState: Type.Function(
-            [projectContextSchema, projectAgentIdSchema, projectStoreStateChangeInputSchema],
+            [projectContextSchema, projectStoreStateChangeInputSchema],
             Type.Promise(projectStateChangeResultSchema),
         ),
     },
@@ -383,8 +353,6 @@ export type ProjectClearAvatarResult = Static<typeof projectClearAvatarResultSch
 export type ProjectSettingsUpdateResult = Static<typeof projectSettingsUpdateResultSchema>;
 export type ProjectStateChangeResult = Static<typeof projectStateChangeResultSchema>;
 export type ProjectStoreMutationResult = Static<typeof projectStoreMutationResultSchema>;
-export type ProjectAuthorizationAction = Static<typeof projectAuthorizationActionSchema>;
-export type ProjectAuthorization = Static<typeof projectAuthorizationSchema>;
 
 export type { Project, ProjectPage, ProjectPageQuery };
 

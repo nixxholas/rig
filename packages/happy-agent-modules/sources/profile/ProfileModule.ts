@@ -76,11 +76,12 @@ export class ProfileModule<Database extends AgentDatabase = AgentDatabase>
      * Says which installation this is.
      *
      * A profile records the machine it was made on so another machine that later reads it knows
-     * it may not speak for that person. The agent this installation runs as is that machine, and
-     * it is only known once the agent exists, so it arrives here rather than at construction.
+     * it may not speak for that person. The installation's own identity is that machine, and it is
+     * only read out of the folder once the modules have started, so it arrives here rather than at
+     * construction.
      */
-    open(agentId: string): void {
-        this.#localInstanceId = agentId;
+    open(localInstanceId: string): void {
+        this.#localInstanceId = localInstanceId;
     }
 
     /** The profile, or nothing when nobody has been named yet. */

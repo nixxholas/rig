@@ -20,7 +20,7 @@ export function transferWorkspaceTool(workspaces: WorkspacesModule, agentId: str
         describeAutoPermissionAction: ({ targetWorkspaceId }) =>
             `transfer this conversation to workspace ${JSON.stringify(targetWorkspaceId)}, discarding that target's current commit and all local working state`,
         execute: async (ctx, input: WorkspaceSessionTransferInput, call) =>
-            await workspaces.transfer(ctx, agentId, { ...input, operationId: call.id }),
+            await workspaces.transfer(ctx, { ...input, operationId: call.id }),
         toLLM: (result) => [
             {
                 type: "text",

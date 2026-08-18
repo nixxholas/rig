@@ -31,6 +31,7 @@ import type {
 import { agentMessageOptions, type RequestedAgentSelection } from "../http/agentMessageOptions.js";
 import { createRigModelCatalog } from "../http/rigProtocol.js";
 import {
+    daemonAgentConfig,
     resolveSessionOwner,
     sessionAgentConfig,
     sessionSummaryValue,
@@ -42,7 +43,6 @@ import {
     sessionSelection,
     type SessionSelection,
 } from "../http/sessionSelection.js";
-import type { InstallationModule } from "../installation/InstallationModule.js";
 import { importHappyCredentials } from "./credentials/importHappyCredentials.js";
 import type { HappySpawnOperations } from "./handleHappySpawnSession.js";
 import type { HappyConnectionConfiguration } from "./HappyCredentials.js";
@@ -64,10 +64,10 @@ const MAX_CONNECTED_AGENTS = 64;
 /**
  * The modules Happy works through, all of them settled before the agent collection opens.
  *
- * Every one of these is a module, and nothing else is: the credentials folder and the version this
- * build reports are asked of the configuration, and the root agent's identity is asked of the
- * installation that settles it. The agent collection is the one thing that cannot be a constructor
- * argument, because creating it is what starts these modules; it arrives at `beforeStart`.
+ * Every one of these is a module, and nothing else is: the credentials folder, the version this
+ * build reports and the folder a session starts in are all asked of the configuration. The agent
+ * collection is the one thing that cannot be a constructor argument, because creating it is what
+ * starts these modules; it arrives at `beforeStart`.
  */
 export interface HappyModuleOptions {
     /** Where the credentials live, what version to report, and how a session starts out. */
@@ -75,8 +75,6 @@ export interface HappyModuleOptions {
     readonly conversations: ConversationModule;
     /** The journal Happy projects, and writes its own session events to. */
     readonly events: EventsModule;
-    /** Which agent this machine acts as, which is who a session started from the phone belongs to. */
-    readonly installation: InstallationModule;
     readonly scheduling: SchedulingModule;
     readonly userInput: UserInputModule;
     readonly workspaces: WorkspacesModule;
@@ -352,10 +350,9 @@ export class HappyModule
         const existing = await options.conversations.get(ctx, request.sessionId);
         if (existing !== undefined) return { agentId: existing.agentId };
 
-        const rootConfig = (await system.config(ctx, options.installation.rootAgentId)) ?? {};
         const owner = await resolveSessionOwner(
             ctx,
-            { rootAgentId: options.installation.rootAgentId, workspaces: options.workspaces },
+            { workspaces: options.workspaces },
             { cwd: request.cwd },
         );
         // Creating an agent writes its own conversation from defaults that know nothing of this
@@ -372,9 +369,14 @@ export class HappyModule
             providerId: request.providerId,
             scope: owner.scope,
         });
-        const agent = await system.create(ctx, sessionAgentConfig(rootConfig, owner.cwd), {
-            id: agentId,
-        });
+        const agent = await system.create(
+            ctx,
+            sessionAgentConfig(
+                daemonAgentConfig(options.config.configuration.paths.publicHome),
+                owner.cwd,
+            ),
+            { id: agentId },
+        );
         const summary = sessionSummaryValue(
             session,
             createRigModelCatalog(system.models),

@@ -8,7 +8,6 @@ import { WORKSPACES_TABLE } from "../WorkspaceMigrations.js";
 
 type WorkspaceRow = {
     readonly id: string;
-    readonly owner_agent_id: string;
     readonly project_ref: string;
     readonly name: string;
     readonly name_configured: number;
@@ -127,13 +126,13 @@ export async function insertWorkspace(
     await agentDatabaseRun(
         database,
         sql`INSERT INTO ${sql.raw(WORKSPACES_TABLE)} (
-            id, owner_agent_id, project_ref, name, name_key, name_configured, branch, storage_key,
+            id, project_ref, name, name_key, name_configured, branch, storage_key,
             kind, path, base_ref, base_commit, git_common_dir, presence, status, order_key,
             version, creator_session_id, git_ahead, git_behind, git_detached, git_head,
             git_upstream, initialization_attempt, initialization_error, created_at, updated_at,
             archived_at
         ) VALUES (
-            ${workspace.id}, ${workspace.ownerAgentId}, ${workspace.projectRef}, ${workspace.name},
+            ${workspace.id}, ${workspace.projectRef}, ${workspace.name},
             ${workspaceNameKey(workspace.name)}, ${workspace.nameConfigured ? 1 : 0},
             ${workspace.branch}, ${workspace.storageKey}, ${workspace.kind}, ${workspace.path},
             ${workspace.baseRef ?? null}, ${workspace.baseCommit ?? null},
@@ -162,8 +161,7 @@ export async function writeWorkspace(
     const affected = await agentDatabaseRows<{ readonly id: string }>(
         database,
         sql`UPDATE ${sql.raw(WORKSPACES_TABLE)}
-            SET owner_agent_id = ${workspace.ownerAgentId},
-                project_ref = ${workspace.projectRef},
+            SET project_ref = ${workspace.projectRef},
                 name = ${workspace.name},
                 name_key = ${workspaceNameKey(workspace.name)},
                 name_configured = ${workspace.nameConfigured ? 1 : 0},
@@ -219,7 +217,6 @@ export function isUniquenessConflict(error: unknown): boolean {
 function workspaceFromRow(row: WorkspaceRow): Workspace {
     const workspace: Workspace = {
         id: row.id,
-        ownerAgentId: row.owner_agent_id,
         projectRef: row.project_ref,
         name: row.name,
         nameConfigured: Number(row.name_configured) !== 0,

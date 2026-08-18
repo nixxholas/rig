@@ -72,7 +72,6 @@ export function workspaceDetailText(workspace: Workspace): string {
         `Ahead: ${String(workspace.gitAhead)}`,
         `Behind: ${String(workspace.gitBehind)}`,
         `Detached: ${workspace.gitDetached ? "yes" : "no"}`,
-        `Owner agent: ${workspace.ownerAgentId}`,
         ...(workspace.creatorSessionId === undefined
             ? []
             : [`Created by session: ${workspace.creatorSessionId}`]),

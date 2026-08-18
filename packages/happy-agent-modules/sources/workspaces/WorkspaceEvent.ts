@@ -41,7 +41,6 @@ export const workspaceUpdateChangeSchema = Type.Union([
 const eventEnvelope = {
     eventId: workspaceEventIdSchema,
     at: workspaceTimestampSchema,
-    agentId: workspaceAgentIdSchema,
 } as const;
 
 export const workspaceEventSchema = Type.Union([

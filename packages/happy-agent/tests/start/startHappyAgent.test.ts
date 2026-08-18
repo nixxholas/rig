@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -54,18 +55,16 @@ describe("startHappyAgent", () => {
         expect(first.provider).toBe("codex");
         expect(first.models[0]?.id).toBe("openai/gpt-5.6-terra");
         expect(first.models[0]?.providerId).toBe("codex");
-        // The agent works in the public home, which the start created.
-        const environment = (await first.system.config(first.ctx, first.agent.id))?.environment;
-        expect(environment?.workingDirectory).toBe(first.configuration.paths.publicHome);
+        // The start creates the public home every session works out of by default.
+        expect(existsSync(first.configuration.paths.publicHome)).toBe(true);
 
-        const firstAgentId = first.agent.id;
+        const firstEpoch = first.installation.epoch;
         await first.close();
         started.length = 0;
 
-        // The same folder is the same installation: restarting resolves the agent, never a new one.
+        // The same folder is the same installation: restarting keeps the epoch it was started with.
         const second = await start(happyHome);
-        expect(second.agent.id).toBe(firstAgentId);
-        expect(second.installation.epoch).toBe(first.installation.epoch);
+        expect(second.installation.epoch).toBe(firstEpoch);
     });
 
     it("refuses a default model no enabled provider serves", async () => {
@@ -90,8 +89,7 @@ describe("startHappyAgent", () => {
         expect(typeof agent.background).toBe("function");
         expect(agent.gitTracker).toBeDefined();
         // The catalogs do their own Git, folders and clones, so there is no service between them
-        // and the disk any more — only the agent they were opened for.
-        expect(agent.rootAgentId).toBe(agent.agent.id);
+        // and the disk any more — only the installation they were opened for.
         expect(agent.installation.schemaVersion).toBe(1);
     });
 });

@@ -19,7 +19,7 @@ export function createWorkspaceTool(workspaces: WorkspacesModule, agentId: strin
         transactional: true,
         shouldReviewInAutoMode: () => false,
         execute: async (ctx, input: WorkspaceCreateToolInput, call) =>
-            (await workspaces.reserve(ctx, agentId, { ...input, operationId: call.id })).workspace,
+            (await workspaces.reserve(ctx, { ...input, operationId: call.id })).workspace,
         toLLM: (workspace) => [
             {
                 type: "text",

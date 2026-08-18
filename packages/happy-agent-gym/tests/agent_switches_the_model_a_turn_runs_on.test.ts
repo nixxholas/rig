@@ -44,7 +44,7 @@ async function submit(
     },
 ) {
     return await gym.http.post<{ readonly error: string }>(
-        `/v0/sessions/${gym.rootSessionId}/messages`,
+        `/v0/sessions/${gym.defaultSessionId}/messages`,
         { ...selection, text: "Run this somewhere." },
     );
 }

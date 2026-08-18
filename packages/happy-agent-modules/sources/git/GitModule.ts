@@ -22,7 +22,9 @@ export const gitEntitySchema = Type.Object(
 );
 export const gitWatchSchema = Type.Object(
     {
-        entities: Type.Array(gitEntitySchema, { minItems: 1, maxItems: 256 }),
+        // Watching nothing is a real state, not a mistake: a client whose window shows no folder
+        // yet still polls, and it is told about no folders rather than refused.
+        entities: Type.Array(gitEntitySchema, { maxItems: 256 }),
     },
     { additionalProperties: false },
 );

@@ -6,7 +6,6 @@ import { projectSettingsSchema, type ProjectSettings } from "./ProjectSettings.j
 /** Facts about a project that no operation may ever rewrite. */
 const PROJECT_IMMUTABLE_FIELDS = [
     "id",
-    "ownerAgentId",
     "repositoryRef",
     "kind",
     "storageKey",

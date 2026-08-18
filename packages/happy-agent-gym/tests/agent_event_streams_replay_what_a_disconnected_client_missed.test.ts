@@ -91,7 +91,7 @@ describe("a client that reconnects to one chat's stream", () => {
         const other = await gym.createSession();
 
         let missedFrom = "";
-        const before = gym.stream(`/v0/sessions/${gym.rootSessionId}/stream`);
+        const before = gym.stream(`/v0/sessions/${gym.defaultSessionId}/stream`);
         try {
             await before.opened();
             await gym.send("Root, first.");
@@ -109,7 +109,7 @@ describe("a client that reconnects to one chat's stream", () => {
         await gym.send("Other, while nobody watched.", { sessionId: other.id });
         await gym.send("Root, while nobody watched.");
 
-        const resumed = gym.stream(`/v0/sessions/${gym.rootSessionId}/stream`, {
+        const resumed = gym.stream(`/v0/sessions/${gym.defaultSessionId}/stream`, {
             lastEventId: missedFrom,
         });
         try {
@@ -117,7 +117,7 @@ describe("a client that reconnects to one chat's stream", () => {
                 (frame) => frame.event === "hello",
                 "the resumed chat stream to greet its client",
             );
-            expect(hello.data).toMatchObject({ resumed: true, sessionId: gym.rootSessionId });
+            expect(hello.data).toMatchObject({ resumed: true, sessionId: gym.defaultSessionId });
 
             await resumed.waitFor(
                 (frame) => frame.event === "run_finished",

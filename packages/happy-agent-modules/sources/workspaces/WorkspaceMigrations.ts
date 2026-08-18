@@ -143,4 +143,74 @@ export const workspaceMigrations = [
             );
         },
     ],
+    [
+        // A workspace belongs to the project it was cut from, not to an agent. The owning agent was
+        // always the one identity the daemon had, so the column decided nothing and every read
+        // ignored it. Rig is early stage, so the generation is advanced and the catalog reset
+        // rather than rebuilding the table to drop a column SQLite cannot drop in place.
+        "005-workspace-without-owner",
+        async (_ctx: Context, database: AgentDatabase): Promise<void> => {
+            await agentDatabaseRun(
+                database,
+                sql`DROP TABLE IF EXISTS ${sql.raw(WORKSPACES_TABLE)}`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`CREATE TABLE ${sql.raw(WORKSPACES_TABLE)} (
+                    id TEXT PRIMARY KEY,
+                    project_ref TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    name_key TEXT NOT NULL,
+                    name_configured INTEGER NOT NULL,
+                    branch TEXT NOT NULL,
+                    storage_key TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    base_ref TEXT,
+                    base_commit TEXT,
+                    git_common_dir TEXT,
+                    presence TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    order_key TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    creator_session_id TEXT,
+                    git_ahead INTEGER NOT NULL,
+                    git_behind INTEGER NOT NULL,
+                    git_detached INTEGER NOT NULL,
+                    git_head TEXT,
+                    git_upstream TEXT,
+                    initialization_attempt INTEGER NOT NULL,
+                    initialization_error TEXT,
+                    created_at BIGINT NOT NULL,
+                    updated_at BIGINT NOT NULL,
+                    archived_at BIGINT
+                )`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`CREATE INDEX IF NOT EXISTS ${sql.raw(`${WORKSPACES_TABLE}_order`)}
+                    ON ${sql.raw(WORKSPACES_TABLE)} (project_ref, order_key, id)`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`CREATE UNIQUE INDEX IF NOT EXISTS ${sql.raw(`${WORKSPACES_TABLE}_path`)}
+                    ON ${sql.raw(WORKSPACES_TABLE)} (path)`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`CREATE UNIQUE INDEX IF NOT EXISTS ${sql.raw(`${WORKSPACES_TABLE}_branch`)}
+                    ON ${sql.raw(WORKSPACES_TABLE)} (project_ref, branch)`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`CREATE UNIQUE INDEX IF NOT EXISTS ${sql.raw(`${WORKSPACES_TABLE}_storage_key`)}
+                    ON ${sql.raw(WORKSPACES_TABLE)} (project_ref, storage_key)`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`CREATE UNIQUE INDEX IF NOT EXISTS ${sql.raw(`${WORKSPACES_TABLE}_name_key`)}
+                    ON ${sql.raw(WORKSPACES_TABLE)} (project_ref, name_key)`,
+            );
+        },
+    ],
 ] as const;

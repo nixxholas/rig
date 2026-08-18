@@ -7,7 +7,6 @@ import sharp from "sharp";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
-    AGENT_ID,
     createGitRepository,
     git,
     projectTestHarness,
@@ -38,7 +37,7 @@ async function ownedWorkspace(
     projectId: string,
     workspaceId: string,
 ): Promise<Workspace | undefined> {
-    const workspace = await catalogs.workspaces.get(test.ctx, AGENT_ID, workspaceId);
+    const workspace = await catalogs.workspaces.get(test.ctx, workspaceId);
     return workspace?.projectRef === projectId ? workspace : undefined;
 }
 
@@ -47,9 +46,9 @@ async function readyProject(
     folder = "acme-api",
 ): Promise<{ id: string; path: string }> {
     const path = await createGitRepository(join(test.root, folder));
-    const { project } = await test.workspaces.resolvePath(test.ctx, AGENT_ID, path);
+    const { project } = await test.workspaces.resolvePath(test.ctx, path);
     await waitFor(async () => {
-        const current = await test.projects.get(test.ctx, AGENT_ID, project.id);
+        const current = await test.projects.get(test.ctx, project.id);
         return current?.initializationStatus === "ready" ? current : undefined;
     }, `project ${folder} to be set up`);
     return { id: project.id, path };
@@ -61,7 +60,7 @@ async function readyWorkspace(
     name: string,
     nameConfigured?: boolean,
 ) {
-    const reserved = await test.workspaces.createWorkspace(test.ctx, AGENT_ID, projectId, {
+    const reserved = await test.workspaces.createWorkspace(test.ctx, projectId, {
         name,
         ...(nameConfigured === undefined ? {} : { nameConfigured }),
     });
@@ -80,19 +79,19 @@ describe("projects", () => {
         const first = await readyProject(test, "one");
         const second = await readyProject(test, "two");
 
-        const renamed = await test.projects.rename(test.ctx, AGENT_ID, {
+        const renamed = await test.projects.rename(test.ctx, {
             projectId: first.id,
             name: "Acme API",
         });
         expect(renamed.name).toBe("Acme API");
         expect(renamed.nameSource).toBe("user");
 
-        const moved = await test.projects.reorder(test.ctx, AGENT_ID, {
+        const moved = await test.projects.reorder(test.ctx, {
             projectId: first.id,
             afterId: second.id,
         });
         expect(moved).toBeDefined();
-        const page = await test.projects.list(test.ctx, AGENT_ID, { includeArchived: true });
+        const page = await test.projects.list(test.ctx, { includeArchived: true });
         const order = page.projects.map((project) => project.id);
         expect(order.indexOf(first.id)).toBeGreaterThan(order.indexOf(second.id));
     });
@@ -102,7 +101,7 @@ describe("projects", () => {
         const project = await readyProject(test);
 
         await expect(
-            test.projects.rename(test.ctx, AGENT_ID, {
+            test.projects.rename(test.ctx, {
                 projectId: project.id,
                 name: "Acme\u0007API",
             }),
@@ -113,10 +112,10 @@ describe("projects", () => {
         const test = await harness("project-archive-restore");
         const project = await readyProject(test);
 
-        await test.projects.archive(test.ctx, AGENT_ID, project.id);
-        expect((await test.projects.get(test.ctx, AGENT_ID, project.id))?.status).toBe("archived");
+        await test.projects.archive(test.ctx, project.id);
+        expect((await test.projects.get(test.ctx, project.id))?.status).toBe("archived");
 
-        const restored = await test.projects.restore(test.ctx, AGENT_ID, project.id);
+        const restored = await test.projects.restore(test.ctx, project.id);
         expect(restored.status).toBe("active");
     });
 
@@ -124,7 +123,7 @@ describe("projects", () => {
         const test = await harness("project-default-branch");
         const project = await readyProject(test);
 
-        expect((await test.projects.get(test.ctx, AGENT_ID, project.id))?.defaultBranch).toBe(
+        expect((await test.projects.get(test.ctx, project.id))?.defaultBranch).toBe(
             "main",
         );
     });
@@ -134,9 +133,9 @@ describe("projects", () => {
         const project = await readyProject(test);
         await git(project.path, "checkout", "-b", "feature");
 
-        await test.projects.reconcileGitFacts(test.ctx, AGENT_ID);
+        await test.projects.reconcileGitFacts(test.ctx);
 
-        const current = await test.projects.get(test.ctx, AGENT_ID, project.id);
+        const current = await test.projects.get(test.ctx, project.id);
         expect(current?.gitBranch).toBe("feature");
         expect(current?.presence).toBe("present");
         expect(current?.worktreeSupport).toBe("supported");
@@ -149,9 +148,9 @@ describe("projects", () => {
         const { rm } = await import("node:fs/promises");
         await rm(project.path, { force: true, recursive: true });
 
-        await test.projects.reconcileGitFacts(test.ctx, AGENT_ID);
+        await test.projects.reconcileGitFacts(test.ctx);
 
-        expect((await test.projects.get(test.ctx, AGENT_ID, project.id))?.presence).toBe("missing");
+        expect((await test.projects.get(test.ctx, project.id))?.presence).toBe("missing");
     });
 });
 
@@ -167,7 +166,6 @@ describe("project pictures", () => {
 
         const withAvatar = await test.projects.storeAvatarImage(
             test.ctx,
-            AGENT_ID,
             project.id,
             "user",
             png,
@@ -176,7 +174,7 @@ describe("project pictures", () => {
         expect(withAvatar!.avatar?.mediaType).toBe("image/webp");
         expect(withAvatar!.avatar?.width).toBe(256);
         expect(withAvatar!.avatar?.source).toBe("user");
-        const asset = await test.projects.avatarAsset(test.ctx, AGENT_ID, withAvatar!.avatar!.hash);
+        const asset = await test.projects.avatarAsset(test.ctx, withAvatar!.avatar!.hash);
         expect(asset?.mediaType).toBe("image/webp");
         expect(asset!.bytes.byteLength).toBeGreaterThan(0);
     });
@@ -188,7 +186,6 @@ describe("project pictures", () => {
         await expect(
             test.projects.storeAvatarImage(
                 test.ctx,
-                AGENT_ID,
                 project.id,
                 "user",
                 Buffer.alloc(9 * 1024 * 1024, 1),
@@ -197,7 +194,6 @@ describe("project pictures", () => {
         await expect(
             test.projects.storeAvatarImage(
                 test.ctx,
-                AGENT_ID,
                 project.id,
                 "user",
                 Buffer.from("not a picture"),
@@ -216,7 +212,6 @@ describe("project pictures", () => {
             .toBuffer();
         const withAvatar = await test.projects.storeAvatarImage(
             test.ctx,
-            AGENT_ID,
             project.id,
             "user",
             png,
@@ -231,15 +226,15 @@ describe("project pictures", () => {
         );
         expect(existsSync(storedFile)).toBe(true);
 
-        await test.projects.clearAvatar(test.ctx, AGENT_ID, { projectId: project.id });
-        expect((await test.projects.get(test.ctx, AGENT_ID, project.id))?.avatar).toBeUndefined();
+        await test.projects.clearAvatar(test.ctx, { projectId: project.id });
+        expect((await test.projects.get(test.ctx, project.id))?.avatar).toBeUndefined();
 
         // Collection is delayed, so a picture cleared by mistake can still be put back.
-        await test.projects.collectAvatarGarbage(test.ctx, AGENT_ID);
+        await test.projects.collectAvatarGarbage(test.ctx);
         expect(existsSync(storedFile)).toBe(true);
 
         clock += 25 * 60 * 60 * 1000;
-        await test.projects.collectAvatarGarbage(test.ctx, AGENT_ID);
+        await test.projects.collectAvatarGarbage(test.ctx);
         expect(existsSync(storedFile)).toBe(false);
     });
 });
@@ -271,7 +266,7 @@ describe("starting up again", () => {
             "ready",
         );
         expect(
-            (await restarted.projects.get(test.ctx, AGENT_ID, project.id))?.initializationStatus,
+            (await restarted.projects.get(test.ctx, project.id))?.initializationStatus,
         ).toBe("ready");
     });
 
@@ -300,7 +295,7 @@ describe("starting up again", () => {
         const test = await harness("startup-missing");
         const path = join(test.root, "gone");
         await mkdir(path, { recursive: true });
-        const { project } = await test.workspaces.resolvePath(test.ctx, AGENT_ID, path);
+        const { project } = await test.workspaces.resolvePath(test.ctx, path);
         await test.close(test.ctx);
         const { rm } = await import("node:fs/promises");
         await rm(path, { force: true, recursive: true });
@@ -309,7 +304,7 @@ describe("starting up again", () => {
         await restarted.open(test.ctx);
 
         const settled = await waitFor(async () => {
-            const current = await restarted.projects.get(test.ctx, AGENT_ID, project.id);
+            const current = await restarted.projects.get(test.ctx, project.id);
             return current?.initializationStatus === "initializing" ? undefined : current;
         }, "the project to stop being set up");
         expect(settled.initializationStatus).toBe("failed");

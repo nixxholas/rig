@@ -6,7 +6,6 @@ import { ProjectRegistrationError } from "@slopus/happy-agent-modules";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
-    AGENT_ID,
     createGitRepository,
     projectTestHarness,
     type ProjectTestHarness,
@@ -29,7 +28,7 @@ describe("resolving a working directory", () => {
         const test = await harness("resolve-import");
         const path = await createGitRepository(join(test.root, "acme-api"));
 
-        const { project, workspace } = await test.workspaces.resolvePath(test.ctx, AGENT_ID, path);
+        const { project, workspace } = await test.workspaces.resolvePath(test.ctx, path);
 
         expect(workspace).toBeUndefined();
         expect(project.name).toBe("acme-api");
@@ -42,18 +41,18 @@ describe("resolving a working directory", () => {
         const test = await harness("resolve-idempotent");
         const path = await createGitRepository(join(test.root, "acme-api"));
 
-        const first = await test.workspaces.resolvePath(test.ctx, AGENT_ID, path);
-        const second = await test.workspaces.resolvePath(test.ctx, AGENT_ID, path);
+        const first = await test.workspaces.resolvePath(test.ctx, path);
+        const second = await test.workspaces.resolvePath(test.ctx, path);
 
         expect(second.project.id).toBe(first.project.id);
-        const page = await test.projects.list(test.ctx, AGENT_ID, { includeArchived: true });
+        const page = await test.projects.list(test.ctx, { includeArchived: true });
         expect(page.projects.length).toBe(1);
     });
 
     it("treats the home directory as its own kind of project and never sets it up", async () => {
         const test = await harness("resolve-home");
 
-        const { project } = await test.workspaces.resolvePath(test.ctx, AGENT_ID, test.home);
+        const { project } = await test.workspaces.resolvePath(test.ctx, test.home);
 
         expect(project.kind).toBe("home");
         expect(project.name).toBe("Home");
@@ -65,7 +64,7 @@ describe("resolving a working directory", () => {
         const path = join(test.root, "notes");
         await mkdir(path, { recursive: true });
 
-        const { project } = await test.workspaces.resolvePath(test.ctx, AGENT_ID, path);
+        const { project } = await test.workspaces.resolvePath(test.ctx, path);
 
         expect(project.name).toBe("notes");
         expect(project.repositoryRef).toBe(path);
@@ -77,8 +76,8 @@ describe("resolving a working directory", () => {
         const alias = join(test.root, "alias");
         await symlink(path, alias);
 
-        const direct = await test.workspaces.resolvePath(test.ctx, AGENT_ID, path);
-        const viaAlias = await test.workspaces.resolvePath(test.ctx, AGENT_ID, alias);
+        const direct = await test.workspaces.resolvePath(test.ctx, path);
+        const viaAlias = await test.workspaces.resolvePath(test.ctx, alias);
 
         expect(viaAlias.project.id).toBe(direct.project.id);
     });
@@ -86,11 +85,11 @@ describe("resolving a working directory", () => {
     it("restores an archived project instead of refusing to work in its folder", async () => {
         const test = await harness("resolve-archived");
         const path = await createGitRepository(join(test.root, "acme-api"));
-        const { project } = await test.workspaces.resolvePath(test.ctx, AGENT_ID, path);
-        await test.projects.archive(test.ctx, AGENT_ID, project.id);
-        expect((await test.projects.get(test.ctx, AGENT_ID, project.id))?.status).toBe("archived");
+        const { project } = await test.workspaces.resolvePath(test.ctx, path);
+        await test.projects.archive(test.ctx, project.id);
+        expect((await test.projects.get(test.ctx, project.id))?.status).toBe("archived");
 
-        const again = await test.workspaces.resolvePath(test.ctx, AGENT_ID, path);
+        const again = await test.workspaces.resolvePath(test.ctx, path);
 
         expect(again.project.id).toBe(project.id);
         expect(again.project.status).toBe("active");
@@ -104,7 +103,6 @@ describe("resolving a working directory", () => {
 
         const imported = await test.workspaces.resolvePath(
             test.ctx,
-            AGENT_ID,
             first,
             undefined,
             requested,
@@ -114,7 +112,6 @@ describe("resolving a working directory", () => {
         // The folder already is a project, so its identity stands and the request is ignored.
         const existing = await test.workspaces.resolvePath(
             test.ctx,
-            AGENT_ID,
             first,
             undefined,
             createId(),
@@ -122,7 +119,7 @@ describe("resolving a working directory", () => {
         expect(existing.project.id).toBe(requested);
 
         await expect(
-            test.workspaces.resolvePath(test.ctx, AGENT_ID, second, undefined, requested),
+            test.workspaces.resolvePath(test.ctx, second, undefined, requested),
         ).rejects.toThrow();
     });
 });
@@ -132,7 +129,7 @@ describe("registering a project explicitly", () => {
         const test = await harness("register-ok");
         const path = await createGitRepository(join(test.root, "acme-api"));
 
-        const project = await test.projects.register(test.ctx, AGENT_ID, { path });
+        const project = await test.projects.register(test.ctx, { path });
 
         expect(project.repositoryRef).toBe(path);
         expect(project.name).toBe("acme-api");
@@ -142,7 +139,7 @@ describe("registering a project explicitly", () => {
         const test = await harness("register-relative");
 
         await expect(
-            test.projects.register(test.ctx, AGENT_ID, { path: "acme-api" }),
+            test.projects.register(test.ctx, { path: "acme-api" }),
         ).rejects.toMatchObject({ code: "invalid_request" });
     });
 
@@ -151,7 +148,7 @@ describe("registering a project explicitly", () => {
         const path = await createGitRepository(join(test.root, "acme-api"));
 
         await expect(
-            test.projects.register(test.ctx, AGENT_ID, { path, projectId: "not an id" }),
+            test.projects.register(test.ctx, { path, projectId: "not an id" }),
         ).rejects.toMatchObject({ code: "invalid_request" });
     });
 
@@ -159,7 +156,7 @@ describe("registering a project explicitly", () => {
         const test = await harness("register-missing");
 
         await expect(
-            test.projects.register(test.ctx, AGENT_ID, { path: join(test.root, "nowhere") }),
+            test.projects.register(test.ctx, { path: join(test.root, "nowhere") }),
         ).rejects.toMatchObject({ code: "path_missing" });
     });
 
@@ -168,7 +165,7 @@ describe("registering a project explicitly", () => {
         const path = join(test.root, "notes.md");
         await writeFile(path, "# Notes\n");
 
-        await expect(test.projects.register(test.ctx, AGENT_ID, { path })).rejects.toMatchObject({
+        await expect(test.projects.register(test.ctx, { path })).rejects.toMatchObject({
             code: "not_directory",
         });
     });
@@ -178,7 +175,7 @@ describe("registering a project explicitly", () => {
         const path = join(test.root, "notes");
         await mkdir(path, { recursive: true });
 
-        await expect(test.projects.register(test.ctx, AGENT_ID, { path })).rejects.toMatchObject({
+        await expect(test.projects.register(test.ctx, { path })).rejects.toMatchObject({
             code: "not_git_repository",
         });
     });
@@ -190,7 +187,7 @@ describe("registering a project explicitly", () => {
         await mkdir(inside, { recursive: true });
 
         await expect(
-            test.projects.register(test.ctx, AGENT_ID, { path: inside }),
+            test.projects.register(test.ctx, { path: inside }),
         ).rejects.toMatchObject({ code: "not_git_top_level" });
     });
 
@@ -199,19 +196,19 @@ describe("registering a project explicitly", () => {
         const first = await createGitRepository(join(test.root, "one"));
         const second = await createGitRepository(join(test.root, "two"));
         const projectId = createId();
-        await test.projects.register(test.ctx, AGENT_ID, { path: first, projectId });
+        await test.projects.register(test.ctx, { path: first, projectId });
 
         await expect(
-            test.projects.register(test.ctx, AGENT_ID, { path: second, projectId }),
+            test.projects.register(test.ctx, { path: second, projectId }),
         ).rejects.toMatchObject({ code: "project_id_conflict" });
     });
 
     it("answers with the project a folder already has when it is registered again", async () => {
         const test = await harness("register-again");
         const path = await createGitRepository(join(test.root, "acme-api"));
-        const first = await test.projects.register(test.ctx, AGENT_ID, { path });
+        const first = await test.projects.register(test.ctx, { path });
 
-        const again = await test.projects.register(test.ctx, AGENT_ID, { path });
+        const again = await test.projects.register(test.ctx, { path });
 
         expect(again.id).toBe(first.id);
     });
@@ -220,7 +217,7 @@ describe("registering a project explicitly", () => {
         const test = await harness("register-typed");
 
         const error = await test.projects
-            .register(test.ctx, AGENT_ID, { path: join(test.root, "nowhere") })
+            .register(test.ctx, { path: join(test.root, "nowhere") })
             .catch((thrown: unknown) => thrown);
 
         expect(error).toBeInstanceOf(ProjectRegistrationError);

@@ -13,7 +13,6 @@ import { projectSettingsSchema, type ProjectSettings } from "./ProjectSettings.j
 /** One stored project, exactly as SQLite hands it back. */
 export type ProjectRow = {
     readonly id: string;
-    readonly owner_agent_id: string;
     readonly repository_ref: string;
     readonly kind: string;
     readonly storage_key: string;
@@ -52,7 +51,6 @@ export type ProjectSettingsRow = {
 export function projectFromRow(row: ProjectRow): Project {
     const project: Project = {
         id: row.id,
-        ownerAgentId: row.owner_agent_id,
         repositoryRef: row.repository_ref,
         kind: row.kind as Project["kind"],
         storageKey: row.storage_key,

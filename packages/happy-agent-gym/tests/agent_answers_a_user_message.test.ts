@@ -39,6 +39,6 @@ describe("the agent answers a user message", () => {
         });
 
         const sessions = await gym.listSessions();
-        expect(sessions.map((session) => session.id)).toContain(gym.rootSessionId);
+        expect(sessions.map((session) => session.id)).toContain(gym.defaultSessionId);
     });
 });

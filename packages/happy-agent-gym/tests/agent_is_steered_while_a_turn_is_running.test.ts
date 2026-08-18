@@ -139,7 +139,7 @@ describe("the agent is steered while a turn is running", () => {
                 runId: started.runId,
             }),
         ]);
-        expect(steered.sessionId).toBe(gym.rootSessionId);
+        expect(steered.sessionId).toBe(gym.defaultSessionId);
         expect(gym.errors).toEqual([]);
     });
 });
@@ -153,24 +153,11 @@ describe("the agent is steered when it is not working", () => {
         });
         running.add(gym);
 
-        // The installation-wide steering route, which names its message and its model in its own
-        // words rather than in the session route's.
-        const accepted = await gym.http.post<{
-            readonly accepted: string;
-            readonly delivery: string;
-            readonly id: string;
-        }>("/v0/steering", {
-            content: "Start with the readme.",
-            effort: gym.selection.effort,
-            model: gym.selection.modelId,
-            provider: gym.selection.providerId,
-            serviceTier: null,
-        });
-        expect(accepted.status).toBe(202);
-        expect(accepted.body).toMatchObject({ accepted: "created", delivery: "steer" });
+        const accepted = await gym.steer("Start with the readme.");
+        expect(accepted).toMatchObject({ accepted: "created", delivery: "steer" });
 
         // With no turn to join, the steering opens a run named after the message itself.
-        const settled = await gym.waitForRun(accepted.body.id);
+        const settled = await gym.waitForRun(accepted.runId);
         expect(settled.payload).toMatchObject({ stopReason: "stop" });
         expect(gym.inference.userTexts()).toEqual(["Start with the readme."]);
         expect(JSON.stringify(await gym.sessionEvents())).toContain(

@@ -64,7 +64,7 @@ describe("the agent compacts a conversation", () => {
         await gym.send("Remember that the passphrase is marigold.");
 
         const compacted = await gym.http.post<{ readonly result: string }>(
-            `/v0/sessions/${gym.rootSessionId}/compact`,
+            `/v0/sessions/${gym.defaultSessionId}/compact`,
             { await: true },
         );
         expect(compacted.status).toBe(200);
@@ -92,32 +92,6 @@ describe("the agent compacts a conversation", () => {
         expect(gym.inference.unscripted).toEqual([]);
         expect(gym.errors).toEqual([]);
     });
-
-    it("compacts the installation's own chat through the agent-wide route", async () => {
-        const gym = await createAgentGym({
-            compaction: compactionSaying("Earlier: the agent counted to three."),
-            inference: [
-                { content: [{ text: "One, two, three.", type: "text" }] },
-                { content: [{ text: "Three.", type: "text" }] },
-            ],
-        });
-        running.add(gym);
-
-        await gym.send("Count to three.");
-
-        const accepted = await gym.http.post<{ readonly accepted: boolean }>("/v0/compact", {
-            await: true,
-        });
-        expect(accepted.status).toBe(202);
-        expect(accepted.body.accepted).toBe(true);
-        expect(gym.inference.compactions).toHaveLength(1);
-
-        await gym.send("How high did you count?");
-        const shown = JSON.stringify(gym.inference.last?.messages);
-        expect(shown).toContain("Earlier: the agent counted to three.");
-        expect(shown).not.toContain("One, two, three.");
-        expect(gym.errors).toEqual([]);
-    });
 });
 
 describe("the agent accounts for the tokens a turn cost", () => {
@@ -142,7 +116,7 @@ describe("the agent accounts for the tokens a turn cost", () => {
 
         const usage = await gym.http.ok<ProtocolUsage>(
             "GET",
-            `/v0/sessions/${gym.rootSessionId}/usage`,
+            `/v0/sessions/${gym.defaultSessionId}/usage`,
         );
 
         expect(usage.currentProviderId).toBe(GYM_PROVIDER_ID);
@@ -207,7 +181,7 @@ describe("the agent accounts for the tokens a turn cost", () => {
 
         const usage = await gym.http.ok<ProtocolUsage>(
             "GET",
-            `/v0/sessions/${gym.rootSessionId}/usage`,
+            `/v0/sessions/${gym.defaultSessionId}/usage`,
         );
 
         // Compaction erases the conversation, not the record of what it cost to have it.

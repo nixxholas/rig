@@ -28,7 +28,6 @@ export interface FileRouteOptions {
 }
 
 export function createFileRoutes(options: FileRouteOptions): AgentHttpRouteGroup {
-    const agentId = options.agent.agent.id;
     const routes: AgentHttpRoute[] = [
         createSearchRoute("/v0/projects/:projectId/files"),
         createSearchRoute("/v0/projects/:projectId/workspaces/:workspaceId/files"),
@@ -170,7 +169,6 @@ export function createFileRoutes(options: FileRouteOptions): AgentHttpRouteGroup
         return await fileOperation(() =>
             options.files.resolveRoot(
                 ctx,
-                agentId,
                 requireParam(params, "projectId"),
                 params.workspaceId,
             ),

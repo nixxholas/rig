@@ -10,6 +10,7 @@ import type { Context } from "@steve.kite/stdlib";
 
 import type { StartedHappyAgent } from "../../start/startHappyAgent.js";
 import { readValidatedBody } from "./body.js";
+import { projectWire } from "./projectWire.js";
 import { AgentHttpError, sendJson } from "./errors.js";
 import { createRouteGroup, type AgentHttpRouteGroup } from "./router.js";
 import type { GitModule } from "@slopus/happy-agent-modules";
@@ -26,6 +27,13 @@ const registerProjectSchema = Type.Object(
 );
 const cloneProjectSchema = Type.Object(
     {
+        /**
+         * The person this clone is made for, in the Rig protocol's profile terms.
+         *
+         * One installation has exactly one person behind it, so the catalog already knows whose
+         * credentials it may use. The field is accepted because clients send it and refused input
+         * is worse than input that changes nothing.
+         */
         identity: Type.String({ minLength: 1, maxLength: 256 }),
         name: Type.String({ minLength: 1, maxLength: 100, pattern: "^[^/\\\\\\u0000]+$" }),
         projectId: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
@@ -83,16 +91,17 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
     // The catalog is the only thing between a route and a project: it owns the rows, the folders,
     // the clones and the pictures, so a route reads and writes through it directly.
     const catalog = options.agent.modules.projects;
-    const agentId = options.agent.rootAgentId;
     return createRouteGroup("projects", [
         {
             method: "GET",
             path: "/v0/projects",
             handle: async ({ ctx, response }) => {
-                const page = await catalog.list(ctx, agentId, { includeArchived: true });
+                const page = await catalog.list(ctx, { includeArchived: true });
                 sendJson(response, 200, {
                     projects: await Promise.all(
-                        page.projects.map(async (row) => await toProject(ctx, row)),
+                        page.projects.map(
+                            async (row) => await projectWire(ctx, catalog, row),
+                        ),
                     ),
                 });
             },
@@ -103,16 +112,18 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
             handle: async ({ ctx, request, response }) => {
                 const body = await readValidatedBody(request, registerProjectSchema);
                 const project = await registration(async () => {
-                    const registered = await catalog.register(ctx, agentId, {
+                    const registered = await catalog.register(ctx, {
                         path: body.path,
                         ...(body.projectId === undefined ? {} : { projectId: body.projectId }),
                     });
                     await recordProjectEvent(ctx, options.agent, registered.id, "project.created", {
-                        project: await toProject(ctx, registered),
+                        project: await projectWire(ctx, catalog, registered),
                     });
                     return registered;
                 });
-                sendJson(response, 200, { project: await toProject(ctx, project) });
+                sendJson(response, 200, {
+                    project: await projectWire(ctx, catalog, project),
+                });
             },
         },
         {
@@ -120,15 +131,12 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
             path: "/v0/projects/clone",
             handle: async ({ ctx, request, response }) => {
                 const body = await readValidatedBody(request, cloneProjectSchema);
-                if (body.identity !== agentId) {
-                    throw new AgentHttpError(403, "The clone identity does not match this agent.");
-                }
                 // The whole clone — staging folder, credentials, origin proof, the move into the
                 // managed folder — belongs to the host. The route's part is to hand over what the
                 // person asked for, including the credential kind, and to say where it landed.
                 const project = await registration(
                     async () =>
-                        await catalog.createRemote(ctx, agentId, {
+                        await catalog.createRemote(ctx, {
                             name: body.name,
                             ...(body.projectId === undefined ? {} : { projectId: body.projectId }),
                             ...(body.secret === undefined ? {} : { secret: body.secret }),
@@ -139,9 +147,11 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
                         }),
                 );
                 await recordProjectEvent(ctx, options.agent, project.id, "project.created", {
-                    project: await toProject(ctx, project),
+                    project: await projectWire(ctx, catalog, project),
                 });
-                sendJson(response, 202, { project: await toProject(ctx, project) });
+                sendJson(response, 202, {
+                    project: await projectWire(ctx, catalog, project),
+                });
             },
         },
         {
@@ -150,7 +160,9 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
             handle: async ({ ctx, response, url }) => {
                 const projectId = pathParam(url.pathname, "/v0/projects/:projectId", "projectId");
                 const project = await requireProject(ctx, projectId);
-                sendJson(response, 200, { project: await toProject(ctx, project) });
+                sendJson(response, 200, {
+                    project: await projectWire(ctx, catalog, project),
+                });
             },
         },
         {
@@ -161,7 +173,7 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
                 const expectedVersion = await expectVersion(ctx, request, projectId);
                 const body = await readValidatedBody(request, renameProjectSchema);
                 const project = await mutate(ctx, projectId, expectedVersion, async () => {
-                    return await catalog.rename(ctx, agentId, {
+                    return await catalog.rename(ctx, {
                         projectId,
                         name: body.name,
                         expectedVersion,
@@ -169,9 +181,11 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
                 });
                 await recordProjectEvent(ctx, options.agent, projectId, "project.updated", {
                     ...(body.mutationId === undefined ? {} : { mutationId: body.mutationId }),
-                    project: await toProject(ctx, project),
+                    project: await projectWire(ctx, catalog, project),
                 });
-                sendJson(response, 200, { project: await toProject(ctx, project) });
+                sendJson(response, 200, {
+                    project: await projectWire(ctx, catalog, project),
+                });
             },
         },
         {
@@ -186,7 +200,7 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
                 const expectedVersion = await expectVersion(ctx, request, projectId);
                 const body = await readValidatedBody(request, settingsSchema);
                 const project = await mutate(ctx, projectId, expectedVersion, async () => {
-                    await catalog.updateSettings(ctx, agentId, {
+                    await catalog.updateSettings(ctx, {
                         projectId,
                         settings:
                             body.defaultWorkspaceCompute === undefined
@@ -194,14 +208,17 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
                                 : { defaultWorkspaceCompute: body.defaultWorkspaceCompute },
                         expectedVersion,
                     });
-                    return await catalog.get(ctx, agentId, projectId);
+                    return await catalog.get(ctx, projectId);
                 });
-                const settings = await catalog.readSettings(ctx, agentId, projectId);
+                const settings = await catalog.readSettings(ctx, projectId);
                 await recordProjectEvent(ctx, options.agent, projectId, "project.updated", {
                     ...(body.mutationId === undefined ? {} : { mutationId: body.mutationId }),
-                    project: await toProject(ctx, project),
+                    project: await projectWire(ctx, catalog, project),
                 });
-                sendJson(response, 200, { project: await toProject(ctx, project), settings });
+                sendJson(response, 200, {
+                    project: await projectWire(ctx, catalog, project),
+                    settings,
+                });
             },
         },
         {
@@ -217,12 +234,14 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
                 // starts the work again. The answer is 202 because the work outlives the request.
                 const project = await registration(async () => {
                     await requireProject(ctx, projectId);
-                    return await catalog.setUpAgain(ctx, agentId, projectId);
+                    return await catalog.setUpAgain(ctx, projectId);
                 });
                 await recordProjectEvent(ctx, options.agent, projectId, "project.updated", {
-                    project: await toProject(ctx, project),
+                    project: await projectWire(ctx, catalog, project),
                 });
-                sendJson(response, 202, { project: await toProject(ctx, project) });
+                sendJson(response, 202, {
+                    project: await projectWire(ctx, catalog, project),
+                });
             },
         },
         {
@@ -236,8 +255,9 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
                 );
                 const expectedVersion = await expectVersion(ctx, request, projectId);
                 const body = await readValidatedBody(request, reorderSchema);
+                const before = await orderKeysRead(ctx);
                 const project = await mutate(ctx, projectId, expectedVersion, async () => {
-                    return await catalog.reorder(ctx, agentId, {
+                    return await catalog.reorder(ctx, {
                         projectId,
                         afterId: body.afterId,
                         expectedVersion,
@@ -245,9 +265,22 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
                 });
                 await recordProjectEvent(ctx, options.agent, projectId, "project.updated", {
                     ...(body.mutationId === undefined ? {} : { mutationId: body.mutationId }),
-                    project: await toProject(ctx, project),
+                    project: await projectWire(ctx, catalog, project),
                 });
-                sendJson(response, 200, { project: await toProject(ctx, project) });
+                // Moving one project renumbers the list around it, so the neighbours that
+                // slid up or down are announced too. A client that heard only about the
+                // dragged row would hold two projects claiming one position, and would draw
+                // the dragged one straight back where it came from.
+                for (const neighbour of await catalogProjects(ctx)) {
+                    if (neighbour.id === projectId) continue;
+                    if (neighbour.orderKey === before.get(neighbour.id)) continue;
+                    await recordProjectEvent(ctx, options.agent, neighbour.id, "project.updated", {
+                        project: await projectWire(ctx, catalog, neighbour),
+                    });
+                }
+                sendJson(response, 200, {
+                    project: await projectWire(ctx, catalog, project),
+                });
             },
         },
         {
@@ -267,13 +300,15 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
                 const project =
                     current.status === "archived"
                         ? current
-                        : await catalog.archive(ctx, agentId, projectId);
+                        : await catalog.archive(ctx, projectId);
                 // The project's folders go with it, and so do the terminals standing in them.
                 await options.agent.modules.terminals.closeProject(projectId);
                 await recordProjectEvent(ctx, options.agent, projectId, "project.updated", {
-                    project: await toProject(ctx, project),
+                    project: await projectWire(ctx, catalog, project),
                 });
-                sendJson(response, 202, { project: await toProject(ctx, project) });
+                sendJson(response, 202, {
+                    project: await projectWire(ctx, catalog, project),
+                });
             },
         },
         {
@@ -290,7 +325,6 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
                 const project = await mutate(ctx, projectId, expectedVersion, async () => {
                     return await catalog.storeAvatarImage(
                         ctx,
-                        agentId,
                         projectId,
                         "user",
                         bytes,
@@ -298,9 +332,11 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
                     );
                 });
                 await recordProjectEvent(ctx, options.agent, projectId, "project.updated", {
-                    project: await toProject(ctx, project),
+                    project: await projectWire(ctx, catalog, project),
                 });
-                sendJson(response, 200, { project: await toProject(ctx, project) });
+                sendJson(response, 200, {
+                    project: await projectWire(ctx, catalog, project),
+                });
             },
         },
         {
@@ -314,12 +350,14 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
                 );
                 const expectedVersion = await expectVersion(ctx, request, projectId);
                 const project = await mutate(ctx, projectId, expectedVersion, async () => {
-                    return await catalog.clearAvatar(ctx, agentId, { projectId, expectedVersion });
+                    return await catalog.clearAvatar(ctx, { projectId, expectedVersion });
                 });
                 await recordProjectEvent(ctx, options.agent, projectId, "project.updated", {
-                    project: await toProject(ctx, project),
+                    project: await projectWire(ctx, catalog, project),
                 });
-                sendJson(response, 200, { project: await toProject(ctx, project) });
+                sendJson(response, 200, {
+                    project: await projectWire(ctx, catalog, project),
+                });
             },
         },
         {
@@ -346,7 +384,7 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
         if (!/^[0-9a-f]{64}$/.test(hash)) {
             throw new AgentHttpError(404, "The project asset was not found.");
         }
-        const asset = await catalog.avatarAsset(ctx, agentId, hash);
+        const asset = await catalog.avatarAsset(ctx, hash);
         if (asset === undefined) {
             throw new AgentHttpError(404, "The project asset was not found.");
         }
@@ -359,7 +397,7 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
     }
 
     async function requireProject(ctx: Context, projectId: string): Promise<Project> {
-        const project = await catalog.get(ctx, agentId, projectId);
+        const project = await catalog.get(ctx, projectId);
         if (project === undefined) throw new AgentHttpError(404, "The project was not found.");
         return project;
     }
@@ -388,7 +426,7 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
         if (parsed !== current.version) {
             throw new AgentHttpError(409, "The project has changed.", {
                 currentVersion: current.version,
-                project: await toProject(ctx, current),
+                project: await projectWire(ctx, catalog, current),
             });
         }
         return parsed;
@@ -412,17 +450,29 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
             updated = await run();
         } catch (error) {
             if (error instanceof AgentHttpError) throw error;
-            const now = await catalog.get(ctx, agentId, projectId);
+            const now = await catalog.get(ctx, projectId);
             if (now !== undefined && now.version !== expectedVersion) {
                 throw new AgentHttpError(409, "The project has changed.", {
                     currentVersion: now.version,
-                    project: await toProject(ctx, now),
+                    project: await projectWire(ctx, catalog, now),
                 });
             }
             throw registrationError(error);
         }
         if (updated === undefined) throw new AgentHttpError(404, "The project was not found.");
         return updated;
+    }
+
+    /** Every project the catalog holds, archived ones included, in the order it holds them. */
+    async function catalogProjects(ctx: Context): Promise<readonly Project[]> {
+        return (await catalog.list(ctx, { includeArchived: true })).projects;
+    }
+
+    /** Where each project sat before a rearrangement, so the ones that moved can be told apart. */
+    async function orderKeysRead(ctx: Context): Promise<ReadonlyMap<string, string>> {
+        return new Map(
+            (await catalogProjects(ctx)).map((project) => [project.id, project.orderKey]),
+        );
     }
 
     /**
@@ -440,7 +490,6 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
     ): Promise<void> {
         try {
             await agent.modules.events.record(ctx, {
-                agentId: agent.agent.id,
                 payload: { projectId, ...payload },
                 type,
             });
@@ -451,45 +500,6 @@ export function createProjectRoutes(options: ProjectRouteOptions): AgentHttpRout
                 error,
             );
         }
-    }
-
-    /** The wire form of one project. Every field comes from the record, none is invented. */
-    async function toProject(ctx: Context, project: Project): Promise<Record<string, unknown>> {
-        const settings = await catalog.readSettings(ctx, agentId, project.id).catch(() => ({}));
-        return {
-            archivedAt: project.archivedAt,
-            avatar: project.avatar,
-            createdAt: project.createdAt,
-            defaultBranch: project.defaultBranch,
-            description: project.description,
-            git: {
-                ahead: project.gitAhead,
-                behind: project.gitBehind,
-                branch: project.gitBranch,
-                detached: project.gitDetached,
-                head: project.gitHead,
-                upstream: project.gitUpstream,
-            },
-            id: project.id,
-            initializationAttempt: project.initializationAttempt,
-            initializationError: project.initializationError,
-            initializationStatus: project.initializationStatus,
-            kind: project.kind,
-            name: project.name,
-            nameSource: project.nameSource,
-            orderKey: project.orderKey,
-            path: project.repositoryRef,
-            presence: project.presence,
-            remoteSource: project.remoteSource,
-            requiredSecretKind: project.requiredSecretKind,
-            settings,
-            status: project.status,
-            storageKey: project.storageKey,
-            updatedAt: project.updatedAt,
-            version: project.version,
-            worktreeSupport: project.worktreeSupport,
-            worktreeUnsupportedReason: project.worktreeUnsupportedReason,
-        };
     }
 }
 

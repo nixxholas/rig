@@ -157,14 +157,14 @@ export async function insertProjectRow(database: AgentDatabase, project: Project
     await agentDatabaseRun(
         database,
         sql`INSERT INTO ${sql.raw(PROJECTS_TABLE)} (
-            id, owner_agent_id, repository_ref, kind, storage_key, name, name_source,
+            id, repository_ref, kind, storage_key, name, name_source,
             status, presence, initialization_status, initialization_attempt,
             initialization_error, default_branch, worktree_support,
             worktree_unsupported_reason, remote_source_json, required_secret_kind,
             git_ahead, git_behind, git_detached, git_branch, git_head, git_upstream,
             order_key, version, avatar_json, description, created_at, updated_at, archived_at
         ) VALUES (
-            ${project.id}, ${project.ownerAgentId}, ${project.repositoryRef}, ${project.kind},
+            ${project.id}, ${project.repositoryRef}, ${project.kind},
             ${project.storageKey}, ${project.name}, ${project.nameSource},
             ${project.status}, ${project.presence}, ${project.initializationStatus},
             ${project.initializationAttempt}, ${project.initializationError ?? null},

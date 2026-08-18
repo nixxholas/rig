@@ -20,12 +20,12 @@ describe("a Happy agent installation outlives its process", () => {
         running.add(gym);
 
         await gym.send("Remember this.");
-        const sessionId = gym.rootSessionId;
+        const sessionId = gym.defaultSessionId;
         const before = await gym.sessionEvents();
 
         await gym.restart();
 
-        expect(gym.rootSessionId).toBe(sessionId);
+        expect(gym.defaultSessionId).toBe(sessionId);
         const after = await gym.sessionEvents();
         expect(JSON.stringify(after)).toContain("Before the restart.");
         expect(after.length).toBeGreaterThanOrEqual(before.length);

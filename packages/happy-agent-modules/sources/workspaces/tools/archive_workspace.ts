@@ -23,7 +23,7 @@ export function archiveWorkspaceTool(workspaces: WorkspacesModule, agentId: stri
         describeAutoPermissionAction: ({ workspaceId }) =>
             `archive workspace ${JSON.stringify(workspaceId)} and remove its host-managed worktree or folder`,
         execute: async (ctx, { workspaceId }, call) =>
-            await workspaces.archive(ctx, agentId, workspaceId, { operationId: call.id }),
+            await workspaces.archive(ctx, workspaceId, { operationId: call.id }),
         toLLM: (workspace) => [
             {
                 type: "text",

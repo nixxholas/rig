@@ -2,7 +2,7 @@ import { Value } from "@sinclair/typebox/value";
 import { afterCommit, asyncLock, type Context } from "@steve.kite/stdlib";
 
 import { type Workspace, type WorkspaceMutationOperation } from "./Workspace.js";
-import { assertWorkspaceOwner, assertWorkspaceRecord } from "./WorkspaceAccess.js";
+import { assertWorkspaceRecord } from "./WorkspaceRecord.js";
 import { workspaceNow, type WorkspaceClock } from "./WorkspaceClock.js";
 import {
     workspaceEventIdSchema,
@@ -39,7 +39,7 @@ export type WorkspaceEventPayload = WorkspaceEvent extends infer TEvent
 
 export interface WorkspaceMutationsOptions {
     readonly store: WorkspaceStore;
-    readonly eventIdFactory: (ctx: Context, agentId: string) => string | Promise<string>;
+    readonly eventIdFactory: (ctx: Context) => string | Promise<string>;
     readonly clock: WorkspaceClock;
     readonly listener: WorkspaceModuleListener | undefined;
     readonly onPostCommitError:
@@ -79,7 +79,6 @@ export class WorkspaceMutations {
     /** `runResult` for the callers that only care about the row it produced. */
     async run(
         ctx: Context,
-        agentId: string,
         operation: WorkspaceMutationOperation,
         operationId: string,
         workspaceId: string,
@@ -95,7 +94,6 @@ export class WorkspaceMutations {
         return (
             await this.runResult(
                 ctx,
-                agentId,
                 operation,
                 operationId,
                 workspaceId,
@@ -107,7 +105,6 @@ export class WorkspaceMutations {
 
     async runResult(
         ctx: Context,
-        agentId: string,
         operation: WorkspaceMutationOperation,
         operationId: string,
         workspaceId: string,
@@ -126,27 +123,21 @@ export class WorkspaceMutations {
         }
 
         const change = await this.runTransaction(ctx, async (txCtx) => {
-            const before = await this.getOptional(txCtx, agentId, workspaceId);
-            if (before !== undefined) assertWorkspaceOwner(agentId, before);
+            const before = await this.getOptional(txCtx, workspaceId);
 
             const raw = await requirePromise(
                 perform(txCtx, request),
                 `Workspace store ${operation}`,
             );
             assertWorkspaceMutationResult(raw);
-            if (
-                raw.agentId !== agentId ||
-                raw.operation !== operation ||
-                raw.operationId !== operationId
-            ) {
+            if (raw.operation !== operation || raw.operationId !== operationId) {
                 throw new Error("Workspace mutation result identity does not match the request.");
             }
             if (raw.workspace.id !== workspaceId) {
                 throw new Error("Workspace mutation result has a different workspace identity.");
             }
-            assertWorkspaceOwner(agentId, raw.workspace);
 
-            const after = await this.getRequired(txCtx, agentId, workspaceId);
+            const after = await this.getRequired(txCtx, workspaceId);
             if (!sameJson(after, raw.workspace)) {
                 throw new Error(
                     `Workspace ${operation} result does not match authoritative state.`,
@@ -163,7 +154,7 @@ export class WorkspaceMutations {
             if (!changed) return { result };
             const payload = describe(before, after);
             if (payload === undefined) return { result };
-            const event = await this.newEvent(txCtx, agentId, payload);
+            const event = await this.newEvent(txCtx, payload);
             await this.observe(txCtx, event);
             return { result, event };
         });
@@ -192,8 +183,8 @@ export class WorkspaceMutations {
         });
     }
 
-    async getRequired(ctx: Context, agentId: string, workspaceId: string): Promise<Workspace> {
-        const workspace = await this.getOptional(ctx, agentId, workspaceId);
+    async getRequired(ctx: Context, workspaceId: string): Promise<Workspace> {
+        const workspace = await this.getOptional(ctx, workspaceId);
         if (workspace === undefined) {
             throw new Error(`Workspace "${workspaceId}" was not found.`);
         }
@@ -202,11 +193,10 @@ export class WorkspaceMutations {
 
     async getOptional(
         ctx: Context,
-        agentId: string,
         workspaceId: string,
     ): Promise<Workspace | undefined> {
         const raw = await requirePromise(
-            this.#store.get(ctx, agentId, workspaceId),
+            this.#store.get(ctx, workspaceId),
             "Workspace store get",
         );
         if (raw === undefined) return undefined;
@@ -220,15 +210,14 @@ export class WorkspaceMutations {
 
     async newEvent(
         ctx: Context,
-        agentId: string,
         payload: WorkspaceEventPayload,
     ): Promise<WorkspaceEvent> {
-        const rawId = this.#eventIdFactory(ctx, agentId);
+        const rawId = this.#eventIdFactory(ctx);
         const eventId = isPromiseLike(rawId) ? await rawId : rawId;
         if (!Value.Check(workspaceEventIdSchema, eventId)) {
             throw new Error("Workspace event ID factory returned an invalid ID.");
         }
-        const at = workspaceNow(this.#clock, ctx, agentId);
+        const at = workspaceNow(this.#clock, ctx);
         const event = { ...payload, eventId, at };
         if (!Value.Check(workspaceEventSchema, event)) {
             throw new Error("Workspace module created an invalid event.");

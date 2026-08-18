@@ -99,7 +99,7 @@ describe("provider usage reports what the installation spent", () => {
         // measurement the installation-wide snapshot adds up.
         const session = await gym.http.ok<{
             readonly sessionTokenCount: { readonly totalTokens: number };
-        }>("GET", `/v0/sessions/${gym.rootSessionId}/usage`);
+        }>("GET", `/v0/sessions/${gym.defaultSessionId}/usage`);
         expect(session.sessionTokenCount.totalTokens).toBe(1540);
 
         expect(gym.inference.unscripted).toEqual([]);

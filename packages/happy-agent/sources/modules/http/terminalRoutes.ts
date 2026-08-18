@@ -58,7 +58,6 @@ export function createTerminalRoutes(options: TerminalRouteOptions): AgentHttpRo
                         async () =>
                             await terminals$().list(
                                 ctx,
-                                options.agent.rootAgentId,
                                 scopeOf(params),
                             ),
                     );
@@ -74,7 +73,6 @@ export function createTerminalRoutes(options: TerminalRouteOptions): AgentHttpRo
                         async () =>
                             await terminals$().create(
                                 ctx,
-                                options.agent.rootAgentId,
                                 scopeOf(params),
                                 body,
                             ),
@@ -99,7 +97,6 @@ export function createTerminalRoutes(options: TerminalRouteOptions): AgentHttpRo
                         async () =>
                             await terminals$().resize(
                                 ctx,
-                                options.agent.rootAgentId,
                                 scopeOf(params),
                                 params.terminalId ?? "",
                                 body,
@@ -116,7 +113,6 @@ export function createTerminalRoutes(options: TerminalRouteOptions): AgentHttpRo
                         async () =>
                             await terminals$().stop(
                                 ctx,
-                                options.agent.rootAgentId,
                                 scopeOf(params),
                                 params.terminalId ?? "",
                             ),

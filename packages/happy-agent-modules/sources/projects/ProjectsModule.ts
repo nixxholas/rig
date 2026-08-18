@@ -135,8 +135,6 @@ import {
     assertProjectPage,
     assertProjectStoreMutationResult,
     createProjectStore,
-    projectAuthorizationSchema,
-    type ProjectAuthorizationAction,
     type ProjectEnsureResult,
     type ProjectStateChanges,
     type ProjectSettingsUpdateResult,
@@ -175,17 +173,17 @@ const PROJECT_STATE_FIELDS = [
 ] as const satisfies readonly (keyof Project)[];
 
 export const projectIdFactorySchema = Type.Function(
-    [projectContextSchema, projectAgentIdSchema],
+    [projectContextSchema],
     Type.Union([projectIdSchema, Type.Promise(projectIdSchema)]),
 );
 
 export const projectEventIdFactorySchema = Type.Function(
-    [projectContextSchema, projectAgentIdSchema],
+    [projectContextSchema],
     Type.Union([projectEventIdSchema, Type.Promise(projectEventIdSchema)]),
 );
 
 export const projectClockSchema = Type.Function(
-    [projectContextSchema, projectAgentIdSchema],
+    [projectContextSchema],
     projectTimestampSchema,
 );
 
@@ -210,7 +208,6 @@ export const projectModuleOptionsSchema = Type.Object(
          * session's own project is off unless the user turned it on, so it defaults to false.
          */
         crossWorkspace: Type.Optional(Type.Boolean()),
-        authorization: Type.Optional(projectAuthorizationSchema),
         idFactory: Type.Optional(projectIdFactorySchema),
         eventIdFactory: Type.Optional(projectEventIdFactorySchema),
         clock: Type.Optional(projectClockSchema),
@@ -241,9 +238,8 @@ export const projectModuleOptionsSchema = Type.Object(
         /**
          * The one person this copy of Rig acts for, when a caller names nobody.
          *
-         * Which machine that is is not configured: it is the agent the catalog was opened for, so
-         * only the profile is named here. A catalog that has not been opened has no local person
-         * and asks the caller to say who is acting.
+         * A catalog told neither which machine it runs on nor which profile it commits as has no
+         * local person, and asks the caller to say who is acting.
          */
         localProfileId: Type.Optional(Type.String({ minLength: 1 })),
         resolveGitSecret: Type.Optional(projectSecretResolverSchema),
@@ -290,7 +286,7 @@ export class ProjectsModule implements AgentModule {
     readonly #managedProjectsDirectory: string;
     readonly #now: () => number;
     readonly #onHostError: ProjectModuleOptions["onHostError"];
-    readonly #pendingInitializations: { agentId: string; projectId: string }[] = [];
+    readonly #pendingInitializations: string[] = [];
     readonly #probeGit: GitCommandRunner;
     readonly #projectLocks: MapAsyncLock<string> = mapAsyncLock();
     readonly #resolveGitSecret: ((kind: "github") => string | undefined) | undefined;
@@ -301,25 +297,21 @@ export class ProjectsModule implements AgentModule {
 
     #activeInitializations = 0;
     #closed = false;
-    /** This machine, learned from the agent the catalog was opened for. */
+    /** This machine, as the installation that built the catalog named it. */
     #localInstanceId: string | undefined;
 
     constructor(options: ProjectModuleOptions) {
         assertProjectModuleOptions(options);
         this.#store = createProjectStore();
         this.#crossWorkspace = options.crossWorkspace ?? false;
-        this.#idFactory =
-            options.idFactory ??
-            ((_ctx: Context, _agentId: string) => globalThis.crypto.randomUUID());
+        this.#idFactory = options.idFactory ?? ((_ctx: Context) => globalThis.crypto.randomUUID());
         this.#eventIdFactory =
-            options.eventIdFactory ??
-            ((_ctx: Context, _agentId: string) => globalThis.crypto.randomUUID());
-        this.#clock = options.clock ?? ((_ctx: Context, _agentId: string) => Date.now());
+            options.eventIdFactory ?? ((_ctx: Context) => globalThis.crypto.randomUUID());
+        this.#clock = options.clock ?? ((_ctx: Context) => Date.now());
         this.#maxPageSize = options.maxPageSize ?? DEFAULT_PAGE_SIZE;
         this.#maxOutputCharacters = options.maxOutputCharacters ?? DEFAULT_OUTPUT_CHARACTERS;
         this.#mutations = new ProjectMutations({
             store: this.#store,
-            authorization: options.authorization,
             eventIdFactory: this.#eventIdFactory,
             clock: this.#clock,
             listener: options.listener,
@@ -363,7 +355,6 @@ export class ProjectsModule implements AgentModule {
 
     readonly #hooks: AgentModuleHooks = {
         tools: async (ctx: Context, scope: AgentModuleScope): Promise<readonly AnyAgentTool[]> => {
-            this.#assertAgentId(scope.agent.id);
             // The catalog spans every project on the machine, which is exactly what looking
             // outside the current one means, so the user's setting decides whether it exists at
             // all. A subagent works inside the task it was handed and never gets it.
@@ -393,8 +384,7 @@ export class ProjectsModule implements AgentModule {
         this.#mutations.addListener(listener);
     }
 
-    async list(ctx: Context, agentId: string, query: ProjectPageQuery = {}): Promise<ProjectPage> {
-        this.#assertAgentId(agentId);
+    async list(ctx: Context, query: ProjectPageQuery = {}): Promise<ProjectPage> {
         this.#assertInput(projectPageQuerySchema, query, "page query");
         const limit = query.limit ?? this.#maxPageSize;
         if (limit > this.#maxPageSize) {
@@ -403,7 +393,7 @@ export class ProjectsModule implements AgentModule {
         if (query.cursor !== undefined) parseCursor(query.cursor);
         const normalized = { ...structuredClone(query), limit };
         const raw = await requirePromise(
-            this.#store.list(ctx, agentId, normalized),
+            this.#store.list(ctx, normalized),
             "Project store list",
         );
         assertProjectPage(raw);
@@ -422,17 +412,14 @@ export class ProjectsModule implements AgentModule {
                     "The project page returned an archived row that was not asked for.",
                 );
             }
-            await this.#mutations.authorize(ctx, agentId, project.ownerAgentId, "list");
         }
         return structuredClone(fitProjectPage(raw, normalized.cursor, this.#maxOutputCharacters));
     }
 
-    async get(ctx: Context, agentId: string, projectId: string): Promise<Project | undefined> {
-        this.#assertAgentId(agentId);
+    async get(ctx: Context, projectId: string): Promise<Project | undefined> {
         this.#assertId(projectId);
-        const project = await this.#mutations.getOptional(ctx, agentId, projectId);
+        const project = await this.#mutations.getOptional(ctx, projectId);
         if (project === undefined) return undefined;
-        await this.#mutations.authorize(ctx, agentId, project.ownerAgentId, "get");
         return structuredClone(project);
     }
 
@@ -443,53 +430,45 @@ export class ProjectsModule implements AgentModule {
      */
     async getByPath(
         ctx: Context,
-        agentId: string,
         repositoryRef: string,
     ): Promise<Project | undefined> {
-        this.#assertAgentId(agentId);
         if (!Value.Check(projectRepositoryRefSchema, repositoryRef)) {
             throw new Error("A project folder must be an absolute path.");
         }
-        const project = await this.#mutations.findByPath(ctx, agentId, repositoryRef);
+        const project = await this.#mutations.findByPath(ctx, repositoryRef);
         if (project === undefined) return undefined;
-        await this.#mutations.authorize(ctx, agentId, project.ownerAgentId, "get");
         return structuredClone(project);
     }
 
-    async readSettings(ctx: Context, agentId: string, projectId: string): Promise<ProjectSettings> {
-        this.#assertAgentId(agentId);
+    async readSettings(ctx: Context, projectId: string): Promise<ProjectSettings> {
         this.#assertId(projectId);
-        const project = await this.#mutations.getRequired(ctx, agentId, projectId);
-        await this.#mutations.authorize(ctx, agentId, project.ownerAgentId, "settings_read");
-        return await this.#mutations.readSettings(ctx, agentId, projectId);
+        const project = await this.#mutations.getRequired(ctx, projectId);
+        return await this.#mutations.readSettings(ctx, projectId);
     }
 
-    async create(ctx: Context, agentId: string, input: ProjectCreateInput): Promise<Project> {
-        this.#assertAgentId(agentId);
+    async create(ctx: Context, input: ProjectCreateInput): Promise<Project> {
         this.#assertInput(projectCreateInputSchema, input, "creation");
         const normalized = structuredClone(input);
-        const projectId = normalized.id ?? (await this.#newIdentity(ctx, agentId));
+        const projectId = normalized.id ?? (await this.#newIdentity(ctx));
         const kind = normalized.kind ?? "regular";
-        const result = await this.#mutations.run(ctx, agentId, {
-            action: "create",
+        const result = await this.#mutations.run(ctx, {
             changeable: [],
-            event: (after) => ({ type: "project_created", agentId, project: after }),
+            event: (after) => ({ type: "project_created", project: after }),
             run: async (txCtx) => {
                 if (
-                    (await this.#mutations.findByPath(txCtx, agentId, normalized.repositoryRef)) !==
+                    (await this.#mutations.findByPath(txCtx, normalized.repositoryRef)) !==
                     undefined
                 ) {
                     throw new Error(
                         `The folder "${normalized.repositoryRef}" is already a project. Use ensure_project instead.`,
                     );
                 }
-                if ((await this.#mutations.getOptional(txCtx, agentId, projectId)) !== undefined) {
+                if ((await this.#mutations.getOptional(txCtx, projectId)) !== undefined) {
                     throw new Error(`Project "${projectId}" already exists.`);
                 }
                 return await requirePromise(
-                    this.#store.create(txCtx, agentId, {
+                    this.#store.create(txCtx, {
                         id: projectId,
-                        ownerAgentId: agentId,
                         repositoryRef: normalized.repositoryRef,
                         kind,
                         name:
@@ -521,26 +500,22 @@ export class ProjectsModule implements AgentModule {
      */
     async ensure(
         ctx: Context,
-        agentId: string,
         input: ProjectEnsureInput,
     ): Promise<ProjectEnsureResult> {
-        this.#assertAgentId(agentId);
         this.#assertInput(projectEnsureInputSchema, input, "ensure");
         const normalized = structuredClone(input);
-        const candidateId = await this.#newIdentity(ctx, agentId);
+        const candidateId = await this.#newIdentity(ctx);
         const kind = normalized.kind ?? "regular";
-        const result = await this.#mutations.run(ctx, agentId, {
-            action: "ensure",
+        const result = await this.#mutations.run(ctx, {
             changeable: ["status", "archivedAt"],
             event: (after, before) =>
                 before === undefined
-                    ? { type: "project_created", agentId, project: after }
-                    : { type: "project_restored", agentId, project: after },
+                    ? { type: "project_created", project: after }
+                    : { type: "project_restored", project: after },
             run: async (txCtx) =>
                 await requirePromise(
-                    this.#store.ensure(txCtx, agentId, {
+                    this.#store.ensure(txCtx, {
                         id: candidateId,
-                        ownerAgentId: agentId,
                         repositoryRef: normalized.repositoryRef,
                         kind,
                         name:
@@ -568,26 +543,23 @@ export class ProjectsModule implements AgentModule {
         return structuredClone(result);
     }
 
-    async rename(ctx: Context, agentId: string, input: ProjectRenameInput): Promise<Project> {
-        this.#assertAgentId(agentId);
+    async rename(ctx: Context, input: ProjectRenameInput): Promise<Project> {
         this.#assertInput(projectRenameInputSchema, input, "rename");
         // A display name someone typed is trimmed and bounded here, at the boundary it enters the
         // catalog through. The schema only keeps the column honest; what a person may call a project
         // is a narrower question, and it has to be the same answer whichever door the name came in.
         const normalized = { ...structuredClone(input), name: validateProjectName(input.name) };
-        const result = await this.#mutations.run(ctx, agentId, {
-            action: "rename",
+        const result = await this.#mutations.run(ctx, {
             changeable: ["name", "nameSource"],
             projectId: normalized.projectId,
             event: (after, before) => ({
                 type: "project_renamed",
-                agentId,
                 project: after,
                 previousName: before?.name ?? after.name,
             }),
             run: async (txCtx) =>
                 await requirePromise(
-                    this.#store.rename(txCtx, agentId, {
+                    this.#store.rename(txCtx, {
                         projectId: normalized.projectId,
                         name: normalized.name,
                         ...(normalized.expectedVersion === undefined
@@ -600,17 +572,15 @@ export class ProjectsModule implements AgentModule {
         return requireProjectFromResult(result);
     }
 
-    async archive(ctx: Context, agentId: string, projectId: string): Promise<Project> {
-        this.#assertAgentId(agentId);
+    async archive(ctx: Context, projectId: string): Promise<Project> {
         this.#assertId(projectId);
-        const result = await this.#mutations.run(ctx, agentId, {
-            action: "archive",
+        const result = await this.#mutations.run(ctx, {
             changeable: ["status", "archivedAt"],
             projectId,
-            event: (after) => ({ type: "project_archived", agentId, project: after }),
+            event: (after) => ({ type: "project_archived", project: after }),
             run: async (txCtx) =>
                 await requirePromise(
-                    this.#store.archive(txCtx, agentId, { projectId }),
+                    this.#store.archive(txCtx, { projectId }),
                     "Project store archive",
                 ),
         });
@@ -625,17 +595,15 @@ export class ProjectsModule implements AgentModule {
     }
 
     /** Brings an archived project back. Restoring an active project changes nothing. */
-    async restore(ctx: Context, agentId: string, projectId: string): Promise<Project> {
-        this.#assertAgentId(agentId);
+    async restore(ctx: Context, projectId: string): Promise<Project> {
         this.#assertId(projectId);
-        const result = await this.#mutations.run(ctx, agentId, {
-            action: "restore",
+        const result = await this.#mutations.run(ctx, {
             changeable: ["status", "archivedAt"],
             projectId,
-            event: (after) => ({ type: "project_restored", agentId, project: after }),
+            event: (after) => ({ type: "project_restored", project: after }),
             run: async (txCtx) =>
                 await requirePromise(
-                    this.#store.restore(txCtx, agentId, { projectId }),
+                    this.#store.restore(txCtx, { projectId }),
                     "Project store restore",
                 ),
         });
@@ -646,41 +614,36 @@ export class ProjectsModule implements AgentModule {
         return project;
     }
 
-    async reorder(ctx: Context, agentId: string, input: ProjectReorderInput): Promise<Project> {
-        this.#assertAgentId(agentId);
+    async reorder(ctx: Context, input: ProjectReorderInput): Promise<Project> {
         this.#assertInput(projectReorderInputSchema, input, "reorder");
         const normalized = structuredClone(input);
-        const result = await this.#mutations.run(ctx, agentId, {
-            action: "reorder",
+        const result = await this.#mutations.run(ctx, {
             changeable: ["orderKey"],
             projectId: normalized.projectId,
             event: (after, before) => ({
                 type: "project_reordered",
-                agentId,
                 previousOrderKey: before?.orderKey ?? after.orderKey,
                 project: after,
             }),
             run: async (txCtx) =>
                 await requirePromise(
-                    this.#store.reorder(txCtx, agentId, normalized),
+                    this.#store.reorder(txCtx, normalized),
                     "Project store reorder",
                 ),
         });
         return requireProjectFromResult(result);
     }
 
-    async setAvatar(ctx: Context, agentId: string, input: ProjectSetAvatarInput): Promise<Project> {
-        this.#assertAgentId(agentId);
+    async setAvatar(ctx: Context, input: ProjectSetAvatarInput): Promise<Project> {
         this.#assertInput(projectSetAvatarInputSchema, input, "avatar");
         const normalized = structuredClone(input);
-        const result = await this.#mutations.run(ctx, agentId, {
-            action: "avatar_update",
+        const result = await this.#mutations.run(ctx, {
             changeable: ["avatar"],
             projectId: normalized.projectId,
-            event: (after) => ({ type: "project_avatar_updated", agentId, project: after }),
+            event: (after) => ({ type: "project_avatar_updated", project: after }),
             run: async (txCtx) =>
                 await requirePromise(
-                    this.#store.setAvatar(txCtx, agentId, normalized),
+                    this.#store.setAvatar(txCtx, normalized),
                     "Project store set avatar",
                 ),
         });
@@ -693,20 +656,17 @@ export class ProjectsModule implements AgentModule {
 
     async clearAvatar(
         ctx: Context,
-        agentId: string,
         input: ProjectClearAvatarInput,
     ): Promise<Project> {
-        this.#assertAgentId(agentId);
         this.#assertInput(projectClearAvatarInputSchema, input, "avatar clear");
         const normalized = structuredClone(input);
-        const result = await this.#mutations.run(ctx, agentId, {
-            action: "avatar_update",
+        const result = await this.#mutations.run(ctx, {
             changeable: ["avatar"],
             projectId: normalized.projectId,
-            event: (after) => ({ type: "project_avatar_cleared", agentId, project: after }),
+            event: (after) => ({ type: "project_avatar_cleared", project: after }),
             run: async (txCtx) =>
                 await requirePromise(
-                    this.#store.clearAvatar(txCtx, agentId, normalized),
+                    this.#store.clearAvatar(txCtx, normalized),
                     "Project store clear avatar",
                 ),
         });
@@ -717,25 +677,22 @@ export class ProjectsModule implements AgentModule {
         // Setting the project up again is what looks for a picture, so clearing one asks for that
         // look rather than leaving the project without an image until something else happens.
         if (project.kind === "regular") {
-            await this.scheduleInitialization(ctx, agentId, normalized.projectId);
+            await this.scheduleInitialization(ctx, normalized.projectId);
         }
         return project;
     }
 
     async avatarAsset(
         ctx: Context,
-        agentId: string,
         hash: string,
     ): Promise<ProjectAvatarAsset | undefined> {
-        this.#assertAgentId(agentId);
         if (!Value.Check(projectAvatarHashSchema, hash)) {
             throw new Error("The project avatar hash is invalid.");
         }
-        const project = await this.#store.findByAvatarHash(ctx, agentId, hash);
+        const project = await this.#store.findByAvatarHash(ctx, hash);
         if (project === undefined) return undefined;
         assertProject(project);
         assertProjectRecord(project);
-        await this.#mutations.authorize(ctx, agentId, project.ownerAgentId, "avatar_read");
         const raw = await this.#avatars.read(hash);
         if (raw === undefined) return undefined;
         assertProjectAvatarAsset(raw);
@@ -751,23 +708,19 @@ export class ProjectsModule implements AgentModule {
 
     async updateSettings(
         ctx: Context,
-        agentId: string,
         input: ProjectSettingsUpdateInput,
     ): Promise<ProjectSettingsUpdateResult> {
-        this.#assertAgentId(agentId);
         this.#assertInput(projectSettingsUpdateInputSchema, input, "settings update");
         assertProjectSettings(input.settings);
         const normalized = structuredClone(input);
         return await ctx.inTx(async (txCtx) => {
-            const before = await this.#mutations.getRequired(txCtx, agentId, normalized.projectId);
-            await this.#mutations.authorize(txCtx, agentId, before.ownerAgentId, "settings_update");
+            const before = await this.#mutations.getRequired(txCtx, normalized.projectId);
             const beforeSettings = await this.#mutations.readSettings(
                 txCtx,
-                agentId,
                 normalized.projectId,
             );
             const raw = await requirePromise(
-                this.#store.updateSettings(txCtx, agentId, normalized),
+                this.#store.updateSettings(txCtx, normalized),
                 "Project store update settings",
             );
             assertProjectStoreMutationResult(raw);
@@ -775,10 +728,9 @@ export class ProjectsModule implements AgentModule {
                 throw new Error("The settings result does not match the requested project.");
             }
             assertProjectSettings(raw.settings);
-            const after = await this.#mutations.getRequired(txCtx, agentId, normalized.projectId);
+            const after = await this.#mutations.getRequired(txCtx, normalized.projectId);
             const afterSettings = await this.#mutations.readSettings(
                 txCtx,
-                agentId,
                 normalized.projectId,
             );
             if (!sameJson(afterSettings, normalized.settings)) {
@@ -795,9 +747,8 @@ export class ProjectsModule implements AgentModule {
             if (changed) {
                 await this.#mutations.observe(
                     txCtx,
-                    await this.#mutations.newEvent(txCtx, agentId, {
+                    await this.#mutations.newEvent(txCtx, {
                         type: "project_settings_updated",
-                        agentId,
                         projectId: normalized.projectId,
                         settings: afterSettings,
                     }),
@@ -811,11 +762,10 @@ export class ProjectsModule implements AgentModule {
      * Looks at the project folder and records what it found: whether it is still there, whether a
      * workspace can be cut from it, and where its Git state stands.
      */
-    async probe(ctx: Context, agentId: string, projectId: string): Promise<Project> {
-        const project = await this.#lookAt(ctx, agentId, projectId, "update_state");
+    async probe(ctx: Context, projectId: string): Promise<Project> {
+        const project = await this.#lookAt(ctx, projectId);
         return await this.#applyProjectProbe(
             ctx,
-            agentId,
             projectId,
             await probeGitRepository({
                 git: this.#probeGit,
@@ -830,34 +780,34 @@ export class ProjectsModule implements AgentModule {
      * only asks when the folder is a repository root: a plain directory inside somebody else's
      * repository must not inherit their branch.
      */
-    async resolveDefaultBranch(ctx: Context, agentId: string, projectId: string): Promise<Project> {
-        const project = await this.#lookAt(ctx, agentId, projectId, "update_state");
+    async resolveDefaultBranch(ctx: Context, projectId: string): Promise<Project> {
+        const project = await this.#lookAt(ctx, projectId);
         if (project.defaultBranch !== undefined) return project;
         if (!(await this.#isRepositoryRoot(project))) return project;
         const branch = await detectGitDefaultBranch(this.#git, project.repositoryRef);
         if (branch === undefined) return project;
-        return await this.setDefaultBranch(ctx, agentId, { projectId, branch });
+        return await this.setDefaultBranch(ctx, { projectId, branch });
     }
 
     /**
      * Takes the name the remote repository gives itself. A name a person chose is left alone, and
      * so is a folder that is not a repository root or has no usable remote.
      */
-    async resolveRemoteName(ctx: Context, agentId: string, projectId: string): Promise<Project> {
-        const project = await this.#lookAt(ctx, agentId, projectId, "update_state");
+    async resolveRemoteName(ctx: Context, projectId: string): Promise<Project> {
+        const project = await this.#lookAt(ctx, projectId);
         if (project.nameSource !== "folder") return project;
         if (!(await this.#isRepositoryRoot(project))) return project;
         const remote = await selectGitRemoteUrl(this.#git, project.repositoryRef);
         const name = remote === undefined ? undefined : remoteProjectName(remote);
         if (name === undefined) return project;
-        return await this.adoptRemoteName(ctx, agentId, { projectId, name });
+        return await this.adoptRemoteName(ctx, { projectId, name });
     }
 
     /** Records what a host probe of the project folder observed. */
-    async applyProbe(ctx: Context, agentId: string, input: ProjectProbeInput): Promise<Project> {
+    async applyProbe(ctx: Context, input: ProjectProbeInput): Promise<Project> {
         this.#assertInput(projectProbeInputSchema, input, "probe");
         const normalized = structuredClone(input);
-        return await this.#changeState(ctx, agentId, normalized.projectId, "probe", () => ({
+        return await this.#changeState(ctx, normalized.projectId, "probe", () => ({
             presence: normalized.presence,
             worktreeSupport: normalized.worktreeSupport,
             worktreeUnsupportedReason: normalized.worktreeUnsupportedReason ?? null,
@@ -868,12 +818,11 @@ export class ProjectsModule implements AgentModule {
     /** Records the branch, head, upstream and divergence a host read from Git. */
     async applyGitFacts(
         ctx: Context,
-        agentId: string,
         input: ProjectGitFactsInput,
     ): Promise<Project> {
         this.#assertInput(projectGitFactsInputSchema, input, "Git facts");
         const normalized = structuredClone(input);
-        return await this.#changeState(ctx, agentId, normalized.projectId, "git_facts", () =>
+        return await this.#changeState(ctx, normalized.projectId, "git_facts", () =>
             gitChanges(normalized.git),
         );
     }
@@ -885,14 +834,12 @@ export class ProjectsModule implements AgentModule {
      */
     async setDefaultBranch(
         ctx: Context,
-        agentId: string,
         input: ProjectSetDefaultBranchInput,
     ): Promise<Project> {
         this.#assertInput(projectSetDefaultBranchInputSchema, input, "default branch");
         const normalized = structuredClone(input);
         return await this.#changeState(
             ctx,
-            agentId,
             normalized.projectId,
             "default_branch",
             (project) =>
@@ -905,14 +852,12 @@ export class ProjectsModule implements AgentModule {
     /** Replaces a folder-derived name with the remote's. A name a person chose stays. */
     async adoptRemoteName(
         ctx: Context,
-        agentId: string,
         input: ProjectAdoptRemoteNameInput,
     ): Promise<Project> {
         this.#assertInput(projectAdoptRemoteNameInputSchema, input, "remote name");
         const normalized = structuredClone(input);
         return await this.#changeState(
             ctx,
-            agentId,
             normalized.projectId,
             "remote_name",
             (project) =>
@@ -923,18 +868,17 @@ export class ProjectsModule implements AgentModule {
     }
 
     /** The clone has landed, so the folder now exists. */
-    async markCloneReady(ctx: Context, agentId: string, projectId: string): Promise<Project> {
-        return await this.#changeState(ctx, agentId, projectId, "clone_ready", (project) =>
+    async markCloneReady(ctx: Context, projectId: string): Promise<Project> {
+        return await this.#changeState(ctx, projectId, "clone_ready", (project) =>
             project.initializationStatus === "initializing" ? { presence: "present" } : undefined,
         );
     }
 
     async markInitializationReady(
         ctx: Context,
-        agentId: string,
         projectId: string,
     ): Promise<Project> {
-        return await this.#changeState(ctx, agentId, projectId, "initialization_ready", (project) =>
+        return await this.#changeState(ctx, projectId, "initialization_ready", (project) =>
             project.initializationStatus === "initializing"
                 ? {
                       initializationStatus: "ready",
@@ -947,14 +891,12 @@ export class ProjectsModule implements AgentModule {
 
     async markInitializationFailed(
         ctx: Context,
-        agentId: string,
         input: ProjectInitializationFailureInput,
     ): Promise<Project> {
         this.#assertInput(projectInitializationFailureInputSchema, input, "initialization failure");
         const normalized = structuredClone(input);
         return await this.#changeState(
             ctx,
-            agentId,
             normalized.projectId,
             "initialization_failed",
             (project) =>
@@ -969,10 +911,9 @@ export class ProjectsModule implements AgentModule {
     }
 
     /** Puts a failed project back in line for another initialization attempt. */
-    async retryInitialization(ctx: Context, agentId: string, projectId: string): Promise<Project> {
+    async retryInitialization(ctx: Context, projectId: string): Promise<Project> {
         return await this.#changeState(
             ctx,
-            agentId,
             projectId,
             "initialization_retried",
             (project) =>
@@ -986,8 +927,8 @@ export class ProjectsModule implements AgentModule {
      * Puts a project back in line for setup. Nothing initializes the home project, so for `home`
      * this is a no-op that returns the row untouched, like every other guarded lifecycle write.
      */
-    async refresh(ctx: Context, agentId: string, projectId: string): Promise<Project> {
-        return await this.#changeState(ctx, agentId, projectId, "refresh", (project) =>
+    async refresh(ctx: Context, projectId: string): Promise<Project> {
+        return await this.#changeState(ctx, projectId, "refresh", (project) =>
             project.kind === "home"
                 ? undefined
                 : {
@@ -1005,12 +946,12 @@ export class ProjectsModule implements AgentModule {
      * outright rather than quietly doing nothing: somebody who pressed a button deserves to be told
      * there was nothing to press it for.
      */
-    async setUpAgain(ctx: Context, agentId: string, projectId: string): Promise<Project> {
-        if ((await this.#lookAt(ctx, agentId, projectId, "update_state")).kind === "home") {
+    async setUpAgain(ctx: Context, projectId: string): Promise<Project> {
+        if ((await this.#lookAt(ctx, projectId)).kind === "home") {
             throw new Error("The Home project does not need to be set up.");
         }
-        const refreshed = await this.refresh(ctx, agentId, projectId);
-        await this.scheduleInitialization(ctx, agentId, projectId);
+        const refreshed = await this.refresh(ctx, projectId);
+        await this.scheduleInitialization(ctx, projectId);
         return refreshed;
     }
 
@@ -1052,25 +993,23 @@ export class ProjectsModule implements AgentModule {
      * Picks up whatever the last run left unfinished: projects still being set up, failures worth
      * another try, and stale avatar bytes.
      */
-    async open(ctx: Context, agentId: string): Promise<void> {
-        // One machine, one person: the agent the catalog is opened for is the instance, and the
-        // only profile it can resolve is whoever this copy of Git commits as.
-        this.#localInstanceId = agentId;
-        for (const project of await this.#allProjects(ctx, agentId)) {
+    async open(ctx: Context, localInstanceId: string): Promise<void> {
+        this.#localInstanceId = localInstanceId;
+        for (const project of await this.#allProjects(ctx)) {
             if (project.kind !== "regular" || project.status === "archived") continue;
             if (project.initializationStatus === "initializing") {
-                await this.scheduleInitialization(ctx, agentId, project.id);
+                await this.scheduleInitialization(ctx, project.id);
             } else if (
                 project.initializationStatus === "failed" &&
                 project.initializationAttempt < MAX_PROJECT_INITIALIZATION_RETRIES &&
                 existsSync(project.repositoryRef)
             ) {
-                await this.retryInitialization(ctx, agentId, project.id);
-                await this.scheduleInitialization(ctx, agentId, project.id);
+                await this.retryInitialization(ctx, project.id);
+                await this.scheduleInitialization(ctx, project.id);
             }
         }
         this.#runInBackground("project-avatar-maintenance", async (workerCtx) => {
-            await this.collectAvatarGarbage(workerCtx, agentId);
+            await this.collectAvatarGarbage(workerCtx);
         });
     }
 
@@ -1109,7 +1048,6 @@ export class ProjectsModule implements AgentModule {
      */
     async resolvePath(
         ctx: Context,
-        agentId: string,
         cwd: string,
         requestedProjectId?: string,
     ): Promise<Project> {
@@ -1118,29 +1056,29 @@ export class ProjectsModule implements AgentModule {
             requestedProjectId === undefined
                 ? undefined
                 : clientChosenId(requestedProjectId, "project");
-        const existing = await this.getByPath(ctx, agentId, path);
+        const existing = await this.getByPath(ctx, path);
         if (existing !== undefined) {
             // A project is only a folder, so working in it again is what brings it back: starting
             // a session restores an archived project instead of asking someone to unarchive it.
             if (importedId !== undefined && importedId !== existing.id) {
-                await this.#assertUnusedProjectId(ctx, agentId, importedId, path);
+                await this.#assertUnusedProjectId(ctx, importedId, path);
             }
             return existing.status === "archived"
-                ? await this.restore(ctx, agentId, existing.id)
+                ? await this.restore(ctx, existing.id)
                 : existing;
         }
         if (importedId !== undefined) {
-            await this.#assertUnusedProjectId(ctx, agentId, importedId, path);
+            await this.#assertUnusedProjectId(ctx, importedId, path);
         }
 
         const kind = path === this.#homeDirectory ? "home" : "regular";
-        const project = await this.create(ctx, agentId, {
+        const project = await this.create(ctx, {
             ...(importedId === undefined ? {} : { id: importedId }),
             repositoryRef: path,
             kind,
             name: kind === "home" ? HOME_PROJECT_NAME : folderProjectName(path),
         });
-        if (kind === "regular") await this.scheduleInitialization(ctx, agentId, project.id);
+        if (kind === "regular") await this.scheduleInitialization(ctx, project.id);
         return project;
     }
 
@@ -1150,7 +1088,6 @@ export class ProjectsModule implements AgentModule {
      */
     async register(
         ctx: Context,
-        agentId: string,
         request: RegisterProjectRequest,
     ): Promise<Project> {
         if (!isAbsolute(request.path)) {
@@ -1163,7 +1100,6 @@ export class ProjectsModule implements AgentModule {
         const path = await validateRegistrationPath(this.#git, request.path);
         return await this.resolvePath(
             ctx,
-            agentId,
             path,
             ...(request.projectId === undefined ? [] : [request.projectId]),
         );
@@ -1172,11 +1108,10 @@ export class ProjectsModule implements AgentModule {
     /** Refuses a client-chosen project identity that already names another folder. */
     async #assertUnusedProjectId(
         ctx: Context,
-        agentId: string,
         id: string,
         path: string,
     ): Promise<void> {
-        const known = await this.get(ctx, agentId, id);
+        const known = await this.get(ctx, id);
         if (known !== undefined && known.repositoryRef !== path) {
             throw new ProjectRegistrationError(
                 "project_id_conflict",
@@ -1186,14 +1121,14 @@ export class ProjectsModule implements AgentModule {
     }
 
     /** Every project this agent can see, archived ones included. */
-    async #allProjects(ctx: Context, agentId: string): Promise<readonly Project[]> {
-        return (await this.list(ctx, agentId, { includeArchived: true })).projects;
+    async #allProjects(ctx: Context): Promise<readonly Project[]> {
+        return (await this.list(ctx, { includeArchived: true })).projects;
     }
 
     // --- Setting a project up ----------------------------------------------------------------
 
     /** Queues the project's setup, if it is not already queued or running. */
-    async scheduleInitialization(ctx: Context, agentId: string, projectId: string): Promise<void> {
+    async scheduleInitialization(ctx: Context, projectId: string): Promise<void> {
         if (this.#closed || this.#initializing.has(projectId)) return;
         // A catalog built without a root has nowhere to run setup. That is a supported way to use it
         // — it still records everything it is told — so this declines rather than failing the write
@@ -1204,19 +1139,18 @@ export class ProjectsModule implements AgentModule {
             });
             return;
         }
-        const project = await this.get(ctx, agentId, projectId);
+        const project = await this.get(ctx, projectId);
         if (project === undefined) return;
         if (!existsSync(project.repositoryRef) && project.remoteSource === undefined) {
             await this.#failInitialization(
                 ctx,
-                agentId,
                 projectId,
                 "The project folder is not available.",
             );
             return;
         }
         this.#initializing.add(projectId);
-        this.#pendingInitializations.push({ agentId, projectId });
+        this.#pendingInitializations.push(projectId);
         setImmediate(() => {
             this.#drainInitializations();
         });
@@ -1230,19 +1164,19 @@ export class ProjectsModule implements AgentModule {
             this.#activeInitializations += 1;
             this.#runInBackground("project-initialization", async (workerCtx) => {
                 try {
-                    await this.#initializeProject(workerCtx, pending.agentId, pending.projectId);
+                    await this.#initializeProject(workerCtx, pending);
                 } finally {
                     this.#activeInitializations -= 1;
-                    this.#initializing.delete(pending.projectId);
+                    this.#initializing.delete(pending);
                     if (!this.#closed) this.#drainInitializations();
                 }
             });
         }
     }
 
-    async #initializeProject(ctx: Context, agentId: string, projectId: string): Promise<void> {
+    async #initializeProject(ctx: Context, projectId: string): Promise<void> {
         if (this.#closed) return;
-        const project = await this.get(ctx, agentId, projectId);
+        const project = await this.get(ctx, projectId);
         if (
             project === undefined ||
             project.kind === "home" ||
@@ -1252,12 +1186,12 @@ export class ProjectsModule implements AgentModule {
         }
         try {
             if (project.remoteSource !== undefined) {
-                await this.#cloneRemoteProject(ctx, agentId, project);
+                await this.#cloneRemoteProject(ctx, project);
                 if (this.#closed) return;
             }
             // A new project learns its presence and worktree capability here rather than waiting
             // for the next start, because a client offers "Create workspace" immediately.
-            await this.probe(ctx, agentId, projectId);
+            await this.probe(ctx, projectId);
             if (this.#closed) return;
 
             let remote: string | undefined;
@@ -1273,17 +1207,17 @@ export class ProjectsModule implements AgentModule {
 
             // The trunk is decided while the project is being added, so every later workspace has
             // a branch to fork without re-deciding it under someone's request.
-            if (repositoryTopLevel) await this.resolveDefaultBranch(ctx, agentId, projectId);
+            if (repositoryTopLevel) await this.resolveDefaultBranch(ctx, projectId);
             if (this.#closed) return;
 
             const detectedName = remote === undefined ? undefined : remoteProjectName(remote);
-            const current = await this.get(ctx, agentId, projectId);
+            const current = await this.get(ctx, projectId);
             if (current === undefined) return;
             if (detectedName !== undefined && current.nameSource === "folder") {
-                await this.adoptRemoteName(ctx, agentId, { projectId, name: detectedName });
+                await this.adoptRemoteName(ctx, { projectId, name: detectedName });
             }
 
-            if ((await this.get(ctx, agentId, projectId))?.avatar === undefined) {
+            if ((await this.get(ctx, projectId))?.avatar === undefined) {
                 const repositoryAvatar = repositoryTopLevel
                     ? await findRepositoryAvatar(project.repositoryRef)
                     : undefined;
@@ -1295,11 +1229,10 @@ export class ProjectsModule implements AgentModule {
                 if (this.#closed) return;
                 if (
                     candidate !== undefined &&
-                    (await this.get(ctx, agentId, projectId))?.avatar === undefined
+                    (await this.get(ctx, projectId))?.avatar === undefined
                 ) {
                     await this.storeAvatarImage(
                         ctx,
-                        agentId,
                         projectId,
                         repositoryAvatar === undefined ? "hosting" : "repository",
                         candidate,
@@ -1308,20 +1241,19 @@ export class ProjectsModule implements AgentModule {
             }
             if (this.#closed) return;
 
-            await this.markInitializationReady(ctx, agentId, projectId);
+            await this.markInitializationReady(ctx, projectId);
         } catch (error) {
             if (this.#closed) return;
-            await this.#failInitialization(ctx, agentId, projectId, errorToMessage(error));
+            await this.#failInitialization(ctx, projectId, errorToMessage(error));
         }
     }
 
     async #failInitialization(
         ctx: Context,
-        agentId: string,
         projectId: string,
         message: string,
     ): Promise<void> {
-        await this.markInitializationFailed(ctx, agentId, {
+        await this.markInitializationFailed(ctx, {
             projectId,
             error: boundedReason(message),
         });
@@ -1332,7 +1264,6 @@ export class ProjectsModule implements AgentModule {
     /** Adds a project whose folder Rig has still to clone from a remote repository. */
     async createRemote(
         ctx: Context,
-        agentId: string,
         request: CreateRemoteProjectRequest,
         options: ProjectCreatorOptions = {},
     ): Promise<Project> {
@@ -1374,7 +1305,7 @@ export class ProjectsModule implements AgentModule {
             });
         };
 
-        const retried = await this.#retriedRemoteProject(ctx, agentId, id, path, request, creator);
+        const retried = await this.#retriedRemoteProject(ctx, id, path, request, creator);
         if (retried !== undefined) {
             this.#creators.set(id, creator);
             await registerCredential();
@@ -1383,14 +1314,14 @@ export class ProjectsModule implements AgentModule {
                 this.gitAuthentication(retried.id, creator) !== undefined;
             if (retried.initializationStatus === "failed" && !canRetry) return retried;
             if (retried.initializationStatus === "failed") {
-                await this.retryInitialization(ctx, agentId, id);
+                await this.retryInitialization(ctx, id);
             }
             if (retried.initializationStatus !== "ready" && canRetry) {
-                await this.scheduleInitialization(ctx, agentId, id);
+                await this.scheduleInitialization(ctx, id);
             }
-            return (await this.get(ctx, agentId, id)) ?? retried;
+            return (await this.get(ctx, id)) ?? retried;
         }
-        if ((await this.getByPath(ctx, agentId, path)) !== undefined) {
+        if ((await this.getByPath(ctx, path)) !== undefined) {
             throw new ProjectRegistrationError(
                 "project_path_conflict",
                 "That managed project folder already belongs to another project.",
@@ -1406,7 +1337,7 @@ export class ProjectsModule implements AgentModule {
         this.#creators.set(id, creator);
         await registerCredential();
         try {
-            const project = await this.create(ctx, agentId, {
+            const project = await this.create(ctx, {
                 id,
                 repositoryRef: path,
                 kind: "regular",
@@ -1416,12 +1347,11 @@ export class ProjectsModule implements AgentModule {
                     ? {}
                     : { requiredSecretKind: request.secret.kind }),
             });
-            await this.scheduleInitialization(ctx, agentId, id);
+            await this.scheduleInitialization(ctx, id);
             return project;
         } catch (error) {
             const raced = await this.#retriedRemoteProject(
                 ctx,
-                agentId,
                 id,
                 path,
                 request,
@@ -1429,13 +1359,13 @@ export class ProjectsModule implements AgentModule {
             );
             if (raced !== undefined) {
                 if (raced.initializationStatus !== "ready") {
-                    await this.scheduleInitialization(ctx, agentId, id);
+                    await this.scheduleInitialization(ctx, id);
                 }
                 return raced;
             }
             this.#gitCredentialBroker.revoke(id);
             this.#creators.delete(id);
-            if ((await this.getByPath(ctx, agentId, path)) !== undefined) {
+            if ((await this.getByPath(ctx, path)) !== undefined) {
                 throw new ProjectRegistrationError(
                     "project_path_conflict",
                     "That managed project folder already belongs to another project.",
@@ -1447,13 +1377,12 @@ export class ProjectsModule implements AgentModule {
 
     async #retriedRemoteProject(
         ctx: Context,
-        agentId: string,
         id: string,
         path: string,
         request: CreateRemoteProjectRequest,
         creator: ProjectCreator,
     ): Promise<Project | undefined> {
-        const project = await this.get(ctx, agentId, id);
+        const project = await this.get(ctx, id);
         if (project === undefined) return undefined;
         const recordedCreator = this.#creators.get(id);
         if (
@@ -1472,7 +1401,7 @@ export class ProjectsModule implements AgentModule {
         return project;
     }
 
-    async #cloneRemoteProject(ctx: Context, agentId: string, project: Project): Promise<void> {
+    async #cloneRemoteProject(ctx: Context, project: Project): Promise<void> {
         if (project.remoteSource === undefined) return;
         const stagingRoot = join(this.#managedProjectsDirectory, ".rig", "clones");
         const stagingPath = join(stagingRoot, project.id);
@@ -1489,7 +1418,7 @@ export class ProjectsModule implements AgentModule {
             if (!remoteSourceUrlMatches(origin.stdout.trim(), project.remoteSource)) {
                 throw new Error("The managed project folder has a different origin repository.");
             }
-            await this.markCloneReady(ctx, agentId, project.id);
+            await this.markCloneReady(ctx, project.id);
             return;
         }
         const creator = this.#creators.get(project.id) ?? this.#localCreator;
@@ -1527,7 +1456,7 @@ export class ProjectsModule implements AgentModule {
                 throw new Error("The managed project folder appeared while cloning.");
             }
             await rename(stagingPath, project.repositoryRef);
-            await this.markCloneReady(ctx, agentId, project.id);
+            await this.markCloneReady(ctx, project.id);
         } finally {
             await rm(stagingPath, { force: true, recursive: true });
         }
@@ -1535,12 +1464,11 @@ export class ProjectsModule implements AgentModule {
 
     async registerGitCredential(
         ctx: Context,
-        agentId: string,
         projectId: string,
         creator: ProjectCreator,
         githubToken: string,
     ): Promise<GitAuthentication> {
-        const project = await this.get(ctx, agentId, projectId);
+        const project = await this.get(ctx, projectId);
         if (project?.remoteSource?.kind !== "github") {
             throw new Error("GitHub credentials can only be used with a GitHub project.");
         }
@@ -1555,12 +1483,11 @@ export class ProjectsModule implements AgentModule {
 
     async refreshGitCredential(
         ctx: Context,
-        agentId: string,
         projectId: string,
         creator: ProjectCreator,
         githubToken: string,
     ): Promise<GitAuthentication> {
-        const project = await this.get(ctx, agentId, projectId);
+        const project = await this.get(ctx, projectId);
         if (project?.remoteSource?.kind !== "github") {
             throw new Error("That profile does not own a managed GitHub project.");
         }
@@ -1573,14 +1500,13 @@ export class ProjectsModule implements AgentModule {
         }
         const authentication = await this.registerGitCredential(
             ctx,
-            agentId,
             projectId,
             creator,
             githubToken,
         );
         if (project.initializationStatus === "failed") {
-            await this.retryInitialization(ctx, agentId, projectId);
-            await this.scheduleInitialization(ctx, agentId, projectId);
+            await this.retryInitialization(ctx, projectId);
+            await this.scheduleInitialization(ctx, projectId);
         }
         return authentication;
     }
@@ -1593,10 +1519,10 @@ export class ProjectsModule implements AgentModule {
     }
 
     /** Re-registers the local credential for every managed project and retries what failed. */
-    async retryRemoteProjects(ctx: Context, agentId: string, kind: "github"): Promise<void> {
+    async retryRemoteProjects(ctx: Context, kind: "github"): Promise<void> {
         const token = this.#localGitSecret(kind);
         if (token === undefined) return;
-        for (const project of await this.#allProjects(ctx, agentId)) {
+        for (const project of await this.#allProjects(ctx)) {
             if (project.requiredSecretKind !== kind) continue;
             if (project.remoteSource?.kind !== "github") continue;
             const creator = this.#creators.get(project.id) ?? this.#localCreator;
@@ -1613,9 +1539,9 @@ export class ProjectsModule implements AgentModule {
             }
             if (this.#closed) return;
             if (project.initializationStatus === "failed") {
-                await this.retryInitialization(ctx, agentId, project.id);
+                await this.retryInitialization(ctx, project.id);
             }
-            await this.scheduleInitialization(ctx, agentId, project.id);
+            await this.scheduleInitialization(ctx, project.id);
         }
     }
 
@@ -1658,13 +1584,12 @@ export class ProjectsModule implements AgentModule {
     /** Stores an image for a project and records the metadata that points at it. */
     async storeAvatarImage(
         ctx: Context,
-        agentId: string,
         projectId: string,
         source: ProjectAvatar["source"],
         bytes: Buffer,
         expectedVersion?: number,
     ): Promise<Project | undefined> {
-        const project = await this.get(ctx, agentId, projectId);
+        const project = await this.get(ctx, projectId);
         if (project === undefined) return undefined;
         if (bytes.byteLength > MAX_AVATAR_BYTES) {
             throw new Error("The project image is larger than the allowed limit.");
@@ -1674,14 +1599,17 @@ export class ProjectsModule implements AgentModule {
             await this.#avatars.write(normalized.hash, normalized.bytes);
             if (this.#closed) return project;
             try {
-                return await this.setAvatar(ctx, agentId, {
+                return await this.setAvatar(ctx, {
                     projectId,
                     avatar: {
                         hash: normalized.hash,
                         height: normalized.height,
                         mediaType: "image/webp",
                         source,
-                        url: `/v0/projects/avatars/${normalized.hash}`,
+                        // Where a client should ask for the picture, relative to the daemon API it
+                        // already speaks. Clients re-serve this path from their own origin, so it
+                        // names the asset route and carries no protocol prefix of its own.
+                        url: `/project-assets/${normalized.hash}`,
                         width: normalized.width,
                     },
                     ...(expectedVersion === undefined ? {} : { expectedVersion }),
@@ -1694,10 +1622,10 @@ export class ProjectsModule implements AgentModule {
     }
 
     /** Removes stored avatar bytes no project has pointed at for a day. */
-    async collectAvatarGarbage(ctx: Context, agentId: string): Promise<void> {
+    async collectAvatarGarbage(ctx: Context): Promise<void> {
         if (this.#closed) return;
         const referenced = new Set(
-            (await this.#allProjects(ctx, agentId))
+            (await this.#allProjects(ctx))
                 .map((project) => project.avatar?.hash)
                 .filter((hash): hash is string => hash !== undefined),
         );
@@ -1713,12 +1641,12 @@ export class ProjectsModule implements AgentModule {
     // --- Git facts ---------------------------------------------------------------------------
 
     /** Re-derives presence, worktree capability, and Git facts for every live project. */
-    async reconcileGitFacts(ctx: Context, agentId: string): Promise<void> {
-        for (const project of await this.#allProjects(ctx, agentId)) {
+    async reconcileGitFacts(ctx: Context): Promise<void> {
+        for (const project of await this.#allProjects(ctx)) {
             if (this.#closed) return;
             // An archived project is hidden, so re-deriving its Git facts is wasted work.
             if (project.status === "archived") continue;
-            await this.probe(ctx, agentId, project.id);
+            await this.probe(ctx, project.id);
         }
     }
 
@@ -1728,11 +1656,10 @@ export class ProjectsModule implements AgentModule {
      */
     async recordGitFacts(
         ctx: Context,
-        agentId: string,
         projectId: string,
         facts: GitRepositoryFacts,
     ): Promise<void> {
-        await this.applyGitFacts(ctx, agentId, {
+        await this.applyGitFacts(ctx, {
             projectId,
             git: projectGitFactsFrom(facts),
         });
@@ -1740,11 +1667,10 @@ export class ProjectsModule implements AgentModule {
 
     async #applyProjectProbe(
         ctx: Context,
-        agentId: string,
         projectId: string,
         probe: GitRepositoryProbe,
     ): Promise<Project> {
-        return await this.applyProbe(ctx, agentId, {
+        return await this.applyProbe(ctx, {
             projectId,
             presence: probe.presence,
             worktreeSupport: probe.worktreeSupport,
@@ -1790,18 +1716,10 @@ export class ProjectsModule implements AgentModule {
         return formatSettingsForModel(projectId, settings, this.#maxOutputCharacters);
     }
 
-    /** The project this operation names, with the acting agent already authorized. */
-    async #lookAt(
-        ctx: Context,
-        agentId: string,
-        projectId: string,
-        action: ProjectAuthorizationAction,
-    ): Promise<Project> {
-        this.#assertAgentId(agentId);
+    /** The project this operation names, or a refusal saying it is not in the catalog. */
+    async #lookAt(ctx: Context, projectId: string): Promise<Project> {
         this.#assertId(projectId);
-        const project = await this.#mutations.getRequired(ctx, agentId, projectId);
-        await this.#mutations.authorize(ctx, agentId, project.ownerAgentId, action);
-        return project;
+        return await this.#mutations.getRequired(ctx, projectId);
     }
 
     /**
@@ -1821,20 +1739,16 @@ export class ProjectsModule implements AgentModule {
 
     async #changeState(
         ctx: Context,
-        agentId: string,
         projectId: string,
         reason: ProjectStateChangeReason,
         compute: (project: Project) => ProjectStateChanges | undefined,
     ): Promise<Project> {
-        this.#assertAgentId(agentId);
         this.#assertId(projectId);
-        const result = await this.#mutations.run(ctx, agentId, {
-            action: "update_state",
+        const result = await this.#mutations.run(ctx, {
             changeable: PROJECT_STATE_FIELDS,
             projectId,
             event: (after) => ({
                 type: "project_state_changed",
-                agentId,
                 reason,
                 project: after,
             }),
@@ -1848,13 +1762,12 @@ export class ProjectsModule implements AgentModule {
                 if (changes === undefined) {
                     return {
                         operation: "state_change" as const,
-                        agentId,
                         changed: false,
                         project: before,
                     };
                 }
                 return await requirePromise(
-                    this.#store.applyState(txCtx, agentId, { projectId, changes }),
+                    this.#store.applyState(txCtx, { projectId, changes }),
                     "Project store state change",
                 );
             },
@@ -1862,24 +1775,14 @@ export class ProjectsModule implements AgentModule {
         return requireProjectFromResult(result);
     }
 
-    /**
-     * Runs one durable catalog write: it reads the project the operation names,
-     * authorizes the acting agent, checks the store's answer against the row
-     * that is actually stored, and emits one event when something changed.
-     */
-    async #newIdentity(ctx: Context, agentId: string): Promise<string> {
-        const raw = this.#idFactory(ctx, agentId);
+    /** A fresh project identity, from the configured factory or this module's own. */
+    async #newIdentity(ctx: Context): Promise<string> {
+        const raw = this.#idFactory(ctx);
         const value = isPromiseLike(raw) ? await raw : raw;
         if (!Value.Check(projectIdSchema, value)) {
             throw new Error("The project identity factory returned an invalid identity.");
         }
         return value;
-    }
-
-    #assertAgentId(agentId: string): void {
-        if (!Value.Check(projectAgentIdSchema, agentId)) {
-            throw new Error("The project agent ID is invalid.");
-        }
     }
 
     #assertId(projectId: string): void {

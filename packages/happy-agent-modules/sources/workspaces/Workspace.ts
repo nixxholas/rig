@@ -223,14 +223,10 @@ export const workspaceGitFactsSchema = Type.Object(
     { additionalProperties: false },
 );
 
-/**
- * Public workspace data. `ownerAgentId` is deliberately part of the record:
- * the module cannot enforce exact ownership if a host can omit it.
- */
+/** Public workspace data. */
 export const workspaceSchema = Type.Object(
     {
         id: workspaceIdSchema,
-        ownerAgentId: workspaceAgentIdSchema,
         projectRef: workspaceProjectRefSchema,
         name: workspaceNameSchema,
         /** False while the name is still a placeholder a first chat may replace. */

@@ -3,7 +3,6 @@ import { Value } from "@sinclair/typebox/value";
 import type { Context } from "@steve.kite/stdlib";
 
 import {
-    workspaceAgentIdSchema,
     workspaceBranchSchema,
     workspaceGitCommonDirSchema,
     workspaceGitFactsSchema,
@@ -82,7 +81,6 @@ export const workspaceMutationRequestSchema = Type.Object(
 export const workspaceStoreReserveInputSchema = Type.Object(
     {
         id: workspaceIdSchema,
-        ownerAgentId: workspaceAgentIdSchema,
         projectRef: workspaceProjectRefSchema,
         name: workspaceNameSchema,
         nameConfigured: Type.Boolean(),
@@ -164,7 +162,6 @@ export const workspaceStoreApplyProbeInputSchema = Type.Object(
 /** One shape for every durable workspace mutation: what was asked, and the row it produced. */
 export const workspaceMutationResultSchema = Type.Object(
     {
-        agentId: workspaceAgentIdSchema,
         operationId: workspaceOperationIdSchema,
         operation: workspaceMutationOperationSchema,
         changed: Type.Boolean(),
@@ -181,34 +178,10 @@ export const workspaceTransactionChangeSchema = Type.Object(
     { additionalProperties: false },
 );
 
-export const workspaceAuthorizationActionSchema = Type.Union([
-    Type.Literal("list"),
-    Type.Literal("get"),
-    Type.Literal("branch_metadata"),
-    Type.Literal("transfer"),
-]);
-
-/**
- * Missing authorization is an intentional deny for another owner's record.
- * Self access is granted by the module without invoking this policy.
- */
-export const workspaceAuthorizationSchema = Type.Function(
-    [
-        workspaceContextSchema,
-        workspaceAgentIdSchema,
-        workspaceAgentIdSchema,
-        workspaceAuthorizationActionSchema,
-    ],
-    Type.Union([Type.Boolean(), Type.Promise(Type.Boolean())]),
-);
-
-export type WorkspaceAuthorizationAction = Static<typeof workspaceAuthorizationActionSchema>;
-export type WorkspaceAuthorization = Static<typeof workspaceAuthorizationSchema>;
-
 /** Every durable mutation reads the same way: context, agent, what to change, and which call. */
 const mutation = <TInput extends TSchema>(input: TInput) =>
     Type.Function(
-        [workspaceContextSchema, workspaceAgentIdSchema, input, workspaceMutationRequestSchema],
+        [workspaceContextSchema, input, workspaceMutationRequestSchema],
         Type.Promise(workspaceMutationResultSchema),
     );
 
@@ -221,7 +194,6 @@ export const workspaceStoreSchema = Type.Object(
         reserve: Type.Function(
             [
                 workspaceContextSchema,
-                workspaceAgentIdSchema,
                 workspaceStoreReserveInputSchema,
                 workspaceReserveHooksSchema,
                 workspaceMutationRequestSchema,
@@ -229,15 +201,15 @@ export const workspaceStoreSchema = Type.Object(
             Type.Promise(workspaceMutationResultSchema),
         ),
         list: Type.Function(
-            [workspaceContextSchema, workspaceAgentIdSchema, workspacePageQuerySchema],
+            [workspaceContextSchema, workspacePageQuerySchema],
             Type.Promise(workspacePageSchema),
         ),
         get: Type.Function(
-            [workspaceContextSchema, workspaceAgentIdSchema, workspaceIdSchema],
+            [workspaceContextSchema, workspaceIdSchema],
             Type.Promise(Type.Union([workspaceSchema, Type.Undefined()])),
         ),
         getByPath: Type.Function(
-            [workspaceContextSchema, workspaceAgentIdSchema, workspacePathSchema],
+            [workspaceContextSchema, workspacePathSchema],
             Type.Promise(Type.Union([workspaceSchema, Type.Undefined()])),
         ),
         rename: mutation(workspaceStoreRenameInputSchema),
@@ -255,14 +227,13 @@ export const workspaceStoreSchema = Type.Object(
         transfer: Type.Function(
             [
                 workspaceContextSchema,
-                workspaceAgentIdSchema,
                 workspaceTransferInputSchema,
                 workspaceMutationRequestSchema,
             ],
             Type.Promise(workspaceTransferStoreResultSchema),
         ),
         branchMetadata: Type.Function(
-            [workspaceContextSchema, workspaceAgentIdSchema, workspaceIdSchema],
+            [workspaceContextSchema, workspaceIdSchema],
             Type.Promise(workspaceBranchMetadataSchema),
         ),
     },
@@ -383,7 +354,7 @@ export const workspaceHostSchema = Type.Object(
         ),
         branchMetadata: Type.Optional(
             Type.Function(
-                [workspaceContextSchema, workspaceAgentIdSchema, workspaceIdSchema],
+                [workspaceContextSchema, workspaceIdSchema],
                 Type.Promise(workspaceBranchMetadataSchema),
             ),
         ),
@@ -391,8 +362,7 @@ export const workspaceHostSchema = Type.Object(
             Type.Function(
                 [
                     workspaceContextSchema,
-                    workspaceAgentIdSchema,
-                    workspaceTransferInputSchema,
+                        workspaceTransferInputSchema,
                     workspaceMutationRequestSchema,
                 ],
                 Type.Promise(workspaceTransferStoreResultSchema),
@@ -419,7 +389,7 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
     // Every timestamp the store writes comes from here, so a host that supplies a clock sees it in
     // the reservation as well as in each later change.
     const clock: WorkspaceClock = options.clock ?? (() => Date.now());
-    const now = (ctx: Context, agentId: string): number => workspaceNow(clock, ctx, agentId);
+    const now = (ctx: Context): number => workspaceNow(clock, ctx);
 
     /**
      * One durable write. The row the decision was read from is part of the update predicate, so a
@@ -428,7 +398,6 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
      */
     const update = async (
         ctx: Context,
-        agentId: string,
         workspaceId: string,
         operation: WorkspaceMutationRequest,
         decide: (before: Workspace) => Workspace | undefined | Promise<Workspace | undefined>,
@@ -439,7 +408,6 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
         const decided = await decide(before);
         if (decided === undefined) {
             return {
-                agentId,
                 operationId: operation.operationId,
                 operation: operation.operation,
                 changed: false,
@@ -449,12 +417,11 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
         const workspace: Workspace = {
             ...decided,
             version: before.version + 1,
-            updatedAt: Math.max(now(ctx, agentId), before.updatedAt + 1),
+            updatedAt: Math.max(now(ctx), before.updatedAt + 1),
         };
         assertWorkspace(workspace);
         const stored = await writeWorkspace(database, workspace, before.version);
         return {
-            agentId,
             operationId: operation.operationId,
             operation: operation.operation,
             changed: true,
@@ -463,12 +430,12 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
     };
 
     return {
-        reserve: async (ctx, actingAgentId, input, hooks, operation) =>
-            await reserveWorkspace(ctx.db, actingAgentId, input, hooks, host, operation, () =>
-                now(ctx, actingAgentId),
+        reserve: async (ctx, input, hooks, operation) =>
+            await reserveWorkspace(ctx.db, input, hooks, host, operation, () =>
+                now(ctx),
             ),
 
-        list: async (ctx, _agentId, query) => {
+        list: async (ctx, query) => {
             const cursor = query.cursor ?? 0;
             const limit = query.limit ?? 50;
             const rows = await readWorkspacePage(ctx.db, {
@@ -485,15 +452,14 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
             };
         },
 
-        get: async (ctx, _agentId, workspaceId) => await readWorkspace(ctx.db, workspaceId),
+        get: async (ctx, workspaceId) => await readWorkspace(ctx.db, workspaceId),
 
-        getByPath: async (ctx, _agentId, path) => await readWorkspaceByPath(ctx.db, path),
+        getByPath: async (ctx, path) => await readWorkspaceByPath(ctx.db, path),
 
-        rename: async (ctx, actingAgentId, input, operation) => {
+        rename: async (ctx, input, operation) => {
             const siblings = await readProjectWorkspacesFor(ctx.db, input.workspaceId);
             return await update(
                 ctx,
-                actingAgentId,
                 input.workspaceId,
                 operation,
                 async (before) => {
@@ -513,24 +479,30 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
             );
         },
 
-        inheritName: async (ctx, actingAgentId, input, operation) => {
+        inheritName: async (ctx, input, operation) => {
             const siblings = await readProjectWorkspacesFor(ctx.db, input.workspaceId);
-            return await update(ctx, actingAgentId, input.workspaceId, operation, async (before) =>
+            return await update(
+                ctx,
+                input.workspaceId, operation, async (before) =>
                 before.nameConfigured || isSettled(before)
                     ? undefined
                     : await renameTo(before, input.name, siblings, host),
             );
         },
 
-        setBranch: async (ctx, actingAgentId, input, operation) =>
-            await update(ctx, actingAgentId, input.workspaceId, operation, (before) =>
+        setBranch: async (ctx, input, operation) =>
+            await update(
+                ctx,
+                input.workspaceId, operation, (before) =>
                 isSettled(before) || before.branch === input.branch
                     ? undefined
                     : { ...before, branch: input.branch },
             ),
 
-        recordInitialization: async (ctx, actingAgentId, input, operation) =>
-            await update(ctx, actingAgentId, input.workspaceId, operation, (before) => {
+        recordInitialization: async (ctx, input, operation) =>
+            await update(
+                ctx,
+                input.workspaceId, operation, (before) => {
                 // A workspace archived or failed while Git discovery was running keeps its
                 // terminal state and ignores the late result.
                 if (before.status !== "initializing") return undefined;
@@ -543,23 +515,29 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
                 return sameJson(next, before) ? undefined : next;
             }),
 
-        markReady: async (ctx, actingAgentId, input, operation) =>
-            await update(ctx, actingAgentId, input.workspaceId, operation, (before) => {
+        markReady: async (ctx, input, operation) =>
+            await update(
+                ctx,
+                input.workspaceId, operation, (before) => {
                 if (before.status !== "initializing") return undefined;
                 const next = { ...before, presence: "present" as const, status: "ready" as const };
                 delete next.initializationError;
                 return next;
             }),
 
-        markFailed: async (ctx, actingAgentId, input, operation) =>
-            await update(ctx, actingAgentId, input.workspaceId, operation, (before) =>
+        markFailed: async (ctx, input, operation) =>
+            await update(
+                ctx,
+                input.workspaceId, operation, (before) =>
                 before.status === "ready"
                     ? { ...before, status: "failed", initializationError: input.error }
                     : undefined,
             ),
 
-        markInitializationFailed: async (ctx, actingAgentId, input, operation) =>
-            await update(ctx, actingAgentId, input.workspaceId, operation, (before) =>
+        markInitializationFailed: async (ctx, input, operation) =>
+            await update(
+                ctx,
+                input.workspaceId, operation, (before) =>
                 before.status === "initializing"
                     ? {
                           ...before,
@@ -573,7 +551,7 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
                     : undefined,
             ),
 
-        reorder: async (ctx, actingAgentId, input, operation) => {
+        reorder: async (ctx, input, operation) => {
             const database = ctx.db;
             if (input.afterId === input.workspaceId) {
                 throw new Error("A workspace cannot be placed after itself.");
@@ -594,7 +572,9 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
                 afterIndex === -1 ? null : (ordered[afterIndex]?.orderKey ?? null),
                 ordered[afterIndex + 1]?.orderKey ?? null,
             );
-            return await update(ctx, actingAgentId, input.workspaceId, operation, (before) => {
+            return await update(
+                ctx,
+                input.workspaceId, operation, (before) => {
                 assertExpectedVersion(
                     before,
                     input.expectedVersion,
@@ -604,8 +584,10 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
             });
         },
 
-        beginArchive: async (ctx, actingAgentId, input, operation) =>
-            await update(ctx, actingAgentId, input.workspaceId, operation, (before) => {
+        beginArchive: async (ctx, input, operation) =>
+            await update(
+                ctx,
+                input.workspaceId, operation, (before) => {
                 assertExpectedVersion(
                     before,
                     input.expectedVersion,
@@ -617,27 +599,33 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
                 return next;
             }),
 
-        completeArchive: async (ctx, actingAgentId, input, operation) =>
-            await update(ctx, actingAgentId, input.workspaceId, operation, (before) => {
+        completeArchive: async (ctx, input, operation) =>
+            await update(
+                ctx,
+                input.workspaceId, operation, (before) => {
                 if (before.status !== "archiving") return undefined;
                 const next: Workspace = {
                     ...before,
                     status: "archived",
-                    archivedAt: Math.max(now(ctx, actingAgentId), before.updatedAt + 1),
+                    archivedAt: Math.max(now(ctx), before.updatedAt + 1),
                 };
                 delete next.initializationError;
                 return next;
             }),
 
-        applyGitFacts: async (ctx, actingAgentId, input, operation) =>
-            await update(ctx, actingAgentId, input.workspaceId, operation, (before) =>
+        applyGitFacts: async (ctx, input, operation) =>
+            await update(
+                ctx,
+                input.workspaceId, operation, (before) =>
                 // Archival is the terminal decision. A scan that was already running when it was
                 // made describes a workspace nobody has any more.
                 isSettled(before) ? undefined : withGitFacts(before, input.facts),
             ),
 
-        applyProbe: async (ctx, actingAgentId, input, operation) =>
-            await update(ctx, actingAgentId, input.workspaceId, operation, (before) => {
+        applyProbe: async (ctx, input, operation) =>
+            await update(
+                ctx,
+                input.workspaceId, operation, (before) => {
                 // A probe describes a workspace someone can use. Anything still being built or
                 // taken down is described by its own lifecycle transition instead.
                 if (before.status !== "ready") return undefined;
@@ -646,16 +634,16 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
                 return sameJson(probed, before) ? undefined : probed;
             }),
 
-        transfer: async (ctx, actingAgentId, input, operation) => {
+        transfer: async (ctx, input, operation) => {
             const database = ctx.db;
             const hostResult =
                 host?.transfer === undefined
                     ? undefined
-                    : await host.transfer(ctx, actingAgentId, input, operation);
+                    : await host.transfer(ctx, input, operation);
             const result =
                 hostResult ??
-                (await defaultWorkspaceTransfer(ctx, actingAgentId, input, operation, () =>
-                    now(ctx, actingAgentId),
+                (await defaultWorkspaceTransfer(ctx, input, operation, () =>
+                    now(ctx),
                 ));
             if (Value.Check(workspaceSchema, result)) {
                 const current = await readWorkspace(database, result.id);
@@ -668,14 +656,12 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
                     current.version,
                 );
                 return {
-                    agentId: actingAgentId,
                     operationId: operation.operationId,
                     changed: true,
                     state: "transferred",
                     workspace: {
                         id: stored.id,
                         projectRef: stored.projectRef,
-                        ownerAgentId: stored.ownerAgentId,
                         path: stored.path,
                     },
                 };
@@ -692,7 +678,7 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
                             ...current,
                             projectRef: result.workspace.projectRef,
                             version: current.version + 1,
-                            updatedAt: Math.max(now(ctx, actingAgentId), current.updatedAt + 1),
+                            updatedAt: Math.max(now(ctx), current.updatedAt + 1),
                         },
                         current.version,
                     );
@@ -701,11 +687,11 @@ export function createWorkspaceStore(options: WorkspaceStoreOptions = {}): Works
             return result;
         },
 
-        branchMetadata: async (ctx, actingAgentId, workspaceId) => {
+        branchMetadata: async (ctx, workspaceId) => {
             if (host?.branchMetadata === undefined) {
                 throw new Error("Workspace branch metadata requires an injected host service.");
             }
-            return await host.branchMetadata(ctx, actingAgentId, workspaceId);
+            return await host.branchMetadata(ctx, workspaceId);
         },
     };
 }
@@ -770,7 +756,6 @@ function assertExpectedVersion(
 
 async function defaultWorkspaceTransfer(
     ctx: Context,
-    agentId: string,
     input: WorkspaceTransferInput,
     operation: WorkspaceMutationRequest,
     now: () => number,
@@ -791,7 +776,6 @@ async function defaultWorkspaceTransfer(
             target.version,
         );
         return {
-            agentId,
             operationId: operation.operationId,
             changed: true,
             state: "scheduled",
@@ -814,14 +798,12 @@ async function defaultWorkspaceTransfer(
         );
     }
     return {
-        agentId,
         operationId: operation.operationId,
         changed,
         state: "transferred",
         workspace: {
             id: workspace.id,
             projectRef: input.targetProjectRef,
-            ownerAgentId: workspace.ownerAgentId,
             path: workspace.path,
         },
     };

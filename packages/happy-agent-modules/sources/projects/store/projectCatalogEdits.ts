@@ -26,7 +26,7 @@ export function createProjectCatalogEdits(): Pick<
     "rename" | "reorder" | "setAvatar" | "clearAvatar" | "updateSettings"
 > {
     return {
-        rename: async (ctx, actingAgentId, input) => {
+        rename: async (ctx, input) => {
             const database = databaseFor(ctx);
             const before = await requireProject(database, input.projectId);
             assertExpectedProjectVersion(
@@ -37,7 +37,6 @@ export function createProjectCatalogEdits(): Pick<
             if (before.name === input.name && before.nameSource === "user") {
                 return {
                     operation: "rename",
-                    agentId: actingAgentId,
                     changed: false,
                     project: before,
                 };
@@ -45,7 +44,6 @@ export function createProjectCatalogEdits(): Pick<
             const updatedAt = Date.now();
             return {
                 operation: "rename",
-                agentId: actingAgentId,
                 changed: true,
                 project: await writeGuardedProject(
                     database,
@@ -60,7 +58,7 @@ export function createProjectCatalogEdits(): Pick<
                 ),
             };
         },
-        reorder: async (ctx, actingAgentId, input) => {
+        reorder: async (ctx, input) => {
             const database = databaseFor(ctx);
             const before = await requireProject(database, input.projectId);
             assertExpectedProjectVersion(
@@ -103,7 +101,6 @@ export function createProjectCatalogEdits(): Pick<
             if (!changed) {
                 return {
                     operation: "reorder",
-                    agentId: actingAgentId,
                     changed: false,
                     previousOrderKey: before.orderKey,
                     project: before,
@@ -143,13 +140,12 @@ export function createProjectCatalogEdits(): Pick<
             if (moved === undefined) throw new Error(conflict);
             return {
                 operation: "reorder",
-                agentId: actingAgentId,
                 changed: true,
                 previousOrderKey: before.orderKey,
                 project: moved,
             };
         },
-        setAvatar: async (ctx, actingAgentId, input) => {
+        setAvatar: async (ctx, input) => {
             const database = databaseFor(ctx);
             const before = await requireProject(database, input.projectId);
             assertExpectedProjectVersion(
@@ -160,7 +156,6 @@ export function createProjectCatalogEdits(): Pick<
             if (sameJson(before.avatar, input.avatar)) {
                 return {
                     operation: "set_avatar",
-                    agentId: actingAgentId,
                     changed: false,
                     project: before,
                 };
@@ -168,7 +163,6 @@ export function createProjectCatalogEdits(): Pick<
             const updatedAt = Date.now();
             return {
                 operation: "set_avatar",
-                agentId: actingAgentId,
                 changed: true,
                 project: await writeGuardedProject(
                     database,
@@ -183,7 +177,7 @@ export function createProjectCatalogEdits(): Pick<
                 ),
             };
         },
-        clearAvatar: async (ctx, actingAgentId, input) => {
+        clearAvatar: async (ctx, input) => {
             const database = databaseFor(ctx);
             const before = await requireProject(database, input.projectId);
             assertExpectedProjectVersion(
@@ -194,7 +188,6 @@ export function createProjectCatalogEdits(): Pick<
             if (before.avatar === undefined) {
                 return {
                     operation: "clear_avatar",
-                    agentId: actingAgentId,
                     changed: false,
                     project: before,
                 };
@@ -202,7 +195,6 @@ export function createProjectCatalogEdits(): Pick<
             const updatedAt = Date.now();
             return {
                 operation: "clear_avatar",
-                agentId: actingAgentId,
                 changed: true,
                 project: await writeGuardedProject(
                     database,
@@ -217,7 +209,7 @@ export function createProjectCatalogEdits(): Pick<
                 ),
             };
         },
-        updateSettings: async (ctx, actingAgentId, input) => {
+        updateSettings: async (ctx, input) => {
             const database = databaseFor(ctx);
             const project = await requireProject(database, input.projectId);
             assertExpectedProjectVersion(
@@ -255,7 +247,6 @@ export function createProjectCatalogEdits(): Pick<
             }
             return {
                 operation: "update_settings",
-                agentId: actingAgentId,
                 changed,
                 projectId: input.projectId,
                 settings: structuredClone(input.settings),

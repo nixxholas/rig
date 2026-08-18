@@ -89,7 +89,7 @@ describe("the agent asks the user a question and gets an answer", () => {
         });
 
         // Answer it so the daemon has nothing left waiting when this scenario disposes it.
-        await gym.http.ok("POST", `/v0/sessions/${gym.rootSessionId}/user-input/ask-1`, {
+        await gym.http.ok("POST", `/v0/sessions/${gym.defaultSessionId}/user-input/ask-1`, {
             answers: { "ask-1": ["Postgres"] },
         });
         await gym.waitForRun(acceptance.runId);
@@ -125,7 +125,7 @@ describe("the agent asks the user a question and gets an answer", () => {
 
         const answered = await gym.http.ok<{ readonly request: { readonly answer: unknown } }>(
             "POST",
-            `/v0/sessions/${gym.rootSessionId}/user-input/ask-1`,
+            `/v0/sessions/${gym.defaultSessionId}/user-input/ask-1`,
             { answers: { "ask-1": ["Yes, ship on Friday, the team is ready."] } },
         );
         expect(answered.request.answer).toBe("Yes, ship on Friday, the team is ready.");
@@ -161,7 +161,7 @@ describe("the agent asks the user a question and gets an answer", () => {
         running.add(gym);
 
         const response = await gym.http.post(
-            `/v0/sessions/${gym.rootSessionId}/user-input/does-not-exist`,
+            `/v0/sessions/${gym.defaultSessionId}/user-input/does-not-exist`,
             { answers: { "does-not-exist": ["Sure"] } },
         );
 
@@ -206,7 +206,7 @@ describe("the agent asks the user a question and gets an answer", () => {
 
         const firstAnswer = await gym.http.ok<{
             readonly request: { readonly answer: unknown; readonly status: string };
-        }>("POST", `/v0/sessions/${gym.rootSessionId}/user-input/ask-1`, {
+        }>("POST", `/v0/sessions/${gym.defaultSessionId}/user-input/ask-1`, {
             answers: { "ask-1": ["Yes"] },
         });
         expect(firstAnswer.request.answer).toEqual({ selectedOptions: ["Yes"] });
@@ -215,7 +215,7 @@ describe("the agent asks the user a question and gets an answer", () => {
         // A second answer to the same, already-terminal request is accepted but changes nothing.
         const secondAnswer = await gym.http.ok<{
             readonly request: { readonly answer: unknown; readonly status: string };
-        }>("POST", `/v0/sessions/${gym.rootSessionId}/user-input/ask-1`, {
+        }>("POST", `/v0/sessions/${gym.defaultSessionId}/user-input/ask-1`, {
             answers: { "ask-1": ["No"] },
         });
         expect(secondAnswer.request.answer).toEqual({ selectedOptions: ["Yes"] });

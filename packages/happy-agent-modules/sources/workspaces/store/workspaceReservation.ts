@@ -48,7 +48,6 @@ const RESERVATION_ATTEMPTS = 8;
  */
 export async function reserveWorkspace(
     database: AgentDatabase,
-    actingAgentId: string,
     input: WorkspaceStoreReserveInput,
     hooks: WorkspaceReserveHooks,
     host: WorkspaceHost | undefined,
@@ -56,7 +55,6 @@ export async function reserveWorkspace(
     now: () => number,
 ): Promise<WorkspaceMutationResult> {
     const unchanged = (workspace: Workspace): WorkspaceMutationResult => ({
-        agentId: actingAgentId,
         operationId: operation.operationId,
         operation: operation.operation,
         changed: false,
@@ -105,7 +103,6 @@ export async function reserveWorkspace(
         const at = now();
         const workspace: Workspace = {
             id: input.id,
-            ownerAgentId: input.ownerAgentId,
             projectRef: input.projectRef,
             name,
             nameConfigured: input.nameConfigured,
@@ -151,7 +148,6 @@ export async function reserveWorkspace(
             continue;
         }
         return {
-            agentId: actingAgentId,
             operationId: operation.operationId,
             operation: operation.operation,
             changed: true,
@@ -171,9 +167,6 @@ export function assertReservationStillMeans(
 ): void {
     if (existing.projectRef !== input.projectRef) {
         throw new Error("That workspace ID already names a workspace in another project.");
-    }
-    if (existing.ownerAgentId !== input.ownerAgentId) {
-        throw new Error("That workspace ID already names a workspace owned by another agent.");
     }
     if (existing.kind !== input.kind) {
         throw new Error("That workspace ID already names a workspace of another kind.");

@@ -24,13 +24,11 @@ There is no host object, and none may be introduced. A module is never handed a 
 
 The host concept came from the Rig v2 migration plan written for the module rewrite, since deleted. It made Rig the host — owner of paths, providers, Git, files, processes, media, and clocks — and modules pure state machines over the database that received all external reach through injected structural contracts. That split is no longer the design. The `*Host` interfaces still present in `packages/happy-agent-modules/sources` are residue from it: remove one when its module is revisited, and never add, extend, or copy one.
 
-## Module specs: SPEC.md and SPEC_LEARNINGS.md
+## Module learnings: LEARNINGS.md
 
-A module may carry a `SPEC.md` and a `SPEC_LEARNINGS.md` beside it. When working on a specific module, always read that module's `SPEC.md` and `SPEC_LEARNINGS.md` in full before making changes.
+A module may carry a `LEARNINGS.md` beside it. When working on a specific module, always read that module's `LEARNINGS.md` in full before making changes.
 
-`SPEC.md` is always written by direct human input. Never create, edit, or delete a `SPEC.md` yourself; it records what the human dictated, exactly as they dictated it.
-
-`SPEC_LEARNINGS.md` lives alongside its `SPEC.md` and is populated with human feedback on implementations of the spec. Models must always write learnings there as they arise, and must keep the document nice and tidy and on point — consolidate, prune, and rewrite for clarity rather than appending noise. When a learning reveals something critical that the spec itself should say, propose the change to `SPEC.md` to the user instead of editing it.
+`LEARNINGS.md` records human feedback on the module and the decisions that came out of it. Models must always write learnings there as they arise, and must keep the document nice and tidy and on point — consolidate, prune, and rewrite for clarity rather than appending noise. A learning stands on its own: state what was wrong, what the module does now, and why, without pointing at another document to be understood.
 
 ## Product direction
 

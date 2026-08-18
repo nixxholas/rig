@@ -16,7 +16,7 @@ export function listProjectsTool(projects: ProjectsModule, agentId: string) {
         returnType: projectPageSchema,
         durable: true,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, query: ProjectPageQuery) => await projects.list(ctx, agentId, query),
+        execute: async (ctx, query: ProjectPageQuery) => await projects.list(ctx, query),
         toLLM: (page) => [{ type: "text", text: projects.formatPageForModel(page) }],
     });
 }

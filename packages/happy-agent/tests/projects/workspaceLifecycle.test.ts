@@ -7,7 +7,6 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { Workspace } from "@slopus/happy-agent-modules";
 
 import {
-    AGENT_ID,
     createGitRepository,
     git,
     pausableGit,
@@ -39,7 +38,7 @@ async function ownedWorkspace(
     projectId: string,
     workspaceId: string,
 ): Promise<Workspace | undefined> {
-    const workspace = await catalogs.workspaces.get(test.ctx, AGENT_ID, workspaceId);
+    const workspace = await catalogs.workspaces.get(test.ctx, workspaceId);
     return workspace?.projectRef === projectId ? workspace : undefined;
 }
 
@@ -49,9 +48,9 @@ async function readyProject(
     folder = "acme-api",
 ): Promise<{ id: string; path: string }> {
     const path = await createGitRepository(join(test.root, folder));
-    const { project } = await test.workspaces.resolvePath(test.ctx, AGENT_ID, path);
+    const { project } = await test.workspaces.resolvePath(test.ctx, path);
     await waitFor(async () => {
-        const current = await test.projects.get(test.ctx, AGENT_ID, project.id);
+        const current = await test.projects.get(test.ctx, project.id);
         return current?.initializationStatus === "ready" ? current : undefined;
     }, `project ${folder} to finish being set up`);
     return { id: project.id, path };
@@ -77,7 +76,7 @@ describe("creating a workspace", () => {
         const test = await harness("workspace-create");
         const project = await readyProject(test);
 
-        const reserved = await test.workspaces.createWorkspace(test.ctx, AGENT_ID, project.id, {
+        const reserved = await test.workspaces.createWorkspace(test.ctx, project.id, {
             name: "Login flow",
         });
         expect(reserved).toBeDefined();
@@ -102,7 +101,7 @@ describe("creating a workspace", () => {
         const releaseCommit = await git(project.path, "rev-parse", "HEAD");
         await git(project.path, "checkout", "main");
 
-        const reserved = await test.workspaces.createWorkspace(test.ctx, AGENT_ID, project.id, {
+        const reserved = await test.workspaces.createWorkspace(test.ctx, project.id, {
             baseRef: "release",
             name: "Hotfix",
         });
@@ -117,7 +116,7 @@ describe("creating a workspace", () => {
         const project = await readyProject(test);
         await git(project.path, "branch", "worktree/login-flow");
 
-        const reserved = await test.workspaces.createWorkspace(test.ctx, AGENT_ID, project.id, {
+        const reserved = await test.workspaces.createWorkspace(test.ctx, project.id, {
             name: "Login flow",
         });
         const workspace = await readyWorkspace(test, project.id, reserved!.id);
@@ -129,11 +128,11 @@ describe("creating a workspace", () => {
     it("picks a different folder key when the obvious folder is taken", async () => {
         const test = await harness("workspace-storage-collision");
         const project = await readyProject(test);
-        const projectRow = await test.projects.get(test.ctx, AGENT_ID, project.id);
+        const projectRow = await test.projects.get(test.ctx, project.id);
         const squatted = join(test.managedWorkspaces, projectRow!.storageKey, "login-flow");
         await mkdir(squatted, { recursive: true });
 
-        const reserved = await test.workspaces.createWorkspace(test.ctx, AGENT_ID, project.id, {
+        const reserved = await test.workspaces.createWorkspace(test.ctx, project.id, {
             name: "Login flow",
         });
         const workspace = await readyWorkspace(test, project.id, reserved!.id);
@@ -145,19 +144,19 @@ describe("creating a workspace", () => {
     it("answers a repeated request with the workspace the first one made", async () => {
         const test = await harness("workspace-idempotent");
         const project = await readyProject(test);
-        const first = await test.workspaces.createWorkspace(test.ctx, AGENT_ID, project.id, {
+        const first = await test.workspaces.createWorkspace(test.ctx, project.id, {
             id: "c" + "abcdefghijklmnopqrstuvw",
             name: "Login flow",
         });
         await readyWorkspace(test, project.id, first!.id);
 
-        const again = await test.workspaces.createWorkspace(test.ctx, AGENT_ID, project.id, {
+        const again = await test.workspaces.createWorkspace(test.ctx, project.id, {
             id: first!.id,
             name: "Login flow",
         });
 
         expect(again!.id).toBe(first!.id);
-        const listed = await test.workspaces.list(test.ctx, AGENT_ID, { projectRef: project.id });
+        const listed = await test.workspaces.list(test.ctx, { projectRef: project.id });
         expect(listed.length).toBe(1);
     });
 
@@ -165,14 +164,14 @@ describe("creating a workspace", () => {
         const test = await harness("workspace-conflicting-replay");
         const project = await readyProject(test);
         await git(project.path, "branch", "release");
-        const first = await test.workspaces.createWorkspace(test.ctx, AGENT_ID, project.id, {
+        const first = await test.workspaces.createWorkspace(test.ctx, project.id, {
             baseRef: "main",
             name: "Login flow",
         });
         await readyWorkspace(test, project.id, first!.id);
 
         await expect(
-            test.workspaces.createWorkspace(test.ctx, AGENT_ID, project.id, {
+            test.workspaces.createWorkspace(test.ctx, project.id, {
                 baseRef: "release",
                 id: first!.id,
                 name: "Login flow",
@@ -198,7 +197,7 @@ describe("creating a workspace", () => {
         await git(project.path, "add", ".");
         await git(project.path, "commit", "-m", "configure workspaces");
 
-        const reserved = await test.workspaces.createWorkspace(test.ctx, AGENT_ID, project.id, {
+        const reserved = await test.workspaces.createWorkspace(test.ctx, project.id, {
             name: "Setup",
         });
         const workspace = await readyWorkspace(test, project.id, reserved!.id);
@@ -217,7 +216,7 @@ describe("creating a workspace", () => {
         await git(project.path, "add", ".");
         await git(project.path, "commit", "-m", "a setup command that fails");
 
-        const reserved = await test.workspaces.createWorkspace(test.ctx, AGENT_ID, project.id, {
+        const reserved = await test.workspaces.createWorkspace(test.ctx, project.id, {
             name: "Doomed",
         });
         const failed = await waitFor(async () => {
@@ -236,7 +235,7 @@ describe("resuming an interrupted creation", () => {
         const test = await harness("workspace-resume", { git: paused.runner });
         const project = await readyProject(test);
 
-        const reserved = await test.workspaces.createWorkspace(test.ctx, AGENT_ID, project.id, {
+        const reserved = await test.workspaces.createWorkspace(test.ctx, project.id, {
             name: "Interrupted",
         });
         await paused.paused;
@@ -263,7 +262,7 @@ describe("resuming an interrupted creation", () => {
         expect(await git(project.path, "rev-parse", "HEAD")).not.toBe(promisedBase);
 
         const restarted = test.restart({ git: undefined });
-        await restarted.workspaces.reconcileInitializingWorkspaces(test.ctx, AGENT_ID);
+        await restarted.workspaces.reconcileInitializingWorkspaces(test.ctx);
         const resumed = await waitFor(async () => {
             const current = await ownedWorkspace(test, restarted, project.id, reserved!.id);
             return current?.status === "ready" ? current : undefined;
@@ -279,13 +278,13 @@ describe("renaming a workspace", () => {
     it("moves the Git branch after the name is stored", async () => {
         const test = await harness("workspace-rename");
         const project = await readyProject(test);
-        const reserved = await test.workspaces.createWorkspace(test.ctx, AGENT_ID, project.id, {
+        const reserved = await test.workspaces.createWorkspace(test.ctx, project.id, {
             name: "Login flow",
         });
         const workspace = await readyWorkspace(test, project.id, reserved!.id);
         const oldBranch = workspace.branch;
 
-        const renamed = await test.workspaces.rename(test.ctx, AGENT_ID, {
+        const renamed = await test.workspaces.rename(test.ctx, {
             workspaceId: workspace.id,
             name: "Payment flow",
         });
@@ -304,13 +303,13 @@ describe("renaming a workspace", () => {
     it("keeps the name a person chose when a chat suggests another one", async () => {
         const test = await harness("workspace-inherit");
         const project = await readyProject(test);
-        const reserved = await test.workspaces.createWorkspace(test.ctx, AGENT_ID, project.id, {
+        const reserved = await test.workspaces.createWorkspace(test.ctx, project.id, {
             name: "Login flow",
             nameConfigured: true,
         });
         const workspace = await readyWorkspace(test, project.id, reserved!.id);
 
-        const named = await test.workspaces.inheritName(test.ctx, AGENT_ID, {
+        const named = await test.workspaces.inheritName(test.ctx, {
             workspaceId: workspace.id,
             name: "Something a model invented",
         });
@@ -323,15 +322,14 @@ describe("archiving a workspace", () => {
     it("removes the worktree and prunes it out of the project", async () => {
         const test = await harness("workspace-archive");
         const project = await readyProject(test);
-        const reserved = await test.workspaces.createWorkspace(test.ctx, AGENT_ID, project.id, {
+        const reserved = await test.workspaces.createWorkspace(test.ctx, project.id, {
             name: "Login flow",
         });
         const workspace = await readyWorkspace(test, project.id, reserved!.id);
 
-        await test.workspaces.beginArchive(test.ctx, AGENT_ID, workspace.id);
+        await test.workspaces.beginArchive(test.ctx, workspace.id);
         const archived = await test.workspaces.removeArchivedWorkspace(
             test.ctx,
-            AGENT_ID,
             project.id,
             workspace.id,
         );
@@ -349,7 +347,7 @@ describe("archiving a workspace", () => {
             onWorkspaceHostError: (_workspaceId, _kind, message) => cleanupErrors.push(message),
         });
         const project = await readyProject(test);
-        const reserved = await test.workspaces.createWorkspace(test.ctx, AGENT_ID, project.id, {
+        const reserved = await test.workspaces.createWorkspace(test.ctx, project.id, {
             name: "Login flow",
         });
         const workspace = await readyWorkspace(test, project.id, reserved!.id);
@@ -358,10 +356,9 @@ describe("archiving a workspace", () => {
         await git(project.path, "worktree", "remove", "--force", workspace.path);
         await writeFile(workspace.path, "not a workspace\n");
 
-        await test.workspaces.beginArchive(test.ctx, AGENT_ID, workspace.id);
+        await test.workspaces.beginArchive(test.ctx, workspace.id);
         const archived = await test.workspaces.removeArchivedWorkspace(
             test.ctx,
-            AGENT_ID,
             project.id,
             workspace.id,
         );
@@ -375,12 +372,12 @@ describe("archiving a workspace", () => {
     it("archives a project's workspaces along with it", async () => {
         const test = await harness("project-archive");
         const project = await readyProject(test);
-        const reserved = await test.workspaces.createWorkspace(test.ctx, AGENT_ID, project.id, {
+        const reserved = await test.workspaces.createWorkspace(test.ctx, project.id, {
             name: "Login flow",
         });
         const workspace = await readyWorkspace(test, project.id, reserved!.id);
 
-        await test.projects.archive(test.ctx, AGENT_ID, project.id);
+        await test.projects.archive(test.ctx, project.id);
 
         const after = await waitFor(async () => {
             const current = await ownedWorkspace(test, test, project.id, workspace.id);
@@ -397,13 +394,13 @@ describe("a project Git cannot cut a worktree from", () => {
         const path = join(test.root, "notes");
         await mkdir(path, { recursive: true });
         await writeFile(join(path, "todo.md"), "buy milk\n");
-        const { project } = await test.workspaces.resolvePath(test.ctx, AGENT_ID, path);
+        const { project } = await test.workspaces.resolvePath(test.ctx, path);
         await waitFor(async () => {
-            const current = await test.projects.get(test.ctx, AGENT_ID, project.id);
+            const current = await test.projects.get(test.ctx, project.id);
             return current?.initializationStatus === "ready" ? current : undefined;
         }, "the plain folder project to be set up");
 
-        const reserved = await test.workspaces.createWorkspace(test.ctx, AGENT_ID, project.id, {
+        const reserved = await test.workspaces.createWorkspace(test.ctx, project.id, {
             name: "Groceries",
         });
         const workspace = await readyWorkspace(test, project.id, reserved!.id);
@@ -417,14 +414,14 @@ describe("a project Git cannot cut a worktree from", () => {
         const path = join(test.root, "notes");
         await mkdir(path, { recursive: true });
         await writeFile(join(path, "todo.md"), "buy milk\n");
-        const { project } = await test.workspaces.resolvePath(test.ctx, AGENT_ID, path);
-        const reserved = await test.workspaces.createWorkspace(test.ctx, AGENT_ID, project.id, {
+        const { project } = await test.workspaces.resolvePath(test.ctx, path);
+        const reserved = await test.workspaces.createWorkspace(test.ctx, project.id, {
             name: "Groceries",
         });
         const workspace = await readyWorkspace(test, project.id, reserved!.id);
 
-        await test.workspaces.beginArchive(test.ctx, AGENT_ID, workspace.id);
-        await test.workspaces.removeArchivedWorkspace(test.ctx, AGENT_ID, project.id, workspace.id);
+        await test.workspaces.beginArchive(test.ctx, workspace.id);
+        await test.workspaces.removeArchivedWorkspace(test.ctx, project.id, workspace.id);
 
         expect(existsSync(join(workspace.path, "todo.md"))).toBe(true);
     });
@@ -442,14 +439,14 @@ describe("a project Git cannot cut a worktree from", () => {
         const path = join(test.root, "notes");
         await mkdir(path, { recursive: true });
         await writeFile(join(path, "todo.md"), "buy milk\n");
-        const { project } = await test.workspaces.resolvePath(test.ctx, AGENT_ID, path);
-        const reserved = await test.workspaces.createWorkspace(test.ctx, AGENT_ID, project.id, {
+        const { project } = await test.workspaces.resolvePath(test.ctx, path);
+        const reserved = await test.workspaces.createWorkspace(test.ctx, project.id, {
             name: "Groceries",
         });
         const workspace = await readyWorkspace(test, project.id, reserved!.id);
 
-        await test.workspaces.beginArchive(test.ctx, AGENT_ID, workspace.id);
-        await test.workspaces.removeArchivedWorkspace(test.ctx, AGENT_ID, project.id, workspace.id);
+        await test.workspaces.beginArchive(test.ctx, workspace.id);
+        await test.workspaces.removeArchivedWorkspace(test.ctx, project.id, workspace.id);
 
         expect(existsSync(workspace.path)).toBe(false);
     });
@@ -465,13 +462,13 @@ describe("a project Git cannot cut a worktree from", () => {
             },
         });
         const project = await readyProject(test);
-        const reserved = await test.workspaces.createWorkspace(test.ctx, AGENT_ID, project.id, {
+        const reserved = await test.workspaces.createWorkspace(test.ctx, project.id, {
             name: "Login flow",
         });
         const workspace = await readyWorkspace(test, project.id, reserved!.id);
 
-        await test.workspaces.beginArchive(test.ctx, AGENT_ID, workspace.id);
-        await test.workspaces.removeArchivedWorkspace(test.ctx, AGENT_ID, project.id, workspace.id);
+        await test.workspaces.beginArchive(test.ctx, workspace.id);
+        await test.workspaces.removeArchivedWorkspace(test.ctx, project.id, workspace.id);
 
         expect(existsSync(join(workspace.path, "README.md"))).toBe(true);
     });
@@ -483,13 +480,11 @@ describe("moving a session between workspaces", () => {
         const project = await readyProject(test);
         const sourceReserved = await test.workspaces.createWorkspace(
             test.ctx,
-            AGENT_ID,
             project.id,
             { name: "Source" },
         );
         const targetReserved = await test.workspaces.createWorkspace(
             test.ctx,
-            AGENT_ID,
             project.id,
             { name: "Target" },
         );
@@ -499,7 +494,6 @@ describe("moving a session between workspaces", () => {
         await expect(
             test.workspaces.validateSessionTransfer(
                 test.ctx,
-                AGENT_ID,
                 project.id,
                 source.id,
                 source.id,
@@ -508,7 +502,6 @@ describe("moving a session between workspaces", () => {
 
         const moved = await test.workspaces.prepareSessionTransfer(
             test.ctx,
-            AGENT_ID,
             project.id,
             source.id,
             target.id,

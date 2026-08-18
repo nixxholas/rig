@@ -20,7 +20,8 @@ import { drizzle } from "drizzle-orm/sqlite-proxy";
 
 const execFile = promisify(execFileCallback);
 
-export const AGENT_ID = "agent-test";
+/** This installation, which is what the projects catalog records on what it creates. */
+export const INSTANCE_ID = "installation-test";
 
 /** The few things a test wants to change about the pair of catalogs it drives. */
 export interface ProjectCatalogOptions {
@@ -53,7 +54,6 @@ export interface ProjectCatalogs {
 
 /** The temporary directories one test gets, plus everything it has to take down afterwards. */
 export interface ProjectTestHarness extends ProjectCatalogs {
-    readonly agentId: string;
     readonly ctx: Context;
     readonly home: string;
     readonly managedProjects: string;
@@ -144,8 +144,8 @@ export async function projectTestHarness(
             projects,
             workspaces,
             open: async (openCtx) => {
-                await projects.open(openCtx, AGENT_ID);
-                await workspaces.open(openCtx, AGENT_ID);
+                await projects.open(openCtx, INSTANCE_ID);
+                await workspaces.open(openCtx);
             },
             // Workspaces close first: a workspace's cleanup reads the project it was cut from.
             close: async (closeCtx) => {
@@ -165,7 +165,6 @@ export async function projectTestHarness(
     };
 
     return {
-        agentId: AGENT_ID,
         ctx,
         dispose,
         home,

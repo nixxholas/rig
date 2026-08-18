@@ -13,7 +13,6 @@ import { ProjectFilesModule } from "../files/ProjectFilesModule.js";
 import { GitModule } from "@slopus/happy-agent-modules";
 import { readOrCreateAgentToken, isAuthorizedAgentRequest } from "./auth.js";
 import { AgentHttpError, sendError, sendJson } from "./errors.js";
-import { createAgentRoutes } from "./agentRoutes.js";
 import { createCompatibilityRoutes } from "./compatibilityRoutes.js";
 import { createConfigRoutes } from "./configRoutes.js";
 import { createCoreDaemonRoutes } from "./coreDaemonRoutes.js";
@@ -172,7 +171,6 @@ function routeGroups(
         createEventRoutes(),
         createCompatibilityRoutes(),
         createInspectorRoutes(),
-        createAgentRoutes(),
         createPresenceRoutes(),
         createProfileRoutes(),
         createSharingRoutes(),

@@ -77,7 +77,7 @@ describe("listing the chats a person has", () => {
 
         const listed = await gym.listSessions();
         expect(listed.map((session) => session.id)).not.toContain(second.id);
-        expect(listed.map((session) => session.id)).toContain(gym.rootSessionId);
+        expect(listed.map((session) => session.id)).toContain(gym.defaultSessionId);
 
         const everything = await gym.http.ok<{ readonly sessions: readonly { id: string }[] }>(
             "GET",
@@ -134,7 +134,7 @@ describe("what a turn cost", () => {
                 readonly lastContextTokens: number;
                 readonly totalTokens: number;
             };
-        }>("GET", `/v0/sessions/${gym.rootSessionId}/usage`);
+        }>("GET", `/v0/sessions/${gym.defaultSessionId}/usage`);
         expect(usage.sessionTokenCount.totalTokens).toBe(1000);
         expect(usage.sessionTokenCount.lastContextTokens).toBe(1000);
     });

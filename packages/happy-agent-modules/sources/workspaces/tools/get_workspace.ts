@@ -28,7 +28,7 @@ export function getWorkspaceTool(workspaces: WorkspacesModule, agentId: string) 
         execute: async (
             ctx,
             { workspaceId, ...query }: { workspaceId: string } & WorkspaceDetailQuery,
-        ) => await workspaces.getPage(ctx, agentId, workspaceId, query),
+        ) => await workspaces.getPage(ctx, workspaceId, query),
         toLLM: (page) => [
             {
                 type: "text",

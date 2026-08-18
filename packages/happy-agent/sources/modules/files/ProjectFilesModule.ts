@@ -147,11 +147,10 @@ export class ProjectFilesModule {
 
     async resolveRoot(
         ctx: Context,
-        agentId: string,
         projectId: string,
         workspaceId?: string,
     ): Promise<ProjectFileRoot> {
-        const project = await this.#projects.get(ctx, agentId, projectId);
+        const project = await this.#projects.get(ctx, projectId);
         if (project === undefined) {
             throw new ProjectFileError(404, "missing", "The project was not found.");
         }
@@ -159,7 +158,7 @@ export class ProjectFilesModule {
         if (workspaceId === undefined) {
             return { projectId, root: projectRoot };
         }
-        const workspace = await this.#workspaces.get(ctx, agentId, workspaceId);
+        const workspace = await this.#workspaces.get(ctx, workspaceId);
         if (workspace === undefined || workspace.projectRef !== projectId) {
             throw new ProjectFileError(404, "missing", "The workspace was not found.");
         }

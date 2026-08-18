@@ -15,7 +15,6 @@ export interface GitRouteOptions {
 }
 
 export function createGitRoutes(options: GitRouteOptions): AgentHttpRouteGroup {
-    const agentId = options.agent.agent.id;
     return createRouteGroup("git", [
         {
             method: "POST",
@@ -27,7 +26,6 @@ export function createGitRoutes(options: GitRouteOptions): AgentHttpRouteGroup {
                     try {
                         const root = await options.files.resolveRoot(
                             ctx,
-                            agentId,
                             entity.projectId,
                             entity.workspaceId,
                         );
@@ -119,7 +117,7 @@ export function createGitRoutes(options: GitRouteOptions): AgentHttpRouteGroup {
         workspaceId?: string,
     ) {
         try {
-            return await options.files.resolveRoot(ctx, agentId, projectId, workspaceId);
+            return await options.files.resolveRoot(ctx, projectId, workspaceId);
         } catch (error) {
             if (error instanceof ProjectFileError) {
                 throw new AgentHttpError(error.status, error.message, { code: error.code });

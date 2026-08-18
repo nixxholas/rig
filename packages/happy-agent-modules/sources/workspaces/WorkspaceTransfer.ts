@@ -50,14 +50,12 @@ export const workspaceTransferWorkspaceSchema = Type.Object(
     {
         id: workspaceIdSchema,
         projectRef: workspaceProjectRefSchema,
-        ownerAgentId: Type.Optional(workspaceAgentIdSchema),
         path: Type.Optional(workspacePathSchema),
     },
     { additionalProperties: false },
 );
 
 const transferEnvelope = {
-    agentId: workspaceAgentIdSchema,
     operationId: workspaceOperationIdSchema,
     changed: Type.Boolean(),
 } as const;

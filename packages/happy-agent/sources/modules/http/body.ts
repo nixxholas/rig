@@ -41,9 +41,21 @@ export async function readValidatedBody<Schema extends TSchema>(
 ): Promise<Static<Schema>> {
     const value = await readJsonBody(request);
     if (!Value.Check(schema, value)) {
-        throw new AgentHttpError(400, "Request body is invalid.");
+        throw new AgentHttpError(400, describeInvalidBody(schema, value));
     }
     return value as Static<Schema>;
+}
+
+/**
+ * Names the field that failed. A caller reading "Request body is invalid." on its own has to guess
+ * which of a dozen fields the daemon refused, so the first failure is spelled out instead.
+ */
+function describeInvalidBody(schema: TSchema, value: unknown): string {
+    const first = Value.Errors(schema, value).First();
+    if (first === undefined) return "Request body is invalid.";
+    const field =
+        first.path === "" ? "the request body" : `"${first.path.slice(1).replaceAll("/", ".")}"`;
+    return `Request body is invalid: ${first.message} at ${field}.`;
 }
 
 export function parsePositiveLimit(

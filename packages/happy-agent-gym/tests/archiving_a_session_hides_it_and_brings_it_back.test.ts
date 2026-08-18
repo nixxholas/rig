@@ -101,7 +101,7 @@ describe("archiving a session hides it and brings it back", () => {
         await gym.send("Second message.");
 
         for (const operation of ["fork", "reset", "rewind"]) {
-            const response = await gym.http.post(`/v0/sessions/${gym.rootSessionId}/${operation}`);
+            const response = await gym.http.post(`/v0/sessions/${gym.defaultSessionId}/${operation}`);
             expect(response.status).toBe(503);
             expect(response.body).toMatchObject({
                 error: "This session operation is not configured.",

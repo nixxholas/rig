@@ -176,4 +176,71 @@ export const projectMigrations = [
             );
         },
     ],
+    [
+        "005-project-without-owner",
+        /**
+         * A project belongs to this installation, not to an agent. The owning agent was always
+         * the one identity the daemon had, so the column decided nothing and every read ignored
+         * it. Rig is early-stage: the generation is advanced and the catalog reset rather than
+         * rewriting rows to drop a column SQLite would have to rebuild the table for anyway.
+         */
+        async (_ctx: Context, database: AgentDatabase): Promise<void> => {
+            await agentDatabaseRun(database, sql`DROP TABLE IF EXISTS ${sql.raw(PROJECTS_TABLE)}`);
+            await agentDatabaseRun(
+                database,
+                sql`DROP TABLE IF EXISTS ${sql.raw(PROJECT_SETTINGS_TABLE)}`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`CREATE TABLE ${sql.raw(PROJECTS_TABLE)} (
+                    id TEXT PRIMARY KEY,
+                    repository_ref TEXT NOT NULL UNIQUE,
+                    kind TEXT NOT NULL,
+                    storage_key TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    name_source TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    presence TEXT NOT NULL,
+                    initialization_status TEXT NOT NULL,
+                    initialization_attempt BIGINT NOT NULL DEFAULT 0,
+                    initialization_error TEXT,
+                    default_branch TEXT,
+                    worktree_support TEXT NOT NULL DEFAULT 'unknown',
+                    worktree_unsupported_reason TEXT,
+                    remote_source_json TEXT,
+                    required_secret_kind TEXT,
+                    git_ahead BIGINT NOT NULL DEFAULT 0,
+                    git_behind BIGINT NOT NULL DEFAULT 0,
+                    git_detached INTEGER NOT NULL DEFAULT 0,
+                    git_branch TEXT,
+                    git_head TEXT,
+                    git_upstream TEXT,
+                    order_key TEXT NOT NULL,
+                    version BIGINT NOT NULL DEFAULT 1,
+                    avatar_json TEXT,
+                    description TEXT,
+                    created_at BIGINT NOT NULL,
+                    updated_at BIGINT NOT NULL,
+                    archived_at BIGINT
+                )`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`CREATE INDEX IF NOT EXISTS ${sql.raw(`${PROJECTS_TABLE}_status_id`)}
+                    ON ${sql.raw(PROJECTS_TABLE)} (status, id)`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`CREATE INDEX IF NOT EXISTS ${sql.raw(`${PROJECTS_TABLE}_order_id`)}
+                    ON ${sql.raw(PROJECTS_TABLE)} (order_key, id)`,
+            );
+            await agentDatabaseRun(
+                database,
+                sql`CREATE TABLE ${sql.raw(PROJECT_SETTINGS_TABLE)} (
+                    project_id TEXT PRIMARY KEY,
+                    settings_json TEXT NOT NULL
+                )`,
+            );
+        },
+    ],
 ] as const;
