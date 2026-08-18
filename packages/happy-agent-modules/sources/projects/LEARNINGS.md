@@ -72,6 +72,13 @@ tells the whole truth. Neighbour rows remain byte-for-byte unchanged.
 The remote URL pattern accepted `https://github.com:bad/repo`, a URL no clone can resolve. The host
 may carry a port, and a port is digits.
 
+## Cloning does not require a Git author
+
+A machine may have no global Git name or email, and cloning does not create a commit. Managed
+project creation therefore keeps creator and credential ownership checks but does not invent or
+require an author identity. When Git already has a local identity the clone receives it explicitly;
+otherwise the clone environment contains no author or committer override.
+
 ## Detached background work must restore its database
 
 The catalog's background work runs on a lifetime detached from the first caller. Detaching removes

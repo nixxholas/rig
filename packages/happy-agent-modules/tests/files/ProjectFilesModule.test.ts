@@ -54,6 +54,19 @@ describe("ProjectFilesModule writes", () => {
         });
     });
 
+    it("creates missing parent directories beneath the confined root", async () => {
+        const created = await files.write(root, {
+            content: Buffer.from("nested file").toString("base64"),
+            expectedHash: null,
+            path: "generated/deep/note.txt",
+        });
+
+        expect(created.hash).toBe(hash("nested file"));
+        await expect(readFile(join(directory, "generated/deep/note.txt"), "utf8")).resolves.toBe(
+            "nested file",
+        );
+    });
+
     it("updates a file when its expected hash is current", async () => {
         const created = await files.write(root, write("before", null));
         const updated = await files.write(root, write("after", created.hash));

@@ -18,6 +18,10 @@ const GITHUB_REPOSITORY_SEGMENT = /^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,99})$/u;
 const STRIPPED_GIT_ENVIRONMENT = [
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     "GIT_ASKPASS",
+    "GIT_AUTHOR_EMAIL",
+    "GIT_AUTHOR_NAME",
+    "GIT_COMMITTER_EMAIL",
+    "GIT_COMMITTER_NAME",
     "GIT_CONFIG",
     "GIT_CONFIG_GLOBAL",
     "GIT_CONFIG_SYSTEM",
@@ -48,7 +52,7 @@ export interface CloneRemoteRepositoryOptions {
     destination: string;
     execFile?: GitCloneExecFile;
     gitAuthentication?: GitAuthentication;
-    gitIdentity: { email: string; name: string };
+    gitIdentity?: { email: string; name: string };
     source: GitRemoteSource;
 }
 
@@ -77,10 +81,14 @@ export async function cloneRemoteRepository(options: CloneRemoteRepositoryOption
     await rm(stagingPath, { recursive: true });
     const environment = {
         ...cloneEnvironment(options.gitAuthentication),
-        GIT_AUTHOR_EMAIL: options.gitIdentity.email,
-        GIT_AUTHOR_NAME: options.gitIdentity.name,
-        GIT_COMMITTER_EMAIL: options.gitIdentity.email,
-        GIT_COMMITTER_NAME: options.gitIdentity.name,
+        ...(options.gitIdentity === undefined
+            ? {}
+            : {
+                  GIT_AUTHOR_EMAIL: options.gitIdentity.email,
+                  GIT_AUTHOR_NAME: options.gitIdentity.name,
+                  GIT_COMMITTER_EMAIL: options.gitIdentity.email,
+                  GIT_COMMITTER_NAME: options.gitIdentity.name,
+              }),
     };
     try {
         await (options.execFile ?? runExecFile)("git", ["clone", "--", remote, stagingPath], {

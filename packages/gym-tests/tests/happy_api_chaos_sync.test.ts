@@ -989,47 +989,73 @@ class ChaosWorld {
                 expect(view.agents.find((candidate) => candidate.id === agent.id)).toEqual(agent);
             }
         }
-        const [profile, projects, workspaces, rootProject, rootWorkspace] = await Promise.all([
-            this.clients[0]!.getProfile(),
-            this.clients[0]!.listProjects(),
-            this.clients[0]!.listWorkspaces({
-                includeArchived: true,
-                projectId: this.rootId,
-            }),
-            this.clients[0]!.getProject(this.rootId),
-            this.clients[0]!.getWorkspace(this.rootId),
-        ]);
-        expect(profile.profile).toEqual(view.profile);
-        expectStableEqual(
-            "projects",
-            comparableProjects(projects.projects),
-            comparableProjects(view.projects),
+        const barrier = createPublicStateBarrier(async () => {
+            await this.pullUntilHead();
+            const [profile, projects, workspaces, rootProject, rootWorkspace, touchedAgent] =
+                await Promise.all([
+                    this.clients[0]!.getProfile(),
+                    this.clients[0]!.listProjects(),
+                    this.clients[0]!.listWorkspaces({
+                        includeArchived: true,
+                        projectId: this.rootId,
+                    }),
+                    this.clients[0]!.getProject(this.rootId),
+                    this.clients[0]!.getWorkspace(this.rootId),
+                    this.touchedAgentId === undefined
+                        ? Promise.resolve(undefined)
+                        : this.clients[0]!.getAgent(this.touchedAgentId),
+                ]);
+            return {
+                state: {
+                    profile: profile.profile,
+                    projects: projects.projects,
+                    workspaces: workspaces.workspaces,
+                    rootProject: rootProject.project,
+                    rootWorkspace: rootWorkspace.workspace,
+                    touchedAgent: touchedAgent?.agent,
+                },
+                cursor: this.replica.view().cursor,
+            };
+        });
+        await barrier.waitFor(
+            (snapshot) => {
+                const current = this.replica.view();
+                return (
+                    valuesEqual(snapshot.state.profile, current.profile) &&
+                    valuesEqual(
+                        comparableProjects(snapshot.state.projects),
+                        comparableProjects(current.projects),
+                    ) &&
+                    valuesEqual(
+                        comparableWorkspaces(snapshot.state.workspaces),
+                        comparableWorkspaces(
+                            current.workspaces.filter(
+                                (workspace) => workspace.projectId === this.rootId,
+                            ),
+                        ),
+                    ) &&
+                    valuesEqual(
+                        comparableProject(snapshot.state.rootProject),
+                        comparableProject(this.replica.project(this.rootId)),
+                    ) &&
+                    valuesEqual(
+                        comparableWorkspace(snapshot.state.rootWorkspace),
+                        comparableWorkspace(
+                            current.workspaces.find((workspace) => workspace.id === this.rootId),
+                        ),
+                    ) &&
+                    (this.touchedAgentId === undefined ||
+                        valuesEqual(
+                            snapshot.state.touchedAgent === undefined
+                                ? undefined
+                                : comparableAgent(snapshot.state.touchedAgent),
+                            comparableAgent(this.replica.agent(this.touchedAgentId)),
+                        ))
+                );
+            },
+            "fresh reads and the event replica to converge",
+            { timeoutMs: 10_000, pollMs: 10 },
         );
-        expectStableEqual(
-            "workspaces",
-            comparableWorkspaces(workspaces.workspaces),
-            comparableWorkspaces(
-                view.workspaces.filter((workspace) => workspace.projectId === this.rootId),
-            ),
-        );
-        expectStableEqual(
-            "root project",
-            comparableProject(rootProject.project),
-            comparableProject(this.replica.project(this.rootId)),
-        );
-        expectStableEqual(
-            "root workspace",
-            comparableWorkspace(rootWorkspace.workspace),
-            comparableWorkspace(view.workspaces.find((workspace) => workspace.id === this.rootId)),
-        );
-        if (this.touchedAgentId !== undefined) {
-            const freshAgent = await this.clients[0]!.getAgent(this.touchedAgentId);
-            expectStableEqual(
-                "touched agent",
-                comparableAgent(freshAgent.agent),
-                comparableAgent(this.replica.agent(this.touchedAgentId)),
-            );
-        }
         const matchingMutationEvents = [...this.mutationIds].flatMap((mutationId) =>
             this.replica.eventsForMutation(mutationId),
         );
@@ -1097,31 +1123,22 @@ function projectEqual(
     left: ReturnType<typeof comparableProject>,
     right: ReturnType<typeof comparableProject>,
 ): boolean {
-    try {
-        expect(left).toEqual(right);
-        return true;
-    } catch {
-        return false;
-    }
+    return valuesEqual(left, right);
 }
 
 function workspaceEqual(
     left: ReturnType<typeof comparableWorkspace>,
     right: ReturnType<typeof comparableWorkspace>,
 ): boolean {
+    return valuesEqual(left, right);
+}
+
+function valuesEqual(left: unknown, right: unknown): boolean {
     try {
         expect(left).toEqual(right);
         return true;
     } catch {
         return false;
-    }
-}
-
-function expectStableEqual(label: string, actual: unknown, expected: unknown): void {
-    try {
-        expect(actual).toEqual(expected);
-    } catch (error: unknown) {
-        throw new Error(`${label} did not converge.`, { cause: error });
     }
 }
 

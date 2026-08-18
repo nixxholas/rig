@@ -10,7 +10,7 @@ import {
     unlink,
     writeFile,
 } from "node:fs/promises";
-import { dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
@@ -456,11 +456,22 @@ export class ProjectFilesModule {
         try {
             return await realpath(candidate);
         } catch {
-            const parent = await realpath(dirname(candidate)).catch(() => undefined);
-            if (parent === undefined) {
-                throw new ProjectFileError(404, "missing", "The parent directory was not found.");
+            const suffix = [basename(candidate)];
+            let ancestor = dirname(candidate);
+            for (;;) {
+                const parent = await realpath(ancestor).catch(() => undefined);
+                if (parent !== undefined) return join(parent, ...suffix);
+                const next = dirname(ancestor);
+                if (next === ancestor) {
+                    throw new ProjectFileError(
+                        404,
+                        "missing",
+                        "The parent directory was not found.",
+                    );
+                }
+                suffix.unshift(basename(ancestor));
+                ancestor = next;
             }
-            return join(parent, candidate.slice(dirname(candidate).length + 1));
         }
     }
 

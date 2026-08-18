@@ -50,6 +50,40 @@ describe("cloneRemoteRepository", () => {
         expect(await readdir(join(parent, ".rig", "clones"))).toEqual([]);
     });
 
+    it("clones without inventing a Git identity when none is configured", async () => {
+        const source = await createRepository();
+        await commitFile(source, "README.md", "fixture\n");
+        const parent = await createRoot();
+        const destination = join(parent, "clone");
+        const expectedRemote = "https://git.example.test/team/anonymous.git";
+        let environment: NodeJS.ProcessEnv | undefined;
+        const execute: GitCloneExecFile = async (file, args, options) => {
+            environment = options.env;
+            const staging = args[3];
+            if (staging === undefined) throw new Error("Expected a staging destination.");
+            const result = await execFile(file, ["clone", "--quiet", "--", source, staging], {
+                encoding: "utf8",
+                env: options.env,
+                maxBuffer: options.maxBuffer,
+                timeout: options.timeout,
+            });
+            await git(staging, ["remote", "set-url", "origin", expectedRemote]);
+            return result;
+        };
+
+        await cloneRemoteRepository({
+            destination,
+            execFile: execute,
+            source: { kind: "git", url: expectedRemote },
+        });
+
+        expect(environment?.GIT_AUTHOR_NAME).toBeUndefined();
+        expect(environment?.GIT_AUTHOR_EMAIL).toBeUndefined();
+        expect(environment?.GIT_COMMITTER_NAME).toBeUndefined();
+        expect(environment?.GIT_COMMITTER_EMAIL).toBeUndefined();
+        await expect(access(join(destination, "README.md"))).resolves.toBeUndefined();
+    });
+
     it("removes a partial staging clone after failure", async () => {
         const parent = await createRoot();
         const destination = join(parent, "clone");

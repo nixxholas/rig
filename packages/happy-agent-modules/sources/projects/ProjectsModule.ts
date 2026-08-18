@@ -1444,7 +1444,7 @@ export class ProjectsModule implements AgentModule {
             );
         }
         const profile = await this.#resolveProfile(creator.profileId, creator.instanceId);
-        if (profile === undefined || profile.parentInstanceId !== creator.instanceId) {
+        if (profile !== undefined && profile.parentInstanceId !== creator.instanceId) {
             throw new Error("The project creator's profile is unavailable.");
         }
         const credential: GitCredentialRef = { creator, projectId: project.id };
@@ -1461,8 +1461,10 @@ export class ProjectsModule implements AgentModule {
         await this.#git.clone({
             credential,
             destination: project.repositoryRef,
-            gitIdentity: { email: profile.email, name: profile.name },
             source: project.remoteSource,
+            ...(profile === undefined
+                ? {}
+                : { gitIdentity: { email: profile.email, name: profile.name } }),
         });
         await this.markCloneReady(ctx, project.id);
     }

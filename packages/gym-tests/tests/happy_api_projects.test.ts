@@ -498,13 +498,14 @@ describe("projects at the public Happy Agent API", () => {
             await execFileAsync("git", ["init", "--quiet", repository]);
             const nested = join(repository, "nested");
             await mkdir(nested, { recursive: true });
-            const nestedProject = (await gym.client.registerProject({ path: nested })).project;
-            if (process.platform !== "darwin") {
-                const nestedFailure = await gym.waitUntil(async () => {
-                    const current = (await gym.client.getProject(nestedProject.id)).project;
-                    return current.initialization.status === "failed" ? current : undefined;
-                }, "Git subdirectory registration to settle as failed");
-                expect(nestedFailure.initialization.error).toEqual(expect.any(String));
+            if (process.platform === "darwin") {
+                const reserved = (await gym.client.registerProject({ path: nested })).project;
+                expect(reserved.initialization.status).toBe("initializing");
+            } else {
+                await expect(gym.client.registerProject({ path: nested })).rejects.toMatchObject({
+                    code: "invalid_request",
+                    status: 400,
+                });
             }
 
             const vanishingPath = join(gym.workspacePath, "projects", "vanishing");

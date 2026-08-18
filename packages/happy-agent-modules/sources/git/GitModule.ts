@@ -411,7 +411,7 @@ export class GitModule implements AgentModule {
     async clone(options: {
         readonly credential?: GitCredentialRef;
         readonly destination: string;
-        readonly gitIdentity: { readonly email: string; readonly name: string };
+        readonly gitIdentity?: { readonly email: string; readonly name: string };
         readonly source: GitRemoteSource;
     }): Promise<void> {
         const authentication =
@@ -423,9 +423,9 @@ export class GitModule implements AgentModule {
                   );
         await cloneRemoteRepository({
             destination: options.destination,
-            gitIdentity: options.gitIdentity,
             source: options.source,
             ...(authentication === undefined ? {} : { gitAuthentication: authentication }),
+            ...(options.gitIdentity === undefined ? {} : { gitIdentity: options.gitIdentity }),
         });
     }
 
