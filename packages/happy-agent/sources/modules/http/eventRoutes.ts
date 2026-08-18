@@ -339,6 +339,33 @@ async function streamEvents(
                 );
             }
         }
+        // A chat that has just been named renames itself in every open client, rather than waiting
+        // for the next time somebody lists their sessions.
+        if (event.type === "session.title-changed") {
+            const payload =
+                typeof event.payload === "object" && event.payload !== null
+                    ? (event.payload as {
+                          readonly sessionId?: unknown;
+                          readonly status?: unknown;
+                          readonly title?: unknown;
+                      })
+                    : undefined;
+            if (typeof payload?.sessionId !== "string" || typeof payload.title !== "string") {
+                return true;
+            }
+            return writer.write(
+                `id: ${event.id}\nevent: update\ndata: ${serializeJson({
+                    cursor: event.id,
+                    event: {
+                        createdAt: event.occurredAt,
+                        data: { status: payload.status ?? "ready", title: payload.title },
+                        id: event.id,
+                        sessionId: payload.sessionId,
+                        type: "session_title_changed",
+                    },
+                })}\n\n`,
+            );
+        }
         return writer.write(
             `id: ${event.id}\nevent: update\ndata: ${serializeJson({
                 cursor: event.id,

@@ -15,7 +15,7 @@ import {
     loadCodexCredential,
     type BaseProvider,
 } from "@slopus/happy-providers";
-import type { HappyAgentConfigValues, HappyAgentConfiguration } from "@slopus/happy-agent-modules";
+import type { HappyAgentConfigValues, HappyAgentConfiguration } from "../ConfigModule.js";
 
 type ConfiguredProvider = HappyAgentConfigValues["providers"][string];
 

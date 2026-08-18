@@ -122,26 +122,27 @@ its public methods, and its storage and event contracts.
 
 | Module                                          | What it adds                                                                                                                              |
 | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| [Config](sources/config/README.md)              | One frozen filesystem layout and layered Happy Agent settings snapshot shared by every other module.                                     |
+| [Config](sources/config/README.md)              | One frozen filesystem layout and layered Happy Agent settings snapshot shared by every other module.                                      |
 | [Observation](sources/observation/README.md)    | What the agent records about itself: a pino log file, optional OpenTelemetry traces, and a readable per-agent history dump.               |
 | [System prompt](sources/systemPrompt/README.md) | Native per-vendor instructions, environment context, and live global/security/project AGENTS.md guidance.                                 |
 | [History](sources/history/README.md)            | The agent's own durable record of what happened, separate from the compactable model context, readable back through `read_agent_history`. |
 | [Model switch](sources/modelSwitch/README.md)   | An honest notice when switching models resets a context that cannot be replayed, with a bounded excerpt of what was lost.                 |
 | [Skills](sources/skills/README.md)              | User and project skills discovered live under `.agents/skills`, exposed as `list_skills` and `read_skill`.                                |
 | [Events](sources/events/README.md)              | A bounded, cursor-addressable journal of what happened, shared by every agent in the collection.                                          |
+| [Titles](sources/titles/README.md)              | The names a first message settles — the chat's title, and the workspace and branch it works in.                                           |
 
 ### The machine
 
-| Module                                                | What it adds                                                                                                                                                  |
-| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [Compute](sources/compute/README.md)                  | One machine offered as each vendor's own filesystem and shell tools, with read-before-write enforcement and background commands that outlive their wait.      |
-| [Permissions](sources/permissions/README.md)          | The permission mode turned into behavior: per-call review, temporary elevation, refusal handling, and mode-change notices.                                    |
-| Auto (`sources/auto`, see its [SPEC.md](sources/auto/SPEC.md)) | The automatic reviewer permissions asks in Auto mode, running on its own private database and its own read-only compute.                         |
-| [MCP](sources/mcp/README.md)                          | MCP servers, tools, resources, and prompts, always reviewed in Auto.                                                                                          |
-| [Search](sources/search/README.md)                    | A bounded common `web_fetch` plus explicit per-vendor search tool wrappers.                                                                                   |
-| [Image generation](sources/imageGeneration/README.md) | Prompt-to-PNG on the configured Codex accounts, including edits from local paths or recent conversation images.                                               |
-| [Gemini](sources/gemini/README.md)                    | Image and music generation and questions about local media files, on a Gemini key of its own.                                                                 |
-| [Git](sources/git/README.md)                          | Reading, probing, and watching repositories, and the worktree, clone, and transfer actions the catalogs perform. No hooks, no tools.                          |
+| Module                                                         | What it adds                                                                                                                                             |
+| -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [Compute](sources/compute/README.md)                           | One machine offered as each vendor's own filesystem and shell tools, with read-before-write enforcement and background commands that outlive their wait. |
+| [Permissions](sources/permissions/README.md)                   | The permission mode turned into behavior: per-call review, temporary elevation, refusal handling, and mode-change notices.                               |
+| Auto (`sources/auto`, see its [SPEC.md](sources/auto/SPEC.md)) | The automatic reviewer permissions asks in Auto mode, running on its own private database and its own read-only compute.                                 |
+| [MCP](sources/mcp/README.md)                                   | MCP servers, tools, resources, and prompts, always reviewed in Auto.                                                                                     |
+| [Search](sources/search/README.md)                             | A bounded common `web_fetch` plus explicit per-vendor search tool wrappers.                                                                              |
+| [Image generation](sources/imageGeneration/README.md)          | Prompt-to-PNG on the configured Codex accounts, including edits from local paths or recent conversation images.                                          |
+| [Gemini](sources/gemini/README.md)                             | Image and music generation and questions about local media files, on a Gemini key of its own.                                                            |
+| [Git](sources/git/README.md)                                   | Reading, probing, and watching repositories, and the worktree, clone, and transfer actions the catalogs perform. No hooks, no tools.                     |
 
 ### Work
 
@@ -177,9 +178,9 @@ its public methods, and its storage and event contracts.
 Modules owning tables through their own migrations: auto, collaboration, events, goal,
 history, mcp, murmur, presence, profile, projects, scheduling, secrets, tasks, usage, user input,
 workflows, and workspaces. The rest own none: compute, config, gemini, git, image generation, model
-switch, observation, permissions, search, skills, and system prompt. Compute and system prompt use
-Agent KV only, terminals stores nothing anywhere because a terminal ends with the process behind it,
-and collaboration's migrations exist only to retire the tables it used to keep.
+switch, observation, permissions, search, skills, system prompt, and titles. Compute, system prompt
+and titles use Agent KV only, terminals stores nothing anywhere because a terminal ends with the
+process behind it, and collaboration's migrations exist only to retire the tables it used to keep.
 
 Murmur owns two tables rather than one: a single row saying which person its identity belongs to,
 and the key–value table Murmur itself writes its cryptographic state into. They share a database

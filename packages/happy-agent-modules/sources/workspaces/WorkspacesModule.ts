@@ -48,11 +48,7 @@ import type { Project } from "../projects/Project.js";
 import type { ProjectsModule } from "../projects/ProjectsModule.js";
 
 import { copyProjectFolder } from "./impl/copyProjectFolder.js";
-import {
-    generateWorkspaceNames,
-    withPreservedNumericPrefix,
-    type WorkspaceNameGenerator,
-} from "./impl/generateWorkspaceNames.js";
+
 import { getManagedWorkspacesDirectory } from "./impl/getManagedWorkspacesDirectory.js";
 import {
     DEFAULT_WORKSPACE_FOLDER_SETTINGS,
@@ -72,12 +68,10 @@ import {
     workspaceEnvironmentSchema,
     workspaceFolderSettingsOptionSchema,
     workspaceGitRunnerSchema,
-    workspaceNameGeneratorSchema,
     workspaceProjectsModuleSchema,
     workspaceRootContextSchema,
     type CreateWorkspaceRequest,
     type WorkspaceCreatorOptions,
-    type WorkspaceNamesFromFirstMessage,
 } from "./WorkspaceProvisioning.js";
 import {
     workspaceAgentIdSchema,
@@ -285,8 +279,6 @@ export const workspaceModuleOptionsSchema = Type.Object(
         workspacesDirectory: Type.Optional(Type.String({ minLength: 1 })),
         /** The configured defaults for setup commands, file sync, and keeping folders. */
         settings: Type.Optional(workspaceFolderSettingsOptionSchema),
-        /** Names a workspace, its branch, and its chat from the first thing a person said. */
-        nameGenerator: Type.Optional(workspaceNameGeneratorSchema),
     },
     { additionalProperties: false },
 );
@@ -322,7 +314,6 @@ export class WorkspacesModule implements AgentModule {
     readonly #folderSettingsDefaults: WorkspaceFolderSettings;
     readonly #git: GitCommandRunner;
     readonly #homeDirectory: string;
-    readonly #nameGenerator: WorkspaceNameGenerator | undefined;
     readonly #probeGit: GitCommandRunner;
     readonly #projectFolders = new Map<string, { path: string; storageKey: string }>();
     readonly #projects: ProjectsModule | undefined;
@@ -346,7 +337,6 @@ export class WorkspacesModule implements AgentModule {
         this.#git = options.git ?? options.projects?.git ?? directGitCommandRunner;
         this.#probeGit = options.probeGit ?? options.git ?? options.projects?.probeGit ?? this.#git;
         this.#homeDirectory = normalizeProjectCwd(options.homeDirectory ?? homedir());
-        this.#nameGenerator = options.nameGenerator;
         this.#workspacesDirectory = normalizeFuturePath(
             options.workspacesDirectory ??
                 getManagedWorkspacesDirectory(this.#environment, this.#homeDirectory),
@@ -1358,61 +1348,6 @@ export class WorkspacesModule implements AgentModule {
 
     async #folderSettings(folder: string): Promise<WorkspaceFolderSettings> {
         return await loadWorkspaceFolderSettings(folder, this.#folderSettingsDefaults);
-    }
-
-    // --- Naming from a first message ---------------------------------------------------------
-
-    /**
-     * Names a workspace and its chat from the first thing someone said.
-     *
-     * The three names are asked for separately, before the session's own work starts, because a
-     * folder, a conversation and a Git ref are different questions. A workspace or a chat someone
-     * has already named is left alone: a person naming something settles it.
-     */
-    async nameFromFirstMessage(
-        ctx: Context,
-        agentId: string,
-        request: {
-            firstMessage: string;
-            projectId: string;
-            providerId?: string;
-            sessionNamed?: boolean;
-            workspaceId: string;
-        },
-    ): Promise<WorkspaceNamesFromFirstMessage> {
-        const generator = this.#nameGenerator;
-        if (generator === undefined) return {};
-        const current = await this.#ownedWorkspace(
-            ctx,
-            agentId,
-            request.projectId,
-            request.workspaceId,
-        );
-        if (current === undefined) return {};
-        const wantWorkspace = !current.nameConfigured;
-        const wantChat = request.sessionNamed !== true;
-        if (!wantWorkspace && !wantChat) return {};
-        const names = await generateWorkspaceNames(
-            ctx,
-            generator,
-            {
-                firstMessage: request.firstMessage,
-                ...(request.providerId === undefined ? {} : { providerId: request.providerId }),
-            },
-            { branch: wantWorkspace, chat: wantChat, workspace: wantWorkspace },
-        );
-        const workspace =
-            names.workspace === undefined
-                ? undefined
-                : await this.inheritName(ctx, agentId, {
-                      workspaceId: request.workspaceId,
-                      name: withPreservedNumericPrefix(current.name, names.workspace),
-                  });
-        return {
-            ...(names.branch === undefined ? {} : { branch: names.branch }),
-            ...(names.chat === undefined ? {} : { chat: names.chat }),
-            ...(workspace === undefined ? {} : { workspace }),
-        };
     }
 
     // --- Archival ----------------------------------------------------------------------------

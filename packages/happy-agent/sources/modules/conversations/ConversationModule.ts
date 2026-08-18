@@ -15,13 +15,26 @@ import {
     type AgentModuleHooks,
     type AgentModuleScope,
     type AgentModuleSystemScope,
+    type AgentSystemRef,
     type AnyAgentTool,
 } from "@slopus/happy-agent-base";
-import { createUuidV7Factory } from "@slopus/happy-agent-modules";
+import {
+    createUuidV7Factory,
+    type EventsModule,
+    type HistoryModule,
+    type TitlesModule,
+} from "@slopus/happy-agent-modules";
 import type { SessionEvent } from "@slopus/happy-providers";
-import type { Context } from "@steve.kite/stdlib";
+import type { Context, RootContext } from "@steve.kite/stdlib";
 import { sql } from "drizzle-orm";
 import type { LibSQLDatabase } from "drizzle-orm/libsql";
+
+import {
+    conversationLines,
+    withJustSaid,
+    worthSecondLook,
+    MAX_TRANSCRIPT_RECORDS,
+} from "./impl/conversationLines.js";
 
 export const conversationSessionIdSchema = Type.String({
     minLength: 1,
@@ -114,6 +127,7 @@ export const conversationUpdateSchema = Type.Object(
         scope: Type.Optional(conversationScopeSchema),
         serviceTier: Type.Optional(Type.Union([Type.Literal("fast"), Type.Null()])),
         status: Type.Optional(conversationStatusSchema),
+        titleStatus: Type.Optional(Type.Union([Type.Literal("pending"), Type.Literal("ready")])),
         unread: Type.Optional(Type.Boolean()),
     },
     { additionalProperties: false },
@@ -242,16 +256,41 @@ export class ConversationModule implements AgentModule<AnyAgentTool, LibSQLDatab
     readonly #createEventId: () => string;
     readonly #defaultCwd: string;
     readonly #ownerInstanceId: string;
+    readonly #events: EventsModule | undefined;
+    readonly #history: HistoryModule | undefined;
+    readonly #titles: TitlesModule | undefined;
+    readonly #rootContext: RootContext | undefined;
+    /** Second looks in flight, so a closing daemon and a test can both wait for them. */
+    readonly #secondLooks = new Set<Promise<void>>();
+    #agents: AgentSystemRef<LibSQLDatabase> | undefined;
 
     constructor(options: {
         readonly defaultCwd?: string;
         readonly clock?: () => number;
         readonly ownerInstanceId?: string;
+        /** Where a title that changed is announced from, so an open client renames the chat. */
+        readonly events?: EventsModule;
+        /** What the second look reads: the conversation, as the agent durably recorded it. */
+        readonly history?: HistoryModule;
+        /** What thinks of the name. Without it a chat simply keeps the title it was given. */
+        readonly titles?: TitlesModule;
+        /**
+         * The lifetime a second look runs on.
+         *
+         * Naming is not part of the run that triggered it: the run has settled, the person is
+         * reading the answer, and holding the settling transaction open to ask a model would be
+         * paying for a label with the thing the label is about.
+         */
+        readonly rootContext?: RootContext;
     }) {
         this.#defaultCwd = options.defaultCwd ?? process.cwd();
         this.#clock = options.clock ?? Date.now;
         this.#createEventId = createUuidV7Factory(this.#clock);
         this.#ownerInstanceId = options.ownerInstanceId ?? createId();
+        this.#events = options.events;
+        this.#history = options.history;
+        this.#titles = options.titles;
+        this.#rootContext = options.rootContext;
     }
 
     async ensure(ctx: Context, input: ConversationCreateInput): Promise<ConversationRecord> {
@@ -330,6 +369,7 @@ export class ConversationModule implements AgentModule<AnyAgentTool, LibSQLDatab
                     archived = ${next.archived ? 1 : 0},
                     unread = ${next.unread ? 1 : 0},
                     status = ${next.status},
+                    title_status = ${next.titleStatus},
                     provider_id = ${next.providerId ?? null},
                     model_id = ${next.modelId ?? null},
                     effort = ${next.effort ?? null},
@@ -426,12 +466,119 @@ export class ConversationModule implements AgentModule<AnyAgentTool, LibSQLDatab
         await this.appendEvent(ctx, session.id, { type, payload });
     }
 
+    /**
+     * Writes a title a chat has just been given everywhere its name is read from.
+     *
+     * That is three places and no more: the agent's own metadata, which every summary reads; the
+     * catalog flag that says the title is settled rather than still expected; and the live event a
+     * client renames an open chat from.
+     */
+    async recordTitle(
+        ctx: Context,
+        session: { readonly agentId: string; readonly id: string },
+        title: string | undefined,
+    ): Promise<void> {
+        if (title === undefined) return;
+        await this.#agents?.updateMetadata(ctx, session.agentId, { title });
+        await this.update(ctx, session.id, { titleStatus: "ready" });
+        await this.#events?.record(ctx, {
+            agentId: session.agentId,
+            payload: { sessionId: session.id, status: "ready", title },
+            type: "session.title-changed",
+        });
+    }
+
+    /**
+     * Starts the one second look a chat gets at its own title, on a lifetime nobody waits for.
+     *
+     * A chat is named from its first message, before there is anything else to go on, and a first
+     * message is a request: what a request turns into is often not what it asked for. Two things
+     * count as more to go on and either is enough — the agent has answered, or the person has said
+     * something else — so whichever arrives first is what starts this. It happens once, and never
+     * on the path a person is waiting on: a chat that could not be looked at again keeps the
+     * perfectly serviceable title it already had.
+     */
+    takeSecondLook(
+        ctx: Context,
+        agentId: string,
+        options: {
+            /**
+             * Something the person has just submitted, which the agent may not have written into
+             * its history yet. Naming a chat after what someone said must not depend on winning
+             * that race.
+             */
+            readonly justSaid?: string;
+        } = {},
+    ): void {
+        const root = this.#rootContext;
+        if (root === undefined || this.#titles === undefined || this.#history === undefined) return;
+        const work = this.#secondLook(root.named("session-title-refinement"), agentId, options)
+            .catch((error: unknown) => {
+                ctx.log.warn("A second look at this chat's title failed.", { agentId }, error);
+            })
+            .finally(() => {
+                this.#secondLooks.delete(work);
+            });
+        this.#secondLooks.add(work);
+    }
+
+    /** Waits for every second look in flight, so a closing daemon does not cut one off. */
+    async whenTitlesSettle(): Promise<void> {
+        while (this.#secondLooks.size > 0) await Promise.allSettled([...this.#secondLooks]);
+    }
+
+    /** The second look itself: read the conversation, ask for a name, keep it if it is a new one. */
+    async #secondLook(
+        ctx: Context,
+        agentId: string,
+        options: { readonly justSaid?: string },
+    ): Promise<void> {
+        const titles = this.#titles;
+        const history = this.#history;
+        if (titles === undefined || history === undefined) return;
+        const session = await this.getByAgent(ctx, agentId);
+        if (session === undefined || session.archived) return;
+        const records = await history.messages(ctx, agentId, {
+            from: "end",
+            limit: MAX_TRANSCRIPT_RECORDS,
+        });
+        const lines = withJustSaid(conversationLines(records), options.justSaid);
+        // Nothing has happened that the first message did not already say, so there is nothing to
+        // look at yet. Asking anyway would spend the chat's one second look re-reading its own
+        // first message, which is precisely the answer it already has.
+        if (!worthSecondLook(lines)) return;
+        // The claim is taken before the work, so two triggers arriving together cannot both pay for
+        // a naming, and it is handed back below when the work produced no name to keep.
+        if (!(await titles.claimChatRefinement(ctx, session.id))) return;
+        let named = false;
+        try {
+            const transcript = lines.map((line) => `${line.speaker}: ${line.text}`).join("\n");
+            const currentTitle = (await this.#agents?.config(ctx, agentId))?.metadata?.title;
+            const title = await titles.refineChat(ctx, {
+                transcript,
+                ...(currentTitle === undefined ? {} : { currentTitle }),
+                ...(session.providerId === undefined ? {} : { providerId: session.providerId }),
+            });
+            if (title === undefined) return;
+            named = true;
+            // The model was asked to keep the name it was given, and usually does. Writing the same
+            // title again would rename the chat in every open client for no reason at all.
+            if (title === currentTitle) return;
+            await this.recordTitle(ctx, session, title);
+        } catch (error) {
+            ctx.log.debug("A second look at this chat's title did not happen.", { agentId }, error);
+        } finally {
+            if (!named) await titles.releaseChatRefinement(ctx, session.id);
+        }
+    }
+
     readonly #hooks: AgentModuleHooks<AnyAgentTool, LibSQLDatabase> = {
         agentCreatedTransact: async (
             ctx: Context,
-            _scope: AgentModuleSystemScope<LibSQLDatabase>,
+            scope: AgentModuleSystemScope<LibSQLDatabase>,
             agent: AgentModuleAgentLifecycle,
         ): Promise<void> => {
+            this.#agents = scope.agents;
             await this.#ensure(ctx, ctx.db, {
                 agentId: agent.id,
                 cwd: this.#defaultCwd,
@@ -440,9 +587,10 @@ export class ConversationModule implements AgentModule<AnyAgentTool, LibSQLDatab
 
         agentRestoredTransact: async (
             ctx: Context,
-            _scope: AgentModuleSystemScope<LibSQLDatabase>,
+            scope: AgentModuleSystemScope<LibSQLDatabase>,
             agent: AgentModuleAgentLifecycle,
         ): Promise<void> => {
+            this.#agents = scope.agents;
             await this.#ensure(ctx, ctx.db, {
                 agentId: agent.id,
                 cwd: this.#defaultCwd,
@@ -525,6 +673,10 @@ export class ConversationModule implements AgentModule<AnyAgentTool, LibSQLDatab
                 payload: settlement,
                 type: "run_finished",
             });
+            // The run is over and the conversation now says what its first message could only ask
+            // for. This is the moment the title is worth reading again, and the work belongs to a
+            // lifetime of its own rather than to the transaction settling the run.
+            this.takeSecondLook(ctx, scope.agent.id);
         },
     };
 

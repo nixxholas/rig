@@ -1369,7 +1369,8 @@ async function sendMessage(
     session: ConversationRecord,
     body: SubmitMessage,
 ): Promise<Record<string, unknown>> {
-    await nameFromFirstMessage(ctx, dependencies, session, body.displayText ?? body.text);
+    const text = body.displayText ?? body.text;
+    const alreadyNamed = await nameFromFirstMessage(ctx, dependencies, session, text);
     const resumeCursor = dependencies.agent.modules.events.cursor();
     const current = sessionSelection(session, sessionCatalogSelection(dependencies));
     const options = messageOptions(body, dependencies.agent.system.models, current);
@@ -1387,6 +1388,14 @@ async function sendMessage(
     // A queued message does not reach the conversation until the current turn ends, and a wait is
     // precisely a turn held open. Someone writing into the chat is what ends it.
     dependencies.agent.modules.scheduling.interruptWaits(ctx, session.agentId);
+    // Someone writing a second time has said more about what this chat is than its title was drawn
+    // from, and they may say it while a long turn is still running. The chat gets one second look
+    // either way; this is so it does not have to wait for the turn to end to happen.
+    if (alreadyNamed) {
+        dependencies.agent.modules.conversations.takeSecondLook(ctx, session.agentId, {
+            justSaid: text,
+        });
+    }
     await persistSessionSelection(
         ctx,
         selectionRecorders(dependencies),
@@ -1408,59 +1417,52 @@ async function sendMessage(
 }
 
 /**
- * Names a workspace, its branch and the chat from the first thing a person said.
+ * Names the chat, and the workspace and branch it works in, from the first thing a person said.
  *
- * A workspace someone opened from a client is called something like "Workspace 3" until there is
- * anything to name it after; the first message is that. Naming happens before the agent's own work
- * so a person is not looking at a placeholder while the answer arrives, and it is skipped entirely
- * once either the workspace or the chat has a name a person chose — settling a name is a decision,
- * not a default. Failing to think of a name never fails the message.
+ * Naming belongs to the titles module, which asks once and hands the folder name to the workspaces
+ * catalog itself. What is left here is what a route knows and a module does not: which chat this
+ * is, whether a person has already named it, and where the answer is written down.
+ *
+ * Answers whether the chat already had a title when this message arrived, which is what tells the
+ * caller this was not the first thing said here.
  */
 async function nameFromFirstMessage(
     ctx: import("@steve.kite/stdlib").Context,
     dependencies: LoadedSessionDependencies,
     session: ConversationRecord,
     firstMessage: string,
-): Promise<void> {
-    if (session.scope.kind !== "workspace" || firstMessage.trim().length === 0) return;
+): Promise<boolean> {
+    if (firstMessage.trim().length === 0) return false;
+    const modules = dependencies.agent.modules;
     const config = await dependencies.agent.system.config(ctx, session.agentId);
     const sessionNamed = config?.metadata?.title !== undefined;
-    try {
-        const named = await dependencies.agent.modules.workspaces.nameFromFirstMessage(
-            ctx,
-            dependencies.agent.rootAgentId,
-            {
-                firstMessage,
-                projectId: session.scope.projectId,
-                ...(session.providerId === undefined ? {} : { providerId: session.providerId }),
-                sessionNamed,
-                workspaceId: session.scope.workspaceId,
-            },
-        );
-        if (named.chat !== undefined && !sessionNamed) {
-            await dependencies.agent.system.updateMetadata(ctx, session.agentId, {
-                title: named.chat,
-            });
-        }
-        if (named.workspace !== undefined) {
-            await dependencies.agent.modules.events.record(ctx, {
-                agentId: session.agentId,
-                payload: {
-                    ...(named.branch === undefined ? {} : { branch: named.branch }),
-                    projectId: session.scope.projectId,
-                    workspaceId: named.workspace.id,
-                    workspace: {
-                        branch: named.workspace.branch,
-                        id: named.workspace.id,
-                        name: named.workspace.name,
-                    },
+    const scope = session.scope;
+    const named = await modules.titles.nameFromFirstMessage(ctx, dependencies.agent.rootAgentId, {
+        firstMessage,
+        sessionNamed,
+        ...(session.providerId === undefined ? {} : { providerId: session.providerId }),
+        ...(scope.kind === "workspace"
+            ? { workspace: { projectId: scope.projectId, workspaceId: scope.workspaceId } }
+            : {}),
+    });
+    await modules.conversations.recordTitle(ctx, session, named.title);
+    if (named.workspace !== undefined && scope.kind === "workspace") {
+        await modules.events.record(ctx, {
+            agentId: session.agentId,
+            payload: {
+                ...(named.branch === undefined ? {} : { branch: named.branch }),
+                projectId: scope.projectId,
+                workspaceId: named.workspace.id,
+                workspace: {
+                    branch: named.workspace.branch,
+                    id: named.workspace.id,
+                    name: named.workspace.name,
                 },
-                type: "workspace.updated",
-            });
-        }
-    } catch (error) {
-        ctx.log.debug("Naming a workspace from its first message did not happen.", {}, error);
+            },
+            type: "workspace.updated",
+        });
     }
+    return sessionNamed;
 }
 
 async function steerMessage(

@@ -448,7 +448,10 @@ async function startTestDaemon() {
     providers.add(
         "scripted",
         (selection) =>
-            scriptedProvider(() => {
+            scriptedProvider((sessionId) => {
+                // Naming a chat is a side question asked on a session of its own, on whichever
+                // model is cheapest. What this records is what the conversation itself ran on.
+                if (sessionId.startsWith("naming:")) return;
                 modelRuns.push(selection.model ?? "");
             }),
         "gym",
@@ -500,7 +503,7 @@ async function connectTestDaemon(daemon: HappyAgentDaemon) {
 }
 
 function scriptedProvider(
-    onRun: () => void = () => undefined,
+    onRun: (sessionId: string) => void = () => undefined,
 ): Parameters<AgentProviders["add"]>[1] {
     return {
         inputTypes: ["text"],
@@ -513,7 +516,7 @@ function scriptedProvider(
             },
             destroy: () => undefined,
             run: () => {
-                onRun();
+                onRun(id);
                 return (async function* () {
                     yield { type: "text_start" } as const;
                     yield { type: "text_delta", delta: "Happy Agent replied." } as const;

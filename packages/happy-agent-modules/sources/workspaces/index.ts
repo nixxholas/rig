@@ -164,22 +164,12 @@ export {
     workspaceEnvironmentSchema,
     workspaceFolderSettingsOptionSchema,
     workspaceGitRunnerSchema,
-    workspaceNameGeneratorSchema,
     workspaceProjectsModuleSchema,
     workspaceRootContextSchema,
     type CreateWorkspaceRequest,
     type WorkspaceCreatorOptions,
-    type WorkspaceNamesFromFirstMessage,
 } from "./WorkspaceProvisioning.js";
-export {
-    generateWorkspaceNames,
-    withPreservedNumericPrefix,
-    workspaceNameKindSchema,
-    type GeneratedWorkspaceNames,
-    type WorkspaceNameGenerator,
-    type WorkspaceNameKind,
-    type WorkspaceNameRequest,
-} from "./impl/generateWorkspaceNames.js";
+export { withPreservedNumericPrefix } from "./impl/withPreservedNumericPrefix.js";
 export { getManagedWorkspacesDirectory } from "./impl/getManagedWorkspacesDirectory.js";
 export { isPathLexicallyWithin, syncWorkspaceFiles } from "./impl/syncWorkspaceFiles.js";
 export {

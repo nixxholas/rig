@@ -16,4 +16,3 @@ export {
     type StartedHappyAgent,
     type StartHappyAgentOptions,
 } from "./start/startHappyAgent.js";
-export { agentModels, agentProviders } from "./start/agentCatalog.js";

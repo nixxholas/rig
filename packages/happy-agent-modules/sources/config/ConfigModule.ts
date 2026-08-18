@@ -2,10 +2,17 @@ import { open } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
-import type { AgentModule, AgentModuleHooks } from "@slopus/happy-agent-base";
+import type {
+    AgentModel,
+    AgentModule,
+    AgentModuleHooks,
+    AgentProviders,
+} from "@slopus/happy-agent-base";
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { parse, TomlDate, type TomlTable, type TomlValue } from "smol-toml";
+
+import { agentModels, agentProviders } from "./impl/agentCatalog.js";
 
 const MAX_PATH_LENGTH = 4_096;
 const MAX_CONFIG_STRING_LENGTH = 16_384;
@@ -925,6 +932,14 @@ const DEFAULT_VALUES: HappyAgentConfigValues = {
 export interface ConfigModuleLoadOptions {
     /** The version this build reports as itself. Defaults to `"development"`. */
     readonly version?: string;
+    /**
+     * Replaces the accounts and the catalog this configuration would otherwise build.
+     *
+     * This exists so a test can script inference without a vendor credential. Nothing in the
+     * product supplies it, and it belongs here because this is what owns the accounts: a scripted
+     * account reaches every module that names one, not only the agent system.
+     */
+    readonly inference?: ConfigInferenceOverride;
 }
 
 /**
@@ -935,8 +950,16 @@ export class ConfigModule implements AgentModule {
     readonly name = "config";
     readonly configuration: HappyAgentConfiguration;
 
-    private constructor(configuration: HappyAgentConfiguration) {
+    readonly #scripted: ConfigInferenceOverride | undefined;
+    #models: readonly AgentModel[] | undefined;
+    #providers: AgentProviders | undefined;
+
+    private constructor(
+        configuration: HappyAgentConfiguration,
+        scripted: ConfigInferenceOverride | undefined,
+    ) {
         this.configuration = configuration;
+        this.#scripted = scripted;
     }
 
     readonly #hooks: AgentModuleHooks = {
@@ -946,6 +969,39 @@ export class ConfigModule implements AgentModule {
     };
 
     readonly beforeStart = (): AgentModuleHooks => this.#hooks;
+
+    /**
+     * Every model the configuration enables, with the configured default first.
+     *
+     * The order is the answer to "what does a session run on when it names nothing", so the first
+     * entry is the account every agent starts on.
+     */
+    get models(): readonly AgentModel[] {
+        this.#models ??= this.#scripted?.models ?? agentModels(this.configuration);
+        return this.#models;
+    }
+
+    /**
+     * The accounts, as one registry built once.
+     *
+     * A provider holds a credential and a connection, so there is exactly one of each per
+     * installation: a module that needs to reach a vendor asks for this rather than building a
+     * second registry that would sign in again.
+     */
+    get providers(): AgentProviders {
+        this.#providers ??= this.#scripted?.providers ?? agentProviders(this.configuration);
+        return this.#providers;
+    }
+
+    /** Bedrock serves its hosted search index from particular models, so an account may name one. */
+    get bedrockSearchModels(): Readonly<Record<string, string>> {
+        const models: Record<string, string> = {};
+        for (const [id, provider] of Object.entries(this.configuration.values.providers)) {
+            if (provider.enabled === false || provider.type !== "bedrock") continue;
+            if (provider.searchModelId !== undefined) models[id] = provider.searchModelId;
+        }
+        return models;
+    }
 
     static async load(
         input?: HappyAgentConfigurationInput,
@@ -975,8 +1031,14 @@ export class ConfigModule implements AgentModule {
         if (!Value.Check(happyAgentConfigurationSchema, configuration)) {
             throw new Error("The Happy Agent configuration is invalid.");
         }
-        return new ConfigModule(deepFreeze(configuration));
+        return new ConfigModule(deepFreeze(configuration), options.inference);
     }
+}
+
+/** Scripted accounts, for a test that runs the whole product without a vendor credential. */
+export interface ConfigInferenceOverride {
+    readonly models: readonly AgentModel[];
+    readonly providers: AgentProviders;
 }
 
 export async function loadHappyAgentConfiguration(

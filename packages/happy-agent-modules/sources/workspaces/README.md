@@ -36,7 +36,12 @@ catalog still records everything it is told but cannot start work of its own. `w
 `homeDirectory`, `environment` and `settings` locate and configure that work — where folders are
 created, which setup commands and sync paths apply, whether folders are kept on archive. `git` and
 `probeGit` replace the Git surfaces so a test can drive the whole lifecycle without Git.
-`nameGenerator` names a workspace, its branch and its chat from the first thing a person said.
+
+This catalog does not name anything. A workspace created from a client is called something like
+"Workspace 3" until a chat working in it settles on something better, and the module that thinks of
+that name is [titles](../titles/README.md): it asks, and then renames the workspace here through
+`inheritName`. What a folder and a branch are called is this catalog's to write down and nobody
+else's, but what they should be called is not a question it asks.
 
 `authorization` lets one agent act on another agent's workspaces (self access is always allowed
 without it); `idFactory`, `eventIdFactory`, and `clock` let a caller control identity and time
@@ -162,8 +167,8 @@ Building a workspace:
   created through to a usable checkout. `open` calls it.
 - `removeArchivedWorkspace(ctx, agentId, projectId, workspaceId)` — deletes an archived workspace's
   folder and moves the row to `archived`.
-- `nameFromFirstMessage(ctx, agentId, request)` — the three names a first message can settle. A
-  workspace or a chat someone has already named is left alone.
+- `inheritName(ctx, agentId, { workspaceId, name })` — gives a workspace the name its first chat
+  arrived at. A workspace someone has already named keeps that name: only a placeholder is replaced.
 - `resolvePath`, `resolveSessionOwnership` — what owns a directory, and the explicit durable owner of
   a new session. Both answer with a `ResolvedProjectOwnership`.
 - `validateSessionTransfer`, `prepareSessionTransfer`, `markSessionTransferTargetFailed` — moving a

@@ -52,6 +52,22 @@ handed to `ConfigModule.load` by whoever starts the agent, defaulting to
 is — a span, a log line, the client header sent to a server — already reads the
 configuration and would otherwise be handed the version separately.
 
+## The accounts
+
+Configuration is not only what the files say. This module owns the accounts too: `providers` is one
+registry holding every enabled provider, each constructing its client on first use so a credential
+is read when a session needs it rather than at startup, and `models` is the curated catalog filtered
+to what those accounts actually serve, with the configured default first. Rig never asks a vendor
+which models exist — the list is source, and a configured provider entry decides which of them its
+own key serves.
+
+A module that needs to reach a vendor takes this module and asks it, instead of being handed a
+registry or building a second one that would sign in again. `bedrockSearchModels` answers the same
+way for the models a Bedrock account serves its hosted search index from.
+
+`load` takes an `inference` override for tests, which replaces both. It belongs here rather than
+where the agent starts, because a scripted account has to reach every module that names one.
+
 Unknown TOML keys are ignored and retained in each source's `unknownSettings`
 list. `unknownSettingsTruncated` explicitly reports bounded metadata.
 Malformed TOML, invalid known values, inconsistent provider types, oversized

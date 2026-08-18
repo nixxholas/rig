@@ -42,6 +42,7 @@ import {
     SystemPromptModule,
     TasksModule,
     TerminalsModule,
+    TitlesModule,
     UsageModule,
     UserInputModule,
     WorkflowsModule,
@@ -56,7 +57,6 @@ import {
 import type { LibSQLDatabase } from "drizzle-orm/libsql";
 import { createRootContext, detach, type Context, type RootContext } from "@steve.kite/stdlib";
 
-import { agentModels, agentProviders } from "./agentCatalog.js";
 import { checkModuleToolParameters } from "../modules/agent/checkModuleToolParameters.js";
 import { openHappyAgentDatabase } from "../modules/agent/HappyAgentDatabase.js";
 import { acquireHappyAgentStorageLock } from "../modules/agent/HappyAgentStorageLock.js";
@@ -118,6 +118,7 @@ export interface HappyAgentModules {
     readonly systemPrompt: SystemPromptModule;
     readonly tasks: TasksModule;
     readonly terminals: TerminalsModule;
+    readonly titles: TitlesModule;
     readonly usage: UsageModule;
     readonly userInput: UserInputModule;
     readonly workflows: WorkflowsModule;
@@ -163,10 +164,10 @@ export interface StartedHappyAgent {
 export async function startHappyAgent(
     options: StartHappyAgentOptions = {},
 ): Promise<StartedHappyAgent> {
-    const config = await ConfigModule.load(
-        options.happyHome,
-        options.version === undefined ? {} : { version: options.version },
-    );
+    const config = await ConfigModule.load(options.happyHome, {
+        ...(options.inference === undefined ? {} : { inference: options.inference }),
+        ...(options.version === undefined ? {} : { version: options.version }),
+    });
     const configuration = config.configuration;
     const paths = configuration.paths;
     // Observation starts before anything it should be able to watch, and the root it installs its
@@ -208,13 +209,13 @@ export async function startHappyAgent(
         await mkdir(paths.publicHome, { mode: 0o755, recursive: true });
         await mkdir(paths.generatedPath, { mode: 0o755, recursive: true });
 
-        const models = options.inference?.models ?? agentModels(configuration);
         // The catalog puts the configured default first, so the account serving it is the one every
         // agent starts on. Nothing else in the agent decides what a turn runs on: a caller names
         // that with the message it sends.
+        const models = config.models;
         const provider = models[0]?.providerId;
         if (provider === undefined) throw new Error("No model is enabled by the configuration.");
-        const providers = options.inference?.providers ?? agentProviders(configuration);
+        const providers = config.providers;
         if (providers.typeOf(provider) === null) {
             throw new Error(`The configured default provider "${provider}" is not enabled.`);
         }
@@ -273,7 +274,6 @@ export async function startHappyAgent(
         unwind.unshift(async () => await compute.computeModule.dispose(ctx));
 
         const history = new HistoryModule({ onAppend: observation.recordHistory });
-        const conversations = new ConversationModule({ defaultCwd: paths.publicHome });
         const events = new EventsModule();
         const presence = new PresenceModule(presenceOptions(configuration));
 
@@ -410,6 +410,23 @@ export async function startHappyAgent(
             },
         });
 
+        // What a first message names: the chat, and the workspace and branch it works in. Naming is
+        // one bounded question asked of the cheapest model of the chat's own account, so it owns the
+        // whole thing — it takes the accounts from the configuration and hands the folder name to
+        // the catalog that owns folders and branches.
+        const titles = new TitlesModule({ config, workspaces });
+
+        // The chat catalog is what a title is written into, so it is what looks at one again once a
+        // run has settled and the conversation says more than the first message could.
+        const conversations = new ConversationModule({
+            defaultCwd: paths.publicHome,
+            events,
+            history,
+            rootContext: catalogRoot,
+            titles,
+        });
+        unwind.unshift(async () => await conversations.whenTitlesSettle());
+
         // Terminals stand in the folders both catalogs own, so they ask those catalogs where a
         // project or workspace actually is rather than deriving a path of their own. They keep no
         // record: a terminal is a running process and a live screen, and both end with this daemon.
@@ -538,7 +555,7 @@ export async function startHappyAgent(
                 providers,
                 models,
                 currentProviderId: provider,
-                bedrockSearchModels: bedrockSearchModels(configuration),
+                bedrockSearchModels: config.bedrockSearchModels,
                 ...(gemini === undefined ? {} : { geminiApiKey: gemini }),
             }),
             secrets: new SecretsModule({}),
@@ -546,6 +563,7 @@ export async function startHappyAgent(
             systemPrompt,
             tasks: new TasksModule({}),
             terminals,
+            titles,
             usage: new UsageModule({}),
             userInput,
             workflows: new WorkflowsModule({
@@ -582,6 +600,9 @@ export async function startHappyAgent(
             // Sharing puts the profile on the wire, so the person exists before the identity does.
             modules.murmur,
             modules.projects,
+            // Titles precedes the catalog it names for: the workspace it renames is the one the
+            // catalog owns, and the fact that a workspace has been named lives in this module.
+            modules.titles,
             modules.workspaces,
             modules.secrets,
             modules.collaboration,
@@ -715,16 +736,6 @@ export async function startHappyAgent(
         await close().catch(() => undefined);
         throw error;
     }
-}
-
-/** Bedrock serves its hosted search index from particular models, so an account may name its own. */
-function bedrockSearchModels(configuration: HappyAgentConfiguration): Record<string, string> {
-    const models: Record<string, string> = {};
-    for (const [id, provider] of Object.entries(configuration.values.providers)) {
-        if (provider.enabled === false || provider.type !== "bedrock") continue;
-        if (provider.searchModelId !== undefined) models[id] = provider.searchModelId;
-    }
-    return models;
 }
 
 /**

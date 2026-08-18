@@ -597,6 +597,9 @@ export * from "./projects/index.js";
 // at that folder, each with one canonical Ghostty emulator behind it.
 export * from "./terminals/index.js";
 
+// Titles: the names a first message settles — the chat, its workspace, and its branch.
+export * from "./titles/index.js";
+
 // User input: questions the agent asks a person, and the answers it waits for.
 export * from "./userInput/index.js";
 

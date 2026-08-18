@@ -2,11 +2,7 @@ import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import {
-    withPreservedNumericPrefix,
-    type Workspace,
-    type WorkspaceNameKind,
-} from "@slopus/happy-agent-modules";
+import { withPreservedNumericPrefix, type Workspace } from "@slopus/happy-agent-modules";
 import sharp from "sharp";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -245,76 +241,6 @@ describe("project pictures", () => {
         clock += 25 * 60 * 60 * 1000;
         await test.projects.collectAvatarGarbage(test.ctx, AGENT_ID);
         expect(existsSync(storedFile)).toBe(false);
-    });
-});
-
-describe("naming a workspace from the first message", () => {
-    it("asks for the three names separately and applies the workspace one", async () => {
-        const asked: WorkspaceNameKind[] = [];
-        const test = await harness("naming", {
-            nameGenerator: {
-                suggest: async (_ctx, request) => {
-                    asked.push(request.kind);
-                    if (request.kind === "branch") return "fix-login-redirect";
-                    if (request.kind === "chat") return "Fixing the login redirect";
-                    return "Login redirect";
-                },
-            },
-        });
-        const project = await readyProject(test);
-        const workspace = await readyWorkspace(test, project.id, "3 Untitled");
-
-        const named = await test.workspaces.nameFromFirstMessage(test.ctx, AGENT_ID, {
-            firstMessage: "The login page redirects in a loop.",
-            projectId: project.id,
-            workspaceId: workspace.id,
-        });
-
-        expect(new Set(asked)).toEqual(new Set(["branch", "chat", "workspace"]));
-        expect(named.branch).toBe("fix-login-redirect");
-        expect(named.chat).toBe("Fixing the login redirect");
-        expect(named.workspace?.name).toBe("3 Login redirect");
-    });
-
-    it("leaves a workspace and a chat a person already named alone", async () => {
-        const asked: WorkspaceNameKind[] = [];
-        const test = await harness("naming-configured", {
-            nameGenerator: {
-                suggest: async (_ctx, request) => {
-                    asked.push(request.kind);
-                    return "Something a model invented";
-                },
-            },
-        });
-        const project = await readyProject(test);
-        const workspace = await readyWorkspace(test, project.id, "Login flow", true);
-
-        const named = await test.workspaces.nameFromFirstMessage(test.ctx, AGENT_ID, {
-            firstMessage: "The login page redirects in a loop.",
-            projectId: project.id,
-            sessionNamed: true,
-            workspaceId: workspace.id,
-        });
-
-        expect(asked).toEqual([]);
-        expect(named).toEqual({});
-        expect((await ownedWorkspace(test, test, project.id, workspace.id))?.name).toBe(
-            "Login flow",
-        );
-    });
-
-    it("names nothing when the session layer offered no way to generate names", async () => {
-        const test = await harness("naming-absent");
-        const project = await readyProject(test);
-        const workspace = await readyWorkspace(test, project.id, "Untitled");
-
-        expect(
-            await test.workspaces.nameFromFirstMessage(test.ctx, AGENT_ID, {
-                firstMessage: "Hello",
-                projectId: project.id,
-                workspaceId: workspace.id,
-            }),
-        ).toEqual({});
     });
 });
 

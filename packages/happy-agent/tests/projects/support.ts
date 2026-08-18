@@ -14,7 +14,6 @@ import {
     WorkspacesModule,
     type GitCommandRunner,
     type WorkspaceFolderSettings,
-    type WorkspaceNameGenerator,
 } from "@slopus/happy-agent-modules";
 import { createRootContext, type Context, type RootContext } from "@steve.kite/stdlib";
 import { drizzle } from "drizzle-orm/sqlite-proxy";
@@ -27,7 +26,6 @@ export const AGENT_ID = "agent-test";
 export interface ProjectCatalogOptions {
     /** Replaces Git for both catalogs, so a test can hold one command still. */
     readonly git?: GitCommandRunner;
-    readonly nameGenerator?: WorkspaceNameGenerator;
     readonly now?: () => number;
     readonly onWorkspaceHostError?: (
         workspaceId: string,
@@ -133,9 +131,6 @@ export async function projectTestHarness(
             rootContext,
             workspacesDirectory: managedWorkspaces,
             ...(settings.git === undefined ? {} : { git: settings.git }),
-            ...(settings.nameGenerator === undefined
-                ? {}
-                : { nameGenerator: settings.nameGenerator }),
             ...(settings.settings === undefined ? {} : { settings: settings.settings }),
             ...(settings.onWorkspaceHostError === undefined
                 ? {}

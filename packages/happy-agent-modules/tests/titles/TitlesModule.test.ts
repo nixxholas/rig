@@ -1,0 +1,363 @@
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import type { AgentModel } from "@slopus/happy-agent-base";
+import type { SessionEvent } from "@slopus/happy-providers";
+import { createRootContext } from "@steve.kite/stdlib";
+import { describe, expect, it } from "vitest";
+
+import { ConfigModule } from "../../sources/config/ConfigModule.js";
+import { TitlesModule } from "../../sources/titles/TitlesModule.js";
+import { WorkspacesModule } from "../../sources/workspaces/WorkspacesModule.js";
+import { providersOf, sharedKV, textTurn } from "../support/fixtures.js";
+import { primaryAgents, resolveModuleHooks } from "../support/moduleHooks.js";
+import { ScriptedProvider } from "../support/ScriptedProvider.js";
+
+const ctx = createRootContext().named("happy-agent-modules-titles");
+
+/** A catalog served by the one scripted account, cheapest model last so preference is visible. */
+function models(
+    ids: readonly string[] = ["openai/gpt-5.6-max", "anthropic/sonnet-5"],
+): AgentModel[] {
+    return ids.map((id) => ({
+        providerId: "scripted",
+        id,
+        name: id,
+        effortLevels: ["off", "medium", "high"],
+        defaultEffort: "medium",
+    })) as AgentModel[];
+}
+
+/**
+ * A configuration whose accounts are scripted, read from a Happy root of its own.
+ *
+ * Naming takes the accounts and the catalog from the configuration module, so a test that scripts
+ * inference scripts it there — exactly where the product's own test seam puts it.
+ */
+async function scriptedConfig(
+    provider: ScriptedProvider,
+    catalog: AgentModel[],
+): Promise<ConfigModule> {
+    const home = await mkdtemp(join(tmpdir(), "happy-titles-"));
+    return await ConfigModule.load(home, {
+        inference: { models: catalog, providers: providersOf(provider) },
+    });
+}
+
+async function titles(script: SessionEvent[][], catalog: AgentModel[] = models()) {
+    const provider = new ScriptedProvider(script);
+    const module = new TitlesModule({
+        config: await scriptedConfig(provider, catalog),
+        // A chat outside a workspace never reaches the catalog, and one inside it is exercised
+        // where a real project and a real worktree exist.
+        workspaces: new WorkspacesModule({ enabled: false }),
+    });
+    return { module, provider };
+}
+
+/**
+ * A module started the way a collection starts it, holding the store its agents share.
+ *
+ * Everything the module remembers between chats lives in that store, so a test that asks what it
+ * remembers has to hand it one first, exactly as the first agent to be created does.
+ */
+async function started(): Promise<TitlesModule> {
+    const { module } = await titles([]);
+    const hooks = await resolveModuleHooks(ctx, module, primaryAgents());
+    await hooks.agentCreatedTransact?.(
+        ctx,
+        { agents: primaryAgents(), sharedKV: sharedKV() },
+        { id: "agent-1", metadata: undefined },
+    );
+    return module;
+}
+
+/** The chat title alone, which is all a chat outside a workspace asks for. */
+async function nameChat(
+    module: TitlesModule,
+    request: { readonly firstMessage: string; readonly providerId?: string },
+): Promise<string | undefined> {
+    const names = await module.suggestNames(ctx, {
+        firstMessage: request.firstMessage,
+        wanted: { title: true },
+        ...(request.providerId === undefined ? {} : { providerId: request.providerId }),
+    });
+    return names.title;
+}
+
+describe("TitlesModule naming", () => {
+    it("names a chat on the cheapest model of its own account, outside the chat's own session", async () => {
+        const test = await titles([textTurn("<title>Retry policy rewrite</title>")]);
+
+        const title = await nameChat(test.module, {
+            firstMessage: "Rewrite how the outer loop retries provider requests.",
+            providerId: "scripted",
+        });
+
+        expect(title).toBe("Retry policy rewrite");
+        const session = test.provider.sessions[0]!;
+        expect(session.id.startsWith("naming:")).toBe(true);
+        expect(session.options.tools).toEqual([]);
+        expect(session.options.inferenceMaxRetries).toBe(0);
+        const request = session.requests[0]!;
+        expect(request.model).toBe("anthropic/sonnet-5");
+        expect(request.effort).toBe("off");
+        expect(JSON.stringify(request.context.messages)).toContain("outer loop retries");
+    });
+
+    it("reads the name out of an answer wrapped in whatever else the model wrote", async () => {
+        const test = await titles([
+            textTurn(
+                "Sure! Here you go:\n\n<title>Retry policy rewrite</title>\n\nHope that helps.",
+            ),
+        ]);
+
+        await expect(nameChat(test.module, { firstMessage: "rewrite retries" })).resolves.toBe(
+            "Retry policy rewrite",
+        );
+    });
+
+    it("takes an untagged answer as the name rather than losing it", async () => {
+        const test = await titles([textTurn("Retry policy rewrite")]);
+
+        await expect(nameChat(test.module, { firstMessage: "rewrite retries" })).resolves.toBe(
+            "Retry policy rewrite",
+        );
+    });
+
+    it("bounds a chat title to six words", async () => {
+        const test = await titles([
+            textTurn("<title>one two three four five six seven eight</title>"),
+        ]);
+
+        await expect(nameChat(test.module, { firstMessage: "anything" })).resolves.toBe(
+            "one two three four five six",
+        );
+    });
+
+    it("asks for the title and the slug together, in one request", async () => {
+        const test = await titles([
+            textTurn("<title>Retry policy rewrite</title>\n<slug>retry-policy-rewrite</slug>"),
+        ]);
+
+        await expect(
+            test.module.suggestNames(ctx, {
+                firstMessage: "rewrite retries",
+                wanted: { slug: true, title: true },
+            }),
+        ).resolves.toEqual({ slug: "retry-policy-rewrite", title: "Retry policy rewrite" });
+        // A person is waiting on their own first message, so both names cost one round trip.
+        expect(test.provider.sessions).toHaveLength(1);
+    });
+
+    it("reduces a slug the model wrote as a title to kebab-case", async () => {
+        const test = await titles([textTurn("<slug>Retry Policy Rewrite</slug>")]);
+
+        await expect(
+            test.module.suggestNames(ctx, {
+                firstMessage: "rewrite retries",
+                wanted: { slug: true },
+            }),
+        ).resolves.toEqual({ slug: "retry-policy-rewrite" });
+    });
+
+    it("asks only for what is still wanted, and reads an untagged answer as that one name", async () => {
+        const test = await titles([textTurn("retry-policy-rewrite")]);
+
+        await expect(
+            test.module.suggestNames(ctx, {
+                firstMessage: "rewrite retries",
+                wanted: { slug: true },
+            }),
+        ).resolves.toEqual({ slug: "retry-policy-rewrite" });
+        const sent = JSON.stringify(test.provider.sessions[0]!.requests[0]);
+        expect(sent).toContain("<slug>");
+        expect(sent).not.toContain("<title>");
+    });
+
+    it("keeps an untagged answer out of two names it cannot be split into", async () => {
+        const test = await titles([textTurn("Retry policy rewrite")]);
+
+        await expect(
+            test.module.suggestNames(ctx, {
+                firstMessage: "rewrite retries",
+                wanted: { slug: true, title: true },
+            }),
+        ).resolves.toEqual({});
+    });
+
+    it("asks nothing when no name is wanted", async () => {
+        const test = await titles([textTurn("<title>Something</title>")]);
+
+        await expect(
+            test.module.suggestNames(ctx, { firstMessage: "rewrite retries", wanted: {} }),
+        ).resolves.toEqual({});
+        expect(test.provider.sessions).toHaveLength(0);
+    });
+
+    it("answers with no name rather than a bad one when the model says nothing usable", async () => {
+        const test = await titles([textTurn("<title>   </title>")]);
+
+        await expect(
+            nameChat(test.module, { firstMessage: "rewrite retries" }),
+        ).resolves.toBeUndefined();
+    });
+
+    it("does not name anything from an empty first message", async () => {
+        const test = await titles([textTurn("<title>Something</title>")]);
+
+        await expect(nameChat(test.module, { firstMessage: "   " })).resolves.toBeUndefined();
+        expect(test.provider.sessions).toHaveLength(0);
+    });
+
+    it("falls back to the configured account when the chat has named none", async () => {
+        const test = await titles([textTurn("<title>Retry policy rewrite</title>")]);
+
+        await expect(
+            nameChat(test.module, { firstMessage: "rewrite retries", providerId: "gone" }),
+        ).resolves.toBe("Retry policy rewrite");
+        expect(test.provider.sessions[0]!.requests[0]!.model).toBe("anthropic/sonnet-5");
+    });
+
+    it("names nothing at all when the catalog is empty", async () => {
+        const test = await titles([textTurn("<title>Retry policy rewrite</title>")], []);
+
+        await expect(
+            nameChat(test.module, { firstMessage: "rewrite retries" }),
+        ).resolves.toBeUndefined();
+        expect(test.provider.sessions).toHaveLength(0);
+    });
+
+    it("reports a provider failure to its caller instead of inventing a name", async () => {
+        const test = await titles([
+            [
+                {
+                    type: "done",
+                    state: "error",
+                    kind: "unknown",
+                    message: "That account is signed out.",
+                },
+            ],
+        ]);
+
+        await expect(nameChat(test.module, { firstMessage: "rewrite retries" })).rejects.toThrow(
+            "That account is signed out.",
+        );
+    });
+});
+
+describe("TitlesModule naming from a first message", () => {
+    it("names a chat that works in no workspace, and asks for no slug it cannot use", async () => {
+        const test = await titles([textTurn("<title>Retry policy rewrite</title>")]);
+
+        await expect(
+            test.module.nameFromFirstMessage(ctx, "agent-1", {
+                firstMessage: "Rewrite how the outer loop retries provider requests.",
+            }),
+        ).resolves.toEqual({ title: "Retry policy rewrite" });
+        const sent = JSON.stringify(test.provider.sessions[0]!.requests[0]);
+        expect(sent).not.toContain("<slug>");
+    });
+
+    it("leaves a chat a person has already named alone", async () => {
+        const test = await titles([textTurn("<title>Something a model invented</title>")]);
+
+        await expect(
+            test.module.nameFromFirstMessage(ctx, "agent-1", {
+                firstMessage: "The login page redirects in a loop.",
+                sessionNamed: true,
+            }),
+        ).resolves.toEqual({});
+        expect(test.provider.sessions).toHaveLength(0);
+    });
+
+    it("names nothing from an empty first message", async () => {
+        const test = await titles([textTurn("<title>Something</title>")]);
+
+        await expect(
+            test.module.nameFromFirstMessage(ctx, "agent-1", { firstMessage: "   " }),
+        ).resolves.toEqual({});
+        expect(test.provider.sessions).toHaveLength(0);
+    });
+
+    it("never fails the message it is naming", async () => {
+        const test = await titles([
+            [{ type: "done", state: "error", kind: "unknown", message: "Signed out." }],
+        ]);
+
+        await expect(
+            test.module.nameFromFirstMessage(ctx, "agent-1", { firstMessage: "rewrite retries" }),
+        ).resolves.toEqual({});
+    });
+});
+
+describe("TitlesModule second look at a title", () => {
+    it("reads the conversation on the cheapest model and answers with a better title", async () => {
+        const test = await titles([textTurn("<title>Retry policy rewrite</title>")]);
+
+        const title = await test.module.refineChat(ctx, {
+            currentTitle: "Flaky provider request",
+            providerId: "scripted",
+            transcript: "User: this keeps failing\nAssistant: the outer loop retries too eagerly",
+        });
+
+        expect(title).toBe("Retry policy rewrite");
+        const session = test.provider.sessions[0]!;
+        expect(session.id.startsWith("naming:")).toBe(true);
+        expect(session.options.tools).toEqual([]);
+        const request = session.requests[0]!;
+        expect(request.model).toBe("anthropic/sonnet-5");
+        expect(request.effort).toBe("off");
+        const sent = JSON.stringify(request.context.messages);
+        expect(sent).toContain("Flaky provider request");
+        expect(sent).toContain("retries too eagerly");
+    });
+
+    it("gives back the title it was shown when the conversation has not contradicted it", async () => {
+        const test = await titles([textTurn("<title>Flaky provider request</title>")]);
+
+        await expect(
+            test.module.refineChat(ctx, {
+                currentTitle: "Flaky provider request",
+                transcript: "User: this keeps failing\nAssistant: it does",
+            }),
+        ).resolves.toBe("Flaky provider request");
+    });
+
+    it("looks at nothing when there is no conversation to look at", async () => {
+        const test = await titles([textTurn("<title>Something</title>")]);
+
+        await expect(test.module.refineChat(ctx, { transcript: "   " })).resolves.toBeUndefined();
+        expect(test.provider.sessions).toHaveLength(0);
+    });
+});
+
+describe("TitlesModule second-look claim", () => {
+    it("gives a chat one second look, and hands the claim back when it produced nothing", async () => {
+        const module = await started();
+
+        await expect(module.claimChatRefinement(ctx, "s-1")).resolves.toBe(true);
+        await expect(module.claimChatRefinement(ctx, "s-1")).resolves.toBe(false);
+        await expect(module.claimChatRefinement(ctx, "s-2")).resolves.toBe(true);
+
+        await module.releaseChatRefinement(ctx, "s-1");
+
+        await expect(module.claimChatRefinement(ctx, "s-1")).resolves.toBe(true);
+        await expect(module.claimChatRefinement(ctx, "s-2")).resolves.toBe(false);
+    });
+});
+
+describe("TitlesModule workspace naming record", () => {
+    it("remembers that a workspace has taken the name of a chat, once", async () => {
+        const module = await started();
+
+        await expect(module.workspaceWasNamed(ctx, "ws-1")).resolves.toBe(false);
+
+        await module.markWorkspaceNamed(ctx, "ws-1");
+        await module.markWorkspaceNamed(ctx, "ws-1");
+
+        await expect(module.workspaceWasNamed(ctx, "ws-1")).resolves.toBe(true);
+        await expect(module.workspaceWasNamed(ctx, "ws-2")).resolves.toBe(false);
+    });
+});
