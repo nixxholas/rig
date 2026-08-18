@@ -115,8 +115,9 @@ it; it is not an idempotency key, and it does not dedupe retries.
 
 Nothing durable is ever permanently deleted through this API — that is deliberate, not an
 omission. Projects, workspaces, and agents **archive**: they leave the active lists but keep
-their history and can be inspected (and, where specced, unarchived). There are no hard-delete
-endpoints. The only things that end are runtime state — a terminal, a background process — and
+their history and can be inspected. Only agents can be unarchived for now; an archived project
+is revived by registering its path again, and an archived workspace stays archived. There are
+no hard-delete endpoints. The only things that end are runtime state — a terminal, a background process — and
 the transcript resets described under `message.deleted`, none of which is a client deleting a
 durable resource.
 
@@ -1829,9 +1830,10 @@ The process object:
   after a kill that produced no code.
 - `startedAt`, `endedAt` — lifecycle timestamps; `endedAt` is `null` while running.
 
-Process output does not travel through this object or through events — it is read on demand,
-the way the agent's own tools read it. What the API announces is existence and state, so a
-client can show "2 processes running" and their commands.
+Process output does not travel through this API at all for now — not in this object, not in
+events, and there is no output-reading endpoint. What the API announces is existence and
+state, so a client can show "2 processes running" and their commands; reading output stays the
+agent's own business.
 
 `DELETE /v0/agents/:agentId/processes/:processId` stops a running process — `200` with the
 final process object; `404` when the agent has no such process.
