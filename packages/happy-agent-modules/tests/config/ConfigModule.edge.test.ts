@@ -78,6 +78,23 @@ describe("ConfigModule edge coverage", () => {
             );
         });
 
+        it("exposes only a bounded Git discovery ceiling from the configured environment", async () => {
+            const root = await temporaryRoot();
+            const configured = await ConfigModule.load(join(root, ".happy"), {
+                environment: {
+                    GIT_CEILING_DIRECTORIES: "  /tmp/happy-git-ceiling  ",
+                    PRIVATE_FIXTURE_SECRET: "must-not-cross-the-module-seam",
+                },
+            });
+            const overlong = await ConfigModule.load(join(root, ".happy-overlong"), {
+                environment: { GIT_CEILING_DIRECTORIES: "x".repeat(16_385) },
+            });
+
+            expect(configured.gitCeilingDirectories).toBe("/tmp/happy-git-ceiling");
+            expect(overlong.gitCeilingDirectories).toBeUndefined();
+            expect("environment" in configured).toBe(false);
+        });
+
         it("resolves relative roots and derives the complete immutable path set", async () => {
             const root = await temporaryRoot();
             const relativeRoot = join(process.cwd(), ".context", `config-relative-${Date.now()}`);

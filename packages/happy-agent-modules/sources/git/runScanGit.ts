@@ -63,6 +63,7 @@ export type ScanGitRunner = (options: {
 export async function runScanGit(options: {
     args: readonly string[];
     cwd: string;
+    gitCeilingDirectories?: string;
     maximumBytes?: number;
     signal?: AbortSignal;
 }): Promise<ScanGitResult> {
@@ -80,7 +81,7 @@ export async function runScanGit(options: {
     const compute = createHostCompute({
         ctx: scanContext,
         cwd: options.cwd,
-        environment: scanEnvironment(),
+        environment: scanEnvironment(options.gitCeilingDirectories),
     });
     try {
         // Happy Agent Compute is the shared host execution boundary in v2. It deliberately accepts
@@ -178,7 +179,7 @@ export function gitCommandRunnerFromScanGitRunner(runGit: ScanGitRunner): GitCom
     };
 }
 
-function scanEnvironment(): NodeJS.ProcessEnv {
+function scanEnvironment(gitCeilingDirectories?: string): NodeJS.ProcessEnv {
     const environment: NodeJS.ProcessEnv = { ...process.env };
     for (const name of STRIPPED_ENVIRONMENT) delete environment[name];
     // The shared sandbox correctly withholds private home-directory files. Tell Git not to probe
@@ -191,6 +192,9 @@ function scanEnvironment(): NodeJS.ProcessEnv {
     environment.GIT_OPTIONAL_LOCKS = "0";
     environment.GIT_NO_LAZY_FETCH = "1";
     environment.GIT_PAGER = "cat";
+    if (gitCeilingDirectories !== undefined) {
+        environment.GIT_CEILING_DIRECTORIES = gitCeilingDirectories;
+    }
     environment.LC_ALL = "C";
     environment.SHELL = "/bin/bash";
     return environment;

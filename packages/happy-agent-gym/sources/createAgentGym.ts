@@ -1,5 +1,5 @@
 import { readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import type { AgentModel, AgentPermissionMode } from "@slopus/happy-agent-base";
@@ -242,6 +242,7 @@ class AgentGymInstance implements AgentGym {
         const daemon = await startHappyAgentDaemon({
             compute: createGymCompute(),
             environment: {
+                GIT_CEILING_DIRECTORIES: resolve(this.#home.root, "..", ".."),
                 RIG_PROJECTS_DIRECTORY: join(this.#home.root, "projects"),
                 RIG_WORKSPACES_DIRECTORY: join(this.#home.root, "workspaces"),
             },

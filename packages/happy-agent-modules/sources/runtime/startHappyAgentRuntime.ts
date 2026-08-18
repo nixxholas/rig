@@ -242,7 +242,7 @@ export async function startHappyAgentRuntime(
         unwind.unshift(async () => await auto.close(ctx));
 
         const permissions = new PermissionsModule(compute.computeModule, auto);
-        const git = new GitModule();
+        const git = new GitModule(config);
         const projects = new ProjectsModule(config, git);
         const workspaces = new WorkspacesModule(config, projects, git);
         const titles = new TitlesModule(config, workspaces);

@@ -6,6 +6,7 @@ import { Value } from "@sinclair/typebox/value";
 import type { AgentModule } from "@slopus/happy-agent-base";
 import { createRootContext, detach, type Context, type RootContext } from "@steve.kite/stdlib";
 
+import type { ConfigModule } from "../config/index.js";
 import type { GitCommandOptions, GitCommandResult, GitCommandRunner } from "./GitCommandRunner.js";
 import {
     GitCredentialBroker,
@@ -41,6 +42,7 @@ import { resolveWorkspaceBase, type WorkspaceBase } from "./resolveWorkspaceBase
 import { directGitCommandRunner, runGitCommandWithEnvironment } from "./runGitCommand.js";
 import {
     gitCommandRunnerFromScanGitRunner,
+    runScanGit,
     scanGitRunnerFromCommandRunner,
     type ScanGitRunner,
 } from "./runScanGit.js";
@@ -153,9 +155,18 @@ export class GitModule implements AgentModule {
     #tracker: GitStateTracker | undefined;
     #version = 0;
 
-    constructor() {
+    constructor(config?: ConfigModule) {
         this.#foreground = directGitCommandRunner;
-        this.#scan = scanGitRunnerFromCommandRunner(directGitCommandRunner);
+        this.#scan =
+            config === undefined
+                ? runScanGit
+                : async (options) => {
+                      const gitCeilingDirectories = config.gitCeilingDirectories;
+                      return await runScanGit({
+                          ...options,
+                          ...(gitCeilingDirectories === undefined ? {} : { gitCeilingDirectories }),
+                      });
+                  };
         this.#read = gitCommandRunnerFromScanGitRunner(this.#scan);
     }
 

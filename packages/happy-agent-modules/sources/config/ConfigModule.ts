@@ -1039,6 +1039,19 @@ export class ConfigModule implements AgentModule {
         return undefined;
     }
 
+    /**
+     * The optional discovery ceiling for unattended Git reads.
+     *
+     * A hermetic installation can live beneath another repository while treating its own project
+     * folders as independent plain directories. Git owns the scan, but configuration owns this
+     * process-level path boundary and exposes only that value rather than its whole environment.
+     */
+    get gitCeilingDirectories(): string | undefined {
+        const value = this.#environmentValue("GIT_CEILING_DIRECTORIES")?.trim();
+        if (value === undefined || value.length === 0) return undefined;
+        return value.length > MAX_CONFIG_STRING_LENGTH ? undefined : value;
+    }
+
     /** Bedrock serves its hosted search index from particular models, so an account may name one. */
     get bedrockSearchModels(): Readonly<Record<string, string>> {
         const models: Record<string, string> = {};
@@ -1078,9 +1091,7 @@ export class ConfigModule implements AgentModule {
     }
 
     #environmentValue(name: string): string | undefined {
-        return Object.hasOwn(this.#environment, name)
-            ? this.#environment[name]
-            : process.env[name];
+        return Object.hasOwn(this.#environment, name) ? this.#environment[name] : process.env[name];
     }
 
     /**
