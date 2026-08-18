@@ -1,0 +1,220 @@
+import { describe, expect, it } from "vitest";
+
+import { HappyAgentApiError } from "../sources/HappyAgentApiError.js";
+import { HappyAgentClient } from "../sources/HappyAgentClient.js";
+
+interface RecordedRequest {
+    url: string;
+    method: string;
+    headers: Headers;
+    body: string | null;
+}
+
+/** A `fetch` that answers from a script and records what it was asked. */
+function stubFetch(answer: (request: RecordedRequest) => Response): {
+    fetch: typeof globalThis.fetch;
+    requests: RecordedRequest[];
+} {
+    const requests: RecordedRequest[] = [];
+    const fetch: typeof globalThis.fetch = async (input, init) => {
+        const request: RecordedRequest = {
+            url: input.toString(),
+            method: init?.method ?? "GET",
+            headers: new Headers(init?.headers),
+            body: typeof init?.body === "string" ? init.body : null,
+        };
+        requests.push(request);
+        return answer(request);
+    };
+    return { fetch, requests };
+}
+
+function json(body: unknown, status = 200): Response {
+    return new Response(JSON.stringify(body), {
+        status,
+        headers: { "content-type": "application/json" },
+    });
+}
+
+function streamOf(text: string): ReadableStream<Uint8Array<ArrayBuffer>> {
+    return new ReadableStream<Uint8Array<ArrayBuffer>>({
+        start(controller) {
+            controller.enqueue(new TextEncoder().encode(text));
+            controller.close();
+        },
+    });
+}
+
+describe("HappyAgentClient", () => {
+    it("authenticates every request and resolves routes beneath the endpoint", async () => {
+        const { fetch, requests } = stubFetch(() => json({ agents: [] }));
+        const client = new HappyAgentClient({
+            endpoint: "http://agent.local/prefix",
+            token: "a-token",
+            fetch,
+        });
+
+        await client.listAgents({ workspaceId: "w1", archived: "all", limit: 20 });
+
+        const request = requests[0];
+        expect(request?.url).toBe(
+            "http://agent.local/prefix/v0/agents?workspaceId=w1&archived=all&limit=20",
+        );
+        expect(request?.headers.get("authorization")).toBe("Bearer a-token");
+        expect(request?.method).toBe("GET");
+    });
+
+    it("leaves out query parameters the caller did not name", async () => {
+        const { fetch, requests } = stubFetch(() => json({ workspaces: [] }));
+        const client = new HappyAgentClient({ endpoint: "http://agent.local", token: "t", fetch });
+
+        await client.listWorkspaces({ projectId: "p1" });
+
+        expect(requests[0]?.url).toBe("http://agent.local/v0/workspaces?projectId=p1");
+    });
+
+    it("sends the version a guarded mutation was made against as If-Match", async () => {
+        const { fetch, requests } = stubFetch(() => json({ project: {} }));
+        const client = new HappyAgentClient({ endpoint: "http://agent.local", token: "t", fetch });
+
+        await client.renameProject(
+            "p1",
+            { name: "Rig", mutationId: "m1" },
+            { ifMatch: "01991f3a-5c1e-7000-8000-2f9a1b3c4d5e" },
+        );
+
+        const request = requests[0];
+        expect(request?.method).toBe("PATCH");
+        expect(request?.headers.get("if-match")).toBe("01991f3a-5c1e-7000-8000-2f9a1b3c4d5e");
+        expect(request?.body).toBe(JSON.stringify({ name: "Rig", mutationId: "m1" }));
+    });
+
+    it("archives with an empty body while still guarding on the version", async () => {
+        const { fetch, requests } = stubFetch(() => json({ workspace: {} }));
+        const client = new HappyAgentClient({ endpoint: "http://agent.local", token: "t", fetch });
+
+        await client.archiveWorkspace("w1", { ifMatch: "v1" });
+
+        expect(requests[0]?.body).toBe("{}");
+        expect(requests[0]?.headers.get("if-match")).toBe("v1");
+    });
+
+    it("reports a failure with the daemon's own code and message", async () => {
+        const { fetch } = stubFetch(() =>
+            json(
+                {
+                    error: "Event cursor is unavailable.",
+                    code: "cursor_unavailable",
+                    cursor: "01991f3a-6d2f-7000-8000-3a0b2c4d5e6f",
+                },
+                409,
+            ),
+        );
+        const client = new HappyAgentClient({ endpoint: "http://agent.local", token: "t", fetch });
+
+        const failure = await client.getEvents({ after: "01991f3a-5c1e" }).catch((error: unknown) => error);
+
+        expect(failure).toBeInstanceOf(HappyAgentApiError);
+        const error = failure as HappyAgentApiError;
+        expect(error.status).toBe(409);
+        expect(error.code).toBe("cursor_unavailable");
+        expect(error.message).toBe("Event cursor is unavailable.");
+        expect(error.body?.["cursor"]).toBe("01991f3a-6d2f-7000-8000-3a0b2c4d5e6f");
+    });
+
+    it("still reports a failure the daemon could not describe in JSON", async () => {
+        const { fetch } = stubFetch(() => new Response("gateway is unhappy", { status: 502 }));
+        const client = new HappyAgentClient({ endpoint: "http://agent.local", token: "t", fetch });
+
+        const failure = await client.getHealth().catch((error: unknown) => error);
+
+        expect(failure).toBeInstanceOf(HappyAgentApiError);
+        expect((failure as HappyAgentApiError).status).toBe(502);
+        expect((failure as HappyAgentApiError).code).toBeNull();
+    });
+
+    it("reads a picture as bytes, and reads nothing when it has not changed", async () => {
+        const { fetch, requests } = stubFetch((request) =>
+            request.headers.get("if-none-match") === "etag-1"
+                ? new Response(null, { status: 304 })
+                : new Response(new Uint8Array([1, 2, 3]), {
+                      headers: { "content-type": "image/png", etag: "etag-1" },
+                  }),
+        );
+        const client = new HappyAgentClient({ endpoint: "http://agent.local", token: "t", fetch });
+
+        const first = await client.getProjectAvatar("p1");
+        expect(first?.contentType).toBe("image/png");
+        expect(first?.etag).toBe("etag-1");
+        expect(new Uint8Array(first?.data ?? new ArrayBuffer(0))).toEqual(
+            new Uint8Array([1, 2, 3]),
+        );
+
+        const second = await client.getProjectAvatar("p1", { ifNoneMatch: "etag-1" });
+        expect(second).toBeNull();
+        expect(requests).toHaveLength(2);
+    });
+
+    it("yields the stream's hello frame and then its events", async () => {
+        const body = [
+            'event: hello\ndata: {"cursor":"c0","gap":false,"resumed":true,"connectedAt":1}\n\n',
+            ": heartbeat\n\n",
+            'id: c1\nevent: run.started\ndata: {"cursor":"c1","type":"run.started","occurredAt":2,',
+            '"payload":{"agentId":"a1","runId":"r1"}}\n\n',
+        ].join("");
+        const { fetch, requests } = stubFetch(
+            () =>
+                new Response(streamOf(body), {
+                    headers: { "content-type": "text/event-stream" },
+                }),
+        );
+        const client = new HappyAgentClient({ endpoint: "http://agent.local", token: "t", fetch });
+
+        const frames = [];
+        for await (const frame of client.streamEvents({ after: "c0", lastEventId: "c0" })) {
+            frames.push(frame);
+        }
+
+        expect(requests[0]?.url).toBe("http://agent.local/v0/events/stream?after=c0");
+        expect(requests[0]?.headers.get("last-event-id")).toBe("c0");
+        expect(requests[0]?.headers.get("accept")).toBe("text/event-stream");
+        expect(frames).toEqual([
+            { kind: "hello", hello: { cursor: "c0", gap: false, resumed: true, connectedAt: 1 } },
+            {
+                kind: "event",
+                cursor: "c1",
+                event: {
+                    cursor: "c1",
+                    type: "run.started",
+                    occurredAt: 2,
+                    payload: { agentId: "a1", runId: "r1" },
+                },
+            },
+        ]);
+    });
+
+    it("stops streaming when the caller stops iterating", async () => {
+        let canceled = false;
+        const body = new ReadableStream<Uint8Array<ArrayBuffer>>({
+            start(controller) {
+                controller.enqueue(
+                    new TextEncoder().encode(
+                        'event: hello\ndata: {"cursor":"c0","gap":false,"resumed":true,"connectedAt":1}\n\n',
+                    ),
+                );
+            },
+            cancel() {
+                canceled = true;
+            },
+        });
+        const { fetch } = stubFetch(() => new Response(body));
+        const client = new HappyAgentClient({ endpoint: "http://agent.local", token: "t", fetch });
+
+        for await (const frame of client.streamEvents()) {
+            expect(frame.kind).toBe("hello");
+            break;
+        }
+
+        expect(canceled).toBe(true);
+    });
+});
