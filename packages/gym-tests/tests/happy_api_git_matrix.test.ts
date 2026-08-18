@@ -182,7 +182,11 @@ describe("Git API matrix: repository facts and revisions", { timeout: 30_000 }, 
         await writeFs(join(context.repositoryPath, "binary.dat"), Buffer.from([0, 1, 2, 3, 255]));
         await git(context.repositoryPath, ["add", "binary.dat"]);
         await git(context.repositoryPath, ["commit", "-m", "binary"]);
-        await writeFs(join(context.repositoryPath, "binary.dat"), Buffer.from([9, 8, 7, 6, 255]));
+        await git(context.repositoryPath, ["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        await writeFs(
+            join(context.repositoryPath, "binary.dat"),
+            Buffer.from([0, 9, 8, 7, 6, 255]),
+        );
         const state = await waitForState(context, (candidate) =>
             candidate.files.some((file) => file.path === "binary.dat" && file.binary),
         );
@@ -395,6 +399,7 @@ describe("Git API matrix: watches, limits, and lifecycle", { timeout: 30_000 }, 
         await writeFs(join(context.repositoryPath, ".gitignore"), "ignored.log\n", "utf8");
         await git(context.repositoryPath, ["add", ".gitignore"]);
         await git(context.repositoryPath, ["commit", "-m", "ignore logs"]);
+        await git(context.repositoryPath, ["update-ref", "refs/remotes/origin/main", "HEAD"]);
         await writeFs(join(context.repositoryPath, "ignored.log"), "ignored\n", "utf8");
         const state = await waitForState(context, (candidate) => candidate.changedFiles === 0);
         expect(state.files.some((file) => file.path === "ignored.log")).toBe(false);

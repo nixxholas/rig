@@ -216,7 +216,11 @@ describe("the public files and Git API", () => {
         );
 
         const binary = Buffer.from([0, 1, 2, 3, 127, 128, 255]);
-        await writeFs(join(repositoryPath, "binary.dat"), binary);
+        await gym.client.writeFile(registered.id, {
+            content: binary.toString("base64"),
+            expectedHash: null,
+            path: "binary.dat",
+        });
         const binaryEvent = await waitForGitEvent(stream, registered.id, (gitState) =>
             gitState.files.some((file) => file.path === "binary.dat" && file.binary),
         );

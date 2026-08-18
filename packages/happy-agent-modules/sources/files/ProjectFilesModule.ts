@@ -316,10 +316,17 @@ export class ProjectFilesModule {
         this.#assertSize(bytes.byteLength);
         const target = await this.#resolveWritePath(root.root, input.path);
         await this.#assertSafe(target, root.root, input.path);
-        return await this.#withWriteLock(
+        const result = await this.#withWriteLock(
             target,
             async () => await this.#writeCompared(target, input, bytes),
         );
+        this.#git.invalidate(root.root);
+        this.#git.markChanged({
+            path: root.root,
+            projectId: root.projectId,
+            ...(root.workspaceId === undefined ? {} : { workspaceId: root.workspaceId }),
+        });
+        return result;
     }
 
     async #writeCompared(

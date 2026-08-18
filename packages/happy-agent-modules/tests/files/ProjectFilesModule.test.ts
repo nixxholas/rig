@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { createHash } from "node:crypto";
 import { Value } from "@sinclair/typebox/value";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GitModule } from "../../sources/git/index.js";
 import {
@@ -18,11 +18,22 @@ import type { WorkspacesModule } from "../../sources/workspaces/index.js";
 
 let directory: string;
 let files: ProjectFilesModule;
+let invalidateGit: ReturnType<typeof vi.fn>;
+let markGitChanged: ReturnType<typeof vi.fn>;
 let root: ProjectFileRoot;
 
 beforeEach(async () => {
     directory = await mkdtemp(join(tmpdir(), "happy-agent-files-"));
-    files = new ProjectFilesModule({} as ProjectsModule, {} as WorkspacesModule, {} as GitModule);
+    invalidateGit = vi.fn();
+    markGitChanged = vi.fn();
+    files = new ProjectFilesModule(
+        {} as ProjectsModule,
+        {} as WorkspacesModule,
+        {
+            invalidate: invalidateGit,
+            markChanged: markGitChanged,
+        } as unknown as GitModule,
+    );
     root = { projectId: "project-1", root: await realpath(directory) };
 });
 
@@ -36,6 +47,11 @@ describe("ProjectFilesModule writes", () => {
 
         expect(created.hash).toBe(hash("new file"));
         await expect(readFile(join(directory, "note.txt"), "utf8")).resolves.toBe("new file");
+        expect(invalidateGit).toHaveBeenCalledWith(root.root);
+        expect(markGitChanged).toHaveBeenCalledWith({
+            path: root.root,
+            projectId: root.projectId,
+        });
     });
 
     it("updates a file when its expected hash is current", async () => {
@@ -48,12 +64,16 @@ describe("ProjectFilesModule writes", () => {
 
     it("reports the authoritative hash when a create races an existing file", async () => {
         const created = await files.write(root, write("before", null));
+        invalidateGit.mockClear();
+        markGitChanged.mockClear();
 
         await expect(files.write(root, write("after", null))).rejects.toMatchObject({
             code: "conflict",
             currentHash: created.hash,
             status: 409,
         } satisfies Partial<ProjectFileError>);
+        expect(invalidateGit).not.toHaveBeenCalled();
+        expect(markGitChanged).not.toHaveBeenCalled();
     });
 
     it("reports the authoritative hash when a write is stale", async () => {
