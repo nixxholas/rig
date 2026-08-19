@@ -72,17 +72,19 @@ async function stopDaemon(gym: Gym): Promise<number> {
         "--eval",
         `
 import { readFile } from "node:fs/promises";
-const registry = JSON.parse(await readFile(process.env.RIG_SERVER_DIRECTORY + "/server.json", "utf8"));
-process.kill(registry.pid, "SIGKILL");
+import { join } from "node:path";
+const lockPath = join(process.env.HOME, ".happy", "agent", "agent.lock");
+const lock = JSON.parse(await readFile(lockPath, "utf8"));
+process.kill(lock.pid, "SIGKILL");
 for (let attempt = 0; attempt < 200; attempt += 1) {
     try {
-        process.kill(registry.pid, 0);
+        process.kill(lock.pid, 0);
         await new Promise((resolve) => setTimeout(resolve, 10));
     } catch {
         break;
     }
 }
-console.log(registry.pid);
+console.log(lock.pid);
 `,
     ]);
     return Number(result.stdout.trim());
@@ -94,8 +96,10 @@ async function readDaemonPid(gym: Gym): Promise<number> {
         "--eval",
         `
 import { readFile } from "node:fs/promises";
-const registry = JSON.parse(await readFile(process.env.RIG_SERVER_DIRECTORY + "/server.json", "utf8"));
-console.log(registry.pid);
+import { join } from "node:path";
+const lockPath = join(process.env.HOME, ".happy", "agent", "agent.lock");
+const lock = JSON.parse(await readFile(lockPath, "utf8"));
+console.log(lock.pid);
 `,
     ]);
     return Number(result.stdout.trim());
