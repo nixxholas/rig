@@ -90,7 +90,8 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
     readonly #messageEventResults = new Map<string, ApiMessage | typeof MESSAGE_DELETED>();
     /** The streamed assistant message of each run, so a finished run can decorate it. */
     readonly #assistantMessageIdsByRunId = new Map<string, string>();
-    #activeSend = false;
+    /** True while a send() carrying an onEvent callback owns loop-event delivery. */
+    #sendOwnsLoopEvents = false;
     #resyncing: Promise<AgentSnapshot> | undefined;
     #selection: PendingSelection | undefined;
 
@@ -323,7 +324,7 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         options: AgentRunOptions = {},
     ): Promise<AgentRunResult> {
         const selection = this.#selection;
-        this.#activeSend = true;
+        this.#sendOwnsLoopEvents = options.onEvent !== undefined;
         const submitted = await this.#client
             .sendMessage(this.id, {
                 ...toSendBody(content, options.displayText, this.#messageMode(selection)),
@@ -333,7 +334,7 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
                     : { id: options.clientSubmissionId }),
             })
             .catch((error: unknown) => {
-                this.#activeSend = false;
+                this.#sendOwnsLoopEvents = false;
                 throw error;
             });
         this.#clearSelection(selection);
@@ -400,7 +401,7 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         } catch (error) {
             if (!aborted) throw error;
         } finally {
-            this.#activeSend = false;
+            this.#sendOwnsLoopEvents = false;
             options.signal?.removeEventListener("abort", abort);
             streamController.abort();
         }
@@ -509,9 +510,13 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         return undefined;
     }
 
-    /** Projects streaming and reset API events into Rig's live inference vocabulary. */
+    /**
+     * Projects streaming and reset API events into Rig's live inference vocabulary. A send that
+     * carries its own onEvent callback receives loop events there instead, so this global path
+     * stays silent for it rather than delivering every event twice.
+     */
     applyLoopEvent(event: HappyAgentEvent): AgentLoopEvent | undefined {
-        if (this.#activeSend) return undefined;
+        if (this.#sendOwnsLoopEvents) return undefined;
         return this.#projectLoopEvent(event);
     }
 

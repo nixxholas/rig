@@ -42,17 +42,20 @@ describe("Agent Base protocol projection", () => {
         expect(streaming.text).not.toContain("AGENT_BASE_STREAM_END");
 
         await gym.terminal.waitForText("AGENT_BASE_STREAM_END", 10_000);
+        // The second prompt must open its own run, so the first turn settles into history
+        // first; submitting while the run is still open would steer into it instead.
+        await gym.terminal.waitUntil(
+            (snapshot) => snapshot.text.includes("Worked for"),
+            "the first turn to settle into history",
+            10_000,
+        );
         gym.terminal.type("Show that the first turn remains in history.");
         gym.terminal.press("enter");
         await gym.terminal.waitForText("AGENT_BASE_SECOND_REPLY", 10_000);
         await expect
-            .poll(async () => await readEventTypes(gym), { timeout: 10_000 })
-            .toContain("run_finished");
-        expect(
-            (await readEventTypes(gym)).filter(
-                (type) => type === "run_finished" || type === "run_error",
-            ),
-        ).toHaveLength(1);
+            .poll(async () => (await readFinishedRuns(gym)).length, { timeout: 10_000 })
+            .toBe(2);
+        expect(await readFinishedRuns(gym)).toEqual(["completed", "completed"]);
         await gym.terminal.waitUntil(
             (snapshot) =>
                 snapshot.text.includes("AGENT_BASE_SECOND_REPLY") &&
@@ -76,14 +79,42 @@ function count(value: string, search: string): number {
     return value.split(search).length - 1;
 }
 
-async function readEventTypes(gym: Gym): Promise<string[]> {
-    const result = await gym.runInContainer("sqlite3", [
-        "-json",
-        "/home/rig/.server/agent-sessions.sqlite",
-        "SELECT type FROM session_events WHERE session_id = " +
-            "(SELECT id FROM sessions WHERE parent_session_id IS NULL " +
-            "ORDER BY created_at_ms DESC LIMIT 1) ORDER BY seq",
+/** Reads each settled run's finish reason from the daemon, in run order. */
+async function readFinishedRuns(gym: Gym): Promise<string[]> {
+    const result = await gym.runInContainer("node", [
+        "-e",
+        `
+const { readFileSync } = require("node:fs");
+const { request } = require("node:http");
+const { join } = require("node:path");
+const directory = join(process.env.HOME, ".happy", "agent");
+const token = readFileSync(join(directory, "token"), "utf8").trim();
+const socketPath = join(directory, "server.sock");
+function call(path) {
+    return new Promise((resolve, reject) => {
+        const outgoing = request(
+            { headers: { authorization: "Bearer " + token }, method: "GET", path, socketPath },
+            (response) => {
+                let data = "";
+                response.on("data", (chunk) => { data += chunk; });
+                response.on("end", () => resolve(JSON.parse(data)));
+            },
+        );
+        outgoing.on("error", reject);
+        outgoing.end();
+    });
+}
+(async () => {
+    const bootstrap = await call("/v0/bootstrap/desktop");
+    const agents = bootstrap.workspaces.flatMap((workspace) => workspace.agents ?? []);
+    const events = await call("/v0/events?limit=10000");
+    const finished = events.events.filter(
+        (event) => event.type === "run.finished" && event.payload.agentId === agents[0].id,
+    );
+    console.log(JSON.stringify(finished.map((event) => event.payload.run.reason)));
+})().catch((error) => { console.error(error); process.exit(1); });
+`,
     ]);
     expect(result.stderr).toBe("");
-    return (JSON.parse(result.stdout) as Array<{ type: string }>).map(({ type }) => type);
+    return JSON.parse(result.stdout) as string[];
 }
