@@ -1,6 +1,8 @@
 import type { Context } from "@steve.kite/stdlib";
 import type {
     Agent as ApiAgent,
+    AgentBootstrapResponse,
+    AgentDraftSnapshot,
     DaemonConfig,
     HappyAgentClient,
     HappyAgentEvent,
@@ -10,6 +12,7 @@ import type {
     MessageMode,
     Run,
     ToolCallBlock as ApiToolCallBlock,
+    UserMessage as ApiUserMessage,
 } from "@slopus/happy-agent-client";
 
 import type {
@@ -47,6 +50,7 @@ import type { HappyAgentEventHub } from "./HappyAgentEventHub.js";
 
 export interface RemoteAgentOptions {
     agent: ApiAgent;
+    bootstrap: AgentBootstrapResponse;
     client: HappyAgentClient;
     config: DaemonConfig;
     events: HappyAgentEventHub;
@@ -77,6 +81,9 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
     readonly #config: DaemonConfig;
     readonly #events: HappyAgentEventHub;
     #history: MessageHistoryResponse;
+    #draft: AgentDraftSnapshot;
+    #lastMode: MessageMode | null;
+    #pending: ApiUserMessage[];
     readonly #messages = new Map<string, ApiMessage>();
     readonly #messageEventResults = new Map<string, ApiMessage | typeof MESSAGE_DELETED>();
     #activeSend = false;
@@ -89,11 +96,14 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         this.#config = options.config;
         this.#events = options.events;
         this.#history = options.history;
+        this.#draft = structuredClone(options.bootstrap.draft);
+        this.#lastMode = options.bootstrap.mode;
+        this.#pending = structuredClone(options.bootstrap.pending);
         this.id = options.agent.id;
         for (const run of options.history.runs) {
             for (const message of run.messages) this.#messages.set(message.id, message);
         }
-        for (const message of options.history.pending) this.#messages.set(message.id, message);
+        for (const message of this.#pending) this.#messages.set(message.id, message);
     }
 
     get canChangeModel(): boolean {
@@ -148,11 +158,11 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
     }
 
     get draft(): string {
-        return this.#agent.draft?.text ?? "";
+        return this.#draft.value?.text ?? "";
     }
 
     get draftUpdatedAt(): number | undefined {
-        return this.#agent.draft === null ? undefined : this.#agent.updatedAt;
+        return this.#draft.updatedAt ?? undefined;
     }
 
     async setDraft(
@@ -175,7 +185,7 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
             ...(options.updatedAt === undefined ? {} : { updatedAt: options.updatedAt }),
             ...(options.origin === undefined ? {} : { mutationId: options.origin }),
         });
-        this.#agent = response.agent;
+        this.#draft = structuredClone(response.draft);
     }
 
     async abort(options: AbortRunOptions = {}): Promise<AbortRunResponse> {
@@ -237,9 +247,20 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         return {
             currentProviderId: this.#currentMode().providerId,
             groups,
+            ...(response.context === null
+                ? {}
+                : {
+                      context: {
+                          approximate: response.context.approximate,
+                          modelId: response.context.modelId ?? this.#currentMode().modelId,
+                          providerId: response.context.providerId,
+                          requestedModelId: response.context.modelId ?? this.#currentMode().modelId,
+                          totalTokens: response.context.contextTokens,
+                      },
+                  }),
             quotas: [],
             sessionTokenCount: {
-                lastContextTokens: 0,
+                lastContextTokens: response.context?.contextTokens ?? 0,
                 totalTokens: groups.reduce((total, group) => total + group.usage.totalTokens, 0),
             },
         };
@@ -283,11 +304,12 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         options: SteeringRunOptions = {},
     ): Promise<void | SteerMessageResponse> {
         const selection = this.#selection;
-        await this.#client.sendMessage(this.id, {
+        const submitted = await this.#client.sendMessage(this.id, {
             ...toSendBody(content, options.displayText, this.#messageMode(selection)),
             delivery: "steer",
             ...(options.clientSubmissionId === undefined ? {} : { id: options.clientSubmissionId }),
         });
+        this.#lastMode = submitted.message.mode;
         this.#clearSelection(selection);
     }
 
@@ -311,6 +333,7 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
                 throw error;
             });
         this.#clearSelection(selection);
+        this.#lastMode = submitted.message.mode;
 
         let activeRunId = submitted.message.runId;
         let terminalRun: Run | undefined;
@@ -430,7 +453,7 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
             messages: this.#snapshotMessages(),
             modelId: mode.modelId,
             providerId: mode.providerId,
-            queue: this.#history.pending.map((message) => ({
+            queue: this.#pending.map((message) => ({
                 id: message.id,
                 message: toRigMessage(message),
             })),
@@ -456,6 +479,7 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
     applyEvent(event: HappyAgentEvent): Message | undefined {
         if (!belongsToAgent(event, this.id)) return undefined;
         this.#applyResourceEvent(event);
+        this.#applyBootstrapEvent(event);
         const message = this.#projectMessageEvent(event);
         if (message !== undefined && message !== MESSAGE_DELETED && event.type !== "message.delta")
             return toRigMessage(message);
@@ -502,6 +526,9 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
             return [
                 {
                     defaultThinkingLevel: definition.defaultEffort,
+                    ...(definition.contextWindow === null
+                        ? {}
+                        : { contextWindow: definition.contextWindow }),
                     id: reference.id,
                     name: definition.name,
                     thinkingLevels: definition.efforts,
@@ -511,8 +538,8 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
     }
 
     #currentMode(): MessageMode {
-        const base = this.#agent.lastMode ?? this.#config.defaults;
-        const previousServiceTier = this.#agent.lastMode?.serviceTier ?? null;
+        const base = this.#lastMode ?? this.#config.defaults;
+        const previousServiceTier = this.#lastMode?.serviceTier ?? null;
         return {
             effort: this.#selection?.effort ?? base.effort,
             modelId: this.#selection?.modelId ?? base.modelId,
@@ -561,17 +588,44 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
     }
 
     async #refresh(): Promise<void> {
-        const [agent, history] = await Promise.all([
+        const [agent, bootstrap, history] = await Promise.all([
             this.#client.getAgent(this.id),
+            this.#client.getAgentBootstrap(this.id),
             this.#client.getMessages(this.id, { limit: 50 }),
         ]);
         this.#agent = agent.agent;
+        this.#draft = structuredClone(bootstrap.draft);
+        this.#lastMode = bootstrap.mode;
+        this.#pending = structuredClone(bootstrap.pending);
         this.#history = history;
         this.#messages.clear();
         for (const run of history.runs) {
             for (const message of run.messages) this.#messages.set(message.id, message);
         }
-        for (const message of history.pending) this.#messages.set(message.id, message);
+        for (const message of this.#pending) this.#messages.set(message.id, message);
+    }
+
+    #applyBootstrapEvent(event: HappyAgentEvent): void {
+        if (event.type === "agent.draft.updated") {
+            this.#draft = structuredClone(event.payload.draft);
+            return;
+        }
+        if (event.type === "message.created" && event.payload.message.role === "user") {
+            this.#lastMode = event.payload.message.mode;
+            if (event.payload.message.status === "pending") {
+                this.#pending = [
+                    ...this.#pending.filter((message) => message.id !== event.payload.message.id),
+                    structuredClone(event.payload.message),
+                ];
+            }
+            return;
+        }
+        const accepted =
+            event.type === "run.started" || event.type === "run.boundary"
+                ? new Set(event.payload.acceptedMessageIds)
+                : undefined;
+        if (accepted === undefined || accepted.size === 0) return;
+        this.#pending = this.#pending.filter((message) => !accepted.has(message.id));
     }
 
     #applyResourceEvent(event: HappyAgentEvent): void {

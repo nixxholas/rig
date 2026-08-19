@@ -331,9 +331,7 @@ export async function agentResource(
         subagents: { total: children.length, running: state.runningSubagents ?? 0 },
         processes: { running: state.runningProcesses ?? 0 },
         pendingQuestionId: state.pendingQuestionId ?? null,
-        lastMode: agentModeFromConfig(config),
         unread: metadata["unread"] ?? null,
-        draft: metadata["draft"] ?? null,
         orderKey: state.orderKey ?? null,
         lastCursor: latestEvent?.cursor ?? null,
         version,
@@ -386,7 +384,7 @@ function numericMetadata(value: unknown): number | undefined {
         : undefined;
 }
 
-function agentModeFromConfig(config: AgentConfig): unknown {
+export function agentModeFromConfig(config: AgentConfig): unknown {
     const value = config.metadata?.["lastMode"];
     return value === undefined ? null : value;
 }

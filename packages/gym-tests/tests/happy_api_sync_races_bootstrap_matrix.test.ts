@@ -925,9 +925,7 @@ describe("public sync races, bootstrap boundaries, and recovery", () => {
             expect(restoredAgent.agent).toMatchObject({
                 archivedAt: created.agent.archivedAt,
                 createdAt: created.agent.createdAt,
-                draft: created.agent.draft,
                 id: created.agent.id,
-                lastMode: created.agent.lastMode,
                 orderKey: created.agent.orderKey,
                 parentAgentId: created.agent.parentAgentId,
                 pendingQuestionId: created.agent.pendingQuestionId,
@@ -938,6 +936,9 @@ describe("public sync races, bootstrap boundaries, and recovery", () => {
                 titleStatus: created.agent.titleStatus,
                 unread: created.agent.unread,
                 workspaceId: created.agent.workspaceId,
+            });
+            await expect(gym.client.getAgentMode(created.agent.id)).resolves.toEqual({
+                mode: null,
             });
             await expect(gym.client.getProfile()).resolves.toEqual(before);
             const bootstrap = await gym.client.getDesktopBootstrap();

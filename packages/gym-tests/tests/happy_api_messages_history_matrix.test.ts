@@ -17,7 +17,10 @@ describe("public message and history matrix", () => {
     it("MH-01 starts with an empty complete history", async () => {
         const gym = await startGym();
         const history = await gym.client.getMessages(gym.defaultSessionId);
-        expect(history).toEqual({ hasMore: false, pending: [], runs: [] });
+        expect(history).toEqual({ hasMore: false, runs: [] });
+        await expect(gym.client.getAgentBootstrap(gym.defaultSessionId)).resolves.toMatchObject({
+            pending: [],
+        });
     });
 
     it("MH-02 stores one accepted user and assistant message in one run", async () => {
@@ -69,15 +72,15 @@ describe("public message and history matrix", () => {
             runId: null,
             status: "pending",
         });
-        expect((await gym.client.getMessages(gym.defaultSessionId)).pending).toContainEqual(
+        expect((await gym.client.getAgentBootstrap(gym.defaultSessionId)).pending).toContainEqual(
             queued.message,
         );
 
         release();
         await gym.waitForRun(first.runId);
         await gym.waitUntil(async () => {
-            const history = await gym.client.getMessages(gym.defaultSessionId);
-            return history.pending.length === 0 ? history : undefined;
+            const bootstrap = await gym.client.getAgentBootstrap(gym.defaultSessionId);
+            return bootstrap.pending.length === 0 ? bootstrap : undefined;
         }, "queued message acceptance");
         const history = await gym.client.getMessages(gym.defaultSessionId);
         expect(history.runs).toHaveLength(2);
@@ -121,8 +124,13 @@ describe("public message and history matrix", () => {
         release();
         await gym.waitForRun(first.runId);
         await gym.waitUntil(async () => {
-            const history = await gym.client.getMessages(gym.defaultSessionId);
-            return history.pending.length === 0 && history.runs.length === 2 ? history : undefined;
+            const [bootstrap, history] = await Promise.all([
+                gym.client.getAgentBootstrap(gym.defaultSessionId),
+                gym.client.getMessages(gym.defaultSessionId),
+            ]);
+            return bootstrap.pending.length === 0 && history.runs.length === 2
+                ? history
+                : undefined;
         }, "all queued messages to run");
         const history = await gym.client.getMessages(gym.defaultSessionId);
         expect(textOf(history.runs[0]?.messages[0])).toEqual(["first"]);
@@ -133,7 +141,7 @@ describe("public message and history matrix", () => {
         ).toEqual(["second", "third", "fourth"]);
     }, 40_000);
 
-    it("MH-05 returns the complete pending list even when a small limit is requested", async () => {
+    it("MH-05 returns the complete pending list from bootstrap independently of history paging", async () => {
         let release!: () => void;
         let providerStarted!: () => void;
         const providerReady = new Promise<void>((resolve) => {
@@ -161,7 +169,13 @@ describe("public message and history matrix", () => {
             });
         }
         const page = await gym.client.getMessages(gym.defaultSessionId, { limit: 1 });
-        expect(page.pending.map((message) => textOf(message))).toEqual([["p1"], ["p2"], ["p3"]]);
+        expect(page).not.toHaveProperty("pending");
+        const bootstrap = await gym.client.getAgentBootstrap(gym.defaultSessionId);
+        expect(bootstrap.pending.map((message) => textOf(message))).toEqual([
+            ["p1"],
+            ["p2"],
+            ["p3"],
+        ]);
         release();
         await gym.waitForRun(first.runId);
     }, 30_000);
@@ -539,9 +553,9 @@ describe("public message and history matrix", () => {
                 serviceTier: null,
             },
         });
-        expect((await gym.client.getAgent(gym.defaultSessionId)).agent.lastMode).toEqual(
-            user?.mode,
-        );
+        await expect(gym.client.getAgentMode(gym.defaultSessionId)).resolves.toEqual({
+            mode: user?.mode,
+        });
     });
 
     it("MH-22 reuses a client message ID without duplicating pending or accepted work", async () => {
@@ -600,15 +614,20 @@ describe("public message and history matrix", () => {
         ]);
         expect(pendingRetry.message).toEqual(original.message);
         expect(concurrentRetry.message).toEqual(original.message);
-        expect((await gym.client.getMessages(gym.defaultSessionId)).pending).toEqual([
+        expect((await gym.client.getAgentBootstrap(gym.defaultSessionId)).pending).toEqual([
             original.message,
         ]);
 
         release();
         await gym.waitForRun(first.runId);
         const settled = await gym.waitUntil(async () => {
-            const history = await gym.client.getMessages(gym.defaultSessionId);
-            return history.pending.length === 0 && history.runs.length === 2 ? history : undefined;
+            const [bootstrap, history] = await Promise.all([
+                gym.client.getAgentBootstrap(gym.defaultSessionId),
+                gym.client.getMessages(gym.defaultSessionId),
+            ]);
+            return bootstrap.pending.length === 0 && history.runs.length === 2
+                ? history
+                : undefined;
         }, "the client-named queued message to settle once");
 
         const acceptedRetry = await gym.client.sendMessage(gym.defaultSessionId, {
@@ -663,7 +682,9 @@ describe("public message and history matrix", () => {
         });
         const accepted = await gym.send("clear pending");
         const history = await gym.client.getMessages(gym.defaultSessionId);
-        expect(history.pending).toEqual([]);
+        await expect(gym.client.getAgentBootstrap(gym.defaultSessionId)).resolves.toMatchObject({
+            pending: [],
+        });
         const occurrences = history.runs
             .flatMap((run) => run.messages)
             .filter((message) => message.id === accepted.id);

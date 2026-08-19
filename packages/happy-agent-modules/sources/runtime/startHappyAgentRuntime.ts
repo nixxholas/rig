@@ -19,6 +19,7 @@ import { AutoModule } from "../auto/index.js";
 import { CollaborationModule } from "../collaboration/index.js";
 import { ComputeModule, createComputeModules, type HostCompute } from "../compute/index.js";
 import { ConfigModule, type HappyAgentConfiguration } from "../config/index.js";
+import { ContextWindowModule } from "../contextWindow/index.js";
 import { EventsModule } from "../events/index.js";
 import { ProjectFilesModule } from "../files/index.js";
 import { GitModule } from "../git/index.js";
@@ -91,6 +92,7 @@ export interface HappyAgentRuntimeModules {
     readonly collaboration: CollaborationModule;
     readonly compute: ComputeModule;
     readonly config: ConfigModule;
+    readonly contextWindow: ContextWindowModule;
     readonly events: EventsModule;
     readonly fileSearch: WorkspaceFileSearchModule;
     readonly files: ProjectFilesModule;
@@ -293,6 +295,7 @@ export async function startHappyAgentRuntime(
         const secrets = new SecretsModule();
         const tasks = new TasksModule();
         const usage = new UsageModule(events);
+        const contextWindow = new ContextWindowModule(config);
         const workflows = new WorkflowsModule(config, collaboration, compute.computeModule);
         const api = new ApiModule(
             abort,
@@ -320,6 +323,7 @@ export async function startHappyAgentRuntime(
             collaboration,
             compute: compute.computeModule,
             config,
+            contextWindow,
             events,
             fileSearch,
             files,
@@ -364,6 +368,7 @@ export async function startHappyAgentRuntime(
             goal,
             tasks,
             usage,
+            contextWindow,
             profile,
             murmur,
             git,

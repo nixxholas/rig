@@ -12,13 +12,15 @@ import type {
     AgentAbortResponse,
     AgentActivityResponse,
     AgentCompactResponse,
+    AgentDraftResponse,
+    AgentModeResponse,
     AgentResponse,
     CreateAgentRequest,
     MutationOnlyRequest,
     ReorderAgentRequest,
     SaveAgentDraftRequest,
 } from "./protocol/agents.js";
-import type { DesktopBootstrapResponse } from "./protocol/bootstrap.js";
+import type { AgentBootstrapResponse, DesktopBootstrapResponse } from "./protocol/bootstrap.js";
 import type {
     ConfigPatch,
     ConfigResponse,
@@ -788,6 +790,27 @@ export class HappyAgentClient {
         });
     }
 
+    /** `GET /v0/agents/:agentId/mode` — the last submitted message mode. */
+    async getAgentMode(agentId: Cuid2, options: RequestOptions = {}): Promise<AgentModeResponse> {
+        return await this.#json({
+            method: "GET",
+            path: `v0/agents/${encodeURIComponent(agentId)}/mode`,
+            signal: options.signal,
+        });
+    }
+
+    /** `GET /v0/agents/:agentId/bootstrap` — mode, usage, pending messages, and cursor. */
+    async getAgentBootstrap(
+        agentId: Cuid2,
+        options: RequestOptions = {},
+    ): Promise<AgentBootstrapResponse> {
+        return await this.#json({
+            method: "GET",
+            path: `v0/agents/${encodeURIComponent(agentId)}/bootstrap`,
+            signal: options.signal,
+        });
+    }
+
     /**
      * `POST /v0/agents/:agentId/send` — queues a message, or steers the run.
      *
@@ -953,11 +976,20 @@ export class HappyAgentClient {
         agentId: Cuid2,
         request: SaveAgentDraftRequest,
         options: RequestOptions = {},
-    ): Promise<AgentResponse> {
+    ): Promise<AgentDraftResponse> {
         return await this.#json({
             method: "PUT",
             path: `v0/agents/${encodeURIComponent(agentId)}/draft`,
             json: request,
+            signal: options.signal,
+        });
+    }
+
+    /** `GET /v0/agents/:agentId/draft` — current composer state and LWW timestamp. */
+    async getAgentDraft(agentId: Cuid2, options: RequestOptions = {}): Promise<AgentDraftResponse> {
+        return await this.#json({
+            method: "GET",
+            path: `v0/agents/${encodeURIComponent(agentId)}/draft`,
             signal: options.signal,
         });
     }

@@ -57,7 +57,11 @@ import {
 } from "../terminals/index.js";
 import { TitlesModule } from "../titles/index.js";
 import { createNodeBinaryWebSocket, WebSocketDuplex } from "../transport/index.js";
-import { UsageModule, type UsageInferenceRecord } from "../usage/index.js";
+import {
+    UsageModule,
+    type UsageCurrentContext,
+    type UsageInferenceRecord,
+} from "../usage/index.js";
 import { UserInputModule, type UserInputEvent } from "../userInput/index.js";
 import { fileSearchQuerySchema, WorkspaceFileSearchModule } from "../workspaceFileSearch/index.js";
 import {
@@ -71,6 +75,7 @@ import { ApiEventJournal, type ApiEvent } from "./ApiEventJournal.js";
 import { messageResource, providerMessageContent } from "./ApiMessageProjection.js";
 import {
     agentResource,
+    agentModeFromConfig,
     apiResourceVersion,
     gitResource,
     profileResource,
@@ -103,7 +108,7 @@ import {
 } from "./ApiSchemas.js";
 import { WorkspaceProxy } from "./WorkspaceProxy.js";
 
-const API_PROTOCOL_VERSION = 17;
+const API_PROTOCOL_VERSION = 18;
 const MAX_JSON_BODY_BYTES = 48 * 1024 * 1024;
 const HEARTBEAT_MS = 15_000;
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
@@ -634,7 +639,27 @@ export class ApiModule implements AgentModule {
                 await this.#convertUserInputEvent(ctx, event);
             }),
             this.#usage.onEvent(async (_eventCtx, event) => {
-                if (event.type !== "usage_recorded") return;
+                if (event.type === "usage_context_changed") {
+                    this.#journal.append(
+                        "agent.context.updated",
+                        {
+                            agentId: event.agentId,
+                            context: this.#agentContext(event.context ?? undefined),
+                        },
+                        event.at,
+                    );
+                    return;
+                }
+                if (event.type === "usage_reset") {
+                    if (event.agentId !== null) {
+                        this.#journal.append(
+                            "agent.context.updated",
+                            { agentId: event.agentId, context: null },
+                            event.at,
+                        );
+                    }
+                    return;
+                }
                 await this.#updateAgentMetadata(ctx, event.record.agentId, {});
             }),
             this.#profile.onEvent(async (_eventCtx: Context, event: ProfileChangedEvent) => {
@@ -966,6 +991,13 @@ export class ApiModule implements AgentModule {
         if (event.type === "agent.metadata-changed") {
             const update = recordValue(payload?.["update"]);
             if (update === undefined) return;
+            if (Object.hasOwn(update, "draft")) {
+                this.#journal.append(
+                    "agent.draft.updated",
+                    { agentId, draft: await this.#agentDraft(ctx, agentId) },
+                    event.occurredAt,
+                );
+            }
             await this.#appendAgentUpdate(
                 ctx,
                 event,
@@ -1388,7 +1420,7 @@ export class ApiModule implements AgentModule {
             return true;
         }
         const action =
-            /^\/v0\/agents\/([a-z][a-z0-9]*)\/(send|messages|question|abort|compact|read|archive|unarchive|reorder|draft|usage|activity)$/.exec(
+            /^\/v0\/agents\/([a-z][a-z0-9]*)\/(send|messages|question|abort|compact|read|archive|unarchive|reorder|draft|usage|mode|bootstrap|activity)$/.exec(
                 url.pathname,
             );
         if (action !== null) {
@@ -1564,15 +1596,26 @@ export class ApiModule implements AgentModule {
                             }),
                     );
                 }
-                sendJson(response, 200, {
-                    agent: await this.#requireAgentResource(ctx, agentId),
-                });
+                sendJson(response, 200, { draft: await this.#agentDraft(ctx, agentId) });
+                return true;
+            }
+            if (operation === "draft" && request.method === "GET") {
+                await this.#requireAgentResource(ctx, agentId);
+                sendJson(response, 200, { draft: await this.#agentDraft(ctx, agentId) });
                 return true;
             }
             if (operation === "usage" && request.method === "GET") {
                 await this.#requireAgentResource(ctx, agentId);
-                const records = await this.#usageRecordsForAgentTree(ctx, agentId);
-                sendJson(response, 200, { usage: usageRecordsSince(records, 0) });
+                sendJson(response, 200, await this.#agentUsage(ctx, agentId));
+                return true;
+            }
+            if (operation === "mode" && request.method === "GET") {
+                await this.#requireAgentResource(ctx, agentId);
+                sendJson(response, 200, { mode: await this.#agentMode(ctx, agentId) });
+                return true;
+            }
+            if (operation === "bootstrap" && request.method === "GET") {
+                sendJson(response, 200, await this.#agentBootstrap(ctx, agentId));
                 return true;
             }
             if (operation === "activity" && request.method === "GET") {
@@ -1760,6 +1803,7 @@ export class ApiModule implements AgentModule {
                 accepted === undefined
                     ? pendingMessageResource(pending)
                     : messageResource(accepted);
+            await this.#updateAgentMetadata(ctx, agentId, { lastMode: body.mode });
             this.#journal.append("message.created", {
                 agentId,
                 runId: null,
@@ -1768,7 +1812,6 @@ export class ApiModule implements AgentModule {
             this.#announcedPendingMessages.delete(id);
             this.#finishPendingMessageAnnouncement(id);
             this.#flushAcceptedMessages(agentId);
-            await this.#updateAgentMetadata(ctx, agentId, { lastMode: body.mode });
             sendJson(response, 202, { message, cursor });
         });
     }
@@ -1810,9 +1853,74 @@ export class ApiModule implements AgentModule {
                     };
                 }),
             ),
-            pending: page.pending.map(pendingMessageResource),
             hasMore: page.hasMore,
         });
+    }
+
+    async #agentMode(ctx: Context, agentId: string): Promise<unknown> {
+        const config = await this.#agentSystem().config(ctx, agentId);
+        if (config === undefined) throw notFound("The agent was not found.");
+        return agentModeFromConfig(config);
+    }
+
+    async #agentDraft(ctx: Context, agentId: string): Promise<Record<string, unknown>> {
+        const config = await this.#agentSystem().config(ctx, agentId);
+        if (config === undefined) throw notFound("The agent was not found.");
+        const value = config.metadata?.["draft"] ?? null;
+        const updatedAt = config.metadata?.["draftUpdatedAt"];
+        return {
+            value: Value.Check(draftBodySchema.properties.draft, value) ? value : null,
+            updatedAt:
+                typeof updatedAt === "number" && Number.isSafeInteger(updatedAt) && updatedAt >= 0
+                    ? updatedAt
+                    : null,
+        };
+    }
+
+    async #agentUsage(ctx: Context, agentId: string): Promise<Record<string, unknown>> {
+        const [records, summary] = await Promise.all([
+            this.#usageRecordsForAgentTree(ctx, agentId),
+            this.#usage.read(ctx, agentId),
+        ]);
+        return {
+            context: this.#agentContext(summary.currentContext),
+            usage: usageRecordsSince(records, 0),
+        };
+    }
+
+    #agentContext(context: UsageCurrentContext | undefined): Record<string, unknown> | null {
+        if (context === undefined) return null;
+        const modelContext =
+            context.model === undefined
+                ? undefined
+                : this.#config.modelContext(context.provider, context.model);
+        return {
+            approximate: context.approximate,
+            contextTokens: context.contextTokens,
+            contextWindow: modelContext?.contextWindow ?? null,
+            modelId: context.model ?? null,
+            providerId: context.provider,
+        };
+    }
+
+    async #agentBootstrap(ctx: Context, agentId: string): Promise<Record<string, unknown>> {
+        // Capture first so every concurrent mutation is either in this snapshot or replayed.
+        const cursor = this.#journal.cursor();
+        const agent = await this.#requireAgentResource(ctx, agentId);
+        const [draft, mode, usage, pending] = await Promise.all([
+            this.#agentDraft(ctx, agentId),
+            this.#agentMode(ctx, agentId),
+            this.#agentUsage(ctx, agentId),
+            this.#history.pending(ctx, agentId),
+        ]);
+        return {
+            ...usage,
+            agent,
+            draft,
+            mode,
+            pending: pending.map(pendingMessageResource),
+            cursor,
+        };
     }
 
     async #requireAgentResource(ctx: Context, agentId: string): Promise<Record<string, unknown>> {
@@ -3111,6 +3219,9 @@ export class ApiModule implements AgentModule {
                 model.id,
                 {
                     name: model.name,
+                    contextWindow:
+                        this.#config.modelContext(model.providerId, model.id)?.contextWindow ??
+                        null,
                     efforts: model.effortLevels,
                     defaultEffort: model.defaultEffort,
                     serviceTiers: model.serviceTiers ?? [],
@@ -3612,8 +3723,6 @@ function agentMetadataChanges(
     const changes: Record<string, unknown> = { updatedAt: occurredAt };
     for (const key of [
         "archivedAt",
-        "draft",
-        "lastMode",
         "orderKey",
         "pendingQuestionId",
         "processes",

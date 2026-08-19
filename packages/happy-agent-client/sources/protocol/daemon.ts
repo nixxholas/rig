@@ -10,7 +10,7 @@ import { effortSchema, Nullable, permissionModeSchema, serviceTierSchema } from 
  * A daemon reports its own number through `GET /v0/health`; a client that reads
  * a different one refuses to talk to that daemon.
  */
-export const HAPPY_AGENT_PROTOCOL_VERSION = 17;
+export const HAPPY_AGENT_PROTOCOL_VERSION = 18;
 
 /** `GET /` — a greeting confirming the caller reached a Happy agent. */
 export const greetingResponseSchema = Type.Object({ text: Type.String() });
@@ -109,6 +109,8 @@ export type PresenceConfig = Static<typeof presenceConfigSchema>;
 
 /** Everything a client needs to present a model, defined once. */
 export const modelDefinitionSchema = Type.Object({
+    /** Maximum measured conversation tokens accepted before provider inference must compact. */
+    contextWindow: Nullable(Type.Integer({ minimum: 1 })),
     defaultEffort: effortSchema,
     efforts: Type.Array(effortSchema),
     name: Type.String(),

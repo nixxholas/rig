@@ -11,10 +11,8 @@ export function agentCatalogEntry(
         agent: {
             archivedAt: null,
             createdAt: AGENT_FIXTURE_NOW,
-            draft: null,
             id,
             lastCursor: "01900000-0000-7000-8000-000000000000",
-            lastMode: null,
             orderKey: "a",
             parentAgentId: null,
             pendingQuestionId: null,

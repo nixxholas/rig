@@ -192,6 +192,9 @@ describe("Happy Agent platform API matrix", () => {
                     name: expect.any(String),
                     serviceTiers: expect.any(Array),
                 });
+                expect(
+                    model.contextWindow === null || typeof model.contextWindow === "number",
+                ).toBe(true);
             }
             for (const provider of Object.values(config.providers)) {
                 expect(provider.models).toEqual(expect.any(Array));

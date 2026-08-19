@@ -7,7 +7,7 @@
  */
 
 import type { Cuid2, EventCursor, ResourceVersion, Timestamp } from "./common.js";
-import type { Agent } from "./agents.js";
+import type { Agent, AgentDraftSnapshot } from "./agents.js";
 import type { GitState } from "./git.js";
 import type { Message, Run } from "./messages.js";
 import type { BackgroundProcess } from "./processes.js";
@@ -15,6 +15,7 @@ import type { Profile } from "./profile.js";
 import type { Project } from "./projects.js";
 import type { Question } from "./questions.js";
 import type { Terminal } from "./terminals.js";
+import type { AgentContextUsage } from "./usage.js";
 import type { Workspace } from "./workspaces.js";
 
 /**
@@ -57,6 +58,18 @@ export interface GitUpdatedPayload {
 
 export type AgentCreatedPayload = MutationEcho & { agent: Agent };
 export type AgentUpdatedPayload = ResourceUpdate<Agent> & { agentId: Cuid2 };
+
+/** Current context is computed state, so it carries a complete replacement and no version chain. */
+export interface AgentContextUpdatedPayload {
+    agentId: Cuid2;
+    context: AgentContextUsage | null;
+}
+
+/** Draft state is a complete current-value replacement rather than part of the agent resource. */
+export interface AgentDraftUpdatedPayload extends MutationEcho {
+    agentId: Cuid2;
+    draft: AgentDraftSnapshot;
+}
 
 export type ProcessStartedPayload = MutationEcho & { process: BackgroundProcess };
 export type ProcessUpdatedPayload = ResourceUpdate<BackgroundProcess> & { processId: Cuid2 };
@@ -158,6 +171,8 @@ export type HappyAgentEvent =
     | EventEnvelope<"git.updated", GitUpdatedPayload>
     | EventEnvelope<"agent.created", AgentCreatedPayload>
     | EventEnvelope<"agent.updated", AgentUpdatedPayload>
+    | EventEnvelope<"agent.context.updated", AgentContextUpdatedPayload>
+    | EventEnvelope<"agent.draft.updated", AgentDraftUpdatedPayload>
     | EventEnvelope<"process.started", ProcessStartedPayload>
     | EventEnvelope<"process.updated", ProcessUpdatedPayload>
     | EventEnvelope<"process.exited", ProcessUpdatedPayload>

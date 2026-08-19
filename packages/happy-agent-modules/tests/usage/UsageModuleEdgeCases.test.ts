@@ -943,13 +943,14 @@ describe("UsageModule edge cases", () => {
 
     it("returns exact collection aggregates and latest context measurements", async () => {
         await withUsageDatabase("usage-collection-aggregate", async (database) => {
-            await insertRawRecord(database, inferenceRecord("one", "agent-1", 10));
-            await insertRawRecord(
-                database,
+            const store = new UsageDatabase();
+            await store.record(database.context, inferenceRecord("one", "agent-1", 10));
+            await store.record(
+                database.context,
                 turnRecord("turn-1", "agent-1", 20, { contextTokens: 50 }),
             );
-            await insertRawRecord(
-                database,
+            await store.record(
+                database.context,
                 inferenceRecord("two", "agent-2", 30, {
                     provider: "provider-other",
                     model: "model-other",

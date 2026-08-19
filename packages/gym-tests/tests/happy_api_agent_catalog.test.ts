@@ -184,8 +184,7 @@ describe("the public agent catalog API", () => {
         });
         expect(reorderEvent.payload.mutationId).toBe("catalog-reorder-second-first");
 
-        const lastModeBeforeSend = (await gym.client.getAgent(first.id)).agent;
-        expect(lastModeBeforeSend.lastMode).toBeNull();
+        await expect(gym.client.getAgentMode(first.id)).resolves.toEqual({ mode: null });
         const accepted = await gym.send("remember this mode", {
             effort: "high",
             modelId: "gym/model-2",
@@ -197,7 +196,8 @@ describe("the public agent catalog API", () => {
             const current = (await gym.client.getAgent(first.id)).agent;
             return current.unread === null ? undefined : current;
         }, "the completed turn to mark the agent unread");
-        expect(afterSend.lastMode).toEqual({
+        const afterSendMode = (await gym.client.getAgentMode(first.id)).mode;
+        expect(afterSendMode).toEqual({
             effort: "high",
             modelId: "gym/model-2",
             permissionMode: "workspace_write",
@@ -205,15 +205,7 @@ describe("the public agent catalog API", () => {
             serviceTier: null,
         });
         expect(afterSend.unread).toMatchObject({ reason: "turn_finished" });
-        const sendEvent = await waitForAgentEvent(
-            gym,
-            first.id,
-            "agent.updated",
-            "catalog-send-mode",
-        );
-        expect(sendEvent.payload.changes).toMatchObject({
-            lastMode: afterSend.lastMode,
-        });
+        expect((await gym.client.getAgent(first.id)).agent).not.toHaveProperty("lastMode");
 
         const read = await gym.client.markAgentRead(first.id, {
             mutationId: "catalog-mark-read",
@@ -237,21 +229,28 @@ describe("the public agent catalog API", () => {
         };
         const olderDraft = { ...newestDraft, text: "old draft" };
         const now = Date.now();
+        await expect(gym.client.getAgentDraft(first.id)).resolves.toEqual({
+            draft: { value: null, updatedAt: null },
+        });
         const saved = await gym.client.saveAgentDraft(first.id, {
             draft: newestDraft,
             mutationId: "catalog-draft-new",
             updatedAt: now + 100,
         });
-        expect(saved.agent.draft).toEqual(newestDraft);
+        expect(saved.draft).toEqual({ value: newestDraft, updatedAt: now + 100 });
         const ignored = await gym.client.saveAgentDraft(first.id, {
             draft: olderDraft,
             mutationId: "catalog-draft-old",
             updatedAt: now,
         });
-        expect(ignored.agent.draft).toEqual(newestDraft);
+        expect(ignored.draft).toEqual(saved.draft);
+        expect((await gym.client.getAgent(first.id)).agent).not.toHaveProperty("draft");
+        await expect(gym.client.getAgentBootstrap(first.id)).resolves.toMatchObject({
+            draft: saved.draft,
+        });
         const draftEvents = (await gym.events()).filter(
             (event) =>
-                event.type === "agent.updated" &&
+                event.type === "agent.draft.updated" &&
                 (event.payload as unknown as Record<string, unknown>).agentId === first.id &&
                 ((event.payload as unknown as Record<string, unknown>).mutationId ===
                     "catalog-draft-new" ||
@@ -263,6 +262,10 @@ describe("the public agent catalog API", () => {
                 (event) => (event.payload as unknown as Record<string, unknown>).mutationId,
             ),
         ).toEqual(["catalog-draft-new"]);
+        expect(draftEvents[0]).toMatchObject({
+            type: "agent.draft.updated",
+            payload: { agentId: first.id, draft: saved.draft },
+        });
 
         const archived = await gym.client.archiveAgent(first.id, {
             mutationId: "catalog-archive",
@@ -296,10 +299,12 @@ describe("the public agent catalog API", () => {
         const restarted = (await gym.client.getAgent(first.id)).agent;
         expect(restarted).toMatchObject({
             archivedAt: null,
-            draft: newestDraft,
             id: first.id,
-            lastMode: afterSend.lastMode,
             unread: null,
+        });
+        await expect(gym.client.getAgentDraft(first.id)).resolves.toEqual({ draft: saved.draft });
+        await expect(gym.client.getAgentMode(first.id)).resolves.toEqual({
+            mode: afterSendMode,
         });
         expect(
             (await gym.client.getProject(root.id)).project.agents.map((agent) => agent.id),

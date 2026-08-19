@@ -31,7 +31,7 @@ at `paths.tokenPath` with mode `0600`. A missing or mismatched token yields `401
 
 All routes are prefixed with `/v0`. Independently of the path version, every daemon advertises
 its identity through the health endpoint as a single `version` object: a numeric `protocol`
-(integer, currently 17) and the `daemon` product version string. Clients compare `protocol`
+(integer, currently 18) and the `daemon` product version string. Clients compare `protocol`
 against the number they were built for and refuse to talk to an incompatible daemon; `daemon` is
 for display and diagnostics only.
 
@@ -171,7 +171,7 @@ Response — `200`:
     "healthy": true,
     "ready": true,
     "status": "ready",
-    "version": { "protocol": 17, "daemon": "1.2.3" }
+    "version": { "protocol": 18, "daemon": "1.2.3" }
 }
 ```
 
@@ -194,8 +194,8 @@ stripped of credentials and carry only their declared shape.
 
 The response carries a top-level `models` map holding **every model the daemon knows** — the
 curated catalog is source code, so the daemon always knows the full list. A model definition
-carries everything a client needs to present it: display name, allowed effort levels, default
-effort, and supported service tiers. Provider entries do not repeat definitions; they reference
+carries everything a client needs to present it: display name, context window, allowed effort
+levels, default effort, and supported service tiers. Provider entries do not repeat definitions; they reference
 model IDs and say whether each is enabled on that provider. A model is enabled when its provider
 is enabled and the provider's include/exclude filters admit it. The raw filter lists are
 configuration input; the response carries only the derived answer.
@@ -259,60 +259,70 @@ Response — `200`:
         "models": {
             "openai/gpt-5.6-sol": {
                 "name": "GPT-5.6 Sol",
+                "contextWindow": 272000,
                 "efforts": ["low", "medium", "high", "xhigh", "max"],
                 "defaultEffort": "medium",
                 "serviceTiers": ["priority"]
             },
             "openai/gpt-5.6-terra": {
                 "name": "GPT-5.6 Terra",
+                "contextWindow": 272000,
                 "efforts": ["off", "low", "medium", "high", "xhigh", "max"],
                 "defaultEffort": "medium",
                 "serviceTiers": ["priority"]
             },
             "openai/gpt-5.6-luna": {
                 "name": "GPT-5.6 Luna",
+                "contextWindow": 272000,
                 "efforts": ["off", "low", "medium", "high", "xhigh", "max"],
                 "defaultEffort": "medium",
                 "serviceTiers": ["priority"]
             },
             "anthropic/opus-5": {
                 "name": "Opus 5 1M",
+                "contextWindow": 1000000,
                 "efforts": ["off", "low", "medium", "high", "xhigh", "max"],
                 "defaultEffort": "medium",
                 "serviceTiers": []
             },
             "anthropic/sonnet-5": {
                 "name": "Sonnet 5",
+                "contextWindow": 1000000,
                 "efforts": ["off", "low", "medium", "high", "xhigh", "max"],
                 "defaultEffort": "medium",
                 "serviceTiers": []
             },
             "anthropic/fable-5": {
                 "name": "Fable 5",
+                "contextWindow": 1000000,
                 "efforts": ["off", "low", "medium", "high", "xhigh", "max"],
                 "defaultEffort": "medium",
                 "serviceTiers": []
             },
             "anthropic/opus-4-8": {
                 "name": "Opus 4.8 1M",
+                "contextWindow": 1000000,
                 "efforts": ["off", "low", "medium", "high", "xhigh", "max"],
                 "defaultEffort": "medium",
                 "serviceTiers": []
             },
             "xai/grok-build": {
                 "name": "Grok Build",
+                "contextWindow": 500000,
                 "efforts": ["medium"],
                 "defaultEffort": "medium",
                 "serviceTiers": []
             },
             "xai/grok-4.5": {
                 "name": "Grok 4.5",
+                "contextWindow": 500000,
                 "efforts": ["low", "medium", "high"],
                 "defaultEffort": "high",
                 "serviceTiers": []
             },
             "xai/grok-composer-2.5-fast": {
                 "name": "Composer 2.5",
+                "contextWindow": 200000,
                 "efforts": ["off"],
                 "defaultEffort": "off",
                 "serviceTiers": []
@@ -388,8 +398,9 @@ Field groups:
 - `permissions` — permission configuration, including project-relative protected paths.
 - `presence` — the defined presence states and which one is current.
 - `models` — every known model, keyed by model ID. Each definition carries the display `name`,
-  the allowed `efforts`, the `defaultEffort`, and the supported `serviceTiers` (empty when the
-  model has none). Definitions live only here; everything else refers to models by ID.
+  `contextWindow` in tokens (`null` only for a custom model whose limit is unknown), the allowed
+  `efforts`, the `defaultEffort`, and the supported `serviceTiers` (empty when the model has none).
+  Definitions live only here; everything else refers to models by ID.
 - `providers` — one entry per configured provider: its `type` (canonical provider key),
   whether the provider is `enabled`, and its model list as references — `id` into the top-level
   `models` map plus a per-provider `enabled` flag. A disabled provider still lists its known
@@ -1196,14 +1207,14 @@ are a top-level resource at `/v0/agents/:agentId`. Every agent belongs to exactl
 workspace — possibly a project's root workspace — and works in that workspace's folder.
 
 An agent does not hold a model, effort, or permission mode of its own. Those are chosen on
-every message sent; what the agent object reports is the selection the **last** message used,
-so a client can prefill its composer. A fresh agent has used nothing yet and reports `null`.
+every message sent. The last submitted selection is current composer state rather than catalog
+state, so it has its own `mode` endpoint and is composed into the agent bootstrap response.
 
 An agent is either a top-level conversation or a **subagent** — one spawned by another agent to
 help with its task, carrying `parentAgentId`. Subagents are driven entirely by their parent:
-they cannot be sent messages, have no place in the list order, no draft, and no archival — they
+they cannot be sent messages, have no place in the list order, no mutable draft, and no archival — they
 are read-only through this API, observed via `GET` and events, and they end when their work
-ends. `send`, `reorder`, `archive`, `unarchive`, `read`, and `draft` on a subagent answer
+ends. `send`, `reorder`, `archive`, `unarchive`, `read`, and `PUT draft` on a subagent answer
 `409`.
 
 Agents accept the optional `mutationId` from the basics — except `send`, whose message is
@@ -1225,22 +1236,7 @@ guarding the whole row. The version exists for event chaining and newer-copy com
     "subagents": { "total": 2, "running": 0 },
     "processes": { "running": 1 },
     "pendingQuestionId": null,
-    "lastMode": {
-        "providerId": "codex",
-        "modelId": "openai/gpt-5.6-sol",
-        "effort": "medium",
-        "serviceTier": null,
-        "permissionMode": "auto"
-    },
     "unread": { "reason": "turn_finished", "since": 1755400000000 },
-    "draft": {
-        "text": "Now fix the signup flow the same way",
-        "providerId": "codex",
-        "modelId": "openai/gpt-5.6-sol",
-        "effort": "high",
-        "serviceTier": null,
-        "permissionMode": "auto"
-    },
     "orderKey": "5",
     "lastCursor": "01991f3a-5c1e-7000-8000-2f9a1b3c4d5e",
     "version": "01991f3a-5f4d-7000-8000-6d3e5f708192",
@@ -1277,15 +1273,8 @@ Fields:
   Process lifecycle detail travels in the `process.*` events and the activity endpoint.
 - `pendingQuestionId` — the ID of the open question when the run is waiting on the person, or
   `null`. See "Questions" below.
-- `lastMode` — everything the last message ran with: the model selection in the config
-  catalog's vocabulary (`serviceTier` `null` meaning the default tier) and the
-  `permissionMode` (`"read_only"`, `"workspace_write"`, `"auto"`, or `"full_access"`). `null`
-  when no message has been sent yet.
 - `unread` — set when the agent finished work the user has not looked at: why (`reason`) and
   since when. `null` when there is nothing unread. Cleared by `POST /v0/agents/:agentId/read`.
-- `draft` — the composer draft saved for this agent, or `null`. A draft is the whole composer
-  state — the `text` plus the selection it will be sent with — so a message started on one
-  device can be finished on another exactly as it was left.
 - `orderKey` — an opaque owner-local sort key, as on projects and workspaces; the list order is
   manual and moved with `reorder`. It is `null` on a subagent because subagents do not appear in an
   owner list.
@@ -1328,6 +1317,28 @@ workspace, or the owning child workspace, also advance and emit their update wit
 Returns one agent.
 
 Response — `200`: `{ "agent": { ... } }`; `404` when no such agent exists.
+
+### `GET /v0/agents/:agentId/mode`
+
+Returns the complete mode carried by the last submitted message, whether that message is already
+accepted or still pending. It is separate from the agent object because model choice, effort,
+service tier, and permission mode are composer state rather than agent lifecycle state.
+
+Response — `200`:
+
+```json
+{
+    "mode": {
+        "providerId": "codex",
+        "modelId": "openai/gpt-5.6-sol",
+        "effort": "medium",
+        "serviceTier": null,
+        "permissionMode": "auto"
+    }
+}
+```
+
+`mode` is `null` before the first message. `404` when no such agent exists.
 
 ### Messages and runs
 
@@ -1387,8 +1398,8 @@ These compound events let a client close the old group, move the accepted messag
 new group, and update activity in one frame without repeating message content.
 
 Every message carries its own mode — the full model selection and permission mode. There is no
-agent-level default; the client sends what its composer shows (typically prefilled from
-`lastMode`).
+agent-level default; the client sends what its composer shows (typically prefilled from the
+agent's `mode` endpoint or bootstrap response).
 
 ### Message content
 
@@ -1547,7 +1558,7 @@ real history — it has no run. It stays pending until inference **accepts** it 
 message when its run starts, a steering message when it is actually placed in front of the
 model. Acceptance assigns the `runId` and moves the message into history; sending to an idle
 agent accepts immediately. Both states are visible to every client: the pending message
-appears in history loads (below) and in events, so a second device shows what the first one
+appears in the agent bootstrap response and in events, so a second device shows what the first one
 sent even before the model has seen it.
 
 Response — `202`: the durable message as it now stands, plus the event cursor at send:
@@ -1667,24 +1678,6 @@ Response — `200`:
             ]
         }
     ],
-    "pending": [
-        {
-            "id": "x3k9m2q7w1e5r8t4y6u0i2o5",
-            "role": "user",
-            "status": "pending",
-            "delivery": "queue",
-            "createdAt": 1755400009000,
-            "content": [{ "type": "text", "text": "Then update the tests" }],
-            "mode": {
-                "providerId": "codex",
-                "modelId": "openai/gpt-5.6-sol",
-                "effort": "medium",
-                "serviceTier": null,
-                "permissionMode": "auto"
-            },
-            "runId": null
-        }
-    ],
     "hasMore": true
 }
 ```
@@ -1693,12 +1686,10 @@ Runs are returned oldest first, and messages oldest first within each run. A his
 run metadata above plus `messages`, oldest first. Its `id` is the `runId` assigned at message
 acceptance.
 
-`pending` is the messages sent but not yet accepted by inference — queued behind the current
-run, or steering still on its way to the model. They belong to no run yet, so they live
-outside the `runs` grouping, ordered oldest first. Every history load returns the **complete**
-pending list regardless of cursors — it is current composer state, not pageable history. When
-a pending message is accepted it leaves `pending` and appears in its run, announced atomically
-by `run.started` or `run.boundary` with its assigned `runId`.
+Pending queue and steering messages are deliberately absent here: they are current composer state,
+not pageable accepted history. The agent bootstrap endpoint returns their complete oldest-first
+snapshot. When one is accepted it appears in its run, announced atomically by `run.started` or
+`run.boundary` with its assigned `runId`.
 
 ### Questions
 
@@ -1831,7 +1822,7 @@ Response — `200`: `{ "agent": { ... } }` with `archivedAt` set.
 ### `POST /v0/agents/:agentId/unarchive`
 
 Brings an archived agent back: it reappears in the default list and can receive messages again,
-with its history, `lastMode`, owner, and order intact. Idempotent.
+with its history, last submitted mode, owner, and order intact. Idempotent.
 
 Response — `200`: `{ "agent": { ... } }` with `archivedAt` `null`.
 
@@ -1847,9 +1838,36 @@ Response — `200`: `{ "agent": { ... } }`. Reordering assigns the moved agent a
 only the moved agent emits an `agent.updated` reorder event. Its owning project or workspace also
 advances because the embedded ordered agent list changed.
 
+### `GET /v0/agents/:agentId/draft`
+
+Returns the current composer draft as separate current state. A draft is the text plus the exact
+mode it will be sent with. The wrapper retains `updatedAt` even when `value` is `null`, so a clear
+cannot be overwritten by an older device reconnecting later.
+
+Response — `200`:
+
+```json
+{
+    "draft": {
+        "value": {
+            "text": "Now fix the signup flow the same way",
+            "providerId": "codex",
+            "modelId": "openai/gpt-5.6-sol",
+            "effort": "high",
+            "serviceTier": null,
+            "permissionMode": "auto"
+        },
+        "updatedAt": 1755400000000
+    }
+}
+```
+
+A fresh agent, and every subagent, returns
+`{ "draft": { "value": null, "updatedAt": null } }`.
+
 ### `PUT /v0/agents/:agentId/draft`
 
-Saves or clears the composer draft — the whole composer state, as on the agent object.
+Saves or clears the focused composer draft state.
 
 Request:
 
@@ -1873,20 +1891,28 @@ Request:
   across devices: a write carrying an older `updatedAt` than the stored draft is ignored, so a
   stale device cannot clobber what was typed elsewhere. Omitted, the write always applies.
 
-Response — `200`: `{ "agent": { ... } }` carrying the draft as stored — which is the previous
-one when the write was ignored as stale.
+Response — `200`: the same `{ "draft": { "value", "updatedAt" } }` shape as `GET`, carrying
+the authoritative stored state — which is the previous one when the write was ignored as stale.
 
 ### `GET /v0/agents/:agentId/usage`
 
 Reports what this agent has consumed over its whole life, including the work of its subagents.
 Usage is never summarized across models: it is always broken down by provider, then by model,
 because tokens from different models are not comparable quantities. Clients that want a rollup
-compute their own.
+compute their own. The response also carries the latest exact context measurement for the root
+agent only; subagents each own a separate context window.
 
 Response — `200`:
 
 ```json
 {
+    "context": {
+        "approximate": false,
+        "contextTokens": 201000,
+        "contextWindow": 272000,
+        "providerId": "codex",
+        "modelId": "openai/gpt-5.6-sol"
+    },
     "usage": {
         "codex": {
             "openai/gpt-5.6-sol": {
@@ -1907,6 +1933,17 @@ Response — `200`:
     }
 }
 ```
+
+- `context` — the root agent's active conversation occupancy and hard model limit. It is `null`
+  before the first provider measurement and after compaction or a context reset, until the next
+  inference measures the replacement. `contextWindow` is `null` only for a custom model whose
+  catalog entry has no known limit. Provider-measured occupancy is durable across daemon restart.
+- `usage` — lifetime inference totals for the complete agent subtree.
+
+When an exact measurement reaches the model's curated automatic-compaction threshold, the daemon
+requests compaction before another inference can overflow the hard `contextWindow`. Successful
+compaction clears `context`; the first inference on the replacement context establishes its next
+exact value.
 
 ### Background processes
 
@@ -2118,10 +2155,20 @@ how a bootstrap snapshot and an event stream reconcile.
 - `agent.updated` — any change to the agent object. This is the agent **state-change** event:
   every `status` move between `"idle"`, `"thinking"`, `"working"`, `"generating_tools"`, and
   `"running_tools"` is one of these, as is every change to the `subagents` and `processes`
-  counts, `pendingQuestionId`, title generation, `lastMode`, unread, draft, reorder, archive
+  counts, `pendingQuestionId`, title generation, unread, reorder, archive
   and unarchive. `changes` carries exactly the fields that moved — a status flip is
   `{ "status": "running_tools", "updatedAt": ... }`, nothing more.
     - `agentId` (ID string), `previousVersion`, `version`, `changes`.
+- `agent.context.updated` — the provider measured the active conversation context, or compaction
+  or reset invalidated the previous measurement. Context is computed state and has no resource
+  version chain; replace the prior value whole.
+    - `agentId` (ID string).
+    - `context` — the complete context object from the agent usage/bootstrap response, or `null`
+      until the next inference measures the replacement context.
+- `agent.draft.updated` — the focused composer draft changed. It is current state and has no
+  resource version chain; replace it whole.
+    - `agentId` (ID string).
+    - `draft` — the complete `{ "value", "updatedAt" }` object from the draft/bootstrap response.
 
 **Background processes**
 
@@ -2267,6 +2314,75 @@ that falls too far behind reading is disconnected rather than buffered without b
 back with its last cursor — landing in either the resumed or the gap case above.
 
 ## Bootstrap
+
+### `GET /v0/agents/:agentId/bootstrap`
+
+One bounded snapshot for opening a conversation. It composes the exact agent object plus the
+`mode`, `context`, and `usage` fields from the focused agent endpoints with every durable queue or
+steering message that inference has not accepted yet. It also captures the event cursor before
+reading, so a client can render the snapshot and follow every concurrent change without a
+snapshot-to-stream gap.
+
+Response — `200`:
+
+```json
+{
+    "agent": {
+        /* exactly GET /v0/agents/:agentId */
+    },
+    "draft": {
+        "value": null,
+        "updatedAt": 1755400000000
+    },
+    "mode": {
+        "providerId": "codex",
+        "modelId": "openai/gpt-5.6-sol",
+        "effort": "medium",
+        "serviceTier": null,
+        "permissionMode": "auto"
+    },
+    "context": {
+        "approximate": false,
+        "contextTokens": 201000,
+        "contextWindow": 272000,
+        "providerId": "codex",
+        "modelId": "openai/gpt-5.6-sol"
+    },
+    "usage": {
+        /* exactly the provider-then-model map from GET /v0/agents/:agentId/usage */
+    },
+    "pending": [
+        {
+            "id": "x3k9m2q7w1e5r8t4y6u0i2o5",
+            "role": "user",
+            "status": "pending",
+            "delivery": "steer",
+            "createdAt": 1755400009000,
+            "content": [{ "type": "text", "text": "Then update the tests" }],
+            "mode": {
+                "providerId": "codex",
+                "modelId": "openai/gpt-5.6-sol",
+                "effort": "medium",
+                "serviceTier": null,
+                "permissionMode": "auto"
+            },
+            "runId": null
+        }
+    ],
+    "cursor": "01991f3a-6d2f-7000-8000-3a0b2c4d5e6f"
+}
+```
+
+- `agent` — exactly the focused agent resource.
+- `draft` — exactly the focused draft response object.
+- `mode` — exactly the focused mode response; `null` on a fresh agent.
+- `context`, `usage` — exactly the focused usage response fields.
+- `pending` — every not-yet-accepted `queue` and `steer` message, oldest first and never paged.
+- `cursor` — the event cursor captured before the snapshot reads. Open the global event stream
+  from it; duplicate facts are harmless, while no concurrent fact can disappear.
+
+`404` when no such agent exists. Accepted message history remains in the pageable `messages`
+endpoint and is intentionally not repeated here.
 
 ### `GET /v0/bootstrap/desktop`
 

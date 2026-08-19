@@ -131,9 +131,9 @@ export async function runApp(ctx: Context, options: RunAppOptions = {}): Promise
                     "Subagents are driven by their parent and cannot be opened as an interactive Rig agent.",
                 );
             }
-            const eventCursor = (await localServer.client.getEvents({ limit: 1 })).latestCursor;
-            const [configResponse, history, pendingQuestion, workspaceResponse] = await Promise.all(
-                [
+            const [bootstrap, configResponse, history, pendingQuestion, workspaceResponse] =
+                await Promise.all([
+                    localServer.client.getAgentBootstrap(agentResponse.agent.id),
                     localServer.client.getConfig(),
                     localServer.client.getMessages(agentResponse.agent.id, {
                         limit: INITIAL_TUI_MESSAGE_LIMIT,
@@ -141,17 +141,17 @@ export async function runApp(ctx: Context, options: RunAppOptions = {}): Promise
                     }),
                     localServer.client.getPendingQuestion(agentResponse.agent.id),
                     localServer.client.getWorkspace(agentResponse.agent.workspaceId),
-                ],
-            );
+                ]);
             if (agentResponse.agent.unread !== null) {
                 await localServer.client
                     .markAgentRead(agentResponse.agent.id)
                     .catch(() => undefined);
             }
             return {
-                agent: agentResponse.agent,
+                agent: bootstrap.agent,
+                bootstrap,
                 config: configResponse.config,
-                eventCursor,
+                eventCursor: bootstrap.cursor,
                 history,
                 localServer,
                 pendingQuestion: pendingQuestion.question,
@@ -192,6 +192,7 @@ export async function runApp(ctx: Context, options: RunAppOptions = {}): Promise
         events.start();
         const agent = new RemoteAgent({
             agent: opened.agent,
+            bootstrap: opened.bootstrap,
             client: opened.localServer.client,
             config: opened.config,
             events,

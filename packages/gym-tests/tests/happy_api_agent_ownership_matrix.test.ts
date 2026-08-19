@@ -329,7 +329,7 @@ describe("public top-level agent ownership matrix", () => {
                     mutationId: "ao-019",
                     updatedAt: 2_000,
                 });
-                expect(saved.agent.draft).toEqual(draft);
+                expect(saved.draft).toEqual({ value: draft, updatedAt: 2_000 });
             },
         },
         {
@@ -347,7 +347,7 @@ describe("public top-level agent ownership matrix", () => {
                     mutationId: "ao-020",
                     updatedAt: 1_000,
                 });
-                expect(ignored.agent.draft).toEqual(newer);
+                expect(ignored.draft).toEqual({ value: newer, updatedAt: 2_000 });
             },
         },
         {
@@ -364,7 +364,7 @@ describe("public top-level agent ownership matrix", () => {
                     mutationId: "ao-021",
                     updatedAt: 3_000,
                 });
-                expect(cleared.agent.draft).toBeNull();
+                expect(cleared.draft).toEqual({ value: null, updatedAt: 3_000 });
             },
         },
         {
@@ -381,10 +381,12 @@ describe("public top-level agent ownership matrix", () => {
                 const restarted = (await gym.client.getAgent(agent.id)).agent;
                 expect(restarted).toMatchObject({
                     archivedAt: null,
-                    draft: draftFor("restart"),
                     id: agent.id,
                     unread: null,
                     workspaceId: project.id,
+                });
+                await expect(gym.client.getAgentDraft(agent.id)).resolves.toEqual({
+                    draft: { value: draftFor("restart"), updatedAt: 2_000 },
                 });
             },
         },

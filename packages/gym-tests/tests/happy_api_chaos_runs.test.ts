@@ -51,6 +51,7 @@ interface RunActionDetails {
 
 type PublicRunSnapshot = {
     readonly agent: Awaited<ReturnType<AgentGym["client"]["getAgent"]>>["agent"];
+    readonly bootstrap: Awaited<ReturnType<AgentGym["client"]["getAgentBootstrap"]>>;
     readonly history: Awaited<ReturnType<AgentGym["client"]["getMessages"]>>;
     readonly question: Awaited<ReturnType<AgentGym["client"]["getPendingQuestion"]>>["question"];
     readonly activity: Awaited<ReturnType<AgentGym["client"]["getAgentActivity"]>>;
@@ -224,7 +225,7 @@ describe("public run chaos", () => {
                                 kind: action.kind,
                                 eventCount: observed.events.length,
                                 historyRunCount: observed.history.runs.length,
-                                pendingMessageCount: observed.history.pending.length,
+                                pendingMessageCount: observed.bootstrap.pending.length,
                                 processCount: observed.activity.processes.length,
                                 question: observed.question?.status ?? null,
                             },
@@ -315,6 +316,7 @@ async function createRunContext(seed: string): Promise<RunContext> {
 
 async function readPublicRunSnapshot(gym: AgentGym): Promise<PublicRunSnapshot> {
     const agent = await gym.client.getAgent(gym.defaultSessionId);
+    const bootstrap = await gym.client.getAgentBootstrap(gym.defaultSessionId);
     const history = await gym.client.getMessages(gym.defaultSessionId);
     const question = (await gym.client.getPendingQuestion(gym.defaultSessionId)).question;
     const activity = await gym.client.getAgentActivity(gym.defaultSessionId);
@@ -326,6 +328,7 @@ async function readPublicRunSnapshot(gym: AgentGym): Promise<PublicRunSnapshot> 
     return {
         agent: agent.agent,
         activity,
+        bootstrap,
         events,
         history,
         question,
@@ -340,7 +343,7 @@ function createRunModel(snapshot: PublicRunSnapshot): RunModel {
         eventCursors: snapshot.events.map((event) => event.cursor),
         historyRunIds: snapshot.history.runs.map((run) => run.id),
         historyRunStatuses: snapshot.history.runs.map((run) => run.status),
-        pendingMessageIds: snapshot.history.pending.map((message) => message.id),
+        pendingMessageIds: snapshot.bootstrap.pending.map((message) => message.id),
         processIds: snapshot.activity.processes.map((process) => process.id),
         runningProcessIds: snapshot.activity.processes
             .filter((process) => process.status === "running")
@@ -396,7 +399,7 @@ async function executeRunAction(
             await barrier.waitFor(
                 (snapshot) =>
                     acceptedMessageIds.every((id) =>
-                        snapshot.history.pending.some((message) => message.id === id),
+                        snapshot.bootstrap.pending.some((message) => message.id === id),
                     ),
                 "both steering messages to be pending",
             );
@@ -495,7 +498,7 @@ async function executeRunAction(
                 (snapshot) =>
                     snapshot.agent.status === "idle" &&
                     snapshot.question === null &&
-                    snapshot.history.pending.length === 0,
+                    snapshot.bootstrap.pending.length === 0,
                 "compaction to settle at an idle public state",
             );
             model.activeRunId = null;
@@ -642,7 +645,7 @@ function reconcileRunModel(
     model.eventCursors = snapshot.events.map((event) => event.cursor);
     model.historyRunIds = snapshot.history.runs.map((run) => run.id);
     model.historyRunStatuses = snapshot.history.runs.map((run) => run.status);
-    model.pendingMessageIds = snapshot.history.pending.map((message) => message.id);
+    model.pendingMessageIds = snapshot.bootstrap.pending.map((message) => message.id);
     model.processIds = snapshot.activity.processes.map((process) => process.id);
     model.runningProcessIds = snapshot.activity.processes
         .filter((process) => process.status === "running")

@@ -126,10 +126,11 @@ describe("public transcript and run APIs", () => {
             status: "pending",
         });
 
-        const pending = await gym.client.getMessages(gym.defaultSessionId);
+        const pending = await gym.client.getAgentBootstrap(gym.defaultSessionId);
         expect(pending.pending.map((message) => message.id)).toContain(secondResponse.message.id);
-        expect(pending.runs).toHaveLength(1);
-        expect(pending.runs[0]?.id).toBe(firstRunId);
+        const duringFirstRun = await gym.client.getMessages(gym.defaultSessionId);
+        expect(duringFirstRun.runs).toHaveLength(1);
+        expect(duringFirstRun.runs[0]?.id).toBe(firstRunId);
 
         releaseFirst();
         await waitForFinished(gym, gym.defaultSessionId, firstRunId);
@@ -143,7 +144,9 @@ describe("public transcript and run APIs", () => {
         await waitForFinished(gym, gym.defaultSessionId, secondRunId);
 
         const history = await gym.client.getMessages(gym.defaultSessionId);
-        expect(history.pending).toEqual([]);
+        await expect(gym.client.getAgentBootstrap(gym.defaultSessionId)).resolves.toMatchObject({
+            pending: [],
+        });
         expect(history.runs.map((run) => run.id)).toEqual([firstRunId, secondRunId]);
         expect(history.runs.flatMap((run) => run.messages).map((message) => message.role)).toEqual([
             "user",
@@ -181,6 +184,200 @@ describe("public transcript and run APIs", () => {
             input: 24,
             output: 16,
         });
+    }, 60_000);
+
+    it("bootstraps queued and steering messages outside accepted history", async () => {
+        let release!: () => void;
+        let providerStarted!: () => void;
+        let agentCalls = 0;
+        const providerReady = new Promise<void>((resolve) => {
+            providerStarted = resolve;
+        });
+        const gate = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        const gym = await startGym({
+            inference: async (request) => {
+                if (request.sessionId.startsWith("naming:")) return namingTurn();
+                const call = agentCalls;
+                agentCalls += 1;
+                if (call === 0) {
+                    providerStarted();
+                    await gate;
+                }
+                return { content: [{ text: `answer-${String(call)}`, type: "text" }] };
+            },
+        });
+
+        const first = await gym.send("hold the first run", { wait: false });
+        await providerReady;
+        const queuedRequest = gym.client.sendMessage(gym.defaultSessionId, {
+            delivery: "queue",
+            mode: modeFor(gym),
+            text: "queued bootstrap message",
+        });
+        const steeringRequest = gym.client.sendMessage(gym.defaultSessionId, {
+            delivery: "steer",
+            mode: modeFor(gym),
+            text: "steering bootstrap message",
+        });
+
+        const pending = await gym.waitUntil(async () => {
+            const bootstrap = await gym.client.getAgentBootstrap(gym.defaultSessionId);
+            return bootstrap.pending.length === 2 ? bootstrap : undefined;
+        }, "both pending messages in agent bootstrap");
+        expect(pending).toMatchObject({
+            agent: { id: gym.defaultSessionId },
+            cursor: expect.any(String),
+            mode: modeFor(gym),
+        });
+        expect(pending.pending.map((message) => message.delivery).sort()).toEqual([
+            "queue",
+            "steer",
+        ]);
+        expect(await gym.client.getMessages(gym.defaultSessionId)).not.toHaveProperty("pending");
+
+        release();
+        await Promise.all([queuedRequest, steeringRequest]);
+        await gym.waitForRun(first.runId);
+        await gym.waitUntil(async () => {
+            const bootstrap = await gym.client.getAgentBootstrap(gym.defaultSessionId);
+            return bootstrap.pending.length === 0 ? true : undefined;
+        }, "bootstrap pending messages to be accepted");
+    }, 60_000);
+
+    it("reports the current context window and clears it after compaction", async () => {
+        const gym = await startGym({
+            models: [contextWindowModel()],
+            inference: (request) =>
+                request.sessionId.startsWith("naming:")
+                    ? namingTurn()
+                    : {
+                          content: [{ text: "measured answer", type: "text" }],
+                          usage: {
+                              cacheRead: 150_000,
+                              cacheWrite: 0,
+                              input: 200_000,
+                              output: 1_000,
+                              totalTokens: 201_000,
+                          },
+                      },
+        });
+
+        await expect(gym.client.getAgentMode(gym.defaultSessionId)).resolves.toEqual({
+            mode: null,
+        });
+        const initialBootstrap = await gym.client.getAgentBootstrap(gym.defaultSessionId);
+        expect(initialBootstrap).toMatchObject({
+            agent: { id: gym.defaultSessionId },
+            context: null,
+            mode: null,
+            pending: [],
+            usage: {},
+            cursor: expect.any(String),
+        });
+
+        await gym.send("measure this conversation");
+        const measuredEvent = await gym.waitForEvent(
+            (event) =>
+                event.type === "agent.context.updated" &&
+                event.payload.agentId === gym.defaultSessionId &&
+                event.payload.context?.contextTokens === 201_000,
+            "the exact context measurement event",
+        );
+        expect(measuredEvent).toMatchObject({
+            type: "agent.context.updated",
+            payload: {
+                agentId: gym.defaultSessionId,
+                context: {
+                    approximate: false,
+                    contextTokens: 201_000,
+                    contextWindow: 272_000,
+                    modelId: "openai/gpt-5.6-sol",
+                    providerId: "gym",
+                },
+            },
+        });
+        expect(
+            (
+                await gym.client.getEvents({
+                    after: initialBootstrap.cursor,
+                    limit: 100,
+                })
+            ).events,
+        ).toContainEqual(measuredEvent);
+        const measured = await gym.client.getAgentUsage(gym.defaultSessionId);
+        expect(measured).toMatchObject({
+            context: {
+                approximate: false,
+                contextTokens: 201_000,
+                contextWindow: 272_000,
+                modelId: "openai/gpt-5.6-sol",
+                providerId: "gym",
+            },
+        });
+        const mode = await gym.client.getAgentMode(gym.defaultSessionId);
+        expect(mode.mode).toMatchObject({
+            modelId: "openai/gpt-5.6-sol",
+            permissionMode: "auto",
+            providerId: "gym",
+        });
+        await expect(gym.client.getAgentBootstrap(gym.defaultSessionId)).resolves.toMatchObject({
+            ...measured,
+            ...mode,
+            pending: [],
+            cursor: expect.any(String),
+        });
+
+        await gym.restart();
+        await expect(gym.client.getAgentUsage(gym.defaultSessionId)).resolves.toMatchObject({
+            context: { contextTokens: 201_000, contextWindow: 272_000 },
+        });
+
+        await gym.client.compactAgent(gym.defaultSessionId);
+        await gym.waitUntil(
+            () => (gym.inference.compactions.length === 1 ? true : undefined),
+            "the measured conversation to compact",
+        );
+        await gym.waitForEvent(
+            (event) =>
+                event.type === "agent.context.updated" &&
+                event.payload.agentId === gym.defaultSessionId &&
+                event.payload.context === null,
+            "the compacted context invalidation event",
+        );
+        await expect(gym.client.getAgentUsage(gym.defaultSessionId)).resolves.toMatchObject({
+            context: null,
+        });
+    }, 60_000);
+
+    it("automatically compacts before the measured context reaches the model limit", async () => {
+        const gym = await startGym({
+            models: [contextWindowModel()],
+            inference: (request) =>
+                request.sessionId.startsWith("naming:")
+                    ? namingTurn()
+                    : {
+                          content: [{ text: "near the limit", type: "text" }],
+                          usage: {
+                              cacheRead: 200_000,
+                              cacheWrite: 0,
+                              input: 244_000,
+                              output: 1_000,
+                              totalTokens: 245_000,
+                          },
+                      },
+        });
+
+        await gym.send("approach the context limit");
+        await gym.waitUntil(
+            () => (gym.inference.compactions.length === 1 ? true : undefined),
+            "automatic context compaction",
+        );
+        await expect(gym.client.getAgentUsage(gym.defaultSessionId)).resolves.toMatchObject({
+            context: null,
+        });
+        expect(gym.inference.unscripted).toEqual([]);
     }, 60_000);
 
     it("groups concurrent steering acceptances into one successor boundary", async () => {
@@ -651,6 +848,27 @@ function modeFor(gym: AgentGym) {
     };
 }
 
+function contextWindowModel() {
+    return {
+        defaultEffort: "medium" as const,
+        effortLevels: ["low", "medium", "high"] as const,
+        id: "openai/gpt-5.6-sol",
+        name: "Context Window Model",
+        providerId: "gym",
+    };
+}
+
+function namingTurn() {
+    return {
+        content: [
+            {
+                text: "<title>Context window test</title><slug>context-window-test</slug>",
+                type: "text" as const,
+            },
+        ],
+    };
+}
+
 async function waitForStarted(
     gym: AgentGym,
     agentId: string,
@@ -714,10 +932,10 @@ async function waitForPendingMessageIds(
     texts: readonly string[],
 ): Promise<readonly string[]> {
     return await gym.waitUntil(async () => {
-        const history = await gym.client.getMessages(agentId);
+        const bootstrap = await gym.client.getAgentBootstrap(agentId);
         const ids = texts.map(
             (text) =>
-                history.pending.find((message) =>
+                bootstrap.pending.find((message) =>
                     message.content.some((block) => block.type === "text" && block.text === text),
                 )?.id,
         );

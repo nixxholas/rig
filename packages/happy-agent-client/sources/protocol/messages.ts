@@ -285,10 +285,5 @@ export interface MessageHistoryQuery {
 export interface MessageHistoryResponse {
     /** Oldest first, whole runs only. */
     runs: HistoryRun[];
-    /**
-     * Messages sent but not yet accepted by inference. Every history load
-     * returns the complete list regardless of cursors.
-     */
-    pending: UserMessage[];
     hasMore: boolean;
 }

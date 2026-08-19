@@ -15,7 +15,12 @@ import { parse, TomlDate, type TomlTable, type TomlValue } from "smol-toml";
 
 import { getManagedProjectsDirectory } from "../impl/managedProjectsDirectory.js";
 import { getManagedWorkspacesDirectory } from "../impl/managedWorkspacesDirectory.js";
-import { agentModels, agentProviders } from "./impl/agentCatalog.js";
+import {
+    agentModelContext,
+    agentModels,
+    agentProviders,
+    type AgentModelContext,
+} from "./impl/agentCatalog.js";
 import { readGlobalInstructions } from "./impl/readGlobalInstructions.js";
 import { readSecurityDocument } from "./impl/readSecurityDocument.js";
 
@@ -991,6 +996,14 @@ export class ConfigModule implements AgentModule {
     get models(): readonly AgentModel[] {
         this.#models ??= this.#scripted?.models ?? agentModels(this.configuration);
         return this.#models;
+    }
+
+    /** Curated context limits for one enabled provider/model route. */
+    modelContext(providerId: string, modelId: string): AgentModelContext | undefined {
+        const enabled = this.models.some(
+            (model) => model.providerId === providerId && model.id === modelId,
+        );
+        return enabled ? agentModelContext(modelId) : undefined;
     }
 
     /**

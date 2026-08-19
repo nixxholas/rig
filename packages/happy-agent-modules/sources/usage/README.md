@@ -100,8 +100,8 @@ model a cost was actually spent on live on the records and are read through `rea
   — the same bounded renderers the tools use, exposed so a host can produce the same text outside a
   tool call. `maxCharacters` defaults to `USAGE_OUTPUT_CHARACTERS` and may only ask for less.
 - `onEventTransactional(listener)` — watch every committed mutation as a `UsageEvent`
-  (`usage_recorded` or `usage_reset`) from inside the recording transaction; a failure there fails
-  the mutation. Returns the function that ends the subscription.
+  (`usage_recorded`, `usage_context_changed`, or `usage_reset`) from inside the recording
+  transaction; a failure there fails the mutation. Returns the function that ends the subscription.
 - `onEvent(listener)` — watch the same events after commit. Accounting is advisory, so a failing
   subscriber is logged through `ctx.log.warn` and the subscribers behind it still hear about the
   change. Returns the function that ends the subscription.
@@ -130,10 +130,11 @@ completion hooks. Inference state also retains the latest provider-reported cach
 
 The identities come from Agent Base rather than module-owned replay state.
 
-**Module-owned table** (`happy_agent_usage_records`): durable records and bounded aggregates.
+**Module-owned tables**: durable records, bounded aggregates, and the current context snapshot.
 Migration `002-drop-usage-reset-receipts` removes the obsolete reset-receipt table created by the
 immutable first migration. Migration `003-usage-run-attribution` adds the exact run ID and its
-bounded lookup index.
+bounded lookup index. Migration `004-usage-current-context` adds one current-context row per agent;
+a `null` payload is a durable invalidation tombstone.
 
 - `record(ctx, UsageRecord)` inserts one record (`usage_inference_record` or `usage_turn_record`),
   keyed by Base's `inferenceId` or `turnId` and attributed by
@@ -147,8 +148,9 @@ bounded lookup index.
   (`inferenceCount`, `turnCount`, token and duration sums) plus a bounded, paged array of
   `UsageGroup` rows (one per provider/model/effort/tier combination), capped at
   `USAGE_GROUP_PAGE_SIZE` (100) groups per page. It also exposes `currentContext` when the latest turn has a provider-measured
-  context size; the value is exact (`approximate: false`) and disappears after a reset/compaction
-  invalidates the previous measurement until a later response measures the new context.
+  context size from `happy_agent_usage_contexts`; the value is exact (`approximate: false`) and
+  disappears after a reset/compaction writes an invalidation until a later response measures the
+  new context. Updating this row and recording the turn share Agent Base's completion transaction.
 - `reset(ctx, agentId | null)` deletes matching records and reports how many were removed.
 - The host transaction is the single read/decide/write boundary every mutation runs inside, and
   stdlib `afterCommit(ctx, callback)` registers post-commit event delivery inside that same

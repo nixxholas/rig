@@ -2,6 +2,7 @@ import { Type, type Static } from "@sinclair/typebox";
 
 import {
     usageAgentIdSchema,
+    usageCurrentContextSchema,
     usageIdSchema,
     usageRecordSchema,
     usageTimestampSchema,
@@ -21,6 +22,16 @@ export const usageEventSchema = Type.Union([
             eventId: usageIdSchema,
             at: usageTimestampSchema,
             record: usageRecordSchema,
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            type: Type.Literal("usage_context_changed"),
+            eventId: usageIdSchema,
+            at: usageTimestampSchema,
+            agentId: usageAgentIdSchema,
+            context: Type.Union([usageCurrentContextSchema, Type.Null()]),
         },
         { additionalProperties: false },
     ),

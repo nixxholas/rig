@@ -79,7 +79,9 @@ describe("the public agent API", () => {
             "GET",
             `/v0/agents/${created.agent.id}/messages`,
         );
-        expect(history.pending).toEqual([]);
+        await expect(gym.client.getAgentBootstrap(created.agent.id)).resolves.toMatchObject({
+            pending: [],
+        });
         expect(history.runs).toHaveLength(1);
         expect(JSON.stringify(history.runs[0])).toContain("Answer through the public API.");
         expect(JSON.stringify(history.runs[0])).toContain("The API message was answered.");

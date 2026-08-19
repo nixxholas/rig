@@ -1,10 +1,27 @@
 /** Bootstrap: one request that gets a desktop client on screen instantly. */
 
+import type { AgentDraftResponse, AgentModeResponse, AgentResponse } from "./agents.js";
 import type { EventCursor } from "./common.js";
 import type { DaemonConfig, OnboardingState } from "./daemon.js";
+import type { UserMessage } from "./messages.js";
 import type { Profile } from "./profile.js";
 import type { Project } from "./projects.js";
+import type { AgentUsageResponse } from "./usage.js";
 import type { Workspace } from "./workspaces.js";
+
+/**
+ * `GET /v0/agents/:agentId/bootstrap`
+ *
+ * The small, current agent facts a conversation client needs before following events. Usage and
+ * mode keep their own focused endpoints; this composes those exact response fields with the
+ * durable pending composer queue and the cursor that closes the snapshot window.
+ */
+export interface AgentBootstrapResponse
+    extends AgentDraftResponse, AgentModeResponse, AgentResponse, AgentUsageResponse {
+    /** Queued and steering messages not yet accepted by inference, oldest first. */
+    pending: UserMessage[];
+    cursor: EventCursor;
+}
 
 /**
  * `GET /v0/bootstrap/desktop`

@@ -48,10 +48,7 @@ export interface Agent {
     processes: { running: number };
     /** The open question when the run is waiting on the person. */
     pendingQuestionId: Cuid2 | null;
-    /** Everything the last message ran with; `null` when nothing was sent yet. */
-    lastMode: MessageMode | null;
     unread: AgentUnread | null;
-    draft: AgentDraft | null;
     /** Owner-local order for a top-level agent; `null` on a subagent. */
     orderKey: string | null;
     /** The newest event cursor for this agent, so a stream opens where this left off. */
@@ -65,6 +62,23 @@ export interface Agent {
 /** Every single-agent route answers with this. */
 export interface AgentResponse {
     agent: Agent;
+}
+
+/** `GET /v0/agents/:agentId/mode` */
+export interface AgentModeResponse {
+    /** Everything the last submitted message used; `null` before the first message. */
+    mode: MessageMode | null;
+}
+
+/** Draft state is separate from agent lifecycle state and keeps clears ordered across clients. */
+export interface AgentDraftSnapshot {
+    value: AgentDraft | null;
+    updatedAt: Timestamp | null;
+}
+
+/** `GET|PUT /v0/agents/:agentId/draft` */
+export interface AgentDraftResponse {
+    draft: AgentDraftSnapshot;
 }
 
 /** `POST /v0/agents/:agentId/abort` */

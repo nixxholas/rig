@@ -430,6 +430,9 @@ export * from "./workflows/index.js";
 // Usage: advisory provider, model, token, and timing accounting.
 export * from "./usage/index.js";
 
+// Context windows: automatic compaction from exact provider measurements.
+export * from "./contextWindow/index.js";
+
 // Image generation: one prompt becomes one PNG on a configured Codex account, written to disk.
 export * from "./imageGeneration/index.js";
 

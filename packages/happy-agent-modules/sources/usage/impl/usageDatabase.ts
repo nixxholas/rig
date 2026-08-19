@@ -6,12 +6,14 @@ import type { Context } from "@steve.kite/stdlib";
 import {
     MAX_USAGE_RECORDS,
     usageAggregateQuerySchema,
+    usageCurrentContextSchema,
     usagePageQuerySchema,
     usagePageSchema,
     usageRunIdSchema,
     usageRunSummarySchema,
     usageSummarySchema,
     type UsageAggregateQuery,
+    type UsageCurrentContext,
     type UsagePage,
     type UsagePageQuery,
     type UsageRecord,
@@ -21,6 +23,7 @@ import {
 import { assertUsageRecord } from "./assertUsageRecord.js";
 
 const RECORDS_TABLE = "happy_agent_usage_records";
+const CONTEXTS_TABLE = "happy_agent_usage_contexts";
 
 export class UsageDatabase {
     async run(ctx: Context, agentId: string, runId: string): Promise<UsageRunSummary> {
@@ -192,21 +195,7 @@ export class UsageDatabase {
         const allGroups = [...groups.values()];
         const cursor = query.cursor ?? 0;
         const page = allGroups.slice(cursor, cursor + maxGroups);
-        let latestTurn: Extract<UsageRecord, { kind: "turn" }> | undefined;
-        for (const record of records) {
-            if (record.kind === "turn") latestTurn = record;
-        }
-        const currentContext =
-            latestTurn?.contextTokens === undefined
-                ? undefined
-                : {
-                      approximate: false,
-                      contextTokens: latestTurn.contextTokens,
-                      provider: latestTurn.provider,
-                      ...(latestTurn.model === undefined ? {} : { model: latestTurn.model }),
-                      ...(latestTurn.effort === undefined ? {} : { effort: latestTurn.effort }),
-                      ...(latestTurn.tier === undefined ? {} : { tier: latestTurn.tier }),
-                  };
+        const currentContext = await this.currentContext(ctx, query.agentId);
         const summary: UsageSummary = {
             ...(query.agentId === undefined ? {} : { agentId: query.agentId }),
             cursor,
@@ -248,7 +237,7 @@ export class UsageDatabase {
         return structuredClone(summary);
     }
 
-    async record(ctx: Context, record: UsageRecord): Promise<void> {
+    async record(ctx: Context, record: UsageRecord): Promise<boolean> {
         assertUsageRecord(record);
         await agentDatabaseRun(
             ctx.db,
@@ -265,6 +254,50 @@ export class UsageDatabase {
                     LIMIT 9223372036854775807 OFFSET ${MAX_USAGE_RECORDS}
                 )`,
         );
+        if (record.kind === "turn") {
+            return await this.#writeCurrentContext(
+                ctx,
+                record.agentId,
+                record.finishedAt,
+                record.contextTokens === undefined
+                    ? null
+                    : {
+                          approximate: false,
+                          contextTokens: record.contextTokens,
+                          provider: record.provider,
+                          ...(record.model === undefined ? {} : { model: record.model }),
+                          ...(record.effort === undefined ? {} : { effort: record.effort }),
+                          ...(record.tier === undefined ? {} : { tier: record.tier }),
+                      },
+            );
+        }
+        return false;
+    }
+
+    async currentContext(ctx: Context, agentId?: string): Promise<UsageCurrentContext | undefined> {
+        const rows = await agentDatabaseRows<{ context_json: string | null }>(
+            ctx.db,
+            agentId === undefined
+                ? sql`SELECT context_json
+                      FROM ${sql.raw(CONTEXTS_TABLE)}
+                      ORDER BY updated_at DESC, agent_id DESC
+                      LIMIT 1`
+                : sql`SELECT context_json
+                      FROM ${sql.raw(CONTEXTS_TABLE)}
+                      WHERE agent_id = ${agentId}
+                      LIMIT 1`,
+        );
+        const encoded = rows[0]?.context_json;
+        if (encoded === undefined || encoded === null) return undefined;
+        const value: unknown = JSON.parse(encoded);
+        if (!Value.Check(usageCurrentContextSchema, value)) {
+            throw new Error("Usage database returned an invalid current context.");
+        }
+        return structuredClone(value);
+    }
+
+    async clearCurrentContext(ctx: Context, agentId: string, updatedAt: number): Promise<boolean> {
+        return await this.#writeCurrentContext(ctx, agentId, updatedAt, null);
     }
 
     async reset(ctx: Context, agentId: string | null): Promise<number> {
@@ -282,7 +315,42 @@ export class UsageDatabase {
                 ? sql`DELETE FROM ${sql.raw(RECORDS_TABLE)}`
                 : sql`DELETE FROM ${sql.raw(RECORDS_TABLE)} WHERE agent_id = ${agentId}`,
         );
+        await agentDatabaseRun(
+            ctx.db,
+            agentId === null
+                ? sql`DELETE FROM ${sql.raw(CONTEXTS_TABLE)}`
+                : sql`DELETE FROM ${sql.raw(CONTEXTS_TABLE)} WHERE agent_id = ${agentId}`,
+        );
         return count;
+    }
+
+    async #writeCurrentContext(
+        ctx: Context,
+        agentId: string,
+        updatedAt: number,
+        context: UsageCurrentContext | null,
+    ): Promise<boolean> {
+        if (context !== null && !Value.Check(usageCurrentContextSchema, context)) {
+            throw new Error("Usage current context is invalid.");
+        }
+        const encoded = context === null ? null : JSON.stringify(context);
+        const previous = await agentDatabaseRows<{ context_json: string | null }>(
+            ctx.db,
+            sql`SELECT context_json
+                FROM ${sql.raw(CONTEXTS_TABLE)}
+                WHERE agent_id = ${agentId}
+                LIMIT 1`,
+        );
+        const changed = (previous[0]?.context_json ?? null) !== encoded;
+        await agentDatabaseRun(
+            ctx.db,
+            sql`INSERT INTO ${sql.raw(CONTEXTS_TABLE)} (agent_id, updated_at, context_json)
+                VALUES (${agentId}, ${updatedAt}, ${encoded})
+                ON CONFLICT(agent_id) DO UPDATE SET
+                    updated_at = excluded.updated_at,
+                    context_json = excluded.context_json`,
+        );
+        return changed;
     }
 
     #parseRecord(encoded: string): UsageRecord {

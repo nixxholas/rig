@@ -19,6 +19,61 @@ import type { HappyAgentConfigValues, HappyAgentConfiguration } from "../ConfigM
 
 type ConfiguredProvider = HappyAgentConfigValues["providers"][string];
 
+/** Provider-facing context limits that are not part of Agent Base's routing identity. */
+export interface AgentModelContext {
+    readonly contextWindow: number;
+    readonly autoCompactWindow: number;
+}
+
+type CatalogAgentModel = AgentModel & AgentModelContext;
+
+const MODEL_CONTEXTS: Readonly<Record<string, AgentModelContext>> = Object.freeze({
+    "anthropic/fable-5": Object.freeze({
+        contextWindow: 1_000_000,
+        autoCompactWindow: 333_000,
+    }),
+    "anthropic/opus-4-8": Object.freeze({
+        contextWindow: 1_000_000,
+        autoCompactWindow: 333_000,
+    }),
+    "anthropic/opus-5": Object.freeze({
+        contextWindow: 1_000_000,
+        autoCompactWindow: 333_000,
+    }),
+    "anthropic/sonnet-5": Object.freeze({
+        contextWindow: 1_000_000,
+        autoCompactWindow: 333_000,
+    }),
+    "openai/gpt-5.4": Object.freeze({
+        contextWindow: 272_000,
+        autoCompactWindow: 244_800,
+    }),
+    "openai/gpt-5.6-luna": Object.freeze({
+        contextWindow: 272_000,
+        autoCompactWindow: 244_800,
+    }),
+    "openai/gpt-5.6-sol": Object.freeze({
+        contextWindow: 272_000,
+        autoCompactWindow: 244_800,
+    }),
+    "openai/gpt-5.6-terra": Object.freeze({
+        contextWindow: 272_000,
+        autoCompactWindow: 244_800,
+    }),
+    "xai/grok-4.5": Object.freeze({
+        contextWindow: 500_000,
+        autoCompactWindow: 450_000,
+    }),
+    "xai/grok-build": Object.freeze({
+        contextWindow: 500_000,
+        autoCompactWindow: 450_000,
+    }),
+    "xai/grok-composer-2.5-fast": Object.freeze({
+        contextWindow: 200_000,
+        autoCompactWindow: 180_000,
+    }),
+});
+
 const EVERY_EFFORT: AgentModel["effortLevels"] = ["off", "low", "medium", "high", "xhigh", "max"];
 const ALL_BUT_OFF: AgentModel["effortLevels"] = ["low", "medium", "high", "xhigh", "max"];
 
@@ -26,7 +81,7 @@ const ALL_BUT_OFF: AgentModel["effortLevels"] = ["low", "medium", "high", "xhigh
  * The curated catalog. Rig never asks a vendor which models exist; the list is source, and a
  * configured provider entry decides which of these its own key serves.
  */
-const CATALOG: readonly AgentModel[] = [
+const CATALOG: readonly CatalogAgentModel[] = [
     model("codex", "openai/gpt-5.6-sol", "GPT-5.6 Sol", ALL_BUT_OFF, "medium", ["priority"]),
     model("codex", "openai/gpt-5.6-terra", "GPT-5.6 Terra", EVERY_EFFORT, "medium", ["priority"]),
     model("codex", "openai/gpt-5.6-luna", "GPT-5.6 Luna", EVERY_EFFORT, "medium", ["priority"]),
@@ -40,7 +95,7 @@ const CATALOG: readonly AgentModel[] = [
 ];
 
 /** Bedrock resells the same families, minus Grok, and adds one of its own. */
-const BEDROCK_CATALOG: readonly AgentModel[] = [
+const BEDROCK_CATALOG: readonly CatalogAgentModel[] = [
     ...CATALOG.filter((candidate) => candidate.providerId !== "grok").map((candidate) => {
         const { serviceTiers: _unsupported, ...rest } = candidate;
         return { ...rest, providerId: "bedrock" };
@@ -53,9 +108,9 @@ const BEDROCK_CATALOG: readonly AgentModel[] = [
  *
  * The order matters: the first entry is what a session gets when it names nothing.
  */
-export function agentModels(configuration: HappyAgentConfiguration): readonly AgentModel[] {
+export function agentModels(configuration: HappyAgentConfiguration): readonly CatalogAgentModel[] {
     const values = configuration.values;
-    const available: AgentModel[] = [];
+    const available: CatalogAgentModel[] = [];
     for (const [id, provider] of Object.entries(values.providers)) {
         if (provider.enabled === false) continue;
         const source = provider.type === "bedrock" ? BEDROCK_CATALOG : CATALOG;
@@ -93,6 +148,12 @@ export function agentModels(configuration: HappyAgentConfiguration): readonly Ag
             ? chosen
             : { ...chosen, defaultEffort: effort as AgentModel["defaultEffort"] };
     return [first, ...available.filter((candidate) => candidate !== chosen)];
+}
+
+/** Context limits for one enabled provider/model route, when the curated catalog knows them. */
+export function agentModelContext(modelId: string): AgentModelContext | undefined {
+    const context = MODEL_CONTEXTS[modelId];
+    return context === undefined ? undefined : { ...context };
 }
 
 /**
@@ -268,8 +329,13 @@ function model(
     effortLevels: AgentModel["effortLevels"] = EVERY_EFFORT,
     defaultEffort: AgentModel["defaultEffort"] = "medium",
     serviceTiers?: AgentModel["serviceTiers"],
-): AgentModel {
+): CatalogAgentModel {
+    const context = MODEL_CONTEXTS[id];
+    if (context === undefined) {
+        throw new Error(`Model "${id}" has no configured context window.`);
+    }
     return {
+        ...context,
         defaultEffort,
         effortLevels,
         id,

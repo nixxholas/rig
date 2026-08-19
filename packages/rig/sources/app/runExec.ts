@@ -47,10 +47,16 @@ async function run(options: ExecCommandOptions, environment: NodeJS.ProcessEnv):
     );
     const config = (await connection.client.getConfig()).config;
     const opened = await openAgent(options, cwd, connection.client);
-    const eventCursor = (await connection.client.getEvents({ limit: 1 })).latestCursor;
-    const events = new HappyAgentEventHub(connection.client, eventCursor);
+    const bootstrap = await connection.client.getAgentBootstrap(opened.id);
+    const events = new HappyAgentEventHub(connection.client, bootstrap.cursor);
     events.start();
-    const mode = resolveMode(options, environment, loadedConfig.config.defaults, config, opened);
+    const mode = resolveMode(
+        options,
+        environment,
+        loadedConfig.config.defaults,
+        config,
+        bootstrap.mode,
+    );
     const submitted = await connection.client.sendMessage(opened.id, {
         delivery: "queue",
         mode,
@@ -195,9 +201,8 @@ function resolveMode(
         serviceTier?: "fast";
     },
     config: DaemonConfig,
-    agent: Agent,
+    previous: MessageMode | null,
 ): MessageMode {
-    const previous = agent.lastMode;
     const providerId =
         options.providerId ??
         environment.RIG_PROVIDER ??

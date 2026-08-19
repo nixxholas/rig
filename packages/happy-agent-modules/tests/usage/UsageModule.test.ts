@@ -218,7 +218,20 @@ describe("UsageModule", () => {
                 contextTokens: 14,
             },
         ]);
-        expect(events.map((event) => event.eventId)).toEqual(["inference-base-id", "turn-base-id"]);
+        expect(events.slice(0, 2).map((event) => event.eventId)).toEqual([
+            "inference-base-id",
+            "turn-base-id",
+        ]);
+        expect(events[2]).toMatchObject({
+            type: "usage_context_changed",
+            agentId: "agent-1",
+            context: {
+                approximate: false,
+                contextTokens: 14,
+                provider: "provider-main",
+                model: "model-main",
+            },
+        });
         expect(runKV.values.size).toBe(0);
         await expect(module.read(ctx, "agent-1")).resolves.toMatchObject({
             currentContext: {
@@ -388,6 +401,7 @@ describe("UsageModule", () => {
 
         await module.migrations[1]![1](database.context, database.database);
         await module.migrations[2]![1](database.context, database.database);
+        await module.migrations[3]![1](database.context, database.database);
         const afterDrop = await agentDatabaseRows<{ name: string }>(
             database.database,
             sql`SELECT name FROM sqlite_master

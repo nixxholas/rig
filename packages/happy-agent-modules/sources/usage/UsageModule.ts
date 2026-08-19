@@ -48,6 +48,7 @@ import {
     type UsageAgentTree,
     type UsageAgentTreeRelation,
     type UsageAgentTreeSession,
+    type UsageCurrentContext,
     type UsageInferenceRecord,
     type UsagePage,
     type UsagePageQuery,
@@ -178,6 +179,19 @@ export class UsageModule implements AgentModule {
                     database,
                     sql`CREATE INDEX happy_agent_usage_records_agent_run_time
                         ON happy_agent_usage_records (agent_id, run_id, finished_at, record_id)`,
+                );
+            },
+        ],
+        [
+            "004-usage-current-context",
+            async (_ctx: Context, database: AgentDatabaseFacade<AgentDatabase>): Promise<void> => {
+                await agentDatabaseRun(
+                    database,
+                    sql`CREATE TABLE IF NOT EXISTS happy_agent_usage_contexts (
+                        agent_id TEXT PRIMARY KEY,
+                        updated_at INTEGER NOT NULL,
+                        context_json TEXT
+                    )`,
                 );
             },
         ],
@@ -616,7 +630,24 @@ export class UsageModule implements AgentModule {
                         : { contextTokens: turn.contextTokens }),
                 };
                 assertUsageRecord(record);
-                await this.#record(ctx, scope, record);
+                const contextChanged = await this.#record(ctx, scope, record);
+                if (contextChanged) {
+                    await this.#recordContextChange(
+                        ctx,
+                        record.agentId,
+                        record.contextTokens === undefined
+                            ? null
+                            : {
+                                  approximate: false,
+                                  contextTokens: record.contextTokens,
+                                  provider: record.provider,
+                                  ...(record.model === undefined ? {} : { model: record.model }),
+                                  ...(record.effort === undefined ? {} : { effort: record.effort }),
+                                  ...(record.tier === undefined ? {} : { tier: record.tier }),
+                              },
+                        record.finishedAt,
+                    );
+                }
             },
         );
     }
@@ -691,15 +722,33 @@ export class UsageModule implements AgentModule {
         }
     }
 
-    async #record(ctx: Context, scope: AgentModuleScope, record: UsageRecord): Promise<void> {
+    async #record(ctx: Context, scope: AgentModuleScope, record: UsageRecord): Promise<boolean> {
         assertUsageRecord(record);
         const detachedRecord = deepFreeze(cloneValue(record));
-        await new UsageDatabase().record(ctx, detachedRecord);
+        const contextChanged = await new UsageDatabase().record(ctx, detachedRecord);
         const event = cloneAndFreezeEvent({
             type: "usage_recorded",
             eventId: detachedRecord.id,
             at: detachedRecord.finishedAt,
             record: cloneValue(detachedRecord),
+        });
+        await this.#notifyTransactional(ctx, event);
+        this.#registerPostCommit(ctx, event);
+        return contextChanged;
+    }
+
+    async #recordContextChange(
+        ctx: Context,
+        agentId: string,
+        context: UsageCurrentContext | null,
+        at: number,
+    ): Promise<void> {
+        const event = cloneAndFreezeEvent({
+            type: "usage_context_changed",
+            eventId: this.#newId(),
+            at,
+            agentId,
+            context: context === null ? null : cloneValue(context),
         });
         await this.#notifyTransactional(ctx, event);
         this.#registerPostCommit(ctx, event);
@@ -914,6 +963,13 @@ export class UsageModule implements AgentModule {
             turn: AgentBaseTurn,
         ): Promise<void> => {
             await this.#finishTurn(ctx, scope, turn);
+        },
+
+        /** A successful compaction invalidates the prior provider measurement atomically. */
+        historyErasedTransact: async (ctx: Context, scope: AgentModuleScope): Promise<void> => {
+            const at = this.#now();
+            const changed = await new UsageDatabase().clearCurrentContext(ctx, scope.agent.id, at);
+            if (changed) await this.#recordContextChange(ctx, scope.agent.id, null, at);
         },
     };
 

@@ -53,8 +53,13 @@ describe("public run boundary matrix", () => {
         release();
         await gym.waitForRun(first.runId);
         await gym.waitUntil(async () => {
-            const history = await gym.client.getMessages(gym.defaultSessionId);
-            return history.runs.length === 2 && history.pending.length === 0 ? history : undefined;
+            const [bootstrap, history] = await Promise.all([
+                gym.client.getAgentBootstrap(gym.defaultSessionId),
+                gym.client.getMessages(gym.defaultSessionId),
+            ]);
+            return history.runs.length === 2 && bootstrap.pending.length === 0
+                ? history
+                : undefined;
         }, "queued run");
         expect((await lifecycleFor(gym)).filter((event) => event.type === "run.boundary")).toEqual(
             [],
@@ -172,7 +177,9 @@ describe("public run boundary matrix", () => {
             session.first.runId,
             boundary.payload.startedRun.id,
         ]);
-        expect(history.pending).toEqual([]);
+        await expect(
+            session.gym.client.getAgentBootstrap(session.gym.defaultSessionId),
+        ).resolves.toMatchObject({ pending: [] });
     }, 30_000);
 
     it("RB-11 accepts a queued message after the steering successor without a second boundary", async () => {
@@ -190,8 +197,13 @@ describe("public run boundary matrix", () => {
         const boundary = await waitForBoundary(session.gym, [accepted.id]);
         await session.gym.waitForRun(boundary.payload.startedRun.id);
         await session.gym.waitUntil(async () => {
-            const history = await session.gym.client.getMessages(session.gym.defaultSessionId);
-            return history.runs.length === 3 && history.pending.length === 0 ? history : undefined;
+            const [bootstrap, history] = await Promise.all([
+                session.gym.client.getAgentBootstrap(session.gym.defaultSessionId),
+                session.gym.client.getMessages(session.gym.defaultSessionId),
+            ]);
+            return history.runs.length === 3 && bootstrap.pending.length === 0
+                ? history
+                : undefined;
         }, "queued successor");
         expect(
             (await lifecycleFor(session.gym)).filter((event) => event.type === "run.boundary"),
@@ -506,8 +518,8 @@ function gymSteer(gym: AgentGym, text: string, id?: string) {
 
 async function pendingText(gym: AgentGym, text: string): Promise<void> {
     await gym.waitUntil(async () => {
-        const history = await gym.client.getMessages(gym.defaultSessionId);
-        return history.pending.some((message) =>
+        const bootstrap = await gym.client.getAgentBootstrap(gym.defaultSessionId);
+        return bootstrap.pending.some((message) =>
             message.content.some((block) => block.type === "text" && block.text === text),
         )
             ? true

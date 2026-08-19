@@ -31,6 +31,7 @@ type History = Awaited<ReturnType<AgentGym["client"]["getMessages"]>>;
 type Activity = Awaited<ReturnType<AgentGym["client"]["getAgentActivity"]>>;
 type Question = Awaited<ReturnType<AgentGym["client"]["getPendingQuestion"]>>;
 type AgentUsage = Awaited<ReturnType<AgentGym["client"]["getAgentUsage"]>>;
+type AgentDraft = Awaited<ReturnType<AgentGym["client"]["getAgentDraft"]>>["draft"];
 
 type RecoveryActionKind =
     | "bootstrap"
@@ -73,6 +74,7 @@ interface RecoveryAction {
 
 interface AgentDetail {
     readonly agent: Agent;
+    readonly draft: AgentDraft;
     readonly history: History | undefined;
     readonly activity: Activity | undefined;
     readonly question: Question | undefined;
@@ -937,16 +939,19 @@ async function collectPublicSnapshot(
         await Promise.all(
             agentIds.map(async (agentId): Promise<AgentDetail | undefined> => {
                 try {
-                    const [agent, history, activity, question, agentUsage] = await Promise.all([
-                        client.getAgent(agentId),
-                        client.getMessages(agentId),
-                        client.getAgentActivity(agentId),
-                        client.getPendingQuestion(agentId),
-                        client.getAgentUsage(agentId),
-                    ]);
+                    const [agent, draft, history, activity, question, agentUsage] =
+                        await Promise.all([
+                            client.getAgent(agentId),
+                            client.getAgentDraft(agentId),
+                            client.getMessages(agentId),
+                            client.getAgentActivity(agentId),
+                            client.getPendingQuestion(agentId),
+                            client.getAgentUsage(agentId),
+                        ]);
                     return {
                         activity,
                         agent: agent.agent,
+                        draft: draft.draft,
                         history,
                         question,
                         usage: agentUsage,
@@ -1009,9 +1014,9 @@ function durableProjection(
 ): DurableProjection {
     return {
         agents: snapshot.agents
-            .map(({ agent }) => ({
+            .map(({ agent, draft }) => ({
                 archivedAt: agent.archivedAt,
-                draft: agent.draft,
+                draft,
                 id: agent.id,
                 title: agent.title,
                 workspaceId: agent.workspaceId,
