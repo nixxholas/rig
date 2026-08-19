@@ -22,13 +22,17 @@ describe("Codex retry configuration", () => {
         const codex = await createCodexRetryFixture();
         runningServers.add(codex);
         const gym = await createGym({
-            environment: {
-                RIG_CODEX_BASE_URL: codex.baseUrl,
-                RIG_CODEX_TRANSPORT: "websocket",
-            },
             homeFiles: {
                 ".codex/auth.json": codexAuth(),
-                "Happy/Config/happy.toml": "[settings]\ninference_max_retries = 0\n",
+                "Happy/Config/happy.toml": [
+                    "[settings]",
+                    "inference_max_retries = 0",
+                    "",
+                    "[providers.codex]",
+                    `base_url = "${codex.baseUrl}"`,
+                    'transport = "websocket"',
+                    "",
+                ].join("\n"),
             },
             modelId: "openai/gpt-5.6-sol",
             providerId: "codex",

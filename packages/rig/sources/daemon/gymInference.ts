@@ -55,15 +55,36 @@ export function createGymInferenceFromEnvironment(
     const token = env.RIG_GYM_TOKEN?.trim();
 
     // The configuration decides which providers exist and which models they serve, exactly as
-    // in production; the gym only replaces how each of those accounts serves inference.
+    // in production; the gym only replaces how each of those accounts serves inference. A
+    // provider the configuration aims at an explicit base URL already targets a
+    // scenario-controlled fixture, so it keeps its real implementation.
     return (real, configuration) => {
         const providers = new AgentProviders();
         providers.add("gym", new GymHttpProvider({ endpoint, providerId: "gym", token }), "gym");
         for (const providerId of new Set(real.models.map((model) => model.providerId))) {
+            const configured = configuration.values.providers[providerId];
+            const configuredBaseUrl =
+                configured?.type === "codex" || configured?.type === "grok"
+                    ? configured.baseUrl
+                    : undefined;
+            if (configuredBaseUrl !== undefined) {
+                providers.add(
+                    providerId,
+                    async (selection) => {
+                        const provider = await real.providers.resolve(selection.id, selection.model);
+                        if (provider === null) {
+                            throw new Error(`Provider "${selection.id}" is not registered.`);
+                        }
+                        return provider;
+                    },
+                    real.providers.typeOf(providerId) ?? configured?.type ?? "codex",
+                );
+                continue;
+            }
             providers.add(
                 providerId,
                 new GymHttpProvider({ endpoint, providerId, token }),
-                configuration.values.providers[providerId]?.type ?? "codex",
+                configured?.type ?? "codex",
             );
         }
         return { models: [GYM_MODEL, ...real.models], providers };

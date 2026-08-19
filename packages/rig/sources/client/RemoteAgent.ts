@@ -94,6 +94,7 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
     readonly #assistantMessageIdsByRunId = new Map<string, string>();
     /** The service record of each run, so a failed run can surface its error report. */
     readonly #serviceMessageIdsByRunId = new Map<string, string>();
+    #lastRunFailure: { runId: string; text: string } | undefined;
     /** One account-quota probe per provider; quota is a courtesy and never re-fires. */
     readonly #quotaProbes = new Map<string, Promise<readonly SessionProviderQuota[]>>();
     /** True while a send() carrying an onEvent callback owns loop-event delivery. */
@@ -432,8 +433,14 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         const runId = terminalRun?.id ?? activeRunId ?? submitted.message.id;
         const stopReason = aborted ? "aborted" : toStopReason(terminalRun);
         if (terminalRun?.status === "failed") {
+            const captured =
+                this.#lastRunFailure?.runId === terminalRun.id
+                    ? this.#lastRunFailure.text
+                    : undefined;
             throw new RemoteAgentRunError(
-                failedRunMessage(this.#history, terminalRun.id) ?? "The remote run failed.",
+                captured ??
+                    failedRunMessage(this.#history, terminalRun.id) ??
+                    "The remote run failed.",
             );
         }
         return {
@@ -520,7 +527,12 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
                 this.#serviceMessageIdsByRunId.delete(event.payload.run.id);
                 this.#assistantMessageIdsByRunId.delete(event.payload.run.id);
                 const service = serviceId === undefined ? undefined : this.#messages.get(serviceId);
-                return service === undefined ? undefined : toRunErrorMessage(service);
+                const report = service === undefined ? undefined : toRunErrorMessage(service);
+                const block = report?.blocks[0];
+                if (block?.type === "text") {
+                    this.#lastRunFailure = { runId: event.payload.run.id, text: block.text };
+                }
+                return report;
             }
             // The protocol carries usage on the run; the TUI accounts it on the run's
             // assistant message, so the finished run decorates that message once.
