@@ -75,7 +75,8 @@ const runResult = await runCommand(
         "--maxWorkers=1",
         "--retry=0",
         "--reporter=json",
-        `--outputFile=${reportPath}`,
+        "--reporter=hanging-process",
+        `--outputFile.json=${reportPath}`,
         ...apiTestPaths,
     ],
     packageRoot,
@@ -174,6 +175,13 @@ console.error(summary.join(" "));
 
 if (failures.length > 0) {
     for (const failure of failures) console.error(`FAIL: ${failure}`);
+    if (runResult.exitCode !== 0) {
+        const diagnostics = [runResult.stderr, runResult.stdout]
+            .map((output) => output.trim())
+            .filter((output) => output.length > 0)
+            .join("\n");
+        if (diagnostics.length > 0) console.error(`VITEST OUTPUT:\n${diagnostics}`);
+    }
     for (const assertion of failedAssertions) {
         console.error(
             `FAILED ${assertion.fullName ?? assertion.title ?? "unnamed"}\n` +
