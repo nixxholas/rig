@@ -47,6 +47,7 @@ import { getCodexModelProperties } from "@/vendors/codex/impl/getCodexModelPrope
 import { getCodexTurnKey } from "@/vendors/codex/impl/getCodexTurnKey.js";
 import { isCodexContextWindowError } from "@/vendors/codex/errors/codexErrors.js";
 import { isCodexPreviousResponseNotFoundError } from "@/vendors/codex/errors/codexErrors.js";
+import { readCodexMissingToolOutputCallId } from "@/vendors/codex/errors/codexErrors.js";
 import { isCodexUnauthorizedError } from "@/vendors/codex/errors/codexErrors.js";
 import { isCodexWebSocketUnavailableError } from "@/vendors/codex/errors/codexErrors.js";
 import { isRetryableCodexStreamError } from "@/vendors/codex/errors/codexErrors.js";
@@ -521,6 +522,7 @@ export class CodexSession extends BaseSession {
         let transportRetries = 0;
         let reportedAttempt = 0;
         let previousResponseRecoveries = 0;
+        let missingToolOutputRecoveries = 0;
         let unauthorizedRecoveryStep = 0;
 
         for (;;) {
@@ -677,6 +679,22 @@ export class CodexSession extends BaseSession {
                         this.replaceCredential(recovered);
                         continue;
                     }
+                }
+                const missingToolOutputCallId = readCodexMissingToolOutputCallId(error);
+                if (
+                    !useSse &&
+                    missingToolOutputCallId !== undefined &&
+                    missingToolOutputRecoveries < 1 &&
+                    codexRequestHasToolOutput(payload, missingToolOutputCallId)
+                ) {
+                    missingToolOutputRecoveries += 1;
+                    reportedAttempt += 1;
+                    yield {
+                        type: "retrying",
+                        attempt: reportedAttempt,
+                        reason: "Codex lost a tool result; replaying full context.",
+                    };
+                    continue;
                 }
                 if (
                     !useSse &&
@@ -859,6 +877,18 @@ function cloneConfiguration(configuration: SessionModelConfiguration): SessionMo
         instructions: configuration.instructions,
         tools: [...(configuration.tools ?? [])],
     };
+}
+
+/** Whether the complete caller-owned request can repair a poisoned incremental response chain. */
+function codexRequestHasToolOutput(request: CodexResponseRequest, callId: string): boolean {
+    return (
+        Array.isArray(request.input) &&
+        request.input.some(
+            (item) =>
+                (item.type === "function_call_output" || item.type === "custom_tool_call_output") &&
+                item.call_id === callId,
+        )
+    );
 }
 
 function cancelledStream(): SessionStream {

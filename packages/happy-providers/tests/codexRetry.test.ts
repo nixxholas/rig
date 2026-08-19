@@ -15,6 +15,7 @@ import { codexErrorMessage } from "@/vendors/codex/errors/codexErrors.js";
 import { isCodexContextWindowError } from "@/vendors/codex/errors/codexErrors.js";
 import { isRetryableCodexStreamError } from "@/vendors/codex/errors/codexErrors.js";
 import { isCodexPreviousResponseNotFoundError } from "@/vendors/codex/errors/codexErrors.js";
+import { readCodexMissingToolOutputCallId } from "@/vendors/codex/errors/codexErrors.js";
 import { isCodexUnauthorizedError } from "@/vendors/codex/errors/codexErrors.js";
 import { isCodexWebSocketUnavailableError } from "@/vendors/codex/errors/codexErrors.js";
 import { collectCodexCompaction } from "@/vendors/codex/impl/codexCompaction.js";
@@ -86,6 +87,31 @@ describe("Codex stream retries", () => {
                 Object.assign(new Error("invalid request"), { status: 400 }),
             ),
         ).toBe(false);
+    });
+
+    it("recognizes a missing tool output as a deterministic context rejection", () => {
+        const responseError = {
+            type: "invalid_request_error",
+            code: null,
+            message: "No tool output found for function call call_missing_output.",
+            param: "input",
+        };
+        const error = Object.assign(
+            new WebSocketError(
+                JSON.stringify({ type: "error", error: responseError, status: 400 }),
+                {
+                    type: "error",
+                    code: "invalid_request_error",
+                    message: responseError.message,
+                    param: "input",
+                    sequence_number: 1,
+                } as never,
+            ),
+            { error: responseError, status: 400 },
+        );
+
+        expect(readCodexMissingToolOutputCallId(error)).toBe("call_missing_output");
+        expect(isRetryableCodexStreamError(error)).toBe(false);
     });
 
     it("formats the native user agent from runtime identity", () => {

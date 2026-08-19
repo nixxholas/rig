@@ -50,6 +50,7 @@ import { checkModuleToolParameters } from "./checkModuleToolParameters.js";
 import { openHappyAgentDatabase } from "./HappyAgentDatabase.js";
 import { acquireHappyAgentStorageLock } from "./HappyAgentStorageLock.js";
 import { InstallationModule } from "./InstallationModule.js";
+import { instrumentModuleLogging } from "./instrumentModuleLogging.js";
 
 /** The only runtime inputs not owned by configuration. Product startup supplies only version. */
 export interface StartHappyAgentRuntimeOptions {
@@ -381,7 +382,9 @@ export async function startHappyAgentRuntime(
             events,
             happy,
             installation,
-        ].map(checkModuleToolParameters);
+        ]
+            .map(checkModuleToolParameters)
+            .map(instrumentModuleLogging);
 
         await api.prepare();
         await options.onPrepared?.({

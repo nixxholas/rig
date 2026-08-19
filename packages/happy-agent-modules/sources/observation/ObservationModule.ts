@@ -3,8 +3,10 @@ import { mkdir } from "node:fs/promises";
 import type {
     AgentBaseCompaction,
     AgentBaseInference,
+    AgentBaseInferenceStart,
     AgentBaseLoop,
     AgentBaseSettlement,
+    AgentBaseToolCall,
     AgentBaseToolOutcome,
     AgentBaseTurn,
     AgentBaseTurnStart,
@@ -12,6 +14,7 @@ import type {
     AgentModuleHooks,
     AgentModuleScope,
 } from "@slopus/happy-agent-base";
+import type { SessionEvent } from "@slopus/happy-providers";
 import {
     withLogContext,
     withLogger,
@@ -61,6 +64,9 @@ export class ObservationModule implements AgentModule {
     readonly #logger: Logger | undefined;
     readonly #tracing: ObservationTracing | undefined;
     readonly #historyDump: HistoryDump | undefined;
+    readonly #activeCompactions = new Map<string, ActiveCompaction>();
+    readonly #activeInferences = new Map<string, ActiveInference>();
+    readonly #activeTools = new Map<string, ActiveTool>();
     #closed = false;
 
     private constructor(parts: {
@@ -182,7 +188,7 @@ export class ObservationModule implements AgentModule {
     readonly #hooks: AgentModuleHooks = {
         beforeAgentLoop: (ctx: Context, scope: AgentModuleScope, loop: AgentBaseLoop): void => {
             withLogContext(ctx, { agentId: scope.agent.id, loopId: loop.loopId }).log.info(
-                "The agent started a run.",
+                `agent:run:start agentId=${logValue(scope.agent.id)} loopId=${logValue(loop.loopId)}`,
             );
         },
 
@@ -195,7 +201,9 @@ export class ObservationModule implements AgentModule {
                 agentId: scope.agent.id,
                 turnId: turn.turnId,
                 ...(turn.contextTokens === undefined ? {} : { contextTokens: turn.contextTokens }),
-            }).log.debug("The agent started a turn.");
+            }).log.debug(
+                `agent:turn:start agentId=${logValue(scope.agent.id)} turnId=${logValue(turn.turnId)}${numberField("contextTokens", turn.contextTokens)}`,
+            );
             return undefined;
         },
 
@@ -204,9 +212,78 @@ export class ObservationModule implements AgentModule {
                 agentId: scope.agent.id,
                 turnId: turn.turnId,
             }).log.debug(
-                turn.aborted ? "The agent's turn was cancelled." : "The agent finished a turn.",
+                `agent:turn:finish agentId=${logValue(scope.agent.id)} turnId=${logValue(turn.turnId)} outcome=${turn.aborted ? "cancelled" : "completed"}`,
             );
             return undefined;
+        },
+
+        beforeInference: (
+            ctx: Context,
+            scope: AgentModuleScope,
+            inference: AgentBaseInferenceStart,
+        ): void => {
+            const startedAt = Date.now();
+            this.#activeInferences.set(scope.agent.id, {
+                activitySeen: false,
+                attempt: 1,
+                attemptStartedAt: startedAt,
+                inferenceId: inference.inferenceId,
+                startedAt,
+            });
+            withLogContext(ctx, {
+                agentId: scope.agent.id,
+                inferenceId: inference.inferenceId,
+                provider: scope.agent.provider,
+                ...(scope.agent.model === undefined ? {} : { model: scope.agent.model }),
+                ...(scope.agent.effort === undefined ? {} : { effort: scope.agent.effort }),
+                ...(scope.agent.tier === undefined ? {} : { tier: scope.agent.tier }),
+                ...(inference.contextTokens === undefined
+                    ? {}
+                    : { contextTokens: inference.contextTokens }),
+            }).log.debug(
+                `inference:start agentId=${logValue(scope.agent.id)} inferenceId=${logValue(inference.inferenceId)} provider=${logValue(scope.agent.provider)}${stringField("model", scope.agent.model)}${stringField("effort", scope.agent.effort)}${stringField("tier", scope.agent.tier)}${numberField("contextTokens", inference.contextTokens)}`,
+            );
+        },
+
+        onEvent: (ctx: Context, scope: AgentModuleScope, event: SessionEvent): void => {
+            const active = this.#activeInferences.get(scope.agent.id);
+            if (active === undefined) return;
+            const eventCtx = withLogContext(ctx, {
+                agentId: scope.agent.id,
+                inferenceId: active.inferenceId,
+                attempt: active.attempt,
+                event: event.type,
+                module: this.name,
+            });
+            if (event.type === "block_start") {
+                active.attemptStartedAt = Date.now();
+                active.activitySeen = false;
+                eventCtx.log.debug(
+                    `inference:stream:open agentId=${logValue(scope.agent.id)} inferenceId=${logValue(active.inferenceId)} attempt=${active.attempt} elapsedMs=${elapsed(active.startedAt)}`,
+                );
+                return;
+            }
+            if (event.type === "retrying") {
+                eventCtx.log.warn(
+                    `inference:retry agentId=${logValue(scope.agent.id)} inferenceId=${logValue(active.inferenceId)} retry=${event.attempt} elapsedMs=${elapsed(active.startedAt)} reason=${logValue(event.reason)}`,
+                );
+                active.attempt = event.attempt + 1;
+                active.activitySeen = false;
+                return;
+            }
+            if (event.type === "block_reset") {
+                eventCtx.log.warn(
+                    `inference:stream:reset agentId=${logValue(scope.agent.id)} inferenceId=${logValue(active.inferenceId)} attempt=${active.attempt} elapsedMs=${elapsed(active.startedAt)}`,
+                );
+                active.activitySeen = false;
+                return;
+            }
+            if (!active.activitySeen) {
+                active.activitySeen = true;
+                eventCtx.log.debug(
+                    `inference:first-activity agentId=${logValue(scope.agent.id)} inferenceId=${logValue(active.inferenceId)} attempt=${active.attempt} event=${logValue(event.type)} attemptElapsedMs=${elapsed(active.attemptStartedAt)} elapsedMs=${elapsed(active.startedAt)}`,
+                );
+            }
         },
 
         afterInference: (
@@ -214,6 +291,10 @@ export class ObservationModule implements AgentModule {
             scope: AgentModuleScope,
             inference: AgentBaseInference,
         ): void => {
+            const active = this.#activeInferences.get(scope.agent.id);
+            if (active?.inferenceId === inference.inferenceId) {
+                this.#activeInferences.delete(scope.agent.id);
+            }
             const inferenceCtx = withLogContext(ctx, {
                 agentId: scope.agent.id,
                 inferenceId: inference.inferenceId,
@@ -225,11 +306,35 @@ export class ObservationModule implements AgentModule {
                           outputTokens: inference.tokens.output,
                       }),
             });
+            const message =
+                `inference:finish agentId=${logValue(scope.agent.id)} inferenceId=${logValue(inference.inferenceId)} state=${logValue(inference.state ?? "missing")}` +
+                (active === undefined ? "" : ` durationMs=${elapsed(active.startedAt)}`) +
+                (inference.tokens === undefined
+                    ? ""
+                    : ` inputTokens=${inference.tokens.input} outputTokens=${inference.tokens.output}`);
             if (inference.errorMessage === undefined) {
-                inferenceCtx.log.debug("The model answered.");
+                inferenceCtx.log.debug(message);
                 return;
             }
-            inferenceCtx.log.warn("The model did not answer:", inference.errorMessage);
+            inferenceCtx.log.warn(`${message} error=${logValue(inference.errorMessage)}`);
+        },
+
+        beforeToolCall: (
+            ctx: Context,
+            scope: AgentModuleScope,
+            call: AgentBaseToolCall,
+        ): undefined => {
+            this.#activeTools.set(toolKey(scope.agent.id, call.callId), {
+                startedAt: Date.now(),
+            });
+            withLogContext(ctx, {
+                agentId: scope.agent.id,
+                callId: call.callId,
+                tool: call.tool.name,
+            }).log.debug(
+                `tool:start agentId=${logValue(scope.agent.id)} callId=${logValue(call.callId)} tool=${logValue(call.tool.name)}`,
+            );
+            return undefined;
         },
 
         afterToolCall: (
@@ -237,15 +342,29 @@ export class ObservationModule implements AgentModule {
             scope: AgentModuleScope,
             outcome: AgentBaseToolOutcome,
         ): void => {
+            const key = toolKey(scope.agent.id, outcome.callId);
+            const active = this.#activeTools.get(key);
+            this.#activeTools.delete(key);
             const callCtx = withLogContext(ctx, {
                 agentId: scope.agent.id,
                 callId: outcome.callId,
                 tool: outcome.tool.name,
             });
             callCtx.log.debug(
-                outcome.isError
-                    ? `The ${outcome.tool.name} tool reported a failure.`
-                    : `The ${outcome.tool.name} tool finished.`,
+                `tool:finish agentId=${logValue(scope.agent.id)} callId=${logValue(outcome.callId)} tool=${logValue(outcome.tool.name)} outcome=${outcome.isError ? "error" : "completed"}${active === undefined ? "" : ` durationMs=${elapsed(active.startedAt)}`}`,
+            );
+        },
+
+        beforeCompaction: (ctx: Context, scope: AgentModuleScope, compaction): void => {
+            this.#activeCompactions.set(scope.agent.id, {
+                compactionId: compaction.compactionId,
+                startedAt: Date.now(),
+            });
+            withLogContext(ctx, {
+                agentId: scope.agent.id,
+                compactionId: compaction.compactionId,
+            }).log.debug(
+                `compaction:start agentId=${logValue(scope.agent.id)} compactionId=${logValue(compaction.compactionId)}${numberField("contextTokens", compaction.contextTokens)}`,
             );
         },
 
@@ -254,11 +373,17 @@ export class ObservationModule implements AgentModule {
             scope: AgentModuleScope,
             compaction: AgentBaseCompaction,
         ): void => {
+            const active = this.#activeCompactions.get(scope.agent.id);
+            if (active?.compactionId === compaction.compactionId) {
+                this.#activeCompactions.delete(scope.agent.id);
+            }
             withLogContext(ctx, {
                 agentId: scope.agent.id,
                 compactionId: compaction.compactionId,
                 outcome: compaction.result.status,
-            }).log.info(COMPACTION_MESSAGES[compaction.result.status]);
+            }).log.info(
+                `compaction:finish agentId=${logValue(scope.agent.id)} compactionId=${logValue(compaction.compactionId)} outcome=${compaction.result.status}${active === undefined ? "" : ` durationMs=${elapsed(active.startedAt)}`}`,
+            );
         },
 
         afterAgentSettled: (
@@ -266,20 +391,61 @@ export class ObservationModule implements AgentModule {
             scope: AgentModuleScope,
             settlement: AgentBaseSettlement,
         ): void => {
-            withLogContext(ctx, {
+            this.#activeCompactions.delete(scope.agent.id);
+            this.#activeInferences.delete(scope.agent.id);
+            const toolPrefix = `${scope.agent.id}\u0000`;
+            for (const key of this.#activeTools.keys()) {
+                if (key.startsWith(toolPrefix)) this.#activeTools.delete(key);
+            }
+            const settlementCtx = withLogContext(ctx, {
                 agentId: scope.agent.id,
                 loopId: settlement.loopId,
                 settlementId: settlement.settlementId,
-            }).log.info("The agent has nothing left to do.");
+            });
+            const message =
+                `agent:run:finish agentId=${logValue(scope.agent.id)} loopId=${logValue(settlement.loopId)} settlementId=${logValue(settlement.settlementId)} outcome=${settlement.error === undefined ? "completed" : "error"}` +
+                (settlement.error === undefined ? "" : ` error=${logValue(settlement.error)}`);
+            if (settlement.error === undefined) settlementCtx.log.info(message);
+            else settlementCtx.log.warn(message);
         },
     };
 
     readonly beforeStart = (): AgentModuleHooks => this.#hooks;
 }
 
-/** What each compaction outcome is called, in the words a person reading the log would use. */
-const COMPACTION_MESSAGES: Readonly<Record<AgentBaseCompaction["result"]["status"], string>> = {
-    cancelled: "Compacting the conversation was cancelled.",
-    completed: "The conversation was compacted.",
-    failed: "Compacting the conversation failed.",
-};
+interface ActiveCompaction {
+    readonly compactionId: string;
+    readonly startedAt: number;
+}
+
+interface ActiveInference {
+    activitySeen: boolean;
+    attempt: number;
+    attemptStartedAt: number;
+    readonly inferenceId: string;
+    readonly startedAt: number;
+}
+
+interface ActiveTool {
+    readonly startedAt: number;
+}
+
+function toolKey(agentId: string, callId: string): string {
+    return `${agentId}\u0000${callId}`;
+}
+
+function elapsed(startedAt: number): number {
+    return Math.max(0, Date.now() - startedAt);
+}
+
+function stringField(name: string, value: string | undefined): string {
+    return value === undefined ? "" : ` ${name}=${logValue(value)}`;
+}
+
+function numberField(name: string, value: number | undefined): string {
+    return value === undefined ? "" : ` ${name}=${value}`;
+}
+
+function logValue(value: string): string {
+    return JSON.stringify(value);
+}

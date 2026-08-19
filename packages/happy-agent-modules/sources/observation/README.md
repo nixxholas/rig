@@ -77,6 +77,43 @@ Only scalar log-context fields are recorded, up to 64 per line. A context may
 carry anything a caller had to hand, including objects with cycles or getters
 that throw; a log line is not the place to discover that.
 
+Every module startup and ordinary agent hook runs with its stable module name
+in the log context. At `trace`, ordinary hook boundaries record their start,
+finish, and duration. Raw provider-event hooks stay allocation-free and omit
+per-delta boundaries so one streamed response cannot flood or slow the agent;
+the observation module records their significant phase changes instead.
+Ordinary and transactional hook failures are always recorded, and hooks slower
+than 250 ms are also summarized at `debug`.
+
+The observation module adds focused phase records at `debug`: compaction start
+and finish, inference start, stream open, first provider activity, retries,
+stream resets, inference finish, and tool duration. These records contain IDs
+and durations in the message itself, so a filtered log remains understandable.
+
+For one debugging daemon, enable the complete module timeline and reload the
+daemon so it inherits the environment:
+
+```sh
+HAPPY_OBSERVATION_LOGS=true HAPPY_OBSERVATION_LOG_LEVEL=trace rig daemon reload
+```
+
+For a persistent setting, put this in `~/Happy/Config/happy.toml` and reload the
+daemon:
+
+```toml
+[observation]
+logs = true
+log_level = "trace"
+```
+
+The default log is `~/.happy/agent/observation/agent.log`; when
+`HAPPY_HOME_DIR` is set, replace `~/.happy` with that directory. To render the
+JSONL as the compact time/module/message view used for interactive debugging:
+
+```sh
+tail -F ~/.happy/agent/observation/agent.log | jq -r '\(.time[11:19]) \((.module // "runtime") + "            " | .[0:12])  \(.msg)'
+```
+
 ## Traces
 
 When `traces` is on, the module starts a `NodeTracerProvider` with a batching

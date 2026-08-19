@@ -15,6 +15,50 @@ afterEach(async () => {
 });
 
 describe("public transcript and run APIs", () => {
+    it("persists provider startup failures as service messages in the failed run", async () => {
+        const failure = "Codex access token could not be refreshed: 401 Unauthorized";
+        const gym = await startGym({
+            inference: () => {
+                throw new Error(failure);
+            },
+        });
+
+        const sent = await gym.client.sendMessage(gym.defaultSessionId, {
+            mode: modeFor(gym),
+            mutationId: "transcript-provider-startup-failure",
+            text: "Reply with exactly: rig beta zero works",
+        });
+        const started = await waitForStarted(gym, gym.defaultSessionId, sent.message.id);
+        const runId = runIdOf(started);
+        if (runId === undefined) throw new Error("The failed run had no ID.");
+        await waitForFinished(gym, gym.defaultSessionId, runId);
+
+        const beforeRestart = await gym.client.getMessages(gym.defaultSessionId);
+        expect(beforeRestart.runs).toMatchObject([
+            {
+                id: runId,
+                reason: "error",
+                status: "failed",
+                messages: [
+                    {
+                        content: [
+                            { text: "Reply with exactly: rig beta zero works", type: "text" },
+                        ],
+                        role: "user",
+                    },
+                    {
+                        content: [{ text: failure, type: "text" }],
+                        role: "service",
+                    },
+                ],
+            },
+        ]);
+
+        await gym.restart();
+        expect(await gym.client.getMessages(gym.defaultSessionId)).toEqual(beforeRestart);
+        expect(gym.inference.requests).toHaveLength(1);
+    }, 60_000);
+
     it("keeps queued messages pending, accepts them in order, and pages whole runs", async () => {
         let releaseFirst!: () => void;
         let providerStarted!: () => void;

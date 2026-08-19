@@ -814,6 +814,41 @@ export class HistoryModule implements AgentModule {
     }
 
     /**
+     * Record a run failure that happened before Agent Base could commit an inference outcome.
+     *
+     * Provider construction, credential refresh, and an iterator throwing before its first event
+     * all settle the run with an error without reaching `afterInferenceTransact`. A normal failed
+     * inference already owns this stable record, so settlement is only the atomic fallback: it
+     * fills the missing record and never repeats an error the inference hook persisted.
+     */
+    async #recordSettlementFailure(
+        ctx: Context,
+        scope: AgentModuleScope,
+        error: string,
+    ): Promise<void> {
+        const runId = this.#events?.activeRunId(scope.agent.id);
+        if (runId === undefined) return;
+        const recordId = `${runId}-error`;
+        const existing = await agentDatabaseRows<{ record_id: string }>(
+            ctx.db,
+            sql`SELECT record_id
+                FROM ${sql.raw(HISTORY_TABLE)}
+                WHERE agent_id = ${scope.agent.id} AND record_id = ${recordId}
+                LIMIT 1`,
+        );
+        if (existing[0] !== undefined) return;
+        await this.#append(ctx, scope.agent.id, {
+            at: Date.now(),
+            blocks: [{ type: "text", text: error }],
+            recordId,
+            role: "error",
+            runId,
+            ...(scope.agent.model === undefined ? {} : { model: scope.agent.model }),
+            provider: scope.agent.provider,
+        });
+    }
+
+    /**
      * Grow one run-visible message under its stable live identity.
      *
      * Agent Base commits every completed inference block and tool result exactly once. Merging
@@ -1360,6 +1395,7 @@ export class HistoryModule implements AgentModule {
                 await scope.runKV.delete(ctx, PENDING_BLOCKS_KEY);
             }
             if (settlement.error !== undefined) {
+                await this.#recordSettlementFailure(ctx, scope, settlement.error);
                 await this.#finishRun(ctx, scope.agent.id, "failed", "error", Date.now());
             } else {
                 await this.#finishRun(ctx, scope.agent.id, "completed", "completed", Date.now());

@@ -12,6 +12,7 @@ import { ObservationModule } from "../../sources/observation/ObservationModule.j
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
+    vi.useRealTimers();
     vi.unstubAllEnvs();
     await Promise.all(
         temporaryDirectories.splice(0).map((path) => rm(path, { force: true, recursive: true })),
@@ -129,6 +130,8 @@ describe("ObservationModule edge cases", () => {
     });
 
     it("logs every lifecycle hook with its stable identifiers and outcome", async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
         vi.stubEnv("HAPPY_OBSERVATION_LOG_LEVEL", "trace");
         const root = await temporaryRoot("happy-observation-hooks-");
         const config = await configIn(root);
@@ -136,7 +139,12 @@ describe("ObservationModule edge cases", () => {
         const ctx = observation.install(createRootContext());
         const hooks = observation.beforeStart();
         const scope = {
-            agent: { id: "agent1" },
+            agent: {
+                effort: "high",
+                id: "agent1",
+                model: "gpt-5.6-sol",
+                provider: "codex",
+            },
             kv: {},
             sharedKV: {},
             runKV: {},
@@ -155,6 +163,26 @@ describe("ObservationModule edge cases", () => {
             contextTokens: 42,
             aborted: true,
         });
+        hooks.beforeInference?.(ctx, scope as never, {
+            loopId: "loop1",
+            turnId: "turn1",
+            contextTokens: 42,
+            inferenceId: "inference1",
+        });
+        hooks.onEvent?.(ctx, scope as never, { type: "block_start" });
+        vi.advanceTimersByTime(60_000);
+        hooks.onEvent?.(ctx, scope as never, { type: "reasoning_start" });
+        vi.advanceTimersByTime(1);
+        hooks.onEvent?.(ctx, scope as never, { type: "block_reset" });
+        hooks.onEvent?.(ctx, scope as never, {
+            type: "retrying",
+            attempt: 1,
+            reason: "provider busy",
+        });
+        vi.advanceTimersByTime(2_000);
+        hooks.onEvent?.(ctx, scope as never, { type: "block_start" });
+        vi.advanceTimersByTime(3_000);
+        hooks.onEvent?.(ctx, scope as never, { type: "text_start" });
         hooks.afterInference?.(
             ctx,
             scope as never,
@@ -163,7 +191,7 @@ describe("ObservationModule edge cases", () => {
                 turnId: "turn1",
                 contextTokens: 42,
                 inferenceId: "inference1",
-                state: "completed",
+                state: "normal",
                 tokens: { input: 3, output: 4 },
             } as never,
         );
@@ -180,6 +208,12 @@ describe("ObservationModule edge cases", () => {
                 errorMessage: "provider failed",
             } as never,
         );
+        hooks.beforeToolCall?.(
+            ctx,
+            scope as never,
+            { callId: "call1", tool: { name: "read_file" }, arguments: {} } as never,
+        );
+        vi.advanceTimersByTime(100);
         hooks.afterToolCall?.(
             ctx,
             scope as never,
@@ -191,6 +225,12 @@ describe("ObservationModule edge cases", () => {
                 isError: false,
             } as never,
         );
+        hooks.beforeToolCall?.(
+            ctx,
+            scope as never,
+            { callId: "call2", tool: { name: "write_file" }, arguments: {} } as never,
+        );
+        vi.advanceTimersByTime(200);
         hooks.afterToolCall?.(
             ctx,
             scope as never,
@@ -203,6 +243,13 @@ describe("ObservationModule edge cases", () => {
             } as never,
         );
         for (const status of ["cancelled", "completed", "failed"] as const) {
+            hooks.beforeCompaction?.(ctx, scope as never, {
+                loopId: "loop1",
+                turnId: "turn1",
+                contextTokens: 42,
+                compactionId: `compact-${status}`,
+            });
+            vi.advanceTimersByTime(300);
             hooks.afterCompaction?.(
                 ctx,
                 scope as never,
@@ -224,28 +271,38 @@ describe("ObservationModule edge cases", () => {
         await observation.close();
 
         const records = logRecords(await readFile(config.configuration.paths.logPath, "utf8"));
-        expect(records).toHaveLength(11);
-        expect(records.map((record) => record.msg)).toEqual([
-            "The agent started a run.",
-            "The agent started a turn.",
-            "The agent's turn was cancelled.",
-            "The model answered.",
-            "The model did not answer: provider failed",
-            "The read_file tool finished.",
-            "The write_file tool reported a failure.",
-            "Compacting the conversation was cancelled.",
-            "The conversation was compacted.",
-            "Compacting the conversation failed.",
-            "The agent has nothing left to do.",
-        ]);
+        expect(records).toHaveLength(23);
+        expect(records.map((record) => record.msg)).toEqual(
+            expect.arrayContaining([
+                'agent:run:start agentId="agent1" loopId="loop1"',
+                'agent:turn:start agentId="agent1" turnId="turn1" contextTokens=42',
+                'agent:turn:finish agentId="agent1" turnId="turn1" outcome=cancelled',
+                'inference:start agentId="agent1" inferenceId="inference1" provider="codex" model="gpt-5.6-sol" effort="high" contextTokens=42',
+                'inference:first-activity agentId="agent1" inferenceId="inference1" attempt=1 event="reasoning_start" attemptElapsedMs=60000 elapsedMs=60000',
+                'inference:retry agentId="agent1" inferenceId="inference1" retry=1 elapsedMs=60001 reason="provider busy"',
+                'inference:first-activity agentId="agent1" inferenceId="inference1" attempt=2 event="text_start" attemptElapsedMs=3000 elapsedMs=65001',
+                'inference:finish agentId="agent1" inferenceId="inference1" state="normal" durationMs=65001 inputTokens=3 outputTokens=4',
+                'inference:finish agentId="agent1" inferenceId="inference2" state="missing" error="provider failed"',
+                'tool:finish agentId="agent1" callId="call1" tool="read_file" outcome=completed durationMs=100',
+                'tool:finish agentId="agent1" callId="call2" tool="write_file" outcome=error durationMs=200',
+                'compaction:finish agentId="agent1" compactionId="compact-completed" outcome=completed durationMs=300',
+                'agent:run:finish agentId="agent1" loopId="loop1" settlementId="settlement1" outcome=completed',
+            ]),
+        );
         expect(records[0]).toMatchObject({ agentId: "agent1", loopId: "loop1" });
-        expect(records[3]).toMatchObject({
+        expect(
+            records.find((record) =>
+                String(record.msg).startsWith('inference:finish agentId="agent1"'),
+            ),
+        ).toMatchObject({
             inferenceId: "inference1",
             inputTokens: 3,
             outputTokens: 4,
-            state: "completed",
+            state: "normal",
         });
-        expect(records[4]).toMatchObject({ inferenceId: "inference2" });
+        expect(
+            records.find((record) => String(record.msg).includes('inferenceId="inference2"')),
+        ).toMatchObject({ inferenceId: "inference2" });
     });
 
     it("does not emit history after the module is closed", async () => {

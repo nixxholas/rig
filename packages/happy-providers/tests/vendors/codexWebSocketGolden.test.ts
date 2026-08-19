@@ -22,6 +22,7 @@ const websocket = vi.hoisted(() => ({
         errorListenerCount: () => number;
     }>,
     internalErrorFailures: 0,
+    missingToolOutputCallId: undefined as string | undefined,
     missingPreviousResponseFailures: 0,
     endMidstreamOnce: false,
     emitTextResponses: false,
@@ -130,6 +131,33 @@ vi.mock("openai/resources/responses/ws", () => ({
                     error: Object.assign(
                         new Error(
                             JSON.stringify({ type: "error", error: responseError, status: 400 }),
+                        ),
+                        { error: responseError, status: 400 },
+                    ),
+                });
+                return;
+            }
+            if (websocket.missingToolOutputCallId !== undefined && request.generate !== false) {
+                const callId = websocket.missingToolOutputCallId;
+                websocket.missingToolOutputCallId = undefined;
+                const responseError = {
+                    type: "invalid_request_error",
+                    code: null,
+                    message: `No tool output found for custom tool call ${callId}.`,
+                    param: "input",
+                };
+                this.messages.push({
+                    type: "error",
+                    error: Object.assign(
+                        new WebSocketError(
+                            JSON.stringify({ type: "error", error: responseError, status: 400 }),
+                            {
+                                type: "error",
+                                code: "invalid_request_error",
+                                message: responseError.message,
+                                param: "input",
+                                sequence_number: 1,
+                            } as never,
                         ),
                         { error: responseError, status: 400 },
                     ),
@@ -473,6 +501,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         websocket.holdWarmupOpenOnce = false;
         websocket.instances.splice(0);
         websocket.internalErrorFailures = 0;
+        websocket.missingToolOutputCallId = undefined;
         websocket.missingPreviousResponseFailures = 0;
         websocket.endMidstreamOnce = false;
         websocket.emitTextResponses = false;
@@ -1610,6 +1639,119 @@ describe("Codex CLI mode WebSocket goldens", () => {
                 output: "true",
             },
         ]);
+        session.destroy();
+    });
+
+    it("replays full context once when a cached continuation loses a tool output", async () => {
+        const prompt = codexCliPrompt("gpt-5.6-sol", "websocket");
+        websocket.emitCustomToolResponse = true;
+        const session = await codexProvider("websocket", 10).session("<SESSION_ID>", {
+            instructions: prompt.instructions,
+            tools: codexCliTools("gpt-5.6-sol"),
+        });
+        const user = {
+            role: "user" as const,
+            content: [{ type: "text" as const, text: "use exec" }],
+        };
+        const toolCall = {
+            type: "tool_call" as const,
+            callId: "custom-call",
+            name: "exec",
+            arguments: "text(true);",
+            vendor: { provider: "codex" as const, type: "custom_tool_call" as const },
+        };
+        await drain(
+            session.run(testContext, {
+                context: { instructions: "", messages: [user] },
+                effort: "low",
+            }),
+        );
+        websocket.missingToolOutputCallId = toolCall.callId;
+
+        const events = [];
+        for await (const event of session.run(testContext, {
+            context: {
+                instructions: "",
+                messages: [
+                    user,
+                    { role: "assistant", content: [toolCall] },
+                    {
+                        role: "tool",
+                        content: [{ type: "text" as const, text: "true" }],
+                        callId: toolCall.callId,
+                        vendor: { provider: "codex", type: "custom_tool_call" },
+                    },
+                ],
+            },
+            effort: "low",
+        })) {
+            events.push(event);
+        }
+
+        expect(events).toContainEqual({
+            type: "retrying",
+            attempt: 1,
+            reason: "Codex lost a tool result; replaying full context.",
+        });
+        expect(events.filter((event) => event.type === "retrying")).toHaveLength(1);
+        expect(events.at(-1)).toMatchObject({ type: "done", state: "normal" });
+        expect(websocket.sent).toHaveLength(4);
+        expect(websocket.sent[2]!.previous_response_id).toBe("response");
+        expect(websocket.sent[3]!.previous_response_id).toBeUndefined();
+        expect(websocket.sent[3]!.input).toContainEqual({
+            type: "custom_tool_call_output",
+            call_id: toolCall.callId,
+            output: "true",
+        });
+        session.destroy();
+    });
+
+    it("does not retry when full caller context is missing the tool output", async () => {
+        const prompt = codexCliPrompt("gpt-5.6-sol", "websocket");
+        const session = await codexProvider("websocket", 10).session("<SESSION_ID>", {
+            instructions: prompt.instructions,
+            tools: codexCliTools("gpt-5.6-sol"),
+        });
+        websocket.missingToolOutputCallId = "custom-call";
+
+        const events = [];
+        for await (const event of session.run(testContext, {
+            context: {
+                instructions: "",
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ type: "text" as const, text: "use exec" }],
+                    },
+                    {
+                        role: "assistant",
+                        content: [
+                            {
+                                type: "tool_call",
+                                callId: "custom-call",
+                                name: "exec",
+                                arguments: "text(true);",
+                                vendor: {
+                                    provider: "codex",
+                                    type: "custom_tool_call",
+                                },
+                            },
+                        ],
+                    },
+                ],
+            },
+            effort: "low",
+        })) {
+            events.push(event);
+        }
+
+        expect(events).not.toContainEqual(expect.objectContaining({ type: "retrying" }));
+        expect(events.at(-1)).toMatchObject({
+            type: "done",
+            state: "error",
+            message: "No tool output found for custom tool call custom-call.",
+        });
+        expect(websocket.sent).toHaveLength(2);
         session.destroy();
     });
 

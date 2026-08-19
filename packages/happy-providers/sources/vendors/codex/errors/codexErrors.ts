@@ -263,6 +263,26 @@ export function isCodexPreviousResponseNotFoundError(error: unknown): boolean {
     return matches(error);
 }
 
+const MISSING_TOOL_OUTPUT =
+    /No tool output found for (?:function|custom tool) call ([A-Za-z0-9_-]+)/u;
+
+/** Reads the call identity from Codex's deterministic incomplete-tool-history rejection. */
+export function readCodexMissingToolOutputCallId(error: unknown): string | undefined {
+    const seen = new Set<object>();
+    const read = (value: unknown): string | undefined => {
+        if (typeof value === "string") return MISSING_TOOL_OUTPUT.exec(value)?.[1];
+        if (typeof value !== "object" || value === null || seen.has(value)) return undefined;
+        seen.add(value);
+        const record = value as Record<string, unknown>;
+        for (const candidate of [record.error, record.cause, record.body, record.message]) {
+            const callId = read(candidate);
+            if (callId !== undefined) return callId;
+        }
+        return undefined;
+    };
+    return read(error);
+}
+
 export function isCodexUnauthorizedError(error: unknown): boolean {
     return hasUnauthorized(error, new Set());
 }
@@ -350,6 +370,9 @@ function readDetails(
 export function isRetryableCodexStreamError(error: unknown): boolean {
     if (isEmptyResponseError(error)) return true;
     if (hasAbortError(error, new Set())) return false;
+    // Repeating the same request cannot supply the tool output it omitted. CodexSession may
+    // instead replay one complete caller context when that context proves the output exists.
+    if (readCodexMissingToolOutputCallId(error) !== undefined) return false;
     // A spent account is the one 429 that waiting cannot fix, and retrying it costs the person
     // minutes of backoff before they are told. Every other 429, including Bedrock throttling,
     // stays retryable below.

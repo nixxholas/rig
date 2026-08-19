@@ -125,6 +125,51 @@ async function finishInference(
 }
 
 describe("HistoryModule run history", () => {
+    it("records a settlement failure when the provider throws before completing inference", async () => {
+        const world = await setup("history-runs-settlement-error");
+        try {
+            await world.history.queuePending(
+                world.database.context,
+                pending("message-settlement-error", 100),
+            );
+            await acceptBatch(world, [accepted("message-settlement-error", "send")]);
+
+            await world.historyHooks.afterAgentSettledTransact?.(
+                world.database.context,
+                world.scope,
+                {
+                    error: "Codex access token could not be refreshed: 401 Unauthorized",
+                    loopId: "loop-settlement-error",
+                    settlementId: "settlement-error",
+                },
+            );
+
+            const page = await world.history.runs(world.database.context, "agent-a");
+            expect(page.runs).toHaveLength(1);
+            expect(page.runs[0]).toMatchObject({
+                id: "message-settlement-error",
+                reason: "error",
+                status: "failed",
+            });
+            expect(page.runs[0]?.messages).toMatchObject([
+                { recordId: "message-settlement-error", role: "user" },
+                {
+                    blocks: [
+                        {
+                            text: "Codex access token could not be refreshed: 401 Unauthorized",
+                            type: "text",
+                        },
+                    ],
+                    recordId: "message-settlement-error-error",
+                    role: "error",
+                    runId: "message-settlement-error",
+                },
+            ]);
+        } finally {
+            world.database.close();
+        }
+    });
+
     it("uses one deterministic error record when a run reports multiple failed inferences", async () => {
         const world = await setup("history-runs-stable-error");
         try {
@@ -148,6 +193,15 @@ describe("HistoryModule run history", () => {
                     },
                 );
             }
+            await world.historyHooks.afterAgentSettledTransact?.(
+                world.database.context,
+                world.scope,
+                {
+                    error: "second failure",
+                    loopId: "loop-error",
+                    settlementId: "settlement-error",
+                },
+            );
 
             const page = await world.history.runs(world.database.context, "agent-a");
             expect(page.runs[0]?.messages.map((message) => message.recordId)).toEqual([

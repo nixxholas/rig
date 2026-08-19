@@ -125,6 +125,10 @@ optimistic updates checks arriving events against its in-flight mutation IDs —
 "that is my own change coming back," no match means someone else's. The daemon never interprets
 it; it is not an idempotency key, and it does not dedupe retries.
 
+User messages do not need this dance at all: the client names the message itself by supplying
+its `id` to `send`, so the optimistic copy and the durable message are one message from the
+start — see `POST /v0/agents/:agentId/send`.
+
 ### Archival, not deletion
 
 Nothing durable is ever permanently deleted through this API — that is deliberate, not an
@@ -1202,7 +1206,8 @@ are read-only through this API, observed via `GET` and events, and they end when
 ends. `send`, `reorder`, `archive`, `unarchive`, `read`, and `draft` on a subagent answer
 `409`.
 
-Agents accept the optional `mutationId` from the basics and carry a `version` like every
+Agents accept the optional `mutationId` from the basics — except `send`, whose message is
+named by the client-supplied `id` instead — and carry a `version` like every
 resource that appears in update events, but their mutations do not use `If-Match` — their
 state changes continuously while a turn runs, so mutations name what they change instead of
 guarding the whole row. The version exists for event chaining and newer-copy comparison.
@@ -1557,6 +1562,7 @@ Request:
 
 ```json
 {
+    "id": "tz4a98xxat96iws9zmbrgj3a",
     "text": "Fix the login redirect loop",
     "content": [
         { "type": "text", "text": "Here is the screenshot:" },
@@ -1569,11 +1575,18 @@ Request:
         "effort": "medium",
         "serviceTier": null,
         "permissionMode": "auto"
-    },
-    "mutationId": "..."
+    }
 }
 ```
 
+- `id` — optional client-chosen message ID, a CUID2. The daemon creates the message under
+  exactly this identity, so the optimistic copy the client rendered at send and the durable
+  message are **the same message** — in this response, in every event, and in every history
+  load. No reconciliation or echo-matching is needed, and no path can strand a stale
+  optimistic copy: whichever way the authoritative message arrives, it carries the ID the
+  client already keys by. Omitted, the daemon generates one. Sending again with an `id` the
+  agent already has creates nothing and returns the message as it now stands, which makes
+  retrying a send whose response was lost safe.
 - `text` — the message text. Required.
 - `content` — optional rich blocks (text and images) accompanying the text. Image bytes
   travel **inline**, base64 in the block, exactly as they later appear in history — there is
@@ -1583,7 +1596,9 @@ Request:
   agent the two are identical: a run starts.
 - `mode` — required: the model selection and permission mode this message runs with, validated
   against the config catalog. An unknown or disabled model is `400`.
-- `mutationId` — echoed in the events this message produces.
+
+There is no `mutationId` here: the message `id` is the client's, so the client recognizes its
+own message in every event and history load by the identity it already holds.
 
 A sent message is **pending** first: the daemon holds it durably, but it is not yet part of the
 real history — it has no run. It stays pending until inference **accepts** it — a queued
@@ -1617,6 +1632,7 @@ Response — `202`: the durable message as it now stands, plus the event cursor 
 }
 ```
 
+- `id` — the client-supplied ID when the request named one, otherwise daemon-generated.
 - `status` — `"pending"` or `"accepted"`; user messages only. `runId` is `null` while pending
   and set at acceptance — the acceptance travels inside `run.started` or `run.boundary`, and
   the `runId` it brings is the handle for `abort`.
