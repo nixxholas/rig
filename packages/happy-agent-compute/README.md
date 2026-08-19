@@ -179,7 +179,7 @@ macOS denies them natively and compute's protected-path monitor remains the cros
 
 The four static supervisor artifacts are installed as optional dependencies so Docker can run a
 Linux supervisor even when the caller is on macOS. The package dependency is exactly
-`@slopus/happy-agent-supervisor@0.0.1`; platform aliases resolve the matching darwin or Linux
+`@slopus/happy-agent-supervisor@0.0.2`; platform aliases resolve the matching darwin or Linux
 arm64/x64 binary. The workspace pnpm install configuration includes both Darwin and Linux
 arm64/x64 targets, so a macOS checkout downloads the Linux artifact needed by an emulated Docker
 image.
