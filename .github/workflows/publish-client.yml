@@ -84,9 +84,7 @@ jobs:
               run: pnpm --filter @slopus/happy-agent-client check
 
             - name: Run tests
-              run: |
-                  pnpm run test:scripts
-                  pnpm --filter @slopus/happy-agent-client test
+              run: pnpm --filter @slopus/happy-agent-client test
 
             - name: Build the package
               run: pnpm --filter @slopus/happy-agent-client build

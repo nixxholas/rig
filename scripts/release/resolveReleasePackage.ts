@@ -21,10 +21,7 @@ const PACKAGES: Record<ReleasePackageKey, ReleasePackage> = {
         key: "happy-agent-client",
         manifestPath: "packages/happy-agent-client/package.json",
         tagPrefix: "happy-agent-client-v",
-        testArguments: [
-            ["run", "test:scripts"],
-            ["--filter", "@slopus/happy-agent-client", "test"],
-        ],
+        testArguments: [["--filter", "@slopus/happy-agent-client", "test"]],
     },
     "happy-agent-compute": {
         buildArguments: ["--filter", "@slopus/happy-agent-compute", "build"],

@@ -49,7 +49,6 @@ describe("resolveReleasePackage", () => {
             "check",
         ]);
         assert.deepEqual(target.testArguments, [
-            ["run", "test:scripts"],
             ["--filter", "@slopus/happy-agent-client", "test"],
         ]);
     });
