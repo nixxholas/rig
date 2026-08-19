@@ -18,6 +18,7 @@ import {
 
 import {
     type AgentLoopEvent,
+    type AgentSnapshot,
     type ContentBlock,
     type Message,
     type ToolResultBlock,
@@ -500,6 +501,7 @@ export class CodingAssistantApp implements Component, Focusable {
     #reviewingPermissionToolCallIds = new Set<string>();
     #stoppedToolCallIds = new Set<string>();
     #seenToolCallIds = new Set<string>();
+    #accountedUsageMessageIds = new Set<string>();
     #statusText = "Idle";
     #stopped = false;
     #streamEntryId: string | undefined;
@@ -717,6 +719,24 @@ export class CodingAssistantApp implements Component, Focusable {
             return;
         }
         this.#applyAgentMessage(message);
+    }
+
+    /** Reconciles the TUI from an authoritative API snapshot after an event-stream gap. */
+    applyAgentSnapshot(snapshot: AgentSnapshot): void {
+        this.#applyAgentEvent({ type: "block_reset" });
+        for (const message of snapshot.messages) this.applyMessage(message);
+        if (snapshot.status !== "idle" || this.#activeSessionRunId === undefined) return;
+        this.applySessionEvent({
+            createdAt: this.#now(),
+            data: {
+                modelLocked: false,
+                runId: this.#activeSessionRunId,
+                stopReason: "stop",
+            },
+            id: createId(),
+            sessionId: snapshot.id,
+            type: "run_finished",
+        });
     }
 
     /** Applies a public API streaming or reset event delivered outside the active send call. */
@@ -3796,7 +3816,12 @@ export class CodingAssistantApp implements Component, Focusable {
             return;
         }
         if (message.role === "compaction") {
-            if (message.usage !== undefined && !this.#skipInitialUsageReplay) {
+            if (
+                message.usage !== undefined &&
+                !this.#skipInitialUsageReplay &&
+                !this.#accountedUsageMessageIds.has(message.id)
+            ) {
+                this.#accountedUsageMessageIds.add(message.id);
                 this.#usage = addUsage(this.#usage, message.usage);
                 this.#sessionTokenCount = updateSessionTokenCount(this.#sessionTokenCount, {
                     type: "usage",
@@ -3810,7 +3835,8 @@ export class CodingAssistantApp implements Component, Focusable {
             return;
         }
         if (message.usage !== undefined) {
-            if (!this.#skipInitialUsageReplay) {
+            if (!this.#skipInitialUsageReplay && !this.#accountedUsageMessageIds.has(message.id)) {
+                this.#accountedUsageMessageIds.add(message.id);
                 this.#usage = addUsage(this.#usage, message.usage);
                 this.#sessionTokenCount = updateSessionTokenCount(this.#sessionTokenCount, {
                     type: "usage",
@@ -4067,8 +4093,12 @@ export class CodingAssistantApp implements Component, Focusable {
             return;
         }
 
-        const entry = this.#ensureThinkingEntry(contentIndex);
-        entry.id = `${messageId}:thinking:${contentIndex}`;
+        const id = `${messageId}:thinking:${contentIndex}`;
+        const settled = this.#entries.find(
+            (candidate) => candidate.id === id && candidate.role === "thinking",
+        );
+        const entry = settled ?? this.#ensureThinkingEntry(contentIndex);
+        entry.id = id;
         entry.text = text;
         this.#thinkingEntryIdsByContentIndex.set(contentIndex, entry.id);
     }

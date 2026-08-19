@@ -74,6 +74,18 @@ async function run(options: ExecCommandOptions, environment: NodeJS.ProcessEnv):
         await events.follow({
             after: submitted.cursor,
             signal: controller.signal,
+            onGap: async () => {
+                const history = await connection.client.getMessages(opened.id, { limit: 50 });
+                const recovered = history.runs.find((run) =>
+                    run.messages.some((message) => message.id === submitted.message.id),
+                );
+                if (recovered === undefined) return;
+                activeRunId = recovered.id;
+                if (recovered.status !== "running") {
+                    terminalRun = recovered;
+                    controller.abort();
+                }
+            },
             onEvent: async (event) => {
                 if (options.outputFormat === "stream-json") {
                     process.stdout.write(`${JSON.stringify({ event, type: "event" })}\n`);

@@ -963,7 +963,7 @@ export class ApiModule implements AgentModule {
             );
             return;
         }
-        if (event.type === "provider.event") {
+        if (event.type === "provider.event" || event.type === "tool.completed") {
             this.#convertProviderMessageEvent(event, payload);
         }
         if (event.type === "inference.completed") {

@@ -475,20 +475,44 @@ export class EventsModule implements AgentModule<AnyAgentTool> {
             scope: AgentModuleScope,
             result: SessionToolResultMessage,
         ): Promise<void> => {
-            const run = this.#runs.get(scope.agent.id);
+            // The tool result is recorded in the same transaction as its conversation entry. The
+            // durable row, rather than the post-commit cache, is therefore authoritative here.
+            const run = await loadActiveRun(ctx.db, scope.agent.id, parseActiveRun);
             const toolName = toolNameForCall(run, result.callId);
-            if (run !== undefined) await this.openLoop(ctx, scope.agent.id, run.runId);
+            const completion = toolExecutionEnd(
+                result.callId,
+                toolName,
+                result.content,
+                result.isError,
+            );
+            const next =
+                run === undefined
+                    ? undefined
+                    : {
+                          ...run,
+                          blocks: [...run.blocks, completion["result"]],
+                      };
+            if (next !== undefined) {
+                await saveActiveRun(ctx.db, scope.agent.id, next);
+                afterCommit(ctx, () => {
+                    this.#runs.set(scope.agent.id, next);
+                });
+                await this.openLoop(ctx, scope.agent.id, next.runId);
+            }
             await this.recordInDatabase(ctx, ctx.db, {
                 agentId: scope.agent.id,
                 payload: {
                     ...result,
-                    rigEvent: toolExecutionEnd(
-                        result.callId,
-                        toolName,
-                        result.content,
-                        result.isError,
-                    ),
-                    runId: run?.runId,
+                    rigEvent:
+                        next === undefined
+                            ? completion
+                            : {
+                                  ...completion,
+                                  // Public message consumers must see the completed tool before
+                                  // later inference or settlement events can advance the run.
+                                  partial: partialMessage(next, Date.now()),
+                              },
+                    runId: next?.runId,
                 },
                 type: "tool.completed",
             });
@@ -744,8 +768,7 @@ function projectProviderEvent(
     } else if (event.type === "reasoning_end") {
         const index = requireActive(run, "reasoning");
         const block = recordValue(run.blocks[index]);
-        const content =
-            event.reasoning ?? (typeof block?.thinking === "string" ? block.thinking : "");
+        const content = typeof block?.thinking === "string" ? block.thinking : "";
         run.blocks[index] = { thinking: content, type: "thinking" };
         rigEvent = {
             content,
@@ -827,7 +850,7 @@ function projectProviderEvent(
         const toolName = toolNameForCall(run, event.callId);
         const result = toolExecutionEnd(event.callId, toolName, event.content, event.isError);
         run.blocks.push(result.result);
-        rigEvent = result;
+        rigEvent = { ...result, partial: partialMessage(run, now) };
     } else if (event.type === "retrying") {
         rigEvent = { ...event, messageId };
     } else if (event.type === "done") {

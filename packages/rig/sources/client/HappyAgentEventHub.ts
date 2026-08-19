@@ -3,10 +3,8 @@ import type { EventCursor, HappyAgentClient, HappyAgentEvent } from "@slopus/hap
 const MAX_REPLAY_EVENTS = 1_000;
 const RECONNECT_DELAY_MS = 100;
 
-class EventGapError extends Error {}
-
 interface EventFollower {
-    fail(error: unknown): void;
+    gap(cursor: EventCursor): void;
     push(event: HappyAgentEvent): void;
 }
 
@@ -21,6 +19,7 @@ export class HappyAgentEventHub {
     readonly #client: HappyAgentClient;
     readonly #controller = new AbortController();
     #cursor: EventCursor;
+    #gapCursor: EventCursor | undefined;
     readonly #events: HappyAgentEvent[] = [];
     readonly #followers = new Set<EventFollower>();
     #pump: Promise<void> | undefined;
@@ -45,6 +44,8 @@ export class HappyAgentEventHub {
      */
     follow(options: {
         after: EventCursor;
+        /** Refreshes authoritative state when the daemon can no longer replay `after`. */
+        onGap: (cursor: EventCursor) => void | Promise<void>;
         onEvent: (event: HappyAgentEvent) => boolean | Promise<boolean>;
         signal?: AbortSignal;
     }): Promise<void> {
@@ -66,15 +67,26 @@ export class HappyAgentEventHub {
                 cursor = event.cursor;
                 if (await options.onEvent(event)) finish();
             };
+            const resync = async (nextCursor: EventCursor) => {
+                if (settled) return;
+                cursor = nextCursor;
+                await options.onGap(nextCursor);
+            };
             const enqueue = (event: HappyAgentEvent) => {
                 chain = chain.then(() => consume(event)).catch(finish);
             };
+            const enqueueGap = (nextCursor: EventCursor) => {
+                chain = chain.then(() => resync(nextCursor)).catch(finish);
+            };
             const abort = () => finish();
             const follower: EventFollower = {
-                fail: finish,
+                gap: enqueueGap,
                 push: enqueue,
             };
             this.#followers.add(follower);
+            if (this.#gapCursor !== undefined && options.after < this.#gapCursor) {
+                enqueueGap(this.#gapCursor);
+            }
             for (const event of this.#events) enqueue(event);
             if (options.signal?.aborted === true) finish();
             else options.signal?.addEventListener("abort", abort, { once: true });
@@ -90,9 +102,11 @@ export class HappyAgentEventHub {
                 })) {
                     if (frame.kind === "hello") {
                         if (frame.hello.gap) {
-                            throw new EventGapError(
-                                "The daemon event cursor is no longer available; reload to resync.",
-                            );
+                            this.#gapCursor = frame.hello.cursor;
+                            this.#events.length = 0;
+                            for (const follower of this.#followers) {
+                                follower.gap(frame.hello.cursor);
+                            }
                         }
                         this.#cursor = frame.hello.cursor;
                         continue;
@@ -102,15 +116,10 @@ export class HappyAgentEventHub {
                     if (this.#events.length > MAX_REPLAY_EVENTS) this.#events.shift();
                     for (const follower of this.#followers) follower.push(frame.event);
                 }
-            } catch (error) {
+            } catch {
                 if (this.#controller.signal.aborted) break;
                 // Transport interruption is exactly what the cursor is for:
-                // reconnect and keep every waiter in place. A journal gap is
-                // different—the snapshots behind those waiters are no longer
-                // provably current, so they must surface the resync boundary.
-                if (error instanceof EventGapError) {
-                    for (const follower of this.#followers) follower.fail(error);
-                }
+                // reconnect and keep every waiter in place.
             }
             if (!this.#controller.signal.aborted) {
                 await delay(RECONNECT_DELAY_MS, this.#controller.signal);

@@ -80,6 +80,7 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
     readonly #messages = new Map<string, ApiMessage>();
     readonly #messageEventResults = new Map<string, ApiMessage | typeof MESSAGE_DELETED>();
     #activeSend = false;
+    #resyncing: Promise<AgentSnapshot> | undefined;
     #selection: PendingSelection | undefined;
 
     constructor(options: RemoteAgentOptions) {
@@ -331,6 +332,18 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
             await this.#events.follow({
                 after: submitted.cursor,
                 signal: streamController.signal,
+                onGap: async () => {
+                    await this.resync();
+                    const recovered = this.#history.runs.find((run) =>
+                        run.messages.some((message) => message.id === submitted.message.id),
+                    );
+                    if (recovered === undefined) return;
+                    activeRunId = recovered.id;
+                    if (recovered.status !== "running") {
+                        terminalRun = recovered;
+                        streamController.abort();
+                    }
+                },
                 onEvent: async (event) => {
                     if (!belongsToAgent(event, this.id)) return false;
                     this.#applyResourceEvent(event);
@@ -425,6 +438,18 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
             status: this.#agent.status === "idle" ? "idle" : "running",
             tools: [],
         };
+    }
+
+    /** Reloads the authoritative agent and transcript after an event-stream gap. */
+    async resync(): Promise<AgentSnapshot> {
+        if (this.#resyncing !== undefined) return await this.#resyncing;
+        const resyncing = this.#refresh().then(() => this.snapshot());
+        this.#resyncing = resyncing;
+        try {
+            return await resyncing;
+        } finally {
+            if (this.#resyncing === resyncing) this.#resyncing = undefined;
+        }
     }
 
     /** Applies one global API event and returns a renderable message when it carried one. */

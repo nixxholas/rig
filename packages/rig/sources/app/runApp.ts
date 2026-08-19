@@ -418,6 +418,9 @@ async function followAgentEvents(options: {
     await options.events.follow({
         after: options.after,
         signal: options.signal,
+        onGap: async () => {
+            options.app.applyAgentSnapshot(await options.agent.resync());
+        },
         onEvent: (event) => {
             const message = options.agent.applyEvent(event);
             if (message !== undefined) options.app.applyMessage(message);

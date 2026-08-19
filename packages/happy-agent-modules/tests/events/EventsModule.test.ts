@@ -657,6 +657,162 @@ describe("EventsModule", () => {
         }
     });
 
+    it("persists a completed local tool in the active assistant message", async () => {
+        const events = new EventsModule();
+        const database = moduleDatabase(events.migrations ?? [], "events-tool-result-test");
+        await database.ready;
+        try {
+            const hooks = await resolveModuleHooks(database.context, events);
+            const scope = scopeFor("agent-tool-result");
+            await hooks.messageAcceptedTransact?.(database.context, scope, {
+                id: "message-tool-result",
+                kind: "send",
+                message: { role: "user", content: [{ type: "text", text: "Run it." }] },
+            });
+            await hooks.onEvent?.(database.context, scope, { type: "block_start" });
+            await hooks.onEvent?.(database.context, scope, {
+                type: "toolcall_start",
+                callId: "call-tool-result",
+                name: "exec_command",
+            });
+            await hooks.onEvent?.(database.context, scope, {
+                type: "toolcall_end",
+                callId: "call-tool-result",
+                arguments: '{"cmd":"printf done"}',
+            });
+            await hooks.beforeToolCallTransact?.(database.context, scope, {
+                callId: "call-tool-result",
+                name: "exec_command",
+                arguments: '{"cmd":"printf done"}',
+            } as never);
+            await hooks.afterToolCallTransact?.(database.context, scope, {
+                callId: "call-tool-result",
+                content: [{ type: "text", text: "done" }],
+                isError: false,
+            } as never);
+            await hooks.afterInferenceTransact?.(database.context, scope, {
+                inferenceId: "inference-tool-result",
+                loopId: "loop-tool-result",
+                state: "normal",
+                tokens: { input: 1, output: 1 },
+            } as never);
+
+            const replay = events.replay(events.originCursor());
+            const completion = replay?.events.find((event) => event.type === "tool.completed");
+            expect(completion?.payload).toMatchObject({
+                callId: "call-tool-result",
+                rigEvent: {
+                    partial: {
+                        content: [
+                            {
+                                arguments: { cmd: "printf done" },
+                                id: "call-tool-result",
+                                name: "exec_command",
+                                type: "toolCall",
+                            },
+                            {
+                                display: "done",
+                                rendered: [{ text: "done", type: "text" }],
+                                toolCallId: "call-tool-result",
+                                toolName: "exec_command",
+                                type: "tool_result",
+                            },
+                        ],
+                    },
+                    type: "tool_execution_end",
+                },
+                runId: "message-tool-result",
+            });
+            expect(
+                replay?.events.find((event) => event.type === "inference.completed")?.payload,
+            ).toMatchObject({
+                blocks: [
+                    {
+                        id: "call-tool-result",
+                        name: "exec_command",
+                        type: "toolCall",
+                    },
+                    {
+                        display: "done",
+                        toolCallId: "call-tool-result",
+                        type: "tool_result",
+                    },
+                ],
+            });
+        } finally {
+            database.close();
+        }
+    });
+
+    it("rolls back the completed tool partial with its outer transaction", async () => {
+        const events = new EventsModule();
+        const database = moduleDatabase(
+            events.migrations ?? [],
+            "events-tool-result-rollback-test",
+        );
+        await database.ready;
+        try {
+            const hooks = await resolveModuleHooks(database.context, events);
+            const scope = scopeFor("agent-tool-rollback");
+            await hooks.messageAcceptedTransact?.(database.context, scope, {
+                id: "message-tool-rollback",
+                kind: "send",
+                message: { role: "user", content: [{ type: "text", text: "Run it." }] },
+            });
+            await hooks.onEvent?.(database.context, scope, { type: "block_start" });
+            await hooks.onEvent?.(database.context, scope, {
+                type: "toolcall_start",
+                callId: "call-tool-rollback",
+                name: "exec_command",
+            });
+            await hooks.onEvent?.(database.context, scope, {
+                type: "toolcall_end",
+                callId: "call-tool-rollback",
+                arguments: '{"cmd":"printf rollback"}',
+            });
+
+            await expect(
+                database.context.inTx(async (txCtx) => {
+                    await hooks.afterToolCallTransact?.(txCtx, scope, {
+                        callId: "call-tool-rollback",
+                        content: [{ type: "text", text: "must disappear" }],
+                        isError: false,
+                    } as never);
+                    throw new Error("roll back the result");
+                }),
+            ).rejects.toThrow("roll back the result");
+            expect(
+                events
+                    .replay(events.originCursor())
+                    ?.events.some((event) => event.type === "tool.completed"),
+            ).toBe(false);
+
+            const restarted = new EventsModule();
+            const restartedHooks = await resolveModuleHooks(database.context, restarted);
+            await restartedHooks.afterInferenceTransact?.(database.context, scope, {
+                inferenceId: "inference-tool-rollback",
+                loopId: "loop-tool-rollback",
+                state: "normal",
+                tokens: { input: 1, output: 1 },
+            } as never);
+            expect(
+                restarted
+                    .replay(restarted.originCursor())
+                    ?.events.find((event) => event.type === "inference.completed")?.payload,
+            ).toMatchObject({
+                blocks: [
+                    {
+                        id: "call-tool-rollback",
+                        name: "exec_command",
+                        type: "toolCall",
+                    },
+                ],
+            });
+        } finally {
+            database.close();
+        }
+    });
+
     it("records restored, archived, permission, and metadata lifecycle hooks", async () => {
         const events = new EventsModule();
         const database = moduleDatabase(events.migrations ?? [], "events-lifecycle-hooks-test");
@@ -879,7 +1035,7 @@ describe("EventsModule", () => {
             });
             await hooks.onEvent?.(database.context, scope, {
                 type: "reasoning_end",
-                reasoning: "thinking complete",
+                reasoning: '{"type":"reasoning","encrypted_content":"OPAQUE_REASONING_SENTINEL"}',
             });
             await hooks.onEvent?.(database.context, scope, {
                 type: "toolcall_start",
@@ -957,9 +1113,16 @@ describe("EventsModule", () => {
                 rigEvent: { type: "block_start" },
             });
             expect(providerEvents[3]?.payload).toMatchObject({
-                event: { type: "reasoning_end" },
+                event: {
+                    reasoning:
+                        '{"type":"reasoning","encrypted_content":"OPAQUE_REASONING_SENTINEL"}',
+                    type: "reasoning_end",
+                },
                 rigEvent: {
-                    content: "thinking complete",
+                    content: "think",
+                    partial: {
+                        content: [{ thinking: "think", type: "thinking" }],
+                    },
                     type: "thinking_end",
                 },
             });
