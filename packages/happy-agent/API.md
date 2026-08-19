@@ -31,7 +31,7 @@ at `paths.tokenPath` with mode `0600`. A missing or mismatched token yields `401
 
 All routes are prefixed with `/v0`. Independently of the path version, every daemon advertises
 its identity through the health endpoint as a single `version` object: a numeric `protocol`
-(integer, currently 19) and the `daemon` product version string. Clients compare `protocol`
+(integer, currently 20) and the `daemon` product version string. Clients compare `protocol`
 against the number they were built for and refuse to talk to an incompatible daemon; `daemon` is
 for display and diagnostics only.
 
@@ -77,7 +77,7 @@ section).
 ### Resource versions and `If-Match`
 
 Every resource that appears in `*.updated` events — projects, workspaces, terminals, agents,
-questions, processes, and the profile — carries a `version` field: a **UUIDv7** minted at the
+compactions, questions, processes, and the profile — carries a `version` field: a **UUIDv7** minted at the
 moment of the change. Because versions are time-ordered, a client holding two copies of the
 same resource compares their versions and keeps the greater one; this is how a REST snapshot
 and the event stream reconcile without bookkeeping. Versions also chain updates together:
@@ -105,8 +105,8 @@ resource, so the client can catch up without another request:
 }
 ```
 
-The other versioned resources (agents, terminals, questions, processes) change mostly on the
-daemon's own initiative, so their mutations do not use `If-Match`; their versions exist for
+The other versioned resources (agents, terminals, compactions, questions, processes) change mostly
+on the daemon's own initiative, so their mutations do not use `If-Match`; their versions exist for
 event chaining and newer-copy comparison.
 
 The `agents` arrays embedded in projects and workspaces contain independently versioned agent
@@ -171,7 +171,7 @@ Response — `200`:
     "healthy": true,
     "ready": true,
     "status": "ready",
-    "version": { "protocol": 19, "daemon": "1.2.3" }
+    "version": { "protocol": 20, "daemon": "1.2.3" }
 }
 ```
 
@@ -1263,8 +1263,9 @@ Fields:
 
     During a run the status moves freely between the four working states, and every move is an
     `agent.updated` event, so a client can show "Thinking…" / "Running tools…" live. Maintenance
-    such as explicit compaction may also use `"working"` without creating a run. Status is
-    orthogonal to archival, which is `archivedAt`.
+    may also use `"working"` without creating a run, but this generic status never identifies
+    compaction. Clients render compaction from the typed compaction resource described below.
+    Status is orthogonal to archival, which is `archivedAt`.
 
 - `subagents` — how many subagents this agent has spawned over its life (`total`) and how many
   are running right now (`running`). Changes to either count are `agent.updated` events. The
@@ -1423,8 +1424,9 @@ recognize as this object grows.
   `status` of `"pending"` or `"accepted"` — pending until inference takes it up; see `send`.
 - `agent` — produced by the model: its text, reasoning, and tool calls, as blocks in order.
 - `system` — content the daemon injected into the model's context, when it is worth showing.
-- `service` — operational records the model never saw: compaction, aborts, and similar
-  housekeeping.
+- `service` — operational records the model never saw: aborts and similar housekeeping. A service
+  message may mention compaction for human context, but it carries no lifecycle meaning; clients
+  identify compaction only through the typed compaction resource.
 
 **Blocks** say what is in a message:
 
@@ -1719,13 +1721,6 @@ Response — `200`:
                         },
                         { "type": "text", "text": "Found it — the callback URL rewrites..." }
                     ]
-                },
-                {
-                    "id": "nc6bzmkmd014706rfda898to",
-                    "role": "service",
-                    "createdAt": 1755400008000,
-                    "content": [{ "type": "text", "text": "Context compacted." }],
-                    "metadata": {}
                 }
             ]
         }
@@ -1848,14 +1843,91 @@ Compacts the conversation context: the daemon summarizes older history so the ne
 model's window. The transcript in history is unaffected — compaction changes what the model
 sees, not what the user can read.
 
-Explicit compaction is allowed only while the agent is idle. It is maintenance work, not a
-conversation turn: it creates no run and writes no transcript message. The agent is
-`"working"` while compaction runs and returns to `"idle"` through `agent.updated` events.
+Every manual and automatic attempt is a durable **compaction** resource:
 
-Response — `202`: `{ "agent": { ... }, "cursor": "..." }`. Streaming from `cursor` follows
-the activity through completion. Compacting a working agent is `409`. Automatic compaction
-during a run remains inside that run and may add an ordinary service message; it never emits a
-run boundary.
+```json
+{
+    "id": "c8n4q1r7v2x9z5m3k6p0t8w1",
+    "agentId": "a1b2c3d4",
+    "runId": null,
+    "trigger": "manual",
+    "status": "running",
+    "tokensBefore": 201000,
+    "tokensAfter": null,
+    "failureReason": null,
+    "startedAt": 1755400000000,
+    "completedAt": null,
+    "updatedAt": 1755400000000,
+    "version": "01991f3a-6353-7000-8000-a16273041536"
+}
+```
+
+- `id` — stable CUID2 identity of this attempt.
+- `agentId` — the agent whose provider context is being replaced.
+- `runId` — the active run for an automatic compaction, or `null` for manual maintenance.
+- `trigger` — `"manual"` for this endpoint or `"automatic"` when the context-window policy
+  requested the same operation inside a run.
+- `status` — `"running"`, `"completed"`, or `"failed"`. Every attempt is created as
+  `"running"` and has exactly one terminal update.
+- `tokensBefore` — the exact provider-measured context size immediately before compaction, or
+  `null` when no measurement was available.
+- `tokensAfter` — the exact replacement-context size once the first subsequent inference measures
+  it, or `null` until or unless that measurement becomes available. This may update a completed
+  compaction after its terminal transition.
+- `failureReason` — a human-readable explanation on `"failed"`, otherwise `null`. Clients display
+  it but never match its text.
+- `startedAt`, `completedAt` — lifecycle timestamps. `completedAt` is `null` only while running.
+- `updatedAt`, `version` — the usual last-change timestamp and UUIDv7 resource version used by
+  `compaction.updated`.
+
+Explicit compaction is allowed only while the agent is idle and no other compaction is running for
+it. It is maintenance work, not a conversation turn: `runId` is `null`, it creates no run, and it
+writes no required transcript message. The generic agent status may move through `"working"`, but
+clients must not use that status to identify compaction.
+
+Response — `202`:
+
+```json
+{ "agent": { ... }, "compaction": { ... }, "cursor": "..." }
+```
+
+The compaction is already durable and normally `"running"` when this response is sent. Streaming
+from `cursor` includes its `compaction.created` and terminal `compaction.updated` lifecycle.
+Compacting a working agent, or an agent whose compaction is already running, is `409`.
+
+Automatic compaction creates the same resource with `trigger: "automatic"` and the active
+`runId`. It stays inside that run and never emits a run boundary. A transcript service message is
+optional human context and never substitutes for the resource.
+
+Cancellation and provider failure settle the resource as `"failed"` with a reason. On daemon
+startup, every durable compaction still marked `"running"` is settled as `"failed"` with an
+interruption reason before the daemon becomes ready. A client can therefore never reconnect to a
+stale indefinitely-running compaction.
+
+### `GET /v0/agents/:agentId/compactions`
+
+Loads the agent's durable compaction history, newest first. This endpoint is the source of truth;
+realtime events are only delivery hints.
+
+Query parameters:
+
+- `before` — a compaction ID; return attempts older than it. CUID2s are opaque, so the daemon
+  resolves the ID's stored position rather than comparing IDs.
+- `limit` — optional, `1`–`100`, default `50`.
+
+Response — `200`:
+
+```json
+{
+    "compactions": [
+        /* full compaction resources, newest first */
+    ],
+    "hasMore": false
+}
+```
+
+`404` when no such agent exists. Running, completed, and failed attempts all remain readable after
+reconnect and daemon restart.
 
 ### `POST /v0/agents/:agentId/read`
 
@@ -1995,7 +2067,7 @@ Response — `200`:
 When an exact measurement reaches the model's curated automatic-compaction threshold, the daemon
 requests compaction before another inference can overflow the hard `contextWindow`. Successful
 compaction clears `context`; the first inference on the replacement context establishes its next
-exact value.
+exact value and also records that value as `tokensAfter` on the completed compaction.
 
 ### Background processes
 
@@ -2152,8 +2224,8 @@ object does not name (a message's `agentId` and `runId`, for example).
 }
 ```
 
-- the resource ID (`projectId`, `workspaceId`, `terminalId`, `agentId`, `processId`,
-  `questionId`) — an ID string naming what changed, since the full object is not here;
+- the resource ID (`projectId`, `workspaceId`, `terminalId`, `agentId`, `compactionId`,
+  `processId`, `questionId`) — an ID string naming what changed, since the full object is not here;
 - `previousVersion` — the resource's version **before** this change;
 - `version` — its version after;
 - `changes` — a partial resource object: only the fields that changed, with their new values
@@ -2291,6 +2363,19 @@ how a bootstrap snapshot and an event stream reconcile.
     - `runId` (ID string).
     - `messageId` (ID string).
 
+**Compactions**
+
+- `compaction.created` — a manual or automatic compaction became durable. The object is already
+  `"running"`; automatic objects carry their active `runId`.
+    - `compaction` (full compaction object).
+- `compaction.updated` — a compaction completed, failed, or later gained its exact
+  `tokensAfter` measurement.
+    - `compactionId` (ID string), `previousVersion`, `version`, `changes`.
+
+These events are synchronization hints. A client that reconnects, sees a stream gap, or wants to
+verify current state reads the bootstrap snapshot or compaction history endpoint instead of
+reconstructing compactions from event delivery.
+
 **Configuration and profile**
 
 - `config.updated` — payload `{}`, deliberately empty. Something about the daemon's
@@ -2371,9 +2456,9 @@ back with its last cursor — landing in either the resumed or the gap case abov
 
 One bounded snapshot for opening a conversation. It composes the exact agent object plus the
 `mode`, `context`, and `usage` fields from the focused agent endpoints with every durable queue or
-steering message that inference has not accepted yet. It also captures the event cursor before
-reading, so a client can render the snapshot and follow every concurrent change without a
-snapshot-to-stream gap.
+steering message that inference has not accepted yet and the newest durable compaction page. It
+also captures the event cursor before reading, so a client can render the snapshot and follow every
+concurrent change without a snapshot-to-stream gap.
 
 Response — `200`:
 
@@ -2422,6 +2507,10 @@ Response — `200`:
             "runId": null
         }
     ],
+    "compactions": [
+        /* up to the newest 50 full compaction resources, newest first */
+    ],
+    "compactionsHasMore": false,
     "cursor": "01991f3a-6d2f-7000-8000-3a0b2c4d5e6f"
 }
 ```
@@ -2431,6 +2520,9 @@ Response — `200`:
 - `mode` — exactly the focused mode response; `null` on a fresh agent.
 - `context`, `usage` — exactly the focused usage response fields.
 - `pending` — every not-yet-accepted `queue` and `steer` message, oldest first and never paged.
+- `compactions`, `compactionsHasMore` — the first page from
+  `GET /v0/agents/:agentId/compactions` at its default limit. This makes both an in-progress
+  compaction and recent completed or failed outcomes available immediately after reconnect.
 - `cursor` — the event cursor captured before the snapshot reads. Open the global event stream
   from it; duplicate facts are harmless, while no concurrent fact can disappear.
 

@@ -128,6 +128,26 @@ describe("HappyAgentClient", () => {
         expect(requests[0]?.headers.get("if-match")).toBe("v1");
     });
 
+    it("starts and pages durable compactions through their typed routes", async () => {
+        const { fetch, requests } = stubFetch((request) =>
+            request.method === "POST"
+                ? json({ agent: {}, compaction: {}, cursor: "c1" }, 202)
+                : json({ compactions: [], hasMore: false }),
+        );
+        const client = new HappyAgentClient({ endpoint: "http://agent.local", token: "t", fetch });
+
+        await client.compactAgent("agent1", { mutationId: "compact1" });
+        await client.listAgentCompactions("agent1", { before: "compaction1", limit: 25 });
+
+        expect(requests[0]?.url).toBe("http://agent.local/v0/agents/agent1/compact");
+        expect(requests[0]?.method).toBe("POST");
+        expect(requests[0]?.body).toBe(JSON.stringify({ mutationId: "compact1" }));
+        expect(requests[1]?.url).toBe(
+            "http://agent.local/v0/agents/agent1/compactions?before=compaction1&limit=25",
+        );
+        expect(requests[1]?.method).toBe("GET");
+    });
+
     it("reports a failure with the daemon's own code and message", async () => {
         const { fetch } = stubFetch(() =>
             json(

@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { HAPPY_AGENT_PROTOCOL_VERSION } from "../sources/protocol/daemon.js";
 
 describe("Happy Agent protocol version", () => {
-    it("matches the protocol-19 API contract", () => {
-        expect(HAPPY_AGENT_PROTOCOL_VERSION).toBe(19);
+    it("matches the protocol-20 API contract", () => {
+        expect(HAPPY_AGENT_PROTOCOL_VERSION).toBe(20);
     });
 });

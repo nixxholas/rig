@@ -11,6 +11,7 @@ import type {
     Timestamp,
 } from "./common.js";
 import type { BackgroundProcess } from "./processes.js";
+import type { Compaction } from "./compactions.js";
 
 /** What the agent is doing right now. */
 export type AgentStatus = "idle" | "thinking" | "working" | "generating_tools" | "running_tools";
@@ -91,7 +92,9 @@ export interface AgentAbortResponse {
 /** `POST /v0/agents/:agentId/compact` */
 export interface AgentCompactResponse {
     agent: Agent;
-    /** The maintenance activity arrives through events from here. */
+    /** The durable manual compaction, normally still running. */
+    compaction: Compaction;
+    /** The compaction lifecycle arrives through events from here. */
     cursor: EventCursor;
 }
 
