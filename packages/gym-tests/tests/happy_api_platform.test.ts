@@ -133,10 +133,10 @@ describe("Happy Agent platform API", () => {
             }
 
             expect(
-                permissions((await stat(join(gym.workspacePath, "Config", "AGENTS.md"))).mode),
+                permissions((await stat(join(gym.publicHomePath, "Config", "AGENTS.md"))).mode),
             ).toBe(0o600);
             expect(
-                permissions((await stat(join(gym.workspacePath, "Config", "SECURITY.md"))).mode),
+                permissions((await stat(join(gym.publicHomePath, "Config", "SECURITY.md"))).mode),
             ).toBe(0o600);
 
             await expect(

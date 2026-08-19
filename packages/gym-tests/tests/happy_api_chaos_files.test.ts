@@ -820,9 +820,7 @@ async function applySearch(
     const paths = response.files.map((file) => file.path);
     expect(paths).toHaveLength(new Set(paths).size);
     expect(paths.length).toBeLessThanOrEqual(action.limit);
-    // The daemon creates its own starter files under Config/ at startup, and this harness's
-    // workspace doubles as the public Happy folder; only chaos-written files belong to the model.
-    for (const path of paths.filter((candidate) => !candidate.startsWith("Config/"))) {
+    for (const path of paths) {
         expect(model.files.has(path)).toBe(true);
     }
 }

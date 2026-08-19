@@ -113,6 +113,8 @@ export interface GymCreateSessionOptions {
 export interface AgentGym {
     /** Happy's private root for this gym. */
     readonly happyHome: string;
+    /** The public Happy folder, where the daemon keeps its user-facing configuration. */
+    readonly publicHomePath: string;
     /** The agent's working directory, which is also where fixtures were written. */
     readonly workspacePath: string;
     readonly socketPath: string;
@@ -277,6 +279,10 @@ class AgentGymInstance implements AgentGym {
 
     get happyHome(): string {
         return this.#home.happyHome;
+    }
+
+    get publicHomePath(): string {
+        return this.#home.publicHomePath;
     }
 
     get workspacePath(): string {

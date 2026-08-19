@@ -21,7 +21,13 @@ export interface GymHome {
     readonly root: string;
     /** Happy's private root, the folder `startHappyAgent` is pointed at. */
     readonly happyHome: string;
-    /** The public home, which is both the agent's working directory and where fixtures land. */
+    /** The public Happy folder, where the daemon keeps its user-facing configuration. */
+    readonly publicHomePath: string;
+    /**
+     * The agent's working directory, where fixtures land. It is a sibling of the public home
+     * rather than the public home itself, because the daemon seeds starter configuration files
+     * into the public home and a workspace must only ever hold what the scenario put there.
+     */
     readonly workspacePath: string;
     /** Delete everything this home owns. */
     remove(): Promise<void>;
@@ -46,7 +52,8 @@ export async function createGymHome(options: GymHomeOptions = {}): Promise<GymHo
     const runRoot = await mkdtemp(join(scratch, "r-"));
     const root = await mkdtemp(join(runRoot, "i-"));
     const happyHome = join(root, ".happy");
-    const workspacePath = join(root, "Happy");
+    const publicHome = join(root, "Happy");
+    const workspacePath = join(root, "workspace");
     const socketPath = join(happyHome, "agent", "server.sock");
     if (Buffer.byteLength(socketPath) > MAX_SOCKET_PATH) {
         await rm(root, { force: true, recursive: true });
@@ -59,7 +66,8 @@ export async function createGymHome(options: GymHomeOptions = {}): Promise<GymHo
         );
     }
 
-    await mkdir(join(workspacePath, "Config"), { recursive: true });
+    await mkdir(workspacePath, { recursive: true });
+    await mkdir(join(publicHome, "Config"), { recursive: true });
     const config = [
         ...(options.permissionMode === undefined
             ? []
@@ -67,7 +75,7 @@ export async function createGymHome(options: GymHomeOptions = {}): Promise<GymHo
         ...(options.config === undefined ? [] : [options.config, ""]),
     ].join("\n");
     if (config.trim().length > 0) {
-        await writeFile(join(workspacePath, "Config", "happy.toml"), config, "utf8");
+        await writeFile(join(publicHome, "Config", "happy.toml"), config, "utf8");
     }
 
     for (const [path, fixture] of Object.entries(options.files ?? {})) {
@@ -79,6 +87,7 @@ export async function createGymHome(options: GymHomeOptions = {}): Promise<GymHo
 
     return {
         happyHome,
+        publicHomePath: publicHome,
         remove: async () => {
             await rm(root, { force: true, recursive: true });
             await rm(runRoot, { force: true, recursive: true });
