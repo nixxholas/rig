@@ -66,9 +66,41 @@ describe("createUnixSocketFetch", () => {
             kind: "event",
         });
     });
+
+    it("contains late socket errors when the server rejects a buffered upload early", async () => {
+        const { fetch } = await serveFetch((request, response) => {
+            request.once("data", () => {
+                response.writeHead(413, { "content-type": "application/json" });
+                response.end(JSON.stringify({ code: "too_large", error: "Too large." }));
+            });
+        });
+
+        const response = await fetch("http://happy/v0/upload", {
+            body: Buffer.alloc(8 * 1024 * 1024 + 1),
+            method: "PUT",
+        });
+
+        expect(response.status).toBe(413);
+        await expect(response.json()).resolves.toEqual({
+            code: "too_large",
+            error: "Too large.",
+        });
+        await new Promise<void>((resolve) => setImmediate(resolve));
+    });
 });
 
 async function serve(listener: RequestListener): Promise<{ client: HappyAgentClient }> {
+    const { fetch } = await serveFetch(listener);
+    return {
+        client: new HappyAgentClient({
+            endpoint: "http://happy",
+            fetch,
+            token: "token",
+        }),
+    };
+}
+
+async function serveFetch(listener: RequestListener): Promise<{ fetch: typeof globalThis.fetch }> {
     const localRoot = join(process.cwd(), "../../.local");
     await mkdir(localRoot, { recursive: true });
     const root = await mkdtemp(join(localRoot, "rig-fetch-"));
@@ -84,10 +116,6 @@ async function serve(listener: RequestListener): Promise<{ client: HappyAgentCli
         });
     });
     return {
-        client: new HappyAgentClient({
-            endpoint: "http://happy",
-            fetch: createUnixSocketFetch(socketPath),
-            token: "token",
-        }),
+        fetch: createUnixSocketFetch(socketPath),
     };
 }

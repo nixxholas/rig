@@ -52,7 +52,11 @@ export function createUnixSocketFetch(socketPath: string): typeof globalThis.fet
                 responseStream?.destroy(reason);
             };
             signal?.addEventListener("abort", abort, { once: true });
-            request.once("error", (error) => {
+            // A server may answer a bounded upload before every buffered byte has reached it.
+            // Node can then report more than one late socket-write error after the response. Keep
+            // the listener for the request's whole lifetime so those expected post-response
+            // errors cannot escape as uncaught exceptions.
+            request.on("error", (error) => {
                 if (settled) return;
                 settled = true;
                 signal?.removeEventListener("abort", abort);
