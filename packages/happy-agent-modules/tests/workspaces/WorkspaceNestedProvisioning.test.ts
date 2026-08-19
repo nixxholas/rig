@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -12,6 +13,7 @@ import {
     type CreateWorkspaceRequest,
     type Workspace,
 } from "../../sources/workspaces/index.js";
+import { createWorkspaceTool } from "../../sources/workspaces/tools/create_workspace.js";
 import {
     cleanupRoots,
     commitFile,
@@ -26,6 +28,97 @@ import { moduleDatabase } from "../support/moduleDatabase.js";
 afterEach(cleanupRoots);
 
 describe("nested workspace provisioning", () => {
+    it("provisions a workspace created by the transactional agent tool after commit", async () => {
+        const repository = join(await createRoot("workspace-tool-project-"), "project");
+        await mkdir(repository);
+        await writeFile(join(repository, "project.txt"), "project\n", "utf8");
+        const world = await createWorld("workspace-tool-commit");
+        try {
+            const project = await world.projects.create(world.database.context, {
+                id: "project-a",
+                repositoryRef: world.git.normalizeProjectCwd(repository),
+                name: "Project",
+            });
+            await readyProject(world, project.id);
+            await world.workspaces.open(world.database.context);
+            const callId = "call_workspace_tool_commit";
+            const tool = createWorkspaceTool(world.workspaces, "agent-a");
+            let reserved: Workspace | undefined;
+
+            await world.database.context.inTx(async (txCtx) => {
+                reserved = await tool.execute(
+                    txCtx,
+                    { projectRef: project.id, name: "Tool workspace" },
+                    { id: callId, providerCallId: "provider-call" } as never,
+                );
+                expect(reserved).toMatchObject({
+                    id: callId,
+                    creatorSessionId: "agent-a",
+                    kind: "directory",
+                    status: "initializing",
+                });
+                expect(existsSync(reserved.path)).toBe(false);
+            });
+
+            const ready = await waitForWorkspace(world, callId, "ready");
+            expect(existsSync(ready.path)).toBe(true);
+            expect(await readFile(join(ready.path, "project.txt"), "utf8")).toBe("project\n");
+            await expect(
+                world.database.context.inTx(
+                    async (txCtx) =>
+                        await tool.execute(
+                            txCtx,
+                            { projectRef: project.id, name: "Tool workspace" },
+                            { id: callId, providerCallId: "provider-call-retry" } as never,
+                        ),
+                ),
+            ).resolves.toMatchObject({ id: callId, status: "ready" });
+            expect(
+                (await world.workspaces.list(world.database.context)).filter(
+                    (workspace) => workspace.id === callId,
+                ),
+            ).toHaveLength(1);
+        } finally {
+            await world.close();
+        }
+    }, 20_000);
+
+    it("does not provision a tool-created workspace when its transaction rolls back", async () => {
+        const repository = join(await createRoot("workspace-tool-rollback-project-"), "project");
+        await mkdir(repository);
+        const world = await createWorld("workspace-tool-rollback");
+        try {
+            const project = await world.projects.create(world.database.context, {
+                id: "project-a",
+                repositoryRef: world.git.normalizeProjectCwd(repository),
+                name: "Project",
+            });
+            await readyProject(world, project.id);
+            await world.workspaces.open(world.database.context);
+            const callId = "toolu_workspace_tool_rollback";
+            const tool = createWorkspaceTool(world.workspaces, "agent-a");
+            let reservedPath: string | undefined;
+
+            await expect(
+                world.database.context.inTx(async (txCtx) => {
+                    const reserved = await tool.execute(
+                        txCtx,
+                        { projectRef: project.id, name: "Rolled back workspace" },
+                        { id: callId, providerCallId: "provider-call" } as never,
+                    );
+                    reservedPath = reserved.path;
+                    throw new Error("roll back tool call");
+                }),
+            ).rejects.toThrow("roll back tool call");
+
+            expect(await world.workspaces.get(world.database.context, callId)).toBeUndefined();
+            expect(reservedPath).toBeDefined();
+            expect(existsSync(reservedPath!)).toBe(false);
+        } finally {
+            await world.close();
+        }
+    });
+
     it("creates a child worktree from its ready parent branch", async () => {
         const repository = await createRepository();
         await commitFile(repository, "project.txt", "project\n");

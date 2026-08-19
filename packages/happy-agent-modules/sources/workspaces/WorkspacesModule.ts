@@ -14,6 +14,7 @@ import { createId } from "@paralleldrive/cuid2";
 import { type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import {
+    afterCommit,
     detach,
     mapAsyncLock,
     type Context,
@@ -828,7 +829,7 @@ export class WorkspacesModule implements AgentModule {
             normalized.id === undefined
                 ? undefined
                 : projects.validateClientChosenId(normalized.id, "workspace");
-        const workspaceId = requestedId ?? createId();
+        const workspaceId = requestedId ?? options.operationId ?? createId();
         if (workspaceId === project.id) {
             throw new Error("A workspace cannot use its project's implicit root ID.");
         }
@@ -862,6 +863,7 @@ export class WorkspacesModule implements AgentModule {
             ctx,
             {
                 id: workspaceId,
+                ...(options.operationId === undefined ? {} : { operationId: options.operationId }),
                 projectRef: projectId,
                 parentId: parent?.id ?? projectId,
                 name,
@@ -882,8 +884,14 @@ export class WorkspacesModule implements AgentModule {
         );
         if (reserved.created) {
             const workspace = reserved.workspace;
-            this.#runInBackground(ctx, "workspace-initialization", async (workerCtx) => {
-                await this.#initializeWorkspace(workerCtx, workspace);
+            afterCommit(ctx, (postCommitCtx) => {
+                this.#runInBackground(
+                    postCommitCtx,
+                    "workspace-initialization",
+                    async (workerCtx) => {
+                        await this.#initializeWorkspace(workerCtx, workspace);
+                    },
+                );
             });
         }
         return reserved.workspace;

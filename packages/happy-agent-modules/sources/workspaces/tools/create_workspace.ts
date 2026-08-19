@@ -7,7 +7,7 @@ import {
 } from "../Workspace.js";
 import type { WorkspacesModule } from "../WorkspacesModule.js";
 
-/** Reserve one host-managed workspace: a folder, and the branch that names the work in it. */
+/** Create one host-managed workspace: a folder, and the branch that names the work in it. */
 export function createWorkspaceTool(workspaces: WorkspacesModule, agentId: string) {
     return defineAgentTool({
         name: "create_workspace",
@@ -18,8 +18,16 @@ export function createWorkspaceTool(workspaces: WorkspacesModule, agentId: strin
         durable: true,
         transactional: true,
         shouldReviewInAutoMode: () => false,
-        execute: async (ctx, input: WorkspaceCreateToolInput, call) =>
-            (await workspaces.reserve(ctx, { ...input, operationId: call.id })).workspace,
+        execute: async (ctx, input: WorkspaceCreateToolInput, call) => {
+            const { projectRef, ...request } = input;
+            const workspace = await workspaces.createWorkspace(ctx, projectRef, request, agentId, {
+                operationId: call.id,
+            });
+            if (workspace === undefined) {
+                throw new Error(`Project "${projectRef}" was not found.`);
+            }
+            return workspace;
+        },
         toLLM: (workspace) => [
             {
                 type: "text",

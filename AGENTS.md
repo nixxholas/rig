@@ -135,6 +135,15 @@ Work that only consumes the package — a new feature, a new caller, a new packa
 
 Always use `pnpm` for this project. Do not use `npm`, `npx`, or `yarn` for installs, scripts, dependency changes, or lockfile updates unless the user explicitly asks for a different package manager.
 
+## Default release versions
+
+When the user asks for a release without naming a version:
+
+- Release Rig as the next beta prerelease.
+- Release libraries as the next patch version.
+
+Use an explicitly requested version or release channel instead whenever the user provides one.
+
 ## Published SDK dependencies
 
 `@slopus/happy-providers`, `@slopus/happy-agent-base`, `@slopus/happy-agent-client`, and
@@ -202,7 +211,7 @@ Use gym tests for behavior spanning terminal input or rendering, inference, tool
 Run the suite with `pnpm test:gym`. Read [`packages/gym-tests/README.md`](packages/gym-tests/README.md) before writing or debugging a gym test; it is the source of truth for architecture, APIs, inference scripts, fixtures, terminal snapshots, scroll tracking, examples, and targeted test commands.
 
 The complete Happy Agent API gym, `pnpm test:gym:api`, is an exhaustive gate with
-662 scenarios, 120 deterministic chaos seeds, and 9,640 chaos actions. It takes
+663 scenarios, 120 deterministic chaos seeds, and 9,640 chaos actions. It takes
 about 45 minutes on the unprivileged Linux runner. Do not run it as routine
 verification or automatically on every push or pull request. Run targeted API
 gym files while developing. Run the complete gate only when a human explicitly

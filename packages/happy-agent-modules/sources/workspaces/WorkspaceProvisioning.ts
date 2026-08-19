@@ -6,6 +6,7 @@ import {
     workspaceBaseRefSchema,
     workspaceIdSchema,
     workspaceNameSchema,
+    workspaceOperationIdSchema,
     workspaceParentIdSchema,
 } from "./Workspace.js";
 
@@ -26,11 +27,13 @@ export const createWorkspaceRequestSchema = Type.Object(
 );
 export type CreateWorkspaceRequest = Static<typeof createWorkspaceRequestSchema>;
 
-/** Who asked for the workspace, and with which credential. */
+/** Who asked for the workspace, its durable operation identity, and any credential it needs. */
 export const workspaceCreatorOptionsSchema = Type.Object(
     {
         createdBy: Type.Optional(projectCreatorSchema),
         githubToken: Type.Optional(Type.String({ minLength: 1, maxLength: 16_384 })),
+        /** Durable internal identity for a retried caller operation, such as an agent tool call. */
+        operationId: Type.Optional(workspaceOperationIdSchema),
     },
     { additionalProperties: false },
 );
