@@ -11,9 +11,10 @@ import type {
     AgentSystemRef,
 } from "@slopus/happy-agent-base";
 import { Value } from "@sinclair/typebox/value";
-import { afterCommit, type Context } from "@steve.kite/stdlib";
+import type { Context } from "@steve.kite/stdlib";
 
 import { EventsModule } from "../events/index.js";
+import { HistoryModule, type HistoryMessage } from "../history/index.js";
 import { UsageModule } from "../usage/index.js";
 import {
     CompactionAlreadyRunningError,
@@ -26,12 +27,6 @@ import {
     type CompactionPageQuery,
     type RunningCompaction,
 } from "./Compaction.js";
-import {
-    compactionEventSchema,
-    compactionEventListenerSchema,
-    type CompactionEvent,
-    type CompactionEventListener,
-} from "./CompactionEvent.js";
 import { CompactionDatabase, compactionMigrations } from "./persistence/CompactionDatabase.js";
 
 const RESTART_FAILURE = "Compaction was interrupted when the daemon restarted.";
@@ -42,26 +37,13 @@ const CANCELLATION_FAILURE = "Compaction was canceled.";
 export class CompactionsModule implements AgentModule {
     readonly name = "compactions";
     readonly migrations = compactionMigrations;
-    readonly #transactionalListeners = new Set<CompactionEventListener>();
-    readonly #listeners = new Set<CompactionEventListener>();
     #agents: AgentSystemRef | undefined;
 
     constructor(
         private readonly events: EventsModule,
         private readonly usage: UsageModule,
+        private readonly history: HistoryModule,
     ) {}
-
-    onEventTransactional(listener: CompactionEventListener): () => void {
-        assertListener(listener);
-        this.#transactionalListeners.add(listener);
-        return () => this.#transactionalListeners.delete(listener);
-    }
-
-    onEvent(listener: CompactionEventListener): () => void {
-        assertListener(listener);
-        this.#listeners.add(listener);
-        return () => this.#listeners.delete(listener);
-    }
 
     async get(ctx: Context, compactionId: string): Promise<Compaction | undefined> {
         assertCompactionId(compactionId);
@@ -85,6 +67,48 @@ export class CompactionsModule implements AgentModule {
         return await new CompactionDatabase().listPage(ctx, agentId, query);
     }
 
+    /** Project the internal lifecycle row into its canonical durable history message. */
+    historyMessage(compaction: Compaction): HistoryMessage {
+        const base = {
+            replacedMessageIds: [...compaction.replacedMessageIds],
+            startedAt: compaction.startedAt,
+            tokensBefore: compaction.tokensBefore ?? null,
+            trigger: compaction.trigger,
+            type: "compaction" as const,
+        };
+        const block: HistoryMessage["blocks"][number] =
+            compaction.status === "running"
+                ? {
+                      ...base,
+                      completedAt: null,
+                      failureReason: null,
+                      status: "running",
+                      tokensAfter: null,
+                  }
+                : compaction.status === "completed"
+                  ? {
+                        ...base,
+                        completedAt: compaction.completedAt,
+                        failureReason: null,
+                        status: "completed",
+                        tokensAfter: compaction.tokensAfter ?? null,
+                    }
+                  : {
+                        ...base,
+                        completedAt: compaction.completedAt,
+                        failureReason: compaction.failureReason,
+                        status: "failed",
+                        tokensAfter: null,
+                    };
+        return {
+            at: compaction.startedAt,
+            blocks: [block],
+            recordId: compaction.id,
+            role: "service",
+            runId: compaction.runId,
+        };
+    }
+
     /** Create the durable manual attempt before asking Agent Base to carry it out. */
     async startManual(ctx: Context, agentId: string): Promise<Compaction> {
         assertCompactionId(agentId);
@@ -94,27 +118,29 @@ export class CompactionsModule implements AgentModule {
         }
         const current = await this.usage.read(ctx, agentId);
         const startedAt = Date.now();
-        const compaction: RunningCompaction = {
-            agentId,
-            id: createId(),
-            startedAt,
-            status: "running",
-            ...(current.currentContext === undefined
-                ? {}
-                : { tokensBefore: current.currentContext.contextTokens }),
-            trigger: "manual",
-            updatedAt: startedAt,
-            version: 1,
-        };
-        await ctx.inTx(async (txCtx) => {
+        const id = createId();
+        const compaction = await ctx.inTx(async (txCtx): Promise<RunningCompaction> => {
             const running = await new CompactionDatabase().running(txCtx, agentId);
             if (running !== undefined) throw new CompactionAlreadyRunningError(running);
-            await new CompactionDatabase().insert(txCtx, compaction);
-            await this.#publish(txCtx, {
-                at: startedAt,
-                compaction,
-                type: "compaction_created",
-            });
+            const created: RunningCompaction = {
+                agentId,
+                id,
+                runId: id,
+                replacedMessageIds: await this.history.compactionMessageIds(txCtx, agentId),
+                startedAt,
+                status: "running",
+                ...(current.currentContext === undefined
+                    ? {}
+                    : { tokensBefore: current.currentContext.contextTokens }),
+                trigger: "manual",
+                updatedAt: startedAt,
+                version: 1,
+            };
+            await this.history.beginMaintenanceRun(txCtx, agentId, created.runId, startedAt);
+            await this.history.record(txCtx, agentId, this.historyMessage(created));
+            await new CompactionDatabase().insert(txCtx, created);
+            await this.#recordCreated(txCtx, created);
+            return created;
         });
         try {
             await agents.compact(ctx, agentId);
@@ -212,6 +238,7 @@ export class CompactionsModule implements AgentModule {
                 agentId: scope.agent.id,
                 id: attempt.compactionId,
                 runId,
+                replacedMessageIds: await this.history.compactionMessageIds(txCtx, scope.agent.id),
                 startedAt,
                 status: "running",
                 ...(tokensBefore === undefined ? {} : { tokensBefore }),
@@ -222,11 +249,8 @@ export class CompactionsModule implements AgentModule {
             await database.insert(txCtx, compaction, {
                 baseCompactionId: attempt.compactionId,
             });
-            await this.#publish(txCtx, {
-                at: startedAt,
-                compaction,
-                type: "compaction_created",
-            });
+            await this.history.record(txCtx, scope.agent.id, this.historyMessage(compaction));
+            await this.#recordCreated(txCtx, compaction);
         });
     }
 
@@ -257,6 +281,15 @@ export class CompactionsModule implements AgentModule {
             awaitingAfter: true,
         });
         await this.#publishUpdate(ctx, running, next);
+        if (next.trigger === "manual") {
+            await this.history.finishMaintenanceRun(
+                ctx,
+                next.agentId,
+                next.runId,
+                "completed",
+                completedAt,
+            );
+        }
     }
 
     async #failByBase(
@@ -290,6 +323,15 @@ export class CompactionsModule implements AgentModule {
         };
         await new CompactionDatabase().update(ctx, next);
         await this.#publishUpdate(ctx, running, next);
+        if (next.trigger === "manual") {
+            await this.history.finishMaintenanceRun(
+                ctx,
+                next.agentId,
+                next.runId,
+                "failed",
+                completedAt,
+            );
+        }
     }
 
     async #measureReplacement(
@@ -330,34 +372,19 @@ export class CompactionsModule implements AgentModule {
         previous: Compaction,
         compaction: Compaction,
     ): Promise<void> {
-        await this.#publish(ctx, {
-            at: compaction.updatedAt,
-            compaction,
-            previous,
-            type: "compaction_updated",
+        await this.history.replace(ctx, compaction.agentId, this.historyMessage(compaction));
+        await this.events.record(ctx, {
+            agentId: compaction.agentId,
+            payload: { compaction, previous },
+            type: "compaction.message-updated",
         });
     }
 
-    async #publish(ctx: Context, event: CompactionEvent): Promise<void> {
-        if (!Value.Check(compactionEventSchema, event)) {
-            throw new Error("The compaction lifecycle event is invalid.");
-        }
-        const detached = structuredClone(event);
-        for (const listener of this.#transactionalListeners) {
-            await listener(ctx, structuredClone(detached));
-        }
-        afterCommit(ctx, async (postCommitCtx) => {
-            for (const listener of this.#listeners) {
-                try {
-                    await listener(postCommitCtx, structuredClone(detached));
-                } catch (error: unknown) {
-                    postCommitCtx.log.warn(
-                        "A compaction lifecycle subscriber failed.",
-                        { compactionId: detached.compaction.id, eventType: detached.type },
-                        error,
-                    );
-                }
-            }
+    async #recordCreated(ctx: Context, compaction: RunningCompaction): Promise<void> {
+        await this.events.record(ctx, {
+            agentId: compaction.agentId,
+            payload: { compaction },
+            type: "compaction.message-created",
         });
     }
 }
@@ -365,12 +392,6 @@ export class CompactionsModule implements AgentModule {
 function assertCompactionId(value: string): void {
     if (!Value.Check(compactionIdSchema, value)) {
         throw new Error("The compaction identifier is invalid.");
-    }
-}
-
-function assertListener(value: unknown): asserts value is CompactionEventListener {
-    if (!Value.Check(compactionEventListenerSchema, value)) {
-        throw new Error("A compaction subscriber must be a function.");
     }
 }
 

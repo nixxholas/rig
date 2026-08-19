@@ -2,8 +2,9 @@ import type { AgentModuleHooks, AgentModuleScope, AgentSystemRef } from "@slopus
 import { withAfterCommit, type Context } from "@steve.kite/stdlib";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { CompactionsModule, type CompactionEvent } from "../../sources/compactions/index.js";
-import { EventsModule } from "../../sources/events/index.js";
+import { CompactionsModule } from "../../sources/compactions/index.js";
+import { EventsModule, type AgentEvent } from "../../sources/events/index.js";
+import { HistoryModule } from "../../sources/history/index.js";
 import { UsageModule } from "../../sources/usage/index.js";
 import { moduleDatabase } from "../support/moduleDatabase.js";
 import { resolveModuleHooks } from "../support/moduleHooks.js";
@@ -69,16 +70,22 @@ async function createEnvironment(name: string) {
         parentOf: () => Promise.resolve(null),
     } as unknown as AgentSystemRef;
     const events = new EventsModule();
+    const history = new HistoryModule(events);
     const usage = new UsageModule(events);
-    const compactions = new CompactionsModule(events, usage);
+    const compactions = new CompactionsModule(events, usage, history);
     const database = moduleDatabase(
-        [...events.migrations, ...usage.migrations, ...compactions.migrations],
+        [
+            ...events.migrations,
+            ...history.migrations,
+            ...usage.migrations,
+            ...compactions.migrations,
+        ],
         name,
     );
     await database.ready;
     await events.beforeStart?.(database.context);
     const hooks = await resolveModuleHooks(database.context, compactions, agents);
-    return { agents, compactCalls, compactions, database, events, hooks, usage };
+    return { agents, compactCalls, compactions, database, events, history, hooks, usage };
 }
 
 async function startBaseAttempt(
@@ -110,9 +117,9 @@ describe("CompactionsModule", () => {
         const environment = await createEnvironment("compactions-manual-success");
         databases.push(environment.database);
         const { compactCalls, compactions, database, hooks } = environment;
-        const events: CompactionEvent[] = [];
-        compactions.onEvent((_ctx, event) => {
-            events.push(event);
+        const lifecycleEvents: AgentEvent[] = [];
+        environment.events.subscribe((event) => {
+            if (event.type.startsWith("compaction.message-")) lifecycleEvents.push(event);
         });
 
         const started = await compactions.startManual(database.context, "agent1");
@@ -152,11 +159,11 @@ describe("CompactionsModule", () => {
         expect(
             (await compactions.listPage(database.context, "agent1")).compactions[0],
         ).toMatchObject({ status: "completed", tokensAfter: 42_000 });
-        expect(events.map((event) => event.type)).toEqual([
-            "compaction_created",
-            "compaction_updated",
-            "compaction_updated",
-            "compaction_updated",
+        expect(lifecycleEvents.map((event) => event.type)).toEqual([
+            "compaction.message-created",
+            "compaction.message-updated",
+            "compaction.message-updated",
+            "compaction.message-updated",
         ]);
     });
 
@@ -219,10 +226,10 @@ describe("CompactionsModule", () => {
     it("fails a running attempt during restart reconciliation", async () => {
         const environment = await createEnvironment("compactions-restart");
         databases.push(environment.database);
-        const { agents, compactions, database, events, usage } = environment;
+        const { agents, compactions, database, events, history, usage } = environment;
         const running = await compactions.startManual(database.context, "agent1");
 
-        const restarted = new CompactionsModule(events, usage);
+        const restarted = new CompactionsModule(events, usage, history);
         await resolveModuleHooks(database.context, restarted, agents);
         expect((await restarted.listPage(database.context, "agent1")).compactions[0]).toMatchObject(
             {

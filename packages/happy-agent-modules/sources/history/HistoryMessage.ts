@@ -214,6 +214,72 @@ export const historyToolResultBlockSchema = Type.Object(
     { additionalProperties: false },
 );
 
+const historyCompactionBlockBaseSchema = Type.Object(
+    {
+        type: Type.Literal("compaction"),
+        trigger: Type.Union([Type.Literal("manual"), Type.Literal("automatic")]),
+        replacedMessageIds: Type.Array(historyRecordIdSchema, {
+            maxItems: MAX_HISTORY_TOTAL_MESSAGES,
+            uniqueItems: true,
+        }),
+        tokensBefore: Type.Union([
+            Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+            Type.Null(),
+        ]),
+        startedAt: historyTimestampSchema,
+    },
+    { additionalProperties: false },
+);
+
+export const historyRunningCompactionBlockSchema = Type.Composite(
+    [
+        historyCompactionBlockBaseSchema,
+        Type.Object({
+            status: Type.Literal("running"),
+            tokensAfter: Type.Null(),
+            failureReason: Type.Null(),
+            completedAt: Type.Null(),
+        }),
+    ],
+    { additionalProperties: false },
+);
+
+export const historyCompletedCompactionBlockSchema = Type.Composite(
+    [
+        historyCompactionBlockBaseSchema,
+        Type.Object({
+            status: Type.Literal("completed"),
+            tokensAfter: Type.Union([
+                Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+                Type.Null(),
+            ]),
+            failureReason: Type.Null(),
+            completedAt: historyTimestampSchema,
+        }),
+    ],
+    { additionalProperties: false },
+);
+
+export const historyFailedCompactionBlockSchema = Type.Composite(
+    [
+        historyCompactionBlockBaseSchema,
+        Type.Object({
+            status: Type.Literal("failed"),
+            tokensAfter: Type.Null(),
+            failureReason: Type.String({ minLength: 1, maxLength: 8_192 }),
+            completedAt: historyTimestampSchema,
+        }),
+    ],
+    { additionalProperties: false },
+);
+
+/** One complete context-compaction lifecycle inside a durable service message. */
+export const historyCompactionBlockSchema = Type.Union([
+    historyRunningCompactionBlockSchema,
+    historyCompletedCompactionBlockSchema,
+    historyFailedCompactionBlockSchema,
+]);
+
 /** One piece of a recorded message. */
 export const historyBlockSchema = Type.Union([
     historyTextBlockSchema,
@@ -221,6 +287,7 @@ export const historyBlockSchema = Type.Union([
     historyImageBlockSchema,
     historyToolCallBlockSchema,
     historyToolResultBlockSchema,
+    historyCompactionBlockSchema,
 ]);
 
 /** The TypeScript type inferred from {@link historyBlockSchema}. */

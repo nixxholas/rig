@@ -41,7 +41,7 @@ export function formatHistoryMessage(
         } else if (block.type === "tool_call") {
             if (!includeTools) continue;
             lines.push(`Tool call: ${block.name} ${truncateJson(block.arguments ?? null)}`);
-        } else {
+        } else if (block.type === "tool_result") {
             if (!includeTools) continue;
             const summary =
                 block.display === undefined
@@ -50,6 +50,13 @@ export function formatHistoryMessage(
             lines.push(
                 `Tool result: ${block.toolName} (${block.isError === true ? "error" : "ok"})${summary}\nOutput: ${truncate(block.output ?? "", OUTPUT_LIMIT)}`,
             );
+        } else {
+            const tokenChange =
+                block.tokensBefore === null
+                    ? ""
+                    : ` (${String(block.tokensBefore)} → ${block.tokensAfter === null ? "unknown" : String(block.tokensAfter)} tokens)`;
+            const reason = block.failureReason === null ? "" : `: ${block.failureReason}`;
+            lines.push(`Compaction: ${block.status}${tokenChange}${reason}`);
         }
     }
     return lines.join("\n");

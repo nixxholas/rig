@@ -337,12 +337,20 @@ describe("public transcript and run APIs", () => {
         const compacted = await gym.client.compactAgent(gym.defaultSessionId, {
             mutationId: "manual-compaction-success",
         });
-        expect(compacted.compaction).toMatchObject({
-            agentId: gym.defaultSessionId,
-            runId: null,
-            status: "running",
-            tokensBefore: 201_000,
-            trigger: "manual",
+        expect(compacted).toMatchObject({
+            run: { id: compacted.message.id, status: "running" },
+            message: {
+                id: compacted.message.id,
+                role: "service",
+                content: [
+                    {
+                        type: "compaction",
+                        status: "running",
+                        tokensBefore: 201_000,
+                        trigger: "manual",
+                    },
+                ],
+            },
         });
         await gym.waitUntil(
             () => (gym.inference.compactions.length === 1 ? true : undefined),
@@ -350,9 +358,11 @@ describe("public transcript and run APIs", () => {
         );
         await gym.waitForEvent(
             (event) =>
-                event.type === "compaction.updated" &&
-                event.payload.compactionId === compacted.compaction.id &&
-                event.payload.changes.status === "completed",
+                event.type === "message.updated" &&
+                event.payload.message.id === compacted.message.id &&
+                event.payload.message.content.some(
+                    (block) => block.type === "compaction" && block.status === "completed",
+                ),
             "the manual compaction to complete",
         );
         await gym.waitForEvent(
@@ -365,29 +375,20 @@ describe("public transcript and run APIs", () => {
         await expect(gym.client.getAgentUsage(gym.defaultSessionId)).resolves.toMatchObject({
             context: null,
         });
-        const completed = await gym.client.listAgentCompactions(gym.defaultSessionId);
-        expect(completed).toMatchObject({
-            compactions: [
-                {
-                    id: compacted.compaction.id,
-                    failureReason: null,
-                    runId: null,
-                    status: "completed",
-                    tokensBefore: 201_000,
-                    trigger: "manual",
-                },
-            ],
-            hasMore: false,
+        const completed = await gym.client.getMessages(gym.defaultSessionId);
+        expect(compactionFrom(completed, compacted.message.id)).toMatchObject({
+            run: { id: compacted.run.id, status: "completed" },
+            message: { id: compacted.message.id, role: "service" },
+            block: {
+                failureReason: null,
+                status: "completed",
+                tokensBefore: 201_000,
+                trigger: "manual",
+            },
         });
 
         await gym.restart();
-        await expect(gym.client.getAgentBootstrap(gym.defaultSessionId)).resolves.toMatchObject({
-            compactions: [{ id: compacted.compaction.id, status: "completed" }],
-            compactionsHasMore: false,
-        });
-        await expect(gym.client.listAgentCompactions(gym.defaultSessionId)).resolves.toEqual(
-            completed,
-        );
+        await expect(gym.client.getMessages(gym.defaultSessionId)).resolves.toEqual(completed);
     }, 60_000);
 
     it("syncs a running manual compaction from durable bootstrap state", async () => {
@@ -423,34 +424,34 @@ describe("public transcript and run APIs", () => {
         await started;
 
         try {
-            await expect(gym.client.getAgentBootstrap(gym.defaultSessionId)).resolves.toMatchObject(
-                {
-                    compactions: [
-                        {
-                            id: compacted.compaction.id,
-                            status: "running",
-                            trigger: "manual",
-                        },
-                    ],
-                },
-            );
-            await expect(
-                gym.client.listAgentCompactions(gym.defaultSessionId),
-            ).resolves.toMatchObject({
-                compactions: [{ id: compacted.compaction.id, status: "running" }],
-            });
             expect(
-                (
-                    await gym.client.getEvents({
-                        after: compacted.cursor,
-                        limit: 100,
-                    })
-                ).events,
-            ).toContainEqual(
+                compactionFrom(
+                    await gym.client.getMessages(gym.defaultSessionId),
+                    compacted.message.id,
+                ),
+            ).toMatchObject({
+                run: { id: compacted.run.id, status: "running" },
+                block: { status: "running", trigger: "manual" },
+            });
+            const lifecycle = (
+                await gym.client.getEvents({
+                    after: compacted.cursor,
+                    limit: 100,
+                })
+            ).events;
+            expect(lifecycle).toContainEqual(
                 expect.objectContaining({
-                    type: "compaction.created",
+                    type: "run.started",
                     payload: expect.objectContaining({
-                        compaction: expect.objectContaining({ id: compacted.compaction.id }),
+                        run: expect.objectContaining({ id: compacted.run.id }),
+                    }),
+                }),
+            );
+            expect(lifecycle).toContainEqual(
+                expect.objectContaining({
+                    type: "message.created",
+                    payload: expect.objectContaining({
+                        message: expect.objectContaining({ id: compacted.message.id }),
                     }),
                 }),
             );
@@ -458,9 +459,11 @@ describe("public transcript and run APIs", () => {
             releaseCompaction();
         }
         await gym.waitUntil(async () => {
-            const latest = (await gym.client.listAgentCompactions(gym.defaultSessionId))
-                .compactions[0];
-            return latest?.status === "completed" ? true : undefined;
+            const latest = compactionFrom(
+                await gym.client.getMessages(gym.defaultSessionId),
+                compacted.message.id,
+            );
+            return latest.block.status === "completed" ? true : undefined;
         }, "the synchronized running compaction to complete");
     }, 60_000);
 
@@ -477,23 +480,31 @@ describe("public transcript and run APIs", () => {
         await gym.send("prepare a failed manual compaction");
         const compacted = await gym.client.compactAgent(gym.defaultSessionId);
         const failed = await gym.waitUntil(async () => {
-            const latest = (await gym.client.listAgentCompactions(gym.defaultSessionId))
-                .compactions[0];
-            return latest?.status === "failed" ? latest : undefined;
+            const latest = compactionFrom(
+                await gym.client.getMessages(gym.defaultSessionId),
+                compacted.message.id,
+            );
+            return latest.block.status === "failed" ? latest : undefined;
         }, "the manual compaction to fail");
         expect(failed).toMatchObject({
-            id: compacted.compaction.id,
-            completedAt: expect.any(Number),
-            failureReason: failure,
-            status: "failed",
-            trigger: "manual",
+            message: { id: compacted.message.id, role: "service" },
+            block: {
+                completedAt: expect.any(Number),
+                failureReason: failure,
+                status: "failed",
+                trigger: "manual",
+            },
         });
         await gym.waitForEvent(
             (event) =>
-                event.type === "compaction.updated" &&
-                event.payload.compactionId === compacted.compaction.id &&
-                event.payload.changes.status === "failed" &&
-                event.payload.changes.failureReason === failure,
+                event.type === "message.updated" &&
+                event.payload.message.id === compacted.message.id &&
+                event.payload.message.content.some(
+                    (block) =>
+                        block.type === "compaction" &&
+                        block.status === "failed" &&
+                        block.failureReason === failure,
+                ),
             "the failed compaction lifecycle event",
         );
         await gym.waitUntil(async () => {
@@ -501,9 +512,10 @@ describe("public transcript and run APIs", () => {
                 ? true
                 : undefined;
         }, "the agent to leave failed compaction work");
-        await expect(gym.client.getAgentBootstrap(gym.defaultSessionId)).resolves.toMatchObject({
-            compactions: [{ id: compacted.compaction.id, status: "failed" }],
-        });
+        expect(
+            compactionFrom(await gym.client.getMessages(gym.defaultSessionId), compacted.message.id)
+                .block.status,
+        ).toBe("failed");
     }, 60_000);
 
     it("automatically compacts before the measured context reaches the model limit", async () => {
@@ -533,16 +545,18 @@ describe("public transcript and run APIs", () => {
             context: null,
         });
         const automatic = await gym.waitUntil(async () => {
-            const latest = (await gym.client.listAgentCompactions(gym.defaultSessionId))
-                .compactions[0];
-            return latest?.status === "completed" ? latest : undefined;
+            const history = await gym.client.getMessages(gym.defaultSessionId);
+            const latest = compactionsFrom(history).at(-1);
+            return latest?.block.status === "completed" ? latest : undefined;
         }, "the automatic compaction lifecycle to settle");
         expect(automatic).toMatchObject({
-            agentId: gym.defaultSessionId,
-            runId: sent.runId,
-            status: "completed",
-            tokensBefore: 245_000,
-            trigger: "automatic",
+            run: { id: sent.runId },
+            message: { role: "service" },
+            block: {
+                status: "completed",
+                tokensBefore: 245_000,
+                trigger: "automatic",
+            },
         });
         expect(gym.inference.unscripted).toEqual([]);
     }, 60_000);
@@ -865,7 +879,7 @@ describe("public transcript and run APIs", () => {
         expect(toolCallFrom(await gym.client.getMessages(gym.defaultSessionId))).toEqual(fullTool);
     }, 60_000);
 
-    it("recovers message deltas, deletes reset content, omits tool data, and keeps compaction out of runs", async () => {
+    it("recovers message deltas, deletes reset content, omits tool data, and records a compaction run", async () => {
         const gym = await startGym({
             inference: [
                 {
@@ -956,7 +970,7 @@ describe("public transcript and run APIs", () => {
                 event.type === "run.boundary" ||
                 event.type === "run.finished",
         ).length;
-        expect(lifecycleAfter).toBe(lifecycleBefore);
+        expect(lifecycleAfter).toBe(lifecycleBefore + 2);
 
         const second = await gym.send("call a tool", {
             permissionMode: "full_access",
@@ -1131,6 +1145,27 @@ function toolCallFrom(history: Awaited<ReturnType<AgentGym["client"]["getMessage
         }
     }
     throw new Error(`The history contained no tool call: ${JSON.stringify(history)}`);
+}
+
+function compactionsFrom(history: Awaited<ReturnType<AgentGym["client"]["getMessages"]>>) {
+    return history.runs.flatMap((run) =>
+        run.messages.flatMap((message) =>
+            message.content.flatMap((block) =>
+                block.type === "compaction" ? [{ block, message, run }] : [],
+            ),
+        ),
+    );
+}
+
+function compactionFrom(
+    history: Awaited<ReturnType<AgentGym["client"]["getMessages"]>>,
+    messageId: string,
+) {
+    const result = compactionsFrom(history).find((candidate) => candidate.message.id === messageId);
+    if (result === undefined) {
+        throw new Error(`The history contained no compaction message ${messageId}.`);
+    }
+    return result;
 }
 
 function completedToolCallFromEvents(events: readonly GymAgentEvent[], agentId: string) {

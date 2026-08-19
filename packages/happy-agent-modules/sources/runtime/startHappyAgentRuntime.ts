@@ -297,7 +297,7 @@ export async function startHappyAgentRuntime(
         const secrets = new SecretsModule();
         const tasks = new TasksModule();
         const usage = new UsageModule(events);
-        const compactions = new CompactionsModule(events, usage);
+        const compactions = new CompactionsModule(events, usage, history);
         const contextWindow = new ContextWindowModule(config);
         const workflows = new WorkflowsModule(config, collaboration, compute.computeModule);
         const api = new ApiModule(
@@ -373,6 +373,7 @@ export async function startHappyAgentRuntime(
             goal,
             tasks,
             usage,
+            events,
             compactions,
             contextWindow,
             profile,
@@ -390,7 +391,6 @@ export async function startHappyAgentRuntime(
             imageGeneration,
             compute.skillsModule,
             compute.computeModule,
-            events,
             happy,
             installation,
         ]

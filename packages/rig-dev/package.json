@@ -13,7 +13,7 @@
     },
     "dependencies": {
         "@slopus/happy-agent": "workspace:*",
-        "@slopus/happy-agent-client": "0.0.8",
+        "@slopus/happy-agent-client": "0.0.9",
         "@steve.kite/stdlib": "0.0.12",
         "tsx": "^4.23.0"
     },

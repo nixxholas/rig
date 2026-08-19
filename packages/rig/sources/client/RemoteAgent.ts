@@ -739,6 +739,13 @@ function toRigMessage(message: ApiMessage): Message {
         };
     }
     if (message.role === "service") {
+        if (message.content.some((block) => block.type === "compaction")) {
+            return {
+                blocks: [],
+                id: message.id,
+                role: "system",
+            };
+        }
         return {
             blocks: message.content.flatMap(toRigContentBlock),
             id: message.id,
@@ -772,6 +779,7 @@ function toRigAgentBlocks(
         return [{ data: block.data, mediaType: block.mimeType, type: "image" }];
     }
     if (block.type === "reasoning") return [{ thinking: block.text, type: "thinking" }];
+    if (block.type === "compaction") return [];
     const toolCallId = `${messageId}:tool:${String(index)}`;
     const callPresentation = toToolCallPresentation(block);
     const call: ToolCallBlock = {

@@ -158,6 +158,19 @@ function historyBlocks(
                     data: block.data ?? "",
                 };
             }
+            if (block.type === "compaction") {
+                return {
+                    type: "compaction",
+                    trigger: block.trigger,
+                    status: block.status,
+                    replacedMessageIds: [...block.replacedMessageIds],
+                    tokensBefore: block.tokensBefore,
+                    tokensAfter: block.tokensAfter,
+                    failureReason: block.failureReason,
+                    startedAt: block.startedAt,
+                    completedAt: block.completedAt,
+                };
+            }
             const result = results.get(block.callId);
             return toolCallResource(
                 {

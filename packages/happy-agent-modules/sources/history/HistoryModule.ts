@@ -41,6 +41,7 @@ import {
     historyAgentIdSchema,
     historyRecordIdSchema,
     historyRemoteMessageIdSchema,
+    historyTimestampSchema,
     MAX_HISTORY_BLOCKS_PER_PAGE,
     MAX_HISTORY_MESSAGES_PER_APPEND,
     MAX_HISTORY_MESSAGE_JSON_BYTES,
@@ -307,6 +308,129 @@ export class HistoryModule implements AgentModule {
             throw new Error("The history module produced an invalid message.");
         }
         await this.#direct(ctx, (txCtx) => this.#append(txCtx, agentId, normalized));
+    }
+
+    /** Replace one durable message under its stable identity. */
+    async replace(ctx: Context, agentId: string, message: HistoryMessage): Promise<void> {
+        if (
+            !Value.Check(historyAgentIdSchema, agentId) ||
+            !historyMessageWithinPersistenceBounds(message)
+        ) {
+            throw new Error("The history module received an invalid message replacement.");
+        }
+        await this.#direct(ctx, async (txCtx) => {
+            const rows = await agentDatabaseRows<HistoryRow>(
+                txCtx.db,
+                sql`SELECT ${sql.raw(HISTORY_ROW_COLUMNS)}
+                    FROM ${sql.raw(HISTORY_TABLE)}
+                    WHERE agent_id = ${agentId} AND record_id = ${message.recordId}
+                    LIMIT 1`,
+            );
+            const row = rows[0];
+            if (row === undefined) {
+                throw new Error("The history message to replace does not exist.");
+            }
+            const existing = toHistoryRecord(row).message;
+            if (existing.role !== message.role || existing.runId !== message.runId) {
+                throw new Error("A history replacement cannot change message ownership.");
+            }
+            const encoded = JSON.stringify(message);
+            const stats = summarizeHistory([message]);
+            const searchText = foldHistorySearchText(historyMessageSearchParts(message).join("\n"));
+            await agentDatabaseRun(
+                txCtx.db,
+                sql`UPDATE ${sql.raw(HISTORY_TABLE)}
+                    SET message_json = ${encoded},
+                        search_text = ${searchText},
+                        assistant_messages = ${stats.assistantMessages},
+                        user_messages = ${stats.userMessages},
+                        text_characters = ${stats.textCharacters},
+                        thinking_blocks = ${stats.thinkingBlocks},
+                        tool_calls = ${stats.toolCalls},
+                        tool_results = ${stats.toolResults}
+                    WHERE agent_id = ${agentId} AND record_id = ${message.recordId}`,
+            );
+            await indexHistoryToolCalls(txCtx.db, agentId, message);
+        });
+    }
+
+    /** Ordered durable message identities represented by the next context compaction. */
+    async compactionMessageIds(ctx: Context, agentId: string): Promise<string[]> {
+        if (!Value.Check(historyAgentIdSchema, agentId)) {
+            throw new Error("The history module received an invalid compaction agent ID.");
+        }
+        return await this.#direct(ctx, async (txCtx) => {
+            const anchorRows = await agentDatabaseRows<{ position: number | string | null }>(
+                txCtx.db,
+                sql`SELECT MAX(position) AS position
+                    FROM ${sql.raw(HISTORY_TABLE)}
+                    WHERE agent_id = ${agentId}
+                      AND json_extract(message_json, '$.blocks[0].type') = 'compaction'`,
+            );
+            const anchor =
+                anchorRows[0]?.position === null || anchorRows[0]?.position === undefined
+                    ? 0
+                    : toSafeInteger(anchorRows[0].position, "compaction history anchor");
+            const rows = await agentDatabaseRows<{ record_id: string }>(
+                txCtx.db,
+                sql`SELECT record_id
+                    FROM ${sql.raw(HISTORY_TABLE)}
+                    WHERE agent_id = ${agentId} AND position >= ${anchor}
+                    ORDER BY position ASC
+                    LIMIT ${MAX_HISTORY_TOTAL_MESSAGES + 1}`,
+            );
+            if (rows.length > MAX_HISTORY_TOTAL_MESSAGES) {
+                throw new Error("The compaction history identity set exceeds its safe bound.");
+            }
+            return rows.map((row) => row.record_id);
+        });
+    }
+
+    /** Open the standalone run that owns an explicit compaction message. */
+    async beginMaintenanceRun(
+        ctx: Context,
+        agentId: string,
+        runId: string,
+        startedAt: number,
+    ): Promise<void> {
+        if (
+            !Value.Check(historyAgentIdSchema, agentId) ||
+            !Value.Check(historyRecordIdSchema, runId) ||
+            !Value.Check(historyTimestampSchema, startedAt)
+        ) {
+            throw new Error("The history module received an invalid maintenance run.");
+        }
+        await this.#direct(
+            ctx,
+            async (txCtx) => await this.#beginRun(txCtx, agentId, runId, "send", startedAt),
+        );
+    }
+
+    /** Settle one standalone maintenance run by its stable identity. */
+    async finishMaintenanceRun(
+        ctx: Context,
+        agentId: string,
+        runId: string,
+        status: "completed" | "aborted" | "failed",
+        endedAt: number,
+    ): Promise<void> {
+        if (
+            !Value.Check(historyAgentIdSchema, agentId) ||
+            !Value.Check(historyRecordIdSchema, runId) ||
+            !Value.Check(historyTimestampSchema, endedAt)
+        ) {
+            throw new Error("The history module received an invalid maintenance settlement.");
+        }
+        const reason =
+            status === "completed" ? "completed" : status === "aborted" ? "abort" : "error";
+        await this.#direct(ctx, async (txCtx) => {
+            await agentDatabaseRun(
+                txCtx.db,
+                sql`UPDATE ${sql.raw(HISTORY_RUNS_TABLE)}
+                    SET status = ${status}, reason = ${reason}, ended_at = ${endedAt}
+                    WHERE agent_id = ${agentId} AND run_id = ${runId} AND status = 'running'`,
+            );
+        });
     }
 
     /**

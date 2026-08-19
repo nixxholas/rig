@@ -1,34 +1,36 @@
 # Compactions
 
-Typed, durable lifecycle for every provider context-compaction attempt. One module instance serves
-the full agent collection and owns a SQLite table recording manual and automatic starts, terminal
-outcomes, run association, and exact before/after context measurements.
+Typed, durable history messages for every provider context-compaction attempt. One module instance
+serves the full agent collection. The person-visible entity is a `service` message containing one
+`compaction` block; the module's SQLite table is its private provider-attempt correlation index.
 
 ```text
 manual API request ─┐
-                    ├─ running row ── provider outcome ── completed / failed
-automatic policy ──┘                         │
-                                            └─ first later inference records tokensAfter
+                    ├─ running message ── provider outcome ── completed / failed
+automatic policy ──┘                             │
+                                                └─ first later inference records tokensAfter
 ```
 
 ## Public surface
 
-- `startManual(ctx, agentId)` creates and publishes the running resource before asking Agent Base
-  to compact. A second running attempt throws `CompactionAlreadyRunningError`.
-- `get(ctx, compactionId)`, `running(ctx, agentId)`, and `listPage(ctx, agentId, query)` read the
-  durable source of truth. Pages are newest first, default to 50 rows, and cap at 100.
-- `onEventTransactional` and `onEvent` publish `compaction_created` and `compaction_updated` around
-  the same commit that changes storage.
+- `startManual(ctx, agentId)` creates the maintenance run and running history message before asking
+  Agent Base to compact. A second running attempt throws `CompactionAlreadyRunningError`.
+- `historyMessage(compaction)` produces the exact service message used by history, API responses,
+  and realtime message events.
+- `get(ctx, compactionId)`, `running(ctx, agentId)`, and `listPage(ctx, agentId, query)` inspect the
+  private lifecycle index; they are not a second public protocol surface.
 
-The module takes `EventsModule` to associate automatic compaction with the exact active public run,
-and `UsageModule` to seed a manual attempt with the latest exact context measurement. No caller
-supplies IDs, run handles, clocks, or token estimates.
+The module takes `EventsModule`, `UsageModule`, and `HistoryModule`. Automatic compaction joins the
+exact active run. Manual compaction creates a maintenance run whose ID is the message ID. The
+history write and raw `compaction.message-created` or `compaction.message-updated` journal event
+commit together; the API converts those durable facts to ordinary `message.created` and
+`message.updated` events.
 
 ## Lifecycle and recovery
 
 Agent Base's stable compaction ID correlates the start, history replacement, and provider outcome.
-Successful replacement is marked completed inside the same transaction that replaces model
-history. Failed and canceled outcomes become failed resources with a human-readable reason. The
+Successful replacement updates the message inside the same transaction that replaces model
+history. Failed and canceled outcomes update it to failed with a human-readable reason. The
 agent-settlement transaction is a backstop for provider exceptions that never returned a typed
 outcome.
 
@@ -36,13 +38,12 @@ Completed compactions retain `tokensAfter` as absent until the first later infer
 replacement context's exact input-plus-output size. An incompatible model reset clears that pending
 association instead of attributing the new model's unrelated context.
 
-At startup, every row left running by the previous process is failed before the daemon becomes
-ready. Realtime delivery is therefore only a hint: a reconnecting client reads the table through the
-API and never remains stuck on stale compacting state.
+At startup, every row left running by the previous process and its matching history message are
+failed before the daemon becomes ready. A reconnecting client reads the same message from
+`GET /v0/agents/:agentId/messages`; there is no compaction list endpoint and no text parsing.
 
 ## Storage
 
-Migration `001-durable-compactions` creates `happy_agent_compactions`, a stable insertion sequence
-for opaque-ID paging, a unique Base-attempt correlation, and a partial unique index allowing at most
-one running compaction per agent. Rows are retained as durable history and are never loaded without
-a page bound except for the startup scan of the one-running-per-agent set.
+Migration `001-durable-compactions` creates `happy_agent_compactions`, a unique Base-attempt
+correlation, an after-measurement marker, and a partial unique index allowing at most one running
+compaction per agent. The canonical person-visible record remains the history message.
