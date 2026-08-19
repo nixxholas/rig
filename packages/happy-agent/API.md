@@ -31,7 +31,7 @@ at `paths.tokenPath` with mode `0600`. A missing or mismatched token yields `401
 
 All routes are prefixed with `/v0`. Independently of the path version, every daemon advertises
 its identity through the health endpoint as a single `version` object: a numeric `protocol`
-(integer, currently 18) and the `daemon` product version string. Clients compare `protocol`
+(integer, currently 19) and the `daemon` product version string. Clients compare `protocol`
 against the number they were built for and refuse to talk to an incompatible daemon; `daemon` is
 for display and diagnostics only.
 
@@ -171,7 +171,7 @@ Response — `200`:
     "healthy": true,
     "ready": true,
     "status": "ready",
-    "version": { "protocol": 18, "daemon": "1.2.3" }
+    "version": { "protocol": 19, "daemon": "1.2.3" }
 }
 ```
 
@@ -1403,8 +1403,19 @@ agent's `mode` endpoint or bootstrap response).
 
 ### Message content
 
-Every message is `id`, `role`, `createdAt`, and `content` — an ordered array of blocks. This
-one shape carries the whole conversation; history, send acceptances, and events all speak it.
+Every message is `id`, `role`, `createdAt`, `content` — an ordered array of blocks — and a
+required `metadata` object. This one shape carries the whole conversation; history, send
+acceptances, and events all speak it.
+
+`metadata` carries typed public provenance rather than internal message metadata:
+
+- `providerId` — the provider that produced the message, when it came from inference.
+- `modelId` — the model that produced the message, when it came from inference.
+- `senderAgentId` — the agent that sent a system-generated message, when one identified itself.
+
+Each field is optional, but the object itself is always present. A message without public
+provenance therefore carries `"metadata": {}`. Clients ignore metadata fields they do not
+recognize as this object grows.
 
 **Roles** say who produced the message:
 
@@ -1430,6 +1441,13 @@ one shape carries the whole conversation; history, send acceptances, and events 
     "status": "completed",
     "arguments": { "cmd": "pnpm test" },
     "result": { "output": "42 passed" },
+    "elevated": true,
+    "review": {
+        "outcome": "allowed",
+        "reason": "The user explicitly requested the release.",
+        "risk": "high",
+        "userAuthorization": "high"
+    },
     "presentation": {
         "type": "exec_command",
         "command": "pnpm test",
@@ -1440,6 +1458,33 @@ one shape carries the whole conversation; history, send acceptances, and events 
 
 `status` is `"running"`, `"completed"`, or `"failed"`; `arguments` and `result` are the raw
 tool data; `presentation` is defined below.
+
+A tool call that crossed the automatic-review boundary additionally carries `elevated` and
+`review` as one required pair. Calls that did not require review carry neither field.
+`elevated` is `true` when the reviewed call was allowed to run with temporary Full access and
+`false` when it remained in the current sandbox or did not run. `review` is exactly one of:
+
+```json
+{
+    "outcome": "allowed | denied",
+    "reason": "Human-readable explanation.",
+    "risk": "low | medium | high | critical",
+    "userAuthorization": "unknown | low | medium | high"
+}
+```
+
+or, when no trustworthy decision could be established:
+
+```json
+{
+    "outcome": "unproven",
+    "kind": "timed_out | unavailable",
+    "reason": "Human-readable explanation."
+}
+```
+
+The discriminated shapes are exhaustive: allowed and denied reviews always carry `risk` and
+`userAuthorization`; unproven reviews always carry `kind` and never claim a risk decision.
 
 Both the role set and the block set will grow; clients must skip roles and blocks they do not
 recognize.
@@ -1572,6 +1617,7 @@ Response — `202`: the durable message as it now stands, plus the event cursor 
         "delivery": "queue",
         "createdAt": 1755400000000,
         "content": [{ "type": "text", "text": "Fix the login redirect loop" }],
+        "metadata": {},
         "mode": {
             "providerId": "codex",
             "modelId": "openai/gpt-5.6-sol",
@@ -1637,6 +1683,7 @@ Response — `200`:
                     "role": "user",
                     "createdAt": 1755400000000,
                     "content": [{ "type": "text", "text": "Fix the login redirect loop" }],
+                    "metadata": {},
                     "mode": {
                         "providerId": "codex",
                         "modelId": "openai/gpt-5.6-sol",
@@ -1649,6 +1696,10 @@ Response — `200`:
                     "id": "pfh0haxfpzowht3oi213cqos",
                     "role": "agent",
                     "createdAt": 1755400002000,
+                    "metadata": {
+                        "providerId": "claude",
+                        "modelId": "anthropic/sonnet-5"
+                    },
                     "content": [
                         {
                             "type": "reasoning",
@@ -1673,7 +1724,8 @@ Response — `200`:
                     "id": "nc6bzmkmd014706rfda898to",
                     "role": "service",
                     "createdAt": 1755400008000,
-                    "content": [{ "type": "text", "text": "Context compacted." }]
+                    "content": [{ "type": "text", "text": "Context compacted." }],
+                    "metadata": {}
                 }
             ]
         }
@@ -2359,6 +2411,7 @@ Response — `200`:
             "delivery": "steer",
             "createdAt": 1755400009000,
             "content": [{ "type": "text", "text": "Then update the tests" }],
+            "metadata": {},
             "mode": {
                 "providerId": "codex",
                 "modelId": "openai/gpt-5.6-sol",

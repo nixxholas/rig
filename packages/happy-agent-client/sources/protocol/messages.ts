@@ -146,6 +146,16 @@ export type ToolPresentation = Static<typeof toolPresentationSchema>;
 /** What is in a message, in order. */
 export type MessageBlock = TextBlock | ImageBlock | ReasoningBlock | ToolCallBlock;
 
+/** Stable provenance carried with a message without exposing internal module metadata. */
+export interface MessageMetadata {
+    /** The provider that produced this message, when it came from inference. */
+    providerId?: string;
+    /** The model that produced this message, when it came from inference. */
+    modelId?: string;
+    /** The agent that sent this system-generated message, when one identified itself. */
+    senderAgentId?: Cuid2;
+}
+
 /** Plain text. */
 export interface TextBlock {
     type: "text";
@@ -166,8 +176,33 @@ export interface ReasoningBlock {
     text: string;
 }
 
-/** One tool invocation. */
-export interface ToolCallBlock {
+/** Risk assigned by the automatic permission reviewer. */
+export type ToolPermissionRisk = "low" | "medium" | "high" | "critical";
+
+/** How strongly the conversation authorized an automatically reviewed action. */
+export type ToolPermissionUserAuthorization = "unknown" | "low" | "medium" | "high";
+
+/** The bounded result of reviewing one tool call. */
+export type ToolPermissionReview =
+    | {
+          outcome: "allowed";
+          reason: string;
+          risk: ToolPermissionRisk;
+          userAuthorization: ToolPermissionUserAuthorization;
+      }
+    | {
+          outcome: "denied";
+          reason: string;
+          risk: ToolPermissionRisk;
+          userAuthorization: ToolPermissionUserAuthorization;
+      }
+    | {
+          outcome: "unproven";
+          kind: "timed_out" | "unavailable";
+          reason: string;
+      };
+
+interface ToolCallBlockBase {
     type: "tool_call";
     name: string;
     status: "running" | "completed" | "failed";
@@ -178,6 +213,21 @@ export interface ToolCallBlock {
     /** A typed rendering of what the call did, when the daemon produced one. */
     presentation?: ToolPresentation;
 }
+
+/** A tool call that did not cross the automatic-review boundary. */
+export interface UnreviewedToolCallBlock extends ToolCallBlockBase {
+    elevated?: never;
+    review?: never;
+}
+
+/** A reviewed tool call, including whether its eventual execution used temporary Full access. */
+export interface ReviewedToolCallBlock extends ToolCallBlockBase {
+    elevated: boolean;
+    review: ToolPermissionReview;
+}
+
+/** One tool invocation. Review metadata is present as one complete, discriminated pair. */
+export type ToolCallBlock = UnreviewedToolCallBlock | ReviewedToolCallBlock;
 
 /** Whether a message waits behind the current run or interrupts it. */
 export type MessageDelivery = "queue" | "steer";
@@ -191,6 +241,7 @@ export interface UserMessage {
     role: "user";
     createdAt: Timestamp;
     content: MessageBlock[];
+    metadata: MessageMetadata;
     /** `"pending"` until inference takes the message up. */
     status: "pending" | "accepted";
     delivery: MessageDelivery;
@@ -205,6 +256,7 @@ export interface AgentMessage {
     role: "agent";
     createdAt: Timestamp;
     content: MessageBlock[];
+    metadata: MessageMetadata;
 }
 
 /** Content the daemon injected into the model's context, when worth showing. */
@@ -213,6 +265,7 @@ export interface SystemMessage {
     role: "system";
     createdAt: Timestamp;
     content: MessageBlock[];
+    metadata: MessageMetadata;
 }
 
 /** Operational records the model never saw: compaction, aborts, housekeeping. */
@@ -221,6 +274,7 @@ export interface ServiceMessage {
     role: "service";
     createdAt: Timestamp;
     content: MessageBlock[];
+    metadata: MessageMetadata;
 }
 
 /** The run's outcome. */

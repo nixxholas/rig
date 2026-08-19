@@ -18,6 +18,11 @@ Do not create, edit, rename, or delete any `API.md` file without direct human
 input in the current task that explicitly authorizes the specific API
 specification change.
 
+`packages/happy-agent/API.md` is the authoritative Happy Agent API contract. Client types,
+runtime schemas, daemon behavior, tests, and documentation must conform to it exactly. Never
+invent, implement, preserve, or release behavior that deviates from the specification; stop and
+request a human-directed specification change when the desired behavior is not already described.
+
 ## Modules
 
 A module is a self-contained feature. It carries everything that feature needs to work: it extends the agent loop through its own hooks, owns its tools, starts and supervises its background processes, and holds its connections to third-party services. Adding a module to an agent is the whole installation — nothing elsewhere should have to be wired up, registered, or branched on for the feature to function.
@@ -175,15 +180,24 @@ declares it, in the same change.
 
 When changing the Happy Agent API, use this sequence:
 
-1. Finish the API and client changes, then sync them to `main`.
-2. Release `@slopus/happy-agent-client` from `main`.
-3. Update every package that depends on `@slopus/happy-agent-client` to the newly published exact
-   version, and update the lockfile in the same change.
-4. Fix and run the tests and typechecks against that published client version.
-5. Sync the dependency and test fixes to `main` again.
+1. Update `packages/happy-agent/API.md` first. The specification is the source of truth for the
+   entire change and must describe the complete intended contract before implementation begins.
+2. Implement the matching public types, runtime schemas, and client behavior in
+   `@slopus/happy-agent-client`. Test those changes, sync them to `main`, and release the client
+   through trusted publishing.
+3. Only after the client is published, update every package that depends on
+   `@slopus/happy-agent-client` to the newly published exact version and update the lockfile in the
+   same change.
+4. Implement all remaining daemon, module, protocol, product, and test changes against that
+   published client version. The implementation must not extend or reinterpret the API beyond the
+   approved specification.
+5. Run the relevant tests and typechecks, then sync the remaining implementation and dependency
+   changes to `main`.
 
-Do not point consumers at an unpublished client version or combine the first API sync with the
-post-release dependency upgrade.
+Do not begin the client implementation before the specification is updated. Do not begin the
+remaining implementation before the client is published. Do not point consumers at an unpublished
+client version or combine the client release sync with the post-release dependency and
+implementation sync.
 
 ## Runtime validation
 
