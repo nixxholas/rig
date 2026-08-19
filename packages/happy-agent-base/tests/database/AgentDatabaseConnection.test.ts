@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, symlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { sql } from "drizzle-orm";
@@ -23,6 +23,39 @@ afterEach(async () => {
 });
 
 describe("Agent Database SQLite concurrency", () => {
+    it("rejects a second connection until the process owner closes", async () => {
+        const directory = await createTestDirectory();
+        const path = join(directory, "agent.sqlite");
+        const first = await openAgentSQLiteDatabase(path);
+        try {
+            expect((await stat(`${path}.lock`)).mode & 0o777).toBe(0o600);
+            await expect(openAgentSQLiteDatabase(path)).rejects.toThrow(
+                "The Agent SQLite database is already open in another process.",
+            );
+        } finally {
+            await first.close();
+        }
+
+        const replacement = await openAgentSQLiteDatabase(path);
+        await replacement.close();
+    });
+
+    it("treats symlinked parent directories as the same process owner", async () => {
+        const directory = await createTestDirectory();
+        const real = join(directory, "real");
+        const alias = join(directory, "alias");
+        await mkdir(real);
+        await symlink(real, alias);
+        const first = await openAgentSQLiteDatabase(join(alias, "agent.sqlite"));
+        try {
+            await expect(openAgentSQLiteDatabase(join(real, "agent.sqlite"))).rejects.toThrow(
+                "The Agent SQLite database is already open in another process.",
+            );
+        } finally {
+            await first.close();
+        }
+    });
+
     it("admits root operations in FIFO order without relying on elapsed time", async () => {
         const directory = await createTestDirectory();
         const opened = await openAgentSQLiteDatabase(join(directory, "agent.sqlite"));

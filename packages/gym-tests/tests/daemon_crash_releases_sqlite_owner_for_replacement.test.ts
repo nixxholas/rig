@@ -14,6 +14,7 @@ describe("session database ownership after a daemon crash", () => {
     it("lets a replacement acquire the kernel lock without stale-file recovery", async () => {
         const gym = await createGym({
             mode: "docker",
+            environment: { HAPPY_HOME_DIR: "/tmp/happy" },
             entrypoint: ["bash", "/workspace/replace-crashed-daemon.sh"],
             files: {
                 "replace-crashed-daemon.sh": replaceCrashedDaemonScript,
@@ -37,10 +38,8 @@ rig() {
     node /app/packages/rig/dist/main.js "$@"
 }
 
-registry_path="/tmp/rig-$(id -u)/server.json"
-
-read_registered_pid() {
-    node -e 'process.stdout.write(String(JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).pid))' "$registry_path"
+read_daemon_pid() {
+    pgrep -f '/app/packages/rig/dist/main.js --server$' | head -n 1
 }
 
 wait_for_exit() {
@@ -56,12 +55,12 @@ wait_for_exit() {
 }
 
 rig daemon start
-crashed_pid="$(read_registered_pid)"
+crashed_pid="$(read_daemon_pid)"
 kill -KILL "$crashed_pid"
 wait_for_exit "$crashed_pid"
 
 rig daemon start
-replacement_pid="$(read_registered_pid)"
+replacement_pid="$(read_daemon_pid)"
 if [[ "$replacement_pid" = "$crashed_pid" ]]; then
     echo "The crashed daemon was not replaced." >&2
     exit 1

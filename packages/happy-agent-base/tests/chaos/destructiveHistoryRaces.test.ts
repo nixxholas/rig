@@ -2,7 +2,7 @@ import { Type } from "@sinclair/typebox";
 import { createRootContext } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
-import { AgentBase, defineAgentTool } from "../../sources/index.js";
+import { AGENT_BASE_PENDING_KEY, AgentBase, defineAgentTool } from "../../sources/index.js";
 import { InMemoryPersistence } from "../gym/InMemoryPersistence.js";
 import { ScriptedProvider } from "../gym/ScriptedProvider.js";
 import { providersOf, queued, textTurn, user } from "../gym/fixtures.js";
@@ -46,7 +46,6 @@ describe("consistency across destructive history boundaries", () => {
     it("does not let sibling tool mappers append after a failed result commit ended the turn", async () => {
         const disk = new InMemoryPersistence();
         const firstResultFailed = deferred();
-        const failureRecordPersisted = deferred();
         const slowToolStarted = deferred();
         const releaseSlowTool = deferred();
         const lateToolAppend = deferred();
@@ -62,7 +61,6 @@ describe("consistency across destructive history boundaries", () => {
                 lateToolAppend.resolve();
             }
             await append(appendCtx, record);
-            if (record.type === "system") failureRecordPersisted.resolve();
         };
         const provider = new ScriptedProvider([
             [
@@ -105,19 +103,20 @@ describe("consistency across destructive history boundaries", () => {
         await agent.send(ctx, user("run both"));
         expect(await observedWithin(firstResultFailed.promise)).toBe(true);
         expect(await observedWithin(slowToolStarted.promise)).toBe(true);
-        expect(await observedWithin(failureRecordPersisted.promise)).toBe(true);
-        const recordsAtTerminalFailure = structuredClone(disk.records);
+        await agent.waitForIdle();
+        expect(agent.active).toBe(true);
+        expect(disk.values.has(AGENT_BASE_PENDING_KEY)).toBe(true);
+        expect(disk.records.some((record) => record.type === "system")).toBe(false);
+        const recordsAtBlockedResult = structuredClone(disk.records);
 
         releaseSlowTool.resolve();
         const staleMapperTriedToAppend = await observedWithin(lateToolAppend.promise);
-        await agent.waitForIdle();
         await agent.close();
 
-        // Once the failed turn has recorded its terminal failure, a mapper from that turn no
-        // longer owns the append-only tail. Releasing it must not mutate history behind the
-        // failure record or race a later turn.
+        // The failed result leaves the run active and the call last in history for restart. A
+        // sibling mapper from the failed batch no longer owns that tail and cannot write over it.
         expect(staleMapperTriedToAppend).toBe(false);
-        expect(disk.records).toEqual(recordsAtTerminalFailure);
+        expect(disk.records).toEqual(recordsAtBlockedResult);
     });
 
     it("keeps live and restarted context identical when normal done arrives without text_end", async () => {

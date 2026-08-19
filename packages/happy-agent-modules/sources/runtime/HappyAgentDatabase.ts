@@ -3,13 +3,16 @@ import { pathToFileURL } from "node:url";
 import { createClient, type Client } from "@libsql/client";
 import { drizzle, type LibSQLDatabase } from "drizzle-orm/libsql";
 
+import { acquireHappyAgentSQLiteProcessLock } from "./HappyAgentSQLiteProcessLock.js";
+
 export interface HappyAgentDatabase {
     readonly database: LibSQLDatabase;
-    close(): void;
+    close(): Promise<void>;
 }
 
 /** Open the runtime-owned SQLite database through libSQL's asynchronous Drizzle driver. */
 export async function openHappyAgentDatabase(path: string): Promise<HappyAgentDatabase> {
+    const processLock = await acquireHappyAgentSQLiteProcessLock(path);
     const client = createClient({
         intMode: "number",
         timeout: 5_000,
@@ -21,10 +24,20 @@ export async function openHappyAgentDatabase(path: string): Promise<HappyAgentDa
         serializeDatabaseAccess(client, database);
         return {
             database,
-            close: () => client.close(),
+            close: async () => {
+                try {
+                    client.close();
+                } finally {
+                    await processLock.release();
+                }
+            },
         };
     } catch (error) {
-        client.close();
+        try {
+            client.close();
+        } finally {
+            await processLock.release();
+        }
         throw error;
     }
 }

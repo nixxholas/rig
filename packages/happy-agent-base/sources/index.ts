@@ -60,6 +60,7 @@ export {
     ensureAgentDatabaseConnection,
 } from "./AgentDatabaseConnection.js";
 export { openAgentSQLiteDatabase, type AgentLibSQLDatabase } from "./openAgentSQLiteDatabase.js";
+export { AgentSQLiteDatabaseLockedError } from "./AgentSQLiteProcessLock.js";
 export {
     openAgentPGliteDatabase,
     type AgentPGliteDatabase,

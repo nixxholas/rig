@@ -14,6 +14,7 @@ describe("concurrent local daemon startup", () => {
     it("serializes every caller onto one daemon and one SQLite owner", async () => {
         const gym = await createGym({
             mode: "docker",
+            environment: { HAPPY_HOME_DIR: "/tmp/happy" },
             entrypoint: ["bash", "/workspace/start-daemon-concurrently.sh"],
             files: {
                 "start-daemon-concurrently.sh": startDaemonConcurrentlyScript,
@@ -37,14 +38,11 @@ rig() {
     node /app/packages/rig/dist/main.js "$@"
 }
 
-server_directory="/tmp/rig-$(id -u)"
-registry_path="$server_directory/server.json"
-server_log="$server_directory/server.log"
 barrier="/workspace/start-daemon-now"
 client_pids=""
 
-read_registered_pid() {
-    node -e 'process.stdout.write(String(JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).pid))' "$registry_path"
+read_daemon_pid() {
+    pgrep -f '/app/packages/rig/dist/main.js --server$' | head -n 1
 }
 
 wait_for_exit() {
@@ -83,27 +81,13 @@ for index in $(seq 1 8); do
     fi
 done
 
-ready_count="$(node -e '
-const fs = require("node:fs");
-const records = fs
-    .readFileSync(process.argv[1], "utf8")
-    .trim()
-    .split("\n")
-    .flatMap((line) => {
-        try {
-            return [JSON.parse(line)];
-        } catch {
-            return [];
-        }
-    });
-process.stdout.write(String(records.filter((record) => record.event === "daemon_ready").length));
-' "$server_log")"
-if [[ "$ready_count" != "1" ]]; then
-    echo "Expected one ready daemon, found $ready_count." >&2
+daemon_count="$(pgrep -fc '/app/packages/rig/dist/main.js --server$')"
+if [[ "$daemon_count" != "1" ]]; then
+    echo "Expected one ready daemon, found $daemon_count." >&2
     exit 1
 fi
 
-owner_pid="$(read_registered_pid)"
+owner_pid="$(read_daemon_pid)"
 kill -0 "$owner_pid"
 rig daemon status
 echo "All concurrent clients reached one daemon"

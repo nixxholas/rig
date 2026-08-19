@@ -15,6 +15,7 @@ COPY docs docs
 COPY packages/gym/package.json packages/gym/package.json
 COPY packages/gym-tests/package.json packages/gym-tests/package.json
 COPY packages/ghostty-web/package.json packages/ghostty-web/package.json
+COPY packages/happy-agent-gym/package.json packages/happy-agent-gym/package.json
 COPY packages/happy-providers/package.json packages/happy-providers/package.json
 COPY packages/happy-agent-modules/package.json packages/happy-agent-modules/package.json
 COPY packages/happy-agent/package.json packages/happy-agent/package.json
@@ -24,6 +25,7 @@ RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
     && pnpm install --frozen-lockfile
 
 COPY packages/ghostty-web packages/ghostty-web
+COPY packages/happy-agent-gym packages/happy-agent-gym
 COPY packages/happy-providers packages/happy-providers
 COPY packages/happy-agent-modules packages/happy-agent-modules
 COPY packages/happy-agent packages/happy-agent
@@ -37,9 +39,11 @@ RUN pnpm --filter @slopus/rig build
 # development dependencies: the published bundle compiles them in, but the sources still import
 # them directly.
 RUN pnpm --filter @slopus/rig deploy --legacy /prod/rig
-# The deployed @slopus/ghostty-web ships only its build output, so point its exports at the build
-# instead of the TypeScript sources it normally resolves to inside the workspace.
-RUN node --input-type=module --eval "import { readFileSync, writeFileSync } from 'node:fs'; const path = '/prod/rig/node_modules/@slopus/ghostty-web/package.json'; const manifest = JSON.parse(readFileSync(path, 'utf8')); manifest.exports['.'] = { types: './dist/index.d.ts', default: './dist/index.js' }; writeFileSync(path, JSON.stringify(manifest, null, 2) + '\\n')"
+# Every deployed @slopus/ghostty-web copy ships only its build output, so point its exports at the
+# build instead of the TypeScript sources it normally resolves to inside the workspace. pnpm may
+# install both a published copy and a workspace-file copy at different physical paths.
+RUN find /prod/rig/node_modules -path '*/@slopus/ghostty-web/package.json' \
+    -exec node --input-type=module --eval "import { readFileSync, writeFileSync } from 'node:fs'; const path = process.argv[1]; const manifest = JSON.parse(readFileSync(path, 'utf8')); manifest.exports['.'] = { types: './dist/index.d.ts', default: './dist/index.js' }; writeFileSync(path, JSON.stringify(manifest, null, 2) + '\\n')" {} \;
 RUN pnpm --filter @slopus/rig-gym-tests deploy --prod --legacy /prod/gym
 
 FROM node:24-bookworm-slim

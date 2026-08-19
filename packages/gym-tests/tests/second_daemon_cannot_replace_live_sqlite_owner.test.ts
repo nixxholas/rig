@@ -14,6 +14,7 @@ describe("exclusive daemon ownership of the session database", () => {
     it("rejects a second daemon before it can replace the live socket or open SQLite", async () => {
         const gym = await createGym({
             mode: "docker",
+            environment: { HAPPY_HOME_DIR: "/tmp/happy" },
             entrypoint: ["bash", "/workspace/verify-exclusive-daemon.sh"],
             files: {
                 "verify-exclusive-daemon.sh": verifyExclusiveDaemonScript,
@@ -38,14 +39,10 @@ rig() {
     node /app/packages/rig/dist/main.js "$@"
 }
 
-server_directory="/tmp/rig-$(id -u)"
-registry_path="$server_directory/server.json"
-socket_path="$server_directory/server.sock"
-token_path="$server_directory/token"
 contender_log="/workspace/second-daemon.log"
 
-read_registered_pid() {
-    node -e 'process.stdout.write(String(JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).pid))' "$registry_path"
+read_daemon_pid() {
+    pgrep -f '/app/packages/rig/dist/main.js --server$' | head -n 1
 }
 
 wait_for_exit() {
@@ -60,24 +57,19 @@ wait_for_exit() {
     return 1
 }
 
-rig daemon start
-owner_pid="$(read_registered_pid)"
+if ! rig daemon start; then
+    cat /tmp/happy/agent/daemon.log >&2 || true
+    exit 1
+fi
+owner_pid="$(read_daemon_pid)"
 kill -0 "$owner_pid"
 
-RIG_SERVER_SOCKET_PATH="$socket_path" \
-RIG_SERVER_TOKEN_PATH="$token_path" \
 node /app/packages/rig/dist/main.js --server >"$contender_log" 2>&1 &
 contender_pid=$!
 
 for _ in $(seq 1 200); do
     if ! kill -0 "$contender_pid" 2>/dev/null; then
         break
-    fi
-    registered_pid="$(read_registered_pid)"
-    if [[ "$registered_pid" != "$owner_pid" ]]; then
-        echo "The second daemon replaced the live owner's registry entry." >&2
-        cat "$contender_log" >&2
-        exit 1
     fi
     sleep 0.05
 done
@@ -88,7 +80,7 @@ if kill -0 "$contender_pid" 2>/dev/null; then
     exit 1
 fi
 
-test "$(read_registered_pid)" = "$owner_pid"
+test "$(read_daemon_pid)" = "$owner_pid"
 kill -0 "$owner_pid"
 status="$(rig daemon status)"
 printf '%s\n' "$status"

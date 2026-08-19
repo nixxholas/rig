@@ -4,6 +4,7 @@ import { createClient, type Client } from "@libsql/client";
 import { drizzle, type LibSQLDatabase } from "drizzle-orm/libsql";
 
 import { AgentDatabaseConnection } from "./AgentDatabaseConnection.js";
+import { acquireAgentSQLiteProcessLock } from "./AgentSQLiteProcessLock.js";
 
 export type AgentLibSQLDatabase = LibSQLDatabase;
 
@@ -11,6 +12,7 @@ export type AgentLibSQLDatabase = LibSQLDatabase;
 export async function openAgentSQLiteDatabase(
     path: string,
 ): Promise<AgentDatabaseConnection<AgentLibSQLDatabase>> {
+    const processLock = await acquireAgentSQLiteProcessLock(path);
     const client = createClient({
         intMode: "number",
         timeout: 5_000,
@@ -18,9 +20,19 @@ export async function openAgentSQLiteDatabase(
     });
     try {
         await configure(client);
-        return new AgentDatabaseConnection(drizzle(client), () => client.close());
+        return new AgentDatabaseConnection(drizzle(client), async () => {
+            try {
+                client.close();
+            } finally {
+                await processLock.release();
+            }
+        });
     } catch (error) {
-        client.close();
+        try {
+            client.close();
+        } finally {
+            await processLock.release();
+        }
         throw error;
     }
 }

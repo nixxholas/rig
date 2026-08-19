@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, symlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { sql } from "drizzle-orm";
@@ -18,6 +18,39 @@ afterEach(async () => {
 });
 
 describe("openHappyAgentDatabase", () => {
+    it("rejects a second connection until the process owner closes", async () => {
+        const directory = await createTestDirectory();
+        const path = join(directory, "agent.sqlite");
+        const first = await openHappyAgentDatabase(path);
+        try {
+            expect((await stat(`${path}.lock`)).mode & 0o777).toBe(0o600);
+            await expect(openHappyAgentDatabase(path)).rejects.toThrow(
+                "The Happy agent SQLite database is already open in another process.",
+            );
+        } finally {
+            await first.close();
+        }
+
+        const replacement = await openHappyAgentDatabase(path);
+        await replacement.close();
+    });
+
+    it("treats symlinked parent directories as the same process owner", async () => {
+        const directory = await createTestDirectory();
+        const real = join(directory, "real");
+        const alias = join(directory, "alias");
+        await mkdir(real);
+        await symlink(real, alias);
+        const first = await openHappyAgentDatabase(join(alias, "agent.sqlite"));
+        try {
+            await expect(openHappyAgentDatabase(join(real, "agent.sqlite"))).rejects.toThrow(
+                "The Happy agent SQLite database is already open in another process.",
+            );
+        } finally {
+            await first.close();
+        }
+    });
+
     it("queues a root statement behind an active transaction", async () => {
         const directory = await createTestDirectory();
         const opened = await openHappyAgentDatabase(join(directory, "agent.sqlite"));
@@ -44,7 +77,7 @@ describe("openHappyAgentDatabase", () => {
                 database.all<{ value: string }>(sql`SELECT value FROM writes ORDER BY rowid`),
             ).resolves.toEqual([{ value: "transaction" }, { value: "root" }]);
         } finally {
-            opened.close();
+            await opened.close();
         }
     });
 });

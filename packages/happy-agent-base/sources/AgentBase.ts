@@ -1715,14 +1715,21 @@ export class AgentBase {
     /** The run itself, on the context of the span the whole of it belongs to. */
     async #runTurns(ctx: Context): Promise<void> {
         if (this.#pending?.stage === "settlement") {
-            this.#loopId ??= createId();
-            this.#settlementId ??= createId();
-            setAgentSpanAttributes(ctx, { "agent.loop.id": this.#loopId });
-            await this.#settleDurably(ctx, {
-                loopId: this.#loopId,
-                settlementId: this.#settlementId,
-            });
-            return;
+            // A prior implementation could advance to settlement while a dispatched tool was
+            // still open. Never repeat that conclusion on restore: load the real history, settle
+            // only a complete conversation, and otherwise fall through to the ordinary loop
+            // that resumes the tool batch first.
+            await this.#ensureLoaded(ctx);
+            if (!this.#hasOpenToolCalls()) {
+                this.#loopId ??= createId();
+                this.#settlementId ??= createId();
+                setAgentSpanAttributes(ctx, { "agent.loop.id": this.#loopId });
+                await this.#settleDurably(ctx, {
+                    loopId: this.#loopId,
+                    settlementId: this.#settlementId,
+                });
+                return;
+            }
         }
         // The outer loop reopens when an `afterAgentLoop` action requests more work, so the
         // loop hooks always bracket a settled-to-settled span.
@@ -1745,7 +1752,7 @@ export class AgentBase {
         }
         // A run that could not settle a staged tool result is the one exception: it must leave
         // its pending state exactly as it found it, for the next attempt to finish.
-        if (blocked) return;
+        if (blocked || this.#hasOpenToolCalls()) return;
         // Nothing is asked for any more, so the outstanding work is erased. That erasure is what
         // makes the agent idle, and it commits together with whatever the settling hooks write,
         // so no owner can ever see the agent finished without their conclusions or their
@@ -2187,6 +2194,10 @@ export class AgentBase {
             this.#pendingTools = [];
             this.#pendingToolsUndispatched = false;
             if (resumed.length > 0) {
+                // A failed batch can leave an execution unwinding in this process while its
+                // durable calls remain for resume. Do not retry a durable side effect beside its
+                // earlier invocation; a restarted process has no such in-memory predecessor.
+                if ((await Promise.race([this.#settled(), abortPromise])) === ABORTED) return;
                 // A batch that was never committed has certainly not run — the commit precedes
                 // every execution — so it is dispatched as the fresh batch it never got to be,
                 // rather than resumed, which would refuse the non-durable calls.
@@ -2397,7 +2408,7 @@ export class AgentBase {
         const stream = session.run(this.#workContext(ctx), {
             context: {
                 instructions,
-                messages: [...this.#messages],
+                messages: this.#messagesForProvider(this.#messages),
             },
             ...(this.#model === undefined ? {} : { model: this.#model }),
             ...(this.#effort === undefined ? {} : { effort: this.#effort }),
@@ -2541,7 +2552,7 @@ export class AgentBase {
             await this.#enterStage(ctx, "compaction");
             const instructions = await this.#instructions(ctx);
             const session = await this.#ensureSession(instructions, await this.#tools(ctx));
-            const snapshot = [...this.#messages];
+            const snapshot = this.#messagesForProvider(this.#messages);
             await this.#settled();
             const compactionStart: AgentBaseCompactionStart = {
                 loopId: this.#loopId ?? createId(),
@@ -2632,8 +2643,9 @@ export class AgentBase {
         try {
             await this.#runPersistenceStep(this.#workContext(ctx), async (lockCtx) => {
                 // A call the durable batch still holds belongs to the resume, which answers it
-                // properly — and re-executes it when the tool is durable. Settling it here as
-                // well would give the conversation two results for one call.
+                // properly — and re-executes it when the tool is durable. This run cannot settle
+                // it independently without racing that batch, and it cannot settle the agent
+                // while the call remains open, so leave the durable stage untouched for resume.
                 const pending = await this.#persistence.readValues(lockCtx, "tool.");
                 const dispatched = new Set(
                     pending.map(
@@ -2641,7 +2653,7 @@ export class AgentBase {
                     ),
                 );
                 if (owed.some((call) => dispatched.has(call.callId))) {
-                    settled = true;
+                    this.#durableWorkBlocked = true;
                     return;
                 }
                 const entries = owed.map((call, index) => {
@@ -3259,14 +3271,21 @@ export class AgentBase {
         const running: Promise<SessionToolResultMessage>[] = [];
         let closedDuringTools = false;
         let committed = 0;
-        // A failed commit ends the turn, and the turn records its own failure at the tail. A
-        // sibling still running at that moment no longer owns the append-only tail: its result
-        // would land behind the failure record, where no later turn could make sense of it. So
-        // the first failed commit closes the batch to every result that was not committed yet.
+        // A failed commit blocks the turn with its pending calls intact for resume. A sibling
+        // still running at that moment no longer owns the append-only tail: its result could
+        // race the resumed batch and give one call two answers. So the first failed commit closes
+        // the batch to every result that was not committed yet.
         let commitFailed = false;
+        let commitAvailable = Promise.resolve();
         const commitReady = async (): Promise<void> => {
-            if (commitFailed) return;
+            const previous = commitAvailable;
+            let release!: () => void;
+            commitAvailable = new Promise<void>((resolve) => {
+                release = resolve;
+            });
+            await previous;
             try {
+                if (commitFailed) return;
                 await this.#runPersistenceStep(this.#workContext(ctx), async (lockCtx) => {
                     while (committed < entries.length) {
                         const entry = entries[committed];
@@ -3321,6 +3340,8 @@ export class AgentBase {
             } catch (error: unknown) {
                 commitFailed = true;
                 throw error;
+            } finally {
+                release();
             }
         };
         this.#toolsRunning += 1;
@@ -3382,12 +3403,11 @@ export class AgentBase {
             await batch;
         } finally {
             this.#toolsRunning -= 1;
+            this.#settleLater(Promise.allSettled(running), "tool");
         }
-        // An abort settles the call in the conversation, but it does not settle the call: the
-        // tool is still running, and the session must not make its next request while that work
-        // is in flight. The batch does not wait for it, so a tool that never notices the abort
-        // cannot hold the turn open.
-        this.#settleLater(Promise.allSettled(running), "tool");
+        // An abort or failure may settle the conversation or block the batch without settling the
+        // actual execution. Track that unwinding so another in-process attempt cannot overlap it;
+        // the batch itself does not wait, so an uncooperative tool cannot hold this turn open.
         return closedDuringTools;
     }
 
@@ -3413,18 +3433,67 @@ export class AgentBase {
         return tool?.durable === true;
     }
 
-    /**
-     * The tool calls a restored conversation ends on without any results. Only a trailing
-     * response can hold them: results are appended immediately after the batch that produced
-     * them, so any earlier call is already settled.
-     */
+    /** Every client tool call in the conversation that has no matching result yet. */
     #unansweredCalls(messages: readonly SessionMessage[]): SessionToolCallBlock[] {
-        const last = messages[messages.length - 1];
-        if (last?.role !== "assistant") return [];
-        return last.content.filter(
-            (block): block is SessionToolCallBlock =>
-                block.type === "tool_call" && block.server !== true,
-        );
+        const unanswered: SessionToolCallBlock[] = [];
+        for (const message of messages) {
+            if (message.role === "assistant") {
+                unanswered.push(
+                    ...message.content.filter(
+                        (block): block is SessionToolCallBlock =>
+                            block.type === "tool_call" && block.server !== true,
+                    ),
+                );
+                continue;
+            }
+            if (message.role !== "tool") continue;
+            const index = unanswered.findIndex((call) => call.callId === message.callId);
+            if (index !== -1) unanswered.splice(index, 1);
+        }
+        return unanswered;
+    }
+
+    /** Whether settlement would erase the active marker while a tool result is still owed. */
+    #hasOpenToolCalls(): boolean {
+        return this.#loaded !== undefined && this.#unansweredCalls(this.#messages).length > 0;
+    }
+
+    /**
+     * Give providers protocol-valid tool ordering even when recovering history written by an
+     * older process that put an operational failure or user retry between a call and its result.
+     * Durable history remains append-only; this view moves known results beside their calls and
+     * preserves every intervening message afterwards.
+     */
+    #messagesForProvider(messages: readonly SessionMessage[]): SessionMessage[] {
+        const calls = new Set<string>();
+        const results = new Map<string, SessionToolResultMessage[]>();
+        for (const message of messages) {
+            if (message.role === "assistant") {
+                for (const block of message.content) {
+                    if (block.type === "tool_call" && block.server !== true) {
+                        calls.add(block.callId);
+                    }
+                }
+            } else if (message.role === "tool") {
+                const queued = results.get(message.callId) ?? [];
+                queued.push(message);
+                results.set(message.callId, queued);
+            }
+        }
+
+        const ordered: SessionMessage[] = [];
+        for (const message of messages) {
+            if (message.role === "tool" && calls.has(message.callId)) continue;
+            ordered.push(message);
+            if (message.role !== "assistant") continue;
+            for (const block of message.content) {
+                if (block.type !== "tool_call" || block.server === true) continue;
+                const queued = results.get(block.callId);
+                const result = queued?.shift();
+                if (result !== undefined) ordered.push(result);
+            }
+        }
+        return ordered;
     }
 
     /** Allocate one internal identity before the call becomes durable or executable. */
@@ -3538,9 +3607,15 @@ export class AgentBase {
             content: [{ type: "text", text }],
             isError: true,
         });
-        const tool = (await this.#tools(ctx)).find(
-            (candidate) => candidate.name === call.name && candidate.namespace === call.namespace,
-        );
+        let tool: AnyAgentTool | undefined;
+        try {
+            tool = (await this.#tools(ctx)).find(
+                (candidate) =>
+                    candidate.name === call.name && candidate.namespace === call.namespace,
+            );
+        } catch (error: unknown) {
+            return failure(error instanceof Error ? error.message : String(error));
+        }
         if (tool === undefined) {
             return failure(`Tool "${call.name}" is not available.`);
         }

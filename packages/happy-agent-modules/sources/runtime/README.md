@@ -23,6 +23,10 @@ The main and automatic-review stores are separate databases with separate proces
 shutdown stops new background work, waits for admitted tasks, and closes resources in reverse
 ownership order.
 
+Each SQLite database acquires its kernel-backed sibling `.lock` database before the real database
+client is constructed. A live process therefore excludes every other connector, while process
+exit releases ownership even though the reusable lock database remains on disk.
+
 Every agent module is wrapped at composition time with module-labelled logging. The wrapper keeps
 Agent Base's hook ordering and failure behavior unchanged, emits bounded hook timing, and leaves
 high-volume provider deltas to the observation module's focused phase records.

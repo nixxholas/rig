@@ -9,6 +9,7 @@ import { createRootContext } from "@steve.kite/stdlib";
 import { describe, expect, it } from "vitest";
 
 import {
+    AGENT_BASE_PENDING_KEY,
     AgentBase,
     agentEffort,
     agentModel,
@@ -755,6 +756,173 @@ describe("AgentBase black-box persistence and restart behavior", () => {
         await agent.close();
     });
 
+    it("answers every dispatched call when tool lookup fails after the response", async () => {
+        const calls: SessionToolCallBlock[] = [
+            {
+                type: "tool_call",
+                callId: "call-system-closed-a",
+                name: "first_tool",
+                arguments: "{}",
+            },
+            {
+                type: "tool_call",
+                callId: "call-system-closed-b",
+                name: "second_tool",
+                arguments: "{}",
+            },
+        ];
+        const tools = calls.map((call) =>
+            defineAgentTool({
+                name: call.name,
+                returnType: Type.Object({}),
+                shouldReviewInAutoMode: () => false,
+                execute: async () => ({}),
+                toLLM: () => [{ type: "text" as const, text: "ran" }],
+            }),
+        );
+        let toolReads = 0;
+        const persistence = new InMemoryPersistence();
+        const provider = new ScriptedProvider([
+            toolCallTurn(calls),
+            textTurn("continued after closed calls"),
+        ]);
+        const agent = await AgentBase.create(ctx, {
+            id: "tool-lookup-system-closed",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+            hooks: {
+                tools: () => {
+                    toolReads += 1;
+                    if (toolReads === 2 || toolReads === 3) {
+                        throw new Error("The agent system is closed.");
+                    }
+                    return tools;
+                },
+            },
+        });
+
+        await agent.send(ctx, user("run both"));
+        await agent.waitForIdle();
+
+        const results = persistence.records
+            .filter((record) => record.type === "tool")
+            .map((record) => record.message);
+        expect(results).toEqual(
+            calls.map((call) => toolResult(call.callId, "The agent system is closed.", true)),
+        );
+        expect(persistence.records.some((record) => record.type === "system")).toBe(false);
+        expect(persistence.pending.size).toBe(0);
+        expect(agent.active).toBe(false);
+        expect(provider.sessions[0]?.requests[1]?.context.messages).toEqual([
+            user("run both"),
+            { role: "assistant", content: calls },
+            ...results,
+        ]);
+        await agent.close();
+    });
+
+    it("recovers a call stranded before a failure note and later user retry", async () => {
+        const call: SessionToolCallBlock = {
+            type: "tool_call",
+            callId: "call-before-failure-note",
+            name: "recover_tool",
+            arguments: "{}",
+        };
+        const failure = system("The last turn failed: The agent system is closed.");
+        const persistence = new InMemoryPersistence([
+            userRecord("original request"),
+            { type: "block", block: call },
+            { type: "system", message: failure },
+            userRecord("continue"),
+        ]);
+        const provider = new ScriptedProvider([textTurn("recovered")]);
+        let executions = 0;
+        const agent = await AgentBase.create(ctx, {
+            id: "recover-call-before-failure-note",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+            initialState: {
+                tools: [
+                    defineAgentTool({
+                        name: call.name,
+                        returnType: Type.Object({ value: Type.String() }),
+                        shouldReviewInAutoMode: () => false,
+                        execute: async () => {
+                            executions += 1;
+                            return { value: "recovered result" };
+                        },
+                        toLLM: (result) => [{ type: "text", text: result.value }],
+                    }),
+                ],
+            },
+        });
+
+        agent.start();
+        await agent.waitForIdle();
+
+        expect(executions).toBe(1);
+        expect(provider.sessions[0]?.requests[0]?.context.messages).toEqual([
+            user("original request"),
+            { role: "assistant", content: [call] },
+            toolResult(call.callId, "recovered result"),
+            failure,
+            user("continue"),
+        ]);
+        expect(persistence.pending.size).toBe(0);
+        expect(agent.active).toBe(false);
+        await agent.close();
+    });
+
+    it("closes a hanging tool call before the agent settles", async () => {
+        const call: SessionToolCallBlock = {
+            type: "tool_call",
+            callId: "call-hanging-at-close",
+            name: "hanging_tool",
+            arguments: "{}",
+        };
+        const started = deferred<void>();
+        const persistence = new InMemoryPersistence();
+        const provider = new ScriptedProvider([toolCallTurn([call])]);
+        const agent = await AgentBase.create(ctx, {
+            id: "close-hanging-tool",
+            providers: providersOf(provider),
+            provider: "scripted",
+            persistence,
+            initialState: {
+                tools: [
+                    defineAgentTool({
+                        name: call.name,
+                        returnType: Type.Object({}),
+                        shouldReviewInAutoMode: () => false,
+                        execute: () => {
+                            started.resolve();
+                            return new Promise<never>(() => undefined);
+                        },
+                        toLLM: () => [],
+                    }),
+                ],
+            },
+        });
+
+        await agent.send(ctx, user("hang"));
+        await started.promise;
+        await agent.close();
+
+        expect(persistence.records.at(-1)).toEqual({
+            type: "tool",
+            message: toolResult(
+                call.callId,
+                "The tool call was abandoned when the agent closed.",
+                true,
+            ),
+        });
+        expect(persistence.pending.size).toBe(0);
+        expect(persistence.values.has(AGENT_BASE_PENDING_KEY)).toBe(false);
+        expect(agent.active).toBe(false);
+    });
+
     it("answers again after a restart when the last turn failed", async () => {
         // The note a failed turn leaves behind means the question it was given never got an
         // answer, so a restarted agent owes one — with the note itself as context.
@@ -897,6 +1065,9 @@ describe("AgentBase black-box persistence and restart behavior", () => {
             kind: "internal_error",
             message: "result transaction crashed",
         });
+        expect(firstAgent.active).toBe(true);
+        expect(persistence.values.has(AGENT_BASE_PENDING_KEY)).toBe(true);
+        expect(persistence.records.some((record) => record.type === "system")).toBe(false);
         const pending = [...persistence.pending.entries()];
         expect(pending).toHaveLength(1);
         const [pendingKey, pendingCall] = pending[0]!;
@@ -925,20 +1096,15 @@ describe("AgentBase black-box persistence and restart behavior", () => {
         await secondAgent.waitForIdle();
 
         expect(firstExecutions).toBe(2);
-        // The crashed first turn surfaced its failure as a system message; the recovered tool
-        // result lands after it, since the failure record was already durable at restart.
+        // The failed result transaction left the agent active instead of writing over the open
+        // call. Recovery can therefore put the result directly after the call for the provider.
         expect(secondProvider.sessions[0]?.requests[0]?.context.messages).toEqual([
             user("recover"),
             { role: "assistant", content: [call] },
-            {
-                role: "system",
-                content: [
-                    { type: "text", text: "The last turn failed: result transaction crashed" },
-                ],
-            },
             toolResult("crashed-result", "result"),
         ]);
         expect(persistence.pending.size).toBe(0);
+        expect(secondAgent.active).toBe(false);
         await secondAgent.close();
     });
 

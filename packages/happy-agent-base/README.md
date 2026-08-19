@@ -33,6 +33,11 @@ transaction facade execute directly. Database work must use `agentDatabaseRows`,
 `agentDatabaseRun`, or `ctx.inTx`; invoking the exposed root Drizzle facade directly bypasses the
 owner and is not a supported persistence path.
 
+`openAgentSQLiteDatabase` acquires a kernel-backed write transaction on a sibling `.lock` SQLite
+file before constructing the real database client. A second process therefore cannot even connect
+to the agent database, and graceful close, process exit, or `SIGKILL` releases ownership without
+stale-file recovery.
+
 Storage uses Drizzle transactions and installs stdlib's universal `afterCommit` scope on their
 contexts, draining it only after the outer transaction succeeds. Agent contexts expose the root or
 active Drizzle facade as `ctx.db`; `ctx.inTx(work)` and the exported `inTx(ctx, work)` helper open
