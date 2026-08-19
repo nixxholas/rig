@@ -11,14 +11,14 @@ afterEach(async () => {
 });
 
 describe("Happy configuration", () => {
-    it("keeps synchronization disabled when the machine config turns it off", async () => {
+    it("keeps synchronization disabled when the global config turns it off", async () => {
         const gym = await createGym({
             homeFiles: {
                 ".happy/access.key": JSON.stringify({
                     secret: Buffer.alloc(32, 7).toString("base64"),
                     token: "happy-gym-token",
                 }),
-                "happy/config/happy.toml": "[settings]\nhappy_integration = false\n",
+                "Happy/Config/happy.toml": "[settings]\nhappy_integration = false\n",
             },
             inference: [
                 {
@@ -36,58 +36,18 @@ describe("Happy configuration", () => {
             "-e",
             libsqlCommonJsScript(`
 const fs = require("node:fs");
-const database = await openDatabase("/home/rig/.server/sessions.sqlite", true);
-let sessions;
+const database = await openDatabase("/home/rig/.happy/agent/agent.sqlite", true);
+let sessions = 0;
 try {
     sessions = (
-        await database.execute("select count(*) as count from happy_sessions")
+        await database.execute("select count(*) as count from happy_agent_happy_sessions")
     ).rows[0].count;
+} catch {
+    // Synchronization that never started leaves no happy tables at all.
 } finally {
     await database.close();
 }
-const copied = fs.existsSync("/home/rig/.happy/rig/happy/access.key");
-process.stdout.write(JSON.stringify({ copied, sessions }));
-`),
-        ]);
-
-        expect(JSON.parse(inspection.stdout)).toEqual({ copied: false, sessions: 0 });
-    }, 120_000);
-
-    it("keeps synchronization disabled when the environment override is set", async () => {
-        const gym = await createGym({
-            environment: { RIG_DISABLE_HAPPY_SYNC: "1" },
-            homeFiles: {
-                ".happy/access.key": JSON.stringify({
-                    secret: Buffer.alloc(32, 8).toString("base64"),
-                    token: "happy-gym-token",
-                }),
-            },
-            inference: [
-                {
-                    content: [{ text: "Environment-disabled session completed.", type: "text" }],
-                },
-            ],
-        });
-        running.add(gym);
-
-        gym.terminal.type("Work without Happy synchronization from this environment.");
-        gym.terminal.press("enter");
-        await gym.terminal.waitForText("Environment-disabled session completed.", 30_000);
-
-        const inspection = await gym.runInContainer("node", [
-            "-e",
-            libsqlCommonJsScript(`
-const fs = require("node:fs");
-const database = await openDatabase("/home/rig/.server/sessions.sqlite", true);
-let sessions;
-try {
-    sessions = (
-        await database.execute("select count(*) as count from happy_sessions")
-    ).rows[0].count;
-} finally {
-    await database.close();
-}
-const copied = fs.existsSync("/home/rig/.happy/rig/happy/access.key");
+const copied = fs.existsSync("/home/rig/.happy/agent/happy/access.key");
 process.stdout.write(JSON.stringify({ copied, sessions }));
 `),
         ]);

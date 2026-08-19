@@ -1,6 +1,7 @@
 import { basename } from "node:path";
 
 import { TUI } from "@earendil-works/pi-tui";
+import { createId } from "@paralleldrive/cuid2";
 import type { HappyAgentEvent, Question } from "@slopus/happy-agent-client";
 import type { Context } from "@steve.kite/stdlib";
 
@@ -428,9 +429,27 @@ async function followAgentEvents(options: {
             const loopEvent = options.agent.applyLoopEvent(event);
             if (loopEvent !== undefined) options.app.applyAgentLoopEvent(loopEvent);
             if (event.type === "agent.updated" && event.payload.agentId === options.agent.id) {
-                const title = event.payload.changes.title;
-                if (typeof title === "string") {
-                    options.terminal.setTitle(`Rig - ${sanitizeTerminalTitle(title)}`);
+                const changes = event.payload.changes;
+                if (typeof changes.title === "string") {
+                    options.terminal.setTitle(`Rig - ${sanitizeTerminalTitle(changes.title)}`);
+                }
+                if ("draft" in changes) {
+                    const updatedAt = changes.updatedAt ?? Date.now();
+                    options.app.applySessionEvent({
+                        createdAt: updatedAt,
+                        data: {
+                            ...(changes.draft?.text === undefined
+                                ? {}
+                                : { draft: changes.draft.text }),
+                            ...(event.payload.mutationId === undefined
+                                ? {}
+                                : { origin: event.payload.mutationId }),
+                            updatedAt,
+                        },
+                        id: createId(),
+                        sessionId: options.agent.id,
+                        type: "session_draft_changed",
+                    });
                 }
             } else if (
                 event.type === "question.created" &&

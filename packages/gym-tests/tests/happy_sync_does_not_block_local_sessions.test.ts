@@ -43,18 +43,18 @@ describe("Happy mobile synchronization", () => {
             libsqlCommonJsScript(`
 const fs = require("node:fs");
 const copied = JSON.parse(
-    fs.readFileSync("/home/rig/.happy/rig/happy/access.key", "utf8"),
+    fs.readFileSync("/home/rig/.happy/agent/happy/access.key", "utf8"),
 );
-const mode = fs.statSync("/home/rig/.happy/rig/happy/access.key").mode & 0o777;
-const database = await openDatabase("/home/rig/.server/sessions.sqlite", true);
+const mode = fs.statSync("/home/rig/.happy/agent/happy/access.key").mode & 0o777;
+const database = await openDatabase("/home/rig/.happy/agent/agent.sqlite", true);
 let sessions;
 let outbox;
 try {
     sessions = (
-        await database.execute("select count(*) as count from happy_sessions")
+        await database.execute("select count(*) as count from happy_agent_happy_sessions")
     ).rows[0].count;
     outbox = (
-        await database.execute("select count(*) as count from happy_outbox")
+        await database.execute("select count(*) as count from happy_agent_happy_outbox")
     ).rows[0].count;
 } finally {
     await database.close();

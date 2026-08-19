@@ -171,6 +171,10 @@ export class HappyModule
     async #connect(ctx: Context): Promise<void> {
         const context = this.#context;
         if (context === undefined) return;
+        if (!this.#config.configuration.values.settings.happyIntegration) {
+            ctx.log.debug("Happy synchronization is turned off in the configuration.");
+            return;
+        }
         const configuration = await importHappyCredentials({
             dataDirectory: this.#config.configuration.paths.agentHome,
         });

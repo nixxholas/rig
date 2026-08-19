@@ -18,7 +18,7 @@ const { readFileSync } = require("node:fs");
 const { request } = require("node:http");
 const { join } = require("node:path");
 
-const directory = process.env.RIG_SERVER_DIRECTORY;
+const directory = join(process.env.HOME, ".happy", "agent");
 const token = readFileSync(join(directory, "token"), "utf8").trim();
 const socketPath = join(directory, "server.sock");
 
@@ -48,18 +48,27 @@ function call(method, path, body) {
 }
 
 (async () => {
-    const listed = await call("GET", "/sessions");
-    const sessionId = listed.sessions[0].id;
+    const bootstrap = await call("GET", "/v0/bootstrap/desktop");
+    const agents = bootstrap.workspaces.flatMap((workspace) => workspace.agents ?? []);
+    const agentId = agents[0].id;
     if (process.argv[1] === "write") {
-        await call("PUT", "/sessions/" + sessionId + "/draft", {
-            draft: process.argv[2],
-            origin: "external-client",
+        await call("PUT", "/v0/agents/" + agentId + "/draft", {
+            draft: {
+                text: process.argv[2],
+                providerId: "gym",
+                modelId: "openai/gym",
+                effort: "off",
+                serviceTier: null,
+                permissionMode: "full_access",
+            },
+            updatedAt: Date.now(),
         });
         process.stdout.write("written");
         return;
     }
-    const session = await call("GET", "/sessions/" + sessionId);
-    process.stdout.write(JSON.stringify(session.session.draft ?? ""));
+    const agent = await call("GET", "/v0/agents/" + agentId);
+    const draft = agent.agent.draft;
+    process.stdout.write(JSON.stringify(draft === null || draft === undefined ? "" : draft.text));
 })().catch((error) => {
     process.stderr.write(String(error && error.message ? error.message : error));
     process.exit(1);
