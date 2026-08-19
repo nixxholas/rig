@@ -144,6 +144,11 @@ When the user asks for a release without naming a version:
 
 Use an explicitly requested version or release channel instead whenever the user provides one.
 
+Always release through trusted publishing by pushing the release Git tag. Never publish directly
+from local npm credentials. If a tagged patch release fails before publication, it may remain
+unpublished; advance to the next patch version and push a new release tag instead of reusing or
+moving the failed tag.
+
 ## Published SDK dependencies
 
 `@slopus/happy-providers`, `@slopus/happy-agent-base`, `@slopus/happy-agent-client`, and
