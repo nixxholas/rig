@@ -259,8 +259,8 @@ importers:
         specifier: npm:@slopus/happy-agent-base@0.0.22
         version: 0.0.22(@aws-sdk/credential-provider-node@3.972.71)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)
       '@slopus/happy-agent-client':
-        specifier: 0.0.3
-        version: 0.0.3
+        specifier: 0.0.4
+        version: 0.0.4
       '@slopus/happy-agent-compute':
         specifier: npm:@slopus/happy-agent-compute@0.1.6
         version: 0.1.6
@@ -575,8 +575,8 @@ importers:
         specifier: 0.0.22
         version: 0.0.22(@aws-sdk/credential-provider-node@3.972.71)(@opentelemetry/api@1.9.1)(@smithy/signature-v4@5.6.9)(@types/pg@8.15.6)(sql.js@1.14.1)(ws@8.21.1)(zod@4.4.3)
       '@slopus/happy-agent-client':
-        specifier: 0.0.3
-        version: 0.0.3
+        specifier: 0.0.4
+        version: 0.0.4
       '@slopus/happy-agent-compute':
         specifier: 0.1.6
         version: 0.1.6
@@ -642,8 +642,8 @@ importers:
         specifier: workspace:*
         version: link:../happy-agent
       '@slopus/happy-agent-client':
-        specifier: 0.0.3
-        version: 0.0.3
+        specifier: 0.0.4
+        version: 0.0.4
       '@steve.kite/stdlib':
         specifier: 0.0.12
         version: 0.0.12
@@ -2027,8 +2027,8 @@ packages:
     resolution: {integrity: sha512-8RrlH9OIhKZw2hJupJnWeZ8YrSJjiJy7pvLQjKKXd5w+EyPt+PNxptzkXiAekpJ1m7/WTJJSfUAosJkKMAYyAQ==}
     engines: {node: '>=20'}
 
-  '@slopus/happy-agent-client@0.0.3':
-    resolution: {integrity: sha512-Wbc+Ou7GeoJFgfIiLccU63+8CyaHEGeITY9jj+xqr96xl2GyWRyV1QwdNiMSOm/8svGCmxG4iGxUHsIKTjAlVA==}
+  '@slopus/happy-agent-client@0.0.4':
+    resolution: {integrity: sha512-m3VDkgzQqXaaa/L2qbSrdBtMOEzFGgcG3g2S15GWxWmUaT1J542jmCg6JDniN6iyISsAHCLDQ3wKmWXtfSFubg==}
     engines: {node: '>=20'}
 
   '@slopus/happy-agent-compute@0.1.6':
@@ -5276,7 +5276,7 @@ snapshots:
     dependencies:
       '@sinclair/typebox': 0.34.49
 
-  '@slopus/happy-agent-client@0.0.3':
+  '@slopus/happy-agent-client@0.0.4':
     dependencies:
       '@sinclair/typebox': 0.34.49
 

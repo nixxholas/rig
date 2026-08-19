@@ -18,14 +18,17 @@ describe("AGENTS_SECURITY.md is optional", () => {
     it("does not fail the turn when the project has no AGENTS_SECURITY.md", async () => {
         const gym = await createAgentGym({
             files: { "AGENTS.md": "Use the project conventions.\n" },
-            inference: [{ content: [{ text: "Done.", type: "text" }] }],
+            inference: [
+                { content: [{ text: "<title>Optional security rules</title>", type: "text" }] },
+                { content: [{ text: "Done.", type: "text" }] },
+            ],
         });
         running.add(gym);
 
         await gym.send("Say hello.");
 
-        expect(gym.inference.requests[0]?.instructions).toContain("Use the project conventions.");
-        expect(gym.inference.requests[0]?.instructions).not.toContain("SECURITY_RULES");
+        expect(agentRequest(gym)?.instructions).toContain("Use the project conventions.");
+        expect(agentRequest(gym)?.instructions).not.toContain("SECURITY_RULES");
         expect(gym.inference.unscripted).toEqual([]);
         expect(gym.errors).toEqual([]);
     });
@@ -33,14 +36,23 @@ describe("AGENTS_SECURITY.md is optional", () => {
     it("includes AGENTS_SECURITY.md rules once the file exists", async () => {
         const gym = await createAgentGym({
             files: { "AGENTS_SECURITY.md": "Never expose credentials.\n" },
-            inference: [{ content: [{ text: "Done.", type: "text" }] }],
+            inference: [
+                { content: [{ text: "<title>Project security rules</title>", type: "text" }] },
+                { content: [{ text: "Done.", type: "text" }] },
+            ],
         });
         running.add(gym);
 
         await gym.send("Say hello.");
 
-        expect(gym.inference.requests[0]?.instructions).toContain("SECURITY_RULES");
-        expect(gym.inference.requests[0]?.instructions).toContain("Never expose credentials.");
+        expect(agentRequest(gym)?.instructions).toContain("SECURITY_RULES");
+        expect(agentRequest(gym)?.instructions).toContain("Never expose credentials.");
         expect(gym.errors).toEqual([]);
     });
 });
+
+function agentRequest(gym: AgentGym) {
+    return gym.inference.requests.find(
+        (request) => !request.instructions.includes("You name a piece of work"),
+    );
+}

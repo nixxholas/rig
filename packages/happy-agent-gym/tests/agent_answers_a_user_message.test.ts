@@ -12,15 +12,18 @@ afterEach(async () => {
 describe("the agent answers a user message", () => {
     it("records the answer in the session and shows the model what was asked", async () => {
         const gym = await createAgentGym({
-            inference: [{ content: [{ text: "The repository is empty.", type: "text" }] }],
+            inference: [
+                { content: [{ text: "<title>Repository contents</title>", type: "text" }] },
+                { content: [{ text: "The repository is empty.", type: "text" }] },
+            ],
         });
         running.add(gym);
 
         await gym.send("What is in this repository?");
 
-        expect(gym.inference.requests).toHaveLength(1);
+        expect(agentRequests(gym)).toHaveLength(1);
         expect(gym.inference.userTexts()).toContain("What is in this repository?");
-        expect(gym.inference.last?.model).toBe(gym.selection.modelId);
+        expect(agentRequests(gym).at(-1)?.model).toBe(gym.selection.modelId);
         expect(gym.inference.unscripted).toEqual([]);
 
         const events = await gym.sessionEvents();
@@ -42,3 +45,9 @@ describe("the agent answers a user message", () => {
         expect(sessions.map((session) => session.id)).toContain(gym.defaultSessionId);
     });
 });
+
+function agentRequests(gym: AgentGym) {
+    return gym.inference.requests.filter(
+        (request) => !request.instructions.includes("You name a piece of work"),
+    );
+}

@@ -38,6 +38,11 @@ async function declaredVersions(dependency: string): Promise<ReadonlyMap<string,
     return found;
 }
 
+function publishedVersion(dependency: string, specifier: string): string {
+    const aliasPrefix = `npm:${dependency}@`;
+    return specifier.startsWith(aliasPrefix) ? specifier.slice(aliasPrefix.length) : specifier;
+}
+
 describe("published SDK dependencies", () => {
     for (const dependency of PUBLISHED_SDK_PACKAGES) {
         it(`resolves ${dependency} to one published version everywhere`, async () => {
@@ -53,7 +58,13 @@ describe("published SDK dependencies", () => {
                 `${dependency} must come from npm, but ${linked.join(", ")} links the workspace copy.`,
             );
 
-            const versions = [...new Set(declared.values())];
+            const versions = [
+                ...new Set(
+                    [...declared.values()].map((specifier) =>
+                        publishedVersion(dependency, specifier),
+                    ),
+                ),
+            ];
             assert.equal(
                 versions.length,
                 1,

@@ -12,6 +12,7 @@ afterEach(async () => {
 it("releases delayed scripted inference immediately when the run is aborted", async () => {
     const gym = await createAgentGym({
         inference: [
+            { content: [{ text: "<title>Abort delayed inference</title>", type: "text" }] },
             {
                 content: [{ text: "too late", type: "text" }],
                 delayMs: 60_000,
