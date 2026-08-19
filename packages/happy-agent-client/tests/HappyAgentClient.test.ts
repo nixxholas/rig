@@ -71,6 +71,37 @@ describe("HappyAgentClient", () => {
         expect(requests[0]?.url).toBe("http://agent.local/v0/workspaces?projectId=p1");
     });
 
+    it("sends a client-chosen message ID without a mutation ID", async () => {
+        const { fetch, requests } = stubFetch(() => json({ cursor: "c1", message: {} }));
+        const client = new HappyAgentClient({ endpoint: "http://agent.local", token: "t", fetch });
+
+        await client.sendMessage("agent1", {
+            id: "clientmessage1",
+            mode: {
+                effort: "medium",
+                modelId: "model1",
+                permissionMode: "auto",
+                providerId: "provider1",
+                serviceTier: null,
+            },
+            text: "Hello",
+        });
+
+        expect(requests[0]?.body).toBe(
+            JSON.stringify({
+                id: "clientmessage1",
+                mode: {
+                    effort: "medium",
+                    modelId: "model1",
+                    permissionMode: "auto",
+                    providerId: "provider1",
+                    serviceTier: null,
+                },
+                text: "Hello",
+            }),
+        );
+    });
+
     it("sends the version a guarded mutation was made against as If-Match", async () => {
         const { fetch, requests } = stubFetch(() => json({ project: {} }));
         const client = new HappyAgentClient({ endpoint: "http://agent.local", token: "t", fetch });

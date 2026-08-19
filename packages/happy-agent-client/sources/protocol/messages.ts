@@ -199,6 +199,8 @@ export interface HistoryRun extends Run {
 
 /** `POST /v0/agents/:agentId/send` */
 export interface SendMessageRequest {
+    /** Optional client-chosen identity. Reusing it returns the existing message. */
+    id?: Cuid2;
     /** The message text. Required. */
     text: string;
     /** Optional rich blocks accompanying the text; image bytes travel inline. */
@@ -207,7 +209,6 @@ export interface SendMessageRequest {
     delivery?: MessageDelivery;
     /** The model selection and permission mode this message runs with. */
     mode: MessageMode;
-    mutationId?: string;
 }
 
 /** `POST /v0/agents/:agentId/send` */
