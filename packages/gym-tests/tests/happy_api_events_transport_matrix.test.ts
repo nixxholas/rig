@@ -853,6 +853,21 @@ describe("Happy Agent event transport matrix", () => {
 async function startGym(): Promise<AgentGym> {
     const gym = await createAgentGym({ timeoutMs: 15_000 });
     activeGyms.add(gym);
+    // Startup keeps writing in the background until the root checkout and the Git probe have
+    // settled; the matrix asserts exact event windows, so those writes must land first.
+    await gym.waitUntil(
+        async () => {
+            const bootstrap = await gym.client.getDesktopBootstrap();
+            const settled = bootstrap.projects.every(
+                (project) =>
+                    project.initialization.status !== "initializing" &&
+                    project.worktreeSupport !== "unknown",
+            );
+            return settled ? true : undefined;
+        },
+        "startup project probes to settle",
+        15_000,
+    );
     await waitForStableCursor(gym);
     return gym;
 }
