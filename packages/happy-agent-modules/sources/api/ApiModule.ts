@@ -169,6 +169,8 @@ export class ApiModule implements AgentModule {
     readonly #compute: ComputeModule;
     readonly #mutationIds = new AsyncLocalStorage<string>();
     readonly #backgroundScope = new AsyncResource("happy-agent-api");
+    /** Agents whose usage-driven metadata refresh is already scheduled. */
+    readonly #pendingUsageMetadataAgents = new Set<string>();
     readonly #journal = new MutationAwareApiEventJournal(this.#mutationIds);
     readonly #webSockets = new WebSocketServer({
         maxPayload: MAX_TERMINAL_WIRE_MESSAGE_BYTES,
@@ -659,7 +661,7 @@ export class ApiModule implements AgentModule {
             this.#userInput.onEvent(async (_eventCtx, event) => {
                 await this.#convertUserInputEvent(ctx, event);
             }),
-            this.#usage.onEvent(async (_eventCtx, event) => {
+            this.#usage.onEvent((_eventCtx, event) => {
                 if (event.type === "usage_context_changed") {
                     this.#journal.append(
                         "agent.context.updated",
@@ -681,7 +683,7 @@ export class ApiModule implements AgentModule {
                     }
                     return;
                 }
-                await this.#updateAgentMetadata(ctx, event.record.agentId, {});
+                this.#scheduleUsageMetadataRefresh(ctx, event.record.agentId);
             }),
             this.#profile.onEvent(async (_eventCtx: Context, event: ProfileChangedEvent) => {
                 const profile = profileResource(await this.#profile.ensure(ctx));
@@ -2186,6 +2188,32 @@ export class ApiModule implements AgentModule {
             updatedAt: Date.now(),
             version,
         });
+    }
+
+    /**
+     * Usage is recorded from inside the agent's own operation, where a metadata update would
+     * wait on that same operation. The version bump runs from the module's background scope
+     * instead, as an ordinary external caller the loop never waits on.
+     */
+    #scheduleUsageMetadataRefresh(ctx: Context, agentId: string): void {
+        if (this.#pendingUsageMetadataAgents.has(agentId)) return;
+        this.#pendingUsageMetadataAgents.add(agentId);
+        const task = this.#backgroundScope.runInAsyncScope(async () => {
+            await new Promise<void>((resolve) => setImmediate(resolve));
+            this.#pendingUsageMetadataAgents.delete(agentId);
+            if (this.#closed) return;
+            try {
+                await this.#updateAgentMetadata(ctx, agentId, {});
+            } catch (error: unknown) {
+                ctx.log.warn(
+                    "The API could not refresh agent metadata after usage.",
+                    { agentId },
+                    error,
+                );
+            }
+        });
+        this.#backgroundMetadataUpdates.add(task);
+        void task.finally(() => this.#backgroundMetadataUpdates.delete(task));
     }
 
     #scheduleUnreadUpdate(ctx: Context, agentId: string, since: number): void {

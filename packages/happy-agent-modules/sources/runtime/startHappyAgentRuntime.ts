@@ -159,12 +159,9 @@ export async function startHappyAgentRuntime(
     const ctx = observation.install(createRootContext());
     try {
         await config.ensureUserConfigurationFiles();
-    } catch (error) {
+    } catch (error: unknown) {
         // Starter files are a convenience; a read-only home must not keep the daemon down.
-        ctx.log.warn(
-            { error: error instanceof Error ? error.message : String(error) },
-            "Could not create the user's starter configuration files.",
-        );
+        ctx.log.warn("Could not create the user's starter configuration files.", {}, error);
     }
     const unwind: (() => Promise<void> | void)[] = [async () => await observation.close(ctx)];
     let closed = false;
@@ -192,13 +189,10 @@ export async function startHappyAgentRuntime(
         try {
             await mkdir(paths.publicHome, { mode: 0o755, recursive: true });
             await mkdir(paths.generatedPath, { mode: 0o755, recursive: true });
-        } catch (error) {
+        } catch (error: unknown) {
             // The public Happy folder is a convenience surface; an unusable one degrades the
             // features that write there but must not keep the whole daemon down.
-            ctx.log.warn(
-                { error: error instanceof Error ? error.message : String(error) },
-                "Could not create the public Happy folder.",
-            );
+            ctx.log.warn("Could not create the public Happy folder.", {}, error);
         }
 
         const models = config.models;
