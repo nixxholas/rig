@@ -23,10 +23,13 @@ export function updateSessionTokenCount(
     }
     const contextTokens = Math.max(0, update.contextTokens);
 
+    // A request's total describes the context it processed, and later requests replay the same
+    // grown context, so the session counts its footprint once rather than summing every replay.
     return {
         lastContextTokens: contextTokens,
         totalTokens:
-            previous.totalTokens +
-            (update.type === "compaction" ? 0 : Math.max(0, update.usage.totalTokens)),
+            update.type === "compaction"
+                ? previous.totalTokens
+                : Math.max(previous.totalTokens, update.usage.totalTokens),
     };
 }

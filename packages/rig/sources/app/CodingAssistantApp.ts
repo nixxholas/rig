@@ -2404,7 +2404,10 @@ export class CodingAssistantApp implements Component, Focusable {
                         role: "event",
                         title: "Usage",
                         text: formatSessionUsageSummary(
-                            summary,
+                            // This client accounts session tokens itself: the daemon aggregate
+                            // sums every request, while the session footprint counts the grown
+                            // context once.
+                            { ...summary, sessionTokenCount: this.#sessionTokenCount },
                             this.#agent.modelChoices ?? [
                                 { model: this.#agent.model, providerId: this.#agent.provider.id },
                             ],
