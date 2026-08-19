@@ -161,12 +161,15 @@ describe("public workspace tree matrix", () => {
                         projectId: root.projectId,
                     })
                 ).workspaces;
-                await expect(
-                    gym.client.createWorkspace({
-                        mutationId: "tree-omitted-name",
-                        parentId: root.id,
-                    }),
-                ).rejects.toMatchObject({ status: 400, code: "invalid_request" });
+                // The typed request requires a name, so the omission travels through a cast.
+                const withoutName = {
+                    mutationId: "tree-omitted-name",
+                    parentId: root.id,
+                } as Parameters<AgentGym["client"]["createWorkspace"]>[0];
+                await expect(gym.client.createWorkspace(withoutName)).rejects.toMatchObject({
+                    status: 400,
+                    code: "invalid_request",
+                });
                 const after = (
                     await gym.client.listWorkspaces({
                         includeArchived: true,

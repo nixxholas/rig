@@ -143,6 +143,17 @@ export const workspaceEventSchema = Type.Union([
         },
         { additionalProperties: false },
     ),
+    Type.Object(
+        {
+            ...eventEnvelope,
+            type: Type.Literal("workspace_agent_visibility_changed"),
+            agentId: workspaceAgentIdSchema,
+            visible: Type.Boolean(),
+            workspace: workspaceSchema,
+            previousWorkspace: workspaceSchema,
+        },
+        { additionalProperties: false },
+    ),
 ]);
 
 export type WorkspaceUpdateChange = Static<typeof workspaceUpdateChangeSchema>;

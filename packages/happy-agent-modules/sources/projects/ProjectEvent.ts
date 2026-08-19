@@ -140,6 +140,17 @@ export const projectEventSchema = Type.Union([
     Type.Object(
         {
             ...projectEventEnvelope,
+            type: Type.Literal("project_agent_visibility_changed"),
+            agentId: projectAgentIdSchema,
+            visible: Type.Boolean(),
+            project: projectSchema,
+            previousProject: projectSchema,
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            ...projectEventEnvelope,
             type: Type.Literal("project_state_changed"),
             reason: projectStateChangeReasonSchema,
             project: projectSchema,

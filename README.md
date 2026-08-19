@@ -661,7 +661,7 @@ machine's local authenticated daemon at:
 ```
 
 For example, Happy can pass that URL prefix and the local daemon token to
-`rig-connect`; ordinary requests and long-lived event streams use the same
+`HappyAgentClient`; ordinary requests and long-lived event streams use the same
 prefix. Tokens never cross a P2P transport. The remote daemon authenticates the
 stable identity, then injects its own local token when dispatching the request.
 

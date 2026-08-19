@@ -1996,6 +1996,56 @@ export class WorkspacesModule implements AgentModule {
         );
     }
 
+    /**
+     * Advances the workspace after an attached agent enters or leaves its active public projection.
+     *
+     * Archival does not remove the durable association or its order key.
+     */
+    async refreshAgentVisibility(
+        ctx: Context,
+        workspaceId: string,
+        agentId: string,
+        visible: boolean,
+    ): Promise<void> {
+        this.#assertEnabled();
+        const input = { workspaceId, agentId };
+        this.#assertInput<WorkspaceAgentAttachment>(
+            workspaceAgentAttachmentSchema,
+            input,
+            "agent visibility",
+        );
+        await this.#agentAssociationLocks.runInLock(
+            ctx,
+            `agent:${agentId}`,
+            async (agentCtx) =>
+                await this.#withWorkspaceAgentOwnerLocks(
+                    agentCtx,
+                    [workspaceId],
+                    async (lockCtx) =>
+                        await lockCtx.inTx(async (txCtx) => {
+                            const before = await this.#requireAgentWorkspace(txCtx, workspaceId);
+                            const association = await readWorkspaceAgent(txCtx.db, agentId);
+                            if (association?.workspaceId !== workspaceId) {
+                                throw new Error(
+                                    `Agent "${agentId}" is not attached to that workspace.`,
+                                );
+                            }
+                            const after = await touchWorkspace(txCtx.db, before);
+                            await this.#mutations.observe(
+                                txCtx,
+                                this.#mutations.newEvent({
+                                    type: "workspace_agent_visibility_changed",
+                                    agentId,
+                                    visible,
+                                    workspace: after,
+                                    previousWorkspace: before,
+                                }),
+                            );
+                        }),
+                ),
+        );
+    }
+
     async #requireAgentWorkspace(ctx: Context, workspaceId: string): Promise<Workspace> {
         const workspace = await this.get(ctx, workspaceId);
         if (workspace === undefined) {

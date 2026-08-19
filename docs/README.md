@@ -20,7 +20,7 @@ Rig adds no account of its own. It uses the credentials already managed by the
 coding agents installed on the machine, and it never pools or resells provider
 access. A daemon holds durable sessions; a terminal UI (built on Pi TUI)
 attaches to them; external apps can attach to the same daemon through
-`rig-connect`.
+`@slopus/happy-agent-client`.
 
 The deeper idea: **agents never die**. Every conversation, every subagent, is a
 durable session that can always receive another message and resume with its

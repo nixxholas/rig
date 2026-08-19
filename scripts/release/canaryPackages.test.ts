@@ -15,10 +15,5 @@ test("checks every side package by its published npm name", () => {
             output: "plugins",
             path: "packages/happy-plugins",
         },
-        {
-            npmName: "@slopus/rig-connect",
-            output: "connect",
-            path: "packages/rig-connect",
-        },
     ]);
 });

@@ -23,19 +23,19 @@ describe("assertReleaseTagMatchesPackageVersion", () => {
     it("supports a package-specific tag namespace", () => {
         assert.doesNotThrow(() =>
             assertReleaseTagMatchesPackageVersion(
-                "rig-connect-v1.2.3",
-                { ...MANIFEST, name: "@slopus/rig-connect" },
-                "rig-connect-v",
+                "happy-providers-v1.2.3",
+                { ...MANIFEST, name: "@slopus/happy-providers" },
+                "happy-providers-v",
             ),
         );
         assert.throws(
             () =>
                 assertReleaseTagMatchesPackageVersion(
                     "v1.2.3",
-                    { ...MANIFEST, name: "@slopus/rig-connect" },
-                    "rig-connect-v",
+                    { ...MANIFEST, name: "@slopus/happy-providers" },
+                    "happy-providers-v",
                 ),
-            /Expected rig-connect-v1\.2\.3/u,
+            /Expected happy-providers-v1\.2\.3/u,
         );
     });
 });

@@ -9,9 +9,4 @@ export const CANARY_PACKAGES = [
         output: "plugins",
         path: "packages/happy-plugins",
     },
-    {
-        npmName: "@slopus/rig-connect",
-        output: "connect",
-        path: "packages/rig-connect",
-    },
 ] as const;

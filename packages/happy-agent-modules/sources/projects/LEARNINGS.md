@@ -107,4 +107,6 @@ association row made that visible resource change without advancing the owner's 
 its update, so a client could retain a stale catalog under a current-looking version. A real
 attach, move, or reorder now changes the association, advances every affected owner's version, and
 emits the exact previous and current owner snapshots in one transaction. Repeated attachment and a
-no-op reorder leave both the association and owner untouched.
+no-op reorder leave both the association and owner untouched. Agent archival keeps the permanent
+association and its fractional key, but it does change the active embedded list, so archive and
+unarchive advance the owner and emit the same exact version chain.

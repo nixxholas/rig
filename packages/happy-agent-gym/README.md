@@ -2,8 +2,8 @@
 
 The Happy agent gym is the end-to-end harness for `@slopus/happy-agent`. It starts the real daemon
 on a throwaway Happy installation, serves it a scripted model, and gives the agent an emulated
-machine instead of this computer. A scenario then drives it exactly the way `rig-connect` does:
-over the daemon's own Unix socket.
+machine instead of this computer. A scenario then drives it through
+`@slopus/happy-agent-client` over the daemon's own Unix socket.
 
 ## What is real and what is not
 

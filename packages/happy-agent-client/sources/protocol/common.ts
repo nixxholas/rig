@@ -1,10 +1,11 @@
 /**
  * The small values every chapter of the API shares.
  *
- * Everything the daemon sends is declared here as a TypeBox schema and the
- * TypeScript type is derived from it with `Static`, so one declaration is both
- * the compile-time contract and the runtime check the client validates
- * responses and events against.
+ * Shared wire values are declared as TypeBox schemas with their TypeScript
+ * types derived through `Static`, so one declaration serves as the compile-time
+ * contract and as the schema a consumer that wants runtime validation checks
+ * against. The client itself does not validate responses; see
+ * `HappyAgentClient`.
  *
  * Objects are deliberately not `additionalProperties: false`: the
  * specification says its shapes grow, and a client must keep working when a

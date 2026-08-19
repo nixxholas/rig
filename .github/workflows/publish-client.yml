@@ -1,0 +1,108 @@
+name: Publish happy-agent-client
+
+# @slopus/happy-agent-client is the typed client for the Happy agent HTTP API. It has its own
+# release cadence — starting at 0.0.0 — so it publishes from its own tag namespace instead of
+# riding the main publish workflow.
+
+on:
+    push:
+        tags:
+            - "happy-agent-client-v*"
+    workflow_dispatch:
+        inputs:
+            release_tag:
+                description: Existing happy-agent-client release tag to publish
+                required: true
+                type: string
+
+permissions:
+    contents: read
+
+concurrency:
+    group: publish-client-${{ inputs.release_tag || github.ref_name }}
+    cancel-in-progress: false
+
+env:
+    RELEASE_PACKAGE: happy-agent-client
+    RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+
+jobs:
+    publish:
+        name: Publish @slopus/happy-agent-client
+        if: >-
+            startsWith(github.ref, 'refs/tags/happy-agent-client-v') ||
+            (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+        runs-on: ubuntu-24.04
+        environment: npm
+        timeout-minutes: 20
+        permissions:
+            contents: read
+            id-token: write
+        env:
+            RELEASE_DIST_TAG: ${{ contains(inputs.release_tag || github.ref_name, '-beta.') && 'beta' || '' }}
+
+        steps:
+            - name: Check out the release
+              uses: actions/checkout@v6
+              with:
+                  fetch-depth: 0
+                  ref: refs/tags/${{ inputs.release_tag || github.ref_name }}
+
+            - name: Verify the tagged commit is on main
+              run: |
+                  if ! git merge-base --is-ancestor HEAD origin/main; then
+                      echo "Release tags must point to a commit on the main branch." >&2
+                      exit 1
+                  fi
+
+            - name: Set up pnpm
+              uses: pnpm/action-setup@v6
+
+            - name: Set up Node.js
+              uses: actions/setup-node@v6
+              with:
+                  node-version: "24"
+                  package-manager-cache: false
+                  registry-url: https://registry.npmjs.org
+
+            - name: Install an npm that speaks trusted publishing
+              # OIDC publishing requires npm 11.5.1 or newer. Install the exact reviewed CLI with
+              # pnpm, then invoke its entry point directly so Node's bundled npm cannot shadow it.
+              run: |
+                  pnpm add --global npm@11.18.0
+                  npm_cli="$(pnpm root --global)/npm/bin/npm-cli.js"
+                  test "$(node "${npm_cli}" --version)" = "11.18.0"
+                  echo "NPM_CLI=${npm_cli}" >> "${GITHUB_ENV}"
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Verify the tag matches the package version
+              run: pnpm exec tsx scripts/validateReleaseTag.ts
+
+            - name: Run type checks
+              run: pnpm --filter @slopus/happy-agent-client check
+
+            - name: Run tests
+              run: |
+                  pnpm run test:scripts
+                  pnpm --filter @slopus/happy-agent-client test
+
+            - name: Build the package
+              run: pnpm --filter @slopus/happy-agent-client build
+
+            - name: Publish with GitHub trusted publishing
+              run: |
+                  package="@slopus/happy-agent-client"
+                  version="$(node -p "require('./packages/happy-agent-client/package.json').version")"
+                  distribution_tag="${RELEASE_DIST_TAG:-latest}"
+                  if node "${NPM_CLI}" view "${package}@${version}" version --registry https://registry.npmjs.org/ >/dev/null 2>&1; then
+                      echo "${package}@${version} is already published."
+                  else
+                      cd packages/happy-agent-client
+                      node "${NPM_CLI}" publish \
+                          --access public \
+                          --tag "${distribution_tag}" \
+                          --provenance \
+                          --registry https://registry.npmjs.org/
+                  fi

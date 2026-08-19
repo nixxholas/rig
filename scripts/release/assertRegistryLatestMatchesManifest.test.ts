@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 
 import { assertRegistryLatestMatchesManifest } from "./assertRegistryLatestMatchesManifest.js";
 
-const MANIFEST = { name: "@slopus/rig-connect", version: "0.0.5" };
+const MANIFEST = { name: "@slopus/happy-providers", version: "0.0.5" };
 
 describe("assertRegistryLatestMatchesManifest", () => {
     it("accepts a worktree aligned with npm latest", () => {

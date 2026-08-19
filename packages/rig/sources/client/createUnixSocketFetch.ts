@@ -52,11 +52,19 @@ export function createUnixSocketFetch(socketPath: string): typeof globalThis.fet
             // Node can then report more than one late socket-write error after the response. Keep
             // the listener for the request's whole lifetime so those expected post-response
             // errors cannot escape as uncaught exceptions.
-            request.on("error", (error) => {
+            const handleTransportError = (error: Error): void => {
                 if (settled) return;
                 settled = true;
                 signal?.removeEventListener("abort", abort);
                 reject(error);
+            };
+            request.on("error", handleTransportError);
+            request.on("socket", (socket) => {
+                if (body === undefined || body === null) return;
+                // Linux may deliver a late buffered-write EPIPE on the socket rather than the
+                // ClientRequest after an early bounded-upload response.
+                socket.on("error", handleTransportError);
+                request.once("close", () => socket.removeListener("error", handleTransportError));
             });
             request.once("response", (response) => {
                 if (settled) return;

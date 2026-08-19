@@ -421,8 +421,8 @@ function attachAgent(
 }
 
 function byOrderKey(
-    left: { readonly orderKey?: string; readonly id: string },
-    right: { readonly orderKey?: string; readonly id: string },
+    left: { readonly orderKey?: string | null; readonly id: string },
+    right: { readonly orderKey?: string | null; readonly id: string },
 ): number {
     const leftKey = left.orderKey ?? left.id;
     const rightKey = right.orderKey ?? right.id;

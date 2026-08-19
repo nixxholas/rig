@@ -392,7 +392,7 @@ resets when a new plugin process starts. Runtime socket state below `.runtime/` 
 writable data folder should not be edited or distributed.
 
 Rig exposes the newest useful 16 KiB snapshot through `/plugins <name>`, the `plugin_logs` agent
-tool, the local protocol, and `rig-connect`, with `truncated` set when older retained output was
+tool, and the local protocol, with `truncated` set when older retained output was
 omitted. A plugin is reported explicitly as running, stopped, or failed; logs are
 snapshots, not an unbounded stream or polling API.
 

@@ -38,7 +38,7 @@ describe("resolveCanaryPackageChange", () => {
         const bases: string[] = [];
         const decision = resolveCanaryPackageChange({
             fallbackBase: "failed-push",
-            packagePath: "packages/rig-connect",
+            packagePath: "packages/happy-providers",
             publishedVersion: "0.0.0-canary.39.2222222",
             resolveCommit: () => "published-before-failed-push",
             hasChanges: (base) => {
@@ -98,7 +98,7 @@ describe("resolveCanaryPackageChange", () => {
     it("falls back to the current push when the published commit cannot be resolved", () => {
         const decision = resolveCanaryPackageChange({
             fallbackBase: "current-push-base",
-            packagePath: "packages/rig-connect",
+            packagePath: "packages/happy-providers",
             publishedVersion: "0.0.0-canary.37.4444444",
             resolveCommit: () => undefined,
             hasChanges: (base) => base === "current-push-base",

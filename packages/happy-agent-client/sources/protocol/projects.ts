@@ -38,6 +38,7 @@ export const projectAvatarSchema = Type.Union([
 ]);
 export type ProjectAvatar = Static<typeof projectAvatarSchema>;
 
+/** Per-project preferences that new work inherits. */
 export const projectSettingsSchema = Type.Object({
     /** Where new workspaces of this project run. */
     defaultWorkspaceCompute: computeSelectionSchema,

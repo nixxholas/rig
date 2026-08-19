@@ -792,8 +792,8 @@ export class HappyAgentClient {
      * `POST /v0/agents/:agentId/send` — queues a message, or steers the run.
      *
      * The message is pending until inference accepts it; the acceptance travels
-     * as a `message.updated` event, and the `runId` it brings is the handle for
-     * `abortAgent`.
+     * inside a `run.started` or `run.boundary` event, and the `runId` it brings
+     * is the handle for `abortAgent`.
      */
     async sendMessage(
         agentId: Cuid2,

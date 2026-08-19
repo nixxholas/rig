@@ -95,12 +95,26 @@ A missing or malformed header is `400`. A stale version is `409` carrying the au
 resource, so the client can catch up without another request:
 
 ```json
-{ "error": "The project has changed.", "code": "conflict", "currentVersion": "01991f3a-6d2f-7000-8000-3a0b2c4d5e6f", "project": { /* current row */ } }
+{
+    "error": "The project has changed.",
+    "code": "conflict",
+    "currentVersion": "01991f3a-6d2f-7000-8000-3a0b2c4d5e6f",
+    "project": {
+        /* current row */
+    }
+}
 ```
 
 The other versioned resources (agents, terminals, questions, processes) change mostly on the
 daemon's own initiative, so their mutations do not use `If-Match`; their versions exist for
 event chaining and newer-copy comparison.
+
+The `agents` arrays embedded in projects and workspaces contain independently versioned agent
+resources. An owner's version covers the active membership and order of that series; each embedded
+agent's version covers its own state. Creating, reordering, archiving, or unarchiving an agent
+changes the visible owner series and advances the owner, while the permanent owner association and
+fractional key survive archival. Other agent-only state changes use `agent.updated` without
+advancing the owner. Clients merge nested agents by their own versions.
 
 ### `mutationId`
 
@@ -591,7 +605,10 @@ Every project route answers with the same shape:
     "settings": {
         "defaultWorkspaceCompute": { "type": "host" }
     },
-    "orderKey": "a0",
+    "agents": [
+        /* active top-level agents owned by this project, in order */
+    ],
+    "orderKey": "00000000000000000001",
     "version": "01991f3a-5c1e-7000-8000-2f9a1b3c4d5e",
     "createdAt": 1755300000000,
     "updatedAt": 1755400000000,
@@ -629,6 +646,9 @@ Fields:
   bytes to fetch.
 - `settings` — per-project settings; `defaultWorkspaceCompute` chooses where new workspaces
   run (`{ "type": "host" }` or `{ "type": "docker", "image": "..." }`).
+- `agents` — active top-level agents owned by the project, in `orderKey` order. Because the
+  project is also its root workspace, `GET /v0/workspaces/:projectId` exposes this same series.
+  Archived agents and subagents are excluded.
 - `orderKey` — an opaque sort key; clients order projects by comparing these strings.
 - `version` — the UUIDv7 concurrency version; see “Resource versions and `If-Match`” in the
   basics.
@@ -708,7 +728,10 @@ Replaces the project settings. Requires `If-Match`.
 Request:
 
 ```json
-{ "defaultWorkspaceCompute": { "type": "docker", "image": "ghcr.io/acme/dev:latest" }, "mutationId": "..." }
+{
+    "defaultWorkspaceCompute": { "type": "docker", "image": "ghcr.io/acme/dev:latest" },
+    "mutationId": "..."
+}
 ```
 
 Response — `200`: `{ "project": { ... }, "settings": { ... } }` — the row and the settings as
@@ -729,8 +752,9 @@ Moves the project in the catalog order. Requires `If-Match`.
 Request: `{ "afterId": "b3c4d5e6", "mutationId": "..." }` — the project to place this one
 after, or `null` to move it first.
 
-Response — `200`: `{ "project": { ... } }`. Reordering renumbers neighbours; each project whose
-`orderKey` changed is announced through events, not only the moved one.
+Response — `200`: `{ "project": { ... } }`. Reordering assigns the moved project a fractional
+`orderKey` between its destination neighbours. Neighbour keys and versions remain unchanged; only
+the moved project emits its reorder update.
 
 ### `POST /v0/projects/:projectId/archive`
 
@@ -807,7 +831,10 @@ workspace route.
         "detached": false
     },
     "creatorAgentId": "a1b2c3d4",
-    "orderKey": "a1",
+    "agents": [
+        /* active top-level agents owned by this workspace, in order */
+    ],
+    "orderKey": "5",
     "version": "01991f3a-5d2b-7000-8000-4b1c3d5e6f70",
     "createdAt": 1755300000000,
     "updatedAt": 1755400000000,
@@ -837,6 +864,9 @@ Fields:
 - `git` — the same working-tree summary as on the project, for this workspace's checkout.
 - `creatorAgentId` — the agent that created this workspace, when one did; `null` when a
   person created it directly.
+- `agents` — active top-level agents owned by this workspace, in `orderKey` order. The root
+  workspace exposes the project-owned root-agent series; every child workspace has its own
+  independent series. Archived agents and subagents are excluded.
 - `orderKey`, `version`, timestamps — as on the project. `orderKey` orders a workspace among
   its siblings under the same parent.
 
@@ -918,8 +948,9 @@ Moves the workspace among its siblings — the workspaces sharing its `parentId`
 Request: `{ "afterId": "w2b3c4d5", "mutationId": "..." }` — the sibling to place this one
 after, or `null` to move it first.
 
-Response — `200`: `{ "workspace": { ... } }`. Neighbours whose `orderKey` changed are announced
-through events, as with project reordering.
+Response — `200`: `{ "workspace": { ... } }`. Reordering assigns the moved workspace a fractional
+`orderKey` between its destination siblings. Sibling keys and versions remain unchanged; only the
+moved workspace emits its reorder update.
 
 ### Terminals
 
@@ -1041,7 +1072,13 @@ Response — `200`:
 ```json
 {
     "entries": [
-        { "name": "sources", "path": "sources", "type": "directory", "size": 0, "modified": 1755400000000 }
+        {
+            "name": "sources",
+            "path": "sources",
+            "type": "directory",
+            "size": 0,
+            "modified": 1755400000000
+        }
     ],
     "nextCursor": null
 }
@@ -1099,7 +1136,15 @@ The git state object:
     "countsExact": true,
     "conflicted": false,
     "files": [
-        { "path": "sources/main.ts", "status": "modified", "staged": false, "unstaged": true, "binary": false, "insertions": 100, "deletions": 10 }
+        {
+            "path": "sources/main.ts",
+            "status": "modified",
+            "staged": false,
+            "unstaged": true,
+            "binary": false,
+            "insertions": 100,
+            "deletions": 10
+        }
     ],
     "filesTruncated": false,
     "scannedAt": 1755400000000
@@ -1188,7 +1233,7 @@ guarding the whole row. The version exists for event chaining and newer-copy com
         "serviceTier": null,
         "permissionMode": "auto"
     },
-    "orderKey": "a2",
+    "orderKey": "5",
     "lastCursor": "01991f3a-5c1e-7000-8000-2f9a1b3c4d5e",
     "version": "01991f3a-5f4d-7000-8000-6d3e5f708192",
     "createdAt": 1755300000000,
@@ -1212,10 +1257,11 @@ Fields:
     - `"generating_tools"` — the model is emitting tool calls (streaming their arguments).
     - `"running_tools"` — tool calls are executing.
 
-  During a run the status moves freely between the four working states, and every move is an
-  `agent.updated` event, so a client can show "Thinking…" / "Running tools…" live. Maintenance
-  such as explicit compaction may also use `"working"` without creating a run. Status is
-  orthogonal to archival, which is `archivedAt`.
+    During a run the status moves freely between the four working states, and every move is an
+    `agent.updated` event, so a client can show "Thinking…" / "Running tools…" live. Maintenance
+    such as explicit compaction may also use `"working"` without creating a run. Status is
+    orthogonal to archival, which is `archivedAt`.
+
 - `subagents` — how many subagents this agent has spawned over its life (`total`) and how many
   are running right now (`running`). Changes to either count are `agent.updated` events. The
   subagents themselves are listed by `GET /v0/agents/:agentId/activity`.
@@ -1232,8 +1278,9 @@ Fields:
 - `draft` — the composer draft saved for this agent, or `null`. A draft is the whole composer
   state — the `text` plus the selection it will be sent with — so a message started on one
   device can be finished on another exactly as it was left.
-- `orderKey` — an opaque sort key, as on projects and workspaces; the list order is manual and
-  moved with `reorder`.
+- `orderKey` — an opaque owner-local sort key, as on projects and workspaces; the list order is
+  manual and moved with `reorder`. It is `null` on a subagent because subagents do not appear in an
+  owner list.
 - `lastCursor` — the newest event cursor for this agent, so a client can open an event stream
   from exactly where the snapshot left off.
 - `createdAt`, `updatedAt`, `archivedAt` — lifecycle timestamps; `archivedAt` is `null` while
@@ -1264,23 +1311,9 @@ Creation always makes a top-level agent; subagents are spawned by their parents,
 this endpoint.
 
 Response — `201`: `{ "agent": { ... } }`. Creation is complete when it answers: the agent
-exists, is `"idle"`, and is ready to receive a message.
-
-### `GET /v0/agents`
-
-Lists agents in catalog order (`orderKey`); a client wanting recency sorts by `updatedAt`
-itself.
-
-Query parameters:
-
-- `workspaceId` — optional; only agents in this workspace.
-- `parentAgentId` — optional; a parent's subagents. Subagents are excluded from the list
-  unless asked for this way.
-- `archived` — optional: `false` (default) for active agents, `true` for archived only,
-  `"all"` for both.
-- `limit` — optional, default and maximum 50.
-
-Response — `200`: `{ "agents": [ /* agent objects */ ] }`
+exists, is `"idle"`, and is ready to receive a message. The owning project and its same-ID root
+workspace, or the owning child workspace, also advance and emit their update with the new ordered
+`agents` series.
 
 ### `GET /v0/agents/:agentId`
 
@@ -1403,8 +1436,8 @@ one shape carries the whole conversation; history, send acceptances, and events 
 }
 ```
 
-  `status` is `"running"`, `"completed"`, or `"failed"`; `arguments` and `result` are the raw
-  tool data; `presentation` is defined below.
+`status` is `"running"`, `"completed"`, or `"failed"`; `arguments` and `result` are the raw
+tool data; `presentation` is defined below.
 
 Both the role set and the block set will grow; clients must skip roles and blocks they do not
 recognize.
@@ -1453,7 +1486,12 @@ terminal.
 **`background_terminal_interaction`** — input typed into an existing background terminal.
 
 ```json
-{ "type": "background_terminal_interaction", "terminalId": "t5f6g7h8", "command": "pnpm dev", "input": "y\n" }
+{
+    "type": "background_terminal_interaction",
+    "terminalId": "t5f6g7h8",
+    "command": "pnpm dev",
+    "input": "y\n"
+}
 ```
 
 `command` is what the terminal is running, `input` is what was typed into it.
@@ -1475,7 +1513,11 @@ terminal.
                 {
                     "oldStart": 12,
                     "newStart": 12,
-                    "lines": [{ "kind": "context", "text": "..." }, { "kind": "delete", "text": "..." }, { "kind": "add", "text": "..." }]
+                    "lines": [
+                        { "kind": "context", "text": "..." },
+                        { "kind": "delete", "text": "..." },
+                        { "kind": "add", "text": "..." }
+                    ]
                 }
             ]
         }
@@ -1559,7 +1601,13 @@ Response — `202`: the durable message as it now stands, plus the event cursor 
         "delivery": "queue",
         "createdAt": 1755400000000,
         "content": [{ "type": "text", "text": "Fix the login redirect loop" }],
-        "mode": { "providerId": "codex", "modelId": "openai/gpt-5.6-sol", "effort": "medium", "serviceTier": null, "permissionMode": "auto" },
+        "mode": {
+            "providerId": "codex",
+            "modelId": "openai/gpt-5.6-sol",
+            "effort": "medium",
+            "serviceTier": null,
+            "permissionMode": "auto"
+        },
         "runId": null
     },
     "cursor": "01991f3a-6272-7000-8000-905162a30425"
@@ -1617,15 +1665,30 @@ Response — `200`:
                     "role": "user",
                     "createdAt": 1755400000000,
                     "content": [{ "type": "text", "text": "Fix the login redirect loop" }],
-                    "mode": { "providerId": "codex", "modelId": "openai/gpt-5.6-sol", "effort": "medium", "serviceTier": null, "permissionMode": "auto" }
+                    "mode": {
+                        "providerId": "codex",
+                        "modelId": "openai/gpt-5.6-sol",
+                        "effort": "medium",
+                        "serviceTier": null,
+                        "permissionMode": "auto"
+                    }
                 },
                 {
                     "id": "pfh0haxfpzowht3oi213cqos",
                     "role": "agent",
                     "createdAt": 1755400002000,
                     "content": [
-                        { "type": "reasoning", "text": "The redirect loop suggests the session cookie..." },
-                        { "type": "tool_call", "name": "Bash", "arguments": { "command": "grep -rn redirect sources/auth" }, "status": "completed", "result": { "output": "..." } },
+                        {
+                            "type": "reasoning",
+                            "text": "The redirect loop suggests the session cookie..."
+                        },
+                        {
+                            "type": "tool_call",
+                            "name": "Bash",
+                            "arguments": { "command": "grep -rn redirect sources/auth" },
+                            "status": "completed",
+                            "result": { "output": "..." }
+                        },
                         { "type": "text", "text": "Found it — the callback URL rewrites..." }
                     ]
                 },
@@ -1646,7 +1709,13 @@ Response — `200`:
             "delivery": "queue",
             "createdAt": 1755400009000,
             "content": [{ "type": "text", "text": "Then update the tests" }],
-            "mode": { "providerId": "codex", "modelId": "openai/gpt-5.6-sol", "effort": "medium", "serviceTier": null, "permissionMode": "auto" },
+            "mode": {
+                "providerId": "codex",
+                "modelId": "openai/gpt-5.6-sol",
+                "effort": "medium",
+                "serviceTier": null,
+                "permissionMode": "auto"
+            },
             "runId": null
         }
     ],
@@ -1789,14 +1858,14 @@ Response — `200`: `{ "agent": { ... } }` with `unread` `null`.
 
 Archives the agent. The conversation is kept — an archived agent's history remains readable —
 but it leaves the default list and receives no messages. Archiving a working agent aborts its
-run first. Idempotent.
+run first. Its permanent owner association and `orderKey` are retained. Idempotent.
 
 Response — `200`: `{ "agent": { ... } }` with `archivedAt` set.
 
 ### `POST /v0/agents/:agentId/unarchive`
 
 Brings an archived agent back: it reappears in the default list and can receive messages again,
-with its history and `lastMode` intact. Idempotent.
+with its history, `lastMode`, owner, and order intact. Idempotent.
 
 Response — `200`: `{ "agent": { ... } }` with `archivedAt` `null`.
 
@@ -1807,8 +1876,10 @@ Moves the agent in the list order.
 Request: `{ "afterId": "pfh0haxfpzowht3oi213cqos", "mutationId": "..." }` — the agent to place
 this one after, or `null` to move it first.
 
-Response — `200`: `{ "agent": { ... } }`. As with projects and workspaces, neighbours whose
-`orderKey` changed are announced through events.
+Response — `200`: `{ "agent": { ... } }`. Reordering assigns the moved agent a fractional
+`orderKey` between its destination neighbours. Neighbour agent keys and versions remain unchanged;
+only the moved agent emits an `agent.updated` reorder event. Its owning project or workspace also
+advances because the embedded ordered agent list changed.
 
 ### `PUT /v0/agents/:agentId/draft`
 
@@ -1852,10 +1923,20 @@ Response — `200`:
 {
     "usage": {
         "codex": {
-            "openai/gpt-5.6-sol": { "input": 1250000, "output": 84000, "cacheRead": 900000, "cacheWrite": 120000 }
+            "openai/gpt-5.6-sol": {
+                "input": 1250000,
+                "output": 84000,
+                "cacheRead": 900000,
+                "cacheWrite": 120000
+            }
         },
         "claude": {
-            "anthropic/sonnet-5": { "input": 310000, "output": 42000, "cacheRead": 200000, "cacheWrite": 15000 }
+            "anthropic/sonnet-5": {
+                "input": 310000,
+                "output": 42000,
+                "cacheRead": 200000,
+                "cacheWrite": 15000
+            }
         }
     }
 }
@@ -1908,8 +1989,12 @@ Response — `200`:
 
 ```json
 {
-    "subagents": [ /* full agent objects, newest first */ ],
-    "processes": [ /* full process objects, newest first */ ]
+    "subagents": [
+        /* full agent objects, newest first */
+    ],
+    "processes": [
+        /* full process objects, newest first */
+    ]
 }
 ```
 
@@ -1931,11 +2016,24 @@ Response — `200`:
 ```json
 {
     "hour": {
-        "codex": { "openai/gpt-5.6-sol": { "input": 310000, "output": 21000, "cacheRead": 250000, "cacheWrite": 30000 } }
+        "codex": {
+            "openai/gpt-5.6-sol": {
+                "input": 310000,
+                "output": 21000,
+                "cacheRead": 250000,
+                "cacheWrite": 30000
+            }
+        }
     },
-    "day": { /* same shape */ },
-    "week": { /* same shape */ },
-    "month": { /* same shape */ }
+    "day": {
+        /* same shape */
+    },
+    "week": {
+        /* same shape */
+    },
+    "month": {
+        /* same shape */
+    }
 }
 ```
 
@@ -2017,15 +2115,17 @@ how a bootstrap snapshot and an event stream reconcile.
 
 - `project.created` — a project was registered or a clone began.
     - `project` (full project object).
-- `project.updated` — rename, settings, reorder, archive, avatar, initialization progress.
-  Reordering emits one event per project whose `orderKey` moved.
+- `project.updated` — rename, settings, reorder, archive, avatar, initialization progress, or a
+  change to the root-agent association. Reordering emits one event for the moved project;
+  neighbour keys remain unchanged.
     - `projectId` (ID string), `previousVersion`, `version`, `changes`.
 
 **Workspaces**
 
 - `workspace.created` — a workspace was reserved; its checkout may still be building.
     - `workspace` (full workspace object).
-- `workspace.updated` — rename, reorder, archive progress, initialization settling.
+- `workspace.updated` — rename, reorder, archive progress, initialization settling, or a change
+  to the workspace's top-level-agent association.
     - `workspaceId` (ID string), `previousVersion`, `version`, `changes`.
 
 **Terminals**
@@ -2152,7 +2252,9 @@ Response — `200`:
 
 ```json
 {
-    "events": [ /* envelopes, oldest first */ ],
+    "events": [
+        /* envelopes, oldest first */
+    ],
     "cursor": "01991f3a-5c1e-7000-8000-2f9a1b3c4d5e",
     "latestCursor": "01991f3a-6d2f-7000-8000-3a0b2c4d5e6f"
 }
@@ -2164,7 +2266,11 @@ event the daemon holds, so the client knows how far behind it still is.
 When `after` has fallen out of the journal window — `409`:
 
 ```json
-{ "error": "Event cursor is unavailable.", "code": "cursor_unavailable", "cursor": "<current cursor>" }
+{
+    "error": "Event cursor is unavailable.",
+    "code": "cursor_unavailable",
+    "cursor": "<current cursor>"
+}
 ```
 
 The client resyncs and continues from the returned cursor.
@@ -2206,11 +2312,21 @@ Response — `200`:
 
 ```json
 {
-    "config": { /* exactly GET /v0/config */ },
-    "profile": { /* exactly GET /v0/profile */ },
-    "onboarding": { /* exactly GET /v0/onboarding */ },
-    "projects": [ /* all project objects, catalog order */ ],
-    "workspaces": [ /* root workspaces of every project, plus their first-level children */ ],
+    "config": {
+        /* exactly GET /v0/config */
+    },
+    "profile": {
+        /* exactly GET /v0/profile */
+    },
+    "onboarding": {
+        /* exactly GET /v0/onboarding */
+    },
+    "projects": [
+        /* all project objects, catalog order */
+    ],
+    "workspaces": [
+        /* root workspaces of every project, plus their first-level children */
+    ],
     "cursor": "01991f3a-6d2f-7000-8000-3a0b2c4d5e6f"
 }
 ```
@@ -2218,11 +2334,13 @@ Response — `200`:
 - `config`, `profile`, `onboarding` — the full objects from their own endpoints.
 - `projects` — every active project.
 - `workspaces` — deliberately shallow: each project's root workspace and the workspaces
-  directly under it. Deeper nesting, archived workspaces, and agents are loaded on demand
-  through their own endpoints when the user opens a project.
+  directly under it. Each returned project and workspace embeds its active top-level `agents`
+  series. Deeper nesting and archived resources are loaded on demand through their owner or
+  resource endpoints when the user opens a project.
 - `cursor` — the newest event cursor as of this snapshot. The client opens
   `GET /v0/events/stream` from here and everything it just read stays current; there is no
   window for a change to fall between the snapshot and the stream.
 
-Agents are intentionally absent — the agent list for a workspace is fetched when that
-workspace is opened, keeping bootstrap size proportional to the project list, not to history.
+There is no standalone agent collection in bootstrap or a global agent-list endpoint. Agents
+are discovered through the ordered `agents` arrays embedded in projects and workspaces; an
+individual agent and its history are then loaded by ID.

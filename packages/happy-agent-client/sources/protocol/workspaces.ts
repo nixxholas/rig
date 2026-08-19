@@ -88,7 +88,7 @@ export const createWorkspaceRequestSchema = Type.Object({
     id: Type.Optional(cuid2Schema),
     mutationId: Type.Optional(mutationIdSchema),
     /** The workspace name, which is also its branch name. */
-    name: Type.Optional(Type.String()),
+    name: Type.String(),
     /** The workspace to nest under: a root workspace or any workspace in a tree. */
     parentId: cuid2Schema,
 });

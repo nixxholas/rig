@@ -131,6 +131,7 @@ export async function runApp(ctx: Context, options: RunAppOptions = {}): Promise
                     "Subagents are driven by their parent and cannot be opened as an interactive Rig agent.",
                 );
             }
+            const eventCursor = (await localServer.client.getEvents({ limit: 1 })).latestCursor;
             const [configResponse, history, pendingQuestion, workspaceResponse] = await Promise.all(
                 [
                     localServer.client.getConfig(),
@@ -150,6 +151,7 @@ export async function runApp(ctx: Context, options: RunAppOptions = {}): Promise
             return {
                 agent: agentResponse.agent,
                 config: configResponse.config,
+                eventCursor,
                 history,
                 localServer,
                 pendingQuestion: pendingQuestion.question,
@@ -186,7 +188,7 @@ export async function runApp(ctx: Context, options: RunAppOptions = {}): Promise
             terminal.setTitle(`Rig - ${sanitizeTerminalTitle(opened.agent.title)}`);
         }
 
-        const events = new HappyAgentEventHub(opened.localServer.client, opened.agent.lastCursor);
+        const events = new HappyAgentEventHub(opened.localServer.client, opened.eventCursor);
         events.start();
         const agent = new RemoteAgent({
             agent: opened.agent,
@@ -305,7 +307,7 @@ export async function runApp(ctx: Context, options: RunAppOptions = {}): Promise
                 opened.localServer.client
                     .searchFiles(opened.workspace.id, { query })
                     .then((response) => response.files),
-            sessionBacked: false,
+            sessionBacked: true,
             showReasoning,
             showUsage,
             startupStatus: {

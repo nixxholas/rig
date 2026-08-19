@@ -1,6 +1,16 @@
 import { resolve } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 
-import type { Agent, HappyAgentClient, Project, Workspace } from "@slopus/happy-agent-client";
+import {
+    HappyAgentApiError,
+    type Agent,
+    type HappyAgentClient,
+    type Project,
+    type Workspace,
+} from "@slopus/happy-agent-client";
+
+const WORKSPACE_INITIALIZATION_TIMEOUT_MS = 120_000;
+const WORKSPACE_INITIALIZATION_POLL_MS = 50;
 
 /** One top-level agent together with the file workspace that owns it. */
 export interface AgentCatalogEntry {
@@ -82,17 +92,47 @@ export function workspaceForCwd(
 export async function ensureWorkspaceForCwd(
     client: HappyAgentClient,
     cwd: string,
-): Promise<Workspace | Project> {
+): Promise<Workspace> {
     const catalog = await loadAgentCatalog(client);
     const existing = workspaceForCwd(catalog, cwd);
     if (existing !== undefined) {
         const project = catalog.projects.find((candidate) => candidate.id === existing.id);
-        if (project === undefined || project.status !== "archived") return existing;
+        if (project === undefined || project.status !== "archived") {
+            return await waitForWorkspaceReady(client, existing.id);
+        }
         // Registering an archived project path is the documented revival
         // operation; do not try to create an agent inside an archived root.
-        return (await client.registerProject({ path: resolve(cwd) })).project;
+        const revived = (await client.registerProject({ path: resolve(cwd) })).project;
+        return await waitForWorkspaceReady(client, revived.id);
     }
-    return (await client.registerProject({ path: resolve(cwd) })).project;
+    const registered = (await client.registerProject({ path: resolve(cwd) })).project;
+    return await waitForWorkspaceReady(client, registered.id);
+}
+
+/**
+ * Resolves the public workspace only after its asynchronous provisioning reaches a usable state.
+ *
+ * `GET /v0/workspaces/:id` deliberately answers `not_initialized` during provisioning. Every
+ * other response is terminal and remains authoritative.
+ */
+export async function waitForWorkspaceReady(
+    client: Pick<HappyAgentClient, "getWorkspace">,
+    workspaceId: string,
+): Promise<Workspace> {
+    const deadline = Date.now() + WORKSPACE_INITIALIZATION_TIMEOUT_MS;
+    for (;;) {
+        try {
+            return (await client.getWorkspace(workspaceId)).workspace;
+        } catch (error: unknown) {
+            if (!(error instanceof HappyAgentApiError) || error.code !== "not_initialized") {
+                throw error;
+            }
+            if (Date.now() >= deadline) {
+                throw new Error("The workspace did not finish initializing within two minutes.");
+            }
+            await sleep(WORKSPACE_INITIALIZATION_POLL_MS);
+        }
+    }
 }
 
 function computePath(resource: Workspace | Project): string {

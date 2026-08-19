@@ -22,6 +22,7 @@ export interface ExplorationPresentation {
     operations: ExplorationOperation[];
 }
 
+/** One read the exploration performed: a listing, a file read, or a search. */
 export type ExplorationOperation =
     | { kind: "list"; target: string }
     | { kind: "read"; name: string }
@@ -54,6 +55,7 @@ export interface FileDiffPresentation {
     omittedFiles?: number;
 }
 
+/** One file's changes inside a diff presentation. */
 export interface FileDiff {
     path: string;
     kind: "add" | "delete" | "update";
@@ -66,12 +68,14 @@ export interface FileDiff {
     hunks: FileDiffHunk[];
 }
 
+/** A contiguous run of diff lines, numbered against both sides. */
 export interface FileDiffHunk {
     oldStart: number;
     newStart: number;
     lines: FileDiffLine[];
 }
 
+/** One line of a hunk. */
 export interface FileDiffLine {
     kind: "context" | "add" | "delete";
     text: string;
@@ -85,6 +89,7 @@ export interface SearchPresentation {
     sources?: SearchSource[];
 }
 
+/** One source a search drew from. */
 export interface SearchSource {
     url: string;
     title: string;
@@ -93,11 +98,13 @@ export interface SearchSource {
 /** What is in a message, in order. */
 export type MessageBlock = TextBlock | ImageBlock | ReasoningBlock | ToolCallBlock;
 
+/** Plain text. */
 export interface TextBlock {
     type: "text";
     text: string;
 }
 
+/** An image travelling inline with the message. */
 export interface ImageBlock {
     type: "image";
     mimeType: string;
@@ -168,7 +175,9 @@ export interface ServiceMessage {
     content: MessageBlock[];
 }
 
+/** The run's outcome. */
 export type RunStatus = "running" | "completed" | "aborted" | "failed";
+/** Why a run ended; status is the outcome, reason is the cause. */
 export type RunReason = "completed" | "steering" | "abort" | "error";
 
 /** The work an agent did in response to a message. */

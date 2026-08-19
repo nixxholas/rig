@@ -14,6 +14,7 @@ export type GitFileStatus =
     | "type_changed"
     | "submodule";
 
+/** One changed file against the comparison base. */
 export interface GitFileChange {
     path: string;
     status: GitFileStatus;

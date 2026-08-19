@@ -1,17 +1,18 @@
 # `@slopus/happy-agent-client`
 
-The client library for the Happy agent API. It replaces `rig-connect` for the new
-`happy-agent` API: it connects to an endpoint, follows the stream, keeps live state in
-memory, and hands it to a user interface as ordered values plus a stream of deltas.
+A typed client for the Happy agent HTTP API, specified endpoint by endpoint in
+`packages/happy-agent/API.md`.
 
-Built on plain Web APIs so the same build runs in Node and in a browser.
+`HappyAgentClient` is built from an endpoint and a bearer token. It has one typed method per
+request-response route, and it opens the event journal both as pulled pages and as a typed
+async iterator over the live Server-Sent Events stream, cancelled with an `AbortSignal`. It
+keeps no state: caching, version reconciliation, optimistic mutations, retries, and
+reconnection are decisions for whatever builds a live view on top of it.
 
-What exists today is `HappyAgentClient`: a thin, faithful client for the HTTP API
-specified in `packages/happy-agent/API.md`. It is built from an endpoint and a bearer
-token, has one typed method per request-response route, and opens the event stream as a
-typed async iterator that a caller cancels with an `AbortSignal`. It keeps no state:
-caching, version reconciliation, optimistic mutations, reconnection, and the live chat
-state land on top of it as the API takes shape.
+It is built on plain Web APIs — `fetch`, streams, `AbortController`, standard timers — so the
+same build runs unchanged in Node and in a browser. The daemon listens on a Unix domain
+socket; a caller reaching one supplies its own runtime's socket-capable `fetch`, and the
+client never dials a socket itself or reads credentials from disk.
 
-Protocol values are declared once as TypeBox schemas, with their TypeScript types
-derived from those schemas.
+Protocol shapes live in `sources/protocol/`, one file per API chapter, with shared wire
+values declared as TypeBox schemas and their TypeScript types derived with `Static`.

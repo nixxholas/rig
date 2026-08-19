@@ -221,7 +221,9 @@ describe("public agent state and subagent matrix", () => {
                 const topLevel = await createTopLevel(gym, project.id, "stateseparatetoplevel");
                 const subagent = await spawnSubagent(gym);
                 expect(topLevel.parentAgentId).toBeNull();
+                expect(topLevel.orderKey).toEqual(expect.any(String));
                 expect(subagent.parentAgentId).toBe(gym.defaultSessionId);
+                expect(subagent.orderKey).toBeNull();
                 expect(subagent.workspaceId).toBe(topLevel.workspaceId);
             },
         },

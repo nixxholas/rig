@@ -74,6 +74,9 @@ describe("idle submit", () => {
             expect(completed.text.split("\n").filter((row) => row.includes("↳ queued"))).toEqual(
                 [],
             );
+            expect(
+                completed.rows.filter((row) => row.includes(`› IDLE_SUBMIT_PROMPT`)),
+            ).toHaveLength(1);
             expect(completed.scroll.atBottom).toBe(true);
         } finally {
             await gym.dispose();

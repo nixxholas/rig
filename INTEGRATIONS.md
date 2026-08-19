@@ -247,42 +247,10 @@ TUI agent. File writes retain Happy's SHA-256 optimistic-concurrency contract.
 
 ## Happy2 local plugins and MCP Apps
 
-Happy2 consumes local MCP Apps through `@slopus/rig-connect`. Its Electron main process passes
-the daemon endpoint and bearer token to `connectRig`, then calls `connectPlugins`. Never send those
-credentials to a renderer or open a second event stream. Protocol version 5 is required.
-
-`onChange(apps, plugins, state)` supplies the complete catalog in navigation order. Key logical
-navigation by `app.id`, but key loaded code and caches by both `app.id` and `app.generation`. A
-generation change is replacement, never an in-place update.
-
-For the App Store-style local plugin catalog, render `plugin.name`, `plugin.description`,
-`plugin.author`, and `plugin.category` directly from `LocalPlugin`. Load artwork in Electron main
-with `await connection.readIcon(plugin, { signal })`, then transfer or register only those returned
-PNG bytes for the renderer. Cache by `[plugin.id, plugin.icon.generation]`; on
-`PluginIconRequestError` with `code === "stale_generation"`, discard that cache entry and wait for
-the authoritative catalog. Do not turn the daemon endpoint into a public image URL, send the bearer
-token to a renderer, or infer a filesystem location.
-
-The corresponding Happy dependency change is a direct bump from `@slopus/rig-connect@0.0.29` to
-`@slopus/rig-connect@0.0.30` after that patch is released. Replace Happy's parallel local-plugin
-publisher/category/icon types with the exported `LocalPlugin`, `PluginCategory`, `PluginIcon`, and
-`ReadPluginIconResult` types, and use `RigPluginsConnection.readIcon`. Release
-`happy-plugins@0.0.5` first for manifest authors, Rig `0.0.128` with protocol 5 second, and
-`@slopus/rig-connect@0.0.30` third; then bump Happy. These are required patch releases under the
-repository's early-stage policy—there is no legacy manifest alias or protocol fallback.
-
-Mounting must be instant at click time:
-
-1. As soon as a live catalog exposes a generation, load every declared path through
-   `connection.readResource(app, uri)`.
-2. Verify the whole bounded bundle completed and is still the current generation.
-3. Only then publish it as clickable navigation. A click performs no daemon read.
-4. Serve cached bytes from a generation-specific isolated Electron origin or protocol so relative
-   HTML, scripts, stylesheets, fonts, and images resolve inside the bundle. Mount a dedicated
-   isolated `WebContentsView`, not a remote page.
-5. Preserve the daemon policy at that origin: no default network, frames, objects, base navigation,
-   or forms; bundle scripts, styles, images, and fonts are allowed, with inline styles and data
-   images. Keep context isolation on and Node integration off.
+The legacy local-plugin catalog integration has been removed. Happy2
+integrations must use the public Happy Agent API through
+`@slopus/happy-agent-client`; capabilities absent from that API are not exposed
+through a compatibility adapter.
 
 The renderer implements the MCP Apps 2026-01-26 JSON-RPC 2.0 `postMessage` bridge:
 `ui/initialize`, `ui/notifications/initialized`, `resources/read`, and `tools/call`. Do not inject a

@@ -52,7 +52,8 @@ export interface Agent {
     lastMode: MessageMode | null;
     unread: AgentUnread | null;
     draft: AgentDraft | null;
-    orderKey: string;
+    /** Owner-local order for a top-level agent; `null` on a subagent. */
+    orderKey: string | null;
     /** The newest event cursor for this agent, so a stream opens where this left off. */
     lastCursor: EventCursor;
     version: ResourceVersion;

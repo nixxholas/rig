@@ -76,7 +76,7 @@ interface ResourceSummary {
     readonly version: string;
     readonly status?: string;
     readonly archivedAt?: number | null;
-    readonly orderKey?: string;
+    readonly orderKey?: string | null;
     readonly projectId?: string;
     readonly workspaceId?: string;
     readonly parentId?: string | null;
@@ -1431,9 +1431,7 @@ async function assertGlobalInvariants(
         expect(project.agents.map((agent) => agent.id)).toEqual(
             root?.agents.map((agent) => agent.id),
         );
-        expect(project.agents).toEqual(
-            [...project.agents].sort((left, right) => left.orderKey.localeCompare(right.orderKey)),
-        );
+        expect(project.agents).toEqual([...project.agents].sort(compareTopLevelAgentOrder));
     }
 
     for (const workspace of observation.workspaces) {
@@ -1458,9 +1456,7 @@ async function assertGlobalInvariants(
         }
         expect(current?.kind).toBe("root");
         expect(workspace.agents.map((agent) => agent.id)).toEqual(
-            [...workspace.agents]
-                .sort((left, right) => left.orderKey.localeCompare(right.orderKey))
-                .map((agent) => agent.id),
+            [...workspace.agents].sort(compareTopLevelAgentOrder).map((agent) => agent.id),
         );
         if (workspace.status === "active" && workspace.initialization.status === "ready") {
             await assertDirectory(
@@ -1797,12 +1793,21 @@ function publicModel(observation: Observation) {
 }
 
 function catalogOwnerModel<
-    T extends { readonly agents: readonly { readonly id: string; readonly orderKey: string }[] },
+    T extends {
+        readonly agents: readonly { readonly id: string; readonly orderKey: string | null }[];
+    },
 >(resource: T) {
     return {
         ...resource,
         agents: resource.agents.map((agent) => ({ id: agent.id, orderKey: agent.orderKey })),
     };
+}
+
+function compareTopLevelAgentOrder(left: Agent, right: Agent): number {
+    if (left.orderKey === null || right.orderKey === null) {
+        throw new Error("An owner catalog included a subagent without an order key.");
+    }
+    return left.orderKey.localeCompare(right.orderKey);
 }
 
 function publicChanges(before: Observation, after: Observation) {

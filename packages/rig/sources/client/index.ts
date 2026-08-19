@@ -11,6 +11,7 @@ export { HappyAgentEventHub } from "./HappyAgentEventHub.js";
 export {
     ensureWorkspaceForCwd,
     loadAgentCatalog,
+    waitForWorkspaceReady,
     workspaceForCwd,
     type AgentCatalog,
     type AgentCatalogEntry,

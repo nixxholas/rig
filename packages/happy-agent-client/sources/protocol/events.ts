@@ -87,6 +87,7 @@ export interface RunFinishedPayload extends MutationEcho {
     run: Run;
 }
 
+/** A message entered history; pending user messages arrive here first. */
 export interface MessageCreatedPayload extends MutationEcho {
     agentId: Cuid2;
     /** `null` for a pending user message, which belongs to no run yet. */
@@ -132,6 +133,7 @@ export interface MessageDeletedPayload {
 /** Deliberately empty: a nudge to refetch the config endpoints when convenient. */
 export type ConfigUpdatedPayload = Record<string, never>;
 
+/** The profile changed; the payload is the whole profile, not a diff. */
 export interface ProfileUpdatedPayload extends MutationEcho {
     profile: Profile;
 }

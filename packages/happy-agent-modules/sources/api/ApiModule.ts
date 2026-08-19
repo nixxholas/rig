@@ -214,7 +214,22 @@ export class ApiModule implements AgentModule {
         // a window in which it can emit while the API is awaiting that work.
         this.#subscribeToModules(ctx);
         await this.prepare();
-        return {};
+        return {
+            metadataChangedTransact: async (hookCtx, scope, change) => {
+                const archivedAt = change.update["archivedAt"];
+                if (
+                    !Object.hasOwn(change.update, "archivedAt") ||
+                    (archivedAt !== null && typeof archivedAt !== "number")
+                ) {
+                    return;
+                }
+                await this.#refreshAgentOwnerVisibility(
+                    hookCtx,
+                    scope.agent.id,
+                    archivedAt === null,
+                );
+            },
+        };
     };
 
     get ready(): boolean {
@@ -703,7 +718,9 @@ export class ApiModule implements AgentModule {
         }
         const previous = await projectResource(ctx, this.#projects, event.previousProject);
         const agentsChanged =
-            event.type === "project_agent_attached" || event.type === "project_agent_reordered";
+            event.type === "project_agent_attached" ||
+            event.type === "project_agent_reordered" ||
+            event.type === "project_agent_visibility_changed";
         const changes = agentsChanged
             ? {
                   agents: resource["agents"],
@@ -772,7 +789,8 @@ export class ApiModule implements AgentModule {
         const changes =
             event.type === "workspace_agent_attached" ||
             event.type === "workspace_agent_detached" ||
-            event.type === "workspace_agent_reordered"
+            event.type === "workspace_agent_reordered" ||
+            event.type === "workspace_agent_visibility_changed"
                 ? {
                       agents: resource["agents"],
                       updatedAt: resource["updatedAt"],
@@ -1447,15 +1465,23 @@ export class ApiModule implements AgentModule {
             ) {
                 await this.#assertTopLevelAgent(ctx, agentId, true);
                 const body = await bodyAs(request, emptyMutationBodySchema, "agent archival");
-                await this.#withMutationId(body.mutationId, async () => {
-                    if (operation === "archive") {
-                        await this.#agentSystem().abort(ctx, agentId);
-                        await this.#compute.archiveAgent(ctx, agentId);
-                    }
-                    await this.#updateAgentMetadata(ctx, agentId, {
-                        archivedAt: operation === "archive" ? Date.now() : null,
+                const config = await this.#agentSystem().config(ctx, agentId);
+                if (config === undefined) throw notFound("The agent was not found.");
+                const archived = typeof config.metadata?.["archivedAt"] === "number";
+                const shouldChange =
+                    (operation === "archive" && !archived) ||
+                    (operation === "unarchive" && archived);
+                if (shouldChange) {
+                    await this.#withMutationId(body.mutationId, async () => {
+                        if (operation === "archive") {
+                            await this.#agentSystem().abort(ctx, agentId);
+                            await this.#compute.archiveAgent(ctx, agentId);
+                        }
+                        await this.#updateAgentMetadata(ctx, agentId, {
+                            archivedAt: operation === "archive" ? Date.now() : null,
+                        });
                     });
-                });
+                }
                 sendJson(response, 200, {
                     agent: await this.#requireAgentResource(ctx, agentId),
                 });
@@ -1464,6 +1490,7 @@ export class ApiModule implements AgentModule {
             if (operation === "reorder" && request.method === "POST") {
                 await this.#assertTopLevelAgent(ctx, agentId);
                 const body = await bodyAs(request, reorderBodySchema, "agent reorder");
+                const before = await this.#requireAgentResource(ctx, agentId);
                 const workspaceId = await this.#workspaces.workspaceForAgent(ctx, agentId);
                 if (workspaceId === undefined) {
                     const project = await this.#projects.projectForAgent(ctx, agentId);
@@ -1490,13 +1517,16 @@ export class ApiModule implements AgentModule {
                             ),
                     );
                 }
-                await this.#withMutationId(
-                    body.mutationId,
-                    async () =>
-                        await this.#updateAgentMetadata(ctx, agentId, {
-                            orderKey: await this.#agentOrderKey(ctx, agentId),
-                        }),
-                );
+                const orderKey = await this.#agentOrderKey(ctx, agentId);
+                if (before["orderKey"] !== orderKey) {
+                    await this.#withMutationId(
+                        body.mutationId,
+                        async () =>
+                            await this.#updateAgentMetadata(ctx, agentId, {
+                                orderKey,
+                            }),
+                    );
+                }
                 sendJson(response, 200, {
                     agent: await this.#requireAgentResource(ctx, agentId),
                 });
@@ -2357,7 +2387,13 @@ export class ApiModule implements AgentModule {
     ): Promise<Record<string, unknown>> {
         const project = await this.#projects.get(ctx, workspaceId);
         if (project !== undefined) {
-            if (project.archivedAt !== undefined || project.status !== "active") {
+            if (project.status === "archived" || project.archivedAt !== undefined) {
+                return {
+                    ...rootWorkspaceResource(project),
+                    agents: await this.#agentsForProject(ctx, project.id),
+                };
+            }
+            if (project.status !== "active") {
                 throw new ApiError(409, "conflict", "The root workspace is not available.");
             }
             if (project.initializationStatus === "initializing") {
@@ -2399,6 +2435,21 @@ export class ApiModule implements AgentModule {
             workspace: resource,
         });
         return workspace;
+    }
+
+    async #refreshAgentOwnerVisibility(
+        ctx: Context,
+        agentId: string,
+        visible: boolean,
+    ): Promise<void> {
+        const workspaceId = await this.#workspaces.workspaceForAgent(ctx, agentId);
+        if (workspaceId !== undefined) {
+            await this.#workspaces.refreshAgentVisibility(ctx, workspaceId, agentId, visible);
+            return;
+        }
+        const project = await this.#projects.projectForAgent(ctx, agentId);
+        if (project === undefined) throw notFound("The agent owner was not found.");
+        await this.#projects.refreshAgentVisibility(ctx, project.id, agentId, visible);
     }
 
     async #handleWorkspaceContentRoute(

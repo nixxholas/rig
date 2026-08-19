@@ -20,8 +20,8 @@ const SEMANTIC_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)
 const USAGE = `Usage:
   pnpm release <version>
   pnpm release beta
-  pnpm release rig-connect <version>
   pnpm release happy-agent-base <version>
+  pnpm release happy-agent-client <version>
   pnpm release happy-agent-compute <version>
   pnpm release happy-plugins <version>
   pnpm release happy-providers <version>
@@ -31,8 +31,8 @@ Examples:
   pnpm release patch            a release that only fixes things
   pnpm release beta             the next quick beta, with typechecks but no tests
   pnpm release 0.4.0            that same choice, spelled out
-  pnpm release rig-connect patch
   pnpm release happy-agent-base patch
+  pnpm release happy-agent-client patch
   pnpm release happy-agent-compute patch
   pnpm release happy-plugins patch
   pnpm release happy-providers patch
@@ -44,8 +44,8 @@ async function release(): Promise<void> {
     const arguments_ = process.argv.slice(2);
     const explicitPackage =
         arguments_[0] === "rig" ||
-        arguments_[0] === "rig-connect" ||
         arguments_[0] === "happy-agent-base" ||
+        arguments_[0] === "happy-agent-client" ||
         arguments_[0] === "happy-agent-compute" ||
         arguments_[0] === "happy-plugins" ||
         arguments_[0] === "happy-providers";
@@ -117,15 +117,15 @@ async function release(): Promise<void> {
         console.log(`Resuming the local ${releaseTag} release commit.`);
     }
     if (
-        (releasePackage.key === "rig-connect" ||
-            releasePackage.key === "happy-agent-base" ||
+        (releasePackage.key === "happy-agent-base" ||
+            releasePackage.key === "happy-agent-client" ||
             releasePackage.key === "happy-providers") &&
         !retryingRelease
     ) {
-        const initialHappyProvidersRelease =
+        const initialRelease =
             releasePackage.key === "happy-providers" && initialManifest.version === "0.0.0";
-        if (initialHappyProvidersRelease) {
-            console.log("Preparing the first published happy-providers version.");
+        if (initialRelease) {
+            console.log(`Preparing the first published ${releasePackage.key} version.`);
         } else {
             console.log(`Checking the published ${releasePackage.key} version...`);
             const latest = runCommand(

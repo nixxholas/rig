@@ -47,7 +47,8 @@ async function run(options: ExecCommandOptions, environment: NodeJS.ProcessEnv):
     );
     const config = (await connection.client.getConfig()).config;
     const opened = await openAgent(options, cwd, connection.client);
-    const events = new HappyAgentEventHub(connection.client, opened.lastCursor);
+    const eventCursor = (await connection.client.getEvents({ limit: 1 })).latestCursor;
+    const events = new HappyAgentEventHub(connection.client, eventCursor);
     events.start();
     const mode = resolveMode(options, environment, loadedConfig.config.defaults, config, opened);
     const submitted = await connection.client.sendMessage(opened.id, {

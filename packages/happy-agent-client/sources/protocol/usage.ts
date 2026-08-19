@@ -6,6 +6,7 @@
  * its own.
  */
 
+/** Token counts for one model. */
 export interface ModelUsage {
     input: number;
     output: number;

@@ -45,6 +45,7 @@ export const configDefaultsSchema = Type.Object({
 });
 export type ConfigDefaults = Static<typeof configDefaultsSchema>;
 
+/** Which optional product areas are switched on. */
 export const configFeaturesSchema = Type.Object({
     crossWorkspace: Type.Boolean(),
     workflows: Type.Boolean(),
@@ -80,6 +81,7 @@ export const p2pConfigSchema = Type.Object({
 });
 export type P2pConfig = Static<typeof p2pConfigSchema>;
 
+/** Permission policy that applies across every project. */
 export const permissionsConfigSchema = Type.Object({
     /** Project-relative paths that mutations must not touch unattended. */
     protectedPaths: Type.Array(Type.String()),
@@ -97,6 +99,7 @@ export const presenceStateSchema = Type.Object({
 });
 export type PresenceState = Static<typeof presenceStateSchema>;
 
+/** The person's availability states and which one is current. */
 export const presenceConfigSchema = Type.Object({
     current: Type.String(),
     fallback: Type.String(),
@@ -130,6 +133,7 @@ export const providerModelReferenceSchema = Type.Object({
 });
 export type ProviderModelReference = Static<typeof providerModelReferenceSchema>;
 
+/** One configured inference provider and the models it serves. */
 export const providerConfigSchema = Type.Object({
     enabled: Type.Boolean(),
     models: Type.Array(providerModelReferenceSchema),

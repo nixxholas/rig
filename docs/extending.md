@@ -478,56 +478,13 @@ behavior stay shared.
 
 ---
 
-## Rig Connect and integrations
+## Happy Agent client and integrations
 
-External applications do not extend Rig's agent; they drive Rig. The supported
-way is `@slopus/rig-connect`, the single sync implementation in the product.
-
-### What exists today
-
-`connectRig({ endpoint, token })` creates one shared connection over plain Web
-APIs (`fetch`, streams, `AbortController`, timers), so the same build runs in
-Node and in a browser. It has no runtime dependency on the `rig` package.
-
-```ts
-import { connectRig } from "@slopus/rig-connect";
-
-const rig = connectRig({ endpoint: "http://127.0.0.1:4517", token });
-
-const session = rig.connectSession({
-    sessionId,
-    onChange(elements, state) {
-        render(elements, state);
-    },
-});
-
-const groups = rig.connectGroups({ onChange: renderSidebar });
-const plugins = rig.connectPlugins({ onChange: renderPluginNavigation });
-```
-
-- **Session subscription** — a flat, time-ordered element list (`user_message`,
-  `system_notice`, `agent_text`, `thinking`, `tool_call`, `compaction`,
-  `failure`, `inference`, `group_end`), grouped into inference groups, plus a
-  live session state describing what the session is doing right now.
-- **Group subscription** — projects, worktrees, and sessions, kept current.
-- **Plugin subscription** — the plugin and application catalog, with
-  `loadResource` and `invokeAction` for local applications, plus `listPlugins()`
-  and `readPluginLog()` for one-shot diagnostics.
-- **Actions** — draft, send message, permission mode, model and effort, goals,
-  archive, reset, rewind, compaction, run stop, and more. Every action applies
-  locally at once and is delivered, retried, and reconciled in the background.
-
-Under it, the protocol is one SSE stream (`GET /events/live`) carrying light
-cursored events, plus request-response endpoints (`GET /catalog`,
-`GET /sessions/:id/state`, `POST /timeline`, `GET /plugins`,
-`GET /plugins/<name>/log`) that carry the entities. Unrecognized events are
-ordered and ignored, so a client does not break when the daemon gains one.
-
-`rig-connect` never logs in and never reads credentials. The local daemon writes
-its bearer token to `token` inside its server directory — by default
-`${TMPDIR}/rig-<uid>/`, with `RIG_SERVER_DIRECTORY`, `RIG_SERVER_SOCKET_PATH`,
-and `RIG_SERVER_TOKEN_PATH` as overrides. Obtaining and passing the token is the
-host application's job.
+External applications drive the daemon through `@slopus/happy-agent-client`.
+The host supplies a Fetch implementation and bearer token; the client exposes
+the typed `/v0` request and SSE contracts without reading credentials or daemon
+state directly. See `packages/happy-agent/API.md` for the complete public
+surface.
 
 ### Other integration surfaces
 

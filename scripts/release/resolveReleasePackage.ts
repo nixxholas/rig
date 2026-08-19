@@ -13,6 +13,19 @@ const PACKAGES: Record<ReleasePackageKey, ReleasePackage> = {
         tagPrefix: "happy-agent-base-v",
         testArguments: [["--filter", "@slopus/happy-agent-base", "test"]],
     },
+    "happy-agent-client": {
+        buildArguments: ["--filter", "@slopus/happy-agent-client", "build"],
+        checkArguments: ["--filter", "@slopus/happy-agent-client", "check"],
+        commitPrefix: "Release happy-agent-client v",
+        directory: fileURLToPath(new URL("../../packages/happy-agent-client/", import.meta.url)),
+        key: "happy-agent-client",
+        manifestPath: "packages/happy-agent-client/package.json",
+        tagPrefix: "happy-agent-client-v",
+        testArguments: [
+            ["run", "test:scripts"],
+            ["--filter", "@slopus/happy-agent-client", "test"],
+        ],
+    },
     "happy-agent-compute": {
         buildArguments: ["--filter", "@slopus/happy-agent-compute", "build"],
         checkArguments: ["--filter", "@slopus/happy-agent-compute", "check"],
@@ -59,33 +72,20 @@ const PACKAGES: Record<ReleasePackageKey, ReleasePackage> = {
         tagPrefix: "v",
         testArguments: [["run", "test:release"]],
     },
-    "rig-connect": {
-        buildArguments: ["--filter", "@slopus/rig-connect", "build"],
-        checkArguments: ["--filter", "@slopus/rig-connect", "check"],
-        commitPrefix: "Release rig-connect v",
-        directory: fileURLToPath(new URL("../../packages/rig-connect/", import.meta.url)),
-        key: "rig-connect",
-        manifestPath: "packages/rig-connect/package.json",
-        tagPrefix: "rig-connect-v",
-        testArguments: [
-            ["run", "test:scripts"],
-            ["--filter", "@slopus/rig-connect", "test"],
-        ],
-    },
 };
 
 export function resolveReleasePackage(value: string | undefined): ReleasePackage {
     const key = value ?? "rig";
     if (
         key !== "rig" &&
-        key !== "rig-connect" &&
         key !== "happy-agent-base" &&
+        key !== "happy-agent-client" &&
         key !== "happy-agent-compute" &&
         key !== "happy-plugins" &&
         key !== "happy-providers"
     ) {
         throw new Error(
-            `Unknown release package ${key}. Expected rig, rig-connect, happy-agent-base, happy-agent-compute, happy-plugins, or happy-providers.`,
+            `Unknown release package ${key}. Expected rig, happy-agent-base, happy-agent-client, happy-agent-compute, happy-plugins, or happy-providers.`,
         );
     }
     return PACKAGES[key];

@@ -1,7 +1,7 @@
 export type ReleasePackageKey =
     | "rig"
-    | "rig-connect"
     | "happy-agent-base"
+    | "happy-agent-client"
     | "happy-agent-compute"
     | "happy-plugins"
     | "happy-providers";

@@ -295,6 +295,13 @@ export class ProjectsModule implements AgentModule {
     async attachAgent(ctx: Context, projectId: string, agentId: string): Promise<void> {
         const attachment = { projectId, agentId };
         this.#assertInput(projectAgentAttachmentSchema, attachment, "agent attachment");
+        const agents = this.#agents;
+        if (agents === undefined) {
+            throw new Error("The projects module was asked to attach an agent before it started.");
+        }
+        if ((await agents.parentOf(ctx, agentId)) !== null) {
+            throw new Error("Only a root agent can be attached to a project.");
+        }
         await this.#agentAssociationLocks.runInLock(
             ctx,
             `agent:${agentId}`,
@@ -305,15 +312,6 @@ export class ProjectsModule implements AgentModule {
                     async (lockCtx) =>
                         await lockCtx.inTx(async (txCtx) => {
                             const before = await this.#mutations.getRequired(txCtx, projectId);
-                            const agents = this.#agents;
-                            if (agents === undefined) {
-                                throw new Error(
-                                    "The projects module was asked to attach an agent before it started.",
-                                );
-                            }
-                            if ((await agents.parentOf(txCtx, agentId)) !== null) {
-                                throw new Error("Only a root agent can be attached to a project.");
-                            }
                             const association = await attachProjectRootAgent(txCtx, attachment);
                             if (association === undefined) return;
                             const after = await touchProject(
@@ -412,6 +410,61 @@ export class ProjectsModule implements AgentModule {
                                     type: "project_agent_reordered",
                                     association,
                                     previousOrderKey,
+                                    project: after,
+                                    previousProject: before,
+                                }),
+                            );
+                        }),
+                ),
+        );
+    }
+
+    /**
+     * Advances the project after an attached agent enters or leaves its active public projection.
+     *
+     * Archival does not remove the durable association or its order key.
+     */
+    async refreshAgentVisibility(
+        ctx: Context,
+        projectId: string,
+        agentId: string,
+        visible: boolean,
+    ): Promise<void> {
+        this.#assertId(projectId);
+        if (!Value.Check(projectAgentIdSchema, agentId)) {
+            throw new Error("The project agent ID is invalid.");
+        }
+        await this.#agentAssociationLocks.runInLock(
+            ctx,
+            `agent:${agentId}`,
+            async (agentCtx) =>
+                await this.#agentAssociationLocks.runInLock(
+                    agentCtx,
+                    `project:${projectId}`,
+                    async (lockCtx) =>
+                        await lockCtx.inTx(async (txCtx) => {
+                            const before = await this.#mutations.getRequired(txCtx, projectId);
+                            const association = (
+                                await listProjectRootAgents(txCtx, projectId)
+                            ).find((entry) => entry.agentId === agentId);
+                            if (association === undefined) {
+                                throw new Error(
+                                    `Agent "${agentId}" does not belong to project "${projectId}".`,
+                                );
+                            }
+                            const after = await touchProject(
+                                txCtx.db,
+                                before,
+                                "The project changed while its active agent list was being updated.",
+                            );
+                            assertProjectTransition(before, after, []);
+                            await this.#mutations.observeMutation(
+                                ctx,
+                                txCtx,
+                                this.#mutations.newEvent({
+                                    type: "project_agent_visibility_changed",
+                                    agentId,
+                                    visible,
                                     project: after,
                                     previousProject: before,
                                 }),
