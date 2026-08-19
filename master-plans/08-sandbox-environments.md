@@ -28,12 +28,11 @@ table or another command's temporary process-control state. Restricted commands
 receive a private `/tmp`. When nested procfs mounting is unavailable, an empty
 private `/proc` is the secure fallback.
 
-The repository's root `rig.toml` is part of the sandbox boundary because it can
+The repository's root `happy.toml` is part of the sandbox boundary because it can
 grant managed network access to later commands. Restricted commands must see it
-read-only. When it does not exist, command startup must atomically reserve the
-path with a trusted empty placeholder and mount that placeholder read-only, so
-concurrent commands cannot create policy for themselves or for the next
-command. Rig removes its unchanged placeholder after the command finishes.
+read-only. When it does not exist, it must remain absent before, during, and
+after every restricted command. Rig must never create an empty placeholder or
+any other synthetic file at a protected path in order to enforce the sandbox.
 
 This plan is complete when:
 
@@ -45,5 +44,5 @@ This plan is complete when:
    the managed proxy while direct unconfigured network access remains blocked;
 4. proxy processes, socket bridges, and temporary directories are removed when
    commands finish or fail;
-5. an existing or initially absent root `rig.toml` remains immutable across
-   concurrent restricted commands.
+5. an existing root `happy.toml` remains immutable across concurrent restricted
+   commands, and an initially absent one remains absent throughout execution.

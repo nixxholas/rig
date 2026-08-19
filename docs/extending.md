@@ -403,7 +403,7 @@ Config layers, resolved in this order:
 | --------- | ------------------------------------------------------------------------------------------------------------------------------- |
 | `global`  | `happy.toml` in Rig's config directory — `~/Happy/Config` on macOS, `~/happy/config` on Linux, or `RIG_CONFIGURATION_DIRECTORY` |
 | `runtime` | `~/.happy/rig/runtime.toml`                                                                                                     |
-| `project` | `rig.toml` (or `happy.toml`) in the project                                                                                     |
+| `project` | `happy.toml` in the project                                                                                                     |
 
 Global and runtime are trusted layers. Project entries are separate: a project
 server with the same name as a trusted one does not override it — the trusted one

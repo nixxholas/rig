@@ -485,6 +485,7 @@ export class ComputeModule implements AgentModule {
                 ...new Set([
                     "AGENTS.md",
                     "AGENTS_SECURITY.md",
+                    "happy.toml",
                     ...values.permissions.protectedPaths,
                     ...values.workspace.protectedSync,
                 ]),

@@ -1164,7 +1164,7 @@ export class ConfigModule implements AgentModule {
         const paths = derivePaths(input);
         const [global, local, runtime] = await Promise.all([
             readConfigSource(paths.globalConfigPath, "global"),
-            readProjectConfigSource(paths.localConfigPath),
+            readConfigSource(paths.localConfigPath, "local"),
             readConfigSource(paths.runtimeConfigPath, "runtime"),
         ]);
         const localValues = withoutProjectMachineSettings(local.values);
@@ -1350,12 +1350,6 @@ function normalizeSourceValues(values: PartialValues): Record<string, unknown> {
     };
 }
 
-async function readProjectConfigSource(rigTomlPath: string): Promise<ReadSource> {
-    const preferred = await readConfigSource(rigTomlPath, "local");
-    if (preferred.exists) return preferred;
-    return readConfigSource(join(dirname(rigTomlPath), "happy.toml"), "local");
-}
-
 async function readConfigSource(path: string, _kind: ConfigSourceKind): Promise<ReadSource> {
     let file: Awaited<ReturnType<typeof open>> | undefined;
     try {
@@ -1415,7 +1409,7 @@ function derivePaths(input: HappyAgentConfigurationInput): HappyAgentConfigurati
         happyHome,
         historyDumpHome: join(observationHome, "history"),
         instructionsPath: join(configHome, "AGENTS.md"),
-        localConfigPath: join(process.cwd(), "rig.toml"),
+        localConfigPath: join(process.cwd(), "happy.toml"),
         logPath: join(observationHome, "agent.log"),
         observationHome,
         publicHome,

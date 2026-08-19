@@ -41,10 +41,6 @@ import {
     type ProtectedPathMonitor,
 } from "./impl/createProtectedPathMonitor.js";
 import {
-    prepareHostProjectConfigPlaceholders,
-    type HostProjectConfigPlaceholder,
-} from "./impl/prepareHostProjectConfigPlaceholders.js";
-import {
     DEFAULT_HOST_COMMAND_TIMEOUT_MS,
     DEFAULT_HOST_MAX_OUTPUT_BYTES,
     HOST_SESSION_STOP_GRACE_MS,
@@ -78,7 +74,6 @@ interface PreparedHostCommand {
     command: string;
     directSupervisorCommand?: DirectSupervisorCommand;
     processCwd?: string;
-    projectConfigPlaceholders?: readonly HostProjectConfigPlaceholder[];
     protectedCreatePaths?: readonly string[];
     shell?: string;
     supervisorCommand?: SupervisorCommand;
@@ -195,65 +190,57 @@ export function createHostShell(options: HostShellOptions): ComputeShell {
                   ];
         const absoluteDeniedWritePaths = absoluteHostPaths(canonicalCwd, deniedWritePaths);
         await rejectSymlinkedPaths(absoluteDeniedWritePaths);
-        const projectConfigPlaceholders = await prepareHostProjectConfigPlaceholders(
-            protectedPaths.slice(1),
-        );
-        let supervisorCommand: SupervisorCommand;
-        try {
-            const policy = createSupervisorPolicy({
-                cwd: canonicalCwd,
-                permissions,
-                deniedReadPaths: [
-                    ...(permissions.deniedReadPaths ?? []),
-                    ...privatePaths,
-                    ...sensitiveReadPaths,
-                ],
-                deniedWritePaths: existingHostPaths(canonicalCwd, deniedWritePaths),
-                ...(permissions.allowedReadPaths === undefined
-                    ? {}
-                    : { allowedReadPaths: permissions.allowedReadPaths }),
-                ...(permissions.allowedWritePaths === undefined
-                    ? {}
-                    : {
-                          allowedWritePaths: existingHostPaths(
-                              canonicalCwd,
-                              permissions.allowedWritePaths,
-                          ),
-                      }),
-            });
-            if (!tty) {
-                const directSupervisorCommand = createDirectSupervisorCommand({
-                    command: withWorkingDirectory(command, cwd),
-                    policy,
-                    shell,
-                    supervisorPath,
-                });
-                return {
-                    args: directSupervisorCommand.args,
-                    command: directSupervisorCommand.command,
-                    directSupervisorCommand,
-                    processCwd: canonicalCwd,
-                    projectConfigPlaceholders,
-                    protectedCreatePaths: absoluteDeniedWritePaths.filter(
-                        (path) => !existsHostPath(options.cwd, path),
-                    ),
-                };
-            }
-            supervisorCommand = createSupervisorCommand({
+        const policy = createSupervisorPolicy({
+            cwd: canonicalCwd,
+            permissions,
+            deniedReadPaths: [
+                ...(permissions.deniedReadPaths ?? []),
+                ...privatePaths,
+                ...sensitiveReadPaths,
+            ],
+            deniedWritePaths:
+                process.platform === "darwin"
+                    ? absoluteDeniedWritePaths
+                    : existingHostPaths(canonicalCwd, deniedWritePaths),
+            ...(permissions.allowedReadPaths === undefined
+                ? {}
+                : { allowedReadPaths: permissions.allowedReadPaths }),
+            ...(permissions.allowedWritePaths === undefined
+                ? {}
+                : {
+                      allowedWritePaths: existingHostPaths(
+                          canonicalCwd,
+                          permissions.allowedWritePaths,
+                      ),
+                  }),
+        });
+        if (!tty) {
+            const directSupervisorCommand = createDirectSupervisorCommand({
                 command: withWorkingDirectory(command, cwd),
                 policy,
                 shell,
                 supervisorPath,
             });
-        } catch (error) {
-            await closeProjectConfigPlaceholders(projectConfigPlaceholders);
-            throw error;
+            return {
+                args: directSupervisorCommand.args,
+                command: directSupervisorCommand.command,
+                directSupervisorCommand,
+                processCwd: canonicalCwd,
+                protectedCreatePaths: absoluteDeniedWritePaths.filter(
+                    (path) => !existsHostPath(options.cwd, path),
+                ),
+            };
         }
+        const supervisorCommand = createSupervisorCommand({
+            command: withWorkingDirectory(command, cwd),
+            policy,
+            shell,
+            supervisorPath,
+        });
         return {
             args: supervisorCommand.args,
             command: supervisorCommand.command,
             processCwd: canonicalCwd,
-            projectConfigPlaceholders,
             protectedCreatePaths: absoluteDeniedWritePaths.filter(
                 (path) => !existsHostPath(options.cwd, path),
             ),
@@ -482,25 +469,16 @@ export function createHostShell(options: HostShellOptions): ComputeShell {
                 processRunOptions.shell = preparedCommand.shell;
             }
 
-            let protectedPathMonitor: ProtectedPathMonitor;
-            try {
-                protectedPathMonitor = await createProtectedPathMonitor(
-                    preparedCommand.protectedCreatePaths ?? [],
-                );
-            } catch (error) {
-                await closePreparedCommandFiles(preparedCommand);
-                throw error;
-            }
+            const protectedPathMonitor = await createProtectedPathMonitor(
+                preparedCommand.protectedCreatePaths ?? [],
+            );
             let result: ProcessRunResult;
             let cleanup: CommandCleanupResult = { protectedPathViolation: false };
             try {
                 if (runOptions.signal !== undefined) processRunOptions.signal = runOptions.signal;
                 result = await options.processManager.run(options.ctx, processRunOptions);
             } finally {
-                cleanup = await cleanUpCommandResources(
-                    protectedPathMonitor,
-                    preparedCommand.projectConfigPlaceholders,
-                );
+                cleanup = await cleanUpCommandResources(protectedPathMonitor);
             }
             const protectedPathMessage =
                 cleanup.protectedPathViolation && result.exitCode === 0
@@ -577,23 +555,14 @@ export function createHostShell(options: HostShellOptions): ComputeShell {
                 } else if (preparedCommand.shell !== undefined) {
                     processStartOptions.shell = preparedCommand.shell;
                 }
-                let protectedPathMonitor: ProtectedPathMonitor;
-                try {
-                    protectedPathMonitor = await createProtectedPathMonitor(
-                        preparedCommand.protectedCreatePaths ?? [],
-                    );
-                } catch (error) {
-                    await closePreparedCommandFiles(preparedCommand);
-                    throw error;
-                }
+                const protectedPathMonitor = await createProtectedPathMonitor(
+                    preparedCommand.protectedCreatePaths ?? [],
+                );
                 let process: ManagedProcess;
                 try {
                     process = await options.processManager.start(options.ctx, processStartOptions);
                 } catch (error) {
-                    await cleanUpCommandResources(
-                        protectedPathMonitor,
-                        preparedCommand.projectConfigPlaceholders,
-                    );
+                    await cleanUpCommandResources(protectedPathMonitor);
                     throw error;
                 }
                 const completion = process.wait(options.ctx);
@@ -626,10 +595,7 @@ export function createHostShell(options: HostShellOptions): ComputeShell {
                 onActiveSessionCountChange?.(activeSessionCount());
                 void completion.then(async (result) => {
                     if (session.timeout !== undefined) clearTimeout(session.timeout);
-                    const cleanup = await cleanUpCommandResources(
-                        protectedPathMonitor,
-                        preparedCommand.projectConfigPlaceholders,
-                    );
+                    const cleanup = await cleanUpCommandResources(protectedPathMonitor);
                     const protectedPathMessage =
                         cleanup.protectedPathViolation && result.exitCode === 0
                             ? "Sandbox blocked creation of a protected project path.\n"
@@ -701,12 +667,8 @@ interface CommandCleanupResult {
  */
 async function cleanUpCommandResources(
     protectedPathMonitor: ProtectedPathMonitor,
-    projectConfigPlaceholders: readonly HostProjectConfigPlaceholder[] | undefined,
 ): Promise<CommandCleanupResult> {
-    const results = await Promise.allSettled([
-        protectedPathMonitor.stop(),
-        ...(projectConfigPlaceholders ?? []).map((placeholder) => placeholder.close()),
-    ]);
+    const results = await Promise.allSettled([protectedPathMonitor.stop()]);
     const protectedPathResult = results[0]!;
     const errors = results
         .filter((result) => result.status === "rejected")
@@ -720,24 +682,6 @@ async function cleanUpCommandResources(
         protectedPathViolation:
             protectedPathResult.status === "fulfilled" ? protectedPathResult.value : true,
     };
-}
-
-async function closeProjectConfigPlaceholders(
-    placeholders: readonly HostProjectConfigPlaceholder[],
-): Promise<void> {
-    const results = await Promise.allSettled(
-        placeholders.map((placeholder) => placeholder.close()),
-    );
-    const errors = results
-        .filter((result) => result.status === "rejected")
-        .map((result) => (result.status === "rejected" ? result.reason : undefined));
-    if (errors.length > 0) {
-        throw new AggregateError(errors, "Could not clean up host project policy placeholders.");
-    }
-}
-
-async function closePreparedCommandFiles(prepared: PreparedHostCommand): Promise<void> {
-    await closeProjectConfigPlaceholders(prepared.projectConfigPlaceholders ?? []);
 }
 
 function absoluteHostPaths(cwd: string, paths: readonly string[]): string[] {

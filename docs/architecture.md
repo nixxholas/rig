@@ -381,8 +381,7 @@ may persist in SQLite pages and the WAL.
 Non-database state also under `~/.happy/rig` includes runtime settings, MCP trust
 decisions, Happy credentials, and binaries returned by web fetches. User
 configuration is separate, in `~/Happy/Config/happy.toml` (macOS) or
-`~/happy/config/happy.toml` (Linux), with repository settings in `rig.toml`
-falling back to `happy.toml`.
+`~/happy/config/happy.toml` (Linux), with repository settings in `happy.toml`.
 
 ### Migrations
 

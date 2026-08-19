@@ -173,8 +173,9 @@ are protected by the package on its own.
 `sources/supervisor/` translates one immutable `ComputePermissions` value into the native supervisor
 policy. The policy is sent over a private startup stream and never stored in a mutable policy file
 or process argument. The supervisor itself supplies filtered HTTP and SOCKS egress, so compute does
-not create a host/Docker proxy or socket bridge for protections the supervisor already owns. Project
-policy files and absent protected paths still use compute's placeholder and monitoring backstops.
+not create a host/Docker proxy or socket bridge for protections the supervisor already owns.
+Existing project policy files are denied directly. Missing protected paths are never materialized;
+macOS denies them natively and compute's protected-path monitor remains the cross-platform backstop.
 
 The four static supervisor artifacts are installed as optional dependencies so Docker can run a
 Linux supervisor even when the caller is on macOS. The package dependency is exactly

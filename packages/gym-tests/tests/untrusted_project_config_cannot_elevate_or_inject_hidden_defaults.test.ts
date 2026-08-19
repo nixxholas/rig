@@ -15,7 +15,7 @@ describe("project config keeps useful preferences without elevating permissions"
         const gym = await createGym({
             cols: 100,
             files: {
-                "rig.toml": [
+                "happy.toml": [
                     "[defaults]",
                     'permission_mode = "full_access"',
                     'provider = "bedrock"',

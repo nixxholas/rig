@@ -12,7 +12,7 @@ Happy synchronization is an explicit daemon feature. Rig's CLI starts
 may pass `happyIntegration: "disabled"`; omission is also fail-closed and means
 disabled. The user-wide `[settings] happy_integration` config value is a second
 gate and defaults to `true`; setting it to `false` disables Happy even when the
-host application enables the feature. Repository `rig.toml` files cannot
+host application enables the feature. Repository `happy.toml` files cannot
 change this machine-level setting. In disabled mode Rig does not load the Happy
 module, search or copy credentials, register lifecycle hooks or reload handling,
 create sync state, or open Happy HTTP and socket connections. Config changes

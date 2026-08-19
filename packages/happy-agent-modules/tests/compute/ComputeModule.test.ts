@@ -222,7 +222,7 @@ describe("ComputeModule", () => {
         );
     });
 
-    it.each(["rig.toml", "happy.toml", "AGENTS_SECURITY.md"])(
+    it.each(["happy.toml", "AGENTS_SECURITY.md"])(
         "reviews writes to protected project config %s",
         async (name) => {
             const compute = new FakeCompute();
@@ -236,10 +236,20 @@ describe("ComputeModule", () => {
         },
     );
 
+    it("does not protect rig.toml", async () => {
+        const compute = new FakeCompute();
+        compute.write("/workspace/rig.toml", "ordinary\n");
+        const { tool } = await computeToolset(ctx, compute, { model: CLAUDE_MODEL });
+
+        expect(await tool("Write").shouldReviewInAutoMode({ file_path: "rig.toml" }, ctx)).toBe(
+            false,
+        );
+    });
+
     it("reviews a workspace link that points at protected project config", async () => {
         const compute = new FakeCompute();
-        compute.write("/workspace/rig.toml", "protected\n");
-        compute.links.set("/workspace/config-alias.toml", "/workspace/rig.toml");
+        compute.write("/workspace/happy.toml", "protected\n");
+        compute.links.set("/workspace/config-alias.toml", "/workspace/happy.toml");
         const { tool } = await computeToolset(ctx, compute, { model: CLAUDE_MODEL });
 
         expect(

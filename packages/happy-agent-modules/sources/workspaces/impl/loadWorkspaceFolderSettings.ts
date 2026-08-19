@@ -5,7 +5,7 @@ import { Type, type Static } from "@sinclair/typebox";
 import { parseHappyAgentConfigToml } from "../../config/index.js";
 
 /** The project configuration files a change to which re-arms sync. */
-export const PROJECT_CONFIG_FILE_NAMES: readonly string[] = ["rig.toml"];
+export const PROJECT_CONFIG_FILE_NAMES: readonly string[] = ["happy.toml"];
 
 const MAX_PROJECT_CONFIG_BYTES = 1_048_576;
 
@@ -39,7 +39,7 @@ export const DEFAULT_WORKSPACE_FOLDER_SETTINGS: WorkspaceFolderSettings = {
 };
 
 /**
- * Reads a folder's own `rig.toml` over the agent's resolved defaults.
+ * Reads a folder's own `happy.toml` over the agent's resolved defaults.
  *
  * The sync list and the setup commands belong to the folder being worked in, and they are read
  * again on every pass rather than cached, so an uncommitted change to a project's configuration
@@ -52,7 +52,7 @@ export async function loadWorkspaceFolderSettings(
 ): Promise<WorkspaceFolderSettings> {
     let source: string;
     try {
-        source = await readFile(join(folder, PROJECT_CONFIG_FILE_NAMES[0] ?? "rig.toml"), "utf8");
+        source = await readFile(join(folder, PROJECT_CONFIG_FILE_NAMES[0] ?? "happy.toml"), "utf8");
     } catch {
         return defaults;
     }

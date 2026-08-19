@@ -93,7 +93,7 @@ not appear as mobile machines or mirror test sessions. Set
 force the integration off with `RIG_DISABLE_HAPPY_SYNC=1`; this overrides the
 configuration file.
 
-Repository `rig.toml` files (or fallback `happy.toml` files) cannot enable or disable this machine-level
+Repository `happy.toml` files cannot enable or disable this machine-level
 integration. When enabled, Rig automatically imports newer credentials from
 `~/.happy` when its daemon starts. To authenticate directly from Rig instead,
 run:
@@ -390,10 +390,9 @@ commented `happy.toml` template, and an empty `AGENTS.md` whenever they are
 missing. Existing files are never replaced. Set `RIG_CONFIGURATION_DIRECTORY`
 to an absolute path to choose a different user configuration folder.
 
-Repository settings come from `rig.toml`. If it is absent, Rig reads
-`happy.toml`; when both files exist, `rig.toml` wins. Repository values win
-where both are allowed. MCP servers use these same Rig-owned configuration
-layers; provider configuration files are not imported.
+Repository settings come only from `happy.toml`. Repository values win where
+both are allowed. MCP servers use these same Rig-owned configuration layers;
+provider configuration files are not imported.
 
 Rig keeps internal durable state in `~/.happy/rig`: runtime settings, MCP trust
 decisions, the saved-session database, Happy credentials, and binary files
@@ -442,8 +441,7 @@ were created later.
 ### Managed workspace setup
 
 A repository can prepare every managed workspace before Rig starts an agent in
-it. Add ordered shell commands to the repository's protected `rig.toml` (or
-`happy.toml` when `rig.toml` is absent):
+it. Add ordered shell commands to the repository's protected `happy.toml`:
 
 ```toml
 [workspace]
@@ -466,8 +464,7 @@ repository list replaces that default for its workspaces.
 
 Auto and Workspace write shell commands have no general network access. To let
 those commands use a specific external service, add a managed network policy to
-the user `happy.toml` or the repository's root `rig.toml` (falling
-back to `happy.toml`). Read only
+the user `happy.toml` or the repository's root `happy.toml`. Read only
 always keeps shell networking disabled, even when a policy exists. Full access
 is unrestricted and ignores the managed policy. The policy is
 configuration-owned: it is not exposed as a shell-tool argument, so an agent
@@ -555,13 +552,11 @@ write shell command. Project policy replaces global policy.
 `denied_domains` is the exception: global and project denies are combined, so a
 repository cannot remove a machine-wide global denial. Runtime settings and
 session state cannot define network policy. Changing a network policy therefore
-does not require restarting Rig. Root project `rig.toml` and `happy.toml` files are protected from
-agent writes in Auto, Workspace write, and Read only modes; explicit Full access
-can still modify it. If the file does not yet exist, Rig atomically creates an
-empty temporary placeholder before starting each writable restricted command,
-mounts it read-only inside the command sandbox, and removes it afterward if it
-is still Rig's unchanged placeholder. This closes the create/read race between
-concurrent commands without leaving a configuration file in the repository.
+does not require restarting Rig. An existing root project `happy.toml` is
+protected from agent writes in Auto, Workspace write, and Read only modes;
+explicit Full access can still modify it. If the file does not exist, it remains
+absent before, during, and after restricted commands. Rig never creates a
+placeholder or other synthetic file at that path.
 
 For allowed external domains, Rig starts per-command HTTP CONNECT and SOCKS5
 proxies, points common clients at them with standard proxy environment
@@ -776,7 +771,7 @@ then fall back to Bedrock Runtime regional or global inference profiles. A full
 `endpoint` URL overrides the endpoint selected for that model and bypasses
 Rig's regional availability list for the selected transport. The resolved region is still used for regional
 inference-profile IDs and request metadata. Restart the local daemon after
-changing providers. Repository `rig.toml` files cannot change these
+changing providers. Repository `happy.toml` files cannot change these
 machine-level choices or credential paths.
 
 Use `/configure` for common settings. Environment variables such as `RIG_MODEL`,
@@ -827,7 +822,7 @@ mounts = [
 
 Relative mount sources resolve from the host directory where Rig starts. Use
 absolute paths for home-directory mounts; `~` is not expanded. Repository
-`rig.toml` files cannot select Docker images, sockets, environment variables, or
+`happy.toml` files cannot select Docker images, sockets, environment variables, or
 host mounts.
 
 Image-backed containers are created on the first message and keep a stable,
@@ -1022,7 +1017,7 @@ restart the daemon:
 daemon_heap_snapshots = true
 ```
 
-Rig retains at most two heap snapshots. Repository `rig.toml` files cannot
+Rig retains at most two heap snapshots. Repository `happy.toml` files cannot
 enable this setting.
 
 </details>

@@ -121,11 +121,11 @@ describe("ConfigModule", () => {
         expect(module.configuration.values).toEqual(configuration.values);
     });
 
-    it("loads the project rig.toml layer and filters machine settings", async () => {
+    it("loads the project happy.toml layer and filters machine settings", async () => {
         const root = await mkdtemp(join(tmpdir(), "happy-agent-config-project-"));
         temporaryDirectories.push(root);
         await writeFile(
-            join(root, "rig.toml"),
+            join(root, "happy.toml"),
             [
                 "[defaults]",
                 'model = "project-model"',
@@ -147,7 +147,7 @@ describe("ConfigModule", () => {
 
             expect(configuration.sources.local).toMatchObject({
                 exists: true,
-                path: join(process.cwd(), "rig.toml"),
+                path: join(process.cwd(), "happy.toml"),
             });
             expect(configuration.values.defaults).toMatchObject({
                 modelId: "project-model",
@@ -310,7 +310,7 @@ describe("ConfigModule", () => {
         const root = await mkdtemp(join(tmpdir(), "happy-agent-config-observation-project-"));
         temporaryDirectories.push(root);
         await writeFile(
-            join(root, "rig.toml"),
+            join(root, "happy.toml"),
             [
                 "[observation]",
                 "traces = true",

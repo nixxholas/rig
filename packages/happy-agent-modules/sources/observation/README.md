@@ -60,7 +60,7 @@ supported. Tracing and the history dump are off because both need somewhere to
 go — a collector, or disk the user agreed to spend — and neither is worth
 turning on for someone who never asked.
 
-The section is deliberately **not** read from the project `rig.toml` layer. A
+The section is deliberately **not** read from the project `happy.toml` layer. A
 checked-in file that enabled tracing and named its own endpoint would send this
 machine's traces wherever the repository asked.
 

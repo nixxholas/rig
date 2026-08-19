@@ -59,7 +59,7 @@ override.
 - File changes are allowed inside the working directory.
 - Writes outside the working directory are refused: "Workspace write mode cannot
   modify files outside the working directory."
-- The project config file (`rig.toml` / `happy.toml`) is refused.
+- The project config file (`happy.toml`) is refused.
 - Protected Git control paths are refused: "Workspace write mode cannot modify
   Git control files without Full access."
 - Shell writes are confined to the working directory, its Git control paths, and
@@ -210,8 +210,8 @@ so rewriting the command does not change the outcome.
   the allowlist, in the denylist, DNS could not be resolved safely within two
   seconds, or the destination resolves to a local or private address. Rig owns
   the proxy environment variables; unsetting them cannot grant direct access.
-  Only the user can change the policy, in the repository's `rig.toml` (or its
-  `happy.toml` fallback) or the global config.
+  Only the user can change the policy, in the repository's `happy.toml` or the
+  global config.
 - **Keychain**: on macOS the keychain is unavailable. `security`, and anything
   backed by it, fails or reports nothing rather than returning a secret. Treat
   every other system credential store the same way. Secrets reach a command only
@@ -242,12 +242,11 @@ command and is not something to route around.
 - Restricted execution fails closed with a readable explanation when a sandbox
   dependency is missing.
 
-The repository's root `rig.toml` is part of the sandbox boundary, because it can
-grant managed network access to later commands. Restricted commands see it
-read-only; when it does not exist, Rig atomically reserves the path with a
-trusted empty placeholder, mounts that read-only, and removes its unchanged
-placeholder afterwards. A command cannot write network policy for itself or for
-the next command.
+The repository's root `happy.toml` is part of the sandbox boundary because it
+can grant managed network access to later commands. Restricted commands see an
+existing file read-only. When it does not exist, it remains absent before,
+during, and after the command; Rig never creates a placeholder or other
+synthetic file at that path.
 
 ## Shell and background processes
 

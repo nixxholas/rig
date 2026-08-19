@@ -17,8 +17,8 @@ and exposes one deeply frozen snapshot.
         └── SECURITY.md
 ```
 
-The project layer is `rig.toml`, with `happy.toml` as a fallback, in the
-current working directory. Project machine settings (credentials, provider
+The project layer is `happy.toml` in the current working directory. Project
+machine settings (credentials, provider
 selection, daemon settings, permission mode, and observation) are filtered
 before merging. Precedence is global → project → runtime.
 

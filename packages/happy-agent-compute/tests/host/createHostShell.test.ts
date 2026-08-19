@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, readFile, rm, symlink } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -260,7 +260,7 @@ describe("createHostShell commands", () => {
         expect(policies[0]?.deniedWritePaths).toContain(resolveSupervisorBinary());
     });
 
-    it("rejects project policy paths outside the workspace before creating placeholders", async () => {
+    it("rejects project policy paths outside the workspace without creating them", async () => {
         const cwd = await makeWorkspace();
         const outside = join(cwd, "..", "outside-policy.toml");
         temporaryDirectories.push(outside);
@@ -418,13 +418,13 @@ describe("createHostShell commands", () => {
         expect(policies[0]?.deniedReadPaths).toContain(home);
     });
 
-    it("reserves an absent project policy before invoking the native supervisor", async () => {
+    it("does not materialize an absent project policy before invoking the native supervisor", async () => {
         const cwd = await makeWorkspace();
         const policyPath = join(cwd, "agent-policy.toml");
         let observed = false;
         const run = vi.fn(async () => {
             observed = true;
-            await expect(readFile(policyPath, "utf8")).resolves.toBe("");
+            await expect(access(policyPath)).rejects.toMatchObject({ code: "ENOENT" });
             return completedProcessResult({
                 command: "true",
                 cwd,

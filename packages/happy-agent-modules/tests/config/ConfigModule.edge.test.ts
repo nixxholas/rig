@@ -119,7 +119,7 @@ describe("ConfigModule edge coverage", () => {
                 happyHome: join(root, ".happy"),
                 historyDumpHome: join(root, ".happy", "agent", "observation", "history"),
                 instructionsPath: join(root, "Happy", "Config", "AGENTS.md"),
-                localConfigPath: resolve(process.cwd(), "rig.toml"),
+                localConfigPath: resolve(process.cwd(), "happy.toml"),
                 logPath: join(root, ".happy", "agent", "observation", "agent.log"),
                 observationHome: join(root, ".happy", "agent", "observation"),
                 publicHome: join(root, "Happy"),
@@ -169,7 +169,7 @@ describe("ConfigModule edge coverage", () => {
     });
 
     describe("source selection and merging", () => {
-        it("uses project happy.toml only when rig.toml is absent", async () => {
+        it("uses project happy.toml", async () => {
             const root = await temporaryRoot();
             await writeLayer(root, "happy.toml", '[defaults]\nmodel = "fallback"\n');
             const previousCwd = process.cwd();
@@ -186,7 +186,7 @@ describe("ConfigModule edge coverage", () => {
             }
         });
 
-        it("prefers rig.toml over a project happy.toml fallback", async () => {
+        it("ignores rig.toml when project happy.toml exists", async () => {
             const root = await temporaryRoot();
             await writeLayer(root, "happy.toml", '[defaults]\nmodel = "fallback"\n');
             await writeLayer(root, "rig.toml", '[defaults]\nmodel = "preferred"\n');
@@ -194,8 +194,8 @@ describe("ConfigModule edge coverage", () => {
             process.chdir(root);
             try {
                 const configuration = (await ConfigModule.load(join(root, ".happy"))).configuration;
-                expect(configuration.sources.local.path).toBe(join(process.cwd(), "rig.toml"));
-                expect(configuration.values.defaults.modelId).toBe("preferred");
+                expect(configuration.sources.local.path).toBe(join(process.cwd(), "happy.toml"));
+                expect(configuration.values.defaults.modelId).toBe("fallback");
             } finally {
                 process.chdir(previousCwd);
             }
@@ -205,7 +205,7 @@ describe("ConfigModule edge coverage", () => {
             const root = await temporaryRoot();
             await writeLayer(
                 root,
-                "rig.toml",
+                "happy.toml",
                 [
                     "[defaults]",
                     'model = "project-model"',
