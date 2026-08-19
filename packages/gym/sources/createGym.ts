@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawn } from "@lydell/node-pty";
 
 import { buildGymImage } from "./buildGymImage.js";
@@ -85,7 +86,11 @@ export async function createGym(options: GymOptions): Promise<Gym> {
     const profileId = containerName.slice(-8);
     profileGymTiming(profileId, "fixtures", createStartedAt);
     const localRunnerArguments = [
-        "--experimental-transform-types",
+        // tsx transforms the sources on any supported Node; the native
+        // --experimental-transform-types flag was removed in Node 26. The absolute
+        // URL keeps the import working from the gym's temporary working directory.
+        "--import",
+        pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href,
         "--import",
         join(repositoryRoot, "packages/gym/sources/registerTypeScriptSourceHooks.mjs"),
         join(repositoryRoot, "packages/rig/sources/main.ts"),

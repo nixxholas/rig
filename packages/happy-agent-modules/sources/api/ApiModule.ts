@@ -3357,6 +3357,21 @@ export class ApiModule implements AgentModule {
                 },
             ]),
         );
+        // A scripted catalog may serve providers the configuration files never name; every model
+        // in the catalog must be reachable through the provider list a client sees.
+        for (const model of this.#config.models) {
+            if (model.providerId in providers) continue;
+            const compatibility = this.#config.providers.typeOf(model.providerId);
+            providers[model.providerId] = {
+                // The response's provider types are the configurable vendor set; a scripted
+                // provider reports the closest vendor shape instead of extending the protocol.
+                type: compatibility === null || compatibility === "gym" ? "codex" : compatibility,
+                enabled: true,
+                models: this.#config.models
+                    .filter((candidate) => candidate.providerId === model.providerId)
+                    .map((candidate) => ({ id: candidate.id, enabled: true })),
+            };
+        }
         return {
             defaults: {
                 providerId: values.defaults.providerId ?? this.#config.models[0]?.providerId,

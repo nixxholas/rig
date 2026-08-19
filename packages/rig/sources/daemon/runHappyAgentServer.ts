@@ -1,5 +1,6 @@
 import { startHappyAgentDaemon } from "@slopus/happy-agent";
 
+import { createGymInferenceFromEnvironment } from "./gymInference.js";
 import { getDaemonIdentity } from "./getDaemonIdentity.js";
 import { getHappyDaemonPaths } from "./getHappyDaemonPaths.js";
 
@@ -11,9 +12,11 @@ import { getHappyDaemonPaths } from "./getHappyDaemonPaths.js";
  */
 export async function runHappyAgentServer(): Promise<void> {
     const identity = getDaemonIdentity();
+    const gymInference = createGymInferenceFromEnvironment();
     const daemon = await startHappyAgentDaemon({
         happyHome: getHappyDaemonPaths().happyHome,
         version: identity.version,
+        ...(gymInference === undefined ? {} : { inference: gymInference }),
     });
     const stop = () => {
         void daemon.close().catch(() => undefined);
