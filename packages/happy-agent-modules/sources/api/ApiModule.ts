@@ -692,6 +692,7 @@ export class ApiModule implements AgentModule {
                     }
                     return;
                 }
+                if (event.type !== "usage_recorded") return;
                 this.#scheduleUsageMetadataRefresh(ctx, event.record.agentId);
             }),
             this.#profile.onEvent(async (_eventCtx: Context, event: ProfileChangedEvent) => {

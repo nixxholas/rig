@@ -12,6 +12,7 @@ import type {
     MessageMode,
     Run,
     ToolCallBlock as ApiToolCallBlock,
+    UsageBreakdown,
     UserMessage as ApiUserMessage,
 } from "@slopus/happy-agent-client";
 
@@ -27,6 +28,7 @@ import type {
     StopReason,
     ToolCallBlock,
     ToolResultBlock,
+    Usage,
 } from "../protocol/index.js";
 import type {
     AgentRunOptions,
@@ -86,6 +88,8 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
     #pending: ApiUserMessage[];
     readonly #messages = new Map<string, ApiMessage>();
     readonly #messageEventResults = new Map<string, ApiMessage | typeof MESSAGE_DELETED>();
+    /** The streamed assistant message of each run, so a finished run can decorate it. */
+    readonly #assistantMessageIdsByRunId = new Map<string, string>();
     #activeSend = false;
     #resyncing: Promise<AgentSnapshot> | undefined;
     #selection: PendingSelection | undefined;
@@ -487,6 +491,18 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         if (!belongsToAgent(event, this.id)) return undefined;
         this.#applyResourceEvent(event);
         this.#applyBootstrapEvent(event);
+        if (event.type === "run.finished") {
+            // The protocol carries usage on the run; the TUI accounts it on the run's
+            // assistant message, so the finished run decorates that message once.
+            const messageId = this.#assistantMessageIdsByRunId.get(event.payload.run.id);
+            this.#assistantMessageIdsByRunId.delete(event.payload.run.id);
+            const cached = messageId === undefined ? undefined : this.#messages.get(messageId);
+            const usage = flattenRunUsage(event.payload.run.usage);
+            if (cached === undefined || usage === undefined) return undefined;
+            const projected = toRigMessage(cached);
+            if (projected.role !== "agent") return undefined;
+            return { ...projected, usage };
+        }
         const message = this.#projectMessageEvent(event);
         if (message !== undefined && message !== MESSAGE_DELETED && event.type !== "message.delta")
             return toRigMessage(message);
@@ -660,6 +676,9 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         if (event.type === "message.created" || event.type === "message.updated") {
             result = structuredClone(event.payload.message);
             this.#messages.set(result.id, result);
+            if (result.role === "agent" && event.payload.runId !== null) {
+                this.#assistantMessageIdsByRunId.set(event.payload.runId, result.id);
+            }
         } else if (event.type === "message.delta") {
             const current = this.#messages.get(event.payload.messageId);
             const block = current?.content[event.payload.blockIndex];
@@ -720,6 +739,31 @@ function toSendBody(
                 .map((block) => (block.type === "text" ? block.text : `[image:${block.mediaType}]`))
                 .join(""),
     };
+}
+
+/** Sums a run's per-provider usage into the flat shape the TUI accounts with. */
+function flattenRunUsage(usage: UsageBreakdown): Usage | undefined {
+    const total: Usage = {
+        cacheRead: 0,
+        cacheWrite: 0,
+        cost: { cacheRead: 0, cacheWrite: 0, input: 0, output: 0, total: 0 },
+        input: 0,
+        output: 0,
+        totalTokens: 0,
+    };
+    let observed = false;
+    for (const models of Object.values(usage)) {
+        for (const counts of Object.values(models)) {
+            observed = true;
+            total.input += counts.input;
+            total.output += counts.output;
+            total.cacheRead += counts.cacheRead;
+            total.cacheWrite += counts.cacheWrite;
+        }
+    }
+    if (!observed) return undefined;
+    total.totalTokens = total.input + total.output + total.cacheRead + total.cacheWrite;
+    return total;
 }
 
 function toRigMessage(message: ApiMessage): Message {

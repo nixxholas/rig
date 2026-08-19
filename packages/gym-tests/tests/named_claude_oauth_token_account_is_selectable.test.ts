@@ -18,7 +18,7 @@ describe("named Claude OAuth-token accounts", () => {
                 RIG_PROVIDER: "work_claude",
             },
             homeFiles: {
-                "happy/config/happy.toml": [
+                "Happy/Config/happy.toml": [
                     "[providers.claude]",
                     "enabled = false",
                     "",
