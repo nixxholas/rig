@@ -23,7 +23,7 @@ import {
     registerRigDebugRoot,
 } from "../debug/index.js";
 import { NativeProcessManager } from "../processes/index.js";
-import type { PermissionMode, UserInputRequest } from "../protocol/index.js";
+import type { ContentBlock, PermissionMode, UserInputRequest } from "../protocol/index.js";
 import { readPackageVersion } from "../readPackageVersion.js";
 import { reportCliFailure } from "../reportCliFailure.js";
 import { CodingAssistantApp, type AppExitReason } from "./CodingAssistantApp.js";
@@ -427,6 +427,9 @@ async function followAgentEvents(options: {
     signal: AbortSignal;
     terminal: RigTerminal;
 }): Promise<void> {
+    // Pending steering messages carry no run yet, so the follower remembers which run is
+    // active to stamp their session events with the run they are steering.
+    let activeRunId: string | undefined;
     await options.events.follow({
         after: options.after,
         signal: options.signal,
@@ -434,8 +437,15 @@ async function followAgentEvents(options: {
             options.app.applyAgentSnapshot(await options.agent.resync());
         },
         onEvent: (event) => {
+            const pendingSteer =
+                event.type === "message.created" &&
+                event.payload.message.role === "user" &&
+                event.payload.message.status === "pending" &&
+                event.payload.message.delivery === "steer";
             const message = options.agent.applyEvent(event);
-            if (message !== undefined) options.app.applyMessage(message);
+            // A pending steering message renders in the queued list until its run accepts it,
+            // so it must not also land in the transcript here.
+            if (message !== undefined && !pendingSteer) options.app.applyMessage(message);
             const loopEvent = options.agent.applyLoopEvent(event);
             if (loopEvent !== undefined) options.app.applyAgentLoopEvent(loopEvent);
             if (event.type === "agent.updated" && event.payload.agentId === options.agent.id) {
@@ -474,9 +484,48 @@ async function followAgentEvents(options: {
             ) {
                 options.app.resolveUserInputRequest(event.payload.questionId);
             } else if (
+                event.type === "message.created" &&
+                event.payload.agentId === options.agent.id &&
+                event.payload.message.role === "user" &&
+                event.payload.message.status === "pending" &&
+                event.payload.message.delivery === "steer"
+            ) {
+                options.app.applySessionEvent({
+                    createdAt: event.payload.message.createdAt,
+                    data: {
+                        delivery: "steer",
+                        displayText: userMessageDisplayText(event.payload.message.content),
+                        message: {
+                            blocks: toUserMessageBlocks(event.payload.message.content),
+                            id: event.payload.message.id,
+                            role: "user",
+                        },
+                        ...(event.payload.mutationId === undefined
+                            ? {}
+                            : { mutationId: event.payload.mutationId }),
+                        runId: activeRunId ?? "",
+                    },
+                    id: createId(),
+                    sessionId: options.agent.id,
+                    type: "message_submitted",
+                });
+            } else if (
                 event.type === "run.started" &&
                 event.payload.agentId === options.agent.id
             ) {
+                activeRunId = event.payload.run.id;
+                if (event.payload.acceptedMessageIds.length > 0) {
+                    options.app.applySessionEvent({
+                        createdAt: event.payload.run.startedAt,
+                        data: {
+                            messageIds: event.payload.acceptedMessageIds,
+                            runId: event.payload.run.id,
+                        },
+                        id: createId(),
+                        sessionId: options.agent.id,
+                        type: "steering_applied",
+                    });
+                }
                 options.app.applySessionEvent({
                     createdAt: event.payload.run.startedAt,
                     data: { runId: event.payload.run.id },
@@ -490,6 +539,19 @@ async function followAgentEvents(options: {
             ) {
                 // Steering atomically continues into the successor run; only the run identity
                 // moves, the turn stays open.
+                activeRunId = event.payload.startedRun.id;
+                if (event.payload.acceptedMessageIds.length > 0) {
+                    options.app.applySessionEvent({
+                        createdAt: event.payload.startedRun.startedAt,
+                        data: {
+                            messageIds: event.payload.acceptedMessageIds,
+                            runId: event.payload.startedRun.id,
+                        },
+                        id: createId(),
+                        sessionId: options.agent.id,
+                        type: "steering_applied",
+                    });
+                }
                 options.app.applySessionEvent({
                     createdAt: event.payload.startedRun.startedAt,
                     data: { runId: event.payload.startedRun.id },
@@ -501,6 +563,7 @@ async function followAgentEvents(options: {
                 event.type === "run.finished" &&
                 event.payload.agentId === options.agent.id
             ) {
+                if (activeRunId === event.payload.run.id) activeRunId = undefined;
                 const run = event.payload.run;
                 options.app.applySessionEvent({
                     createdAt: run.endedAt ?? Date.now(),
@@ -531,6 +594,34 @@ function questionBelongsToAgent(
 ): boolean {
     const changes = event.payload.changes;
     return changes.agentId === undefined || changes.agentId === agentId;
+}
+
+type PendingUserMessageContent = Extract<
+    Extract<HappyAgentEvent, { type: "message.created" }>["payload"]["message"],
+    { role: "user" }
+>["content"];
+
+/** The composer text a pending user message renders as, one placeholder per image. */
+function userMessageDisplayText(content: PendingUserMessageContent): string {
+    return content
+        .map((block) =>
+            block.type === "text"
+                ? block.text
+                : block.type === "image"
+                  ? `[image:${block.mimeType}]`
+                  : "",
+        )
+        .join("");
+}
+
+function toUserMessageBlocks(content: PendingUserMessageContent): ContentBlock[] {
+    return content.flatMap((block): ContentBlock[] => {
+        if (block.type === "text") return [{ text: block.text, type: "text" }];
+        if (block.type === "image") {
+            return [{ data: block.data, mediaType: block.mimeType, type: "image" }];
+        }
+        return [];
+    });
 }
 
 function toUserInputRequest(question: Question): UserInputRequest {

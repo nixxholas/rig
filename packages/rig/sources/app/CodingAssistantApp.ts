@@ -856,7 +856,11 @@ export class CodingAssistantApp implements Component, Focusable {
             if (event.data.source === "notification") {
                 if (this.#consumeRenderedCompletionNotice(event.data.displayText)) return;
             } else if (event.data.delivery === "steer") {
-                const localSteering = this.#localSteeringSubmission(event.data.message.id);
+                // This client's own submission travels under the ID it minted, echoed back as
+                // the mutation ID; the daemon mints the durable message its own identity.
+                const localSteering = this.#localSteeringSubmission(
+                    event.data.mutationId ?? event.data.message.id,
+                );
                 if (localSteering !== undefined) {
                     localSteering.accepted = true;
                     localSteering.runId = event.data.runId;
