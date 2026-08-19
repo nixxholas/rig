@@ -24,7 +24,7 @@ describe("public message and history matrix", () => {
         const gym = await startGym({
             inference: [{ content: [{ text: "one answer", type: "text" }] }],
         });
-        const accepted = await gym.send("one question", { mutationId: "mh-02-send" });
+        const accepted = await gym.send("one question");
         const history = await gym.client.getMessages(gym.defaultSessionId);
         expect(history.runs).toHaveLength(1);
         expect(history.runs[0]).toMatchObject({
@@ -56,12 +56,11 @@ describe("public message and history matrix", () => {
             },
         });
 
-        const first = await gym.send("first", { mutationId: "mh-03-first", wait: false });
+        const first = await gym.send("first", { wait: false });
         await providerReady;
         const queued = await gym.client.sendMessage(gym.defaultSessionId, {
             delivery: "queue",
             mode: modeFor(gym),
-            mutationId: "mh-03-queued",
             text: "queued",
         });
         expect(queued.message).toMatchObject({
@@ -103,14 +102,13 @@ describe("public message and history matrix", () => {
                 return { content: [{ text: `reply-${String(request.callIndex)}`, type: "text" }] };
             },
         });
-        const first = await gym.send("first", { mutationId: "mh-04-first", wait: false });
+        const first = await gym.send("first", { wait: false });
         await providerReady;
         const queued = await Promise.all(
-            ["second", "third", "fourth"].map((text, index) =>
+            ["second", "third", "fourth"].map((text) =>
                 gym.client.sendMessage(gym.defaultSessionId, {
                     delivery: "queue",
                     mode: modeFor(gym),
-                    mutationId: `mh-04-${String(index)}`,
                     text,
                 }),
             ),
@@ -224,7 +222,7 @@ describe("public message and history matrix", () => {
         const gym = await startGym({
             inference: [{ content: [{ text: "durable", type: "text" }] }],
         });
-        await gym.send("persist me", { mutationId: "mh-09-send" });
+        await gym.send("persist me");
         const before = await gym.client.getMessages(gym.defaultSessionId);
         await gym.restart();
         await expect(gym.client.getMessages(gym.defaultSessionId)).resolves.toEqual(before);
@@ -522,25 +520,90 @@ describe("public message and history matrix", () => {
         );
     });
 
-    it("MH-22 preserves explicit mutation IDs and queue delivery in the durable message", async () => {
+    it("MH-22 reuses a client message ID without duplicating pending or accepted work", async () => {
+        let release!: () => void;
+        let providerStarted!: () => void;
+        const providerReady = new Promise<void>((resolve) => {
+            providerStarted = resolve;
+        });
+        const gate = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        let realCallIndex = 0;
         const gym = await startGym({
-            inference: [
-                { content: [{ text: "first", type: "text" }] },
-                { content: [{ text: "second", type: "text" }] },
-            ],
+            inference: async (request): Promise<GymTurn> => {
+                if (request.instructions.includes("You name a piece of work")) {
+                    return { content: [{ text: "<title>Retry identity</title>", type: "text" }] };
+                }
+                const current = realCallIndex;
+                realCallIndex += 1;
+                if (current === 0) {
+                    providerStarted();
+                    await gate;
+                }
+                return { content: [{ text: `answer ${String(current)}`, type: "text" }] };
+            },
         });
-        const first = await gym.send("first", { mutationId: "mh-22-first" });
-        const second = await gym.send("second", {
-            mutationId: "mh-22-second",
-            permissionMode: "full_access",
+        const first = await gym.send("blocking", { id: "mh22blocking", wait: false });
+        await providerReady;
+
+        const original = await gym.client.sendMessage(gym.defaultSessionId, {
+            delivery: "queue",
+            id: "mh22retry",
+            mode: modeFor(gym),
+            text: "original queued message",
         });
-        const history = await gym.client.getMessages(gym.defaultSessionId);
-        const users = history.runs
+        expect(original.message).toMatchObject({
+            id: "mh22retry",
+            status: "pending",
+            delivery: "queue",
+            runId: null,
+        });
+
+        const [pendingRetry, concurrentRetry] = await Promise.all([
+            gym.client.sendMessage(gym.defaultSessionId, {
+                delivery: "steer",
+                id: "mh22retry",
+                mode: { ...modeFor(gym), modelId: "unavailable-model" },
+                text: "this retry must be ignored",
+            }),
+            gym.client.sendMessage(gym.defaultSessionId, {
+                delivery: "steer",
+                id: "mh22retry",
+                mode: { ...modeFor(gym), modelId: "another-unavailable-model" },
+                text: "this concurrent retry must also be ignored",
+            }),
+        ]);
+        expect(pendingRetry.message).toEqual(original.message);
+        expect(concurrentRetry.message).toEqual(original.message);
+        expect((await gym.client.getMessages(gym.defaultSessionId)).pending).toEqual([
+            original.message,
+        ]);
+
+        release();
+        await gym.waitForRun(first.runId);
+        const settled = await gym.waitUntil(async () => {
+            const history = await gym.client.getMessages(gym.defaultSessionId);
+            return history.pending.length === 0 && history.runs.length === 2 ? history : undefined;
+        }, "the client-named queued message to settle once");
+
+        const acceptedRetry = await gym.client.sendMessage(gym.defaultSessionId, {
+            delivery: "steer",
+            id: "mh22retry",
+            mode: { ...modeFor(gym), modelId: "unavailable-model" },
+            text: "this accepted retry must also be ignored",
+        });
+        const users = settled.runs
             .flatMap((run) => run.messages)
             .filter((message) => message.role === "user");
+        expect(users.map((message) => message.id)).toEqual(["mh22blocking", "mh22retry"]);
+        expect(users.flatMap((message) => textOf(message))).toEqual([
+            "blocking",
+            "original queued message",
+        ]);
         expect(users.map((message) => message.delivery)).toEqual(["queue", "queue"]);
-        expect(users.map((message) => message.id)).toEqual([first.id, second.id]);
-    });
+        expect(acceptedRetry.message).toEqual(users[1]);
+    }, 30_000);
 
     it("MH-23 pages a three-run history from newest to oldest without overlap", async () => {
         const gym = await startGym({

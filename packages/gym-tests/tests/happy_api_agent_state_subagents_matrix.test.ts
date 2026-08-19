@@ -200,7 +200,7 @@ describe("public agent state and subagent matrix", () => {
             id: "AS-016-assigns-two-subagents-distinct-identities",
             options: subagentOptionsForTwoChildren(),
             run: async (gym) => {
-                await gym.send("create two collaborators", { mutationId: "as-016" });
+                await gym.send("create two collaborators");
                 const activity = await gym.waitUntil(async () => {
                     const current = await gym.client.getAgentActivity(gym.defaultSessionId);
                     return current.subagents.length >= 2 ? current : undefined;
@@ -335,9 +335,7 @@ async function createTopLevel(gym: AgentGym, workspaceId: string, id: string) {
 }
 
 async function spawnSubagent(gym: AgentGym) {
-    await gym.send("create a collaborator", {
-        mutationId: "spawn-subagent",
-    });
+    await gym.send("create a collaborator");
     return await gym.waitUntil(
         async () => {
             const activity = await gym.client.getAgentActivity(gym.defaultSessionId);

@@ -18,7 +18,7 @@ describe("public run boundary matrix", () => {
         const gym = await startGym({
             inference: [{ content: [{ text: "ordinary", type: "text" }] }],
         });
-        const accepted = await gym.send("ordinary", { mutationId: "rb-01" });
+        const accepted = await gym.send("ordinary");
         const lifecycle = await lifecycleFor(gym);
         expect(lifecycle.map((event) => event.type)).toEqual(["run.started", "run.finished"]);
         expect(lifecycle.every((event) => runIdOf(event) === accepted.runId)).toBe(true);
@@ -47,7 +47,6 @@ describe("public run boundary matrix", () => {
         const queued = await gym.client.sendMessage(gym.defaultSessionId, {
             delivery: "queue",
             mode: modeFor(gym),
-            mutationId: "rb-02-queued",
             text: "queued",
         });
         expect(queued.message.status).toBe("pending");
@@ -67,7 +66,6 @@ describe("public run boundary matrix", () => {
             inference: [{ content: [{ text: "steered while idle", type: "text" }] }],
         });
         const accepted = await gym.steer("idle steering", {
-            mutationId: "rb-03-steer",
             wait: true,
         });
         const lifecycle = await lifecycleFor(gym);
@@ -77,7 +75,7 @@ describe("public run boundary matrix", () => {
 
     it("RB-04 one user steering message creates one successor boundary", async () => {
         const session = await gatedRun();
-        const steer = gymSteer(session.gym, "one steering", "rb-04-steer");
+        const steer = gymSteer(session.gym, "one steering");
         await pendingText(session.gym, "one steering");
         session.release();
         const accepted = await steer;
@@ -87,19 +85,21 @@ describe("public run boundary matrix", () => {
         await session.gym.waitForRun(boundary.payload.startedRun.id);
     }, 30_000);
 
-    it("RB-05 echoes the steering mutation ID on the boundary", async () => {
+    it("RB-05 carries the client-chosen steering message ID without a mutation echo", async () => {
         const session = await gatedRun();
-        const steer = gymSteer(session.gym, "echo steering", "rb-05-steer");
+        const steer = gymSteer(session.gym, "echo steering", "rb05steer");
         await pendingText(session.gym, "echo steering");
         session.release();
         const accepted = await steer;
         const boundary = await waitForBoundary(session.gym, [accepted.id]);
-        expect(boundary.payload.mutationId).toBe("rb-05-steer");
+        expect(accepted.id).toBe("rb05steer");
+        expect(boundary.payload.acceptedMessageIds).toEqual(["rb05steer"]);
+        expect(boundary.payload).not.toHaveProperty("mutationId");
     }, 30_000);
 
     it("RB-06 chains the finished and successor run identities", async () => {
         const session = await gatedRun();
-        const steer = gymSteer(session.gym, "successor identity", "rb-06-steer");
+        const steer = gymSteer(session.gym, "successor identity");
         await pendingText(session.gym, "successor identity");
         session.release();
         const accepted = await steer;
@@ -113,8 +113,8 @@ describe("public run boundary matrix", () => {
 
     it("RB-07 fuses concurrent steering IDs into one boundary", async () => {
         const session = await gatedRun();
-        const firstSteer = gymSteer(session.gym, "fused one", "rb-07-one");
-        const secondSteer = gymSteer(session.gym, "fused two", "rb-07-two");
+        const firstSteer = gymSteer(session.gym, "fused one");
+        const secondSteer = gymSteer(session.gym, "fused two");
         await pendingText(session.gym, "fused one");
         await pendingText(session.gym, "fused two");
         session.release();
@@ -131,7 +131,7 @@ describe("public run boundary matrix", () => {
 
     it("RB-08 marks a steering boundary's finished run as steering", async () => {
         const session = await gatedRun();
-        const steer = gymSteer(session.gym, "reason steering", "rb-08-steer");
+        const steer = gymSteer(session.gym, "reason steering");
         await pendingText(session.gym, "reason steering");
         session.release();
         const accepted = await steer;
@@ -146,7 +146,7 @@ describe("public run boundary matrix", () => {
 
     it("RB-09 reports the successor run as running before it finishes", async () => {
         const session = await gatedRun();
-        const steer = gymSteer(session.gym, "successor running", "rb-09-steer");
+        const steer = gymSteer(session.gym, "successor running");
         await pendingText(session.gym, "successor running");
         session.release();
         const accepted = await steer;
@@ -161,7 +161,7 @@ describe("public run boundary matrix", () => {
 
     it("RB-10 stores steering as two whole history runs", async () => {
         const session = await gatedRun();
-        const steer = gymSteer(session.gym, "history successor", "rb-10-steer");
+        const steer = gymSteer(session.gym, "history successor");
         await pendingText(session.gym, "history successor");
         session.release();
         const accepted = await steer;
@@ -176,14 +176,13 @@ describe("public run boundary matrix", () => {
     }, 30_000);
 
     it("RB-11 accepts a queued message after the steering successor without a second boundary", async () => {
-        const session = await gatedRun(3);
+        const session = await gatedRun();
         const queued = session.gym.client.sendMessage(session.gym.defaultSessionId, {
             delivery: "queue",
             mode: modeFor(session.gym),
-            mutationId: "rb-11-queue",
             text: "queued behind steering",
         });
-        const steer = gymSteer(session.gym, "steer before queue", "rb-11-steer");
+        const steer = gymSteer(session.gym, "steer before queue");
         await pendingText(session.gym, "steer before queue");
         await queued;
         session.release();
@@ -366,7 +365,7 @@ describe("public run boundary matrix", () => {
 
     it("RB-20 persists a steering boundary and both runs across restart", async () => {
         const session = await gatedRun();
-        const steer = gymSteer(session.gym, "restart boundary", "rb-20-steer");
+        const steer = gymSteer(session.gym, "restart boundary");
         await pendingText(session.gym, "restart boundary");
         session.release();
         const accepted = await steer;
@@ -401,15 +400,15 @@ describe("public run boundary matrix", () => {
         );
     });
 
-    it("RB-23 reusing a mutation ID creates a second user turn rather than deduplicating", async () => {
+    it("RB-23 distinct client message IDs create distinct user turns", async () => {
         const gym = await startGym({
             inference: [
                 { content: [{ text: "first", type: "text" }] },
                 { content: [{ text: "second", type: "text" }] },
             ],
         });
-        const first = await gym.send("first", { mutationId: "rb-23-reused" });
-        const second = await gym.send("second", { mutationId: "rb-23-reused" });
+        const first = await gym.send("first", { id: "rb23first" });
+        const second = await gym.send("second", { id: "rb23second" });
         expect(second.id).not.toBe(first.id);
         expect(second.runId).not.toBe(first.runId);
         expect((await gym.client.getMessages(gym.defaultSessionId)).runs).toHaveLength(2);
@@ -445,7 +444,7 @@ describe("public run boundary matrix", () => {
             () => (gym.inference.compactions.length > 0 ? true : undefined),
             "compaction before queue",
         );
-        await gym.send("second", { mutationId: "rb-25-second" });
+        await gym.send("second");
         const after = await lifecycleFor(gym);
         expect(after.filter((event) => event.type === "run.boundary")).toEqual([]);
         expect(after.length).toBeGreaterThan(before.length);
@@ -468,7 +467,7 @@ function modeFor(gym: AgentGym) {
     };
 }
 
-async function gatedRun(turns = 2): Promise<{
+async function gatedRun(): Promise<{
     readonly first: { readonly id: string; readonly runId: string };
     readonly gym: AgentGym;
     readonly release: () => void;
@@ -481,25 +480,28 @@ async function gatedRun(turns = 2): Promise<{
     const gate = new Promise<void>((resolve) => {
         release = resolve;
     });
+    let realCallIndex = 0;
     const gym = await startGym({
         inference: async (request): Promise<GymTurn> => {
-            if (request.callIndex === 0) {
+            if (request.instructions.includes("You name a piece of work")) {
+                return { content: [{ text: "<title>Boundary run</title>", type: "text" }] };
+            }
+            const current = realCallIndex;
+            realCallIndex += 1;
+            if (current === 0) {
                 started();
                 await gate;
             }
-            return { content: [{ text: `turn-${String(request.callIndex)}`, type: "text" }] };
+            return { content: [{ text: `turn-${String(current)}`, type: "text" }] };
         },
     });
-    const first = await gym.send("initial work", {
-        mutationId: `rb-gated-first-${String(turns)}`,
-        wait: false,
-    });
+    const first = await gym.send("initial work", { wait: false });
     await providerStarted;
     return { first, gym, release };
 }
 
-function gymSteer(gym: AgentGym, text: string, mutationId: string) {
-    return gym.steer(text, { mutationId, wait: false });
+function gymSteer(gym: AgentGym, text: string, id?: string) {
+    return gym.steer(text, { ...(id === undefined ? {} : { id }), wait: false });
 }
 
 async function pendingText(gym: AgentGym, text: string): Promise<void> {

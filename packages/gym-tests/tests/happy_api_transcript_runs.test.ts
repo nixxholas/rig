@@ -25,7 +25,6 @@ describe("public transcript and run APIs", () => {
 
         const sent = await gym.client.sendMessage(gym.defaultSessionId, {
             mode: modeFor(gym),
-            mutationId: "transcript-provider-startup-failure",
             text: "Reply with exactly: rig beta zero works",
         });
         const started = await waitForStarted(gym, gym.defaultSessionId, sent.message.id);
@@ -56,7 +55,11 @@ describe("public transcript and run APIs", () => {
 
         await gym.restart();
         expect(await gym.client.getMessages(gym.defaultSessionId)).toEqual(beforeRestart);
-        expect(gym.inference.requests).toHaveLength(1);
+        expect(
+            gym.inference.requests.filter(
+                (request) => !request.instructions.includes("You name a piece of work"),
+            ),
+        ).toHaveLength(1);
     }, 60_000);
 
     it("keeps queued messages pending, accepts them in order, and pages whole runs", async () => {
@@ -99,7 +102,6 @@ describe("public transcript and run APIs", () => {
 
         const firstResponse = await gym.client.sendMessage(gym.defaultSessionId, {
             mode: modeFor(gym),
-            mutationId: "transcript-queue-first",
             text: "first question",
         });
         const firstStarted = await waitForStarted(
@@ -114,7 +116,6 @@ describe("public transcript and run APIs", () => {
         const secondResponse = await gym.client.sendMessage(gym.defaultSessionId, {
             delivery: "queue",
             mode: modeFor(gym),
-            mutationId: "transcript-queue-second",
             text: "second question",
         });
         expect(secondResponse.message).toMatchObject({
@@ -204,7 +205,6 @@ describe("public transcript and run APIs", () => {
 
         const first = await gym.client.sendMessage(gym.defaultSessionId, {
             mode: modeFor(gym),
-            mutationId: "transcript-steering-first",
             text: "start work",
         });
         const firstStarted = await waitForStarted(gym, gym.defaultSessionId, first.message.id);
@@ -216,13 +216,11 @@ describe("public transcript and run APIs", () => {
             gym.client.sendMessage(gym.defaultSessionId, {
                 delivery: "steer" as const,
                 mode: modeFor(gym),
-                mutationId: "transcript-steering-one",
                 text: "steer one",
             }),
             gym.client.sendMessage(gym.defaultSessionId, {
                 delivery: "steer" as const,
                 mode: modeFor(gym),
-                mutationId: "transcript-steering-two",
                 text: "steer two",
             }),
         ];
@@ -287,7 +285,6 @@ describe("public transcript and run APIs", () => {
 
         const sent = await gym.client.sendMessage(gym.defaultSessionId, {
             mode: modeFor(gym),
-            mutationId: "transcript-abort-send",
             text: "keep working",
         });
         const started = await waitForStarted(gym, gym.defaultSessionId, sent.message.id);
@@ -492,7 +489,6 @@ describe("public transcript and run APIs", () => {
         await stream.opened();
         const first = await gym.send("stream a resettable answer", {
             permissionMode: "full_access",
-            mutationId: "transcript-delta-reset",
         });
         await waitForFinished(gym, gym.defaultSessionId, first.runId);
 
@@ -533,7 +529,6 @@ describe("public transcript and run APIs", () => {
 
         const second = await gym.send("call a tool", {
             permissionMode: "full_access",
-            mutationId: "transcript-tool-data",
         });
         await waitForFinished(gym, gym.defaultSessionId, second.runId);
         const full = await gym.client.getMessages(gym.defaultSessionId);

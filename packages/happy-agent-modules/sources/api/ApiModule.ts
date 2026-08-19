@@ -172,6 +172,7 @@ export class ApiModule implements AgentModule {
         string,
         { readonly promise: Promise<void>; readonly resolve: () => void }
     >();
+    readonly #messageSendGates = new Map<string, Promise<void>>();
     readonly #processOwners = new Map<string, string>();
     readonly #agentEventChains = new Map<string, Promise<void>>();
     readonly #backgroundMetadataUpdates = new Set<Promise<void>>();
@@ -290,6 +291,7 @@ export class ApiModule implements AgentModule {
         this.#acceptedMessageBatches.clear();
         for (const pending of this.#pendingMessageAnnouncements.values()) pending.resolve();
         this.#pendingMessageAnnouncements.clear();
+        this.#messageSendGates.clear();
         this.#processOwners.clear();
         await Promise.allSettled(this.#agentEventChains.values());
         this.#agentEventChains.clear();
@@ -1658,113 +1660,117 @@ export class ApiModule implements AgentModule {
     ): Promise<void> {
         await this.#assertTopLevelAgent(ctx, agentId);
         const body = await bodyAs(request, messageSendBodySchema, "agent message");
-        const selected = this.#config.models.find(
-            (model) => model.providerId === body.mode.providerId && model.id === body.mode.modelId,
-        );
-        if (
-            selected === undefined ||
-            !selected.effortLevels.some((effort) => effort === body.mode.effort) ||
-            (body.mode.serviceTier !== null &&
-                !selected.serviceTiers?.some((tier) => tier === body.mode.serviceTier))
-        ) {
-            throw invalidRequest(
-                "The selected provider, model, effort, or service tier is unavailable.",
+        const id = body.id ?? createId();
+        await this.#serializeMessageSend(id, async () => {
+            const cursor = this.#journal.cursor();
+            const existing = await ctx.inTx(
+                async (txCtx) => await this.#sentUserMessage(txCtx, agentId, id),
             );
-        }
-        const effort = selected.effortLevels.find((candidate) => candidate === body.mode.effort);
-        if (effort === undefined) throw invalidRequest("The selected effort is unavailable.");
-        const serviceTier =
-            body.mode.serviceTier === null
-                ? undefined
-                : selected.serviceTiers?.find((candidate) => candidate === body.mode.serviceTier);
-        await this.#nameFromFirstMessage(ctx, agentId, body.text, body.mode.providerId);
-        const id = createId();
-        const content = [{ type: "text" as const, text: body.text }, ...(body.content ?? [])];
-        const options: AgentBaseMessageOptions = {
-            id,
-            provider: body.mode.providerId,
-            model: body.mode.modelId,
-            effort,
-            ...(serviceTier === undefined ? {} : { serviceTier }),
-            permissionMode: body.mode.permissionMode,
-            metadata: {
-                ...USER_MESSAGE_ORIGIN_METADATA,
+            if (existing !== undefined) {
+                sendJson(response, 202, { message: existing, cursor });
+                return;
+            }
+
+            const selected = this.#config.models.find(
+                (model) =>
+                    model.providerId === body.mode.providerId && model.id === body.mode.modelId,
+            );
+            if (
+                selected === undefined ||
+                !selected.effortLevels.some((effort) => effort === body.mode.effort) ||
+                (body.mode.serviceTier !== null &&
+                    !selected.serviceTiers?.some((tier) => tier === body.mode.serviceTier))
+            ) {
+                throw invalidRequest(
+                    "The selected provider, model, effort, or service tier is unavailable.",
+                );
+            }
+            const effort = selected.effortLevels.find(
+                (candidate) => candidate === body.mode.effort,
+            );
+            if (effort === undefined) throw invalidRequest("The selected effort is unavailable.");
+            const serviceTier =
+                body.mode.serviceTier === null
+                    ? undefined
+                    : selected.serviceTiers?.find(
+                          (candidate) => candidate === body.mode.serviceTier,
+                      );
+            await this.#nameFromFirstMessage(ctx, agentId, body.text, body.mode.providerId);
+            const content = [{ type: "text" as const, text: body.text }, ...(body.content ?? [])];
+            const options: AgentBaseMessageOptions = {
+                id,
+                provider: body.mode.providerId,
+                model: body.mode.modelId,
+                effort,
+                ...(serviceTier === undefined ? {} : { serviceTier }),
+                permissionMode: body.mode.permissionMode,
+                metadata: {
+                    ...USER_MESSAGE_ORIGIN_METADATA,
+                    mode: body.mode,
+                },
+            };
+            const agents = this.#agentSystem();
+            const createdAt = Date.now();
+            const delivery = body.delivery ?? "queue";
+            const pending: HistoryPendingMessage = {
+                id,
+                agentId,
+                role: "user",
+                status: "pending",
+                delivery,
+                createdAt,
+                blocks: content.map((block) =>
+                    block.type === "text"
+                        ? { type: "text" as const, text: block.text }
+                        : {
+                              type: "image" as const,
+                              mediaType: block.mimeType,
+                              data: block.data,
+                          },
+                ),
                 mode: body.mode,
-                ...(body.mutationId === undefined ? {} : { mutationId: body.mutationId }),
-            },
-        };
-        const agents = this.#agentSystem();
-        const cursor = this.#journal.cursor();
-        const createdAt = Date.now();
-        const delivery = body.delivery ?? "queue";
-        const pending: HistoryPendingMessage = {
-            id,
-            agentId,
-            role: "user",
-            status: "pending",
-            delivery,
-            createdAt,
-            blocks: content.map((block) =>
-                block.type === "text"
-                    ? { type: "text" as const, text: block.text }
-                    : {
-                          type: "image" as const,
-                          mediaType: block.mimeType,
-                          data: block.data,
-                      },
-            ),
-            mode: body.mode,
-            runId: null,
-        };
-        this.#announcedPendingMessages.add(id);
-        this.#beginPendingMessageAnnouncement(id);
-        boundedAdd(this.#apiPendingMessageIds, id, MAX_ANNOUNCED_PENDING_MESSAGES);
-        if (this.#announcedPendingMessages.size > MAX_ANNOUNCED_PENDING_MESSAGES) {
-            const oldest = this.#announcedPendingMessages.values().next().value as
-                | string
-                | undefined;
-            if (oldest !== undefined) this.#announcedPendingMessages.delete(oldest);
-        }
-        try {
-            await ctx.inTx(async (txCtx) => {
-                await this.#history.queuePending(txCtx, pending);
-                if (delivery === "steer") {
-                    await agents.steer(txCtx, agentId, { role: "user", content }, options);
-                } else {
-                    await agents.send(txCtx, agentId, { role: "user", content }, options);
-                }
+                runId: null,
+            };
+            this.#announcedPendingMessages.add(id);
+            this.#beginPendingMessageAnnouncement(id);
+            boundedAdd(this.#apiPendingMessageIds, id, MAX_ANNOUNCED_PENDING_MESSAGES);
+            if (this.#announcedPendingMessages.size > MAX_ANNOUNCED_PENDING_MESSAGES) {
+                const oldest = this.#announcedPendingMessages.values().next().value as
+                    | string
+                    | undefined;
+                if (oldest !== undefined) this.#announcedPendingMessages.delete(oldest);
+            }
+            try {
+                await ctx.inTx(async (txCtx) => {
+                    await this.#history.queuePending(txCtx, pending);
+                    if (delivery === "steer") {
+                        await agents.steer(txCtx, agentId, { role: "user", content }, options);
+                    } else {
+                        await agents.send(txCtx, agentId, { role: "user", content }, options);
+                    }
+                });
+            } catch (error) {
+                this.#announcedPendingMessages.delete(id);
+                this.#apiPendingMessageIds.delete(id);
+                this.#finishPendingMessageAnnouncement(id);
+                throw error;
+            }
+            const accepted = await this.#history.message(ctx, agentId, id);
+            const message =
+                accepted === undefined
+                    ? pendingMessageResource(pending)
+                    : messageResource(accepted);
+            this.#journal.append("message.created", {
+                agentId,
+                runId: null,
+                message: pendingMessageResource(pending),
             });
-        } catch (error) {
             this.#announcedPendingMessages.delete(id);
-            this.#apiPendingMessageIds.delete(id);
             this.#finishPendingMessageAnnouncement(id);
-            throw error;
-        }
-        const accepted = await this.#history.message(ctx, agentId, id);
-        const message = {
-            id,
-            role: "user",
-            status: accepted === undefined ? "pending" : "accepted",
-            delivery,
-            createdAt,
-            content,
-            mode: body.mode,
-            runId: accepted?.runId ?? null,
-        };
-        this.#journal.append("message.created", {
-            agentId,
-            runId: null,
-            message: { ...message, status: "pending", runId: null },
-            ...(body.mutationId === undefined ? {} : { mutationId: body.mutationId }),
+            this.#flushAcceptedMessages(agentId);
+            await this.#updateAgentMetadata(ctx, agentId, { lastMode: body.mode });
+            sendJson(response, 202, { message, cursor });
         });
-        this.#announcedPendingMessages.delete(id);
-        this.#finishPendingMessageAnnouncement(id);
-        this.#flushAcceptedMessages(agentId);
-        await this.#withMutationId(
-            body.mutationId,
-            async () => await this.#updateAgentMetadata(ctx, agentId, { lastMode: body.mode }),
-        );
-        sendJson(response, 202, { message, cursor });
     }
 
     async #handleAgentMessages(
@@ -2849,6 +2855,44 @@ export class ApiModule implements AgentModule {
         const agents = this.#agents;
         if (agents === undefined) throw new Error("The API module has not started.");
         return agents;
+    }
+
+    /** Serialize concurrent retries before they touch the shared pending-announcement state. */
+    async #serializeMessageSend(messageId: string, operation: () => Promise<void>): Promise<void> {
+        const predecessor = this.#messageSendGates.get(messageId);
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        this.#messageSendGates.set(messageId, gate);
+        if (predecessor !== undefined) await predecessor;
+        try {
+            await operation();
+        } finally {
+            release();
+            if (this.#messageSendGates.get(messageId) === gate) {
+                this.#messageSendGates.delete(messageId);
+            }
+        }
+    }
+
+    /** Read one existing client-owned user message from a single transaction snapshot. */
+    async #sentUserMessage(
+        ctx: Context,
+        agentId: string,
+        messageId: string,
+    ): Promise<Record<string, unknown> | undefined> {
+        const accepted = await this.#history.message(ctx, agentId, messageId);
+        if (accepted !== undefined) {
+            if (accepted.role !== "user") {
+                throw new ApiError(409, "conflict", "The message ID is already in use.");
+            }
+            return messageResource(accepted);
+        }
+        const pending = (await this.#history.pending(ctx, agentId)).find(
+            (message) => message.id === messageId,
+        );
+        return pending === undefined ? undefined : pendingMessageResource(pending);
     }
 
     async #withMutationId<Value>(

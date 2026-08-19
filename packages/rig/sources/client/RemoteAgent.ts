@@ -286,9 +286,7 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         await this.#client.sendMessage(this.id, {
             ...toSendBody(content, options.displayText, this.#messageMode(selection)),
             delivery: "steer",
-            ...(options.clientSubmissionId === undefined
-                ? {}
-                : { mutationId: options.clientSubmissionId }),
+            ...(options.clientSubmissionId === undefined ? {} : { id: options.clientSubmissionId }),
         });
         this.#clearSelection(selection);
     }
@@ -306,7 +304,7 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
                 delivery: "queue",
                 ...(options.clientSubmissionId === undefined
                     ? {}
-                    : { mutationId: options.clientSubmissionId }),
+                    : { id: options.clientSubmissionId }),
             })
             .catch((error: unknown) => {
                 this.#activeSend = false;

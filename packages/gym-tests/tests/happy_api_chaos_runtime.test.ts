@@ -518,7 +518,6 @@ async function applyAction(
         }
         case "send-background": {
             const accepted = await gym.send(`runtime process ${context.seed.label}`, {
-                mutationId: action.mutationId,
                 wait: false,
             });
             expect(accepted.runId).toEqual(expect.any(String));

@@ -90,7 +90,8 @@ export interface GymSendOptions {
     readonly modelId?: string;
     readonly providerId?: string;
     readonly permissionMode?: AgentPermissionMode;
-    readonly mutationId?: string;
+    /** Optional client-chosen message identity. */
+    readonly id?: string;
 }
 
 export interface GymCreateSessionOptions {
@@ -521,7 +522,7 @@ class AgentGymInstance implements AgentGym {
                 serviceTier: null,
             },
             text,
-            ...(options.mutationId === undefined ? {} : { mutationId: options.mutationId }),
+            ...(options.id === undefined ? {} : { id: options.id }),
         };
     }
 

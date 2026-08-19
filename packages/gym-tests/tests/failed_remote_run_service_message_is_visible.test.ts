@@ -17,8 +17,7 @@ describe("failed remote run service messages", () => {
                     auth_mode: "chatgpt",
                     tokens: { access_token: "codex-token-without-an-account-id" },
                 }),
-                "happy/config/happy.toml":
-                    "[settings]\ninference_max_retries = 0\n",
+                "happy/config/happy.toml": "[settings]\ninference_max_retries = 0\n",
             },
             inference: [],
             modelId: "openai/gpt-5.6-sol",

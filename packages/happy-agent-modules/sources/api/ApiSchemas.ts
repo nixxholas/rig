@@ -1,4 +1,5 @@
 import { Type } from "@sinclair/typebox";
+import { cuid2Schema } from "@slopus/happy-agent-base";
 
 import { createTerminalInputSchema, resizeTerminalInputSchema } from "../terminals/index.js";
 
@@ -91,7 +92,7 @@ export const workspaceCreateBodySchema = Type.Object(
     {
         agentId: Type.Optional(apiIdSchema),
         baseRef: Type.Optional(Type.String({ minLength: 1, maxLength: 1_024 })),
-        id: Type.Optional(apiIdSchema),
+        id: Type.Optional(cuid2Schema),
         name: Type.String({ minLength: 1, maxLength: 500 }),
         nameConfigured: Type.Optional(Type.Boolean()),
         mutationId: Type.Optional(mutationIdSchema),
@@ -159,8 +160,8 @@ export const messageSendBodySchema = Type.Object(
             ),
         ),
         delivery: Type.Optional(Type.Union([Type.Literal("queue"), Type.Literal("steer")])),
+        id: Type.Optional(apiIdSchema),
         mode: agentModeSchema,
-        mutationId: Type.Optional(mutationIdSchema),
         text: Type.String({ minLength: 1, maxLength: 1_000_000 }),
     },
     { additionalProperties: false },

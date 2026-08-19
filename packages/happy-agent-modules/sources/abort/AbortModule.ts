@@ -9,7 +9,8 @@ export const MAX_ABORT_CHAIN_AGENTS = 10_000;
  *
  * The module reads one stable ancestry snapshot and registers every abort on the same transaction.
  * A traversal or resolution failure therefore releases no aborts, while commit immediately
- * signals the whole chain. It never waits for any run, provider, tool, or descendant to settle.
+ * signals the whole chain from its leaves to its root. It never waits for any run, provider,
+ * tool, or descendant to settle.
  */
 export class AbortModule implements AgentModule {
     readonly name = "abort";
@@ -21,7 +22,10 @@ export class AbortModule implements AgentModule {
         const agents = this.#requireAgents();
         await ctx.inTx(async (txCtx) => {
             const chain = await descendantChain(txCtx, agents, agentId);
-            for (const targetAgentId of chain) {
+            // A descendant can report its settlement to its parent. Release leaf cancellations
+            // first so those reports arrive before the ancestor's cancellation and cannot reopen
+            // an ancestor that was already signalled.
+            for (const targetAgentId of [...chain].reverse()) {
                 await agents.abort(txCtx, targetAgentId);
             }
         });

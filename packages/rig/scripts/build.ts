@@ -76,7 +76,9 @@ function bundleAutoPrompts(): Plugin {
         name: "bundle-auto-prompts",
         setup(build) {
             build.onLoad(
-                { filter: /happy-agent-modules\/sources\/auto\/impl\/createPermissionReviewInstructions\.ts$/ },
+                {
+                    filter: /happy-agent-modules\/sources\/auto\/impl\/createPermissionReviewInstructions\.ts$/,
+                },
                 async ({ path }) => ({
                     contents: (await readFile(path, "utf8")).replaceAll(
                         "../prompts/",

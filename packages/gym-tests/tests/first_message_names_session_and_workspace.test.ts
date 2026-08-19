@@ -14,9 +14,7 @@ describe("first-message naming", () => {
 
         expect((await gym.client.getAgent(gym.defaultSessionId)).agent.title).toBeNull();
 
-        await gym.send("Investigate why the project file list is empty.", {
-            mutationId: "first-message-session-title",
-        });
+        await gym.send("Investigate why the project file list is empty.");
 
         const named = await gym.waitUntil(async () => {
             const agent = (await gym.client.getAgent(gym.defaultSessionId)).agent;
@@ -60,7 +58,6 @@ describe("first-message naming", () => {
             })
         ).agent;
         await gym.send("Investigate why the project file list is empty.", {
-            mutationId: "first-message-workspace-title",
             sessionId: agent.id,
         });
 

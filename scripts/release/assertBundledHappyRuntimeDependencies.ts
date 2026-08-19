@@ -1,9 +1,6 @@
 import type { PackageManifest } from "./PackageManifest.js";
 
-const BUNDLED_HAPPY_PACKAGES = [
-    "@slopus/happy-agent",
-    "@slopus/happy-agent-modules",
-] as const;
+const BUNDLED_HAPPY_PACKAGES = ["@slopus/happy-agent", "@slopus/happy-agent-modules"] as const;
 
 /**
  * Ensures unpublished Happy workspaces are available to Rig's build without leaking into the

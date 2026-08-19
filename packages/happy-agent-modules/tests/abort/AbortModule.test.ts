@@ -51,7 +51,7 @@ describe("AbortModule", () => {
         try {
             await abort.abort(database.context, "root");
 
-            expect(collection.aborted).toEqual(["root", "child-a", "child-b", "grandchild"]);
+            expect(collection.aborted).toEqual(["grandchild", "child-b", "child-a", "root"]);
             expect(new Set(collection.databases).size).toBe(1);
             expect(collection.databases[0]).not.toBe(database.database);
         } finally {
@@ -70,7 +70,7 @@ describe("AbortModule", () => {
                 expect(new Set(collection.databases)).toEqual(new Set([txCtx.db]));
             });
 
-            expect(collection.aborted).toEqual(["root", "child-a", "child-b", "grandchild"]);
+            expect(collection.aborted).toEqual(["grandchild", "child-b", "child-a", "root"]);
         } finally {
             database.close();
         }

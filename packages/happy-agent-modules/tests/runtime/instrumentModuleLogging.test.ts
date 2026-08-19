@@ -6,7 +6,7 @@ import type {
 } from "@slopus/happy-agent-base";
 import { createRootContext, withLogger, type LogContext, type Logger } from "@steve.kite/stdlib";
 import type { LibSQLDatabase } from "drizzle-orm/libsql";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { instrumentModuleLogging } from "../../sources/runtime/instrumentModuleLogging.js";
 
@@ -16,8 +16,14 @@ interface LogRecord {
     readonly message: string;
 }
 
+afterEach(() => {
+    vi.useRealTimers();
+});
+
 describe("instrumentModuleLogging", () => {
     it("labels module startup and every hook context while preserving results", async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
         const records: LogRecord[] = [];
         const ctx = withLogger(createRootContext(), recordingLogger(records));
         const module: AgentModule<AnyAgentTool, LibSQLDatabase> = {

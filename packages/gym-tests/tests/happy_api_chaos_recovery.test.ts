@@ -817,7 +817,6 @@ async function applyRecoveryAction(
                     providerId: "gym",
                     serviceTier: null,
                 },
-                mutationId,
                 text: action.text,
             });
             model.runtime.pendingRuns.add(agentId);

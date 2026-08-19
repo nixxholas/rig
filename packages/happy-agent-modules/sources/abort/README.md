@@ -12,14 +12,17 @@ abort each identity while one `ctx.inTx` transaction is active:
 
 ```text
 target ──> child ──> grandchild
-   │          │           │
-   └──────────┴───────────┴── abort signals issued together at commit
+   ③          ②           ①   abort signals issued together at commit
 ```
 
 If ancestry traversal or any abort request fails, the transaction rolls back and no abort signal is
 issued. On commit, every signal is issued immediately. The operation never waits for an agent loop,
 provider, tool, or descendant to finish settling. Nested callers reuse their transaction, so the
 operation composes with API and tool mutations without an early commit.
+
+Signals are registered from the deepest descendants back to the target. A descendant may report
+its settlement to its creator; leaf-first cancellation ensures that report arrives before the
+creator's own abort and cannot reopen an ancestor that was already canceled.
 
 The traversal is breadth-first, rejects cycles or duplicate identities, and refuses a chain larger
 than `MAX_ABORT_CHAIN_AGENTS` rather than consuming unbounded memory. The module owns no tools,

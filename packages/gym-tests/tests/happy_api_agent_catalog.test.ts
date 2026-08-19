@@ -189,7 +189,6 @@ describe("the public agent catalog API", () => {
         const accepted = await gym.send("remember this mode", {
             effort: "high",
             modelId: "gym/model-2",
-            mutationId: "catalog-send-mode",
             permissionMode: "workspace_write",
             sessionId: first.id,
         });
@@ -336,9 +335,7 @@ describe("the public agent catalog API", () => {
         });
 
         const root = await rootProject(gym);
-        await gym.send("Please create a collaborator.", {
-            mutationId: "catalog-create-subagent-run",
-        });
+        await gym.send("Please create a collaborator.");
         const activity = await gym.waitUntil(
             async () => {
                 const current = await gym.client.getAgentActivity(gym.defaultSessionId);

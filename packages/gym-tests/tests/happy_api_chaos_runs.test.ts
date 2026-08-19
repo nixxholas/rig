@@ -366,7 +366,6 @@ async function executeRunAction(
     switch (action.kind) {
         case "fusionStart": {
             const accepted = await gym.send(`[fusion-start] ${action.text}`, {
-                mutationId,
                 wait: false,
             });
             model.activeRunId = accepted.runId;
@@ -385,13 +384,11 @@ async function executeRunAction(
             const first = gym.client.sendMessage(gym.defaultSessionId, {
                 delivery: "steer",
                 mode: modeFor(gym),
-                mutationId: `${mutationId}-one`,
                 text: firstText,
             });
             const second = gym.client.sendMessage(gym.defaultSessionId, {
                 delivery: "steer",
                 mode: modeFor(gym),
-                mutationId: `${mutationId}-two`,
                 text: secondText,
             });
             const responses = await Promise.all([first, second]);
@@ -431,7 +428,7 @@ async function executeRunAction(
             };
         }
         case "queue": {
-            const accepted = await gym.send(`[queue] ${action.text}`, { mutationId });
+            const accepted = await gym.send(`[queue] ${action.text}`);
             model.activeRunId = null;
             return {
                 acceptedMessageIds: [accepted.id],
@@ -439,7 +436,6 @@ async function executeRunAction(
         }
         case "steer": {
             const accepted = await gym.steer(`[steer] ${action.text}`, {
-                mutationId,
                 wait: true,
             });
             model.activeRunId = null;
@@ -449,7 +445,6 @@ async function executeRunAction(
         }
         case "abortStart": {
             const accepted = await gym.send(`[abort-start] ${action.text}`, {
-                mutationId,
                 wait: false,
             });
             model.activeRunId = accepted.runId;
@@ -508,7 +503,6 @@ async function executeRunAction(
         }
         case "questionStart": {
             const accepted = await gym.send(`[question] ${action.text}`, {
-                mutationId,
                 wait: false,
             });
             model.activeRunId = accepted.runId;
@@ -553,7 +547,7 @@ async function executeRunAction(
             };
         }
         case "processStart": {
-            await gym.send(`[process] ${action.text}`, { mutationId });
+            await gym.send(`[process] ${action.text}`);
             const running = await barrier.waitFor(
                 (snapshot) =>
                     snapshot.activity.processes.some((process) => process.status === "running"),
