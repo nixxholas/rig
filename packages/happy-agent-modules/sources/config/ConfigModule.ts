@@ -974,6 +974,7 @@ export class ConfigModule implements AgentModule {
     readonly #scripted: ConfigInferenceOverride | ConfigInferenceFactory | undefined;
     readonly #environment: Readonly<NodeJS.ProcessEnv>;
     #models: readonly AgentModel[] | undefined;
+    readonly #catalogNotices: string[] = [];
     #projectsHome: string | undefined;
     #providers: AgentProviders | undefined;
     #resolvedScripted: ConfigInferenceOverride | undefined;
@@ -1004,7 +1005,9 @@ export class ConfigModule implements AgentModule {
      * entry is the account every agent starts on.
      */
     get models(): readonly AgentModel[] {
-        this.#models ??= this.#resolveScripted()?.models ?? agentModels(this.configuration);
+        this.#models ??=
+            this.#resolveScripted()?.models ??
+            agentModels(this.configuration, (message) => this.#catalogNotices.push(message));
         return this.#models;
     }
 
@@ -1014,6 +1017,15 @@ export class ConfigModule implements AgentModule {
             (model) => model.providerId === providerId && model.id === modelId,
         );
         return enabled ? agentModelContext(modelId) : undefined;
+    }
+
+    /**
+     * What the catalog ignored to stay serviceable: a configured default model or effort that
+     * no enabled provider satisfies. The daemon surfaces these instead of refusing to start.
+     */
+    get catalogNotices(): readonly string[] {
+        void this.models;
+        return this.#catalogNotices;
     }
 
     /**
@@ -1036,7 +1048,9 @@ export class ConfigModule implements AgentModule {
         if (typeof this.#scripted !== "function") return this.#scripted;
         this.#resolvedScripted ??= this.#scripted(
             {
-                models: agentModels(this.configuration),
+                models: agentModels(this.configuration, (message) =>
+                    this.#catalogNotices.push(message),
+                ),
                 providers: agentProviders(this.configuration),
             },
             this.configuration,

@@ -4,6 +4,7 @@ export { getDefaultLocalConfigPath } from "./getDefaultLocalConfigPath.js";
 export { getDefaultRuntimeConfigPath } from "./getDefaultRuntimeConfigPath.js";
 export { getHappyConfigDirectory } from "./getHappyConfigDirectory.js";
 export { getRigHome } from "./getRigHome.js";
+export { createProjectConfigSecurityNotice } from "./createProjectConfigSecurityNotice.js";
 export { loadConfig } from "./loadConfig.js";
 export { mergeConfigValues } from "./mergeConfigValues.js";
 export {

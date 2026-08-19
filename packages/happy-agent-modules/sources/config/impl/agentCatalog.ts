@@ -107,9 +107,15 @@ const BEDROCK_CATALOG: readonly CatalogAgentModel[] = [
 /**
  * Every model the configuration actually enables, with the configured default first.
  *
- * The order matters: the first entry is what a session gets when it names nothing.
+ * The order matters: the first entry is what a session gets when it names nothing. A configured
+ * default that no enabled provider serves — a removed model, a disabled provider, or a hostile
+ * project file — must not keep the daemon down: the first available model stands in and the
+ * ignored value is reported through `onIgnored` for the caller to surface.
  */
-export function agentModels(configuration: HappyAgentConfiguration): readonly CatalogAgentModel[] {
+export function agentModels(
+    configuration: HappyAgentConfiguration,
+    onIgnored?: (message: string) => void,
+): readonly CatalogAgentModel[] {
     const values = configuration.values;
     const available: CatalogAgentModel[] = [];
     for (const [id, provider] of Object.entries(values.providers)) {
@@ -131,21 +137,24 @@ export function agentModels(configuration: HappyAgentConfiguration): readonly Ca
                 (wantedProvider === undefined || candidate.providerId === wantedProvider),
         ) ?? undefined;
     if (chosen === undefined) {
-        throw new Error(
-            `The configured default model "${wantedModel}" is not served by any enabled provider.`,
-        );
+        const standIn = available[0];
+        if (standIn !== undefined) {
+            onIgnored?.(
+                `The configured default model "${wantedModel}" is not served by any enabled provider, so "${standIn.id}" stands in.`,
+            );
+        }
+        return available;
     }
     const effort = values.defaults.effort;
-    if (
-        effort !== undefined &&
-        !chosen.effortLevels.includes(effort as AgentModel["defaultEffort"])
-    ) {
-        throw new Error(
-            `The configured effort "${effort}" is not supported by model "${chosen.id}".`,
+    const effortSupported =
+        effort === undefined || chosen.effortLevels.includes(effort as AgentModel["defaultEffort"]);
+    if (!effortSupported) {
+        onIgnored?.(
+            `The configured effort "${effort ?? ""}" is not supported by model "${chosen.id}", so its own default effort stands in.`,
         );
     }
     const first =
-        effort === undefined
+        effort === undefined || !effortSupported
             ? chosen
             : { ...chosen, defaultEffort: effort as AgentModel["defaultEffort"] };
     return [first, ...available.filter((candidate) => candidate !== chosen)];

@@ -3,6 +3,7 @@ import { mergeConfigValues } from "./mergeConfigValues.js";
 import { readConfigFile } from "./readConfigFile.js";
 import { readProjectConfigFile } from "./readProjectConfigFile.js";
 import { resolveConfigPaths } from "./resolveConfigPaths.js";
+import { withoutProjectMachineSettings } from "./withoutProjectMachineSettings.js";
 import type { LoadedConfig, LoadConfigOptions } from "./types.js";
 
 export async function loadConfig(options: LoadConfigOptions = {}): Promise<LoadedConfig> {
@@ -20,7 +21,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Loade
         config: mergeConfigValues(
             DEFAULT_RIG_CONFIG,
             globalSource.values,
-            localSource.values,
+            withoutProjectMachineSettings(localSource.values),
             runtimeSource.values,
         ),
         paths,

@@ -11,7 +11,11 @@ import {
     HappyAgentEventHub,
     RemoteAgent,
 } from "../client/index.js";
-import { loadConfig, updateRuntimePreferences } from "../config/index.js";
+import {
+    createProjectConfigSecurityNotice,
+    loadConfig,
+    updateRuntimePreferences,
+} from "../config/index.js";
 import {
     getDebugRootDirectory,
     getNodeInspectorUrl,
@@ -221,6 +225,21 @@ export async function runApp(ctx: Context, options: RunAppOptions = {}): Promise
 
         const version = readPackageVersion();
         const tuiInspectorUrl = getNodeInspectorUrl();
+        const projectConfigNotice = createProjectConfigSecurityNotice(
+            loadedConfig.sources.local.values,
+            basename(loadedConfig.sources.local.path),
+        );
+        const initialNotices = [
+            ...(projectConfigNotice === undefined ? [] : [projectConfigNotice]),
+            ...(options.debug === true
+                ? [
+                      {
+                          text: `Each request may write private JSON records to ${getDebugRootDirectory(workspaceCwd)}. These files can include prompts, model responses, tool arguments, and tool results.`,
+                          title: "Debug logging enabled",
+                      },
+                  ]
+                : []),
+        ];
         const app = new CodingAssistantApp({
             agent,
             compactCompletedTurns,
@@ -245,16 +264,7 @@ export async function runApp(ctx: Context, options: RunAppOptions = {}): Promise
             ...(opened.pendingQuestion === null
                 ? {}
                 : { initialUserInputs: [toUserInputRequest(opened.pendingQuestion)] }),
-            ...(options.debug === true
-                ? {
-                      initialNotices: [
-                          {
-                              text: `Each request may write private JSON records to ${getDebugRootDirectory(workspaceCwd)}. These files can include prompts, model responses, tool arguments, and tool results.`,
-                              title: "Debug logging enabled",
-                          },
-                      ],
-                  }
-                : {}),
+            ...(initialNotices.length === 0 ? {} : { initialNotices }),
             onDefaultModelChange: (preference) =>
                 enqueueRuntimeConfigWrite(() =>
                     updateRuntimePreferences(loadedConfig.paths.runtime, {

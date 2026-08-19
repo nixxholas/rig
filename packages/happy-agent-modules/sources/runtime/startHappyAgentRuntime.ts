@@ -201,6 +201,9 @@ export async function startHappyAgentRuntime(
         }
 
         const models = config.models;
+        for (const notice of config.catalogNotices) {
+            ctx.log.warn(notice, {});
+        }
         const provider = models[0]?.providerId;
         if (provider === undefined) throw new Error("No model is enabled by the configuration.");
         const providers = config.providers;
