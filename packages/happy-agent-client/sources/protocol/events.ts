@@ -8,7 +8,6 @@
 
 import type { Cuid2, EventCursor, ResourceVersion, Timestamp } from "./common.js";
 import type { Agent, AgentDraftSnapshot } from "./agents.js";
-import type { Compaction } from "./compactions.js";
 import type { GitState } from "./git.js";
 import type { Message, Run } from "./messages.js";
 import type { BackgroundProcess } from "./processes.js";
@@ -59,9 +58,6 @@ export interface GitUpdatedPayload {
 
 export type AgentCreatedPayload = MutationEcho & { agent: Agent };
 export type AgentUpdatedPayload = ResourceUpdate<Agent> & { agentId: Cuid2 };
-
-export type CompactionCreatedPayload = MutationEcho & { compaction: Compaction };
-export type CompactionUpdatedPayload = ResourceUpdate<Compaction> & { compactionId: Cuid2 };
 
 /** Current context is computed state, so it carries a complete replacement and no version chain. */
 export interface AgentContextUpdatedPayload {
@@ -177,8 +173,6 @@ export type HappyAgentEvent =
     | EventEnvelope<"agent.updated", AgentUpdatedPayload>
     | EventEnvelope<"agent.context.updated", AgentContextUpdatedPayload>
     | EventEnvelope<"agent.draft.updated", AgentDraftUpdatedPayload>
-    | EventEnvelope<"compaction.created", CompactionCreatedPayload>
-    | EventEnvelope<"compaction.updated", CompactionUpdatedPayload>
     | EventEnvelope<"process.started", ProcessStartedPayload>
     | EventEnvelope<"process.updated", ProcessUpdatedPayload>
     | EventEnvelope<"process.exited", ProcessUpdatedPayload>

@@ -21,7 +21,6 @@ import type {
     SaveAgentDraftRequest,
 } from "./protocol/agents.js";
 import type { AgentBootstrapResponse, DesktopBootstrapResponse } from "./protocol/bootstrap.js";
-import type { CompactionListQuery, CompactionListResponse } from "./protocol/compactions.js";
 import type {
     ConfigPatch,
     ConfigResponse,
@@ -912,23 +911,6 @@ export class HappyAgentClient {
             method: "POST",
             path: `v0/agents/${encodeURIComponent(agentId)}/compact`,
             json: request,
-            signal: options.signal,
-        });
-    }
-
-    /** `GET /v0/agents/:agentId/compactions` — durable lifecycle history, newest first. */
-    async listAgentCompactions(
-        agentId: Cuid2,
-        query: CompactionListQuery = {},
-        options: RequestOptions = {},
-    ): Promise<CompactionListResponse> {
-        return await this.#json({
-            method: "GET",
-            path: `v0/agents/${encodeURIComponent(agentId)}/compactions`,
-            query: {
-                before: query.before,
-                limit: query.limit,
-            },
             signal: options.signal,
         });
     }

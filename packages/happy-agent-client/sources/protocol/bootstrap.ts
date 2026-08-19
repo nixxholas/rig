@@ -2,7 +2,6 @@
 
 import type { AgentDraftResponse, AgentModeResponse, AgentResponse } from "./agents.js";
 import type { EventCursor } from "./common.js";
-import type { Compaction } from "./compactions.js";
 import type { DaemonConfig, OnboardingState } from "./daemon.js";
 import type { UserMessage } from "./messages.js";
 import type { Profile } from "./profile.js";
@@ -21,10 +20,6 @@ export interface AgentBootstrapResponse
     extends AgentDraftResponse, AgentModeResponse, AgentResponse, AgentUsageResponse {
     /** Queued and steering messages not yet accepted by inference, oldest first. */
     pending: UserMessage[];
-    /** The newest durable compaction page, newest first. */
-    compactions: Compaction[];
-    /** Whether older compactions remain on the focused history endpoint. */
-    compactionsHasMore: boolean;
     cursor: EventCursor;
 }
 

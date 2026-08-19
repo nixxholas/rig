@@ -10,6 +10,7 @@ import { type Static, Type } from "@sinclair/typebox";
 import {
     cuid2Schema,
     Nullable,
+    timestampSchema,
     type Cuid2,
     type EventCursor,
     type MessageMode,
@@ -144,7 +145,12 @@ export const toolPresentationSchema = Type.Union([
 export type ToolPresentation = Static<typeof toolPresentationSchema>;
 
 /** What is in a message, in order. */
-export type MessageBlock = TextBlock | ImageBlock | ReasoningBlock | ToolCallBlock;
+export type MessageBlock =
+    | TextBlock
+    | ImageBlock
+    | ReasoningBlock
+    | ToolCallBlock
+    | CompactionBlock;
 
 /** Stable provenance carried with a message without exposing internal module metadata. */
 export interface MessageMetadata {
@@ -229,6 +235,67 @@ export interface ReviewedToolCallBlock extends ToolCallBlockBase {
 /** One tool invocation. Review metadata is present as one complete, discriminated pair. */
 export type ToolCallBlock = UnreviewedToolCallBlock | ReviewedToolCallBlock;
 
+/** What requested a context compaction. */
+export const compactionTriggerSchema = Type.Union([
+    Type.Literal("manual"),
+    Type.Literal("automatic"),
+]);
+export type CompactionTrigger = Static<typeof compactionTriggerSchema>;
+
+const compactionBlockBaseSchema = Type.Object({
+    type: Type.Literal("compaction"),
+    trigger: compactionTriggerSchema,
+    /** Durable history messages whose model-context representations this attempt targets. */
+    replacedMessageIds: Type.Array(cuid2Schema, { uniqueItems: true }),
+    /** Exact provider-measured input context before compaction, when available. */
+    tokensBefore: Nullable(Type.Integer({ minimum: 0 })),
+    startedAt: timestampSchema,
+});
+
+/** A compaction that has started but has not settled. */
+export const runningCompactionBlockSchema = Type.Composite([
+    compactionBlockBaseSchema,
+    Type.Object({
+        status: Type.Literal("running"),
+        tokensAfter: Type.Null(),
+        failureReason: Type.Null(),
+        completedAt: Type.Null(),
+    }),
+]);
+export type RunningCompactionBlock = Static<typeof runningCompactionBlockSchema>;
+
+/** A successfully replaced context, optionally measured by a later inference. */
+export const completedCompactionBlockSchema = Type.Composite([
+    compactionBlockBaseSchema,
+    Type.Object({
+        status: Type.Literal("completed"),
+        tokensAfter: Nullable(Type.Integer({ minimum: 0 })),
+        failureReason: Type.Null(),
+        completedAt: timestampSchema,
+    }),
+]);
+export type CompletedCompactionBlock = Static<typeof completedCompactionBlockSchema>;
+
+/** A provider failure, cancellation, or interrupted compaction. */
+export const failedCompactionBlockSchema = Type.Composite([
+    compactionBlockBaseSchema,
+    Type.Object({
+        status: Type.Literal("failed"),
+        tokensAfter: Type.Null(),
+        failureReason: Type.String({ minLength: 1, maxLength: 8_192 }),
+        completedAt: timestampSchema,
+    }),
+]);
+export type FailedCompactionBlock = Static<typeof failedCompactionBlockSchema>;
+
+/** One typed context-compaction lifecycle inside a durable service message. */
+export const compactionBlockSchema = Type.Union([
+    runningCompactionBlockSchema,
+    completedCompactionBlockSchema,
+    failedCompactionBlockSchema,
+]);
+export type CompactionBlock = Static<typeof compactionBlockSchema>;
+
 /** Whether a message waits behind the current run or interrupts it. */
 export type MessageDelivery = "queue" | "steer";
 
@@ -275,6 +342,11 @@ export interface ServiceMessage {
     createdAt: Timestamp;
     content: MessageBlock[];
     metadata: MessageMetadata;
+}
+
+/** The exact durable message shape used for one compaction attempt. */
+export interface CompactionMessage extends Omit<ServiceMessage, "content"> {
+    content: [CompactionBlock];
 }
 
 /** The run's outcome. */
