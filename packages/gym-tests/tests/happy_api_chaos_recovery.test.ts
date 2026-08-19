@@ -678,7 +678,20 @@ async function applyRecoveryAction(
             });
             model.rememberWorkspace(response.workspace);
             if (response.workspace.initialization.status === "initializing") {
-                model.runtime.pendingInitializations.add(response.workspace.id);
+                // Initialization is a background obligation, and later steps assert exact event
+                // windows, so the creation step owns waiting for its completion event to land.
+                const barrier = createPublicStateBarrier(async () => {
+                    const workspace = (await client.getWorkspace(response.workspace.id)).workspace;
+                    return {
+                        state: workspace.initialization.status,
+                        cursor: workspace.version,
+                    };
+                });
+                await barrier.waitFor(
+                    (snapshot) => snapshot.state === "ready" || snapshot.state === "failed",
+                    "created workspace initialization to settle",
+                    { timeoutMs: 20_000, pollMs: 20 },
+                );
             }
             return response;
         }
