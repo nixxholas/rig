@@ -13,6 +13,7 @@ export class GhosttyTerminal {
     #cols: number;
     #lastAtBottom = true;
     #lastAtTop = false;
+    #colorScheme: TerminalColorScheme;
     #outputHandlers = new Set<(data: string) => void>();
     #outputDecoder = new TextDecoder();
     #outputRevision = 0;
@@ -26,11 +27,13 @@ export class GhosttyTerminal {
         terminal: WasmGhosttyTerminal,
         cols: number,
         rows: number,
+        colorScheme: TerminalColorScheme,
         terminalBackgroundColorQuery: boolean,
     ) {
         this.#terminal = terminal;
         this.#cols = cols;
         this.#rows = rows;
+        this.#colorScheme = colorScheme;
         this.#terminalBackgroundColorQuery = terminalBackgroundColorQuery;
     }
 
@@ -46,7 +49,7 @@ export class GhosttyTerminal {
             maxScrollback: 10_000,
             rows,
         });
-        return new GhosttyTerminal(terminal, cols, rows, terminalBackgroundColorQuery);
+        return new GhosttyTerminal(terminal, cols, rows, colorScheme, terminalBackgroundColorQuery);
     }
 
     close(): void {
@@ -101,6 +104,7 @@ export class GhosttyTerminal {
 
     setColorScheme(colorScheme: TerminalColorScheme): void {
         this.#assertActive();
+        this.#colorScheme = colorScheme;
         this.#terminal.setColorScheme(colorScheme);
     }
 
@@ -124,6 +128,10 @@ export class GhosttyTerminal {
         if (text.includes("\x1b[6n")) {
             const cursor = this.#terminal.snapshot().cursor;
             const response = `\x1b[${(cursor?.y ?? 0) + 1};${(cursor?.x ?? 0) + 1}R`;
+            for (const handler of this.#ptyWriteHandlers) handler(response);
+        }
+        if (text.includes("\x1b[?996n")) {
+            const response = this.#colorScheme === "light" ? "\x1b[?997;2n" : "\x1b[?997;1n";
             for (const handler of this.#ptyWriteHandlers) handler(response);
         }
     }

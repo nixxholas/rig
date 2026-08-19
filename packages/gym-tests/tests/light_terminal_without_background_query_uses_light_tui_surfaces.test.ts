@@ -21,9 +21,11 @@ describe("light terminals without background-color query support", () => {
         gym.terminal.type("Respect the light theme.");
         gym.terminal.press("enter");
 
+        // Without an OSC 11 background reply, the light appearance comes from the
+        // color-scheme report alone, so surfaces derive from the pure-white fallback.
         const snapshot = await gym.terminal.waitForText("Theme-aware response.");
-        expect(rowBackgroundIndexes(snapshot, "Respect the light theme.")).toEqual([254]);
-        expect(rowBackgroundIndexes(snapshot, "Ask Rig to do anything")).toEqual([244, 254]);
+        expect(rowBackgroundIndexes(snapshot, "Respect the light theme.")).toEqual([255]);
+        expect(rowBackgroundIndexes(snapshot, "Ask Rig to do anything")).toEqual([244, 255]);
     }, 20_000);
 });
 

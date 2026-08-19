@@ -172,6 +172,21 @@ describe("GhosttyTerminal cell styles", () => {
         expect((await terminal.snapshot()).synchronizedOutputActive).toBe(false);
     });
 
+    it("answers the color-scheme query from the active scheme", async () => {
+        const terminal = await GhosttyTerminal.create(20, 4, "light");
+        running.add(terminal);
+        const replies: string[] = [];
+        terminal.onPtyWrite((data) => replies.push(data));
+
+        terminal.write("\x1b[?996n");
+        expect(replies).toContain("\x1b[?997;2n");
+
+        replies.length = 0;
+        terminal.setColorScheme("dark");
+        terminal.write("\x1b[?996n");
+        expect(replies).toContain("\x1b[?997;1n");
+    });
+
     it("tracks color-scheme notification mode split across PTY chunks", async () => {
         const terminal = await GhosttyTerminal.create(20, 4);
         running.add(terminal);
