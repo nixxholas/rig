@@ -46,6 +46,7 @@ export async function createSharedDockerFixtureRoot(
         "mkdir",
         "-p",
         `${stateRoot}/tmp`,
+        `${stateRoot}/agent`,
     ]);
     return {
         containerRoot: `${runner.containerRoot}/${id}`,
@@ -78,6 +79,11 @@ export function dockerSandboxArguments(
         "--bind",
         `${stateRoot}/tmp`,
         "/tmp",
+        // The fixture home is a macOS-backed volume that cannot hold the daemon's Unix socket,
+        // so the daemon's private directory lives on container-local storage instead.
+        "--bind",
+        `${stateRoot}/agent`,
+        "/home/rig/.happy/agent",
         "--tmpfs",
         "/gyms",
         "--tmpfs",

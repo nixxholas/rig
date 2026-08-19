@@ -171,6 +171,15 @@ export class ApiModule implements AgentModule {
     readonly #backgroundScope = new AsyncResource("happy-agent-api");
     /** Agents whose usage-driven metadata refresh is already scheduled. */
     readonly #pendingUsageMetadataAgents = new Set<string>();
+    /** Per agent, the streamed assistant message being accumulated block by block. */
+    readonly #streamingAssistantBlocks = new Map<
+        string,
+        {
+            committed: Record<string, unknown>[];
+            current: readonly Record<string, unknown>[];
+            messageId: string;
+        }
+    >();
     readonly #journal = new MutationAwareApiEventJournal(this.#mutationIds);
     readonly #webSockets = new WebSocketServer({
         maxPayload: MAX_TERMINAL_WIRE_MESSAGE_BYTES,
@@ -993,6 +1002,7 @@ export class ApiModule implements AgentModule {
         }
         if (event.type === "loop.settled") {
             this.#flushAcceptedMessages(agentId);
+            this.#streamingAssistantBlocks.delete(agentId);
             const run = this.#activeRuns.get(agentId);
             if (run === undefined) {
                 await this.#appendAgentUpdate(ctx, event, {
@@ -1137,6 +1147,15 @@ export class ApiModule implements AgentModule {
                 : { modelId: stringValue(payload?.["model"]) }),
         };
         if (type === "block_start") {
+            // The provider streams one block at a time, but the API message accumulates them:
+            // a later block joins the message instead of restarting it.
+            const streaming = this.#streamingAssistantBlocks.get(agentId);
+            if (streaming !== undefined && streaming.messageId === messageId) {
+                streaming.committed.push(...streaming.current);
+                streaming.current = [];
+                return;
+            }
+            this.#streamingAssistantBlocks.set(agentId, { committed: [], current: [], messageId });
             this.#journal.append(
                 "message.created",
                 {
@@ -1155,6 +1174,7 @@ export class ApiModule implements AgentModule {
             return;
         }
         if (type === "block_reset") {
+            this.#streamingAssistantBlocks.delete(agentId);
             this.#journal.append(
                 "message.deleted",
                 { agentId, runId, messageId },
@@ -1162,6 +1182,8 @@ export class ApiModule implements AgentModule {
             );
             return;
         }
+        const streaming = this.#streamingAssistantBlocks.get(agentId);
+        const committed = streaming?.messageId === messageId ? streaming.committed : [];
         if (type === "text_delta" || type === "thinking_delta") {
             const blockIndex = rigEvent?.["contentIndex"];
             const append = rigEvent?.["delta"];
@@ -1173,7 +1195,13 @@ export class ApiModule implements AgentModule {
             ) {
                 this.#journal.append(
                     "message.delta",
-                    { agentId, runId, messageId, blockIndex, append },
+                    {
+                        agentId,
+                        runId,
+                        messageId,
+                        blockIndex: committed.length + blockIndex,
+                        append,
+                    },
                     event.occurredAt,
                 );
             }
@@ -1183,6 +1211,9 @@ export class ApiModule implements AgentModule {
         const historical = await this.#history.assistantMessage(ctx, agentId, runId);
         const content = providerMessageContent(partial?.["content"], reviewedToolCalls(historical));
         if (content === undefined) return;
+        if (streaming !== undefined && streaming.messageId === messageId) {
+            streaming.current = content;
+        }
         this.#journal.append(
             "message.updated",
             {

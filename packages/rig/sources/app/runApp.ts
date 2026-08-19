@@ -464,11 +464,51 @@ async function followAgentEvents(options: {
             ) {
                 options.app.resolveUserInputRequest(event.payload.questionId);
             } else if (
-                event.type === "run.finished" &&
-                event.payload.agentId === options.agent.id &&
-                event.payload.run.reason !== "abort"
+                event.type === "run.started" &&
+                event.payload.agentId === options.agent.id
             ) {
-                options.chime();
+                options.app.applySessionEvent({
+                    createdAt: event.payload.run.startedAt,
+                    data: { runId: event.payload.run.id },
+                    id: createId(),
+                    sessionId: options.agent.id,
+                    type: "run_started",
+                });
+            } else if (
+                event.type === "run.boundary" &&
+                event.payload.agentId === options.agent.id
+            ) {
+                // Steering atomically continues into the successor run; only the run identity
+                // moves, the turn stays open.
+                options.app.applySessionEvent({
+                    createdAt: event.payload.startedRun.startedAt,
+                    data: { runId: event.payload.startedRun.id },
+                    id: createId(),
+                    sessionId: options.agent.id,
+                    type: "run_started",
+                });
+            } else if (
+                event.type === "run.finished" &&
+                event.payload.agentId === options.agent.id
+            ) {
+                const run = event.payload.run;
+                options.app.applySessionEvent({
+                    createdAt: run.endedAt ?? Date.now(),
+                    data: {
+                        modelLocked: false,
+                        runId: run.id,
+                        stopReason:
+                            run.reason === "abort"
+                                ? "aborted"
+                                : run.reason === "error"
+                                  ? "error"
+                                  : "stop",
+                    },
+                    id: createId(),
+                    sessionId: options.agent.id,
+                    type: "run_finished",
+                });
+                if (run.reason !== "abort") options.chime();
             }
             return false;
         },
