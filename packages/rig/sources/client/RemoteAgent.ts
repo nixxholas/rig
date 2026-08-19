@@ -44,9 +44,11 @@ import type {
     GetSessionUsageResponse,
     ReadBackgroundProcessResponse,
     RunShellCommandResponse,
+    SessionProviderQuota,
     SteerMessageResponse,
     StopBackgroundProcessResponse,
 } from "../protocol/index.js";
+import { fetchProviderQuotas } from "./fetchProviderQuotas.js";
 import { RemoteAgentRunError } from "./RemoteAgentRunError.js";
 import type { HappyAgentEventHub } from "./HappyAgentEventHub.js";
 
@@ -90,6 +92,8 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
     readonly #messageEventResults = new Map<string, ApiMessage | typeof MESSAGE_DELETED>();
     /** The streamed assistant message of each run, so a finished run can decorate it. */
     readonly #assistantMessageIdsByRunId = new Map<string, string>();
+    /** One account-quota probe per provider; quota is a courtesy and never re-fires. */
+    readonly #quotaProbes = new Map<string, Promise<readonly SessionProviderQuota[]>>();
     /** True while a send() carrying an onEvent callback owns loop-event delivery. */
     #sendOwnsLoopEvents = false;
     #resyncing: Promise<AgentSnapshot> | undefined;
@@ -225,6 +229,21 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         return Promise.resolve({ stopped: false });
     }
 
+    /**
+     * The current provider's account quota, probed at most once per provider. Rig signs in
+     * through the system coding assistants, so the terminal asks the vendor with this machine's
+     * own credentials rather than adding a daemon surface for it.
+     */
+    providerQuotas(): Promise<readonly SessionProviderQuota[]> {
+        const providerId = this.#currentMode().providerId;
+        let probe = this.#quotaProbes.get(providerId);
+        if (probe === undefined) {
+            probe = fetchProviderQuotas(providerId, this.#config.providers[providerId]?.type);
+            this.#quotaProbes.set(providerId, probe);
+        }
+        return probe;
+    }
+
     async getUsage(): Promise<GetSessionUsageResponse> {
         const response = await this.#client.getAgentUsage(this.id);
         const groups = Object.entries(response.usage).flatMap(([providerId, models]) =>
@@ -245,7 +264,7 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
                     },
                     input: usage.input,
                     output: usage.output,
-                    totalTokens: usage.input + usage.output,
+                    totalTokens: usage.input + usage.output + usage.cacheRead + usage.cacheWrite,
                 },
             })),
         );
@@ -263,7 +282,7 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
                           totalTokens: response.context.contextTokens,
                       },
                   }),
-            quotas: [],
+            quotas: await this.providerQuotas(),
             sessionTokenCount: {
                 lastContextTokens: response.context?.contextTokens ?? 0,
                 totalTokens: groups.reduce((total, group) => total + group.usage.totalTokens, 0),

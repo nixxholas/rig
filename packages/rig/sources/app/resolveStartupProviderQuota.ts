@@ -1,11 +1,10 @@
-import type { GetCurrentProviderQuotaResponse } from "../protocol/index.js";
-
 export const STARTUP_PROVIDER_QUOTA_BUDGET_MS = 200;
 
-export async function resolveStartupProviderQuota(
-    load: () => Promise<GetCurrentProviderQuotaResponse>,
+/** Startup shows quota only when the probe answers within its budget; it never blocks. */
+export async function resolveStartupProviderQuota<T>(
+    load: () => Promise<T>,
     budgetMs = STARTUP_PROVIDER_QUOTA_BUDGET_MS,
-): Promise<GetCurrentProviderQuotaResponse | undefined> {
+): Promise<T | undefined> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const unavailable = new Promise<undefined>((resolve) => {
         timer = setTimeout(() => resolve(undefined), Math.max(0, budgetMs));

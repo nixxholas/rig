@@ -34,6 +34,8 @@ import { humanizeProviderId } from "./humanizeProviderId.js";
 import { humanizeReasoningLevel } from "./humanizeReasoningLevel.js";
 import { installResumeInstructions } from "./installResumeInstructions.js";
 import { installTerminalCrashCleanup } from "./installTerminalCrashCleanup.js";
+import { providerQuotaToStartupStatusUsage } from "./providerQuotaToStartupStatusUsage.js";
+import { resolveStartupProviderQuota } from "./resolveStartupProviderQuota.js";
 import {
     resolveStartupSessionId,
     type StartupSessionSelection,
@@ -225,6 +227,11 @@ export async function runApp(ctx: Context, options: RunAppOptions = {}): Promise
 
         const version = readPackageVersion();
         const tuiInspectorUrl = getNodeInspectorUrl();
+        // The probe keeps running for /usage; startup only shows what answers within budget.
+        const startupQuotas = await resolveStartupProviderQuota(() => agent.providerQuotas());
+        const startupUsage = providerQuotaToStartupStatusUsage(
+            startupQuotas?.find((entry) => entry.providerId === agent.provider.id)?.quota,
+        );
         const projectConfigNotice = createProjectConfigSecurityNotice(
             loadedConfig.sources.local.values,
             basename(loadedConfig.sources.local.path),
@@ -332,6 +339,7 @@ export async function runApp(ctx: Context, options: RunAppOptions = {}): Promise
                     agent.snapshot().effort ?? agent.model.defaultThinkingLevel,
                 ),
                 session: opened.resumed ? "Resumed" : "New session",
+                ...(startupUsage === undefined ? {} : { usage: startupUsage }),
                 version,
                 workspace: workspaceCwd,
             },
