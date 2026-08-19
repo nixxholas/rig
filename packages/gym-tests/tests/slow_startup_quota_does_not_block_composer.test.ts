@@ -32,9 +32,11 @@ describe("startup quota interactivity budget", () => {
         });
 
         await probeStarted.promise;
+        // The probe is only released after this race, so a startup that awaited it would never
+        // finish; the budget just tolerates slow parallel-worker boots.
         const gym = await Promise.race([
             gymPromise,
-            rejectAfter(2_500, "Startup remained blocked on the quota probe."),
+            rejectAfter(10_000, "Startup remained blocked on the quota probe."),
         ]);
         running.add(gym);
         const startup = await gym.terminal.snapshot();

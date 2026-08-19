@@ -92,6 +92,8 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
     readonly #messageEventResults = new Map<string, ApiMessage | typeof MESSAGE_DELETED>();
     /** The streamed assistant message of each run, so a finished run can decorate it. */
     readonly #assistantMessageIdsByRunId = new Map<string, string>();
+    /** The service record of each run, so a failed run can surface its error report. */
+    readonly #serviceMessageIdsByRunId = new Map<string, string>();
     /** One account-quota probe per provider; quota is a courtesy and never re-fires. */
     readonly #quotaProbes = new Map<string, Promise<readonly SessionProviderQuota[]>>();
     /** True while a send() carrying an onEvent callback owns loop-event delivery. */
@@ -512,10 +514,19 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         this.#applyResourceEvent(event);
         this.#applyBootstrapEvent(event);
         if (event.type === "run.finished") {
+            if (event.payload.run.status === "failed") {
+                // A failed run's service record is its error report, rendered as one.
+                const serviceId = this.#serviceMessageIdsByRunId.get(event.payload.run.id);
+                this.#serviceMessageIdsByRunId.delete(event.payload.run.id);
+                this.#assistantMessageIdsByRunId.delete(event.payload.run.id);
+                const service = serviceId === undefined ? undefined : this.#messages.get(serviceId);
+                return service === undefined ? undefined : toRunErrorMessage(service);
+            }
             // The protocol carries usage on the run; the TUI accounts it on the run's
             // assistant message, so the finished run decorates that message once.
             const messageId = this.#assistantMessageIdsByRunId.get(event.payload.run.id);
             this.#assistantMessageIdsByRunId.delete(event.payload.run.id);
+            this.#serviceMessageIdsByRunId.delete(event.payload.run.id);
             const cached = messageId === undefined ? undefined : this.#messages.get(messageId);
             const usage = flattenRunUsage(event.payload.run.usage);
             if (cached === undefined || usage === undefined) return undefined;
@@ -631,7 +642,13 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
     }
 
     #snapshotMessages(): Message[] {
-        return this.#history.runs.flatMap((run) => run.messages.map(toRigMessage));
+        return this.#history.runs.flatMap((run) =>
+            run.messages.map((message) =>
+                run.status === "failed" && message.role === "service"
+                    ? (toRunErrorMessage(message) ?? toRigMessage(message))
+                    : toRigMessage(message),
+            ),
+        );
     }
 
     async #refresh(): Promise<void> {
@@ -702,6 +719,9 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
             this.#messages.set(result.id, result);
             if (result.role === "agent" && event.payload.runId !== null) {
                 this.#assistantMessageIdsByRunId.set(event.payload.runId, result.id);
+            }
+            if (result.role === "service" && event.payload.runId !== null) {
+                this.#serviceMessageIdsByRunId.set(event.payload.runId, result.id);
             }
         } else if (event.type === "message.delta") {
             const current = this.#messages.get(event.payload.messageId);
@@ -788,6 +808,21 @@ function flattenRunUsage(usage: UsageBreakdown): Usage | undefined {
     if (!observed) return undefined;
     total.totalTokens = total.input + total.output + total.cacheRead + total.cacheWrite;
     return total;
+}
+
+/** A failed run's service record rendered as the error it reports, or nothing when empty. */
+function toRunErrorMessage(message: ApiMessage): Message | undefined {
+    const text = message.content
+        .flatMap((block) => (block.type === "text" ? [block.text] : []))
+        .join("\n")
+        .trim();
+    if (text.length === 0) return undefined;
+    return {
+        blocks: [{ text, type: "text" }],
+        id: message.id,
+        outcome: "failed",
+        role: "error",
+    };
 }
 
 function toRigMessage(message: ApiMessage): Message {

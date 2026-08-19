@@ -1014,7 +1014,8 @@ export class ApiModule implements AgentModule {
                 return;
             }
             const stopReason = stringValue(payload?.["stopReason"]);
-            const failed = typeof payload?.["error"] === "string" || stopReason === "error";
+            const errorText = stringValue(payload?.["error"]);
+            const failed = errorText !== undefined || stopReason === "error";
             const aborted = stopReason === "aborted";
             const finished = {
                 ...run,
@@ -1023,6 +1024,24 @@ export class ApiModule implements AgentModule {
                 endedAt: event.occurredAt,
             };
             this.#activeRuns.delete(agentId);
+            if (errorText !== undefined) {
+                // History records the failure as the run's error message; clients watching live
+                // hear about it the same way they hear about any message coming into being.
+                this.#journal.append(
+                    "message.created",
+                    {
+                        agentId,
+                        runId: run["id"],
+                        message: {
+                            id: `${run["id"] as string}-error`,
+                            role: "service",
+                            createdAt: event.occurredAt,
+                            content: [{ type: "text", text: errorText }],
+                        },
+                    },
+                    event.occurredAt,
+                );
+            }
             this.#journal.append("run.finished", { agentId, run: finished }, event.occurredAt);
             await this.#appendAgentUpdate(ctx, event, {
                 status: "idle",
